@@ -71,6 +71,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   const shouldShowKeybinds = () => terminalWidth() >= 100
   const shouldShowModeDisplay = () => terminalWidth() >= 80
   const shouldShowSelectedCount = () => terminalWidth() >= 60
+  const shouldShowPriorityLegend = () => terminalWidth() >= 120
 
   // Build status line as single string to avoid rendering bugs
   const statusLine = () => {
@@ -158,6 +159,17 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                 <KeyHint key="Esc" action="Cancel" />
               </Match>
             </Switch>
+          </box>
+        </Show>
+
+        {/* Priority legend - show on wide terminals */}
+        <Show when={shouldShowPriorityLegend()}>
+          <box flexDirection="row" gap={1}>
+            <text fg={theme.overlay0}>Priority:</text>
+            <text fg={theme.red}>P1</text>
+            <text fg={theme.peach}>P2</text>
+            <text fg={theme.yellow}>P3</text>
+            <text fg={theme.text}>P4</text>
           </box>
         </Show>
 
