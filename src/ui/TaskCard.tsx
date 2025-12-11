@@ -4,7 +4,7 @@
 import type { Component } from "solid-js"
 import type { TaskWithSession } from "./types"
 import { SESSION_INDICATORS } from "./types"
-import { theme, getPriorityColor } from "./theme"
+import { theme } from "./theme"
 
 export interface TaskCardProps {
   task: TaskWithSession
@@ -36,25 +36,24 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
     return undefined
   }
 
-  // Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
-  const headerLine = () => {
-    let line = ""
+  // Build the complete card content as a single string to avoid OpenTUI rendering bugs
+  // Multiple <text> siblings cause character corruption
+  const cardContent = () => {
+    let header = ""
     if (props.jumpLabel) {
-      line += props.jumpLabel + " "
+      header += props.jumpLabel + " "
     }
-    line += props.task.id + " [" + props.task.issue_type + "]"
+    header += props.task.id + " [" + props.task.issue_type + "]"
     const ind = indicator()
     if (ind) {
-      line += " " + ind
+      header += " " + ind
     }
     if (props.isMultiSelected) {
-      line += " *"
+      header += " *"
     }
-    return line
+    // Combine header and title with newline
+    return header + "\n" + props.task.title
   }
-
-  // Priority color for title - need to apply via ANSI since we use single text element
-  const priorityColor = () => getPriorityColor(props.task.priority)
 
   return (
     <box
@@ -64,12 +63,9 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
       backgroundColor={backgroundColor()}
       paddingLeft={1}
       paddingRight={1}
-      flexDirection="column"
     >
-      {/* Header line - ID and type */}
-      <text fg={theme.overlay0}>{headerLine()}</text>
-      {/* Title line - separate text element for different color */}
-      <text fg={priorityColor()}>{props.task.title}</text>
+      {/* Single text element to avoid OpenTUI sibling text rendering bugs */}
+      <text fg={theme.overlay0}>{cardContent()}</text>
     </box>
   )
 }
