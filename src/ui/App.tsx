@@ -1,11 +1,12 @@
 /**
  * App component - root component with Helix-style modal keybindings
  */
-import { type Component, createSignal, createMemo, createEffect, batch } from "solid-js"
+import { type Component, createSignal, createMemo, createEffect, batch, Show } from "solid-js"
 import { Result } from "@effect-atom/atom"
 import { useKeyboard } from "@opentui/solid"
 import { Board } from "./Board"
 import { StatusBar } from "./StatusBar"
+import { HelpOverlay } from "./HelpOverlay"
 import { tasksAtom, appRuntime, moveTaskEffect, moveTasksEffect } from "./atoms"
 import { useAtomValue, useAtomMount, useAtomRefresh } from "../lib/effect-atom-solid"
 import { Effect } from "effect"
@@ -60,6 +61,7 @@ export const App: Component = () => {
   const [selectedIds, setSelectedIds] = createSignal<Set<string>>(new Set())
   const [jumpLabels, setJumpLabels] = createSignal<Map<string, JumpTarget> | null>(null)
   const [pendingJumpKey, setPendingJumpKey] = createSignal<string | null>(null)
+  const [showHelp, setShowHelp] = createSignal(false)
 
   // Group tasks by column for navigation
   const tasksByColumn = createMemo(() => {
@@ -181,6 +183,12 @@ export const App: Component = () => {
     const columns = tasksByColumn()
     const { columnIndex, taskIndex } = nav()
     const currentMode = mode()
+
+    // Help overlay handling - dismiss on any key
+    if (showHelp()) {
+      setShowHelp(false)
+      return
+    }
 
     // Escape always returns to normal mode
     if (event.name === "escape") {
@@ -403,6 +411,11 @@ export const App: Component = () => {
         process.exit(0)
         break
       }
+      case "?": {
+        // Toggle help overlay
+        setShowHelp(true)
+        break
+      }
     }
 
     // Ctrl-d: half page down
@@ -499,6 +512,11 @@ export const App: Component = () => {
         modeDisplay={modeDisplay()}
         selectedCount={selectedIds().size}
       />
+
+      {/* Help overlay */}
+      <Show when={showHelp()}>
+        <HelpOverlay />
+      </Show>
     </box>
   )
 }

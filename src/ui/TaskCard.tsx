@@ -53,6 +53,9 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
     return line
   }
 
+  // Priority color for title - need to apply via ANSI since we use single text element
+  const priorityColor = () => getPriorityColor(props.task.priority)
+
   return (
     <box
       borderStyle="single"
@@ -61,11 +64,12 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
       backgroundColor={backgroundColor()}
       paddingLeft={1}
       paddingRight={1}
+      flexDirection="column"
     >
-      <box flexDirection="column">
-        <text fg={theme.overlay0}>{headerLine()}</text>
-        <text fg={getPriorityColor(props.task.priority)}>{props.task.title}</text>
-      </box>
+      {/* Header line - ID and type */}
+      <text fg={theme.overlay0}>{headerLine()}</text>
+      {/* Title line - separate text element for different color */}
+      <text fg={priorityColor()}>{props.task.title}</text>
     </box>
   )
 }
