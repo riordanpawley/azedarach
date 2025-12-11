@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "skills": [
+    {
+      "id": "beads-tracking",
+      "name": "Beads Issue Tracking",
+      "path": ".claude/skills/workflow/beads-tracking.skill.md",
+      "type": "workflow",
+      "priority": "high",
+      "confidence": {
+        "required": 0.60,
+        "suggested": 0.45
+      },
+      "triggers": {
+        "filePatterns": [".beads/**"],
+        "contentPatterns": [
+          "bd create",
+          "bd update",
+          "bd close",
+          "bd search",
+          "bd ready"
+        ],
+        "keywords": [
+          "beads",
+          "issue",
+          "task",
+          "tracking",
+          "bd",
+          "epic",
+          "dependency"
+        ]
+      },
+      "resources": [
+        ".claude/skills/resources/beads/workflows.md",
+        ".claude/skills/resources/beads/worktree-integration.md"
+      ]
+    }
+  ]
+}
