@@ -7,6 +7,7 @@ import { useKeyboard } from "@opentui/solid"
 import { Board } from "./Board"
 import { StatusBar } from "./StatusBar"
 import { HelpOverlay } from "./HelpOverlay"
+import { TASK_CARD_HEIGHT } from "./TaskCard"
 import { tasksAtom, appRuntime, moveTaskEffect, moveTasksEffect } from "./atoms"
 import { useAtomValue, useAtomMount, useAtomRefresh } from "../lib/effect-atom-solid"
 import { Effect } from "effect"
@@ -30,8 +31,6 @@ import { theme } from "./theme"
  * - Select mode: multi-selection with space to toggle
  * - Action mode: space in normal opens command palette
  */
-// Each task card takes approximately 4 lines (border + id + title + border)
-const TASK_CARD_HEIGHT = 4
 // Header (1) + status bar (3) + padding (2)
 const CHROME_HEIGHT = 6
 
@@ -307,6 +306,8 @@ export const App: Component = () => {
     }
 
     // Handle action mode (Space menu)
+    // Stay in action mode after moves so user can continue moving h/l
+    // Press Escape to exit action mode
     if (currentMode === "action") {
       switch (event.name) {
         case "left":
@@ -318,13 +319,21 @@ export const App: Component = () => {
               const ids = selectedIds()
               const task = selectedTask()
               if (ids.size > 0) {
-                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(refreshTasks)
+                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(() => {
+                  refreshTasks()
+                  // Follow the task to the new column
+                  navigateTo(columnIndex - 1, taskIndex)
+                })
               } else if (task) {
-                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(refreshTasks)
+                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(() => {
+                  refreshTasks()
+                  // Follow the task to the new column
+                  navigateTo(columnIndex - 1, taskIndex)
+                })
               }
             }
           }
-          exitToNormal()
+          // Stay in action mode
           break
         }
         case "right":
@@ -336,18 +345,27 @@ export const App: Component = () => {
               const ids = selectedIds()
               const task = selectedTask()
               if (ids.size > 0) {
-                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(refreshTasks)
+                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(() => {
+                  refreshTasks()
+                  // Follow the task to the new column
+                  navigateTo(columnIndex + 1, taskIndex)
+                })
               } else if (task) {
-                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(refreshTasks)
+                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(() => {
+                  refreshTasks()
+                  // Follow the task to the new column
+                  navigateTo(columnIndex + 1, taskIndex)
+                })
               }
             }
           }
-          exitToNormal()
+          // Stay in action mode
           break
         }
         // TODO: Add more actions (s=start, a=attach, p=pause, etc.)
         default:
-          exitToNormal()
+          // Unknown key in action mode - ignore (don't exit)
+          break
       }
       return
     }

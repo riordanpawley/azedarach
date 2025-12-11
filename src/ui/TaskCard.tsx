@@ -4,7 +4,10 @@
 import type { Component } from "solid-js"
 import type { TaskWithSession } from "./types"
 import { SESSION_INDICATORS } from "./types"
-import { theme } from "./theme"
+import { theme, getPriorityColor } from "./theme"
+
+/** Height of each task card in terminal rows */
+export const TASK_CARD_HEIGHT = 6
 
 export interface TaskCardProps {
   task: TaskWithSession
@@ -36,23 +39,24 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
     return undefined
   }
 
-  // Build the complete card content as a single string to avoid OpenTUI rendering bugs
-  // Multiple <text> siblings cause character corruption
-  const cardContent = () => {
-    let header = ""
+  // Priority label like P1, P2, P3, P4
+  const priorityLabel = () => `P${props.task.priority}`
+
+  // Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
+  const headerLine = () => {
+    let line = ""
     if (props.jumpLabel) {
-      header += props.jumpLabel + " "
+      line += props.jumpLabel + " "
     }
-    header += props.task.id + " [" + props.task.issue_type + "]"
+    line += props.task.id + " [" + props.task.issue_type + "]"
     const ind = indicator()
     if (ind) {
-      header += " " + ind
+      line += " " + ind
     }
     if (props.isMultiSelected) {
-      header += " *"
+      line += " *"
     }
-    // Combine header and title with newline
-    return header + "\n" + props.task.title
+    return line
   }
 
   return (
@@ -63,9 +67,14 @@ export const TaskCard: Component<TaskCardProps> = (props) => {
       backgroundColor={backgroundColor()}
       paddingLeft={1}
       paddingRight={1}
+      height={TASK_CARD_HEIGHT}
+      flexDirection="column"
     >
-      {/* Single text element to avoid OpenTUI sibling text rendering bugs */}
-      <text fg={theme.overlay0}>{cardContent()}</text>
+      <box flexDirection="row" gap={1}>
+        <text fg={getPriorityColor(props.task.priority)}>{priorityLabel()}</text>
+        <text fg={theme.overlay0}>{headerLine()}</text>
+      </box>
+      <text fg={theme.text}>{props.task.title}</text>
     </box>
   )
 }
