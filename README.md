@@ -98,22 +98,54 @@ The user-facing terminal interface.
 - **Detail View**: Full task info, logs, actions
 - **Session View**: Live output from attached Claude session
 
-**Key Bindings**:
+**Keybindings** (Helix-editor style):
+
+Azedarach uses **modal keybindings** inspired by the [Helix editor](https://helix-editor.com/). The current mode is shown in the status bar (NOR/SEL/GTO/ACT).
+
+**Normal Mode** (default):
 | Key | Action |
 |-----|--------|
-| `↑/k`, `↓/j` | Navigate tasks |
-| `←/h`, `→/l` | Navigate columns |
-| `Enter` | Start task (spawn Claude) |
+| `h/j/k/l` or `←↓↑→` | Navigate (column/down/up/column) |
+| `Ctrl-d` / `Ctrl-u` | Half-page down/up |
+| `Space` | Open action menu |
+| `v` | Enter select mode (multi-select) |
+| `g` | Enter goto mode (see below) |
+| `q` | Quit (sessions persist) |
+
+**Goto Mode** (after pressing `g`):
+| Key | Action |
+|-----|--------|
+| `w` | Word/item jump - shows 2-char labels on each task |
+| `g` | Go to first task (first column, top) |
+| `e` | Go to last task (last column, bottom) |
+| `h` | Go to first column (keep task index) |
+| `l` | Go to last column (keep task index) |
+| `Esc` | Cancel |
+
+**Jump Mode** (after `gw`):
+Each task displays a 2-character label (e.g., `aa`, `as`, `ad`). Type the label to instantly jump to that task. Labels use home-row keys for ergonomics.
+
+**Select Mode** (after pressing `v`):
+| Key | Action |
+|-----|--------|
+| `h/j/k/l` | Navigate (same as normal mode) |
+| `Space` | Toggle selection on current task |
+| `v` | Exit select mode (keep selections) |
+| `Esc` | Exit and clear all selections |
+
+**Action Mode** (after pressing `Space` in normal):
+| Key | Action |
+|-----|--------|
+| `h/l` | **Move task(s)** to previous/next column |
+| `s` | Start task (spawn Claude session) |
 | `a` | Attach to running session (opens Ghostty) |
-| `A` | Attach inline (within TUI) |
 | `p` | Pause session (commit WIP, detach) |
 | `r` | Resume paused session |
 | `d` | Show diff for task |
 | `P` | Create/view PR |
-| `s` | Sync beads (`bd sync`) |
-| `n` | New task (`bd create`) |
-| `?` | Help |
-| `q` | Quit (sessions persist) |
+| `Esc` | Cancel |
+
+In action mode, `h`/`l` (or left/right arrows) **move the selected task(s)** to the adjacent column. This updates the task's status via the beads CLI. If you have multi-selected tasks (via `v` → `Space`), all selected tasks are moved together.
 
 ### 2. Session Manager
 
