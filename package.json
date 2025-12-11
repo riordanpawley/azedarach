@@ -1,0 +1,38 @@
+{
+  "name": "azedarach",
+  "version": "0.1.0",
+  "description": "TUI Kanban board for orchestrating parallel Claude Code sessions",
+  "type": "module",
+  "bin": {
+    "az": "./bin/az.ts"
+  },
+  "scripts": {
+    "dev": "bun run bin/az.ts",
+    "build": "tsup bin/az.ts --format esm --clean",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "tui",
+    "kanban",
+    "claude",
+    "orchestration"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@effect-atom/atom": "latest",
+    "@effect/cli": "latest",
+    "@effect/cluster": "^0.55.0",
+    "@effect/platform": "latest",
+    "@effect/platform-bun": "latest",
+    "@opentui/core": "latest",
+    "@opentui/solid": "latest",
+    "effect": "latest",
+    "solid-js": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tsup": "latest",
+    "typescript": "latest"
+  }
+}
