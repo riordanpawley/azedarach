@@ -1,16 +1,32 @@
 /**
  * App component - root component with Helix-style modal keybindings
  */
-import { type Component, createSignal, createMemo, createEffect, batch, Show } from "solid-js"
+import { type Component, createSignal, createMemo, batch, Show } from "solid-js"
 import { Result } from "@effect-atom/atom"
 import { useKeyboard } from "@opentui/solid"
 import { Board } from "./Board"
 import { StatusBar } from "./StatusBar"
 import { HelpOverlay } from "./HelpOverlay"
+import { ActionPalette } from "./ActionPalette"
+import { DetailPanel } from "./DetailPanel"
+import { CreateTaskPrompt } from "./CreateTaskPrompt"
+import { ToastContainer, type ToastMessage, generateToastId } from "./Toast"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
-import { tasksAtom, appRuntime, moveTaskEffect, moveTasksEffect } from "./atoms"
-import { useAtomValue, useAtomMount, useAtomRefresh } from "../lib/effect-atom-solid"
-import { Effect } from "effect"
+import {
+  tasksAtom,
+  appRuntime,
+  moveTaskAtom,
+  moveTasksAtom,
+  attachExternalAtom,
+  attachInlineAtom,
+  startSessionAtom,
+  pauseSessionAtom,
+  resumeSessionAtom,
+  stopSessionAtom,
+  createTaskAtom,
+  editBeadAtom,
+} from "./atoms"
+import { useAtomValue, useAtomMount, useAtomRefresh, useAtomSet } from "../lib/effect-atom-solid"
 import {
   COLUMNS,
   type TaskWithSession,
@@ -44,6 +60,18 @@ export const App: Component = () => {
   // Refresh function to re-fetch tasks after mutations
   const refreshTasks = useAtomRefresh(tasksAtom)
 
+  // Action atoms for session lifecycle (using effect-atom fn pattern)
+  const moveTask = useAtomSet(moveTaskAtom, { mode: "promise" })
+  const moveTasks = useAtomSet(moveTasksAtom, { mode: "promise" })
+  const attachExternal = useAtomSet(attachExternalAtom, { mode: "promise" })
+  const attachInline = useAtomSet(attachInlineAtom, { mode: "promise" })
+  const startSession = useAtomSet(startSessionAtom, { mode: "promise" })
+  const pauseSession = useAtomSet(pauseSessionAtom, { mode: "promise" })
+  const resumeSession = useAtomSet(resumeSessionAtom, { mode: "promise" })
+  const stopSession = useAtomSet(stopSessionAtom, { mode: "promise" })
+  const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
+  const editBead = useAtomSet(editBeadAtom, { mode: "promise" })
+
   // Calculate how many tasks can fit based on terminal height
   const maxVisibleTasks = () => {
     const rows = process.stdout.rows || 24
@@ -61,6 +89,40 @@ export const App: Component = () => {
   const [jumpLabels, setJumpLabels] = createSignal<Map<string, JumpTarget> | null>(null)
   const [pendingJumpKey, setPendingJumpKey] = createSignal<string | null>(null)
   const [showHelp, setShowHelp] = createSignal(false)
+  const [showDetail, setShowDetail] = createSignal(false)
+  const [showCreatePrompt, setShowCreatePrompt] = createSignal(false)
+
+  // Toast notifications state
+  const [toasts, setToasts] = createSignal<ToastMessage[]>([])
+
+  // Helper to show an error toast
+  const showError = (message: string) => {
+    setToasts((prev) => [
+      ...prev,
+      { id: generateToastId(), message, type: "error", timestamp: Date.now() },
+    ])
+  }
+
+  // Helper to show a success toast
+  const showSuccess = (message: string) => {
+    setToasts((prev) => [
+      ...prev,
+      { id: generateToastId(), message, type: "success", timestamp: Date.now() },
+    ])
+  }
+
+  // Helper to show an info toast
+  const showInfo = (message: string) => {
+    setToasts((prev) => [
+      ...prev,
+      { id: generateToastId(), message, type: "info", timestamp: Date.now() },
+    ])
+  }
+
+  // Dismiss a toast by ID
+  const dismissToast = (id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }
 
   // Group tasks by column for navigation
   const tasksByColumn = createMemo(() => {
@@ -186,6 +248,19 @@ export const App: Component = () => {
     // Help overlay handling - dismiss on any key
     if (showHelp()) {
       setShowHelp(false)
+      return
+    }
+
+    // Detail panel handling - dismiss on Enter or Escape
+    if (showDetail()) {
+      if (event.name === "return" || event.name === "escape") {
+        setShowDetail(false)
+      }
+      return
+    }
+
+    // Create prompt handling - CreateTaskPrompt handles its own keyboard input
+    if (showCreatePrompt()) {
       return
     }
 
@@ -319,17 +394,19 @@ export const App: Component = () => {
               const ids = selectedIds()
               const task = selectedTask()
               if (ids.size > 0) {
-                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(() => {
-                  refreshTasks()
-                  // Follow the task to the new column
-                  navigateTo(columnIndex - 1, taskIndex)
-                })
+                moveTasks({ taskIds: [...ids], newStatus: targetStatus })
+                  .then(() => {
+                    refreshTasks()
+                    navigateTo(columnIndex - 1, taskIndex)
+                  })
+                  .catch((error) => showError(`Move failed: ${error}`))
               } else if (task) {
-                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(() => {
-                  refreshTasks()
-                  // Follow the task to the new column
-                  navigateTo(columnIndex - 1, taskIndex)
-                })
+                moveTask({ taskId: task.id, newStatus: targetStatus })
+                  .then(() => {
+                    refreshTasks()
+                    navigateTo(columnIndex - 1, taskIndex)
+                  })
+                  .catch((error) => showError(`Move failed: ${error}`))
               }
             }
           }
@@ -345,24 +422,161 @@ export const App: Component = () => {
               const ids = selectedIds()
               const task = selectedTask()
               if (ids.size > 0) {
-                Effect.runPromise(moveTasksEffect([...ids], targetStatus)).then(() => {
-                  refreshTasks()
-                  // Follow the task to the new column
-                  navigateTo(columnIndex + 1, taskIndex)
-                })
+                moveTasks({ taskIds: [...ids], newStatus: targetStatus })
+                  .then(() => {
+                    refreshTasks()
+                    navigateTo(columnIndex + 1, taskIndex)
+                  })
+                  .catch((error) => showError(`Move failed: ${error}`))
               } else if (task) {
-                Effect.runPromise(moveTaskEffect(task.id, targetStatus)).then(() => {
-                  refreshTasks()
-                  // Follow the task to the new column
-                  navigateTo(columnIndex + 1, taskIndex)
-                })
+                moveTask({ taskId: task.id, newStatus: targetStatus })
+                  .then(() => {
+                    refreshTasks()
+                    navigateTo(columnIndex + 1, taskIndex)
+                  })
+                  .catch((error) => showError(`Move failed: ${error}`))
               }
             }
           }
           // Stay in action mode
           break
         }
-        // TODO: Add more actions (s=start, a=attach, p=pause, etc.)
+        case "s": {
+          // Start a new session (only for idle tasks)
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState !== "idle") {
+              showError(`Cannot start: task is ${task.sessionState}`)
+            } else {
+              startSession(task.id)
+                .then(() => {
+                  refreshTasks()
+                  showSuccess(`Started session for ${task.id}`)
+                })
+                .catch((error) => {
+                  showError(`Failed to start: ${error}`)
+                })
+            }
+          }
+          exitToNormal()
+          break
+        }
+        case "a": {
+          // Attach to session - switches tmux client to Claude session
+          // Claude sessions use Ctrl-a prefix, so Ctrl-a ) switches back
+          const task = selectedTask()
+          if (task) {
+            attachExternal(task.id)
+              .then(() => {
+                // Switched! Show reminder about how to get back
+                showInfo(`Switched! Ctrl-a ) to return`)
+              })
+              .catch((error) => {
+                const msg = error && typeof error === "object" && error._tag === "SessionNotFoundError"
+                  ? `No session for ${task.id} - press Space+s to start`
+                  : `Failed to attach: ${error}`
+                showError(msg)
+              })
+          }
+          exitToNormal()
+          break
+        }
+        case "A": {
+          // Attach to session inline (replace TUI)
+          // Don't pre-check sessionState - it may be stale. Let AttachmentService check tmux directly.
+          const task = selectedTask()
+          if (task) {
+            attachInline(task.id).catch((error) => {
+              const msg = error && typeof error === "object" && error._tag === "SessionNotFoundError"
+                ? `No session for ${task.id} - press Space+s to start`
+                : `Failed to attach: ${error}`
+              showError(msg)
+            })
+          }
+          exitToNormal()
+          break
+        }
+        case "p": {
+          // Pause a running session (only for busy tasks)
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState !== "busy") {
+              showError(`Cannot pause: task is ${task.sessionState}`)
+            } else {
+              pauseSession(task.id)
+                .then(() => {
+                  refreshTasks()
+                  showSuccess(`Paused session for ${task.id}`)
+                })
+                .catch((error) => {
+                  showError(`Failed to pause: ${error}`)
+                })
+            }
+          }
+          exitToNormal()
+          break
+        }
+        case "r": {
+          // Resume a paused session (only for paused tasks)
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState !== "paused") {
+              showError(`Cannot resume: task is ${task.sessionState}`)
+            } else {
+              resumeSession(task.id)
+                .then(() => {
+                  refreshTasks()
+                  showSuccess(`Resumed session for ${task.id}`)
+                })
+                .catch((error) => {
+                  showError(`Failed to resume: ${error}`)
+                })
+            }
+          }
+          exitToNormal()
+          break
+        }
+        case "x": {
+          // Stop/kill a running session
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState === "idle") {
+              showError(`No session to stop`)
+            } else {
+              stopSession(task.id)
+                .then(() => {
+                  refreshTasks()
+                  showSuccess(`Stopped session for ${task.id}`)
+                })
+                .catch((error) => {
+                  showError(`Failed to stop: ${error}`)
+                })
+            }
+          }
+          exitToNormal()
+          break
+        }
+        case "e": {
+          // Edit bead in $EDITOR
+          const task = selectedTask()
+          if (task) {
+            editBead(task)
+              .then(() => {
+                refreshTasks()
+                showSuccess(`Updated ${task.id}`)
+              })
+              .catch((error) => {
+                const msg = error && typeof error === "object" && error._tag === "ParseMarkdownError"
+                  ? `Invalid format: ${error.message}`
+                  : error && typeof error === "object" && error._tag === "EditorError"
+                  ? `Editor error: ${error.message}`
+                  : `Failed to edit: ${error}`
+                showError(msg)
+              })
+          }
+          exitToNormal()
+          break
+        }
         default:
           // Unknown key in action mode - ignore (don't exit)
           break
@@ -432,6 +646,19 @@ export const App: Component = () => {
       case "?": {
         // Toggle help overlay
         setShowHelp(true)
+        break
+      }
+      case "return": {
+        // Show detail panel for selected task
+        const task = selectedTask()
+        if (task) {
+          setShowDetail(true)
+        }
+        break
+      }
+      case "c": {
+        // Create new task
+        setShowCreatePrompt(true)
         break
       }
     }
@@ -535,6 +762,38 @@ export const App: Component = () => {
       <Show when={showHelp()}>
         <HelpOverlay />
       </Show>
+
+      {/* Action palette */}
+      <Show when={mode() === "action"}>
+        <ActionPalette task={selectedTask()} />
+      </Show>
+
+      {/* Detail panel */}
+      <Show when={showDetail() && selectedTask()}>
+        {(task) => <DetailPanel task={task()} />}
+      </Show>
+
+      {/* Create task prompt */}
+      <Show when={showCreatePrompt()}>
+        <CreateTaskPrompt
+          onSubmit={(params) => {
+            createTask(params)
+              .then((issue) => {
+                setShowCreatePrompt(false)
+                refreshTasks()
+                showSuccess(`Created task: ${issue.id}`)
+              })
+              .catch((error) => {
+                setShowCreatePrompt(false)
+                showError(`Failed to create task: ${error}`)
+              })
+          }}
+          onCancel={() => setShowCreatePrompt(false)}
+        />
+      </Show>
+
+      {/* Toast notifications */}
+      <ToastContainer toasts={toasts()} onDismiss={dismissToast} />
     </box>
   )
 }

@@ -12,9 +12,8 @@ export {
   useRegistry,
   useAtomValue,
   useAtomSet,
-  useAtom,
   useAtomMount,
-  useAtomRefresh
+  useAtomRefresh,
 } from "./hooks"
 
 // Re-export Provider

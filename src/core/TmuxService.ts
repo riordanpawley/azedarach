@@ -20,6 +20,8 @@ export interface TmuxServiceI {
   readonly newSession: (name: string, opts?: {
     cwd?: string
     command?: string
+    /** Custom prefix key (default: C-a to avoid Claude capturing C-b) */
+    prefix?: string
   }) => Effect.Effect<void, TmuxError>
 
   readonly killSession: (name: string) => Effect.Effect<void, TmuxError | SessionNotFoundError>
@@ -31,6 +33,8 @@ export interface TmuxServiceI {
   readonly sendKeys: (session: string, keys: string) => Effect.Effect<void, TmuxError | SessionNotFoundError>
 
   readonly attachCommand: (session: string) => string  // Returns the command string to attach
+
+  readonly switchClient: (session: string) => Effect.Effect<void, TmuxError | SessionNotFoundError>
 }
 
 // Service Tag
@@ -48,12 +52,17 @@ const runTmux = (args: string[]): Effect.Effect<string, TmuxError, CommandExecut
 // Service implementation
 const TmuxServiceImpl = Effect.gen(function* () {
   return {
-    newSession: (name: string, opts?: { cwd?: string; command?: string }) =>
+    newSession: (name: string, opts?: { cwd?: string; command?: string; prefix?: string }) =>
       Effect.gen(function* () {
         const args = ["new-session", "-d", "-s", name]
         if (opts?.cwd) args.push("-c", opts.cwd)
         if (opts?.command) args.push(opts.command)
         yield* runTmux(args)
+
+        // Set custom prefix for this session (default C-a to avoid Claude capturing C-b)
+        const prefix = opts?.prefix ?? "C-a"
+        yield* runTmux(["set-option", "-t", name, "prefix", prefix])
+        yield* runTmux(["set-option", "-t", name, "prefix2", "None"])
       }),
 
     killSession: (name: string) =>
@@ -91,7 +100,13 @@ const TmuxServiceImpl = Effect.gen(function* () {
         Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session })))
       ),
 
-    attachCommand: (session: string) => `tmux attach-session -t ${session}`
+    attachCommand: (session: string) => `tmux attach-session -t ${session}`,
+
+    switchClient: (session: string) =>
+      runTmux(["switch-client", "-t", session]).pipe(
+        Effect.asVoid,
+        Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session })))
+      )
   }
 })
 

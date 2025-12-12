@@ -156,6 +156,8 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
                 <KeyHint key="s" action="Start" />
                 <KeyHint key="a" action="Attach" />
                 <KeyHint key="p" action="Pause" />
+                <KeyHint key="r" action="Resume" />
+                <KeyHint key="x" action="Stop" />
                 <KeyHint key="Esc" action="Cancel" />
               </Match>
             </Switch>

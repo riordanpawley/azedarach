@@ -31,6 +31,8 @@ const IssueSchema = Schema.Struct({
   labels: Schema.Array(Schema.String).pipe(Schema.optional),
   design: Schema.String.pipe(Schema.optional),
   notes: Schema.String.pipe(Schema.optional),
+  acceptance: Schema.String.pipe(Schema.optional),
+  estimate: Schema.Number.pipe(Schema.optional),
 })
 
 export type Issue = Schema.Schema.Type<typeof IssueSchema>
@@ -179,6 +181,25 @@ export interface BeadsClientService {
   readonly search: (
     query: string
   ) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+
+  /**
+   * Create a new issue
+   *
+   * @example
+   * ```ts
+   * BeadsClient.create({
+   *   title: "Implement feature X",
+   *   type: "task",
+   *   priority: 2
+   * })
+   * ```
+   */
+  readonly create: (params: {
+    title: string
+    type?: string
+    priority?: number
+    description?: string
+  }) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
 }
 
 /**
@@ -344,6 +365,37 @@ const BeadsClientServiceImpl = Effect.gen(function* () {
         const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
         return [...parsed] as Issue[]
       }),
+
+    create: (params) =>
+      Effect.gen(function* () {
+        const args: string[] = ["create", params.title]
+
+        if (params.type) {
+          args.push("--type", params.type)
+        }
+        if (params.priority !== undefined) {
+          args.push("--priority", String(params.priority))
+        }
+        if (params.description) {
+          args.push("--description", params.description)
+        }
+
+        const output = yield* runBd(args)
+
+        // bd create returns an array with the created issue
+        const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+        if (parsed.length === 0) {
+          return yield* Effect.fail(
+            new BeadsError({
+              message: "bd create returned no issue",
+              command: `bd ${args.join(" ")}`,
+            })
+          )
+        }
+
+        return parsed[0]!
+      }),
   })
 })
 
@@ -457,3 +509,17 @@ export const search = (
   BeadsError | ParseError,
   BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.search(query))
+
+/**
+ * Create a new issue
+ */
+export const create = (params: {
+  title: string
+  type?: string
+  priority?: number
+  description?: string
+}): Effect.Effect<
+  Issue,
+  BeadsError | ParseError,
+  BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.create(params))
