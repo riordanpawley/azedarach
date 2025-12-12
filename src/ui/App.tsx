@@ -96,6 +96,9 @@ export const App: Component = () => {
   const [showDetail, setShowDetail] = createSignal(false)
   const [showCreatePrompt, setShowCreatePrompt] = createSignal(false)
 
+  // Derived signal for action palette visibility (OpenTUI needs this pattern)
+  const showActionPalette = createMemo(() => mode() === "action")
+
   // Toast notifications state
   const [toasts, setToasts] = createSignal<ToastMessage[]>([])
 
@@ -813,7 +816,7 @@ export const App: Component = () => {
       </Show>
 
       {/* Action palette */}
-      <Show when={mode() === "action"}>
+      <Show when={showActionPalette()}>
         <ActionPalette task={selectedTask()} />
       </Show>
 
