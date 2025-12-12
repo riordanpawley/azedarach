@@ -101,9 +101,9 @@ For each issue, suggest appropriate beads task structure (don't create yet):
 
 ## What Went Well
 
-### 1. Ink component composition
+### 1. OpenTUI component composition
 **Classification**: Validates existing pattern
-**Details**: React patterns translated well to Ink, component composition worked smoothly
+**Details**: React patterns translated well to OpenTUI, component composition worked smoothly
 **Impact**: Clean code, good separation of concerns
 
 ### 2. Beads CLI integration

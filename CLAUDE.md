@@ -53,9 +53,9 @@ bd sync                           # REQUIRED in worktrees (manual sync)
 
 **Stack:**
 - TypeScript (strict mode)
-- Ink (React for CLI)
+- OpenTUI + React (TUI framework)
+- Effect (services and state)
 - tmux (session persistence)
-- node-pty (PTY handling)
 - Beads (task tracking backend)
 
 **Core Features:**
@@ -72,7 +72,7 @@ src/
 ├── index.tsx              # Entry point
 ├── cli.ts                 # CLI argument parsing
 │
-├── ui/                    # Ink components
+├── ui/                    # OpenTUI components
 │   ├── App.tsx            # Root component
 │   ├── Board.tsx          # Kanban board
 │   ├── Column.tsx         # Status column
@@ -165,7 +165,7 @@ Skills auto-load when you edit files or mention keywords:
 
 - **Type errors:** Always run `pnpm type-check` for validation
 - **Files:** Check references before deleting (`rg "filename"`)
-- **Testing:** Test TUI components with `ink-testing-library`
+- **Testing:** Run `pnpm dev` for interactive testing, `pnpm type-check` for types
 
 ## Documentation
 
