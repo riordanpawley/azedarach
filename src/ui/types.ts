@@ -15,9 +15,33 @@ export type SessionState =
   | "paused"      // Session paused
 
 /**
- * Task with session state
+ * Session metrics for monitoring context health
+ *
+ * These metrics are populated when a Claude session is active and
+ * enable progressive disclosure UI:
+ * - Border colors encode health at-a-glance (lavender/yellow/red)
+ * - DetailPanel shows full metrics when task is selected
  */
-export interface TaskWithSession extends Issue {
+export interface SessionMetrics {
+  /** Context window usage percentage (0-100). Critical for monitoring auto-compact risk. */
+  contextPercent?: number
+  /** When the session started (ISO 8601) */
+  sessionStartedAt?: string
+  /** Estimated token count for the session */
+  estimatedTokens?: number
+  /** When context was last compacted (ISO 8601). Indicates context loss events. */
+  lastCompactedAt?: string
+  /** Recent output snippet for monitoring session progress */
+  recentOutput?: string
+}
+
+/**
+ * Task with session state and optional metrics
+ *
+ * Extends Issue with session tracking. Metrics are only populated
+ * when the session is active (not idle).
+ */
+export interface TaskWithSession extends Issue, SessionMetrics {
   sessionState: SessionState
 }
 
