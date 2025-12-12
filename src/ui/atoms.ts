@@ -13,17 +13,21 @@ import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentServ
 import { SessionManager, SessionManagerLive } from "../core/SessionManager"
 import { EditorService, EditorServiceLive } from "../core/EditorService"
 import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
+import { AppConfigLiveWithPlatform } from "../config/index"
 
 /**
  * Combined runtime layer with all services
  *
- * Merges BeadsClient, TmuxService, TerminalService, AttachmentService, and SessionManager.
- * AttachmentService and SessionManager depend on the base services.
+ * Merges BeadsClient, TmuxService, TerminalService, AttachmentService, SessionManager, and AppConfig.
+ * AppConfig is provided so SessionManager can use custom init commands and session settings.
  */
+const configLayer = AppConfigLiveWithPlatform(process.cwd())
+
 const baseLayer = Layer.mergeAll(
   BeadsClientLiveWithPlatform,
   TmuxServiceLive,
-  TerminalServiceLive
+  TerminalServiceLive,
+  configLayer
 )
 
 const appLayer = baseLayer.pipe(
