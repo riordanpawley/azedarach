@@ -21,17 +21,19 @@
   "license": "MIT",
   "dependencies": {
     "@effect-atom/atom": "latest",
+    "@effect-atom/atom-react": "latest",
     "@effect/cli": "latest",
     "@effect/cluster": "^0.55.0",
     "@effect/platform": "latest",
     "@effect/platform-bun": "latest",
     "@opentui/core": "latest",
-    "@opentui/solid": "latest",
+    "@opentui/react": "latest",
     "effect": "latest",
-    "solid-js": "latest"
+    "react": "^19.0.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/react": "^19.2.7",
     "tsup": "latest",
     "typescript": "latest"
   }

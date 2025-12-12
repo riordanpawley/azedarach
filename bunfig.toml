@@ -1,4 +1,2 @@
 # Bun configuration for Azedarach
-# Registers the OpenTUI/Solid JSX transform plugin
-
-preload = ["@opentui/solid/preload"]
+# No preload needed for OpenTUI/React - JSX transform handled by tsconfig.json

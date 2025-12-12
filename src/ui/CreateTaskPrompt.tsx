@@ -1,8 +1,8 @@
 /**
  * CreateTaskPrompt - Modal prompt for creating new tasks
  */
-import { type Component, createSignal } from "solid-js"
-import { useKeyboard } from "@opentui/solid"
+import { useState } from "react"
+import { useKeyboard } from "@opentui/react"
 import { theme } from "./theme"
 
 export interface CreateTaskPromptProps {
@@ -12,6 +12,7 @@ export interface CreateTaskPromptProps {
 
 const TASK_TYPES = ["task", "bug", "feature", "epic", "chore"] as const
 const PRIORITIES = [1, 2, 3, 4] as const
+const ATTR_BOLD = 1
 
 /**
  * CreateTaskPrompt component
@@ -19,14 +20,14 @@ const PRIORITIES = [1, 2, 3, 4] as const
  * Simple modal for creating new tasks with title, type, and priority inputs.
  * Uses tab/shift-tab to cycle through fields, Enter to submit, Esc to cancel.
  */
-export const CreateTaskPrompt: Component<CreateTaskPromptProps> = (props) => {
-  const [title, setTitle] = createSignal("")
-  const [typeIndex, setTypeIndex] = createSignal(0) // default: task
-  const [priorityIndex, setPriorityIndex] = createSignal(1) // default: P2
-  const [focusedField, setFocusedField] = createSignal<"title" | "type" | "priority">("title")
+export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
+  const [title, setTitle] = useState("")
+  const [typeIndex, setTypeIndex] = useState(0) // default: task
+  const [priorityIndex, setPriorityIndex] = useState(1) // default: P2
+  const [focusedField, setFocusedField] = useState<"title" | "type" | "priority">("title")
 
   useKeyboard((event) => {
-    const field = focusedField()
+    const field = focusedField
 
     // Escape to cancel
     if (event.name === "escape") {
@@ -52,12 +53,11 @@ export const CreateTaskPrompt: Component<CreateTaskPromptProps> = (props) => {
 
     // Enter to submit (only if title is not empty)
     if (event.name === "return") {
-      const currentTitle = title()
-      if (currentTitle.trim()) {
+      if (title.trim()) {
         props.onSubmit({
-          title: currentTitle,
-          type: TASK_TYPES[typeIndex()],
-          priority: PRIORITIES[priorityIndex()],
+          title: title,
+          type: TASK_TYPES[typeIndex],
+          priority: PRIORITIES[priorityIndex],
         })
       }
       return
@@ -90,14 +90,10 @@ export const CreateTaskPrompt: Component<CreateTaskPromptProps> = (props) => {
     }
   })
 
-  const selectedType = () => TASK_TYPES[typeIndex()]
-  const selectedPriority = () => PRIORITIES[priorityIndex()]
-
-  // Calculate modal dimensions and position
-  const ATTR_BOLD = 1
+  const selectedType = TASK_TYPES[typeIndex]
+  const selectedPriority = PRIORITIES[priorityIndex]
 
   const modalWidth = 60
-  const modalHeight = 12
 
   return (
     <box
@@ -131,34 +127,34 @@ export const CreateTaskPrompt: Component<CreateTaskPromptProps> = (props) => {
 
         {/* Title input */}
         <box flexDirection="row" marginTop={1}>
-          <text fg={focusedField() === "title" ? theme.yellow : theme.subtext0}>Title: </text>
-          <text fg={theme.text}>{title()}</text>
-          {focusedField() === "title" && <text fg={theme.yellow}>_</text>}
+          <text fg={focusedField === "title" ? theme.yellow : theme.subtext0}>Title: </text>
+          <text fg={theme.text}>{title}</text>
+          {focusedField === "title" && <text fg={theme.yellow}>_</text>}
         </box>
 
         {/* Type selector */}
         <box flexDirection="row" marginTop={1}>
-          <text fg={focusedField() === "type" ? theme.yellow : theme.subtext0}>Type:  </text>
-          {focusedField() === "type" && <text fg={theme.subtext0}>{"< "}</text>}
-          <text fg={theme.text} attributes={focusedField() === "type" ? ATTR_BOLD : undefined}>
-            {selectedType()}
+          <text fg={focusedField === "type" ? theme.yellow : theme.subtext0}>Type:  </text>
+          {focusedField === "type" && <text fg={theme.subtext0}>{"< "}</text>}
+          <text fg={theme.text} attributes={focusedField === "type" ? ATTR_BOLD : undefined}>
+            {selectedType}
           </text>
-          {focusedField() === "type" && <text fg={theme.subtext0}>{" >"}</text>}
+          {focusedField === "type" && <text fg={theme.subtext0}>{" >"}</text>}
         </box>
 
         {/* Priority selector */}
         <box flexDirection="row" marginTop={1}>
-          <text fg={focusedField() === "priority" ? theme.yellow : theme.subtext0}>
+          <text fg={focusedField === "priority" ? theme.yellow : theme.subtext0}>
             Priority:{" "}
           </text>
-          {focusedField() === "priority" && <text fg={theme.subtext0}>{"< "}</text>}
+          {focusedField === "priority" && <text fg={theme.subtext0}>{"< "}</text>}
           <text
             fg={theme.text}
-            attributes={focusedField() === "priority" ? ATTR_BOLD : undefined}
+            attributes={focusedField === "priority" ? ATTR_BOLD : undefined}
           >
-            P{selectedPriority()}
+            P{selectedPriority}
           </text>
-          {focusedField() === "priority" && <text fg={theme.subtext0}>{" >"}</text>}
+          {focusedField === "priority" && <text fg={theme.subtext0}>{" >"}</text>}
         </box>
 
         {/* Help text */}
