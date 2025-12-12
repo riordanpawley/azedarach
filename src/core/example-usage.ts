@@ -52,11 +52,11 @@ const attachToSession = (beadId: string) =>
       return yield* Effect.fail(new Error(`Session ${sessionName} not found`))
     }
 
-    // Get the attach command and open in terminal
+    // Get the attach command and open in a new tmux window
     const attachCmd = tmux.attachCommand(sessionName)
-    yield* terminal.openWithCommand(attachCmd)
+    yield* terminal.openInTmuxWindow(attachCmd, sessionName)
 
-    console.log(`Opened terminal with session: ${sessionName}`)
+    console.log(`Opened tmux window with session: ${sessionName}`)
   })
 
 // Example 4: Path utilities

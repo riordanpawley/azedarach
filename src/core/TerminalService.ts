@@ -1,55 +1,82 @@
 import { Effect, Context, Layer, Data } from "effect"
 
-export class TerminalNotFoundError extends Data.TaggedError("TerminalNotFoundError")<{
-  message?: string
+export class NotInsideTmuxError extends Data.TaggedError("NotInsideTmuxError")<{
+  message: string
 }> {}
 
-export type TerminalType = "ghostty" | "iterm" | "terminal-app" | "unknown"
+export class TmuxCommandError extends Data.TaggedError("TmuxCommandError")<{
+  message: string
+  command: string
+}> {}
 
 export interface TerminalServiceI {
-  readonly detect: () => Effect.Effect<TerminalType, never>
-  readonly openWithCommand: (cmd: string) => Effect.Effect<void, TerminalNotFoundError>
+  /**
+   * Check if running inside a tmux session
+   */
+  readonly isInsideTmux: () => Effect.Effect<boolean, never>
+
+  /**
+   * Open a command in a new tmux window
+   * Requires azedarach to be running inside tmux
+   */
+  readonly openInTmuxWindow: (cmd: string, windowName?: string) => Effect.Effect<void, NotInsideTmuxError | TmuxCommandError>
+
+  /**
+   * Switch to another tmux session
+   * Use this to attach to Claude sessions - switches the whole client
+   */
+  readonly switchToSession: (sessionName: string) => Effect.Effect<void, NotInsideTmuxError | TmuxCommandError>
 }
 
 export class TerminalService extends Context.Tag("TerminalService")<TerminalService, TerminalServiceI>() {}
 
-// Helper function to detect terminal type
-const detectTerminal = (): TerminalType => {
-  const term = process.env.TERM_PROGRAM?.toLowerCase()
-  if (term?.includes("ghostty")) return "ghostty"
-  if (term?.includes("iterm")) return "iterm"
-  if (term?.includes("apple_terminal")) return "terminal-app"
-  return "unknown"
+// Check if running inside tmux
+const isInsideTmux = (): boolean => {
+  return !!process.env.TMUX
 }
 
 export const TerminalServiceLive = Layer.succeed(TerminalService, {
-  detect: () =>
-    Effect.sync(() => detectTerminal()),
+  isInsideTmux: () =>
+    Effect.sync(() => isInsideTmux()),
 
-  openWithCommand: (cmd: string) =>
+  openInTmuxWindow: (cmd: string, windowName?: string) =>
     Effect.gen(function* () {
-      const terminal = detectTerminal()
-
-      switch (terminal) {
-        case "ghostty":
-          yield* Effect.tryPromise(() =>
-            Bun.spawn(["ghostty", "-e", cmd]).exited
-          )
-          break
-        case "iterm":
-          // Use osascript for iTerm
-          yield* Effect.tryPromise(() =>
-            Bun.spawn(["osascript", "-e", `tell application "iTerm" to create window with default profile command "${cmd}"`]).exited
-          )
-          break
-        default:
-          // Fallback to open with Terminal.app
-          yield* Effect.tryPromise(() =>
-            Bun.spawn(["open", "-a", "Terminal", cmd]).exited
-          )
+      if (!isInsideTmux()) {
+        return yield* Effect.fail(new NotInsideTmuxError({
+          message: "Azedarach must be run inside tmux. Start with: tmux new-session -s az 'pnpm dev'"
+        }))
       }
-    }).pipe(
-      Effect.asVoid,
-      Effect.catchAll(() => Effect.fail(new TerminalNotFoundError({})))
-    )
+
+      const args = windowName
+        ? ["tmux", "new-window", "-n", windowName, cmd]
+        : ["tmux", "new-window", cmd]
+
+      yield* Effect.tryPromise({
+        try: () => Bun.spawn(args).exited,
+        catch: (e) => new TmuxCommandError({
+          message: `Failed to create tmux window: ${e}`,
+          command: args.join(" ")
+        })
+      })
+    }).pipe(Effect.asVoid),
+
+  /**
+   * Switch to another tmux session (for attaching to Claude sessions)
+   */
+  switchToSession: (sessionName: string) =>
+    Effect.gen(function* () {
+      if (!isInsideTmux()) {
+        return yield* Effect.fail(new NotInsideTmuxError({
+          message: "Azedarach must be run inside tmux. Start with: tmux new-session -s az 'pnpm dev'"
+        }))
+      }
+
+      yield* Effect.tryPromise({
+        try: () => Bun.spawn(["tmux", "switch-client", "-t", sessionName]).exited,
+        catch: (e) => new TmuxCommandError({
+          message: `Failed to switch to session: ${e}`,
+          command: `tmux switch-client -t ${sessionName}`
+        })
+      })
+    }).pipe(Effect.asVoid)
 })

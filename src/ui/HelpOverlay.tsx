@@ -105,6 +105,12 @@ export const HelpOverlay: Component = () => {
             {/* General section */}
             <text fg={theme.blue} attributes={ATTR_BOLD}>{"General:\n"}</text>
             {"  "}
+            <text fg={theme.lavender}>{"Enter"}</text>
+            {"         Show task details\n"}
+            {"  "}
+            <text fg={theme.lavender}>{"c"}</text>
+            {"            Create new task\n"}
+            {"  "}
             <text fg={theme.lavender}>{"q"}</text>
             {"            Quit application\n"}
             {"  "}

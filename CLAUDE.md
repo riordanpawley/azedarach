@@ -167,9 +167,30 @@ Skills auto-load when you edit files or mention keywords:
 - **Files:** Check references before deleting (`rg "filename"`)
 - **Testing:** Test TUI components with `ink-testing-library`
 
+## Documentation
+
+**IMPORTANT:** Keep the user guide updated when implementing features.
+
+**Documentation location:** `docs/`
+
+| File | Purpose |
+|------|---------|
+| `docs/README.md` | Main user guide index - UPDATE when adding features |
+| `docs/keybindings.md` | Keybinding reference |
+| `docs/services.md` | Effect services architecture |
+| `docs/testing.md` | Testing guide |
+| `docs/tmux-guide.md` | tmux primer for new users |
+
+**When to update docs:**
+- Adding new keybindings → Update `keybindings.md` AND `README.md`
+- Adding new services → Update `services.md`
+- Changing test procedures → Update `testing.md`
+- Any user-facing feature → Update `README.md`
+
 ## Quick Help
 
 - Workflow help: Use beads-tracking skill
 - Architecture: See README.md for full spec
+- User guide: See `docs/README.md`
 
 </ai_context>
