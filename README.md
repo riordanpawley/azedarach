@@ -136,7 +136,7 @@ Each task displays a 2-character label (e.g., `aa`, `as`, `ad`). Type the label 
 |-----|--------|
 | `h/l` | **Move task(s)** to previous/next column |
 | `s` | Start task (spawn Claude session) |
-| `a` | Attach to running session (opens terminal) |
+| `a` | Attach to running session |
 | `p` | Pause session (commit WIP, detach) |
 | `r` | Resume paused session |
 | `d` | Show diff for task |
@@ -326,7 +326,7 @@ Task shows 🟡 indicator
   ↓
 User presses 'a' on CHE-106
   ↓
-Azedarach opens new terminal tab:
+Azedarach attaches to tmux session:
   `tmux attach-session -t che-106`
   ↓
 User responds to Claude's question
@@ -495,9 +495,6 @@ Config file: `.azedarach.json`, `.azedarachrc`, or `azedarach` key in `package.j
 
 ```json
 {
-  "terminal": "iterm",
-  "terminalArgs": ["-e"],
-
   "worktree": {
     "location": "../{project}-{bead-id}",
     "baseBranch": "main"
@@ -566,9 +563,6 @@ az sync                 # Sync all worktrees
 - gh CLI (authenticated)
 - Beads (`bd` CLI installed and configured)
 - Claude Code (`claude` CLI installed and authenticated)
-
-**Optional**:
-- Terminal configured for external attachment (iTerm, Terminal.app)
 
 ---
 
