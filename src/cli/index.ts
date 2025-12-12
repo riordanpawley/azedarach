@@ -6,11 +6,13 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { Effect, Console, Option } from "effect"
+import { Effect, Console, Option, Layer } from "effect"
 import { BunContext, BunRuntime } from "@effect/platform-bun"
 import * as FileSystem from "@effect/platform/FileSystem"
 import * as Path from "@effect/platform/Path"
 import { BeadsClientLiveWithPlatform } from "../core/BeadsClient.js"
+import { AppConfigLiveWithPlatform } from "../config/index.js"
+import { SessionManagerLive, SessionManager } from "../core/SessionManager.js"
 
 // ============================================================================
 // Shared Options
@@ -110,24 +112,40 @@ const startHandler = (args: {
 }) =>
   Effect.gen(function* () {
     const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+    const configPath = Option.getOrUndefined(args.config)
 
     yield* Console.log(`Starting Claude session for issue: ${args.issueId}`)
     yield* Console.log(`Project: ${cwd}`)
 
     if (args.verbose) {
       yield* Console.log("Verbose mode enabled")
+      if (configPath) {
+        yield* Console.log(`Using config: ${configPath}`)
+      }
     }
 
     // Validate beads database
     yield* validateBeadsDatabase(cwd)
 
-    // TODO: Implement session creation
-    yield* Console.log("[Stub] Creating worktree...")
-    yield* Console.log("[Stub] Spawning tmux session...")
-    yield* Console.log("[Stub] Starting Claude Code...")
-    yield* Console.log(
-      `[Stub] Session 'az-${args.issueId}' started. Use 'az attach ${args.issueId}' to connect.`
-    )
+    // Create the combined layer with config
+    const appConfigLayer = AppConfigLiveWithPlatform(cwd, configPath)
+    const fullLayer = Layer.provideMerge(SessionManagerLive, appConfigLayer)
+
+    // Start the session using SessionManager
+    const session = yield* Effect.gen(function* () {
+      const sessionManager = yield* SessionManager
+      return yield* sessionManager.start({
+        beadId: args.issueId,
+        projectPath: cwd,
+      })
+    }).pipe(Effect.provide(fullLayer))
+
+    yield* Console.log(`Session started successfully!`)
+    yield* Console.log(`  Worktree: ${session.worktreePath}`)
+    yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
+    yield* Console.log(``)
+    yield* Console.log(`To attach: az attach ${args.issueId}`)
+    yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
   })
 
 /**
