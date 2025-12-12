@@ -12,6 +12,7 @@ import { TerminalServiceLive } from "../core/TerminalService"
 import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentService"
 import { SessionManager, SessionManagerLive } from "../core/SessionManager"
 import { EditorService, EditorServiceLive } from "../core/EditorService"
+import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
 
 /**
  * Combined runtime layer with all services
@@ -28,7 +29,8 @@ const baseLayer = Layer.mergeAll(
 const appLayer = baseLayer.pipe(
   Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
   Layer.merge(SessionManagerLive),
-  Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer)))
+  Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
+  Layer.merge(PRWorkflowLive)
 )
 
 /**
@@ -211,4 +213,53 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
     const editor = yield* EditorService
     yield* editor.editBead(bead)
   })
+)
+
+// ============================================================================
+// PR Workflow Atoms
+// ============================================================================
+
+/**
+ * Create a PR for a bead's worktree branch
+ *
+ * Usage: const createPR = useAtomSet(createPRAtom, { mode: "promise" })
+ *        const pr = await createPR(beadId)
+ */
+export const createPRAtom = appRuntime.fn((beadId: string) =>
+  Effect.gen(function* () {
+    const prWorkflow = yield* PRWorkflow
+    return yield* prWorkflow.createPR({
+      beadId,
+      projectPath: process.cwd(),
+    })
+  })
+)
+
+/**
+ * Cleanup worktree and branches after PR merge or abandonment
+ *
+ * Usage: const cleanup = useAtomSet(cleanupAtom, { mode: "promise" })
+ *        await cleanup(beadId)
+ */
+export const cleanupAtom = appRuntime.fn((beadId: string) =>
+  Effect.gen(function* () {
+    const prWorkflow = yield* PRWorkflow
+    yield* prWorkflow.cleanup({
+      beadId,
+      projectPath: process.cwd(),
+    })
+  })
+)
+
+/**
+ * Check if gh CLI is available and authenticated
+ *
+ * Usage: const ghAvailable = useAtomValue(ghCLIAvailableAtom)
+ */
+export const ghCLIAvailableAtom = appRuntime.atom(
+  Effect.gen(function* () {
+    const prWorkflow = yield* PRWorkflow
+    return yield* prWorkflow.checkGHCLI()
+  }),
+  { initialValue: false }
 )

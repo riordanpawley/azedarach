@@ -25,6 +25,8 @@ import {
   stopSessionAtom,
   createTaskAtom,
   editBeadAtom,
+  createPRAtom,
+  cleanupAtom,
 } from "./atoms"
 import { useAtomValue, useAtomMount, useAtomRefresh, useAtomSet } from "../lib/effect-atom-solid"
 import {
@@ -71,6 +73,8 @@ export const App: Component = () => {
   const stopSession = useAtomSet(stopSessionAtom, { mode: "promise" })
   const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
   const editBead = useAtomSet(editBeadAtom, { mode: "promise" })
+  const createPR = useAtomSet(createPRAtom, { mode: "promise" })
+  const cleanup = useAtomSet(cleanupAtom, { mode: "promise" })
 
   // Calculate how many tasks can fit based on terminal height
   const maxVisibleTasks = () => {
@@ -573,6 +577,51 @@ export const App: Component = () => {
                   : `Failed to edit: ${error}`
                 showError(msg)
               })
+          }
+          exitToNormal()
+          break
+        }
+        case "P": {
+          // Create PR (push branch + gh pr create)
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState === "idle") {
+              showError(`No worktree for ${task.id} - start a session first`)
+            } else {
+              showInfo(`Creating PR for ${task.id}...`)
+              createPR(task.id)
+                .then((pr) => {
+                  showSuccess(`PR created: ${pr.url}`)
+                })
+                .catch((error) => {
+                  const msg = error && typeof error === "object" && error._tag === "GHCLIError"
+                    ? error.message
+                    : `Failed to create PR: ${error}`
+                  showError(msg)
+                })
+            }
+          }
+          exitToNormal()
+          break
+        }
+        case "d": {
+          // Cleanup/delete worktree and branches
+          const task = selectedTask()
+          if (task) {
+            if (task.sessionState === "idle") {
+              showError(`No worktree to delete for ${task.id}`)
+            } else {
+              // TODO: Add confirmation dialog for destructive action
+              showInfo(`Cleaning up ${task.id}...`)
+              cleanup(task.id)
+                .then(() => {
+                  refreshTasks()
+                  showSuccess(`Cleaned up ${task.id}`)
+                })
+                .catch((error) => {
+                  showError(`Failed to cleanup: ${error}`)
+                })
+            }
           }
           exitToNormal()
           break

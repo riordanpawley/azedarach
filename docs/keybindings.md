@@ -98,14 +98,38 @@ Selected tasks are highlighted with a different background color. The status bar
 
 ## Action Mode
 
-Press `Space` in Normal mode to enter action mode.
+Press `Space` in Normal mode to enter action mode. A floating palette shows available actions.
+
+### Session Actions
+
+| Sequence | Action | Available When |
+|----------|--------|----------------|
+| `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
+| `Space` `a` | Attach to session | Session exists (switches tmux client) |
+| `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
+| `Space` `r` | Resume session | Session is paused |
+| `Space` `x` | Stop session | Session exists (kills tmux) |
+
+### Git/PR Actions
+
+| Sequence | Action | Available When |
+|----------|--------|----------------|
+| `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
+| `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
+
+### Movement Actions
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
 | `Space` `h` | Move left | Move task(s) to previous column |
 | `Space` `l` | Move right | Move task(s) to next column |
-| `Space` `a` | Attach external | Open session in new terminal |
-| `Space` `A` | Attach inline | (Not yet implemented) |
+
+### Other Actions
+
+| Sequence | Action | Description |
+|----------|--------|-------------|
+| `Space` `e` | Edit bead | Opens in $EDITOR as markdown |
+| `Esc` | Cancel | Exit action mode |
 
 ### Batch Operations
 

@@ -34,6 +34,10 @@ export const ActionPalette: Component<ActionPaletteProps> = (props) => {
         return sessionState === "paused"
       case "x": // Stop - only if not idle
         return sessionState !== "idle"
+      case "P": // Create PR - only if session has worktree (not idle)
+        return sessionState !== "idle"
+      case "d": // Cleanup/Delete worktree - only if session exists
+        return sessionState !== "idle"
       case "h": // Move left - always available
       case "l": // Move right - always available
         return true
@@ -94,6 +98,11 @@ export const ActionPalette: Component<ActionPaletteProps> = (props) => {
             {renderAction("p", "Pause session")}
             {renderAction("r", "Resume session")}
             {renderAction("x", "Stop session")}
+            {"\n"}
+            {/* PR/Git actions */}
+            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Git/PR\n"}</text>
+            {renderAction("P", "Create PR (push + gh pr create)")}
+            {renderAction("d", "Delete worktree & branch")}
             {"\n"}
             {/* Move actions */}
             <text fg={theme.blue} attributes={ATTR_BOLD}>{"Move\n"}</text>
