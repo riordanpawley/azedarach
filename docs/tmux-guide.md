@@ -89,15 +89,17 @@ tmux -V
 
 ### The Prefix Key
 
-tmux commands start with a **prefix key**: `Ctrl-b` by default.
+tmux commands start with a **prefix key**. Azedarach uses `Ctrl-a` (configured in the recommended `.tmux.conf` below).
 
 To run a tmux command:
-1. Press `Ctrl-b` (nothing visible happens)
+1. Press `Ctrl-a` (nothing visible happens)
 2. Then press the command key
 
-Example: To detach, press `Ctrl-b` then `d`.
+Example: To detach, press `Ctrl-a` then `d`.
 
-I'll write this as: `Ctrl-b d`
+I'll write this as: `Ctrl-a d`
+
+> **Note:** The tmux default is `Ctrl-b`, but `Ctrl-a` is easier to reach and matches GNU Screen.
 
 ### Session Commands
 
@@ -108,7 +110,7 @@ I'll write this as: `Ctrl-b d`
 | `tmux attach -t name` | Attach to session "name" |
 | `tmux list-sessions` | List all sessions |
 | `tmux kill-session -t name` | Kill session "name" |
-| `Ctrl-b d` | Detach from current session |
+| `Ctrl-a d` | Detach from current session |
 
 ### Quick Reference Card
 
@@ -116,31 +118,31 @@ I'll write this as: `Ctrl-b d`
 ┌────────────────────────────────────────────────────────┐
 │               tmux Quick Reference                      │
 ├────────────────────────────────────────────────────────┤
-│ PREFIX = Ctrl-b (press first, then command key)        │
+│ PREFIX = Ctrl-a (press first, then command key)        │
 ├────────────────────────────────────────────────────────┤
 │ Session Commands:                                       │
-│   Ctrl-b d     Detach from session                     │
-│   Ctrl-b $     Rename session                          │
-│   Ctrl-b s     List sessions (interactive)             │
-│   Ctrl-b (     Previous session                        │
-│   Ctrl-b )     Next session                            │
+│   Ctrl-a d     Detach from session                     │
+│   Ctrl-a $     Rename session                          │
+│   Ctrl-a s     List sessions (interactive)             │
+│   Ctrl-a (     Previous session                        │
+│   Ctrl-a )     Next session                            │
 ├────────────────────────────────────────────────────────┤
 │ Window Commands:                                        │
-│   Ctrl-b c     Create new window                       │
-│   Ctrl-b n     Next window                             │
-│   Ctrl-b p     Previous window                         │
-│   Ctrl-b 0-9   Switch to window by number              │
+│   Ctrl-a c     Create new window                       │
+│   Ctrl-a n     Next window                             │
+│   Ctrl-a p     Previous window                         │
+│   Ctrl-a 0-9   Switch to window by number              │
 ├────────────────────────────────────────────────────────┤
 │ Pane Commands:                                          │
-│   Ctrl-b %     Split vertically                        │
-│   Ctrl-b "     Split horizontally                      │
-│   Ctrl-b o     Switch to next pane                     │
-│   Ctrl-b x     Close current pane                      │
+│   Ctrl-a %     Split vertically                        │
+│   Ctrl-a "     Split horizontally                      │
+│   Ctrl-a o     Switch to next pane                     │
+│   Ctrl-a x     Close current pane                      │
 ├────────────────────────────────────────────────────────┤
 │ Other:                                                  │
-│   Ctrl-b ?     Help (list all keybindings)             │
-│   Ctrl-b :     Command prompt                          │
-│   Ctrl-b [     Scroll mode (q to exit)                 │
+│   Ctrl-a ?     Help (list all keybindings)             │
+│   Ctrl-a :     Command prompt                          │
+│   Ctrl-a [     Scroll mode (q to exit)                 │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -185,7 +187,7 @@ tmux attach -t claude-az-05y
 ### Detaching from Sessions
 
 When viewing a Claude session:
-- Press `Ctrl-b` then `d` to detach
+- Press `Ctrl-a` then `d` to detach
 - The session continues running in the background
 - You return to your previous terminal
 
@@ -193,7 +195,7 @@ When viewing a Claude session:
 
 If you want to scroll through Claude's output:
 1. Attach to the session
-2. Press `Ctrl-b` then `[` to enter scroll mode
+2. Press `Ctrl-a` then `[` to enter scroll mode
 3. Use arrow keys or `Page Up`/`Page Down` to scroll
 4. Press `q` to exit scroll mode
 
@@ -209,7 +211,7 @@ tmux list-sessions
 tmux attach -t claude-az-05y
 
 # 3. Watch for a while, then detach
-# Press: Ctrl-b d
+# Press: Ctrl-a d
 
 # Claude continues working in the background
 ```
@@ -224,7 +226,7 @@ tmux attach -t claude-az-05y
 # (if Claude is waiting for input)
 
 # 3. When done, detach
-# Press: Ctrl-b d
+# Press: Ctrl-a d
 ```
 
 ### Workflow 3: Check Multiple Sessions
@@ -238,7 +240,7 @@ tmux list-sessions
 # claude-az-xyz: 1 windows (created Thu Dec 12 10:35:00 2024)
 
 # Quick switch between sessions (while attached):
-# Ctrl-b s  (shows session list, use arrows to select)
+# Ctrl-a s  (shows session list, use arrows to select)
 ```
 
 ### Workflow 4: Kill a Stuck Session
@@ -269,7 +271,7 @@ tmux attach -t claude-test
 # You should see "Hello from tmux!"
 
 # 4. Detach
-# Press: Ctrl-b d
+# Press: Ctrl-a d
 
 # 5. Clean up
 tmux kill-session -t claude-test
@@ -302,7 +304,7 @@ tmux kill-session -t claude-az-05y
 
 **Problem:** You're trying to start tmux inside tmux.
 
-**Solution:** Detach first (`Ctrl-b d`), then run your tmux command.
+**Solution:** Detach first (`Ctrl-a d`), then run your tmux command.
 
 ### "no server running"
 
@@ -347,18 +349,19 @@ tmux list-sessions
 reset
 
 # Or inside tmux:
-# Ctrl-b :
+# Ctrl-a :
 # Then type: refresh-client
 ```
 
-## Advanced Configuration (Optional)
+## Required Configuration
 
 ### Recommended .tmux.conf
 
-Create `~/.tmux.conf` for a better experience:
+Create `~/.tmux.conf` for Azedarach compatibility:
 
 ```bash
 # Use Ctrl-a instead of Ctrl-b (easier to reach)
+# This is required for the keybindings documented above
 set -g prefix C-a
 unbind C-b
 bind C-a send-prefix
