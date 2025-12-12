@@ -61,8 +61,9 @@ export interface NavigationState {
  * - goto: Jump mode triggered by 'g' - shows 2-char labels for instant jumping
  * - select: Multi-selection mode triggered by 'v'
  * - action: Action menu mode triggered by Space
+ * - search: Search/filter mode triggered by '/'
  */
-export type EditorMode = "normal" | "goto" | "select" | "action"
+export type EditorMode = "normal" | "goto" | "select" | "action" | "search"
 
 /**
  * Goto mode sub-state

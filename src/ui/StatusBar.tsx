@@ -37,6 +37,8 @@ export const StatusBar = (props: StatusBarProps) => {
         return theme.yellow
       case "action":
         return theme.green
+      case "search":
+        return theme.peach
       default:
         return theme.text
     }
@@ -53,6 +55,8 @@ export const StatusBar = (props: StatusBarProps) => {
         return "GTO"
       case "action":
         return "ACT"
+      case "search":
+        return "SRC"
       default:
         return "???"
     }
@@ -116,9 +120,17 @@ export const StatusBar = (props: StatusBarProps) => {
             {props.mode === "normal" && (
               <>
                 <KeyHint keyName="Space" action="Menu" />
+                <KeyHint keyName="/" action="Search" />
                 <KeyHint keyName="v" action="Select" />
                 <KeyHint keyName="g" action="Goto" />
                 <KeyHint keyName="q" action="Quit" />
+              </>
+            )}
+
+            {props.mode === "search" && (
+              <>
+                <KeyHint keyName="Enter" action="Confirm" />
+                <KeyHint keyName="Esc" action="Clear" />
               </>
             )}
 

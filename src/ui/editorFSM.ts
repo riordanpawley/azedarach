@@ -14,6 +14,7 @@ export interface EditorState {
   jumpLabels: Map<string, JumpTarget> | null
   pendingJumpKey: string | null
   selectedIds: Set<string>
+  searchQuery: string
 }
 
 // FSM Actions
@@ -25,6 +26,9 @@ export type EditorAction =
   | { type: "ENTER_JUMP"; labels: Map<string, JumpTarget> }
   | { type: "SET_PENDING_JUMP_KEY"; key: string }
   | { type: "ENTER_ACTION" }
+  | { type: "ENTER_SEARCH" }
+  | { type: "UPDATE_SEARCH_QUERY"; query: string }
+  | { type: "CLEAR_SEARCH" }
   | { type: "EXIT_TO_NORMAL" }
   | { type: "RESET" }
 
@@ -35,6 +39,7 @@ export const initialEditorState: EditorState = {
   jumpLabels: null,
   pendingJumpKey: null,
   selectedIds: new Set(),
+  searchQuery: "",
 }
 
 // FSM Reducer
@@ -71,6 +76,15 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 
     case "ENTER_ACTION":
       return { ...state, mode: "action" }
+
+    case "ENTER_SEARCH":
+      return { ...state, mode: "search" }
+
+    case "UPDATE_SEARCH_QUERY":
+      return { ...state, searchQuery: action.query }
+
+    case "CLEAR_SEARCH":
+      return { ...state, mode: "normal", searchQuery: "" }
 
     case "EXIT_TO_NORMAL":
       return {
