@@ -11,6 +11,7 @@ import { HelpOverlay } from "./HelpOverlay"
 import { ActionPalette } from "./ActionPalette"
 import { DetailPanel } from "./DetailPanel"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
+import { SearchInput } from "./SearchInput"
 import { ToastContainer, type ToastMessage, generateToastId } from "./Toast"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import {
@@ -143,14 +144,27 @@ export const App = () => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // Group tasks by column for navigation
+  // Group tasks by column for navigation, filtering by search query
   const tasksByColumn = useMemo(() => {
     if (!Result.isSuccess(tasksResult)) return []
 
+    const { searchQuery } = editorState
+    const query = searchQuery.toLowerCase().trim()
+
     return COLUMNS.map((col) =>
-      tasksResult.value.filter((task) => task.status === col.status)
+      tasksResult.value.filter((task) => {
+        // First filter by status
+        if (task.status !== col.status) return false
+        // Then filter by search query if present
+        if (query) {
+          const titleMatch = task.title.toLowerCase().includes(query)
+          const idMatch = task.id.toLowerCase().includes(query)
+          return titleMatch || idMatch
+        }
+        return true
+      })
     )
-  }, [tasksResult])
+  }, [tasksResult, editorState.searchQuery])
 
   // Get all tasks as flat list for jump label generation
   const allTasks = useMemo(() => {
@@ -267,6 +281,9 @@ export const App = () => {
       if (mode === "select") {
         // Clear selections when exiting select mode
         dispatch({ type: "EXIT_SELECT", clearSelections: true })
+      } else if (mode === "search") {
+        // Clear search when exiting search mode
+        dispatch({ type: "CLEAR_SEARCH" })
       } else {
         dispatch({ type: "EXIT_TO_NORMAL" })
       }
@@ -372,6 +389,33 @@ export const App = () => {
           break
         }
       }
+      return
+    }
+
+    // Handle search mode
+    if (mode === "search") {
+      const { searchQuery } = state
+
+      if (event.name === "return") {
+        // Confirm search - stay in normal mode with active filter
+        dispatch({ type: "EXIT_TO_NORMAL" })
+        return
+      }
+
+      if (event.name === "backspace") {
+        // Delete character from search query
+        if (searchQuery.length > 0) {
+          dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery.slice(0, -1) })
+        }
+        return
+      }
+
+      // Regular character input
+      if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
+        dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery + event.sequence })
+        return
+      }
+
       return
     }
 
@@ -688,6 +732,12 @@ export const App = () => {
       }
     }
 
+    // "/" to enter search mode
+    if (event.sequence === "/") {
+      dispatch({ type: "ENTER_SEARCH" })
+      return
+    }
+
     // Ctrl-d: half page down
     if (event.ctrl && event.name === "d") {
       const column = tasksByColumn[columnIndex]
@@ -723,7 +773,7 @@ export const App = () => {
 
   // Mode display text
   const modeDisplay = useMemo(() => {
-    const { mode, gotoSubMode, pendingJumpKey, selectedIds } = editorState
+    const { mode, gotoSubMode, pendingJumpKey, selectedIds, searchQuery } = editorState
     switch (mode) {
       case "goto":
         if (gotoSubMode === "pending") return "g..."
@@ -733,8 +783,11 @@ export const App = () => {
         return `select (${selectedIds.size})`
       case "action":
         return "action"
+      case "search":
+        return "search"
       default:
-        return "normal"
+        // Show active filter in normal mode
+        return searchQuery ? `filter: ${searchQuery}` : "normal"
     }
   }, [editorState])
 
@@ -791,6 +844,9 @@ export const App = () => {
 
       {/* Action palette */}
       {editorState.mode === "action" && <ActionPalette task={selectedTask} />}
+
+      {/* Search input */}
+      {editorState.mode === "search" && <SearchInput query={editorState.searchQuery} />}
 
       {/* Detail panel */}
       {showDetail && selectedTask && <DetailPanel task={selectedTask} />}
