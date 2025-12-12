@@ -6,13 +6,16 @@ import type { EditorMode } from "./types"
 import { theme } from "./theme"
 
 export interface StatusBarProps {
-  totalTasks: number
-  activeSessions: number
-  mode: EditorMode
-  modeDisplay: string
-  selectedCount: number
+  totalTasks: number | (() => number)
+  activeSessions: number | (() => number)
+  mode: EditorMode | (() => EditorMode)
+  modeDisplay: string | (() => string)
+  selectedCount: number | (() => number)
   connected?: boolean
 }
+
+// Helper to unwrap value or accessor
+const unwrap = <T,>(v: T | (() => T)): T => (typeof v === "function" ? (v as () => T)() : v)
 
 /**
  * StatusBar component
@@ -27,9 +30,16 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
   // Get terminal width, default to 80 if not available
   const terminalWidth = () => process.stdout.columns || 80
 
+  // Unwrap all props for reactivity
+  const mode = () => unwrap(props.mode)
+  const modeDisplay = () => unwrap(props.modeDisplay)
+  const totalTasks = () => unwrap(props.totalTasks)
+  const activeSessions = () => unwrap(props.activeSessions)
+  const selectedCount = () => unwrap(props.selectedCount)
+
   // Mode colors matching Helix conventions
   const modeColor = () => {
-    switch (props.mode) {
+    switch (mode()) {
       case "normal":
         return theme.blue
       case "select":
@@ -45,7 +55,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 
   // Short mode label like Helix
   const modeLabel = () => {
-    switch (props.mode) {
+    switch (mode()) {
       case "normal":
         return "NOR"
       case "select":
@@ -84,11 +94,11 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
     // Mode indicator is always shown
     // Stats section: always show on right
     const stats: string[] = []
-    if (shouldShowSelectedCount() && props.selectedCount > 0) {
-      stats.push(`Selected: ${props.selectedCount}`)
+    if (shouldShowSelectedCount() && selectedCount() > 0) {
+      stats.push(`Selected: ${selectedCount()}`)
     }
-    stats.push(`Tasks: ${props.totalTasks}`)
-    stats.push(`Active: ${props.activeSessions}`)
+    stats.push(`Tasks: ${totalTasks()}`)
+    stats.push(`Active: ${activeSessions()}`)
 
     return { projectInfo: parts.join(" "), stats: stats.join("  ") }
   }
@@ -123,35 +133,35 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
         </box>
 
         {/* Mode detail (shows pending keys, selection count, etc) */}
-        <Show when={shouldShowModeDisplay() && props.modeDisplay}>
-          <text fg={theme.subtext0}>{props.modeDisplay}</text>
+        <Show when={shouldShowModeDisplay() && modeDisplay()}>
+          <text fg={theme.subtext0}>{modeDisplay()}</text>
         </Show>
 
         {/* Contextual keyboard shortcuts - hide on narrow terminals */}
         <Show when={shouldShowKeybinds()}>
           <box flexDirection="row" gap={2}>
             <Switch>
-              <Match when={props.mode === "normal"}>
+              <Match when={mode() === "normal"}>
                 <KeyHint key="Space" action="Menu" />
                 <KeyHint key="v" action="Select" />
                 <KeyHint key="g" action="Goto" />
                 <KeyHint key="q" action="Quit" />
               </Match>
 
-              <Match when={props.mode === "select"}>
+              <Match when={mode() === "select"}>
                 <KeyHint key="Space" action="Toggle" />
                 <KeyHint key="v" action="Exit" />
                 <KeyHint key="Esc" action="Clear" />
               </Match>
 
-              <Match when={props.mode === "goto"}>
+              <Match when={mode() === "goto"}>
                 <KeyHint key="w" action="Jump" />
                 <KeyHint key="g" action="First" />
                 <KeyHint key="e" action="Last" />
                 <KeyHint key="Esc" action="Cancel" />
               </Match>
 
-              <Match when={props.mode === "action"}>
+              <Match when={mode() === "action"}>
                 <KeyHint key="h/l" action="Move" />
                 <KeyHint key="s" action="Start" />
                 <KeyHint key="a" action="Attach" />
@@ -178,11 +188,11 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
         {/* Stats - right aligned */}
         <box flexGrow={1} />
         <box flexDirection="row" gap={2}>
-          <Show when={shouldShowSelectedCount() && props.selectedCount > 0}>
-            <text fg={theme.mauve}>Selected: {props.selectedCount}</text>
+          <Show when={shouldShowSelectedCount() && selectedCount() > 0}>
+            <text fg={theme.mauve}>Selected: {selectedCount()}</text>
           </Show>
-          <text fg={theme.green}>Tasks: {props.totalTasks}</text>
-          <text fg={theme.blue}>Active: {props.activeSessions}</text>
+          <text fg={theme.green}>Tasks: {totalTasks()}</text>
+          <text fg={theme.blue}>Active: {activeSessions()}</text>
         </box>
       </box>
     </box>
