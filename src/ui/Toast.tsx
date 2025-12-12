@@ -1,7 +1,7 @@
 /**
  * Toast component - dismissible error/info notifications
  */
-import { type Component, For, createEffect, onCleanup } from "solid-js"
+import { useEffect } from "react"
 import { theme } from "./theme"
 
 export interface ToastMessage {
@@ -37,15 +37,14 @@ function getToastStyle(type: ToastMessage["type"]) {
 /**
  * Toast container - shows stacked toasts at bottom-right
  */
-export const ToastContainer: Component<ToastProps> = (props) => {
+export const ToastContainer = (props: ToastProps) => {
   // Auto-dismiss toasts after duration
-  createEffect(() => {
-    const toasts = props.toasts
-    if (toasts.length === 0) return
+  useEffect(() => {
+    if (props.toasts.length === 0) return
 
     const timers: NodeJS.Timeout[] = []
 
-    for (const toast of toasts) {
+    for (const toast of props.toasts) {
       const elapsed = Date.now() - toast.timestamp
       const remaining = TOAST_DURATION_MS - elapsed
 
@@ -60,12 +59,12 @@ export const ToastContainer: Component<ToastProps> = (props) => {
       }
     }
 
-    onCleanup(() => {
+    return () => {
       for (const timer of timers) {
         clearTimeout(timer)
       }
-    })
-  })
+    }
+  }, [props.toasts, props.onDismiss])
 
   return (
     <box
@@ -75,27 +74,26 @@ export const ToastContainer: Component<ToastProps> = (props) => {
       flexDirection="column"
       gap={1}
     >
-      <For each={props.toasts}>
-        {(toast) => {
-          const style = getToastStyle(toast.type)
-          return (
-            <box
-              backgroundColor={style.bg}
-              paddingLeft={1}
-              paddingRight={1}
-              borderStyle="rounded"
-              border={true}
-              borderColor={style.bg}
-              minWidth={30}
-              maxWidth={60}
-            >
-              <text fg={style.fg} attributes={ATTR_BOLD}>
-                {` ${style.icon} ${toast.message} `}
-              </text>
-            </box>
-          )
-        }}
-      </For>
+      {props.toasts.map((toast) => {
+        const style = getToastStyle(toast.type)
+        return (
+          <box
+            key={toast.id}
+            backgroundColor={style.bg}
+            paddingLeft={1}
+            paddingRight={1}
+            borderStyle="rounded"
+            border={true}
+            borderColor={style.bg}
+            minWidth={30}
+            maxWidth={60}
+          >
+            <text fg={style.fg} attributes={ATTR_BOLD}>
+              {` ${style.icon} ${toast.message} `}
+            </text>
+          </box>
+        )
+      })}
     </box>
   )
 }

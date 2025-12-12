@@ -1,7 +1,7 @@
 /**
  * DetailPanel component - expandable detail view for selected task
  */
-import { type Component, Show, createMemo } from "solid-js"
+import { useMemo } from "react"
 import type { TaskWithSession } from "./types"
 import { theme, getPriorityColor } from "./theme"
 import { SESSION_INDICATORS } from "./types"
@@ -9,6 +9,8 @@ import { SESSION_INDICATORS } from "./types"
 export interface DetailPanelProps {
   task: TaskWithSession
 }
+
+const ATTR_BOLD = 1
 
 /**
  * DetailPanel component
@@ -21,13 +23,11 @@ export interface DetailPanelProps {
  * - Session status and recent output (future enhancement)
  * - Available actions based on state (future enhancement)
  */
-export const DetailPanel: Component<DetailPanelProps> = (props) => {
-  const ATTR_BOLD = 1
-
-  const indicator = () => SESSION_INDICATORS[props.task.sessionState]
+export const DetailPanel = (props: DetailPanelProps) => {
+  const indicator = SESSION_INDICATORS[props.task.sessionState]
 
   // Priority label like P1, P2, P3, P4
-  const priorityLabel = () => `P${props.task.priority}`
+  const priorityLabel = `P${props.task.priority}`
 
   // Format timestamps
   const formatDate = (dateStr: string) => {
@@ -40,7 +40,7 @@ export const DetailPanel: Component<DetailPanelProps> = (props) => {
   }
 
   // Status color based on task status
-  const statusColor = () => {
+  const getStatusColor = () => {
     switch (props.task.status) {
       case "open":
         return theme.blue
@@ -56,20 +56,20 @@ export const DetailPanel: Component<DetailPanelProps> = (props) => {
   }
 
   // Available actions based on task state
-  const availableActions = createMemo(() => {
+  const availableActions = useMemo(() => {
     const actions: string[] = []
 
     switch (props.task.status) {
       case "open":
         actions.push("Space h - Move to previous column")
         actions.push("Space l - Move to next column (Start)")
-        actions.push("s - Start session (coming soon)")
+        actions.push("s - Start session")
         break
       case "in_progress":
         actions.push("Space h - Move to Open")
         actions.push("Space l - Move to Blocked")
-        actions.push("a - Attach to session (coming soon)")
-        actions.push("p - Pause session (coming soon)")
+        actions.push("a - Attach to session")
+        actions.push("p - Pause session")
         break
       case "blocked":
         actions.push("Space h - Move to In Progress")
@@ -81,7 +81,10 @@ export const DetailPanel: Component<DetailPanelProps> = (props) => {
     }
 
     return actions
-  })
+  }, [props.task.status])
+
+  // Build header line
+  const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? " " + indicator : ""}`
 
   return (
     <box
@@ -92,7 +95,7 @@ export const DetailPanel: Component<DetailPanelProps> = (props) => {
       bottom={0}
       alignItems="center"
       justifyContent="center"
-      backgroundColor={theme.crust + "CC"} // Semi-transparent overlay
+      backgroundColor={theme.crust + "CC"}
     >
       <box
         borderStyle="rounded"
@@ -108,107 +111,67 @@ export const DetailPanel: Component<DetailPanelProps> = (props) => {
         flexDirection="column"
       >
         {/* Header with task ID and type */}
-        <text fg={theme.mauve} attributes={ATTR_BOLD}>
-          {`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`}
-          {"  "}
-          {props.task.id}
-          {" ["}
-          {props.task.issue_type}
-          {"]"}
-          {indicator() ? " " + indicator() : ""}
-          {"\n"}
-          {"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"}
-          {"\n"}
-        </text>
+        <text fg={theme.mauve} attributes={ATTR_BOLD}>{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}</text>
+        <text fg={theme.mauve} attributes={ATTR_BOLD}>{headerLine}</text>
+        <text fg={theme.mauve} attributes={ATTR_BOLD}>{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}</text>
+        <text>{" "}</text>
 
         {/* Title */}
-        <text fg={theme.text} attributes={ATTR_BOLD}>
-          {props.task.title}
-          {"\n\n"}
-        </text>
+        <text fg={theme.text} attributes={ATTR_BOLD}>{props.task.title}</text>
+        <text>{" "}</text>
 
         {/* Metadata row */}
         <box flexDirection="row" gap={2}>
-          <text fg={getPriorityColor(props.task.priority)}>
-            {"Priority: "}
-            {priorityLabel()}
-          </text>
-          <text fg={statusColor()}>
-            {"Status: "}
-            {props.task.status}
-          </text>
-          <text fg={theme.subtext0}>
-            {"Session: "}
-            {props.task.sessionState}
-          </text>
+          <text fg={getPriorityColor(props.task.priority)}>{"Priority: " + priorityLabel}</text>
+          <text fg={getStatusColor()}>{"Status: " + props.task.status}</text>
+          <text fg={theme.subtext0}>{"Session: " + props.task.sessionState}</text>
         </box>
-        <text>{"\n"}</text>
+        <text>{" "}</text>
 
         {/* Description */}
-        <Show when={props.task.description}>
-          <text fg={theme.blue} attributes={ATTR_BOLD}>
-            {"Description:\n"}
-          </text>
-          <text fg={theme.text}>
-            {props.task.description}
-            {"\n\n"}
-          </text>
-        </Show>
+        {props.task.description && (
+          <box flexDirection="column">
+            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Description:"}</text>
+            <text fg={theme.text}>{props.task.description}</text>
+            <text>{" "}</text>
+          </box>
+        )}
 
         {/* Design notes */}
-        <Show when={props.task.design}>
-          <text fg={theme.blue} attributes={ATTR_BOLD}>
-            {"Design:\n"}
-          </text>
-          <text fg={theme.text}>
-            {props.task.design}
-            {"\n\n"}
-          </text>
-        </Show>
+        {props.task.design && (
+          <box flexDirection="column">
+            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Design:"}</text>
+            <text fg={theme.text}>{props.task.design}</text>
+            <text>{" "}</text>
+          </box>
+        )}
 
         {/* Notes */}
-        <Show when={props.task.notes}>
-          <text fg={theme.blue} attributes={ATTR_BOLD}>
-            {"Notes:\n"}
-          </text>
-          <text fg={theme.text}>
-            {props.task.notes}
-            {"\n\n"}
-          </text>
-        </Show>
+        {props.task.notes && (
+          <box flexDirection="column">
+            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Notes:"}</text>
+            <text fg={theme.text}>{props.task.notes}</text>
+            <text>{" "}</text>
+          </box>
+        )}
 
         {/* Timestamps */}
-        <text fg={theme.subtext0}>
-          {"Created: "}
-          {formatDate(props.task.created_at)}
-          {"\n"}
-          {"Updated: "}
-          {formatDate(props.task.updated_at)}
-          {"\n"}
-        </text>
-        <Show when={props.task.closed_at}>
-          <text fg={theme.subtext0}>
-            {"Closed: "}
-            {formatDate(props.task.closed_at!)}
-            {"\n"}
-          </text>
-        </Show>
-
-        <text>{"\n"}</text>
+        <text fg={theme.subtext0}>{"Created: " + formatDate(props.task.created_at)}</text>
+        <text fg={theme.subtext0}>{"Updated: " + formatDate(props.task.updated_at)}</text>
+        {props.task.closed_at && (
+          <text fg={theme.subtext0}>{"Closed: " + formatDate(props.task.closed_at)}</text>
+        )}
+        <text>{" "}</text>
 
         {/* Available actions */}
-        <text fg={theme.blue} attributes={ATTR_BOLD}>
-          {"Available Actions:\n"}
-        </text>
-        <text fg={theme.text}>
-          {availableActions().map((action) => "  " + action).join("\n")}
-          {"\n\n"}
-        </text>
+        <text fg={theme.blue} attributes={ATTR_BOLD}>{"Available Actions:"}</text>
+        {availableActions.map((action, i) => (
+          <text key={i} fg={theme.text}>{"  " + action}</text>
+        ))}
+        <text>{" "}</text>
 
         {/* Footer instructions */}
-        <text fg={theme.subtext0}>
-          {"Press Enter or Esc to close..."}
-        </text>
+        <text fg={theme.subtext0}>{"Press Enter or Esc to close..."}</text>
       </box>
     </box>
   )

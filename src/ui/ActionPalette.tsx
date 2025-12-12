@@ -1,7 +1,6 @@
 /**
- * ActionPalette component - modal showing available actions
+ * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
-import { type Component } from "solid-js"
 import { theme } from "./theme"
 import type { TaskWithSession } from "./types"
 
@@ -9,20 +8,20 @@ export interface ActionPaletteProps {
   task?: TaskWithSession
 }
 
+const ATTR_BOLD = 1
+const ATTR_DIM = 2
+
 /**
  * ActionPalette component
  *
- * Displays a centered modal overlay with all available actions
- * grouped by category. Actions are grayed out based on session state.
+ * Displays a small floating panel in the bottom-right corner showing available
+ * actions. Non-intrusive design allows seeing the board while moving tasks.
  */
-export const ActionPalette: Component<ActionPaletteProps> = (props) => {
-  const ATTR_BOLD = 1
-  const ATTR_DIM = 2
+export const ActionPalette = (props: ActionPaletteProps) => {
+  const sessionState = props.task?.sessionState ?? "idle"
 
   // Helper to check if an action is available
   const isAvailable = (action: string): boolean => {
-    const sessionState = props.task?.sessionState ?? "idle"
-
     switch (action) {
       case "s": // Start - only if idle
         return sessionState === "idle"
@@ -46,72 +45,52 @@ export const ActionPalette: Component<ActionPaletteProps> = (props) => {
     }
   }
 
-  // Helper to render an action line with conditional dimming
-  const renderAction = (key: string, description: string) => {
-    const available = isAvailable(key)
+  // Action line component
+  const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {
+    const available = isAvailable(keyName)
     const fgColor = available ? theme.text : theme.overlay0
     const keyColor = available ? theme.lavender : theme.overlay0
     const attrs = available ? 0 : ATTR_DIM
 
     return (
-      <>
-        {"  "}
-        <text fg={keyColor} attributes={attrs}>{key}</text>
-        {"  "}
-        <text fg={fgColor} attributes={attrs}>{description}</text>
-        {"\n"}
-      </>
+      <box flexDirection="row">
+        <text fg={keyColor} attributes={attrs}>{keyName}</text>
+        <text fg={fgColor} attributes={attrs}>{" " + description}</text>
+      </box>
     )
   }
 
   return (
     <box
       position="absolute"
-      left={0}
-      right={0}
-      top={0}
-      bottom={0}
-      alignItems="center"
-      justifyContent="center"
-      backgroundColor={theme.crust + "CC"} // Semi-transparent overlay
+      right={1}
+      bottom={4}
     >
       <box
         borderStyle="rounded"
         border={true}
-        borderColor={theme.mauve}
+        borderColor={theme.surface1}
         backgroundColor={theme.base}
-        paddingLeft={2}
-        paddingRight={2}
-        paddingTop={1}
-        paddingBottom={1}
-        minWidth={40}
+        paddingLeft={1}
+        paddingRight={1}
+        flexDirection="column"
       >
-        {/* Header */}
-        <text fg={theme.mauve} attributes={ATTR_BOLD}>
-          {"┌─ Actions ─────────────────────┐\n"}
-          {"\n"}
-          {/* Session actions */}
-          <text fg={theme.blue} attributes={ATTR_BOLD}>{"Session\n"}</text>
-          <text fg={theme.text}>
-            {renderAction("s", "Start session")}
-            {renderAction("a", "Attach to session")}
-            {renderAction("p", "Pause session")}
-            {renderAction("r", "Resume session")}
-            {renderAction("x", "Stop session")}
-            {"\n"}
-            {/* PR/Git actions */}
-            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Git/PR\n"}</text>
-            {renderAction("P", "Create PR (push + gh pr create)")}
-            {renderAction("d", "Delete worktree & branch")}
-            {"\n"}
-            {/* Move actions */}
-            <text fg={theme.blue} attributes={ATTR_BOLD}>{"Move\n"}</text>
-            {renderAction("h", "Move left")}
-            {renderAction("l", "Move right")}
-            {"\n"}
-            <text fg={theme.subtext0}>{"Press Esc to cancel"}</text>
-          </text>
-        </text>
+        {/* Move actions - most common, at top */}
+        <ActionLine keyName="h" description="← move" />
+        <ActionLine keyName="l" description="→ move" />
+        <text fg={theme.surface1}>{"─────────"}</text>
+
+        {/* Session actions */}
+        <ActionLine keyName="s" description="start" />
+        <ActionLine keyName="a" description="attach" />
+        <ActionLine keyName="p" description="pause" />
+        <ActionLine keyName="r" description="resume" />
+        <ActionLine keyName="x" description="stop" />
+        <text fg={theme.surface1}>{"─────────"}</text>
+
+        {/* Git/PR */}
+        <ActionLine keyName="P" description="PR" />
+        <ActionLine keyName="d" description="cleanup" />
       </box>
     </box>
   )

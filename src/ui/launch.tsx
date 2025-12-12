@@ -1,26 +1,17 @@
 /**
  * TUI launcher - initializes OpenTUI and renders the app
  */
-import { render } from "@opentui/solid"
+import { createCliRenderer } from "@opentui/core"
+import { createRoot } from "@opentui/react"
 import { App } from "./App"
-import { AtomProvider } from "../lib/effect-atom-solid"
 
 /**
  * Launch the TUI application
  *
  * Initializes the OpenTUI renderer and starts the application.
- * Wraps App with AtomProvider for effect-atom state management.
+ * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
-  await render(
-    () => (
-      <AtomProvider>
-        <App />
-      </AtomProvider>
-    ),
-    {
-      // OpenTUI renderer config
-      // Use default terminal size
-    }
-  )
+  const renderer = await createCliRenderer()
+  createRoot(renderer).render(<App />)
 }
