@@ -800,11 +800,11 @@ export const App: Component = () => {
 
       {/* Status bar at bottom */}
       <StatusBar
-        totalTasks={totalTasks()}
-        activeSessions={activeSessions()}
-        mode={mode()}
-        modeDisplay={modeDisplay()}
-        selectedCount={selectedIds().size}
+        totalTasks={totalTasks}
+        activeSessions={activeSessions}
+        mode={mode}
+        modeDisplay={modeDisplay}
+        selectedCount={() => selectedIds().size}
       />
 
       {/* Help overlay */}
