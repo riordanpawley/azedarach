@@ -1,13 +1,7 @@
 /**
  * AttachmentService - Effect service for attaching to Claude Code sessions
  *
- * Provides two modes of session attachment:
- * - External: Opens a new terminal window/tab with the tmux session
- * - Inline: Replaces the TUI with the session output (future implementation)
- *
- * Terminal detection uses TERM_PROGRAM environment variable to identify:
- * - iTerm2
- * - Terminal.app
+ * Uses tmux to attach to running Claude Code sessions for manual intervention.
  */
 
 import { Effect, Context, Layer, Data } from "effect"
