@@ -260,20 +260,11 @@ ls -la .beads/
 bd init
 ```
 
-### Terminal detection returns "unknown"
-
-```bash
-# Check your TERM_PROGRAM environment variable
-echo $TERM_PROGRAM
-
-# Expected: "ghostty", "iTerm.app", or "Apple_Terminal"
-```
-
 ### Rendering issues
 
 1. Resize terminal window
 2. Restart the application
-3. Try a different terminal (Ghostty recommended)
+3. Try a different terminal with true color support
 4. Check terminal supports true color:
    ```bash
    echo $COLORTERM  # Should be "truecolor"
