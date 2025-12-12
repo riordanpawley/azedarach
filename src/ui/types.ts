@@ -57,12 +57,13 @@ export interface NavigationState {
 /**
  * Editor modes (Helix-style)
  *
- * - normal: Default navigation mode (hjkl to move)
- * - goto: Jump mode triggered by 'g' - shows 2-char labels for instant jumping
- * - select: Multi-selection mode triggered by 'v'
  * - action: Action menu mode triggered by Space
+ * - goto: Jump mode triggered by 'g' - shows 2-char labels for instant jumping
+ * - normal: Default navigation mode (hjkl to move)
+ * - search: Search/filter mode triggered by '/'
+ * - select: Multi-selection mode triggered by 'v'
  */
-export type EditorMode = "normal" | "goto" | "select" | "action"
+export type EditorMode = "action" | "goto" | "normal" | "search" | "select"
 
 /**
  * Goto mode sub-state
