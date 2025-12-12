@@ -11,6 +11,7 @@ import { HelpOverlay } from "./HelpOverlay"
 import { ActionPalette } from "./ActionPalette"
 import { DetailPanel } from "./DetailPanel"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
+import { SearchInput } from "./SearchInput"
 import { ToastContainer, type ToastMessage, generateToastId } from "./Toast"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import {
@@ -143,14 +144,27 @@ export const App = () => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  // Group tasks by column for navigation
+  // Group tasks by column for navigation, filtering by search query
   const tasksByColumn = useMemo(() => {
     if (!Result.isSuccess(tasksResult)) return []
 
+    const { searchQuery } = editorState
+    const query = searchQuery.toLowerCase().trim()
+
     return COLUMNS.map((col) =>
-      tasksResult.value.filter((task) => task.status === col.status)
+      tasksResult.value.filter((task) => {
+        // First filter by status
+        if (task.status !== col.status) return false
+        // Then filter by search query if present
+        if (query) {
+          const titleMatch = task.title.toLowerCase().includes(query)
+          const idMatch = task.id.toLowerCase().includes(query)
+          return titleMatch || idMatch
+        }
+        return true
+      })
     )
-  }, [tasksResult])
+  }, [tasksResult, editorState.searchQuery])
 
   // Get all tasks as flat list for jump label generation
   const allTasks = useMemo(() => {
@@ -264,113 +278,14 @@ export const App = () => {
 
     // Escape always returns to normal mode
     if (event.name === "escape") {
-      if (mode === "select") {
+      if (mode === "search") {
+        // Clear search when exiting search mode
+        dispatch({ type: "CLEAR_SEARCH" })
+      } else if (mode === "select") {
         // Clear selections when exiting select mode
         dispatch({ type: "EXIT_SELECT", clearSelections: true })
       } else {
         dispatch({ type: "EXIT_TO_NORMAL" })
-      }
-      return
-    }
-
-    // Handle goto mode
-    if (mode === "goto") {
-      if (gotoSubMode === "pending") {
-        // Waiting for second key after 'g'
-        switch (event.name) {
-          case "w": {
-            // Enter jump mode with labels
-            const labels = computeJumpLabels()
-            dispatch({ type: "ENTER_JUMP", labels })
-            break
-          }
-          case "g": {
-            // Go to first task in first column
-            navigateTo(0, 0)
-            dispatch({ type: "EXIT_TO_NORMAL" })
-            break
-          }
-          case "e": {
-            // Go to last task in last column
-            const lastColIdx = COLUMNS.length - 1
-            const lastCol = tasksByColumn[lastColIdx]
-            navigateTo(lastColIdx, lastCol ? lastCol.length - 1 : 0)
-            dispatch({ type: "EXIT_TO_NORMAL" })
-            break
-          }
-          case "h": {
-            // Go to first column, keep task index
-            navigateTo(0, taskIndex)
-            dispatch({ type: "EXIT_TO_NORMAL" })
-            break
-          }
-          case "l": {
-            // Go to last column, keep task index
-            navigateTo(COLUMNS.length - 1, taskIndex)
-            dispatch({ type: "EXIT_TO_NORMAL" })
-            break
-          }
-          default:
-            dispatch({ type: "EXIT_TO_NORMAL" })
-        }
-        return
-      }
-
-      if (gotoSubMode === "jump") {
-        // In jump mode - handle label input
-        handleJumpInput(event.name)
-        return
-      }
-      return
-    }
-
-    // Handle select mode
-    if (mode === "select") {
-      switch (event.name) {
-        case "up":
-        case "k": {
-          const column = tasksByColumn[columnIndex]
-          if (column && taskIndex > 0) {
-            navRef.current = { columnIndex, taskIndex: taskIndex - 1 }
-            setNav({ columnIndex, taskIndex: taskIndex - 1 })
-          }
-          break
-        }
-        case "down":
-        case "j": {
-          const column = tasksByColumn[columnIndex]
-          if (column && taskIndex < column.length - 1) {
-            navRef.current = { columnIndex, taskIndex: taskIndex + 1 }
-            setNav({ columnIndex, taskIndex: taskIndex + 1 })
-          }
-          break
-        }
-        case "left":
-        case "h": {
-          if (columnIndex > 0) {
-            navigateTo(columnIndex - 1, taskIndex)
-          }
-          break
-        }
-        case "right":
-        case "l": {
-          if (columnIndex < COLUMNS.length - 1) {
-            navigateTo(columnIndex + 1, taskIndex)
-          }
-          break
-        }
-        case "space": {
-          // Toggle selection of current task
-          if (selectedTask) {
-            dispatch({ type: "TOGGLE_SELECTION", taskId: selectedTask.id })
-          }
-          break
-        }
-        case "v": {
-          // Exit select mode (back to normal)
-          dispatch({ type: "EXIT_SELECT" })
-          break
-        }
       }
       return
     }
@@ -611,6 +526,135 @@ export const App = () => {
       return
     }
 
+    // Handle goto mode
+    if (mode === "goto") {
+      if (gotoSubMode === "pending") {
+        // Waiting for second key after 'g'
+        switch (event.name) {
+          case "w": {
+            // Enter jump mode with labels
+            const labels = computeJumpLabels()
+            dispatch({ type: "ENTER_JUMP", labels })
+            break
+          }
+          case "g": {
+            // Go to first task in first column
+            navigateTo(0, 0)
+            dispatch({ type: "EXIT_TO_NORMAL" })
+            break
+          }
+          case "e": {
+            // Go to last task in last column
+            const lastColIdx = COLUMNS.length - 1
+            const lastCol = tasksByColumn[lastColIdx]
+            navigateTo(lastColIdx, lastCol ? lastCol.length - 1 : 0)
+            dispatch({ type: "EXIT_TO_NORMAL" })
+            break
+          }
+          case "h": {
+            // Go to first column, keep task index
+            navigateTo(0, taskIndex)
+            dispatch({ type: "EXIT_TO_NORMAL" })
+            break
+          }
+          case "l": {
+            // Go to last column, keep task index
+            navigateTo(COLUMNS.length - 1, taskIndex)
+            dispatch({ type: "EXIT_TO_NORMAL" })
+            break
+          }
+          default:
+            dispatch({ type: "EXIT_TO_NORMAL" })
+        }
+        return
+      }
+
+      if (gotoSubMode === "jump") {
+        // In jump mode - handle label input
+        handleJumpInput(event.name)
+        return
+      }
+      return
+    }
+
+    // Handle search mode
+    if (mode === "search") {
+      const { searchQuery } = state
+
+      if (event.name === "return") {
+        // Confirm search - stay in normal mode with active filter
+        dispatch({ type: "EXIT_TO_NORMAL" })
+        return
+      }
+
+      if (event.name === "backspace") {
+        // Delete character from search query
+        if (searchQuery.length > 0) {
+          dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery.slice(0, -1) })
+        }
+        return
+      }
+
+      // Regular character input
+      if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
+        dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery + event.sequence })
+        return
+      }
+
+      return
+    }
+
+    // Handle select mode
+    if (mode === "select") {
+      switch (event.name) {
+        case "up":
+        case "k": {
+          const column = tasksByColumn[columnIndex]
+          if (column && taskIndex > 0) {
+            navRef.current = { columnIndex, taskIndex: taskIndex - 1 }
+            setNav({ columnIndex, taskIndex: taskIndex - 1 })
+          }
+          break
+        }
+        case "down":
+        case "j": {
+          const column = tasksByColumn[columnIndex]
+          if (column && taskIndex < column.length - 1) {
+            navRef.current = { columnIndex, taskIndex: taskIndex + 1 }
+            setNav({ columnIndex, taskIndex: taskIndex + 1 })
+          }
+          break
+        }
+        case "left":
+        case "h": {
+          if (columnIndex > 0) {
+            navigateTo(columnIndex - 1, taskIndex)
+          }
+          break
+        }
+        case "right":
+        case "l": {
+          if (columnIndex < COLUMNS.length - 1) {
+            navigateTo(columnIndex + 1, taskIndex)
+          }
+          break
+        }
+        case "space": {
+          // Toggle selection of current task
+          if (selectedTask) {
+            dispatch({ type: "TOGGLE_SELECTION", taskId: selectedTask.id })
+          }
+          break
+        }
+        case "v": {
+          // Exit select mode (back to normal)
+          dispatch({ type: "EXIT_SELECT" })
+          break
+        }
+      }
+      return
+    }
+
     // Normal mode
     switch (event.name) {
       case "up":
@@ -688,6 +732,12 @@ export const App = () => {
       }
     }
 
+    // "/" to enter search mode
+    if (event.sequence === "/") {
+      dispatch({ type: "ENTER_SEARCH" })
+      return
+    }
+
     // Ctrl-d: half page down
     if (event.ctrl && event.name === "d") {
       const column = tasksByColumn[columnIndex]
@@ -723,18 +773,21 @@ export const App = () => {
 
   // Mode display text
   const modeDisplay = useMemo(() => {
-    const { mode, gotoSubMode, pendingJumpKey, selectedIds } = editorState
+    const { mode, gotoSubMode, pendingJumpKey, selectedIds, searchQuery } = editorState
     switch (mode) {
+      case "action":
+        return "action"
       case "goto":
         if (gotoSubMode === "pending") return "g..."
         if (gotoSubMode === "jump") return pendingJumpKey ? `g w ${pendingJumpKey}_` : "g w ..."
         return "goto"
+      case "normal":
+        // Show active filter in normal mode
+        return searchQuery ? `filter: ${searchQuery}` : "normal"
+      case "search":
+        return "search"
       case "select":
         return `select (${selectedIds.size})`
-      case "action":
-        return "action"
-      default:
-        return "normal"
     }
   }, [editorState])
 
@@ -791,6 +844,9 @@ export const App = () => {
 
       {/* Action palette */}
       {editorState.mode === "action" && <ActionPalette task={selectedTask} />}
+
+      {/* Search input */}
+      {editorState.mode === "search" && <SearchInput query={editorState.searchQuery} />}
 
       {/* Detail panel */}
       {showDetail && selectedTask && <DetailPanel task={selectedTask} />}
