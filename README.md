@@ -136,7 +136,7 @@ Each task displays a 2-character label (e.g., `aa`, `as`, `ad`). Type the label 
 |-----|--------|
 | `h/l` | **Move task(s)** to previous/next column |
 | `s` | Start task (spawn Claude session) |
-| `a` | Attach to running session (opens Ghostty) |
+| `a` | Attach to running session (opens terminal) |
 | `p` | Pause session (commit WIP, detach) |
 | `r` | Resume paused session |
 | `d` | Show diff for task |
@@ -326,8 +326,8 @@ Task shows 🟡 indicator
   ↓
 User presses 'a' on CHE-106
   ↓
-Azedarach opens new Ghostty tab:
-  `ghostty -e tmux attach-session -t che-106`
+Azedarach opens new terminal tab:
+  `tmux attach-session -t che-106`
   ↓
 User responds to Claude's question
   ↓
@@ -425,7 +425,6 @@ Task resumes with 🔵 indicator
 
 ### System Integration
 - **gh** CLI - GitHub PR creation (system dependency)
-- **ghostty** - Terminal attachment (configurable)
 
 ### Configuration
 - **cosmiconfig** - Config file loading
@@ -496,7 +495,7 @@ Config file: `.azedarach.json`, `.azedarachrc`, or `azedarach` key in `package.j
 
 ```json
 {
-  "terminal": "ghostty",
+  "terminal": "iterm",
   "terminalArgs": ["-e"],
 
   "worktree": {
@@ -569,7 +568,7 @@ az sync                 # Sync all worktrees
 - Claude Code (`claude` CLI installed and authenticated)
 
 **Optional**:
-- Ghostty (or other terminal configured)
+- Terminal configured for external attachment (iTerm, Terminal.app)
 
 ---
 

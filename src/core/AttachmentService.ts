@@ -6,7 +6,6 @@
  * - Inline: Replaces the TUI with the session output (future implementation)
  *
  * Terminal detection uses TERM_PROGRAM environment variable to identify:
- * - Ghostty
  * - iTerm2
  * - Terminal.app
  */

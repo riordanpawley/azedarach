@@ -110,7 +110,7 @@ Terminal emulator detection and command execution.
 
 ```typescript
 interface TerminalServiceI {
-  detect(): Effect<TerminalType, never>  // "ghostty" | "iterm" | "terminal-app" | "unknown"
+  detect(): Effect<TerminalType, never>  // "iterm" | "terminal-app" | "unknown"
   openWithCommand(cmd): Effect<void, TerminalError>
 }
 ```
@@ -133,7 +133,7 @@ interface AttachmentServiceI {
 ```
 
 **External attachment:**
-1. Detects terminal type (Ghostty, iTerm, Terminal.app)
+1. Detects terminal type (iTerm, Terminal.app)
 2. Generates `tmux attach-session -t {sessionId}` command
 3. Opens new terminal window with that command
 
