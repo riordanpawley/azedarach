@@ -259,7 +259,7 @@ If you don't have tmux sessions running, you'll see errors in the console (not i
 
 ```
 src/
-├── ui/                 # TUI components (OpenTUI + SolidJS)
+├── ui/                 # TUI components (OpenTUI + React)
 │   ├── App.tsx         # Root component with modal keybindings
 │   ├── Board.tsx       # Kanban board layout
 │   ├── Column.tsx      # Status column with virtual scroll
@@ -279,7 +279,7 @@ src/
 │   └── StateDetector.ts    # Claude output patterns
 │
 └── lib/                # Utilities
-    └── effect-atom-solid/  # SolidJS adapter for effect-atom
+    └── effect-atom-react/  # React adapter for effect-atom
 ```
 
 ---

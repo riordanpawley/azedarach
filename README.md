@@ -38,7 +38,7 @@ The key insight: **Claude Code already handles all the hard parts** (permissions
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Azedarach TUI (Ink)                          │
+│                      Azedarach TUI (OpenTUI)                         │
 │                                                                     │
 │  ┌─────────┐ ┌─────────────┐ ┌─────────┐ ┌────────┐ ┌────────┐    │
 │  │  open   │ │ in_progress │ │ blocked │ │ review │ │ closed │    │
@@ -82,16 +82,14 @@ The key insight: **Claude Code already handles all the hard parts** (permissions
 
 ## Core Components
 
-### 1. TUI Layer (Ink + React)
+### 1. TUI Layer (OpenTUI + React)
 
 The user-facing terminal interface.
 
-**Technology**: Ink (React for CLI) with:
-- `ink` - Core React renderer for terminals
-- `ink-select-input` - Selection/navigation
-- `ink-text-input` - Text entry
-- `ink-spinner` - Loading states
-- `yoga-layout` - Flexbox for terminal
+**Technology**: OpenTUI (React for CLI) with:
+- `@opentui/core` - TUI rendering engine (Zig backend)
+- `@opentui/react` - React bindings for OpenTUI
+- `effect-atom` - Effect-to-React state bridge
 
 **Views**:
 - **Board View**: Kanban columns matching beads statuses
@@ -406,17 +404,15 @@ Task resumes with 🔵 indicator
 ## Technical Stack
 
 ### Runtime & Build
-- **Node.js** >= 20 (for Ink)
+- **Bun** >= 1.0 (required for OpenTUI's Zig FFI)
 - **TypeScript** (strict mode)
-- **tsup** or **esbuild** (bundling)
+- **tsup** (bundling)
 
 ### TUI Framework
-- **ink** ^5.0 - React for CLI
-- **ink-select-input** - Selection
-- **ink-text-input** - Input fields
-- **ink-spinner** - Loading indicators
-- **chalk** - Terminal colors
-- **yoga-layout** - Flexbox layout (via Ink)
+- **@opentui/core** - TUI rendering engine
+- **@opentui/react** - React bindings
+- **effect-atom** - Effect-to-React state bridge
+- **react** ^19.0 - React framework
 
 ### Terminal/Process Management
 - **node-pty** - PTY for Claude process
@@ -449,7 +445,7 @@ azedarach/
 │   ├── index.tsx              # Entry point
 │   ├── cli.ts                 # CLI argument parsing
 │   │
-│   ├── ui/                    # Ink components
+│   ├── ui/                    # OpenTUI components
 │   │   ├── App.tsx            # Root component
 │   │   ├── Board.tsx          # Kanban board
 │   │   ├── Column.tsx         # Status column
@@ -565,7 +561,7 @@ az sync                 # Sync all worktrees
 ## System Requirements
 
 **Required**:
-- Node.js >= 20
+- Bun >= 1.0 (required for OpenTUI's Zig FFI)
 - Git >= 2.20 (worktree support)
 - tmux >= 3.0
 - gh CLI (authenticated)
@@ -636,5 +632,5 @@ az /path/to/project
 - [Beads Worktree Docs](https://github.com/steveyegge/beads/blob/main/docs/ADVANCED.md#git-worktrees)
 - [CCManager](https://github.com/kbwo/ccmanager) - Session management inspiration
 - [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel Claude orchestration
-- [Ink](https://github.com/vadimdemedes/ink) - React for CLI
+- [OpenTUI](https://github.com/sst/opentui) - React for CLI (successor to Ink)
 - [node-pty](https://github.com/microsoft/node-pty) - PTY handling
