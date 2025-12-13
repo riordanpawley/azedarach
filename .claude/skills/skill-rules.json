@@ -1,5 +1,10 @@
 {
 	"version": "1.0",
+	"metadata": {
+		"project": "Azedarach",
+		"description": "Auto-activating skills configuration for Azedarach TUI",
+		"lastUpdated": "2025-12-14"
+	},
 	"skills": [
 		{
 			"id": "beads-tracking",
@@ -9,17 +14,53 @@
 			"priority": "high",
 			"confidence": {
 				"required": 0.6,
-				"suggested": 0.45
+				"suggested": 0.4
 			},
 			"triggers": {
-				"filePatterns": [".beads/**"],
-				"contentPatterns": ["bd create", "bd update", "bd close", "bd search", "bd ready"],
-				"keywords": ["beads", "issue", "task", "tracking", "bd", "epic", "dependency"]
+				"filePatterns": [".beads/**/*"],
+				"contentPatterns": ["bd ready", "bd create", "bd update", "bd close", "bd search"],
+				"keywords": [
+					"bead",
+					"beads",
+					"track this work",
+					"create issue",
+					"multi-session",
+					"resume work",
+					"ready work",
+					"bd issue",
+					"bd create",
+					"bd update",
+					"bd cli",
+					"bd tool",
+					"to beads",
+					"with bd",
+					"using bd",
+					"use beads",
+					"add task",
+					"create task",
+					"new task",
+					"task tracking",
+					"work persistence",
+					"dependency tracking",
+					"issue tracking",
+					"epic",
+					"dependency"
+				],
+				"directoryExists": [".beads/"]
 			},
+			"affinities": [],
+			"affinity_threshold": 0.5,
 			"resources": [
 				".claude/skills/resources/beads/workflows.md",
 				".claude/skills/resources/beads/worktree-integration.md"
-			]
+			],
+			"validation": {
+				"enforces": [
+					"Run 'bd ready' at session start when .beads/ exists",
+					"Use bd for multi-session work, TodoWrite for single-session",
+					"Write notes for resumability (COMPLETED, IN PROGRESS, NEXT, BLOCKERS)"
+				]
+			}
 		}
 	]
 }
