@@ -2,7 +2,8 @@
   "worktree": {
     "initCommands": [
       "direnv allow",
-      "bun install"
+      "bun install",
+      "bd sync"
     ],
     "continueOnFailure": true,
     "parallel": false
