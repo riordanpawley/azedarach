@@ -444,6 +444,13 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
 		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
 
+		// Warn if using dangerous permissions flag
+		if (dangerouslySkipPermissions) {
+			yield* Effect.logWarning(
+				"Running Claude with --dangerously-skip-permissions. All permission prompts will be bypassed.",
+			)
+		}
+
 		// Create the tmux session
 		yield* tmux.newSession(sessionName, {
 			cwd: projectPath,
@@ -454,12 +461,24 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		// Wait briefly for Claude to start up
 		yield* Effect.sleep("1500 millis")
 
-		// Build the prompt for Claude
-		const prompt = `Create a new bead issue for the following task. Use the bd create command with appropriate title, type (task/feature/bug), and description.
+		// Build the prompt for Claude with explicit bd create instructions
+		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
 
-Task description: ${description}
+**bd create syntax:**
+\`\`\`
+bd create --title="<title>" --type=<task|feature|bug> [--description="<description>"] [--priority=<1-5>]
+\`\`\`
 
-After creating the bead, tell me the bead ID and ask if I'd like you to start working on it immediately.`
+**Examples:**
+- \`bd create --title="Add dark mode" --type=feature --description="Toggle in settings"\`
+- \`bd create --title="Fix login bug" --type=bug --priority=1\`
+
+**Your task:**
+Based on the following description, create an appropriate bead:
+
+${description}
+
+After running \`bd create\`, tell me the bead ID that was created and ask if I'd like you to start working on it immediately.`
 
 		// Send the prompt to Claude
 		yield* tmux.sendKeys(sessionName, prompt)

@@ -1038,7 +1038,7 @@ export const App = () => {
 						claudeCreateSession(description)
 							.then((sessionName) => {
 								showSuccess(`Session started: ${sessionName}`)
-								showInfo("Use Ctrl-a ) to switch to the session")
+								showInfo(`Attach with: tmux attach -t ${sessionName}`)
 							})
 							.catch((error) => {
 								showError(`Failed to launch session: ${error}`)
