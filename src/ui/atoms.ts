@@ -415,6 +415,26 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 )
 
 // ============================================================================
+// Editor Create Atom (manual create via $EDITOR)
+// ============================================================================
+
+/**
+ * Create a new bead via $EDITOR
+ *
+ * Opens $EDITOR with a blank template, parses the result, and creates the bead.
+ * Returns the created bead info.
+ *
+ * Usage: const createBead = useAtom(createBeadViaEditorAtom, { mode: "promise" })
+ *        const { id, title } = await createBead()
+ */
+export const createBeadViaEditorAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* EditorService
+		return yield* editor.createBead()
+	}),
+)
+
+// ============================================================================
 // Claude Create Session Atom
 // ============================================================================
 
@@ -444,6 +464,13 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
 		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
 
+		// Warn if using dangerous permissions flag
+		if (dangerouslySkipPermissions) {
+			yield* Effect.logWarning(
+				"Running Claude with --dangerously-skip-permissions. All permission prompts will be bypassed.",
+			)
+		}
+
 		// Create the tmux session
 		yield* tmux.newSession(sessionName, {
 			cwd: projectPath,
@@ -454,12 +481,101 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		// Wait briefly for Claude to start up
 		yield* Effect.sleep("1500 millis")
 
-		// Build the prompt for Claude
-		const prompt = `Create a new bead issue for the following task. Use the bd create command with appropriate title, type (task/feature/bug), and description.
+		// Build the prompt for Claude with explicit bd create instructions
+		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
 
-Task description: ${description}
+**bd create syntax:**
+\`\`\`
+bd create --title="<title>" --type=<task|feature|bug> [--description="<description>"] [--priority=<1-5>]
+\`\`\`
 
-After creating the bead, tell me the bead ID and ask if I'd like you to start working on it immediately.`
+**Examples:**
+- \`bd create --title="Add dark mode" --type=feature --description="Toggle in settings"\`
+- \`bd create --title="Fix login bug" --type=bug --priority=1\`
+
+**Your task:**
+Based on the following description, create an appropriate bead:
+
+${description}
+
+After running \`bd create\`, tell me the bead ID that was created and ask if I'd like you to start working on it immediately.`
+
+		// Send the prompt to Claude
+		yield* tmux.sendKeys(sessionName, prompt)
+
+		return sessionName
+	}),
+)
+
+// ============================================================================
+// Claude Edit Session Atom (AI edit mode)
+// ============================================================================
+
+/**
+ * Create a Claude session to edit an existing bead
+ *
+ * Spawns a tmux session with Claude in the main project directory,
+ * sends the bead details to Claude, and asks for editing guidance.
+ *
+ * Returns the session name so the UI can inform the user.
+ *
+ * Usage: const claudeEdit = useAtom(claudeEditSessionAtom, { mode: "promise" })
+ *        const sessionName = await claudeEdit(task)
+ */
+export const claudeEditSessionAtom = appRuntime.fn((task: TaskWithSession) =>
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const { config } = yield* AppConfig
+
+		// Generate unique session name with bead ID
+		const sessionName = `claude-edit-${task.id}`
+		const projectPath = process.cwd()
+
+		// Build the Claude command with session settings
+		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
+		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+
+		// Warn if using dangerous permissions flag
+		if (dangerouslySkipPermissions) {
+			yield* Effect.logWarning(
+				"Running Claude with --dangerously-skip-permissions. All permission prompts will be bypassed.",
+			)
+		}
+
+		// Create the tmux session
+		yield* tmux.newSession(sessionName, {
+			cwd: projectPath,
+			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
+			prefix: tmuxPrefix,
+		})
+
+		// Wait briefly for Claude to start up
+		yield* Effect.sleep("1500 millis")
+
+		// Build the bead details for context
+		const beadDetails = `**Bead ID:** ${task.id}
+**Title:** ${task.title}
+**Type:** ${task.issue_type}
+**Status:** ${task.status}
+**Priority:** P${task.priority}
+**Description:** ${task.description || "(none)"}
+**Design:** ${task.design || "(none)"}
+**Notes:** ${task.notes || "(none)"}
+**Acceptance Criteria:** ${task.acceptance || "(none)"}`
+
+		// Build the prompt for Claude with explicit bd update instructions
+		const prompt = `I want to edit the following bead. Here are its current details:
+
+${beadDetails}
+
+**bd update syntax:**
+\`\`\`
+bd update <bead-id> [--title="<title>"] [--status=<status>] [--priority=<0-4>] [--description="<desc>"] [--notes="<notes>"] [--design="<design>"] [--acceptance="<criteria>"]
+\`\`\`
+
+**Available statuses:** backlog, ready, in_progress, review, done
+
+What would you like to change? Describe the edits you want and I'll help you update the bead using \`bd update ${task.id}\`.`
 
 		// Send the prompt to Claude
 		yield* tmux.sendKeys(sessionName, prompt)

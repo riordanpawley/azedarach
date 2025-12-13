@@ -51,14 +51,76 @@ The default mode for navigation and basic actions.
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
-| `c` | Create new task | Opens manual task creation prompt |
+| `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
+| `E` | Edit via Claude | AI-assisted editing |
+| `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
 
-## Claude Create Mode
+## Create & Edit Modes
+
+Azedarach provides both manual (via $EDITOR) and AI-assisted (via Claude) modes for creating and editing beads.
+
+| Action | Manual | AI-Assisted |
+|--------|--------|-------------|
+| Create | `c` (editor) | `C` (Claude) |
+| Edit | `e` (editor) | `E` (Claude) |
+
+## Manual Create Mode (`c`)
+
+Press `c` to create a new bead using your $EDITOR with a structured template.
+
+### How It Works
+
+1. Press `c` to open your $EDITOR with a blank template
+2. Fill in the fields:
+   - **Title**: Required - the task name
+   - **Type**: task, bug, feature, epic, or chore
+   - **Priority**: P0 (highest) to P4 (lowest)
+   - **Status**: backlog, ready, in_progress, review, done
+   - **Description**, **Design**, **Notes**, **Acceptance Criteria**: Optional sections
+3. Save and close the editor
+4. The bead is created via `bd create`
+
+### Template Format
+
+```markdown
+# NEW: Enter title here
+───────────────────────────────────────────────────────────────
+Type:     task        (task | bug | feature | epic | chore)
+Priority: P2          (P0 = highest, P4 = lowest)
+Status:   backlog     (backlog | ready | in_progress | review | done)
+Assignee:
+Labels:
+Estimate:
+
+───────────────────────────────────────────────────────────────
+## Description
+
+Describe the task here...
+
+───────────────────────────────────────────────────────────────
+## Acceptance Criteria
+
+- [ ] Criteria 1
+```
+
+## Manual Edit Mode (`e`)
+
+Press `e` to edit the selected bead in your $EDITOR.
+
+### How It Works
+
+1. Select a task with hjkl navigation
+2. Press `e` to open your $EDITOR with the bead's current data
+3. Modify any fields you want to change
+4. Save and close the editor
+5. Changes are applied via `bd update`
+
+## Claude Create Mode (`C`)
 
 Press `C` (capital C) to create a task using natural language. This spawns a Claude session that interprets your description and creates the appropriate bead.
 
@@ -78,16 +140,45 @@ Press `C` (capital C) to create a task using natural language. This spawns a Cla
 2. Type: `Add dark mode toggle to settings page`
 3. Press `Enter`
 4. Claude creates a bead and asks if you'd like to start working on it
-5. Use `Ctrl-a )` to switch to the Claude session
+5. Attach to the session: `tmux attach -t claude-create-xxx`
 
-### Differences from Manual Create (`c`)
+### Prompt Shortcuts
 
-| Feature | Manual (`c`) | Claude Create (`C`) |
-|---------|--------------|---------------------|
-| Input | Title, type, priority fields | Natural language description |
-| Processing | Direct bd create | Claude interprets & creates |
-| Session | No session started | Tmux session persists |
-| Follow-up | Must start session separately | Can work immediately |
+When entering your description:
+- `Enter`: Submit and launch session
+- `Esc`: Cancel
+- `Ctrl-U`: Clear entire line
+- `Ctrl-W`: Delete last word
+
+## Claude Edit Mode (`E`)
+
+Press `E` (capital E) to edit the selected bead with Claude's assistance.
+
+### How It Works
+
+1. Select a task with hjkl navigation
+2. Press `E` to launch a Claude edit session
+3. Claude receives the bead's current details and `bd update` syntax
+4. Describe what changes you want in natural language
+5. Claude will help update the bead using `bd update`
+
+### Example
+
+1. Select a task
+2. Press `E`
+3. Claude shows you the bead details and asks what you'd like to change
+4. Type: `Change the priority to P1 and add a note about the deadline`
+5. Claude runs the appropriate `bd update` command
+
+### Comparison: Manual vs Claude
+
+| Feature | Manual (`e`/`c`) | Claude (`E`/`C`) |
+|---------|------------------|------------------|
+| Interface | $EDITOR | tmux session |
+| Input style | Structured fields | Natural language |
+| Session | No session started | tmux session persists |
+| Follow-up | None | Can continue chatting |
+| Best for | Precise edits | Exploration, complex changes |
 
 ## Goto Mode
 

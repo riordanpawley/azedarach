@@ -11,7 +11,9 @@ import {
 	attachExternalAtom,
 	attachInlineAtom,
 	claudeCreateSessionAtom,
+	claudeEditSessionAtom,
 	cleanupAtom,
+	createBeadViaEditorAtom,
 	createPRAtom,
 	createTaskAtom,
 	editBeadAtom,
@@ -97,6 +99,8 @@ export const App = () => {
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
 	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
+	const [, claudeEditSession] = useAtom(claudeEditSessionAtom, { mode: "promise" })
+	const [, createBeadViaEditor] = useAtom(createBeadViaEditorAtom, { mode: "promise" })
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Navigation State (separate from FSM)
@@ -849,13 +853,38 @@ export const App = () => {
 				break
 			}
 			case "c": {
-				// Create new task (manual)
-				setShowCreatePrompt(true)
+				// Create new task via $EDITOR (manual)
+				showInfo("Opening editor...")
+				createBeadViaEditor()
+					.then((result) => {
+						refreshTasks()
+						showSuccess(`Created: ${result.id} - ${result.title}`)
+					})
+					.catch((error) => {
+						showError(`Failed to create bead: ${error}`)
+					})
 				break
 			}
 			case "C": {
 				// Create task via Claude (natural language)
 				setShowClaudeCreatePrompt(true)
+				break
+			}
+			case "E": {
+				// Edit task via Claude (AI edit mode)
+				if (selectedTask) {
+					showInfo("Launching Claude edit session...")
+					claudeEditSession(selectedTask)
+						.then((sessionName) => {
+							showSuccess(`Edit session started: ${sessionName}`)
+							showInfo(`Attach with: tmux attach -t ${sessionName}`)
+						})
+						.catch((error) => {
+							showError(`Failed to launch edit session: ${error}`)
+						})
+				} else {
+					showError("No task selected")
+				}
 				break
 			}
 			case "a": {
@@ -1038,7 +1067,7 @@ export const App = () => {
 						claudeCreateSession(description)
 							.then((sessionName) => {
 								showSuccess(`Session started: ${sessionName}`)
-								showInfo("Use Ctrl-a ) to switch to the session")
+								showInfo(`Attach with: tmux attach -t ${sessionName}`)
 							})
 							.catch((error) => {
 								showError(`Failed to launch session: ${error}`)
