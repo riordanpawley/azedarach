@@ -5,38 +5,79 @@
  */
 import { Atom } from "@effect-atom/atom"
 import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
-import { AppConfigLiveWithPlatform } from "../config/index"
+import { AppConfig, AppConfigLiveWithPlatform } from "../config/index"
 import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentService"
 import { BeadsClient, BeadsClientLiveWithPlatform } from "../core/BeadsClient"
 import { EditorService, EditorServiceLive } from "../core/EditorService"
 import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
-import { SessionManager, SessionManagerLive } from "../core/SessionManager"
+import { SessionManager } from "../core/SessionManager"
 import { TerminalServiceLive } from "../core/TerminalService"
-import { TmuxServiceLive } from "../core/TmuxService"
+import { TmuxService, TmuxServiceLive } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService, VCServiceLive } from "../core/VCService"
 import type { TaskWithSession } from "./types"
 
+// ============================================================================
+// Layer Composition
+// ============================================================================
+
 /**
- * Combined runtime layer with all services
- *
- * Merges BeadsClient, TmuxService, TerminalService, AttachmentService, SessionManager, and AppConfig.
- * AppConfig is provided so SessionManager can use custom init commands and session settings.
+ * AppConfig layer - contextual, needs project path
  */
 const configLayer = AppConfigLiveWithPlatform(process.cwd())
 
-const baseLayer = Layer.mergeAll(
+/**
+ * Leaf services - no dependencies on other app services
+ */
+const leafServices = Layer.mergeAll(
 	BeadsClientLiveWithPlatform,
 	TmuxServiceLive,
 	TerminalServiceLive,
-	configLayer,
 )
 
-const appLayer = baseLayer.pipe(
-	Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
-	Layer.merge(SessionManagerLive),
-	Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
-	Layer.merge(PRWorkflowLive),
-	Layer.merge(VCServiceLive),
+/**
+ * SessionManager.Default bundles its deps but requires AppConfig
+ * Provide AppConfig to satisfy that requirement
+ */
+const sessionManagerLayer = SessionManager.Default.pipe(
+	Layer.provide(configLayer),
+)
+
+/**
+ * Services that need TmuxService and TerminalService
+ */
+const attachmentLayer = AttachmentServiceLive.pipe(
+	Layer.provide(Layer.mergeAll(TmuxServiceLive, TerminalServiceLive)),
+)
+
+/**
+ * EditorService needs BeadsClient
+ */
+const editorLayer = EditorServiceLive.pipe(
+	Layer.provide(BeadsClientLiveWithPlatform),
+)
+
+/**
+ * PRWorkflowLive uses SessionManagerLive which requires AppConfig
+ */
+const prWorkflowLayer = PRWorkflowLive.pipe(
+	Layer.provide(configLayer),
+)
+
+/**
+ * Combined app layer - all services merged
+ *
+ * Layer composition pattern:
+ * - Leaf layers (no app deps): merge directly
+ * - Layers with deps: provide those deps, then merge
+ */
+const appLayer = Layer.mergeAll(
+	leafServices,
+	configLayer,
+	sessionManagerLayer,
+	attachmentLayer,
+	editorLayer,
+	prWorkflowLayer,
+	VCServiceLive,
 )
 
 /**
@@ -370,5 +411,59 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 	Effect.gen(function* () {
 		const vcService = yield* VCService
 		yield* vcService.sendCommand(command)
+	}),
+)
+
+// ============================================================================
+// Claude Create Session Atom
+// ============================================================================
+
+/**
+ * Create a Claude session to generate a bead from natural language
+ *
+ * Spawns a tmux session with Claude in the main project directory,
+ * sends a prompt asking Claude to create a bead from the description,
+ * and leaves the session open for the user to continue working.
+ *
+ * Returns the session name so the UI can inform the user.
+ *
+ * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
+ *        const sessionName = await claudeCreate("Add dark mode toggle to settings")
+ */
+export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const { config } = yield* AppConfig
+
+		// Generate unique session name with timestamp
+		const timestamp = Date.now().toString(36)
+		const sessionName = `claude-create-${timestamp}`
+		const projectPath = process.cwd()
+
+		// Build the Claude command with session settings
+		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
+		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+
+		// Create the tmux session
+		yield* tmux.newSession(sessionName, {
+			cwd: projectPath,
+			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
+			prefix: tmuxPrefix,
+		})
+
+		// Wait briefly for Claude to start up
+		yield* Effect.sleep("1500 millis")
+
+		// Build the prompt for Claude
+		const prompt = `Create a new bead issue for the following task. Use the bd create command with appropriate title, type (task/feature/bug), and description.
+
+Task description: ${description}
+
+After creating the bead, tell me the bead ID and ask if I'd like you to start working on it immediately.`
+
+		// Send the prompt to Claude
+		yield* tmux.sendKeys(sessionName, prompt)
+
+		return sessionName
 	}),
 )

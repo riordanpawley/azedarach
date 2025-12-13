@@ -51,11 +51,43 @@ The default mode for navigation and basic actions.
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
-| `c` | Create new task | Opens task creation prompt |
+| `c` | Create new task | Opens manual task creation prompt |
+| `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
+
+## Claude Create Mode
+
+Press `C` (capital C) to create a task using natural language. This spawns a Claude session that interprets your description and creates the appropriate bead.
+
+### How It Works
+
+1. Press `C` to open the Claude Create prompt
+2. Type a natural language description of what you want to do
+3. Press `Enter` to launch a Claude session
+4. Claude will:
+   - Interpret your description
+   - Create a bead with appropriate title, type, and description using `bd create`
+   - Remain in the session, ready to work on the task if you want
+
+### Example
+
+1. Press `C`
+2. Type: `Add dark mode toggle to settings page`
+3. Press `Enter`
+4. Claude creates a bead and asks if you'd like to start working on it
+5. Use `Ctrl-a )` to switch to the Claude session
+
+### Differences from Manual Create (`c`)
+
+| Feature | Manual (`c`) | Claude Create (`C`) |
+|---------|--------------|---------------------|
+| Input | Title, type, priority fields | Natural language description |
+| Processing | Direct bd create | Claude interprets & creates |
+| Session | No session started | Tmux session persists |
+| Follow-up | Must start session separately | Can work immediately |
 
 ## Goto Mode
 
