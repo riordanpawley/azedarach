@@ -29,14 +29,16 @@ export const StatusBar = (props: StatusBarProps) => {
   // Mode colors matching Helix conventions
   const getModeColor = () => {
     switch (props.mode) {
-      case "normal":
-        return theme.blue
-      case "select":
-        return theme.mauve
-      case "goto":
-        return theme.yellow
       case "action":
         return theme.green
+      case "goto":
+        return theme.yellow
+      case "normal":
+        return theme.blue
+      case "search":
+        return theme.peach
+      case "select":
+        return theme.mauve
       default:
         return theme.text
     }
@@ -45,14 +47,16 @@ export const StatusBar = (props: StatusBarProps) => {
   // Short mode label like Helix
   const getModeLabel = () => {
     switch (props.mode) {
-      case "normal":
-        return "NOR"
-      case "select":
-        return "SEL"
-      case "goto":
-        return "GTO"
       case "action":
         return "ACT"
+      case "goto":
+        return "GTO"
+      case "normal":
+        return "NOR"
+      case "search":
+        return "SRC"
+      case "select":
+        return "SEL"
       default:
         return "???"
     }
@@ -113,20 +117,15 @@ export const StatusBar = (props: StatusBarProps) => {
         {/* Contextual keyboard shortcuts - hide on narrow terminals */}
         {shouldShowKeybinds && (
           <box flexDirection="row" gap={2}>
-            {props.mode === "normal" && (
+            {props.mode === "action" && (
               <>
-                <KeyHint keyName="Space" action="Menu" />
-                <KeyHint keyName="v" action="Select" />
-                <KeyHint keyName="g" action="Goto" />
-                <KeyHint keyName="q" action="Quit" />
-              </>
-            )}
-
-            {props.mode === "select" && (
-              <>
-                <KeyHint keyName="Space" action="Toggle" />
-                <KeyHint keyName="v" action="Exit" />
-                <KeyHint keyName="Esc" action="Clear" />
+                <KeyHint keyName="h/l" action="Move" />
+                <KeyHint keyName="s" action="Start" />
+                <KeyHint keyName="a" action="Attach" />
+                <KeyHint keyName="p" action="Pause" />
+                <KeyHint keyName="r" action="Resume" />
+                <KeyHint keyName="x" action="Stop" />
+                <KeyHint keyName="Esc" action="Cancel" />
               </>
             )}
 
@@ -139,15 +138,28 @@ export const StatusBar = (props: StatusBarProps) => {
               </>
             )}
 
-            {props.mode === "action" && (
+            {props.mode === "normal" && (
               <>
-                <KeyHint keyName="h/l" action="Move" />
-                <KeyHint keyName="s" action="Start" />
-                <KeyHint keyName="a" action="Attach" />
-                <KeyHint keyName="p" action="Pause" />
-                <KeyHint keyName="r" action="Resume" />
-                <KeyHint keyName="x" action="Stop" />
-                <KeyHint keyName="Esc" action="Cancel" />
+                <KeyHint keyName="Space" action="Menu" />
+                <KeyHint keyName="/" action="Search" />
+                <KeyHint keyName="v" action="Select" />
+                <KeyHint keyName="g" action="Goto" />
+                <KeyHint keyName="q" action="Quit" />
+              </>
+            )}
+
+            {props.mode === "search" && (
+              <>
+                <KeyHint keyName="Enter" action="Confirm" />
+                <KeyHint keyName="Esc" action="Clear" />
+              </>
+            )}
+
+            {props.mode === "select" && (
+              <>
+                <KeyHint keyName="Space" action="Toggle" />
+                <KeyHint keyName="v" action="Exit" />
+                <KeyHint keyName="Esc" action="Clear" />
               </>
             )}
           </box>

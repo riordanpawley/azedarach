@@ -43,6 +43,7 @@ import {
 } from "./BeadsClient.js"
 import { StateDetector, StateDetectorLive } from "./StateDetector.js"
 import { getSessionName } from "./paths.js"
+import { AppConfig, AppConfigLiveWithPlatform, ConfigParseError, DEFAULT_CONFIG, type ResolvedConfig } from "../config/index.js"
 
 // ============================================================================
 // Type Definitions
@@ -271,6 +272,18 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
   const beadsClient = yield* BeadsClient
   const stateDetector = yield* StateDetector
 
+  // AppConfig is optional - use defaults if not provided
+  const appConfigOption = yield* Effect.serviceOption(AppConfig)
+  const resolvedConfig: ResolvedConfig = appConfigOption._tag === "Some"
+    ? appConfigOption.value.config
+    : {
+        worktree: { ...DEFAULT_CONFIG.worktree },
+        session: { ...DEFAULT_CONFIG.session },
+        patterns: { ...DEFAULT_CONFIG.patterns },
+        pr: { ...DEFAULT_CONFIG.pr },
+        notifications: { ...DEFAULT_CONFIG.notifications },
+      }
+
   // Track active sessions in memory
   const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
 
@@ -313,6 +326,46 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
           baseBranch,
         })
 
+        // Get configuration for init commands and session settings
+        const worktreeConfig = resolvedConfig.worktree
+        const sessionConfig = resolvedConfig.session
+
+        // Run init commands after worktree creation (e.g., "direnv allow", "bun install")
+        const { initCommands, env, continueOnFailure, parallel } = worktreeConfig
+        if (initCommands.length > 0) {
+          const runInitCommand = (cmd: string) =>
+            Effect.gen(function* () {
+              const initCmd = Command.make("sh", "-c", cmd).pipe(
+                Command.workingDirectory(worktree.path),
+                Command.env(env)
+              )
+              const exitCode = yield* Command.exitCode(initCmd).pipe(
+                Effect.catchAll(() => Effect.succeed(1))
+              )
+              if (exitCode !== 0) {
+                yield* Effect.logWarning(`Init command failed: ${cmd}`)
+                if (!continueOnFailure) {
+                  return yield* Effect.fail(
+                    new SessionError({
+                      message: `Init command failed: ${cmd}`,
+                      beadId,
+                    })
+                  )
+                }
+              }
+            })
+
+          if (parallel) {
+            // Run all commands in parallel
+            yield* Effect.all(initCommands.map(runInitCommand), { concurrency: "unbounded" })
+          } else {
+            // Run commands sequentially (default)
+            for (const cmd of initCommands) {
+              yield* runInitCommand(cmd)
+            }
+          }
+        }
+
         // Generate tmux session name
         const tmuxSessionName = getSessionName(beadId)
 
@@ -324,10 +377,11 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
           // Use user's shell that runs claude so:
           // 1. tmux prefix keys work (shell handles them, not claude)
           // 2. If claude exits, you're left in a shell (session doesn't die)
-          const shell = process.env.SHELL || "bash"
+          const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
           yield* tmuxService.newSession(tmuxSessionName, {
             cwd: worktree.path,
-            command: `${shell} -c 'claude; exec ${shell}'`,
+            command: `${shell} -c '${claudeCommand}; exec ${shell}'`,
+            prefix: tmuxPrefix,
           })
         }
 
@@ -582,12 +636,22 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 })
 
 /**
- * Live SessionManager layer
+ * Base SessionManager layer (requires AppConfig to be provided externally)
  *
- * This layer provides the SessionManager service with all dependencies included.
- * It merges all required service layers and provides BunContext for platform operations.
+ * Use SessionManagerLiveWithConfig(projectPath) for a self-contained layer.
+ */
+export const SessionManagerLive = Layer.effect(SessionManager, SessionManagerServiceImpl).pipe(
+  Layer.provide(
+    Layer.mergeAll(WorktreeManagerLive, TmuxServiceLive, BeadsClientLive, StateDetectorLive)
+  ),
+  Layer.provide(BunContext.layer)
+)
+
+/**
+ * SessionManager layer with AppConfig included
  *
- * This is the recommended layer to use in applications.
+ * This is the recommended layer to use. It creates AppConfig with the given
+ * projectPath and provides it to SessionManager.
  *
  * @example
  * ```ts
@@ -598,18 +662,20 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
  *     projectPath: "/Users/user/project"
  *   })
  *   return session
- * }).pipe(Effect.provide(SessionManagerLive))
+ * }).pipe(Effect.provide(SessionManagerLiveWithConfig(process.cwd())))
  * ```
  */
-export const SessionManagerLive = Layer.effect(SessionManager, SessionManagerServiceImpl).pipe(
-  Layer.provide(
-    Layer.mergeAll(WorktreeManagerLive, TmuxServiceLive, BeadsClientLive, StateDetectorLive)
-  ),
-  Layer.provide(BunContext.layer)
-)
+export const SessionManagerLiveWithConfig = (
+  projectPath: string,
+  configPath?: string
+) =>
+  Layer.provideMerge(
+    SessionManagerLive,
+    AppConfigLiveWithPlatform(projectPath, configPath)
+  )
 
 /**
- * Alias for SessionManagerLive for consistency with other services
+ * Alias for backwards compatibility - use SessionManagerLiveWithConfig for new code
  */
 export const SessionManagerLiveWithPlatform = SessionManagerLive
 

@@ -5,20 +5,20 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ## Mode Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    NORMAL MODE (NOR)                        │
-│   hjkl: navigate   g: goto prefix   v: select   Space: act  │
-└─────────────────────────────────────────────────────────────┘
-         │                │              │            │
-         │                ▼              ▼            ▼
-         │        ┌──────────────┐ ┌──────────┐ ┌──────────┐
-         │        │ GOTO (GTO)   │ │ SELECT   │ │ ACTION   │
-         │        │ gg/ge/gh/gl  │ │ (SEL)    │ │ (ACT)    │
-         │        │ gw: labels   │ │ Space:   │ │ h/l:move │
-         │        └──────────────┘ │ toggle   │ │ a:attach │
-         │               │         └──────────┘ └──────────┘
-         │               │              │            │
-         └───────────────┴──────────────┴────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                       NORMAL MODE (NOR)                           │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search        │
+└───────────────────────────────────────────────────────────────────┘
+         │           │           │           │           │
+         │           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │
+         │         │        └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │
+         └─────────┴─────────────┴───────────┴─────────────┘
                               Esc: return to Normal
 ```
 
@@ -47,6 +47,7 @@ The default mode for navigation and basic actions.
 |-----|--------|-------|
 | `Enter` | Show task details | Modal overlay |
 | `Space` | Enter Action mode | Prefix for commands |
+| `/` | Enter Search mode | Filter tasks by title/ID |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
 | `c` | Create new task | Opens task creation prompt |
@@ -95,6 +96,33 @@ Press `v` to enter select mode for multi-task operations.
 ### Visual Feedback
 
 Selected tasks are highlighted with a different background color. The status bar shows the selection count.
+
+## Search Mode
+
+Press `/` to enter search mode for filtering tasks.
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Enter` | Confirm search | Keep filter active, return to Normal |
+| `Esc` | Clear search | Remove filter, return to Normal |
+| `Backspace` | Delete character | Remove last character from query |
+| Any char | Add to query | Case-insensitive search |
+
+### How Search Works
+
+- **Live filtering**: Tasks are filtered as you type
+- **Matches**: Title and task ID are searched
+- **Case-insensitive**: "Fix" matches "fix", "FIX", etc.
+- **Persistent filter**: After pressing Enter, the filter stays active until you press `/` then `Esc` to clear it
+- **Visual indicator**: Status bar shows "filter: <query>" when a filter is active
+
+### Example
+
+1. Press `/` to enter search mode
+2. Type `auth` to filter tasks containing "auth"
+3. Press `Enter` to confirm and return to normal mode
+4. Navigate filtered results with hjkl
+5. Press `/` then `Esc` to clear the filter
 
 ## Action Mode
 
