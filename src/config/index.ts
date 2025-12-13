@@ -4,38 +4,37 @@
  * Exports all configuration-related types, schemas, and services.
  */
 
-// Schema and types
+// Service and layers
 export {
-  AzedarachConfigSchema,
-  type AzedarachConfig,
-  type AzedarachConfigInput,
-  type WorktreeConfig,
-  type SessionConfig,
-  type PatternsConfig,
-  type PRConfig,
-  type NotificationsConfig,
-} from "./schema.js"
+	// Service
+	AppConfig,
+	// Layers
+	AppConfigLive,
+	AppConfigLiveWithPlatform,
+	type AppConfigService,
+	// Errors
+	ConfigError,
+	ConfigParseError,
+	getNotificationsConfig,
+	getPatternsConfig,
+	getPRConfig,
+	getSessionConfig,
+	// Convenience functions
+	getWorktreeConfig,
+	// Loader
+	loadConfig,
+} from "./AppConfig.js"
 
 // Defaults and resolved types
 export { DEFAULT_CONFIG, mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
-
-// Service and layers
+// Schema and types
 export {
-  // Service
-  AppConfig,
-  type AppConfigService,
-  // Errors
-  ConfigError,
-  ConfigParseError,
-  // Layers
-  AppConfigLive,
-  AppConfigLiveWithPlatform,
-  // Loader
-  loadConfig,
-  // Convenience functions
-  getWorktreeConfig,
-  getSessionConfig,
-  getPatternsConfig,
-  getPRConfig,
-  getNotificationsConfig,
-} from "./AppConfig.js"
+	type AzedarachConfig,
+	type AzedarachConfigInput,
+	AzedarachConfigSchema,
+	type NotificationsConfig,
+	type PatternsConfig,
+	type PRConfig,
+	type SessionConfig,
+	type WorktreeConfig,
+} from "./schema.js"

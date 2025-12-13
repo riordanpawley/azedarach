@@ -5,20 +5,20 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ## Mode Overview
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                       NORMAL MODE (NOR)                           │
-│  hjkl: navigate  g: goto  v: select  Space: act  /: search        │
-└───────────────────────────────────────────────────────────────────┘
-         │           │           │           │           │
-         │           ▼           ▼           ▼           ▼
-         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │
-         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │
-         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │
-         │         │        └──────────┘ └──────────┘ └──────────┘
-         │         │             │           │             │
-         └─────────┴─────────────┴───────────┴─────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                       NORMAL MODE (NOR)                                │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search  :: cmd    │
+└────────────────────────────────────────────────────────────────────────┘
+         │           │           │           │           │           │
+         │           ▼           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ COMMAND  │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (CMD)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ send to  │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ VC REPL  │
+         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │            │
+         └─────────┴─────────────┴───────────┴─────────────┴────────────┘
                               Esc: return to Normal
 ```
 
@@ -48,9 +48,11 @@ The default mode for navigation and basic actions.
 | `Enter` | Show task details | Modal overlay |
 | `Space` | Enter Action mode | Prefix for commands |
 | `/` | Enter Search mode | Filter tasks by title/ID |
+| `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
 | `c` | Create new task | Opens task creation prompt |
+| `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
@@ -123,6 +125,40 @@ Press `/` to enter search mode for filtering tasks.
 3. Press `Enter` to confirm and return to normal mode
 4. Navigate filtered results with hjkl
 5. Press `/` then `Esc` to clear the filter
+
+## Command Mode
+
+Press `:` to enter command mode for sending commands to the VC REPL.
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Enter` | Send command | Sends command to VC, returns to Normal |
+| `Esc` | Cancel | Clear input, return to Normal |
+| `Backspace` | Delete character | Remove last character from input |
+| Any char | Add to input | Build command to send |
+
+### How Command Mode Works
+
+- **VC must be running**: The VC auto-pilot must be active (toggle with `a` key)
+- **Natural language**: Commands are conversational (e.g., "What's ready to work on?")
+- **Sent to REPL**: The command is sent directly to the VC tmux session
+- **Feedback**: A toast notification confirms when the command is sent
+- **Error handling**: Shows error if VC is not running
+
+### Example
+
+1. Press `a` to start VC auto-pilot (if not already running)
+2. Press `:` to enter command mode
+3. Type `Let's continue working`
+4. Press `Enter` to send the command to VC
+5. VC will process the command in its REPL session
+
+### Common Commands
+
+- `What's ready to work on?` - Ask VC for available tasks
+- `Let's continue working` - Resume work on current task
+- `Add Docker support` - Request a new feature
+- `Run tests` - Ask VC to run tests
 
 ## Action Mode
 

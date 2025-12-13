@@ -16,9 +16,9 @@
  * Socket path: /tmp/azedarach-<project-hash>.sock
  */
 
-import { Effect, Context, Layer, Data, Ref, HashMap, Deferred, Duration } from "effect"
-import { normalizePath } from "./paths.js"
 import * as crypto from "node:crypto"
+import { Context, Data, Deferred, Duration, Effect, HashMap, Layer, Ref } from "effect"
+import { normalizePath } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -33,24 +33,24 @@ export type LockType = "exclusive" | "shared"
  * Lock information
  */
 export interface Lock {
-  readonly id: string
-  readonly path: string
-  readonly type: LockType
-  readonly acquiredAt: Date
-  readonly sessionId: string
+	readonly id: string
+	readonly path: string
+	readonly type: LockType
+	readonly acquiredAt: Date
+	readonly sessionId: string
 }
 
 /**
  * Internal lock state tracking
  */
 interface LockState {
-  readonly exclusiveHolder: string | null
-  readonly sharedHolders: Set<string>
-  readonly waitQueue: Array<{
-    lockId: string
-    type: LockType
-    deferred: Deferred.Deferred<Lock, LockError>
-  }>
+	readonly exclusiveHolder: string | null
+	readonly sharedHolders: Set<string>
+	readonly waitQueue: Array<{
+		lockId: string
+		type: LockType
+		deferred: Deferred.Deferred<Lock, LockError>
+	}>
 }
 
 // ============================================================================
@@ -61,26 +61,26 @@ interface LockState {
  * Generic lock operation error
  */
 export class LockError extends Data.TaggedError("LockError")<{
-  readonly message: string
-  readonly path: string
+	readonly message: string
+	readonly path: string
 }> {}
 
 /**
  * Lock acquisition timeout error
  */
 export class LockTimeoutError extends Data.TaggedError("LockTimeoutError")<{
-  readonly path: string
-  readonly timeout: Duration.Duration
+	readonly path: string
+	readonly timeout: Duration.Duration
 }> {}
 
 /**
  * Lock conflict error (trying to acquire incompatible lock)
  */
 export class LockConflictError extends Data.TaggedError("LockConflictError")<{
-  readonly path: string
-  readonly requestedType: LockType
-  readonly existingType: LockType
-  readonly holders: readonly string[]
+	readonly path: string
+	readonly requestedType: LockType
+	readonly existingType: LockType
+	readonly holders: readonly string[]
 }> {}
 
 // ============================================================================
@@ -94,75 +94,77 @@ export class LockConflictError extends Data.TaggedError("LockConflictError")<{
  * multiple Claude sessions. Locks are tracked per normalized file path.
  */
 export interface FileLockManagerService {
-  /**
-   * Acquire a lock on a file path
-   *
-   * Returns a Lock that must be released via releaseLock.
-   * Fails with LockTimeoutError if the lock cannot be acquired within the timeout.
-   * Fails with LockConflictError if an incompatible lock is held.
-   *
-   * Lock semantics:
-   * - Exclusive locks: only one holder, blocks all other locks
-   * - Shared locks: multiple holders allowed, blocks exclusive locks
-   *
-   * @example
-   * ```ts
-   * const manager = yield* FileLockManager
-   * const lock = yield* manager.acquireLock({
-   *   path: "/path/to/file.ts",
-   *   type: "exclusive",
-   *   timeout: Duration.seconds(30)
-   * })
-   * // ... do work ...
-   * yield* manager.releaseLock(lock)
-   * ```
-   */
-  readonly acquireLock: (options: {
-    path: string
-    type: LockType
-    timeout?: Duration.Duration
-    sessionId?: string
-  }) => Effect.Effect<Lock, LockError | LockTimeoutError | LockConflictError>
+	/**
+	 * Acquire a lock on a file path
+	 *
+	 * Returns a Lock that must be released via releaseLock.
+	 * Fails with LockTimeoutError if the lock cannot be acquired within the timeout.
+	 * Fails with LockConflictError if an incompatible lock is held.
+	 *
+	 * Lock semantics:
+	 * - Exclusive locks: only one holder, blocks all other locks
+	 * - Shared locks: multiple holders allowed, blocks exclusive locks
+	 *
+	 * @example
+	 * ```ts
+	 * const manager = yield* FileLockManager
+	 * const lock = yield* manager.acquireLock({
+	 *   path: "/path/to/file.ts",
+	 *   type: "exclusive",
+	 *   timeout: Duration.seconds(30)
+	 * })
+	 * // ... do work ...
+	 * yield* manager.releaseLock(lock)
+	 * ```
+	 */
+	readonly acquireLock: (options: {
+		path: string
+		type: LockType
+		timeout?: Duration.Duration
+		sessionId?: string
+	}) => Effect.Effect<Lock, LockError | LockTimeoutError | LockConflictError>
 
-  /**
-   * Release a previously acquired lock
-   *
-   * Safe to call multiple times (idempotent).
-   * Processes the wait queue to grant locks to waiting requests.
-   *
-   * @example
-   * ```ts
-   * const manager = yield* FileLockManager
-   * yield* manager.releaseLock(lock)
-   * ```
-   */
-  readonly releaseLock: (lock: Lock) => Effect.Effect<void, never>
+	/**
+	 * Release a previously acquired lock
+	 *
+	 * Safe to call multiple times (idempotent).
+	 * Processes the wait queue to grant locks to waiting requests.
+	 *
+	 * @example
+	 * ```ts
+	 * const manager = yield* FileLockManager
+	 * yield* manager.releaseLock(lock)
+	 * ```
+	 */
+	readonly releaseLock: (lock: Lock) => Effect.Effect<void, never>
 
-
-  /**
-   * Get current lock state for a path (for debugging/monitoring)
-   *
-   * Returns null if no locks exist for the path.
-   *
-   * @example
-   * ```ts
-   * const manager = yield* FileLockManager
-   * const state = yield* manager.getLockState("/path/to/file.ts")
-   * ```
-   */
-  readonly getLockState: (path: string) => Effect.Effect<{
-    readonly exclusiveHolder: string | null
-    readonly sharedHolders: readonly string[]
-    readonly waitingCount: number
-  } | null, never>
+	/**
+	 * Get current lock state for a path (for debugging/monitoring)
+	 *
+	 * Returns null if no locks exist for the path.
+	 *
+	 * @example
+	 * ```ts
+	 * const manager = yield* FileLockManager
+	 * const state = yield* manager.getLockState("/path/to/file.ts")
+	 * ```
+	 */
+	readonly getLockState: (path: string) => Effect.Effect<
+		{
+			readonly exclusiveHolder: string | null
+			readonly sharedHolders: readonly string[]
+			readonly waitingCount: number
+		} | null,
+		never
+	>
 }
 
 /**
  * FileLockManager service tag
  */
 export class FileLockManager extends Context.Tag("FileLockManager")<
-  FileLockManager,
-  FileLockManagerService
+	FileLockManager,
+	FileLockManagerService
 >() {}
 
 // ============================================================================
@@ -174,136 +176,136 @@ export class FileLockManager extends Context.Tag("FileLockManager")<
  * Used for creating unique socket paths per project
  */
 export function getProjectHash(projectPath: string): string {
-  const normalized = normalizePath(projectPath)
-  return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16)
+	const normalized = normalizePath(projectPath)
+	return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16)
 }
 
 /**
  * Get socket path for file locking
  */
 export function getSocketPath(projectPath: string): string {
-  const hash = getProjectHash(projectPath)
-  return `/tmp/azedarach-${hash}.sock`
+	const hash = getProjectHash(projectPath)
+	return `/tmp/azedarach-${hash}.sock`
 }
 
 /**
  * Generate a unique lock ID
  */
 const generateLockId = (): string => {
-  return crypto.randomUUID()
+	return crypto.randomUUID()
 }
 
 /**
  * Create initial lock state for a path
  */
 const createInitialLockState = (): LockState => ({
-  exclusiveHolder: null,
-  sharedHolders: new Set(),
-  waitQueue: [],
+	exclusiveHolder: null,
+	sharedHolders: new Set(),
+	waitQueue: [],
 })
 
 /**
  * Check if a lock can be granted given current state
  */
 const canGrantLock = (state: LockState, type: LockType): boolean => {
-  if (type === "exclusive") {
-    // Exclusive lock requires no other locks
-    return state.exclusiveHolder === null && state.sharedHolders.size === 0
-  } else {
-    // Shared lock requires no exclusive lock
-    return state.exclusiveHolder === null
-  }
+	if (type === "exclusive") {
+		// Exclusive lock requires no other locks
+		return state.exclusiveHolder === null && state.sharedHolders.size === 0
+	} else {
+		// Shared lock requires no exclusive lock
+		return state.exclusiveHolder === null
+	}
 }
 
 /**
  * Grant a lock by updating state
  */
 const grantLock = (state: LockState, lockId: string, type: LockType): LockState => {
-  if (type === "exclusive") {
-    return {
-      ...state,
-      exclusiveHolder: lockId,
-    }
-  } else {
-    const newSharedHolders = new Set(state.sharedHolders)
-    newSharedHolders.add(lockId)
-    return {
-      ...state,
-      sharedHolders: newSharedHolders,
-    }
-  }
+	if (type === "exclusive") {
+		return {
+			...state,
+			exclusiveHolder: lockId,
+		}
+	} else {
+		const newSharedHolders = new Set(state.sharedHolders)
+		newSharedHolders.add(lockId)
+		return {
+			...state,
+			sharedHolders: newSharedHolders,
+		}
+	}
 }
 
 /**
  * Release a lock by updating state
  */
 const releaseLockFromState = (state: LockState, lockId: string): LockState => {
-  if (state.exclusiveHolder === lockId) {
-    return {
-      ...state,
-      exclusiveHolder: null,
-    }
-  }
+	if (state.exclusiveHolder === lockId) {
+		return {
+			...state,
+			exclusiveHolder: null,
+		}
+	}
 
-  const newSharedHolders = new Set(state.sharedHolders)
-  newSharedHolders.delete(lockId)
-  return {
-    ...state,
-    sharedHolders: newSharedHolders,
-  }
+	const newSharedHolders = new Set(state.sharedHolders)
+	newSharedHolders.delete(lockId)
+	return {
+		...state,
+		sharedHolders: newSharedHolders,
+	}
 }
 
 /**
  * Process wait queue to grant pending locks
  */
 const processWaitQueue = (
-  locksRef: Ref.Ref<HashMap.HashMap<string, LockState>>,
-  path: string
+	locksRef: Ref.Ref<HashMap.HashMap<string, LockState>>,
+	path: string,
 ): Effect.Effect<void, never> =>
-  Effect.gen(function* () {
-    const locks = yield* Ref.get(locksRef)
-    const state = HashMap.get(locks, path)
+	Effect.gen(function* () {
+		const locks = yield* Ref.get(locksRef)
+		const state = HashMap.get(locks, path)
 
-    if (state._tag === "None") {
-      return
-    }
+		if (state._tag === "None") {
+			return
+		}
 
-    const currentState = state.value
-    const remainingQueue: typeof currentState.waitQueue = []
+		const currentState = state.value
+		const remainingQueue: typeof currentState.waitQueue = []
 
-    // Try to grant locks from the queue
-    for (const waiter of currentState.waitQueue) {
-      if (canGrantLock(currentState, waiter.type)) {
-        // Grant the lock
-        const newState = grantLock(currentState, waiter.lockId, waiter.type)
-        yield* Ref.update(locksRef, HashMap.set(path, newState))
+		// Try to grant locks from the queue
+		for (const waiter of currentState.waitQueue) {
+			if (canGrantLock(currentState, waiter.type)) {
+				// Grant the lock
+				const newState = grantLock(currentState, waiter.lockId, waiter.type)
+				yield* Ref.update(locksRef, HashMap.set(path, newState))
 
-        // Resolve the deferred with the lock
-        const lock: Lock = {
-          id: waiter.lockId,
-          path,
-          type: waiter.type,
-          acquiredAt: new Date(),
-          sessionId: waiter.lockId.split("-")[0] || "unknown",
-        }
-        yield* Deferred.succeed(waiter.deferred, lock)
-      } else {
-        // Can't grant yet, keep in queue
-        remainingQueue.push(waiter)
-      }
-    }
+				// Resolve the deferred with the lock
+				const lock: Lock = {
+					id: waiter.lockId,
+					path,
+					type: waiter.type,
+					acquiredAt: new Date(),
+					sessionId: waiter.lockId.split("-")[0] || "unknown",
+				}
+				yield* Deferred.succeed(waiter.deferred, lock)
+			} else {
+				// Can't grant yet, keep in queue
+				remainingQueue.push(waiter)
+			}
+		}
 
-    // Update the wait queue
-    if (remainingQueue.length !== currentState.waitQueue.length) {
-      yield* Ref.update(
-        locksRef,
-        HashMap.modify(path, (s) => ({
-          ...s,
-          waitQueue: remainingQueue,
-        }))
-      )
-    }
-  })
+		// Update the wait queue
+		if (remainingQueue.length !== currentState.waitQueue.length) {
+			yield* Ref.update(
+				locksRef,
+				HashMap.modify(path, (s) => ({
+					...s,
+					waitQueue: remainingQueue,
+				})),
+			)
+		}
+	})
 
 // ============================================================================
 // Live Implementation
@@ -321,133 +323,130 @@ const DEFAULT_TIMEOUT = Duration.seconds(30)
  * Automatically cleans up locks on fiber interruption.
  */
 const FileLockManagerServiceImpl = Effect.gen(function* () {
-  // Track locks per normalized path
-  const locksRef = yield* Ref.make<HashMap.HashMap<string, LockState>>(HashMap.empty())
+	// Track locks per normalized path
+	const locksRef = yield* Ref.make<HashMap.HashMap<string, LockState>>(HashMap.empty())
 
-  return FileLockManager.of({
-    acquireLock: (options) =>
-      Effect.gen(function* () {
-        const { path: rawPath, type, timeout = DEFAULT_TIMEOUT, sessionId } = options
-        const path = normalizePath(rawPath)
-        const lockId = sessionId ? `${sessionId}-${generateLockId()}` : generateLockId()
+	return FileLockManager.of({
+		acquireLock: (options) =>
+			Effect.gen(function* () {
+				const { path: rawPath, type, timeout = DEFAULT_TIMEOUT, sessionId } = options
+				const path = normalizePath(rawPath)
+				const lockId = sessionId ? `${sessionId}-${generateLockId()}` : generateLockId()
 
-        // Get or create lock state for this path
-        const locks = yield* Ref.get(locksRef)
-        const existingState = HashMap.get(locks, path)
+				// Get or create lock state for this path
+				const locks = yield* Ref.get(locksRef)
+				const existingState = HashMap.get(locks, path)
 
-        const state =
-          existingState._tag === "Some"
-            ? existingState.value
-            : createInitialLockState()
+				const state = existingState._tag === "Some" ? existingState.value : createInitialLockState()
 
-        // Check if we can grant the lock immediately
-        if (canGrantLock(state, type)) {
-          const newState = grantLock(state, lockId, type)
-          yield* Ref.update(locksRef, HashMap.set(path, newState))
+				// Check if we can grant the lock immediately
+				if (canGrantLock(state, type)) {
+					const newState = grantLock(state, lockId, type)
+					yield* Ref.update(locksRef, HashMap.set(path, newState))
 
-          const lock: Lock = {
-            id: lockId,
-            path,
-            type,
-            acquiredAt: new Date(),
-            sessionId: sessionId || lockId.split("-")[0] || "unknown",
-          }
+					const lock: Lock = {
+						id: lockId,
+						path,
+						type,
+						acquiredAt: new Date(),
+						sessionId: sessionId || lockId.split("-")[0] || "unknown",
+					}
 
-          return lock
-        }
+					return lock
+				}
 
-        // Can't grant immediately - add to wait queue with deferred
-        const deferred = yield* Deferred.make<Lock, LockError>()
+				// Can't grant immediately - add to wait queue with deferred
+				const deferred = yield* Deferred.make<Lock, LockError>()
 
-        const waitEntry = {
-          lockId,
-          type,
-          deferred,
-        }
+				const waitEntry = {
+					lockId,
+					type,
+					deferred,
+				}
 
-        const stateWithWait = {
-          ...state,
-          waitQueue: [...state.waitQueue, waitEntry],
-        }
+				const stateWithWait = {
+					...state,
+					waitQueue: [...state.waitQueue, waitEntry],
+				}
 
-        yield* Ref.update(locksRef, HashMap.set(path, stateWithWait))
+				yield* Ref.update(locksRef, HashMap.set(path, stateWithWait))
 
-        // Wait for the lock to be granted or timeout
-        const lock = yield* Deferred.await(deferred).pipe(
-          Effect.timeoutFail({
-            duration: timeout,
-            onTimeout: () =>
-              new LockTimeoutError({
-                path,
-                timeout,
-              }),
-          }),
-          Effect.ensuring(
-            // If we timeout or are interrupted, remove ourselves from wait queue
-            Effect.gen(function* () {
-              yield* Ref.update(
-                locksRef,
-                HashMap.modify(path, (s) => ({
-                  ...s,
-                  waitQueue: s.waitQueue.filter((w) => w.lockId !== lockId),
-                }))
-              )
-            })
-          )
-        )
+				// Wait for the lock to be granted or timeout
+				const lock = yield* Deferred.await(deferred).pipe(
+					Effect.timeoutFail({
+						duration: timeout,
+						onTimeout: () =>
+							new LockTimeoutError({
+								path,
+								timeout,
+							}),
+					}),
+					Effect.ensuring(
+						// If we timeout or are interrupted, remove ourselves from wait queue
+						Effect.gen(function* () {
+							yield* Ref.update(
+								locksRef,
+								HashMap.modify(path, (s) => ({
+									...s,
+									waitQueue: s.waitQueue.filter((w) => w.lockId !== lockId),
+								})),
+							)
+						}),
+					),
+				)
 
-        return lock
-      }),
+				return lock
+			}),
 
-    releaseLock: (lock) =>
-      Effect.gen(function* () {
-        const path = normalizePath(lock.path)
-        const locks = yield* Ref.get(locksRef)
-        const state = HashMap.get(locks, path)
+		releaseLock: (lock) =>
+			Effect.gen(function* () {
+				const path = normalizePath(lock.path)
+				const locks = yield* Ref.get(locksRef)
+				const state = HashMap.get(locks, path)
 
-        if (state._tag === "None") {
-          // Lock already released, idempotent
-          return
-        }
+				if (state._tag === "None") {
+					// Lock already released, idempotent
+					return
+				}
 
-        // Release the lock
-        const newState = releaseLockFromState(state.value, lock.id)
-        yield* Ref.update(locksRef, HashMap.set(path, newState))
+				// Release the lock
+				const newState = releaseLockFromState(state.value, lock.id)
+				yield* Ref.update(locksRef, HashMap.set(path, newState))
 
-        // Process wait queue to grant pending locks
-        yield* processWaitQueue(locksRef, path)
+				// Process wait queue to grant pending locks
+				yield* processWaitQueue(locksRef, path)
 
-        // Clean up empty lock states
-        const updatedLocks = yield* Ref.get(locksRef)
-        const updatedState = HashMap.get(updatedLocks, path)
+				// Clean up empty lock states
+				const updatedLocks = yield* Ref.get(locksRef)
+				const updatedState = HashMap.get(updatedLocks, path)
 
-        if (
-          updatedState._tag === "Some" &&
-          updatedState.value.exclusiveHolder === null &&
-          updatedState.value.sharedHolders.size === 0 &&
-          updatedState.value.waitQueue.length === 0
-        ) {
-          yield* Ref.update(locksRef, HashMap.remove(path))
-        }
-      }),
+				if (
+					updatedState._tag === "Some" &&
+					updatedState.value.exclusiveHolder === null &&
+					updatedState.value.sharedHolders.size === 0 &&
+					updatedState.value.waitQueue.length === 0
+				) {
+					yield* Ref.update(locksRef, HashMap.remove(path))
+				}
+			}),
 
-    getLockState: (rawPath) =>
-      Effect.gen(function* () {
-        const path = normalizePath(rawPath)
-        const locks = yield* Ref.get(locksRef)
-        const state = HashMap.get(locks, path)
+		getLockState: (rawPath) =>
+			Effect.gen(function* () {
+				const path = normalizePath(rawPath)
+				const locks = yield* Ref.get(locksRef)
+				const state = HashMap.get(locks, path)
 
-        if (state._tag === "None") {
-          return null
-        }
+				if (state._tag === "None") {
+					return null
+				}
 
-        return {
-          exclusiveHolder: state.value.exclusiveHolder,
-          sharedHolders: Array.from(state.value.sharedHolders),
-          waitingCount: state.value.waitQueue.length,
-        }
-      }),
-  })
+				return {
+					exclusiveHolder: state.value.exclusiveHolder,
+					sharedHolders: Array.from(state.value.sharedHolders),
+					waitingCount: state.value.waitQueue.length,
+				}
+			}),
+	})
 })
 
 /**
@@ -488,15 +487,12 @@ export const FileLockManagerLive = Layer.effect(FileLockManager, FileLockManager
  * ```
  */
 export const acquireLock = (options: {
-  path: string
-  type: LockType
-  timeout?: Duration.Duration
-  sessionId?: string
-}): Effect.Effect<
-  Lock,
-  LockError | LockTimeoutError | LockConflictError,
-  FileLockManager
-> => Effect.flatMap(FileLockManager, (manager) => manager.acquireLock(options))
+	path: string
+	type: LockType
+	timeout?: Duration.Duration
+	sessionId?: string
+}): Effect.Effect<Lock, LockError | LockTimeoutError | LockConflictError, FileLockManager> =>
+	Effect.flatMap(FileLockManager, (manager) => manager.acquireLock(options))
 
 /**
  * Release a lock (convenience function)
@@ -507,7 +503,7 @@ export const acquireLock = (options: {
  * ```
  */
 export const releaseLock = (lock: Lock): Effect.Effect<void, never, FileLockManager> =>
-  Effect.flatMap(FileLockManager, (manager) => manager.releaseLock(lock))
+	Effect.flatMap(FileLockManager, (manager) => manager.releaseLock(lock))
 
 /**
  * Execute an effect with a scoped lock (convenience function)
@@ -529,20 +525,20 @@ export const releaseLock = (lock: Lock): Effect.Effect<void, never, FileLockMana
  * ```
  */
 export const withLock = <A, E, R>(
-  options: {
-    path: string
-    type: LockType
-    timeout?: Duration.Duration
-    sessionId?: string
-  },
-  effect: Effect.Effect<A, E, R>
+	options: {
+		path: string
+		type: LockType
+		timeout?: Duration.Duration
+		sessionId?: string
+	},
+	effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | LockError | LockTimeoutError | LockConflictError, R | FileLockManager> =>
-  Effect.gen(function* () {
-    const manager = yield* FileLockManager
-    const lock = yield* manager.acquireLock(options)
+	Effect.gen(function* () {
+		const manager = yield* FileLockManager
+		const lock = yield* manager.acquireLock(options)
 
-    return yield* Effect.ensuring(effect, manager.releaseLock(lock))
-  })
+		return yield* Effect.ensuring(effect, manager.releaseLock(lock))
+	})
 
 /**
  * Get lock state for a path (convenience function)
@@ -557,13 +553,13 @@ export const withLock = <A, E, R>(
  * ```
  */
 export const getLockState = (
-  path: string
+	path: string,
 ): Effect.Effect<
-  {
-    readonly exclusiveHolder: string | null
-    readonly sharedHolders: readonly string[]
-    readonly waitingCount: number
-  } | null,
-  never,
-  FileLockManager
+	{
+		readonly exclusiveHolder: string | null
+		readonly sharedHolders: readonly string[]
+		readonly waitingCount: number
+	} | null,
+	never,
+	FileLockManager
 > => Effect.flatMap(FileLockManager, (manager) => manager.getLockState(path))
