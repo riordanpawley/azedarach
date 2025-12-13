@@ -33,6 +33,15 @@ export class EditorError extends Data.TaggedError("EditorError")<{
 // Service Definition
 // ============================================================================
 
+/**
+ * Result of creating a new bead
+ */
+export interface CreatedBead {
+	readonly id: string
+	readonly title: string
+	readonly type: string
+}
+
 export interface EditorServiceImpl {
 	/**
 	 * Edit a bead in $EDITOR
@@ -51,6 +60,23 @@ export interface EditorServiceImpl {
 		void,
 		ParseMarkdownError | EditorError,
 		CommandExecutor.CommandExecutor | BeadsClient | FileSystem.FileSystem
+	>
+
+	/**
+	 * Create a new bead via $EDITOR
+	 *
+	 * 1. Creates blank template with all fields
+	 * 2. Writes to /tmp/azedarach-new.md
+	 * 3. Opens $EDITOR (blocking)
+	 * 4. Parses result
+	 * 5. Creates bead via bd create
+	 *
+	 * Returns the created bead ID and title.
+	 */
+	readonly createBead: () => Effect.Effect<
+		CreatedBead,
+		ParseMarkdownError | EditorError,
+		CommandExecutor.CommandExecutor | FileSystem.FileSystem
 	>
 }
 
@@ -125,6 +151,195 @@ const serializeBeadToMarkdown = (bead: Issue): string => {
 
 	return lines.join("\n")
 }
+
+/**
+ * Create a blank template for new bead creation
+ */
+const createBlankBeadTemplate = (): string => {
+	const lines: string[] = []
+
+	// Header with placeholder
+	lines.push("# NEW: Enter title here")
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("")
+
+	// Metadata section - user fills in these values
+	lines.push("Type:     task        (task | bug | feature | epic | chore)")
+	lines.push("Priority: P2          (P0 = highest, P4 = lowest)")
+	lines.push("Status:   backlog     (backlog | ready | in_progress | review | done)")
+	lines.push("Assignee: ")
+	lines.push("Labels:   ")
+	lines.push("Estimate: ")
+	lines.push("")
+
+	// Description
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Description")
+	lines.push("")
+	lines.push("Describe the task here...")
+	lines.push("")
+
+	// Design
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Design")
+	lines.push("")
+	lines.push("")
+
+	// Notes
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Notes")
+	lines.push("")
+	lines.push("")
+
+	// Acceptance Criteria
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Acceptance Criteria")
+	lines.push("")
+	lines.push("- [ ] Criteria 1")
+	lines.push("")
+
+	return lines.join("\n")
+}
+
+/**
+ * Fields parsed from a new bead template
+ */
+interface NewBeadFields {
+	title: string
+	type: string
+	priority: number
+	status: string
+	assignee?: string
+	labels?: string[]
+	estimate?: number
+	description?: string
+	design?: string
+	notes?: string
+	acceptance?: string
+}
+
+/**
+ * Parse new bead template markdown
+ */
+const parseNewBeadTemplate = (
+	markdown: string,
+): Effect.Effect<NewBeadFields, ParseMarkdownError> =>
+	Effect.try({
+		try: () => {
+			const lines = markdown.split("\n")
+
+			// Parse header for title
+			const headerLine = lines[0]
+			if (!headerLine?.startsWith("#")) {
+				throw new Error("Missing header line")
+			}
+			const headerMatch = headerLine.match(/^#\s+(?:NEW:\s+)?(.+)$/)
+			if (!headerMatch) {
+				throw new Error("Invalid header format. Expected: # NEW: {title} or # {title}")
+			}
+			const title = headerMatch[1]!.trim()
+			if (!title || title === "Enter title here") {
+				throw new Error("Please enter a title for the bead")
+			}
+
+			// Find metadata section
+			const metadataLines: string[] = []
+			let inMetadata = false
+			let separatorCount = 0
+
+			for (const line of lines) {
+				if (line.startsWith("───")) {
+					separatorCount++
+					if (separatorCount === 1) {
+						inMetadata = true
+						continue
+					}
+					if (separatorCount === 2) {
+						break
+					}
+				}
+				if (inMetadata) {
+					metadataLines.push(line)
+				}
+			}
+
+			// Parse metadata fields
+			let type = "task"
+			let priority = 2
+			let status = "backlog"
+			let assignee: string | undefined
+			let labels: string[] | undefined
+			let estimate: number | undefined
+
+			for (const line of metadataLines) {
+				if (line.startsWith("Type:")) {
+					const typeValue = line.replace(/^Type:\s*/, "").split("(")[0]!.trim()
+					const parsedType = parseTypeLabel(typeValue)
+					if (parsedType) type = parsedType
+				}
+				if (line.startsWith("Priority:")) {
+					const priorityValue = line.replace(/^Priority:\s*/, "").split("(")[0]!.trim()
+					const parsedPriority = parsePriorityLabel(priorityValue)
+					if (parsedPriority !== null) priority = parsedPriority
+				}
+				if (line.startsWith("Status:")) {
+					const statusValue = line.replace(/^Status:\s*/, "").split("(")[0]!.trim()
+					if (statusValue) status = statusValue
+				}
+				if (line.startsWith("Assignee:")) {
+					const assigneeValue = line.replace(/^Assignee:\s*/, "").trim()
+					if (assigneeValue) assignee = assigneeValue
+				}
+				if (line.startsWith("Labels:")) {
+					const labelsValue = line.replace(/^Labels:\s*/, "").trim()
+					if (labelsValue) {
+						labels = labelsValue
+							.split(",")
+							.map((l) => l.trim())
+							.filter(Boolean)
+					}
+				}
+				if (line.startsWith("Estimate:")) {
+					const estimateValue = line.replace(/^Estimate:\s*/, "").trim()
+					if (estimateValue) {
+						const parsed = parseInt(estimateValue, 10)
+						if (!isNaN(parsed)) estimate = parsed
+					}
+				}
+			}
+
+			// Parse sections
+			const description = parseSection(markdown, "Description")
+			const design = parseSection(markdown, "Design")
+			const notes = parseSection(markdown, "Notes")
+			const acceptance = parseSection(markdown, "Acceptance Criteria")
+
+			// Filter out placeholder text
+			const cleanDescription =
+				description === "Describe the task here..." ? undefined : description || undefined
+			const cleanAcceptance =
+				acceptance === "- [ ] Criteria 1" ? undefined : acceptance || undefined
+
+			return {
+				title,
+				type,
+				priority,
+				status,
+				assignee,
+				labels,
+				estimate,
+				description: cleanDescription,
+				design: design || undefined,
+				notes: notes || undefined,
+				acceptance: cleanAcceptance,
+			}
+		},
+		catch: (error) =>
+			new ParseMarkdownError({
+				message: `Failed to parse new bead template: ${error}`,
+				markdown,
+			}),
+	})
 
 // ============================================================================
 // Markdown Parsing
@@ -483,6 +698,107 @@ const EditorServiceImpl = Effect.gen(function* () {
 						),
 					),
 				)
+			}),
+
+		createBead: () =>
+			Effect.gen(function* () {
+				const fs = yield* FileSystem.FileSystem
+
+				// 1. Create blank template
+				const markdown = createBlankBeadTemplate()
+
+				// 2. Write to temp file
+				const tempFile = `/tmp/azedarach-new.md`
+				yield* fs.writeFileString(tempFile, markdown).pipe(
+					Effect.mapError(
+						(error) =>
+							new EditorError({
+								message: `Failed to write temp file: ${error}`,
+							}),
+					),
+				)
+
+				// 3. Get $EDITOR from environment (default to vim)
+				const editor = process.env.EDITOR || "vim"
+
+				// 4. Open editor (blocking)
+				const command = Command.make(editor, tempFile)
+				yield* Command.exitCode(command).pipe(
+					Effect.mapError(
+						(error) =>
+							new EditorError({
+								message: `Failed to open editor: ${error}`,
+							}),
+					),
+				)
+
+				// 5. Read edited content
+				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
+					Effect.mapError(
+						(error) =>
+							new EditorError({
+								message: `Failed to read edited file: ${error}`,
+							}),
+					),
+				)
+
+				// 6. Parse the template
+				const fields = yield* parseNewBeadTemplate(editedMarkdown)
+
+				// 7. Build bd create command
+				const args: string[] = ["create", "--title", fields.title, "--type", fields.type]
+
+				if (fields.priority !== undefined) args.push("--priority", String(fields.priority))
+				if (fields.status) args.push("--status", fields.status)
+				if (fields.description) args.push("--description", fields.description)
+				if (fields.design) args.push("--design", fields.design)
+				if (fields.notes) args.push("--notes", fields.notes)
+				if (fields.acceptance) args.push("--acceptance", fields.acceptance)
+				if (fields.assignee) args.push("--assignee", fields.assignee)
+				if (fields.estimate !== undefined) args.push("--estimate", String(fields.estimate))
+				if (fields.labels && fields.labels.length > 0) {
+					fields.labels.forEach((label) => args.push("--label", label))
+				}
+
+				// 8. Execute bd create and capture output
+				const createCommand = Command.make("bd", ...args)
+				const output = yield* Command.string(createCommand).pipe(
+					Effect.mapError(
+						(error) =>
+							new EditorError({
+								message: `Failed to create bead: ${error}`,
+							}),
+					),
+				)
+
+				// 9. Parse the bead ID from output (format: "Created issue: az-xxx")
+				const idMatch = output.match(/Created issue:\s*(\S+)/i)
+				if (!idMatch) {
+					yield* Effect.fail(
+						new EditorError({
+							message: `Could not parse bead ID from output: ${output}`,
+						}),
+					)
+				}
+				const beadId = idMatch![1]!
+
+				// 10. Clean up temp file
+				yield* Effect.ignoreLogged(
+					fs.remove(tempFile).pipe(
+						Effect.mapError(
+							(error) =>
+								new EditorError({
+									message: `Failed to remove temp file: ${error}`,
+								}),
+						),
+					),
+				)
+
+				return {
+					id: beadId,
+					title: fields.title,
+					type: fields.type,
+				}
 			}),
 	})
 })
