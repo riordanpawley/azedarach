@@ -27,6 +27,7 @@ export const DEFAULT_CONFIG = {
 		command: "claude",
 		shell: process.env.SHELL || "bash",
 		tmuxPrefix: "C-a",
+		dangerouslySkipPermissions: false,
 	},
 	patterns: {
 		waiting: [] as string[],
@@ -65,6 +66,7 @@ export interface ResolvedConfig {
 		command: string
 		shell: string
 		tmuxPrefix: string
+		dangerouslySkipPermissions: boolean
 	}
 	patterns: {
 		waiting: readonly string[]
@@ -107,6 +109,9 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			command: config.session?.command ?? DEFAULT_CONFIG.session.command,
 			shell: config.session?.shell ?? DEFAULT_CONFIG.session.shell,
 			tmuxPrefix: config.session?.tmuxPrefix ?? DEFAULT_CONFIG.session.tmuxPrefix,
+			dangerouslySkipPermissions:
+				config.session?.dangerouslySkipPermissions ??
+				DEFAULT_CONFIG.session.dangerouslySkipPermissions,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,

@@ -98,10 +98,17 @@ export const HelpOverlay = () => {
 				<KeyLine keys="p" description="Pause session" />
 				<text> </text>
 
+				{/* Create/Edit section */}
+				<SectionHeader title="Create & Edit:" />
+				<KeyLine keys="c" description="Create bead via $EDITOR" />
+				<KeyLine keys="C" description="Create bead via Claude (AI)" />
+				<KeyLine keys="e" description="Edit bead via $EDITOR" />
+				<KeyLine keys="E" description="Edit bead via Claude (AI)" />
+				<text> </text>
+
 				{/* General section */}
 				<SectionHeader title="General:" />
 				<KeyLine keys="Enter" description="Show task details" />
-				<KeyLine keys="c" description="Create new task" />
 				<KeyLine keys="q" description="Quit application" />
 				<KeyLine keys="?" description="Toggle this help screen" />
 				<KeyLine keys="Esc" description="Back to normal mode / dismiss" />
