@@ -6,40 +6,36 @@
  * Run with: bun run src/core/VCService.example.ts
  */
 
-import { Effect, Console } from "effect"
-import {
-  VCService,
-  VCServiceLive,
-  type VCExecutorInfo,
-} from "./VCService.js"
+import { Console, Effect } from "effect"
+import { type VCExecutorInfo, VCService, VCServiceLive } from "./VCService.js"
 
 // ============================================================================
 // Example 1: Check if VC is installed
 // ============================================================================
 
 const checkInstallation = Effect.gen(function* () {
-  yield* Console.log("=== Checking VC Installation ===")
+	yield* Console.log("=== Checking VC Installation ===")
 
-  const vc = yield* VCService
-  const available = yield* vc.isAvailable()
+	const vc = yield* VCService
+	const available = yield* vc.isAvailable()
 
-  if (!available) {
-    yield* Console.log("VC is not installed.")
-    yield* Console.log("Install with:")
-    yield* Console.log("  brew tap steveyegge/vc")
-    yield* Console.log("  brew install vc")
-    yield* Console.log("")
-    yield* Console.log("Or build from source:")
-    yield* Console.log("  git clone https://github.com/steveyegge/vc")
-    yield* Console.log("  cd vc && go build -o vc ./cmd/vc")
-    return false
-  }
+	if (!available) {
+		yield* Console.log("VC is not installed.")
+		yield* Console.log("Install with:")
+		yield* Console.log("  brew tap steveyegge/vc")
+		yield* Console.log("  brew install vc")
+		yield* Console.log("")
+		yield* Console.log("Or build from source:")
+		yield* Console.log("  git clone https://github.com/steveyegge/vc")
+		yield* Console.log("  cd vc && go build -o vc ./cmd/vc")
+		return false
+	}
 
-  const version = yield* vc.getVersion().pipe(
-    Effect.catchTag("VCNotInstalledError", () => Effect.succeed("unknown"))
-  )
-  yield* Console.log(`VC is installed: ${version}`)
-  return true
+	const version = yield* vc
+		.getVersion()
+		.pipe(Effect.catchTag("VCNotInstalledError", () => Effect.succeed("unknown")))
+	yield* Console.log(`VC is installed: ${version}`)
+	return true
 })
 
 // ============================================================================
@@ -47,40 +43,42 @@ const checkInstallation = Effect.gen(function* () {
 // ============================================================================
 
 const toggleAutoPilotExample = Effect.gen(function* () {
-  yield* Console.log("\n=== Toggling Auto-Pilot ===")
+	yield* Console.log("\n=== Toggling Auto-Pilot ===")
 
-  const vc = yield* VCService
-  const status = yield* vc.getStatus()
-  yield* Console.log(`Current status: ${status.status}`)
+	const vc = yield* VCService
+	const status = yield* vc.getStatus()
+	yield* Console.log(`Current status: ${status.status}`)
 
-  if (status.status === "not_installed") {
-    yield* Console.log("Cannot toggle - VC not installed")
-    return
-  }
+	if (status.status === "not_installed") {
+		yield* Console.log("Cannot toggle - VC not installed")
+		return
+	}
 
-  const newStatus = yield* vc.toggleAutoPilot().pipe(
-    Effect.catchTag("VCNotInstalledError", () =>
-      Effect.succeed({ status: "not_installed", sessionName: "" } as VCExecutorInfo)
-    )
-  )
+	const newStatus = yield* vc
+		.toggleAutoPilot()
+		.pipe(
+			Effect.catchTag("VCNotInstalledError", () =>
+				Effect.succeed({ status: "not_installed", sessionName: "" } as VCExecutorInfo),
+			),
+		)
 
-  yield* Console.log(`New status: ${newStatus.status}`)
+	yield* Console.log(`New status: ${newStatus.status}`)
 
-  if (newStatus.status === "running") {
-    yield* Console.log("")
-    yield* Console.log("VC auto-pilot is now running!")
-    yield* Console.log("It will:")
-    yield* Console.log("  - Poll for ready issues in Beads")
-    yield* Console.log("  - Claim and execute work autonomously")
-    yield* Console.log("  - Run quality gates (tests, lint, build)")
-    yield* Console.log("  - Create/update issues as needed")
-    yield* Console.log("")
+	if (newStatus.status === "running") {
+		yield* Console.log("")
+		yield* Console.log("VC auto-pilot is now running!")
+		yield* Console.log("It will:")
+		yield* Console.log("  - Poll for ready issues in Beads")
+		yield* Console.log("  - Claim and execute work autonomously")
+		yield* Console.log("  - Run quality gates (tests, lint, build)")
+		yield* Console.log("  - Create/update issues as needed")
+		yield* Console.log("")
 
-    const attachCmd = yield* vc.getAttachCommand().pipe(
-      Effect.catchAll(() => Effect.succeed("tmux attach -t vc-autopilot"))
-    )
-    yield* Console.log(`To view VC output: ${attachCmd}`)
-  }
+		const attachCmd = yield* vc
+			.getAttachCommand()
+			.pipe(Effect.catchAll(() => Effect.succeed("tmux attach -t vc-autopilot")))
+		yield* Console.log(`To view VC output: ${attachCmd}`)
+	}
 })
 
 // ============================================================================
@@ -88,34 +86,30 @@ const toggleAutoPilotExample = Effect.gen(function* () {
 // ============================================================================
 
 const sendCommandsExample = Effect.gen(function* () {
-  yield* Console.log("\n=== Sending Commands to VC ===")
+	yield* Console.log("\n=== Sending Commands to VC ===")
 
-  const vc = yield* VCService
-  const status = yield* vc.getStatus()
+	const vc = yield* VCService
+	const status = yield* vc.getStatus()
 
-  if (status.status !== "running") {
-    yield* Console.log("VC is not running - starting auto-pilot first")
-    yield* vc.toggleAutoPilot().pipe(
-      Effect.catchAll(() => Effect.void)
-    )
-  }
+	if (status.status !== "running") {
+		yield* Console.log("VC is not running - starting auto-pilot first")
+		yield* vc.toggleAutoPilot().pipe(Effect.catchAll(() => Effect.void))
+	}
 
-  // Example commands you can send to VC's conversational REPL
-  const commands = [
-    "status",                           // Check current status
-    "What's ready to work on?",         // Natural language query
-    // "Let's continue working",        // Start executing (commented - would actually run!)
-  ]
+	// Example commands you can send to VC's conversational REPL
+	const commands = [
+		"status", // Check current status
+		"What's ready to work on?", // Natural language query
+		// "Let's continue working",        // Start executing (commented - would actually run!)
+	]
 
-  for (const cmd of commands) {
-    yield* Console.log(`Sending: "${cmd}"`)
-    yield* vc.sendCommand(cmd).pipe(
-      Effect.catchAll((e) => Console.log(`  Error: ${e.message}`))
-    )
-    yield* Effect.sleep("500 millis")
-  }
+	for (const cmd of commands) {
+		yield* Console.log(`Sending: "${cmd}"`)
+		yield* vc.sendCommand(cmd).pipe(Effect.catchAll((e) => Console.log(`  Error: ${e.message}`)))
+		yield* Effect.sleep("500 millis")
+	}
 
-  yield* Console.log("\nCommands sent. Check tmux session for output.")
+	yield* Console.log("\nCommands sent. Check tmux session for output.")
 })
 
 // ============================================================================
@@ -123,8 +117,8 @@ const sendCommandsExample = Effect.gen(function* () {
 // ============================================================================
 
 const tuiIntegrationExample = Effect.gen(function* () {
-  yield* Console.log("\n=== TUI Integration Pattern ===")
-  yield* Console.log(`
+	yield* Console.log("\n=== TUI Integration Pattern ===")
+	yield* Console.log(`
 When integrating with Azedarach's TUI:
 
 1. Status Bar Component:
@@ -167,20 +161,20 @@ Example TUI layout:
 // ============================================================================
 
 const main = Effect.gen(function* () {
-  yield* Console.log("VCService Integration Examples")
-  yield* Console.log("==============================")
+	yield* Console.log("VCService Integration Examples")
+	yield* Console.log("==============================")
 
-  const installed = yield* checkInstallation
+	const installed = yield* checkInstallation
 
-  if (installed) {
-    yield* toggleAutoPilotExample
-    // Uncomment to test command sending:
-    // yield* sendCommandsExample
-  }
+	if (installed) {
+		yield* toggleAutoPilotExample
+		// Uncomment to test command sending:
+		// yield* sendCommandsExample
+	}
 
-  yield* tuiIntegrationExample
+	yield* tuiIntegrationExample
 
-  yield* Console.log("\n=== Done ===")
+	yield* Console.log("\n=== Done ===")
 }).pipe(Effect.provide(VCServiceLive))
 
 // Run the example

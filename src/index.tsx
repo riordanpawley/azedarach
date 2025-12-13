@@ -10,10 +10,10 @@ import { useState } from "react"
  */
 
 export function main() {
-  console.log("Azedarach scaffolding initialized")
+	console.log("Azedarach scaffolding initialized")
 }
 
 export function App() {
-  const [greeting] = useState("Azedarach")
-  return <div>{greeting}</div>
+	const [greeting] = useState("Azedarach")
+	return <div>{greeting}</div>
 }

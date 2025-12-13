@@ -1,32 +1,33 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(bd:*)",
-      "Bash(rg:*)",
-      "Bash(fd:*)",
-      "Bash(git status)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(pnpm:*)",
-      "Bash(npm:*)",
-      "Bash(gh:*)"
-    ],
-    "deny": []
-  },
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": {},
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .claude/hooks/user-prompt-submit-orchestrator.cjs"
-          }
-        ]
-      }
-    ]
-  }
+	"initCommands": ["direnv allow"],
+	"permissions": {
+		"allow": [
+			"Bash(bd:*)",
+			"Bash(rg:*)",
+			"Bash(fd:*)",
+			"Bash(git status)",
+			"Bash(git diff:*)",
+			"Bash(git log:*)",
+			"Bash(git add:*)",
+			"Bash(git commit:*)",
+			"Bash(git push:*)",
+			"Bash(pnpm:*)",
+			"Bash(npm:*)",
+			"Bash(gh:*)"
+		],
+		"deny": []
+	},
+	"hooks": {
+		"UserPromptSubmit": [
+			{
+				"matcher": {},
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node .claude/hooks/user-prompt-submit-orchestrator.cjs"
+					}
+				]
+			}
+		]
+	}
 }

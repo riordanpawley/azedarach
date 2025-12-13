@@ -1,40 +1,44 @@
 {
-  "name": "azedarach",
-  "version": "0.1.0",
-  "description": "TUI Kanban board for orchestrating parallel Claude Code sessions",
-  "type": "module",
-  "bin": {
-    "az": "./bin/az.ts"
-  },
-  "scripts": {
-    "dev": "bun run bin/az.ts",
-    "build": "tsup bin/az.ts --format esm --clean",
-    "type-check": "tsc --noEmit"
-  },
-  "keywords": [
-    "tui",
-    "kanban",
-    "claude",
-    "orchestration"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {
-    "@effect-atom/atom": "latest",
-    "@effect-atom/atom-react": "latest",
-    "@effect/cli": "latest",
-    "@effect/cluster": "^0.55.0",
-    "@effect/platform": "latest",
-    "@effect/platform-bun": "latest",
-    "@opentui/core": "latest",
-    "@opentui/react": "latest",
-    "effect": "latest",
-    "react": "^19.0.0"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "@types/react": "^19.2.7",
-    "tsup": "latest",
-    "typescript": "latest"
-  }
+	"name": "azedarach",
+	"version": "0.1.0",
+	"description": "TUI Kanban board for orchestrating parallel Claude Code sessions",
+	"type": "module",
+	"bin": {
+		"az": "./bin/az.ts"
+	},
+	"scripts": {
+		"dev": "bun run bin/az.ts",
+		"build": "tsup bin/az.ts --format esm --clean",
+		"type-check": "tsc --noEmit",
+		"lint": "biome lint src bin",
+		"format": "biome format --write src bin",
+		"check": "biome check --write src bin"
+	},
+	"keywords": [
+		"tui",
+		"kanban",
+		"claude",
+		"orchestration"
+	],
+	"author": "",
+	"license": "MIT",
+	"dependencies": {
+		"@effect-atom/atom": "latest",
+		"@effect-atom/atom-react": "latest",
+		"@effect/cli": "latest",
+		"@effect/cluster": "^0.55.0",
+		"@effect/platform": "latest",
+		"@effect/platform-bun": "latest",
+		"@opentui/core": "latest",
+		"@opentui/react": "latest",
+		"effect": "latest",
+		"react": "^19.0.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.7",
+		"@types/bun": "latest",
+		"@types/react": "^19.2.7",
+		"tsup": "latest",
+		"typescript": "latest"
+	}
 }
