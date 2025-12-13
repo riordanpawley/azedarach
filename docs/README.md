@@ -8,6 +8,7 @@
 2. [Keyboard Navigation](#keyboard-navigation)
 3. [Modes](#modes)
 4. [Features](#features)
+   - [VC Integration](#vc-integration-vibecoder)
 5. [Testing Features](#testing-features)
 6. [Troubleshooting](#troubleshooting)
 
@@ -26,10 +27,10 @@
 
 ```bash
 # Start the TUI
-pnpm dev
+bun run dev
 
 # Or run directly
-bun run src/index.tsx
+bun run bin/az.ts
 ```
 
 The TUI displays a Kanban board with your beads issues organized by status:
@@ -61,6 +62,9 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 |-----|--------|
 | `Enter` | Show detail panel for selected task |
 | `c` | Create new task (opens modal prompt) |
+| `a` | Toggle VC auto-pilot (start/stop VC executor) |
+| `/` | Enter Search mode (filter tasks) |
+| `:` | Enter Command mode (send commands to VC REPL) |
 | `Space` | Enter Action mode (then press action key) |
 | `?` | Show help overlay |
 | `q` | Quit application |
@@ -153,6 +157,31 @@ Use Action mode (`Space` + `h`/`l`) to move tasks between columns:
 - Moving to "Closed" completes a task
 - Changes are immediately synced to beads
 
+### VC Integration (VibeCoder)
+
+Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an AI-supervised orchestration engine that autonomously executes tasks from your beads backlog.
+
+**How it works:**
+- **Azedarach**: TUI Kanban visualization + parallel session management
+- **VC**: AI-supervised execution with quality gates (tests, lint, build)
+- **Shared**: Both read/write the same `.beads/beads.db` database
+
+**Workflow:**
+
+1. **Start VC auto-pilot**: Press `a` to launch VC in a background tmux session
+2. **Monitor status**: StatusBar shows `VC: running` (green) or `VC: stopped` (yellow)
+3. **Send commands**: Press `:` to send natural language commands to VC's REPL
+4. **Watch progress**: VC claims issues, executes work, and updates status in real-time
+5. **Stop when done**: Press `a` again to toggle off
+
+**Example commands (`:` mode):**
+- `What's ready to work on?` - Query available tasks
+- `Let's continue working` - Resume autonomous work
+- `Add Docker support` - Request a new feature
+- `Run tests` - Execute quality gates
+
+**Note:** VC must be installed separately. See [VC installation](https://github.com/steveyegge/vc) for setup.
+
 ### Session Attachment (Requires Active Sessions)
 
 **Important:** Session attachment only works when there are active tmux sessions running Claude Code.
@@ -173,7 +202,7 @@ To test attachment:
 
 ```bash
 # Start the application
-pnpm dev
+bun run dev
 
 # Navigate with hjkl
 # Press ? for help
@@ -190,7 +219,7 @@ Session attachment requires actual tmux sessions. Here's how to test:
 tmux new-session -d -s claude-test-session "bash"
 
 # 2. In another terminal, start Azedarach
-pnpm dev
+bun run dev
 
 # 3. Create a test bead with matching ID (or use existing)
 bd create --title="Test attachment" --type=task
