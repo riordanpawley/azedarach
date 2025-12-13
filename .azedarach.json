@@ -1,15 +1,11 @@
 {
-  "worktree": {
-    "initCommands": [
-      "direnv allow",
-      "bun install",
-      "bd sync"
-    ],
-    "continueOnFailure": true,
-    "parallel": false
-  },
-  "session": {
-    "command": "claude",
-    "tmuxPrefix": "C-a"
-  }
+	"worktree": {
+		"initCommands": ["direnv allow", "bun install", "bd sync"],
+		"continueOnFailure": true,
+		"parallel": false
+	},
+	"session": {
+		"command": "claude",
+		"tmuxPrefix": "C-a"
+	}
 }

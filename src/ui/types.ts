@@ -7,12 +7,12 @@ import type { Issue } from "../core/BeadsClient"
  * Session state for a task
  */
 export type SessionState =
-  | "idle"        // No session running
-  | "busy"        // Claude is working
-  | "waiting"     // Claude is waiting for input
-  | "done"        // Task completed successfully
-  | "error"       // Task failed
-  | "paused"      // Session paused
+	| "idle" // No session running
+	| "busy" // Claude is working
+	| "waiting" // Claude is waiting for input
+	| "done" // Task completed successfully
+	| "error" // Task failed
+	| "paused" // Session paused
 
 /**
  * Session metrics for monitoring context health
@@ -23,16 +23,16 @@ export type SessionState =
  * - DetailPanel shows full metrics when task is selected
  */
 export interface SessionMetrics {
-  /** Context window usage percentage (0-100). Critical for monitoring auto-compact risk. */
-  contextPercent?: number
-  /** When the session started (ISO 8601) */
-  sessionStartedAt?: string
-  /** Estimated token count for the session */
-  estimatedTokens?: number
-  /** When context was last compacted (ISO 8601). Indicates context loss events. */
-  lastCompactedAt?: string
-  /** Recent output snippet for monitoring session progress */
-  recentOutput?: string
+	/** Context window usage percentage (0-100). Critical for monitoring auto-compact risk. */
+	contextPercent?: number
+	/** When the session started (ISO 8601) */
+	sessionStartedAt?: string
+	/** Estimated token count for the session */
+	estimatedTokens?: number
+	/** When context was last compacted (ISO 8601). Indicates context loss events. */
+	lastCompactedAt?: string
+	/** Recent output snippet for monitoring session progress */
+	recentOutput?: string
 }
 
 /**
@@ -42,52 +42,53 @@ export interface SessionMetrics {
  * when the session is active (not idle).
  */
 export interface TaskWithSession extends Issue, SessionMetrics {
-  sessionState: SessionState
+	sessionState: SessionState
 }
 
 /**
  * Kanban columns by status
  */
 export const COLUMNS = [
-  { id: "open", title: "Open", status: "open" },
-  { id: "in_progress", title: "In Progress", status: "in_progress" },
-  { id: "blocked", title: "Blocked", status: "blocked" },
-  { id: "closed", title: "Closed", status: "closed" },
+	{ id: "open", title: "Open", status: "open" },
+	{ id: "in_progress", title: "In Progress", status: "in_progress" },
+	{ id: "blocked", title: "Blocked", status: "blocked" },
+	{ id: "closed", title: "Closed", status: "closed" },
 ] as const
 
-export type ColumnId = typeof COLUMNS[number]["id"]
-export type ColumnStatus = typeof COLUMNS[number]["status"]
+export type ColumnId = (typeof COLUMNS)[number]["id"]
+export type ColumnStatus = (typeof COLUMNS)[number]["status"]
 
 /**
  * Session state indicators
  */
 export const SESSION_INDICATORS: Record<SessionState, string> = {
-  idle: "",
-  busy: "🔵",
-  waiting: "🟡",
-  done: "✅",
-  error: "❌",
-  paused: "⏸️",
+	idle: "",
+	busy: "🔵",
+	waiting: "🟡",
+	done: "✅",
+	error: "❌",
+	paused: "⏸️",
 }
 
 /**
  * Navigation position in the board
  */
 export interface NavigationState {
-  columnIndex: number
-  taskIndex: number
+	columnIndex: number
+	taskIndex: number
 }
 
 /**
  * Editor modes (Helix-style)
  *
  * - action: Action menu mode triggered by Space
+ * - command: VC command input mode triggered by ':'
  * - goto: Jump mode triggered by 'g' - shows 2-char labels for instant jumping
  * - normal: Default navigation mode (hjkl to move)
  * - search: Search/filter mode triggered by '/'
  * - select: Multi-selection mode triggered by 'v'
  */
-export type EditorMode = "action" | "goto" | "normal" | "search" | "select"
+export type EditorMode = "action" | "command" | "goto" | "normal" | "search" | "select"
 
 /**
  * Goto mode sub-state
@@ -104,20 +105,20 @@ export type GotoSubMode = "pending" | "jump"
  * Application state including modal editing
  */
 export interface AppState {
-  mode: EditorMode
-  gotoSubMode: GotoSubMode | null
-  selectedIds: Set<string>
-  jumpLabels: Map<string, JumpTarget> | null
-  pendingJumpKey: string | null
+	mode: EditorMode
+	gotoSubMode: GotoSubMode | null
+	selectedIds: Set<string>
+	jumpLabels: Map<string, JumpTarget> | null
+	pendingJumpKey: string | null
 }
 
 /**
  * Jump target for goto mode
  */
 export interface JumpTarget {
-  taskId: string
-  columnIndex: number
-  taskIndex: number
+	taskId: string
+	columnIndex: number
+	taskIndex: number
 }
 
 /**
@@ -125,14 +126,14 @@ export interface JumpTarget {
  * Uses home row keys for ergonomics
  */
 export function generateJumpLabels(count: number): string[] {
-  const chars = "asdfjkl;" // Home row keys
-  const labels: string[] = []
+	const chars = "asdfjkl;" // Home row keys
+	const labels: string[] = []
 
-  for (let i = 0; i < chars.length && labels.length < count; i++) {
-    for (let j = 0; j < chars.length && labels.length < count; j++) {
-      labels.push(chars[i] + chars[j])
-    }
-  }
+	for (let i = 0; i < chars.length && labels.length < count; i++) {
+		for (let j = 0; j < chars.length && labels.length < count; j++) {
+			labels.push(chars[i] + chars[j])
+		}
+	}
 
-  return labels
+	return labels
 }

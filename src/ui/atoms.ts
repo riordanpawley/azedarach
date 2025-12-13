@@ -4,16 +4,17 @@
  * Uses effect-atom for reactive state management with Effect integration.
  */
 import { Atom } from "@effect-atom/atom"
-import { Effect, Layer } from "effect"
-import type { TaskWithSession } from "./types"
-import { BeadsClient, BeadsClientLiveWithPlatform } from "../core/BeadsClient"
-import { TmuxServiceLive } from "../core/TmuxService"
-import { TerminalServiceLive } from "../core/TerminalService"
+import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
+import { AppConfigLiveWithPlatform } from "../config/index"
 import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentService"
-import { SessionManager, SessionManagerLive } from "../core/SessionManager"
+import { BeadsClient, BeadsClientLiveWithPlatform } from "../core/BeadsClient"
 import { EditorService, EditorServiceLive } from "../core/EditorService"
 import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
-import { AppConfigLiveWithPlatform } from "../config/index"
+import { SessionManager, SessionManagerLive } from "../core/SessionManager"
+import { TerminalServiceLive } from "../core/TerminalService"
+import { TmuxServiceLive } from "../core/TmuxService"
+import { type VCExecutorInfo, VCService, VCServiceLive } from "../core/VCService"
+import type { TaskWithSession } from "./types"
 
 /**
  * Combined runtime layer with all services
@@ -24,17 +25,18 @@ import { AppConfigLiveWithPlatform } from "../config/index"
 const configLayer = AppConfigLiveWithPlatform(process.cwd())
 
 const baseLayer = Layer.mergeAll(
-  BeadsClientLiveWithPlatform,
-  TmuxServiceLive,
-  TerminalServiceLive,
-  configLayer
+	BeadsClientLiveWithPlatform,
+	TmuxServiceLive,
+	TerminalServiceLive,
+	configLayer,
 )
 
 const appLayer = baseLayer.pipe(
-  Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
-  Layer.merge(SessionManagerLive),
-  Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
-  Layer.merge(PRWorkflowLive)
+	Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
+	Layer.merge(SessionManagerLive),
+	Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
+	Layer.merge(PRWorkflowLive),
+	Layer.merge(VCServiceLive),
 )
 
 /**
@@ -54,28 +56,92 @@ export const appRuntime = Atom.runtime(appLayer)
  * Merges session state from SessionManager for tasks with active sessions.
  */
 export const tasksAtom = appRuntime.atom(
-  Effect.gen(function* () {
-    const client = yield* BeadsClient
-    const sessionManager = yield* SessionManager
+	Effect.gen(function* () {
+		const client = yield* BeadsClient
+		const sessionManager = yield* SessionManager
 
-    // Fetch all issues (no status filter) to populate the full board
-    const issues = yield* client.list()
+		// Fetch all issues (no status filter) to populate the full board
+		const issues = yield* client.list()
 
-    // Get active sessions to merge their state
-    const activeSessions = yield* sessionManager.listActive()
-    const sessionStateMap = new Map(
-      activeSessions.map((session) => [session.beadId, session.state])
-    )
+		// Get active sessions to merge their state
+		const activeSessions = yield* sessionManager.listActive()
+		const sessionStateMap = new Map(
+			activeSessions.map((session) => [session.beadId, session.state]),
+		)
 
-    // Map issues to TaskWithSession, using real session state if available
-    const tasks: TaskWithSession[] = issues.map((issue) => ({
-      ...issue,
-      sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
-    }))
+		// Map issues to TaskWithSession, using real session state if available
+		const tasks: TaskWithSession[] = issues.map((issue) => ({
+			...issue,
+			sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
+		}))
 
-    return tasks
-  }),
-  { initialValue: [] }
+		return tasks
+	}),
+	{ initialValue: [] },
+)
+
+// ============================================================================
+// VC Status Atoms (scoped polling with SubscriptionRef)
+// ============================================================================
+
+const VC_STATUS_INITIAL: VCExecutorInfo = {
+	status: "stopped",
+	sessionName: "vc-autopilot",
+}
+
+/**
+ * SubscriptionRef that holds the current VC status
+ *
+ * This is the single source of truth for VC status.
+ * Updated by both the poller and toggle actions.
+ */
+export const vcStatusRefAtom = appRuntime.atom(
+	SubscriptionRef.make<VCExecutorInfo>(VC_STATUS_INITIAL),
+	{ initialValue: undefined },
+)
+
+/**
+ * Scoped poller that updates vcStatusRefAtom every 5 seconds
+ *
+ * The polling fiber is automatically interrupted when the atom unmounts
+ * because effect-atom provides the Scope.
+ */
+export const vcStatusPollerAtom = appRuntime.atom(
+	(get) =>
+		Effect.gen(function* () {
+			const vc = yield* VCService
+			const ref = yield* get.result(vcStatusRefAtom)
+
+			// Get initial status immediately
+			const initial = yield* vc.getStatus()
+			yield* SubscriptionRef.set(ref, initial)
+
+			// Fork polling loop - scoped by effect-atom, auto-interrupted on unmount
+			yield* Effect.scheduleForked(Schedule.spaced("5 seconds"))(
+				vc.getStatus().pipe(
+					Effect.flatMap((status) => SubscriptionRef.set(ref, status)),
+					Effect.catchAll(() => Effect.void), // Don't crash on transient errors
+				),
+			)
+		}),
+	{ initialValue: undefined },
+)
+
+/**
+ * Read-only atom that subscribes to VC status changes
+ *
+ * Streams the SubscriptionRef's changes so UI updates reactively.
+ *
+ * Usage: const vcStatus = useAtomValue(vcStatusAtom)
+ */
+export const vcStatusAtom = appRuntime.atom(
+	(get) =>
+		pipe(
+			get.result(vcStatusRefAtom),
+			Effect.map((_) => _.changes),
+			Stream.unwrap,
+		),
+	{ initialValue: VC_STATUS_INITIAL },
 )
 
 /**
@@ -99,25 +165,25 @@ export const errorAtom = Atom.make<string | undefined>(undefined)
  *        await moveTask({ taskId: "az-123", newStatus: "in_progress" })
  */
 export const moveTaskAtom = appRuntime.fn(
-  ({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
-    Effect.gen(function* () {
-      const client = yield* BeadsClient
-      yield* client.update(taskId, { status: newStatus })
-    })
+	({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			yield* client.update(taskId, { status: newStatus })
+		}),
 )
 
 /**
  * Move multiple tasks at once
  */
 export const moveTasksAtom = appRuntime.fn(
-  ({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
-    Effect.gen(function* () {
-      const client = yield* BeadsClient
-      yield* Effect.all(
-        taskIds.map((id) => client.update(id, { status: newStatus })),
-        { concurrency: "unbounded" }
-      )
-    })
+	({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			yield* Effect.all(
+				taskIds.map((id) => client.update(id, { status: newStatus })),
+				{ concurrency: "unbounded" },
+			)
+		}),
 )
 
 /**
@@ -127,20 +193,20 @@ export const moveTasksAtom = appRuntime.fn(
  *        await attachExternal(sessionId)
  */
 export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
-  Effect.gen(function* () {
-    const service = yield* AttachmentService
-    yield* service.attachExternal(sessionId)
-  })
+	Effect.gen(function* () {
+		const service = yield* AttachmentService
+		yield* service.attachExternal(sessionId)
+	}),
 )
 
 /**
  * Attach to a session inline (future: replaces TUI)
  */
 export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
-  Effect.gen(function* () {
-    const service = yield* AttachmentService
-    yield* service.attachInline(sessionId)
-  })
+	Effect.gen(function* () {
+		const service = yield* AttachmentService
+		yield* service.attachInline(sessionId)
+	}),
 )
 
 /**
@@ -150,43 +216,43 @@ export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
  *        await startSession(beadId)
  */
 export const startSessionAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const manager = yield* SessionManager
-    yield* manager.start({
-      beadId,
-      projectPath: process.cwd(),
-    })
-  })
+	Effect.gen(function* () {
+		const manager = yield* SessionManager
+		yield* manager.start({
+			beadId,
+			projectPath: process.cwd(),
+		})
+	}),
 )
 
 /**
  * Pause a running session (Ctrl+C + WIP commit)
  */
 export const pauseSessionAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const manager = yield* SessionManager
-    yield* manager.pause(beadId)
-  })
+	Effect.gen(function* () {
+		const manager = yield* SessionManager
+		yield* manager.pause(beadId)
+	}),
 )
 
 /**
  * Resume a paused session
  */
 export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const manager = yield* SessionManager
-    yield* manager.resume(beadId)
-  })
+	Effect.gen(function* () {
+		const manager = yield* SessionManager
+		yield* manager.resume(beadId)
+	}),
 )
 
 /**
  * Stop a running session (kills tmux, marks as idle)
  */
 export const stopSessionAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const manager = yield* SessionManager
-    yield* manager.stop(beadId)
-  })
+	Effect.gen(function* () {
+		const manager = yield* SessionManager
+		yield* manager.stop(beadId)
+	}),
 )
 
 /**
@@ -196,11 +262,11 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
  *        await createTask({ title: "New task", type: "task", priority: 2 })
  */
 export const createTaskAtom = appRuntime.fn(
-  (params: { title: string; type?: string; priority?: number; description?: string }) =>
-    Effect.gen(function* () {
-      const client = yield* BeadsClient
-      return yield* client.create(params)
-    })
+	(params: { title: string; type?: string; priority?: number; description?: string }) =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			return yield* client.create(params)
+		}),
 )
 
 /**
@@ -213,10 +279,10 @@ export const createTaskAtom = appRuntime.fn(
  *        await editBead(task)
  */
 export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
-  Effect.gen(function* () {
-    const editor = yield* EditorService
-    yield* editor.editBead(bead)
-  })
+	Effect.gen(function* () {
+		const editor = yield* EditorService
+		yield* editor.editBead(bead)
+	}),
 )
 
 // ============================================================================
@@ -230,13 +296,13 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
  *        const pr = await createPR(beadId)
  */
 export const createPRAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const prWorkflow = yield* PRWorkflow
-    return yield* prWorkflow.createPR({
-      beadId,
-      projectPath: process.cwd(),
-    })
-  })
+	Effect.gen(function* () {
+		const prWorkflow = yield* PRWorkflow
+		return yield* prWorkflow.createPR({
+			beadId,
+			projectPath: process.cwd(),
+		})
+	}),
 )
 
 /**
@@ -246,13 +312,13 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
  *        await cleanup(beadId)
  */
 export const cleanupAtom = appRuntime.fn((beadId: string) =>
-  Effect.gen(function* () {
-    const prWorkflow = yield* PRWorkflow
-    yield* prWorkflow.cleanup({
-      beadId,
-      projectPath: process.cwd(),
-    })
-  })
+	Effect.gen(function* () {
+		const prWorkflow = yield* PRWorkflow
+		yield* prWorkflow.cleanup({
+			beadId,
+			projectPath: process.cwd(),
+		})
+	}),
 )
 
 /**
@@ -261,9 +327,48 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
  * Usage: const ghAvailable = useAtomValue(ghCLIAvailableAtom)
  */
 export const ghCLIAvailableAtom = appRuntime.atom(
-  Effect.gen(function* () {
-    const prWorkflow = yield* PRWorkflow
-    return yield* prWorkflow.checkGHCLI()
-  }),
-  { initialValue: false }
+	Effect.gen(function* () {
+		const prWorkflow = yield* PRWorkflow
+		return yield* prWorkflow.checkGHCLI()
+	}),
+	{ initialValue: false },
+)
+
+// ============================================================================
+// VC Auto-Pilot Action Atoms
+// ============================================================================
+
+/**
+ * Toggle VC auto-pilot mode
+ *
+ * If running, stops it. If stopped, starts it.
+ * Updates the vcStatusRefAtom immediately so UI reflects the change.
+ *
+ * Usage: const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
+ *        await toggleVCAutoPilot()
+ */
+export const toggleVCAutoPilotAtom = appRuntime.fn((_: void, get) =>
+	Effect.gen(function* () {
+		const vc = yield* VCService
+		const newStatus = yield* vc.toggleAutoPilot()
+
+		// Update the ref immediately so UI reflects the change
+		const ref = yield* get.result(vcStatusRefAtom)
+		yield* SubscriptionRef.set(ref, newStatus)
+
+		return newStatus
+	}),
+)
+
+/**
+ * Send a command to the VC REPL
+ *
+ * Usage: const sendVCCommand = useAtom(sendVCCommandAtom, { mode: "promise" })
+ *        await sendVCCommand("What's ready to work on?")
+ */
+export const sendVCCommandAtom = appRuntime.fn((command: string) =>
+	Effect.gen(function* () {
+		const vcService = yield* VCService
+		yield* vcService.sendCommand(command)
+	}),
 )

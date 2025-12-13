@@ -6,13 +6,13 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { Effect, Console, Option, Layer } from "effect"
-import { BunContext, BunRuntime } from "@effect/platform-bun"
 import * as FileSystem from "@effect/platform/FileSystem"
 import * as Path from "@effect/platform/Path"
-import { BeadsClientLiveWithPlatform } from "../core/BeadsClient.js"
+import { BunContext, BunRuntime } from "@effect/platform-bun"
+import { Console, Effect, Layer, Option } from "effect"
 import { AppConfigLiveWithPlatform } from "../config/index.js"
-import { SessionManagerLive, SessionManager } from "../core/SessionManager.js"
+import { BeadsClientLiveWithPlatform } from "../core/BeadsClient.js"
+import { SessionManager, SessionManagerLive } from "../core/SessionManager.js"
 
 // ============================================================================
 // Shared Options
@@ -22,25 +22,25 @@ import { SessionManagerLive, SessionManager } from "../core/SessionManager.js"
  * Verbose logging flag
  */
 const verboseOption = Options.boolean("verbose").pipe(
-  Options.withAlias("v"),
-  Options.withDescription("Enable verbose logging")
+	Options.withAlias("v"),
+	Options.withDescription("Enable verbose logging"),
 )
 
 /**
  * Config file path option
  */
 const configOption = Options.file("config").pipe(
-  Options.withAlias("c"),
-  Options.optional,
-  Options.withDescription("Path to config file (default: .azedarach.json)")
+	Options.withAlias("c"),
+	Options.optional,
+	Options.withDescription("Path to config file (default: .azedarach.json)"),
 )
 
 /**
  * Project directory argument
  */
 const projectDirArg = Args.directory().pipe(
-  Args.optional,
-  Args.withDescription("Project directory (default: current directory)")
+	Args.optional,
+	Args.withDescription("Project directory (default: current directory)"),
 )
 
 // ============================================================================
@@ -51,22 +51,22 @@ const projectDirArg = Args.directory().pipe(
  * Validate that beads database exists in the project
  */
 const validateBeadsDatabase = (projectDir: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem
-    const path = yield* Path.Path
-    const beadsDir = path.join(projectDir, ".beads")
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const path = yield* Path.Path
+		const beadsDir = path.join(projectDir, ".beads")
 
-    const exists = yield* fs.exists(beadsDir)
-    if (!exists) {
-      return yield* Effect.fail(
-        new Error(
-          `No .beads directory found in ${projectDir}. Run 'bd init' to initialize beads tracking.`
-        )
-      )
-    }
+		const exists = yield* fs.exists(beadsDir)
+		if (!exists) {
+			return yield* Effect.fail(
+				new Error(
+					`No .beads directory found in ${projectDir}. Run 'bd init' to initialize beads tracking.`,
+				),
+			)
+		}
 
-    yield* Console.log(`Using beads database: ${beadsDir}`)
-  })
+		yield* Console.log(`Using beads database: ${beadsDir}`)
+	})
 
 // ============================================================================
 // Command Handlers
@@ -76,191 +76,189 @@ const validateBeadsDatabase = (projectDir: string) =>
  * Default command - Launch TUI
  */
 const defaultHandler = (args: {
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
-  readonly config: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly config: Option.Option<string>
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-    if (args.verbose) {
-      yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
-      yield* Console.log(`Project: ${cwd}`)
-      yield* Console.log("Verbose mode enabled")
-    }
+		if (args.verbose) {
+			yield* Console.log("Azedarach - TUI Kanban for Claude orchestration")
+			yield* Console.log(`Project: ${cwd}`)
+			yield* Console.log("Verbose mode enabled")
+		}
 
-    if (Option.isSome(args.config)) {
-      yield* Console.log(`Using config: ${args.config.value}`)
-    }
+		if (Option.isSome(args.config)) {
+			yield* Console.log(`Using config: ${args.config.value}`)
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    // Launch TUI
-    const { launchTUI } = yield* Effect.promise(() => import("../ui/launch.js"))
-    yield* Effect.promise(() => launchTUI())
-  })
+		// Launch TUI
+		const { launchTUI } = yield* Effect.promise(() => import("../ui/launch.js"))
+		yield* Effect.promise(() => launchTUI())
+	})
 
 /**
  * Start a new Claude session for a beads issue
  */
 const startHandler = (args: {
-  readonly issueId: string
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
-  readonly config: Option.Option<string>
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly config: Option.Option<string>
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-    const configPath = Option.getOrUndefined(args.config)
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const configPath = Option.getOrUndefined(args.config)
 
-    yield* Console.log(`Starting Claude session for issue: ${args.issueId}`)
-    yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Starting Claude session for issue: ${args.issueId}`)
+		yield* Console.log(`Project: ${cwd}`)
 
-    if (args.verbose) {
-      yield* Console.log("Verbose mode enabled")
-      if (configPath) {
-        yield* Console.log(`Using config: ${configPath}`)
-      }
-    }
+		if (args.verbose) {
+			yield* Console.log("Verbose mode enabled")
+			if (configPath) {
+				yield* Console.log(`Using config: ${configPath}`)
+			}
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    // Create the combined layer with config
-    const appConfigLayer = AppConfigLiveWithPlatform(cwd, configPath)
-    const fullLayer = Layer.provideMerge(SessionManagerLive, appConfigLayer)
+		// Create the combined layer with config
+		const appConfigLayer = AppConfigLiveWithPlatform(cwd, configPath)
+		const fullLayer = Layer.provideMerge(SessionManagerLive, appConfigLayer)
 
-    // Start the session using SessionManager
-    const session = yield* Effect.gen(function* () {
-      const sessionManager = yield* SessionManager
-      return yield* sessionManager.start({
-        beadId: args.issueId,
-        projectPath: cwd,
-      })
-    }).pipe(Effect.provide(fullLayer))
+		// Start the session using SessionManager
+		const session = yield* Effect.gen(function* () {
+			const sessionManager = yield* SessionManager
+			return yield* sessionManager.start({
+				beadId: args.issueId,
+				projectPath: cwd,
+			})
+		}).pipe(Effect.provide(fullLayer))
 
-    yield* Console.log(`Session started successfully!`)
-    yield* Console.log(`  Worktree: ${session.worktreePath}`)
-    yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
-    yield* Console.log(``)
-    yield* Console.log(`To attach: az attach ${args.issueId}`)
-    yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
-  })
+		yield* Console.log(`Session started successfully!`)
+		yield* Console.log(`  Worktree: ${session.worktreePath}`)
+		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
+		yield* Console.log(``)
+		yield* Console.log(`To attach: az attach ${args.issueId}`)
+		yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
+	})
 
 /**
  * Attach to an existing Claude session
  */
 const attachHandler = (args: {
-  readonly issueId: string
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-    yield* Console.log(`Attaching to session for issue: ${args.issueId}`)
-    yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Attaching to session for issue: ${args.issueId}`)
+		yield* Console.log(`Project: ${cwd}`)
 
-    if (args.verbose) {
-      yield* Console.log("Verbose mode enabled")
-    }
+		if (args.verbose) {
+			yield* Console.log("Verbose mode enabled")
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    // TODO: Implement session attachment
-    yield* Console.log("[Stub] Checking if session exists...")
-    yield* Console.log("[Stub] Attaching to tmux session...")
-    yield* Console.log(
-      `[Stub] Run: tmux attach-session -t az-${args.issueId}`
-    )
-  })
+		// TODO: Implement session attachment
+		yield* Console.log("[Stub] Checking if session exists...")
+		yield* Console.log("[Stub] Attaching to tmux session...")
+		yield* Console.log(`[Stub] Run: tmux attach-session -t az-${args.issueId}`)
+	})
 
 /**
  * Pause a running Claude session
  */
 const pauseHandler = (args: {
-  readonly issueId: string
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-    yield* Console.log(`Pausing session for issue: ${args.issueId}`)
-    yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log(`Pausing session for issue: ${args.issueId}`)
+		yield* Console.log(`Project: ${cwd}`)
 
-    if (args.verbose) {
-      yield* Console.log("Verbose mode enabled")
-    }
+		if (args.verbose) {
+			yield* Console.log("Verbose mode enabled")
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    // TODO: Implement session pause
-    yield* Console.log("[Stub] Sending Ctrl+C to session...")
-    yield* Console.log("[Stub] Session paused. Use 'az attach' to resume.")
-  })
+		// TODO: Implement session pause
+		yield* Console.log("[Stub] Sending Ctrl+C to session...")
+		yield* Console.log("[Stub] Session paused. Use 'az attach' to resume.")
+	})
 
 /**
  * Show status of all sessions
  */
 const statusHandler = (args: {
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-    yield* Console.log("Session Status")
-    yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log("Session Status")
+		yield* Console.log(`Project: ${cwd}`)
 
-    if (args.verbose) {
-      yield* Console.log("Verbose mode enabled")
-    }
+		if (args.verbose) {
+			yield* Console.log("Verbose mode enabled")
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    // TODO: Implement status display
-    yield* Console.log("[Stub] Active sessions:")
-    yield* Console.log("  az-2qy (CLI parsing) - WAITING")
-    yield* Console.log("  az-05y (BeadsClient) - DONE")
-    yield* Console.log("  az-1a3 (TUI setup)   - ERROR")
-  })
+		// TODO: Implement status display
+		yield* Console.log("[Stub] Active sessions:")
+		yield* Console.log("  az-2qy (CLI parsing) - WAITING")
+		yield* Console.log("  az-05y (BeadsClient) - DONE")
+		yield* Console.log("  az-1a3 (TUI setup)   - ERROR")
+	})
 
 /**
  * Sync beads database in current or all worktrees
  */
 const syncHandler = (args: {
-  readonly all: boolean
-  readonly projectDir: Option.Option<string>
-  readonly verbose: boolean
+	readonly all: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
 }) =>
-  Effect.gen(function* () {
-    const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-    yield* Console.log("Syncing beads database...")
-    yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log("Syncing beads database...")
+		yield* Console.log(`Project: ${cwd}`)
 
-    if (args.verbose) {
-      yield* Console.log("Verbose mode enabled")
-    }
+		if (args.verbose) {
+			yield* Console.log("Verbose mode enabled")
+		}
 
-    // Validate beads database
-    yield* validateBeadsDatabase(cwd)
+		// Validate beads database
+		yield* validateBeadsDatabase(cwd)
 
-    if (args.all) {
-      // TODO: Sync all worktrees
-      yield* Console.log("[Stub] Syncing all worktrees...")
-      yield* Console.log("[Stub] Synced 3 worktrees")
-    } else {
-      // TODO: Sync current directory only
-      yield* Console.log("[Stub] Syncing current directory...")
-      yield* Console.log("[Stub] Pushed: 2, Pulled: 1")
-    }
-  })
+		if (args.all) {
+			// TODO: Sync all worktrees
+			yield* Console.log("[Stub] Syncing all worktrees...")
+			yield* Console.log("[Stub] Synced 3 worktrees")
+		} else {
+			// TODO: Sync current directory only
+			yield* Console.log("[Stub] Syncing current directory...")
+			yield* Console.log("[Stub] Pushed: 2, Pulled: 1")
+		}
+	})
 
 // ============================================================================
 // Command Definitions
@@ -270,82 +268,74 @@ const syncHandler = (args: {
  * Issue ID argument for commands that operate on a specific issue
  */
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-  Args.withDescription("Beads issue ID (e.g., az-2qy)")
+	Args.withDescription("Beads issue ID (e.g., az-2qy)"),
 )
 
 /**
  * az start <issue-id> - Start a new Claude session
  */
 const startCommand = Command.make(
-  "start",
-  {
-    issueId: issueIdArg,
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-    config: configOption,
-  },
-  startHandler
-).pipe(
-  Command.withDescription(
-    "Start a new Claude Code session for a beads issue"
-  )
-)
+	"start",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		config: configOption,
+	},
+	startHandler,
+).pipe(Command.withDescription("Start a new Claude Code session for a beads issue"))
 
 /**
  * az attach <issue-id> - Attach to existing session
  */
 const attachCommand = Command.make(
-  "attach",
-  {
-    issueId: issueIdArg,
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-  },
-  attachHandler
-).pipe(
-  Command.withDescription("Attach to an existing Claude Code session")
-)
+	"attach",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	attachHandler,
+).pipe(Command.withDescription("Attach to an existing Claude Code session"))
 
 /**
  * az pause <issue-id> - Pause a running session
  */
 const pauseCommand = Command.make(
-  "pause",
-  {
-    issueId: issueIdArg,
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-  },
-  pauseHandler
+	"pause",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	pauseHandler,
 ).pipe(Command.withDescription("Pause a running Claude Code session"))
 
 /**
  * az status - Show status of all sessions
  */
 const statusCommand = Command.make(
-  "status",
-  {
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-  },
-  statusHandler
-).pipe(
-  Command.withDescription("Show status of all Claude Code sessions")
-)
+	"status",
+	{
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	statusHandler,
+).pipe(Command.withDescription("Show status of all Claude Code sessions"))
 
 /**
  * az sync - Sync beads database
  */
 const syncCommand = Command.make(
-  "sync",
-  {
-    all: Options.boolean("all").pipe(
-      Options.withDescription("Sync all worktrees (not just current)")
-    ),
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-  },
-  syncHandler
+	"sync",
+	{
+		all: Options.boolean("all").pipe(
+			Options.withDescription("Sync all worktrees (not just current)"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	syncHandler,
 ).pipe(Command.withDescription("Sync beads database in worktrees"))
 
 /**
@@ -355,30 +345,24 @@ const syncCommand = Command.make(
  * without a subcommand. Subcommands (start, attach, etc.) have their own handlers.
  */
 const az = Command.make(
-  "az",
-  {
-    projectDir: projectDirArg,
-    verbose: verboseOption,
-    config: configOption,
-  },
-  defaultHandler
+	"az",
+	{
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		config: configOption,
+	},
+	defaultHandler,
 ).pipe(
-  Command.withDescription(
-    "Azedarach - TUI Kanban board for orchestrating parallel Claude Code sessions"
-  )
+	Command.withDescription(
+		"Azedarach - TUI Kanban board for orchestrating parallel Claude Code sessions",
+	),
 )
 
 /**
  * Full CLI with subcommands attached
  */
 const cli = az.pipe(
-  Command.withSubcommands([
-    startCommand,
-    attachCommand,
-    pauseCommand,
-    statusCommand,
-    syncCommand,
-  ])
+	Command.withSubcommands([startCommand, attachCommand, pauseCommand, statusCommand, syncCommand]),
 )
 
 // ============================================================================
@@ -392,8 +376,8 @@ const cli = az.pipe(
  * an Effect that executes the appropriate command.
  */
 const cliRunner = Command.run(cli, {
-  name: "Azedarach",
-  version: "0.1.0",
+	name: "Azedarach",
+	version: "0.1.0",
 })
 
 /**
@@ -410,7 +394,7 @@ export { cli }
  * Run the CLI with the provided arguments (full process.argv)
  */
 export const run = (argv: ReadonlyArray<string>) =>
-  cliRunner(argv).pipe(
-    Effect.provide(BeadsClientLiveWithPlatform),
-    Effect.provide(BunContext.layer)
-  )
+	cliRunner(argv).pipe(
+		Effect.provide(BeadsClientLiveWithPlatform),
+		Effect.provide(BunContext.layer),
+	)

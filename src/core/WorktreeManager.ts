@@ -12,9 +12,9 @@
  * - Parses git worktree list --porcelain output
  */
 
-import { Effect, Context, Layer, Data, Ref, Scope } from "effect"
-import { Command, CommandExecutor } from "@effect/platform"
+import { Command, type CommandExecutor } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
+import { Context, Data, Effect, Layer, Ref, type Scope } from "effect"
 import { getWorktreePath } from "./paths.js"
 
 // ============================================================================
@@ -25,20 +25,20 @@ import { getWorktreePath } from "./paths.js"
  * Worktree information from git
  */
 export interface Worktree {
-  readonly path: string
-  readonly beadId: string
-  readonly branch: string
-  readonly isLocked: boolean
-  readonly head: string
+	readonly path: string
+	readonly beadId: string
+	readonly branch: string
+	readonly isLocked: boolean
+	readonly head: string
 }
 
 /**
  * Options for creating a worktree
  */
 export interface CreateWorktreeOptions {
-  readonly beadId: string
-  readonly baseBranch?: string
-  readonly projectPath: string
+	readonly beadId: string
+	readonly baseBranch?: string
+	readonly projectPath: string
 }
 
 // ============================================================================
@@ -49,32 +49,32 @@ export interface CreateWorktreeOptions {
  * Generic git command execution error
  */
 export class GitError extends Data.TaggedError("GitError")<{
-  readonly message: string
-  readonly command: string
-  readonly stderr?: string
+	readonly message: string
+	readonly command: string
+	readonly stderr?: string
 }> {}
 
 /**
  * Error when a worktree is not found
  */
 export class WorktreeNotFoundError extends Data.TaggedError("WorktreeNotFoundError")<{
-  readonly beadId: string
-  readonly path: string
+	readonly beadId: string
+	readonly path: string
 }> {}
 
 /**
  * Error when worktree already exists (for non-idempotent operations)
  */
 export class WorktreeExistsError extends Data.TaggedError("WorktreeExistsError")<{
-  readonly beadId: string
-  readonly path: string
+	readonly beadId: string
+	readonly path: string
 }> {}
 
 /**
  * Error when project is not a git repository
  */
 export class NotAGitRepoError extends Data.TaggedError("NotAGitRepoError")<{
-  readonly path: string
+	readonly path: string
 }> {}
 
 // ============================================================================
@@ -88,90 +88,90 @@ export class NotAGitRepoError extends Data.TaggedError("NotAGitRepoError")<{
  * All operations require CommandExecutor in their context.
  */
 export interface WorktreeManagerService {
-  /**
-   * Create a new worktree for a bead
-   *
-   * Idempotent: if worktree already exists at expected path, returns existing worktree info.
-   * Creates a new branch named after the beadId from baseBranch (defaults to current branch).
-   *
-   * @example
-   * ```ts
-   * WorktreeManager.create({
-   *   beadId: "az-05y",
-   *   baseBranch: "main",
-   *   projectPath: "/Users/user/project"
-   * })
-   * ```
-   */
-  readonly create: (
-    options: CreateWorktreeOptions
-  ) => Effect.Effect<Worktree, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	/**
+	 * Create a new worktree for a bead
+	 *
+	 * Idempotent: if worktree already exists at expected path, returns existing worktree info.
+	 * Creates a new branch named after the beadId from baseBranch (defaults to current branch).
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.create({
+	 *   beadId: "az-05y",
+	 *   baseBranch: "main",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly create: (
+		options: CreateWorktreeOptions,
+	) => Effect.Effect<Worktree, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
-  /**
-   * Remove a worktree by bead ID
-   *
-   * Cleans up the worktree directory and removes git metadata.
-   * Safe to call even if worktree doesn't exist (becomes a no-op).
-   *
-   * @example
-   * ```ts
-   * WorktreeManager.remove({ beadId: "az-05y", projectPath: "/Users/user/project" })
-   * ```
-   */
-  readonly remove: (options: {
-    beadId: string
-    projectPath: string
-  }) => Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	/**
+	 * Remove a worktree by bead ID
+	 *
+	 * Cleans up the worktree directory and removes git metadata.
+	 * Safe to call even if worktree doesn't exist (becomes a no-op).
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.remove({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * ```
+	 */
+	readonly remove: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
-  /**
-   * List all worktrees for the current repository
-   *
-   * Parses git worktree list --porcelain output to structured data.
-   *
-   * @example
-   * ```ts
-   * WorktreeManager.list("/Users/user/project")
-   * ```
-   */
-  readonly list: (
-    projectPath: string
-  ) => Effect.Effect<Worktree[], GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	/**
+	 * List all worktrees for the current repository
+	 *
+	 * Parses git worktree list --porcelain output to structured data.
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.list("/Users/user/project")
+	 * ```
+	 */
+	readonly list: (
+		projectPath: string,
+	) => Effect.Effect<Worktree[], GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
-  /**
-   * Check if a worktree exists for a bead
-   *
-   * @example
-   * ```ts
-   * WorktreeManager.exists({ beadId: "az-05y", projectPath: "/Users/user/project" })
-   * ```
-   */
-  readonly exists: (options: {
-    beadId: string
-    projectPath: string
-  }) => Effect.Effect<boolean, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	/**
+	 * Check if a worktree exists for a bead
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.exists({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * ```
+	 */
+	readonly exists: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<boolean, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
-  /**
-   * Get worktree info for a specific bead
-   *
-   * Returns None if worktree doesn't exist.
-   *
-   * @example
-   * ```ts
-   * WorktreeManager.get({ beadId: "az-05y", projectPath: "/Users/user/project" })
-   * ```
-   */
-  readonly get: (options: {
-    beadId: string
-    projectPath: string
-  }) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	/**
+	 * Get worktree info for a specific bead
+	 *
+	 * Returns None if worktree doesn't exist.
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.get({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * ```
+	 */
+	readonly get: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
 
 /**
  * WorktreeManager service tag
  */
 export class WorktreeManager extends Context.Tag("WorktreeManager")<
-  WorktreeManager,
-  WorktreeManagerService
+	WorktreeManager,
+	WorktreeManagerService
 >() {}
 
 // ============================================================================
@@ -182,53 +182,53 @@ export class WorktreeManager extends Context.Tag("WorktreeManager")<
  * Execute a git command and return stdout as string
  */
 const runGit = (
-  args: readonly string[],
-  cwd: string
+	args: readonly string[],
+	cwd: string,
 ): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
-  Effect.gen(function* () {
-    const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
+	Effect.gen(function* () {
+		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 
-    const result = yield* Command.string(command).pipe(
-      Effect.mapError((error) => {
-        const stderr = "stderr" in error ? String(error.stderr) : String(error)
-        return new GitError({
-          message: `git command failed: ${stderr}`,
-          command: `git ${args.join(" ")}`,
-          stderr,
-        })
-      })
-    )
+		const result = yield* Command.string(command).pipe(
+			Effect.mapError((error) => {
+				const stderr = "stderr" in error ? String(error.stderr) : String(error)
+				return new GitError({
+					message: `git command failed: ${stderr}`,
+					command: `git ${args.join(" ")}`,
+					stderr,
+				})
+			}),
+		)
 
-    return result
-  })
+		return result
+	})
 
 /**
  * Check if a path is a git repository
  */
 const isGitRepo = (
-  projectPath: string
+	projectPath: string,
 ): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
-  Effect.gen(function* () {
-    const command = Command.make("git", "rev-parse", "--git-dir").pipe(
-      Command.workingDirectory(projectPath)
-    )
+	Effect.gen(function* () {
+		const command = Command.make("git", "rev-parse", "--git-dir").pipe(
+			Command.workingDirectory(projectPath),
+		)
 
-    return yield* Command.exitCode(command).pipe(
-      Effect.map((code) => code === 0),
-      Effect.catchAll(() => Effect.succeed(false))
-    )
-  })
+		return yield* Command.exitCode(command).pipe(
+			Effect.map((code) => code === 0),
+			Effect.catchAll(() => Effect.succeed(false)),
+		)
+	})
 
 /**
  * Get current branch name
  */
 const getCurrentBranch = (
-  projectPath: string
+	projectPath: string,
 ): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
-  Effect.gen(function* () {
-    const output = yield* runGit(["rev-parse", "--abbrev-ref", "HEAD"], projectPath)
-    return output.trim()
-  })
+	Effect.gen(function* () {
+		const output = yield* runGit(["rev-parse", "--abbrev-ref", "HEAD"], projectPath)
+		return output.trim()
+	})
 
 /**
  * Parse git worktree list --porcelain output
@@ -243,53 +243,53 @@ const getCurrentBranch = (
  * Entries are separated by blank lines.
  */
 const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
-  if (!output.trim()) {
-    return []
-  }
+	if (!output.trim()) {
+		return []
+	}
 
-  const entries = output.split("\n\n").filter((entry) => entry.trim())
-  const worktrees: Worktree[] = []
+	const entries = output.split("\n\n").filter((entry) => entry.trim())
+	const worktrees: Worktree[] = []
 
-  for (const entry of entries) {
-    const lines = entry.split("\n")
-    let path = ""
-    let head = ""
-    let branch = ""
-    let isLocked = false
+	for (const entry of entries) {
+		const lines = entry.split("\n")
+		let path = ""
+		let head = ""
+		let branch = ""
+		let isLocked = false
 
-    for (const line of lines) {
-      if (line.startsWith("worktree ")) {
-        path = line.slice("worktree ".length)
-      } else if (line.startsWith("HEAD ")) {
-        head = line.slice("HEAD ".length)
-      } else if (line.startsWith("branch ")) {
-        const branchRef = line.slice("branch ".length)
-        branch = branchRef.replace("refs/heads/", "")
-      } else if (line.startsWith("locked")) {
-        isLocked = true
-      }
-    }
+		for (const line of lines) {
+			if (line.startsWith("worktree ")) {
+				path = line.slice("worktree ".length)
+			} else if (line.startsWith("HEAD ")) {
+				head = line.slice("HEAD ".length)
+			} else if (line.startsWith("branch ")) {
+				const branchRef = line.slice("branch ".length)
+				branch = branchRef.replace("refs/heads/", "")
+			} else if (line.startsWith("locked")) {
+				isLocked = true
+			}
+		}
 
-    // Extract beadId from path
-    // Path format: /parent/dir/ProjectName-beadId
-    const pathParts = path.split("/")
-    const lastPart = pathParts[pathParts.length - 1]
-    const match = lastPart?.match(/-(az-[a-z0-9]+)$/)
-    const beadId = match?.[1] || ""
+		// Extract beadId from path
+		// Path format: /parent/dir/ProjectName-beadId
+		const pathParts = path.split("/")
+		const lastPart = pathParts[pathParts.length - 1]
+		const match = lastPart?.match(/-(az-[a-z0-9]+)$/)
+		const beadId = match?.[1] || ""
 
-    // Only include worktrees that match our naming convention and aren't the main worktree
-    if (beadId && path !== projectPath) {
-      worktrees.push({
-        path,
-        beadId,
-        branch,
-        isLocked,
-        head,
-      })
-    }
-  }
+		// Only include worktrees that match our naming convention and aren't the main worktree
+		if (beadId && path !== projectPath) {
+			worktrees.push({
+				path,
+				beadId,
+				branch,
+				isLocked,
+				head,
+			})
+		}
+	}
 
-  return worktrees
+	return worktrees
 }
 
 // ============================================================================
@@ -302,126 +302,123 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
  * Creates a service implementation with stateful tracking via Ref.
  */
 const WorktreeManagerServiceImpl = Effect.gen(function* () {
-  // Track active worktrees in memory for fast lookups
-  const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
+	// Track active worktrees in memory for fast lookups
+	const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
-  // Helper to refresh worktrees cache
-  const refreshWorktrees = (
-    projectPath: string
-  ): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
-    Effect.gen(function* () {
-      const isRepo = yield* isGitRepo(projectPath)
-      if (!isRepo) {
-        return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-      }
+	// Helper to refresh worktrees cache
+	const refreshWorktrees = (
+		projectPath: string,
+	): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
+		Effect.gen(function* () {
+			const isRepo = yield* isGitRepo(projectPath)
+			if (!isRepo) {
+				return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+			}
 
-      const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
-      const worktrees = parseWorktreeList(output, projectPath)
+			const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
+			const worktrees = parseWorktreeList(output, projectPath)
 
-      const newMap = new Map<string, Worktree>()
-      for (const wt of worktrees) {
-        newMap.set(wt.beadId, wt)
-      }
+			const newMap = new Map<string, Worktree>()
+			for (const wt of worktrees) {
+				newMap.set(wt.beadId, wt)
+			}
 
-      yield* Ref.set(worktreesRef, newMap)
-    })
+			yield* Ref.set(worktreesRef, newMap)
+		})
 
-  return WorktreeManager.of({
-    create: (options) =>
-      Effect.gen(function* () {
-        const { beadId, baseBranch, projectPath } = options
+	return WorktreeManager.of({
+		create: (options) =>
+			Effect.gen(function* () {
+				const { beadId, baseBranch, projectPath } = options
 
-        // Check if git repo
-        const isRepo = yield* isGitRepo(projectPath)
-        if (!isRepo) {
-          return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-        }
+				// Check if git repo
+				const isRepo = yield* isGitRepo(projectPath)
+				if (!isRepo) {
+					return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+				}
 
-        // Get expected worktree path
-        const worktreePath = getWorktreePath(projectPath, beadId)
+				// Get expected worktree path
+				const worktreePath = getWorktreePath(projectPath, beadId)
 
-        // Refresh cache and check if already exists
-        yield* refreshWorktrees(projectPath)
-        const existing = yield* Ref.get(worktreesRef)
-        const existingWorktree = existing.get(beadId)
+				// Refresh cache and check if already exists
+				yield* refreshWorktrees(projectPath)
+				const existing = yield* Ref.get(worktreesRef)
+				const existingWorktree = existing.get(beadId)
 
-        if (existingWorktree) {
-          // Idempotent: worktree already exists
-          return existingWorktree
-        }
+				if (existingWorktree) {
+					// Idempotent: worktree already exists
+					return existingWorktree
+				}
 
-        // Determine base branch
-        const base = baseBranch || (yield* getCurrentBranch(projectPath))
+				// Determine base branch
+				const base = baseBranch || (yield* getCurrentBranch(projectPath))
 
-        // Create new branch and worktree
-        // git worktree add -b <branch-name> <path> <start-point>
-        yield* runGit(
-          ["worktree", "add", "-b", beadId, worktreePath, base],
-          projectPath
-        )
+				// Create new branch and worktree
+				// git worktree add -b <branch-name> <path> <start-point>
+				yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
 
-        // Refresh cache to get the new worktree info
-        yield* refreshWorktrees(projectPath)
-        const updated = yield* Ref.get(worktreesRef)
-        const newWorktree = updated.get(beadId)
+				// Refresh cache to get the new worktree info
+				yield* refreshWorktrees(projectPath)
+				const updated = yield* Ref.get(worktreesRef)
+				const newWorktree = updated.get(beadId)
 
-        if (!newWorktree) {
-          // This shouldn't happen, but handle it gracefully
-          return yield* Effect.fail(
-            new GitError({
-              message: "Worktree created but not found in list",
-              command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
-            })
-          )
-        }
+				if (!newWorktree) {
+					// This shouldn't happen, but handle it gracefully
+					return yield* Effect.fail(
+						new GitError({
+							message: "Worktree created but not found in list",
+							command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
+						}),
+					)
+				}
 
-        return newWorktree
-      }),
+				return newWorktree
+			}),
 
-    remove: (options) =>
-      Effect.gen(function* () {
-        const { beadId, projectPath } = options
+		remove: (options) =>
+			Effect.gen(function* () {
+				const { beadId, projectPath } = options
 
-        // Refresh cache
-        yield* refreshWorktrees(projectPath)
-        const worktrees = yield* Ref.get(worktreesRef)
-        const worktree = worktrees.get(beadId)
+				// Refresh cache
+				yield* refreshWorktrees(projectPath)
+				const worktrees = yield* Ref.get(worktreesRef)
+				const worktree = worktrees.get(beadId)
 
-        if (!worktree) {
-          // Safe no-op if doesn't exist
-          return
-        }
+				if (!worktree) {
+					// Safe no-op if doesn't exist
+					return
+				}
 
-        // Remove worktree
-        yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
+				// Remove worktree
+				yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
 
-        // Refresh cache
-        yield* refreshWorktrees(projectPath)
-      }),
+				// Refresh cache
+				yield* refreshWorktrees(projectPath)
+			}),
 
-    list: (projectPath) =>
-      Effect.gen(function* () {
-        yield* refreshWorktrees(projectPath)
-        const worktrees = yield* Ref.get(worktreesRef)
-        return Array.from(worktrees.values())
-      }),
+		list: (projectPath) =>
+			Effect.gen(function* () {
+				yield* refreshWorktrees(projectPath)
+				const worktrees = yield* Ref.get(worktreesRef)
+				return Array.from(worktrees.values())
+			}),
 
-    exists: (options) =>
-      Effect.gen(function* () {
-        const { beadId, projectPath } = options
-        yield* refreshWorktrees(projectPath)
-        const worktrees = yield* Ref.get(worktreesRef)
-        return worktrees.has(beadId)
-      }),
+		exists: (options) =>
+			Effect.gen(function* () {
+				const { beadId, projectPath } = options
+				yield* refreshWorktrees(projectPath)
+				const worktrees = yield* Ref.get(worktreesRef)
+				return worktrees.has(beadId)
+			}),
 
-    get: (options) =>
-      Effect.gen(function* () {
-        const { beadId, projectPath } = options
-        yield* refreshWorktrees(projectPath)
-        const worktrees = yield* Ref.get(worktreesRef)
-        return worktrees.get(beadId) || null
-      }),
-  })
+		get: (options) =>
+			Effect.gen(function* () {
+				const { beadId, projectPath } = options
+				yield* refreshWorktrees(projectPath)
+				const worktrees = yield* Ref.get(worktreesRef)
+				return worktrees.get(beadId) || null
+			}),
+	})
 })
 
 /**
@@ -454,8 +451,8 @@ export const WorktreeManagerLive = Layer.effect(WorktreeManager, WorktreeManager
  * ```
  */
 export const WorktreeManagerLiveWithPlatform = Layer.provideMerge(
-  WorktreeManagerLive,
-  BunContext.layer
+	WorktreeManagerLive,
+	BunContext.layer,
 )
 
 // ============================================================================
@@ -466,58 +463,58 @@ export const WorktreeManagerLiveWithPlatform = Layer.provideMerge(
  * Create a worktree for a bead
  */
 export const create = (
-  options: CreateWorktreeOptions
+	options: CreateWorktreeOptions,
 ): Effect.Effect<
-  Worktree,
-  GitError | NotAGitRepoError,
-  WorktreeManager | CommandExecutor.CommandExecutor
+	Worktree,
+	GitError | NotAGitRepoError,
+	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.create(options))
 
 /**
  * Remove a worktree by bead ID
  */
 export const remove = (options: {
-  beadId: string
-  projectPath: string
+	beadId: string
+	projectPath: string
 }): Effect.Effect<
-  void,
-  GitError | NotAGitRepoError,
-  WorktreeManager | CommandExecutor.CommandExecutor
+	void,
+	GitError | NotAGitRepoError,
+	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.remove(options))
 
 /**
  * List all worktrees
  */
 export const list = (
-  projectPath: string
+	projectPath: string,
 ): Effect.Effect<
-  Worktree[],
-  GitError | NotAGitRepoError,
-  WorktreeManager | CommandExecutor.CommandExecutor
+	Worktree[],
+	GitError | NotAGitRepoError,
+	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.list(projectPath))
 
 /**
  * Check if a worktree exists
  */
 export const exists = (options: {
-  beadId: string
-  projectPath: string
+	beadId: string
+	projectPath: string
 }): Effect.Effect<
-  boolean,
-  GitError | NotAGitRepoError,
-  WorktreeManager | CommandExecutor.CommandExecutor
+	boolean,
+	GitError | NotAGitRepoError,
+	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.exists(options))
 
 /**
  * Get worktree info for a bead
  */
 export const get = (options: {
-  beadId: string
-  projectPath: string
+	beadId: string
+	projectPath: string
 }): Effect.Effect<
-  Worktree | null,
-  GitError | NotAGitRepoError,
-  WorktreeManager | CommandExecutor.CommandExecutor
+	Worktree | null,
+	GitError | NotAGitRepoError,
+	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.get(options))
 
 /**
@@ -540,16 +537,14 @@ export const get = (options: {
  * ```
  */
 export const acquireWorktree = (
-  options: CreateWorktreeOptions
+	options: CreateWorktreeOptions,
 ): Effect.Effect<
-  Worktree,
-  GitError | NotAGitRepoError,
-  Scope.Scope | WorktreeManager | CommandExecutor.CommandExecutor
+	Worktree,
+	GitError | NotAGitRepoError,
+	Scope.Scope | WorktreeManager | CommandExecutor.CommandExecutor
 > =>
-  Effect.acquireRelease(
-    create(options),
-    (worktree) =>
-      remove({ beadId: worktree.beadId, projectPath: options.projectPath }).pipe(
-        Effect.orElseSucceed(() => undefined)
-      )
-  )
+	Effect.acquireRelease(create(options), (worktree) =>
+		remove({ beadId: worktree.beadId, projectPath: options.projectPath }).pipe(
+			Effect.orElseSucceed(() => undefined),
+		),
+	)

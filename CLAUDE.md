@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 1.0.0
-Updated: 2025-12-11
+Version: 1.0.1
+Updated: 2025-12-14
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -29,10 +29,10 @@ Purpose: Claude Code entry point for Azedarach development
 
 ```bash
 # Development
-pnpm dev                          # Start development
+bun run dev                       # Start development
 
 # Type Checking
-pnpm type-check                   # Full project check
+bun run type-check                # Full project check
 
 # Search (modern tools)
 rg "pattern" --type ts            # Search content (NOT grep)
@@ -163,9 +163,9 @@ Skills auto-load when you edit files or mention keywords:
 
 ## Development Tips
 
-- **Type errors:** Always run `pnpm type-check` for validation
+- **Type errors:** Always run `bun run type-check` for validation
 - **Files:** Check references before deleting (`rg "filename"`)
-- **Testing:** Run `pnpm dev` for interactive testing, `pnpm type-check` for types
+- **Testing:** Run `bun run dev` for interactive testing, `bun run type-check` for types
 
 ## Documentation
 
