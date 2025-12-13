@@ -246,8 +246,8 @@ export const App = () => {
 				return
 			}
 		}
-		// Task not found (maybe deleted), clear the follow state
-		setFollowTaskId(null)
+		// Task not found yet - keep waiting for tasksByColumn to update
+		// Don't clear followTaskId here; refreshTasks() is async and data may not have arrived
 	}, [followTaskId, tasksByColumn, navigateTo])
 
 	// Poll VC status every 5 seconds
@@ -348,24 +348,22 @@ export const App = () => {
 				case "h": {
 					// Move selected tasks (or current task) to previous column
 					if (columnIndex > 0) {
-						const targetStatus = COLUMNS[columnIndex - 1]?.status
+						const targetColIdx = columnIndex - 1
+						const targetStatus = COLUMNS[targetColIdx]?.status
 						if (targetStatus) {
+							// Optimistic update: move cursor immediately
+							navigateTo(targetColIdx, taskIndex)
+
 							if (selectedIds.size > 0) {
-								// For multi-select, follow the first task in selection
 								const firstTaskId = [...selectedIds][0]
+								setFollowTaskId(firstTaskId ?? null)
 								moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
-									.then(() => {
-										setFollowTaskId(firstTaskId ?? null)
-										refreshTasks()
-									})
+									.then(() => refreshTasks())
 									.catch((error) => showError(`Move failed: ${error}`))
 							} else if (selectedTask) {
-								const taskToFollow = selectedTask.id
+								setFollowTaskId(selectedTask.id)
 								moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
-									.then(() => {
-										setFollowTaskId(taskToFollow)
-										refreshTasks()
-									})
+									.then(() => refreshTasks())
 									.catch((error) => showError(`Move failed: ${error}`))
 							}
 						}
@@ -377,24 +375,22 @@ export const App = () => {
 				case "l": {
 					// Move selected tasks (or current task) to next column
 					if (columnIndex < COLUMNS.length - 1) {
-						const targetStatus = COLUMNS[columnIndex + 1]?.status
+						const targetColIdx = columnIndex + 1
+						const targetStatus = COLUMNS[targetColIdx]?.status
 						if (targetStatus) {
+							// Optimistic update: move cursor immediately
+							navigateTo(targetColIdx, taskIndex)
+
 							if (selectedIds.size > 0) {
-								// For multi-select, follow the first task in selection
 								const firstTaskId = [...selectedIds][0]
+								setFollowTaskId(firstTaskId ?? null)
 								moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
-									.then(() => {
-										setFollowTaskId(firstTaskId ?? null)
-										refreshTasks()
-									})
+									.then(() => refreshTasks())
 									.catch((error) => showError(`Move failed: ${error}`))
 							} else if (selectedTask) {
-								const taskToFollow = selectedTask.id
+								setFollowTaskId(selectedTask.id)
 								moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
-									.then(() => {
-										setFollowTaskId(taskToFollow)
-										refreshTasks()
-									})
+									.then(() => refreshTasks())
 									.catch((error) => showError(`Move failed: ${error}`))
 							}
 						}
