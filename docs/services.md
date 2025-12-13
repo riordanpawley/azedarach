@@ -179,6 +179,66 @@ withLock(options, effect): Effect<A, E | LockError, R>
 - `exclusive`: Only one holder, blocks all other locks
 - `shared`: Multiple holders allowed, blocks exclusive locks
 
+### VCService
+
+**Location:** `src/core/VCService.ts`
+
+Integration with [steveyegge/vc](https://github.com/steveyegge/vc) (VibeCoder) for AI-supervised task orchestration. VC provides an AI supervisor (Sonnet 4.5) for strategy/analysis, quality gates, blocker-priority scheduling, and a conversational interface.
+
+```typescript
+interface VCServiceImpl {
+  isAvailable(): Effect<boolean, never>
+  getVersion(): Effect<string, VCNotInstalledError>
+  startAutoPilot(): Effect<VCExecutorInfo, VCNotInstalledError | VCError | TmuxError>
+  stopAutoPilot(): Effect<void, VCError | TmuxError>
+  isAutoPilotRunning(): Effect<boolean, never>
+  getStatus(): Effect<VCExecutorInfo, never>
+  sendCommand(command): Effect<void, VCNotRunningError | TmuxError>
+  getAttachCommand(): Effect<string, VCNotRunningError>
+  toggleAutoPilot(): Effect<VCExecutorInfo, VCNotInstalledError | VCError | TmuxError>
+}
+```
+
+**Error types:**
+- `VCNotInstalledError`: VC binary not found (install via homebrew)
+- `VCError`: VC execution or startup failures
+- `VCNotRunningError`: Operations requiring running VC when stopped
+
+**Layer:** `VCServiceLive` (includes `TmuxService` and `BunContext`)
+
+**Usage:**
+```typescript
+const program = Effect.gen(function* () {
+  const vc = yield* VCService
+
+  // Check if VC is installed
+  const available = yield* vc.isAvailable()
+  if (!available) {
+    console.log("Install VC: brew tap steveyegge/vc && brew install vc")
+    return
+  }
+
+  // Get current status
+  const status = yield* vc.getStatus()
+  console.log(`VC: ${status.status}`)
+
+  // Toggle auto-pilot mode
+  const newStatus = yield* vc.toggleAutoPilot()
+
+  // Send conversational commands
+  if (newStatus.status === "running") {
+    yield* vc.sendCommand("What's ready to work on?")
+  }
+})
+```
+
+**Integration approach:**
+- Azedarach: TUI Kanban visualization and parallel session orchestration
+- VC: AI-supervised execution engine with quality gates
+- Shared: Same Beads SQLite database for task tracking
+
+**Auto-pilot mode:** VC runs in a tmux session (`vc-autopilot`), autonomously polling for ready issues, claiming work, running quality gates, and updating issue status.
+
 ## Layer Composition
 
 Services are composed using Effect's Layer system:

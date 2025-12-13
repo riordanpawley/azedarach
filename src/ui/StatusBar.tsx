@@ -2,6 +2,7 @@
  * StatusBar component - bottom status bar with mode indicator and contextual keybinds
  */
 import type { EditorMode } from "./types"
+import type { VCStatus } from "../core/VCService"
 import { theme } from "./theme"
 
 export interface StatusBarProps {
@@ -11,6 +12,7 @@ export interface StatusBarProps {
   modeDisplay: string
   selectedCount: number
   connected?: boolean
+  vcStatus?: VCStatus
 }
 
 /**
@@ -68,6 +70,24 @@ export const StatusBar = (props: StatusBarProps) => {
     const icon = connected ? "●" : "○"
     const color = connected ? theme.green : theme.overlay0
     return { icon, color }
+  }
+
+  // VC status indicator
+  const getVCStatusColor = () => {
+    switch (props.vcStatus) {
+      case "running":
+        return theme.green
+      case "starting":
+        return theme.yellow
+      case "stopped":
+        return theme.yellow
+      case "not_installed":
+        return theme.red
+      case "error":
+        return theme.red
+      default:
+        return theme.overlay0
+    }
   }
 
   // Determine what to show based on terminal width
@@ -181,6 +201,9 @@ export const StatusBar = (props: StatusBarProps) => {
         <box flexDirection="row" gap={2}>
           {shouldShowSelectedCount && props.selectedCount > 0 && (
             <text fg={theme.mauve}>Selected: {props.selectedCount}</text>
+          )}
+          {props.vcStatus && (
+            <text fg={getVCStatusColor()}>VC: {props.vcStatus}</text>
           )}
           <text fg={theme.green}>Tasks: {props.totalTasks}</text>
           <text fg={theme.blue}>Active: {props.activeSessions}</text>

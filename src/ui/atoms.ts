@@ -13,6 +13,7 @@ import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentServ
 import { SessionManager, SessionManagerLive } from "../core/SessionManager"
 import { EditorService, EditorServiceLive } from "../core/EditorService"
 import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
+import { VCService, VCServiceLive } from "../core/VCService"
 import { AppConfigLiveWithPlatform } from "../config/index"
 
 /**
@@ -34,7 +35,8 @@ const appLayer = baseLayer.pipe(
   Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
   Layer.merge(SessionManagerLive),
   Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
-  Layer.merge(PRWorkflowLive)
+  Layer.merge(PRWorkflowLive),
+  Layer.merge(VCServiceLive)
 )
 
 /**
@@ -76,6 +78,21 @@ export const tasksAtom = appRuntime.atom(
     return tasks
   }),
   { initialValue: [] }
+)
+
+/**
+ * Async atom that fetches VC executor status
+ *
+ * Polls VCService.getStatus() to check if VC is running, stopped, or not installed.
+ * Used by StatusBar to display VC status indicator.
+ */
+export const vcStatusAtom = appRuntime.atom(
+  Effect.gen(function* () {
+    const vcService = yield* VCService
+    const status = yield* vcService.getStatus()
+    return status
+  }),
+  { initialValue: { status: "stopped" as const, sessionName: "vc-autopilot" } }
 )
 
 /**
@@ -266,4 +283,36 @@ export const ghCLIAvailableAtom = appRuntime.atom(
     return yield* prWorkflow.checkGHCLI()
   }),
   { initialValue: false }
+)
+
+// ============================================================================
+// VC Auto-Pilot Atoms
+// ============================================================================
+
+/**
+ * Toggle VC auto-pilot mode
+ *
+ * If running, stops it. If stopped, starts it.
+ *
+ * Usage: const toggleVCAutoPilot = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
+ *        await toggleVCAutoPilot()
+ */
+export const toggleVCAutoPilotAtom = appRuntime.fn(() =>
+  Effect.gen(function* () {
+    const vcService = yield* VCService
+    return yield* vcService.toggleAutoPilot()
+  })
+)
+
+/**
+ * Send a command to the VC REPL
+ *
+ * Usage: const sendVCCommand = useAtom(sendVCCommandAtom, { mode: "promise" })
+ *        await sendVCCommand("What's ready to work on?")
+ */
+export const sendVCCommandAtom = appRuntime.fn((command: string) =>
+  Effect.gen(function* () {
+    const vcService = yield* VCService
+    yield* vcService.sendCommand(command)
+  })
 )

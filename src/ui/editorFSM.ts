@@ -15,6 +15,7 @@ export interface EditorState {
   pendingJumpKey: string | null
   selectedIds: Set<string>
   searchQuery: string
+  commandInput: string
 }
 
 // FSM Actions
@@ -29,6 +30,9 @@ export type EditorAction =
   | { type: "ENTER_SEARCH" }
   | { type: "UPDATE_SEARCH_QUERY"; query: string }
   | { type: "CLEAR_SEARCH" }
+  | { type: "ENTER_COMMAND" }
+  | { type: "UPDATE_COMMAND_INPUT"; input: string }
+  | { type: "CLEAR_COMMAND" }
   | { type: "EXIT_TO_NORMAL" }
   | { type: "RESET" }
 
@@ -40,6 +44,7 @@ export const initialEditorState: EditorState = {
   pendingJumpKey: null,
   selectedIds: new Set(),
   searchQuery: "",
+  commandInput: "",
 }
 
 // FSM Reducer
@@ -85,6 +90,15 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 
     case "CLEAR_SEARCH":
       return { ...state, mode: "normal", searchQuery: "" }
+
+    case "ENTER_COMMAND":
+      return { ...state, mode: "command" }
+
+    case "UPDATE_COMMAND_INPUT":
+      return { ...state, commandInput: action.input }
+
+    case "CLEAR_COMMAND":
+      return { ...state, mode: "normal", commandInput: "" }
 
     case "EXIT_TO_NORMAL":
       return {

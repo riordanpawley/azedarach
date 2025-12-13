@@ -12,10 +12,12 @@ import { ActionPalette } from "./ActionPalette"
 import { DetailPanel } from "./DetailPanel"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { SearchInput } from "./SearchInput"
+import { CommandInput } from "./CommandInput"
 import { ToastContainer, type ToastMessage, generateToastId } from "./Toast"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import {
   tasksAtom,
+  vcStatusAtom,
   moveTaskAtom,
   moveTasksAtom,
   attachExternalAtom,
@@ -28,6 +30,8 @@ import {
   editBeadAtom,
   createPRAtom,
   cleanupAtom,
+  toggleVCAutoPilotAtom,
+  sendVCCommandAtom,
 } from "./atoms"
 import {
   COLUMNS,
@@ -78,6 +82,8 @@ export const App = () => {
   // ═══════════════════════════════════════════════════════════════════════════
   const tasksResult = useAtomValue(tasksAtom)
   const refreshTasks = useAtomRefresh(tasksAtom)
+  const vcStatusResult = useAtomValue(vcStatusAtom)
+  const refreshVCStatus = useAtomRefresh(vcStatusAtom)
   const [, moveTask] = useAtom(moveTaskAtom, { mode: "promise" })
   const [, moveTasks] = useAtom(moveTasksAtom, { mode: "promise" })
   const [, attachExternal] = useAtom(attachExternalAtom, { mode: "promise" })
@@ -90,6 +96,8 @@ export const App = () => {
   const [, editBead] = useAtom(editBeadAtom, { mode: "promise" })
   const [, createPR] = useAtom(createPRAtom, { mode: "promise" })
   const [, cleanup] = useAtom(cleanupAtom, { mode: "promise" })
+  const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
+  const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Navigation State (separate from FSM)
@@ -240,6 +248,14 @@ export const App = () => {
     setFollowTaskId(null)
   }, [followTaskId, tasksByColumn, navigateTo])
 
+  // Poll VC status every 5 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      refreshVCStatus()
+    }, 5000)
+    return () => clearInterval(interval)
+  }, [refreshVCStatus])
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Jump input handler (for goto → jump mode)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -306,6 +322,9 @@ export const App = () => {
       if (mode === "search") {
         // Clear search when exiting search mode
         dispatch({ type: "CLEAR_SEARCH" })
+      } else if (mode === "command") {
+        // Clear command input when exiting command mode
+        dispatch({ type: "CLEAR_COMMAND" })
       } else if (mode === "select") {
         // Clear selections when exiting select mode
         dispatch({ type: "EXIT_SELECT", clearSelections: true })
@@ -635,6 +654,58 @@ export const App = () => {
       return
     }
 
+    // Handle command mode
+    if (mode === "command") {
+      const { commandInput } = state
+      const vcStatus = Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined
+
+      if (event.name === "return") {
+        // Send command to VC
+        if (!commandInput.trim()) {
+          // Empty command, just exit
+          dispatch({ type: "CLEAR_COMMAND" })
+          return
+        }
+
+        if (vcStatus !== "running") {
+          showError("VC is not running - start it with 'a' key")
+          dispatch({ type: "CLEAR_COMMAND" })
+          return
+        }
+
+        // Send the command
+        sendVCCommand(commandInput)
+          .then(() => {
+            showSuccess(`Sent to VC: ${commandInput}`)
+            dispatch({ type: "CLEAR_COMMAND" })
+          })
+          .catch((error: any) => {
+            const msg = error && typeof error === "object" && error._tag === "VCNotRunningError"
+              ? "VC is not running"
+              : `Failed to send command: ${error}`
+            showError(msg)
+            dispatch({ type: "CLEAR_COMMAND" })
+          })
+        return
+      }
+
+      if (event.name === "backspace") {
+        // Delete character from command input
+        if (commandInput.length > 0) {
+          dispatch({ type: "UPDATE_COMMAND_INPUT", input: commandInput.slice(0, -1) })
+        }
+        return
+      }
+
+      // Regular character input
+      if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
+        dispatch({ type: "UPDATE_COMMAND_INPUT", input: commandInput + event.sequence })
+        return
+      }
+
+      return
+    }
+
     // Handle select mode
     if (mode === "select") {
       switch (event.name) {
@@ -761,11 +832,33 @@ export const App = () => {
         setShowCreatePrompt(true)
         break
       }
+      case "a": {
+        // Toggle VC auto-pilot mode
+        toggleVCAutoPilot()
+          .then((status) => {
+            // Refresh VC status to update StatusBar
+            refreshVCStatus()
+            const message = status.status === "running"
+              ? "VC auto-pilot started"
+              : "VC auto-pilot stopped"
+            showSuccess(message)
+          })
+          .catch((error) => {
+            showError(`Failed to toggle VC auto-pilot: ${error}`)
+          })
+        break
+      }
     }
 
     // "/" to enter search mode
     if (event.sequence === "/") {
       dispatch({ type: "ENTER_SEARCH" })
+      return
+    }
+
+    // ":" to enter command mode
+    if (event.sequence === ":") {
+      dispatch({ type: "ENTER_COMMAND" })
       return
     }
 
@@ -808,6 +901,8 @@ export const App = () => {
     switch (mode) {
       case "action":
         return "action"
+      case "command":
+        return "command"
       case "goto":
         if (gotoSubMode === "pending") return "g..."
         if (gotoSubMode === "jump") return pendingJumpKey ? `g w ${pendingJumpKey}_` : "g w ..."
@@ -868,6 +963,7 @@ export const App = () => {
         mode={editorState.mode}
         modeDisplay={modeDisplay}
         selectedCount={editorState.selectedIds.size}
+        vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
       />
 
       {/* Help overlay */}
@@ -878,6 +974,9 @@ export const App = () => {
 
       {/* Search input */}
       {editorState.mode === "search" && <SearchInput query={editorState.searchQuery} />}
+
+      {/* Command input */}
+      {editorState.mode === "command" && <CommandInput input={editorState.commandInput} />}
 
       {/* Detail panel */}
       {showDetail && selectedTask && <DetailPanel task={selectedTask} />}
