@@ -10,6 +10,7 @@ import { ActionPalette } from "./ActionPalette"
 import {
 	attachExternalAtom,
 	attachInlineAtom,
+	claudeCreateSessionAtom,
 	cleanupAtom,
 	createPRAtom,
 	createTaskAtom,
@@ -26,6 +27,7 @@ import {
 	vcStatusAtom,
 } from "./atoms"
 import { Board } from "./Board"
+import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
@@ -94,6 +96,7 @@ export const App = () => {
 	const [, cleanup] = useAtom(cleanupAtom, { mode: "promise" })
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
+	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Navigation State (separate from FSM)
@@ -106,12 +109,15 @@ export const App = () => {
 	const [showHelp, setShowHelp] = useState(false)
 	const [showDetail, setShowDetail] = useState(false)
 	const [showCreatePrompt, setShowCreatePrompt] = useState(false)
+	const [showClaudeCreatePrompt, setShowClaudeCreatePrompt] = useState(false)
 	const showHelpRef = useRef(showHelp)
 	const showDetailRef = useRef(showDetail)
 	const showCreatePromptRef = useRef(showCreatePrompt)
+	const showClaudeCreatePromptRef = useRef(showClaudeCreatePrompt)
 	showHelpRef.current = showHelp
 	showDetailRef.current = showDetail
 	showCreatePromptRef.current = showCreatePrompt
+	showClaudeCreatePromptRef.current = showClaudeCreatePrompt
 
 	// Terminal size
 	const maxVisibleTasks = useMemo(() => {
@@ -319,6 +325,11 @@ export const App = () => {
 
 		// Create prompt handling - CreateTaskPrompt handles its own keyboard input
 		if (showCreatePromptRef.current) {
+			return
+		}
+
+		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
+		if (showClaudeCreatePromptRef.current) {
 			return
 		}
 
@@ -838,8 +849,13 @@ export const App = () => {
 				break
 			}
 			case "c": {
-				// Create new task
+				// Create new task (manual)
 				setShowCreatePrompt(true)
+				break
+			}
+			case "C": {
+				// Create task via Claude (natural language)
+				setShowClaudeCreatePrompt(true)
 				break
 			}
 			case "a": {
@@ -994,7 +1010,7 @@ export const App = () => {
 			{/* Detail panel */}
 			{showDetail && selectedTask && <DetailPanel task={selectedTask} />}
 
-			{/* Create task prompt */}
+			{/* Create task prompt (manual) */}
 			{showCreatePrompt && (
 				<CreateTaskPrompt
 					onSubmit={(params) => {
@@ -1010,6 +1026,25 @@ export const App = () => {
 							})
 					}}
 					onCancel={() => setShowCreatePrompt(false)}
+				/>
+			)}
+
+			{/* Create task via Claude prompt */}
+			{showClaudeCreatePrompt && (
+				<ClaudeCreatePrompt
+					onSubmit={(description) => {
+						setShowClaudeCreatePrompt(false)
+						showInfo("Launching Claude session...")
+						claudeCreateSession(description)
+							.then((sessionName) => {
+								showSuccess(`Session started: ${sessionName}`)
+								showInfo("Use Ctrl-a ) to switch to the session")
+							})
+							.catch((error) => {
+								showError(`Failed to launch session: ${error}`)
+							})
+					}}
+					onCancel={() => setShowClaudeCreatePrompt(false)}
 				/>
 			)}
 

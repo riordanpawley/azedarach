@@ -44,6 +44,9 @@ const SessionConfigSchema = Schema.Struct({
 
 	/** tmux prefix key (default: "C-a" to avoid Claude capturing C-b) */
 	tmuxPrefix: Schema.optional(Schema.String),
+
+	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
+	dangerouslySkipPermissions: Schema.optional(Schema.Boolean),
 })
 
 /**
