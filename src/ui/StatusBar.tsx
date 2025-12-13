@@ -17,6 +17,82 @@ export interface StatusBarProps {
 }
 
 /**
+ * Keybinding definition with display info
+ */
+interface KeyBinding {
+	key: string
+	action: string
+}
+
+/**
+ * All keybindings per mode, ordered by priority (most important first)
+ */
+const MODE_KEYBINDINGS: Record<EditorMode, KeyBinding[]> = {
+	normal: [
+		{ key: "Space", action: "Menu" },
+		{ key: "/", action: "Search" },
+		{ key: "v", action: "Select" },
+		{ key: "g", action: "Goto" },
+		{ key: "hjkl", action: "Nav" },
+		{ key: "Enter", action: "Details" },
+		{ key: "c", action: "Create" },
+		{ key: "a", action: "VC" },
+		{ key: ":", action: "Cmd" },
+		{ key: "C-d/u", action: "Page" },
+		{ key: "q", action: "Quit" },
+	],
+	action: [
+		{ key: "h/l", action: "Move" },
+		{ key: "s", action: "Start" },
+		{ key: "a", action: "Attach" },
+		{ key: "A", action: "Inline" },
+		{ key: "p", action: "Pause" },
+		{ key: "r", action: "Resume" },
+		{ key: "x", action: "Stop" },
+		{ key: "e", action: "Edit" },
+		{ key: "P", action: "PR" },
+		{ key: "d", action: "Delete" },
+		{ key: "Esc", action: "Cancel" },
+	],
+	goto: [
+		{ key: "w", action: "Jump" },
+		{ key: "g", action: "First" },
+		{ key: "e", action: "Last" },
+		{ key: "h", action: "Left" },
+		{ key: "l", action: "Right" },
+		{ key: "Esc", action: "Cancel" },
+	],
+	select: [
+		{ key: "Space", action: "Toggle" },
+		{ key: "hjkl", action: "Nav" },
+		{ key: "v", action: "Exit" },
+		{ key: "Esc", action: "Clear" },
+	],
+	search: [
+		{ key: "Enter", action: "Confirm" },
+		{ key: "Esc", action: "Clear" },
+	],
+	command: [
+		{ key: "Enter", action: "Send" },
+		{ key: "Esc", action: "Cancel" },
+	],
+}
+
+/**
+ * Calculate display width for a keybinding hint
+ * Format: "key action" with gap=1 between hints
+ */
+const getHintWidth = (binding: KeyBinding): number => {
+	// key + space + action + gap between hints (2 chars for gap)
+	return binding.key.length + 1 + binding.action.length + 2
+}
+
+/**
+ * "? more" indicator width
+ */
+const MORE_INDICATOR_WIDTH = 7 // "? more" + gap
+
+/**
  * StatusBar component
  *
  * Displays:
@@ -92,14 +168,36 @@ export const StatusBar = (props: StatusBarProps) => {
 	}
 
 	// Determine what to show based on terminal width
-	const shouldShowKeybinds = terminalWidth >= 100
 	const shouldShowModeDisplay = terminalWidth >= 80
 	const shouldShowSelectedCount = terminalWidth >= 60
-	const shouldShowPriorityLegend = terminalWidth >= 120
 
 	const connIndicator = getConnectionIndicator()
 	const modeColor = getModeColor()
 	const modeLabel = getModeLabel()
+
+	// Calculate available width for keybindings
+	// Fixed elements: border(2) + padding(2) + "azedarach"(9) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
+	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12)
+	const fixedLeftWidth = 25
+	const fixedRightWidth = 40 // Approximate, includes stats and potential VC status
+	const modeDisplayWidth = shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
+	const availableWidth = terminalWidth - fixedLeftWidth - fixedRightWidth - modeDisplayWidth
+
+	// Get keybindings for current mode and calculate how many fit
+	const allBindings = MODE_KEYBINDINGS[props.mode] || []
+	const visibleBindings: KeyBinding[] = []
+	let usedWidth = MORE_INDICATOR_WIDTH // Always reserve space for "? more"
+
+	for (const binding of allBindings) {
+		const hintWidth = getHintWidth(binding)
+		if (usedWidth + hintWidth <= availableWidth) {
+			visibleBindings.push(binding)
+			usedWidth += hintWidth
+		}
+	}
+
+	// Check if we're showing all bindings (no need for "more" indicator)
+	const showingAll = visibleBindings.length === allBindings.length
 
 	return (
 		<box
@@ -129,67 +227,14 @@ export const StatusBar = (props: StatusBarProps) => {
 					<text fg={theme.subtext0}>{props.modeDisplay}</text>
 				)}
 
-				{/* Contextual keyboard shortcuts - hide on narrow terminals */}
-				{shouldShowKeybinds && (
-					<box flexDirection="row" gap={2}>
-						{props.mode === "action" && (
-							<>
-								<KeyHint keyName="h/l" action="Move" />
-								<KeyHint keyName="s" action="Start" />
-								<KeyHint keyName="a" action="Attach" />
-								<KeyHint keyName="p" action="Pause" />
-								<KeyHint keyName="r" action="Resume" />
-								<KeyHint keyName="x" action="Stop" />
-								<KeyHint keyName="Esc" action="Cancel" />
-							</>
-						)}
-
-						{props.mode === "goto" && (
-							<>
-								<KeyHint keyName="w" action="Jump" />
-								<KeyHint keyName="g" action="First" />
-								<KeyHint keyName="e" action="Last" />
-								<KeyHint keyName="Esc" action="Cancel" />
-							</>
-						)}
-
-						{props.mode === "normal" && (
-							<>
-								<KeyHint keyName="Space" action="Menu" />
-								<KeyHint keyName="/" action="Search" />
-								<KeyHint keyName="v" action="Select" />
-								<KeyHint keyName="g" action="Goto" />
-								<KeyHint keyName="q" action="Quit" />
-							</>
-						)}
-
-						{props.mode === "search" && (
-							<>
-								<KeyHint keyName="Enter" action="Confirm" />
-								<KeyHint keyName="Esc" action="Clear" />
-							</>
-						)}
-
-						{props.mode === "select" && (
-							<>
-								<KeyHint keyName="Space" action="Toggle" />
-								<KeyHint keyName="v" action="Exit" />
-								<KeyHint keyName="Esc" action="Clear" />
-							</>
-						)}
-					</box>
-				)}
-
-				{/* Priority legend - show on wide terminals */}
-				{shouldShowPriorityLegend && (
-					<box flexDirection="row" gap={1}>
-						<text fg={theme.overlay0}>Priority:</text>
-						<text fg={theme.red}>P1</text>
-						<text fg={theme.peach}>P2</text>
-						<text fg={theme.yellow}>P3</text>
-						<text fg={theme.text}>P4</text>
-					</box>
-				)}
+				{/* Contextual keyboard shortcuts - dynamically fit as many as possible */}
+				<box flexDirection="row" gap={2}>
+					{visibleBindings.map((binding) => (
+						<KeyHint key={binding.key} keyName={binding.key} action={binding.action} />
+					))}
+					{/* Always show "? more" indicator unless all bindings are visible */}
+					{!showingAll && <KeyHint keyName="?" action="more" />}
+				</box>
 
 				{/* Stats - right aligned */}
 				<box flexGrow={1} />
