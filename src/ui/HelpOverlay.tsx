@@ -101,7 +101,8 @@ export const HelpOverlay = () => {
 				{/* General section */}
 				<SectionHeader title="General:" />
 				<KeyLine keys="Enter" description="Show task details" />
-				<KeyLine keys="c" description="Create new task" />
+				<KeyLine keys="c" description="Create new task (manual)" />
+				<KeyLine keys="C" description="Create task via Claude (NL prompt)" />
 				<KeyLine keys="q" description="Quit application" />
 				<KeyLine keys="?" description="Toggle this help screen" />
 				<KeyLine keys="Esc" description="Back to normal mode / dismiss" />
