@@ -29,6 +29,9 @@ Thumbs.db
 .env.local
 .env*.local
 
+# direnv (nix flake cache)
+.direnv/
+
 # Logs
 *.log
 npm-debug.log*
