@@ -3,7 +3,8 @@
 /**
  * UserPromptSubmit Hook Orchestrator
  *
- * Combines patterns from:
+ * Adapted from Chefy repo, simplified for single-skill setups.
+ * Original patterns from:
  * - diet103/claude-code-infrastructure-showcase (auto-activating skills)
  * - severity1/claude-code-prompt-improver (prompt clarity)
  * - jefflester/claude-skills-supercharged (AI-driven detection)
@@ -11,10 +12,13 @@
  * Flow:
  * 1. Check bypass prefixes (*, /, #)
  * 2. Evaluate prompt clarity
- * 3. Pattern matching on edited files
- * 4. AI skill detection (optional)
+ * 3. Keyword matching on user prompt
+ * 4. AI skill detection (optional, requires ANTHROPIC_API_KEY)
  * 5. Session deduplication
- * 6. Skill loading
+ * 6. Affinity resolution
+ * 7. Skill loading
+ *
+ * NOTE: File pattern matching removed (not useful for single-skill setups)
  */
 
 const fs = require("node:fs");
@@ -144,7 +148,7 @@ function evaluateClarity(prompt) {
   return clarity;
 }
 
-// Pattern matching on edited files (diet103 pattern)
+// Pattern matching on keywords and content (file pattern matching removed for simplicity)
 function patternMatchSkills(editedFiles, userPrompt, skillRules) {
   const start = Date.now();
   const matches = [];
@@ -153,22 +157,8 @@ function patternMatchSkills(editedFiles, userPrompt, skillRules) {
     let confidence = 0.0;
     const reasons = [];
 
-    // File pattern matching
-    if (skill.triggers.filePatterns) {
-      const fileMatches = editedFiles.filter((file) => {
-        return skill.triggers.filePatterns.some((pattern) => {
-          const regex = new RegExp(
-            pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*"),
-          );
-          return regex.test(file);
-        });
-      });
-
-      if (fileMatches.length > 0) {
-        confidence += 0.3;
-        reasons.push(`Matched ${fileMatches.length} file(s)`);
-      }
-    }
+    // NOTE: File pattern matching removed - not useful for single-skill setups
+    // Content pattern matching still available if editedFiles are tracked
 
     // Content pattern matching
     if (skill.triggers.contentPatterns && editedFiles.length > 0) {
