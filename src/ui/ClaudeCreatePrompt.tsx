@@ -41,15 +41,47 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 			return
 		}
 
-		// Backspace to delete
+		// Backspace to delete last character
 		if (event.name === "backspace") {
 			setDescription((prev) => prev.slice(0, -1))
 			return
 		}
 
-		// Regular character input
+		// Ctrl+U: Clear entire line
+		if (event.ctrl && event.name === "u") {
+			setDescription("")
+			return
+		}
+
+		// Ctrl+W: Delete last word
+		if (event.ctrl && event.name === "w") {
+			setDescription((prev) => prev.replace(/\S+\s*$/, ""))
+			return
+		}
+
+		// Tab: Convert to space (for accessibility)
+		if (event.name === "tab") {
+			setDescription((prev) => prev + " ")
+			return
+		}
+
+		// Handle paste and multi-character input (sequence > 1 char)
+		if (event.sequence && event.sequence.length > 1 && !event.ctrl && !event.meta) {
+			// Filter to printable characters only
+			const printable = event.sequence.replace(/[\x00-\x1F\x7F]/g, "")
+			if (printable) {
+				setDescription((prev) => prev + printable)
+			}
+			return
+		}
+
+		// Regular single character input
 		if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
-			setDescription((prev) => prev + event.sequence)
+			// Only allow printable characters (ASCII 32-126 and extended)
+			const charCode = event.sequence.charCodeAt(0)
+			if (charCode >= 32 && charCode !== 127) {
+				setDescription((prev) => prev + event.sequence)
+			}
 		}
 	})
 
@@ -102,7 +134,9 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 
 				{/* Help text */}
 				<box marginTop={1}>
-					<text fg={theme.overlay0}>Enter: create and launch session Esc: cancel</text>
+					<text fg={theme.overlay0}>
+						Enter: submit  Esc: cancel  Ctrl-U: clear  Ctrl-W: delete word
+					</text>
 				</box>
 			</box>
 		</box>
