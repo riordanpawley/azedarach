@@ -63,6 +63,16 @@ const TmuxServiceImpl = Effect.gen(function* () {
         const prefix = opts?.prefix ?? "C-a"
         yield* runTmux(["set-option", "-t", name, "prefix", prefix])
         yield* runTmux(["set-option", "-t", name, "prefix2", "None"])
+
+        // Increase scrollback buffer (default 2000 is far too small for Claude output)
+        yield* runTmux(["set-option", "-t", name, "history-limit", "500000"])
+
+        // Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
+        yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
+
+        // Bind Ctrl-u to enter copy mode and scroll up (global, idempotent)
+        // This lets users scroll Claude output without prefix+[ first
+        yield* runTmux(["bind-key", "-n", "C-u", "copy-mode", "-u"])
       }),
 
     killSession: (name: string) =>

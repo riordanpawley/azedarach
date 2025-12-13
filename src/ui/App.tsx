@@ -1,7 +1,7 @@
 /**
  * App component - root component with Helix-style modal keybindings
  */
-import { useState, useMemo, useCallback, useRef, useReducer } from "react"
+import { useState, useMemo, useCallback, useRef, useReducer, useEffect } from "react"
 import { Result } from "@effect-atom/atom"
 import { useAtomValue, useAtom, useAtomRefresh } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
@@ -49,7 +49,10 @@ import {
  *
  * Root component implementing Helix-style modal editing using FSM.
  */
-const CHROME_HEIGHT = 6
+// UI chrome height: board padding (2) + status bar (3) + column header (1) = 6
+// Add 1 more row when running inside tmux to account for tmux status bar
+const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
+const CHROME_HEIGHT = 6 + TMUX_STATUS_BAR_HEIGHT
 
 export const App = () => {
   // ═══════════════════════════════════════════════════════════════════════════
@@ -111,6 +114,10 @@ export const App = () => {
     const rows = process.stdout.rows || 24
     return Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
   }, [])
+
+  // Track task ID to follow after move operations
+  // This ensures we navigate to the task's new position after data refreshes
+  const [followTaskId, setFollowTaskId] = useState<string | null>(null)
 
   // Toast notifications state
   const [toasts, setToasts] = useState<ToastMessage[]>([])
@@ -215,6 +222,24 @@ export const App = () => {
     setNav({ columnIndex: clampedCol, taskIndex: clampedTask })
   }, [clampTaskIndex])
 
+  // Effect to follow a task after move operations
+  // When followTaskId is set, find the task in the updated data and navigate to it
+  useEffect(() => {
+    if (!followTaskId) return
+
+    // Search all columns for the task
+    for (let colIdx = 0; colIdx < tasksByColumn.length; colIdx++) {
+      const taskIdx = tasksByColumn[colIdx].findIndex((t) => t.id === followTaskId)
+      if (taskIdx >= 0) {
+        navigateTo(colIdx, taskIdx)
+        setFollowTaskId(null)
+        return
+      }
+    }
+    // Task not found (maybe deleted), clear the follow state
+    setFollowTaskId(null)
+  }, [followTaskId, tasksByColumn, navigateTo])
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Jump input handler (for goto → jump mode)
   // ═══════════════════════════════════════════════════════════════════════════
@@ -302,17 +327,20 @@ export const App = () => {
             const targetStatus = COLUMNS[columnIndex - 1]?.status
             if (targetStatus) {
               if (selectedIds.size > 0) {
+                // For multi-select, follow the first task in selection
+                const firstTaskId = [...selectedIds][0]
                 moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
                   .then(() => {
+                    setFollowTaskId(firstTaskId ?? null)
                     refreshTasks()
-                    navigateTo(columnIndex - 1, taskIndex)
                   })
                   .catch((error) => showError(`Move failed: ${error}`))
               } else if (selectedTask) {
+                const taskToFollow = selectedTask.id
                 moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
                   .then(() => {
+                    setFollowTaskId(taskToFollow)
                     refreshTasks()
-                    navigateTo(columnIndex - 1, taskIndex)
                   })
                   .catch((error) => showError(`Move failed: ${error}`))
               }
@@ -328,17 +356,20 @@ export const App = () => {
             const targetStatus = COLUMNS[columnIndex + 1]?.status
             if (targetStatus) {
               if (selectedIds.size > 0) {
+                // For multi-select, follow the first task in selection
+                const firstTaskId = [...selectedIds][0]
                 moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
                   .then(() => {
+                    setFollowTaskId(firstTaskId ?? null)
                     refreshTasks()
-                    navigateTo(columnIndex + 1, taskIndex)
                   })
                   .catch((error) => showError(`Move failed: ${error}`))
               } else if (selectedTask) {
+                const taskToFollow = selectedTask.id
                 moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
                   .then(() => {
+                    setFollowTaskId(taskToFollow)
                     refreshTasks()
-                    navigateTo(columnIndex + 1, taskIndex)
                   })
                   .catch((error) => showError(`Move failed: ${error}`))
               }
