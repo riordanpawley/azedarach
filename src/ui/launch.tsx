@@ -12,6 +12,6 @@ import { App } from "./App"
  * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
-  const renderer = await createCliRenderer()
-  createRoot(renderer).render(<App />)
+	const renderer = await createCliRenderer()
+	createRoot(renderer).render(<App />)
 }

@@ -4,69 +4,69 @@
  * This file demonstrates how to use the Effect-based services.
  */
 
-import { Effect } from "effect"
 import { BunRuntime } from "@effect/platform-bun"
-import { TmuxService, TmuxServiceLive } from "./TmuxService"
+import { Effect } from "effect"
+import { getProjectName, getSessionName, getWorktreePath } from "./paths"
 import { TerminalService, TerminalServiceLive } from "./TerminalService"
-import { getWorktreePath, getSessionName, getProjectName } from "./paths"
+import { TmuxService, TmuxServiceLive } from "./TmuxService"
 
 // Example 1: Create a new tmux session
 const createSession = (beadId: string, projectPath: string) =>
-  Effect.gen(function* () {
-    const tmux = yield* TmuxService
-    const sessionName = getSessionName(beadId)
-    const worktreePath = getWorktreePath(projectPath, beadId)
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const sessionName = getSessionName(beadId)
+		const worktreePath = getWorktreePath(projectPath, beadId)
 
-    // Create tmux session in the worktree directory
-    yield* tmux.newSession(sessionName, {
-      cwd: worktreePath,
-      command: "claude"
-    })
+		// Create tmux session in the worktree directory
+		yield* tmux.newSession(sessionName, {
+			cwd: worktreePath,
+			command: "claude",
+		})
 
-    console.log(`Created tmux session: ${sessionName}`)
-  })
+		console.log(`Created tmux session: ${sessionName}`)
+	})
 
 // Example 2: List all tmux sessions
 const listAllSessions = Effect.gen(function* () {
-  const tmux = yield* TmuxService
-  const sessions = yield* tmux.listSessions()
+	const tmux = yield* TmuxService
+	const sessions = yield* tmux.listSessions()
 
-  console.log("Active tmux sessions:")
-  for (const session of sessions) {
-    console.log(`  - ${session.name} (${session.windows} windows, attached: ${session.attached})`)
-  }
+	console.log("Active tmux sessions:")
+	for (const session of sessions) {
+		console.log(`  - ${session.name} (${session.windows} windows, attached: ${session.attached})`)
+	}
 
-  return sessions
+	return sessions
 })
 
 // Example 3: Open terminal with tmux attach command
 const attachToSession = (beadId: string) =>
-  Effect.gen(function* () {
-    const tmux = yield* TmuxService
-    const terminal = yield* TerminalService
-    const sessionName = getSessionName(beadId)
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const terminal = yield* TerminalService
+		const sessionName = getSessionName(beadId)
 
-    // Check if session exists
-    const exists = yield* tmux.hasSession(sessionName)
-    if (!exists) {
-      return yield* Effect.fail(new Error(`Session ${sessionName} not found`))
-    }
+		// Check if session exists
+		const exists = yield* tmux.hasSession(sessionName)
+		if (!exists) {
+			return yield* Effect.fail(new Error(`Session ${sessionName} not found`))
+		}
 
-    // Get the attach command and open in a new tmux window
-    const attachCmd = tmux.attachCommand(sessionName)
-    yield* terminal.openInTmuxWindow(attachCmd, sessionName)
+		// Get the attach command and open in a new tmux window
+		const attachCmd = tmux.attachCommand(sessionName)
+		yield* terminal.openInTmuxWindow(attachCmd, sessionName)
 
-    console.log(`Opened tmux window with session: ${sessionName}`)
-  })
+		console.log(`Opened tmux window with session: ${sessionName}`)
+	})
 
 // Example 4: Path utilities
 const pathExample = () => {
-  const projectPath = "/Users/riordan/prog/azedarach"
-  const beadId = "az-001"
+	const projectPath = "/Users/riordan/prog/azedarach"
+	const beadId = "az-001"
 
-  console.log("Project name:", getProjectName(projectPath))  // "azedarach"
-  console.log("Worktree path:", getWorktreePath(projectPath, beadId))  // "/Users/riordan/prog/azedarach-az-001"
-  console.log("Session name:", getSessionName(beadId))  // "az-001"
+	console.log("Project name:", getProjectName(projectPath)) // "azedarach"
+	console.log("Worktree path:", getWorktreePath(projectPath, beadId)) // "/Users/riordan/prog/azedarach-az-001"
+	console.log("Session name:", getSessionName(beadId)) // "az-001"
 }
 
 // Run examples (uncomment to test)
@@ -75,9 +75,4 @@ const pathExample = () => {
 //
 // BunRuntime.runMain(program)
 
-export {
-  createSession,
-  listAllSessions,
-  attachToSession,
-  pathExample
-}
+export { createSession, listAllSessions, attachToSession, pathExample }
