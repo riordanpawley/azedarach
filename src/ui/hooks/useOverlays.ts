@@ -14,6 +14,7 @@ export type OverlayType =
 	| { readonly _tag: "help" }
 	| { readonly _tag: "detail"; readonly taskId: string }
 	| { readonly _tag: "create" }
+	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| {
 			readonly _tag: "confirm"
@@ -59,6 +60,10 @@ export function useOverlays() {
 				push({ _tag: "create" }).catch(console.error)
 			},
 
+			showClaudeCreate: () => {
+				push({ _tag: "claudeCreate" }).catch(console.error)
+			},
+
 			showSettings: () => {
 				push({ _tag: "settings" }).catch(console.error)
 			},
@@ -80,6 +85,7 @@ export function useOverlays() {
 			showingHelp: currentOverlay?._tag === "help",
 			showingDetail: currentOverlay?._tag === "detail",
 			showingCreate: currentOverlay?._tag === "create",
+			showingClaudeCreate: currentOverlay?._tag === "claudeCreate",
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
 		}),

@@ -1,5 +1,7 @@
 # Refactoring App State to Effect Atom Runtime Services with FSM/Actor Model
 
+> **Status: SUPERSEDED** - Replaced by atomic services approach (see state-refactor-atomic-plan.md)
+
 ## Problem Statement
 
 The current state management has several pain points:
