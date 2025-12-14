@@ -3,6 +3,7 @@
  */
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
+import { killActivePopup } from "../core/EditorService"
 import { App } from "./App"
 
 /**
@@ -12,6 +13,13 @@ import { App } from "./App"
  * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
+	// Register SIGINT handler to clean up any active tmux popup
+	// This prevents orphaned popups when user presses Ctrl-C during editor operations
+	process.on("SIGINT", () => {
+		killActivePopup()
+		process.exit(0)
+	})
+
 	const renderer = await createCliRenderer()
 	createRoot(renderer).render(<App />)
 }
