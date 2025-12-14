@@ -11,6 +11,43 @@ import type { Issue } from "./BeadsClient"
 import { BeadsClient } from "./BeadsClient"
 
 // ============================================================================
+// Popup State Tracking (for cleanup on SIGINT)
+// ============================================================================
+
+/**
+ * Track active tmux popup channel for cleanup on process exit.
+ * When a popup is active, we store the channel name so it can be killed.
+ */
+let activePopupChannel: string | null = null
+
+/**
+ * Kill any active tmux popup by sending Ctrl-C to close it.
+ * Called on SIGINT to prevent orphaned popups.
+ */
+export const killActivePopup = (): void => {
+	if (activePopupChannel) {
+		// Send Ctrl-C to the current tmux client to close any popup
+		// This works because popups close on Ctrl-C by default
+		try {
+			Bun.spawnSync(["tmux", "send-keys", "-t", "", "C-c"], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			})
+			// Also signal the wait-for channel to unblock any waiters
+			Bun.spawnSync(["tmux", "wait-for", "-S", activePopupChannel], {
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+			})
+		} catch {
+			// Ignore errors during cleanup
+		}
+		activePopupChannel = null
+	}
+}
+
+// ============================================================================
 // Error Types
 // ============================================================================
 
@@ -155,18 +192,27 @@ const serializeBeadToMarkdown = (bead: Issue): string => {
 /**
  * Create a blank template for new bead creation
  */
+// Anchor placeholders - single words for easy Helix navigation (gw, w, b, e)
+const ANCHORS = {
+	TITLE: "TITLE",
+	DESCRIPTION: "DESCRIPTION",
+	DESIGN: "DESIGN",
+	NOTES: "NOTES",
+	ACCEPTANCE: "ACCEPTANCE",
+} as const
+
 const createBlankBeadTemplate = (): string => {
 	const lines: string[] = []
 
-	// Header with placeholder
-	lines.push("# NEW: Enter title here")
+	// Header with single-word anchor for easy selection
+	lines.push(`# ${ANCHORS.TITLE}`)
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("")
 
 	// Metadata section - user fills in these values
 	lines.push("Type:     task        (task | bug | feature | epic | chore)")
 	lines.push("Priority: P2          (P0 = highest, P4 = lowest)")
-	lines.push("Status:   backlog     (backlog | ready | in_progress | review | done)")
+	lines.push("Status:   open        (open | in_progress | blocked | closed)")
 	lines.push("Assignee: ")
 	lines.push("Labels:   ")
 	lines.push("Estimate: ")
@@ -176,26 +222,28 @@ const createBlankBeadTemplate = (): string => {
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Description")
 	lines.push("")
-	lines.push("Describe the task here...")
+	lines.push(ANCHORS.DESCRIPTION)
 	lines.push("")
 
 	// Design
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Design")
 	lines.push("")
+	lines.push(ANCHORS.DESIGN)
 	lines.push("")
 
 	// Notes
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Notes")
 	lines.push("")
+	lines.push(ANCHORS.NOTES)
 	lines.push("")
 
 	// Acceptance Criteria
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Acceptance Criteria")
 	lines.push("")
-	lines.push("- [ ] Criteria 1")
+	lines.push(ANCHORS.ACCEPTANCE)
 	lines.push("")
 
 	return lines.join("\n")
@@ -238,7 +286,7 @@ const parseNewBeadTemplate = (
 				throw new Error("Invalid header format. Expected: # NEW: {title} or # {title}")
 			}
 			const title = headerMatch[1]!.trim()
-			if (!title || title === "Enter title here") {
+			if (!title || title === ANCHORS.TITLE) {
 				throw new Error("Please enter a title for the bead")
 			}
 
@@ -266,7 +314,7 @@ const parseNewBeadTemplate = (
 			// Parse metadata fields
 			let type = "task"
 			let priority = 2
-			let status = "backlog"
+			let status = "open"
 			let assignee: string | undefined
 			let labels: string[] | undefined
 			let estimate: number | undefined
@@ -314,11 +362,13 @@ const parseNewBeadTemplate = (
 			const notes = parseSection(markdown, "Notes")
 			const acceptance = parseSection(markdown, "Acceptance Criteria")
 
-			// Filter out placeholder text
+			// Filter out unchanged anchor placeholders
 			const cleanDescription =
-				description === "Describe the task here..." ? undefined : description || undefined
+				description === ANCHORS.DESCRIPTION ? undefined : description || undefined
+			const cleanDesign = design === ANCHORS.DESIGN ? undefined : design || undefined
+			const cleanNotes = notes === ANCHORS.NOTES ? undefined : notes || undefined
 			const cleanAcceptance =
-				acceptance === "- [ ] Criteria 1" ? undefined : acceptance || undefined
+				acceptance === ANCHORS.ACCEPTANCE ? undefined : acceptance || undefined
 
 			return {
 				title,
@@ -329,16 +379,23 @@ const parseNewBeadTemplate = (
 				labels,
 				estimate,
 				description: cleanDescription,
-				design: design || undefined,
-				notes: notes || undefined,
+				design: cleanDesign,
+				notes: cleanNotes,
 				acceptance: cleanAcceptance,
 			}
 		},
-		catch: (error) =>
-			new ParseMarkdownError({
-				message: `Failed to parse new bead template: ${error}`,
+		catch: (error) => {
+			const errorMessage =
+				error instanceof Error
+					? error.message
+					: typeof error === "string"
+						? error
+						: "Unknown error"
+			return new ParseMarkdownError({
+				message: errorMessage,
 				markdown,
-			}),
+			})
+		},
 	})
 
 // ============================================================================
@@ -591,18 +648,44 @@ const EditorServiceImpl = Effect.gen(function* () {
 				// 3. Get $EDITOR from environment (default to vim)
 				const editor = process.env.EDITOR || "vim"
 
-				// 4. Open editor (blocking)
-				const command = Command.make(editor, tempFile)
-				yield* Command.exitCode(command).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to open editor: ${error}`,
-							}),
-					),
+				// 4. Open editor in tmux popup with synchronization
+				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+				// 1. Create popup that signals a channel when done
+				// 2. Wait on that channel
+				const channel = `az-editor-${Date.now()}`
+
+				// Track popup for cleanup on SIGINT
+				activePopupChannel = channel
+
+				// Launch popup - when editor exits, it signals the channel
+				Bun.spawnSync(
+					[
+						"tmux",
+						"display-popup",
+						"-E", // Close popup when command exits
+						"-w",
+						"90%",
+						"-h",
+						"90%",
+						"--",
+						"sh",
+						"-c",
+						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+					],
+					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
 				)
 
-				// 5. Read edited content
+				// Block until the channel is signaled (editor closed)
+				Bun.spawnSync(["tmux", "wait-for", channel], {
+					stdin: "inherit",
+					stdout: "inherit",
+					stderr: "inherit",
+				})
+
+				// Clear popup tracking
+				activePopupChannel = null
+
+				// 6. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
 					Effect.mapError(
 						(error) =>
@@ -721,18 +804,44 @@ const EditorServiceImpl = Effect.gen(function* () {
 				// 3. Get $EDITOR from environment (default to vim)
 				const editor = process.env.EDITOR || "vim"
 
-				// 4. Open editor (blocking)
-				const command = Command.make(editor, tempFile)
-				yield* Command.exitCode(command).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to open editor: ${error}`,
-							}),
-					),
+				// 4. Open editor in tmux popup with synchronization
+				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+				// 1. Create popup that signals a channel when done
+				// 2. Wait on that channel
+				const channel = `az-editor-${Date.now()}`
+
+				// Track popup for cleanup on SIGINT
+				activePopupChannel = channel
+
+				// Launch popup - when editor exits, it signals the channel
+				Bun.spawnSync(
+					[
+						"tmux",
+						"display-popup",
+						"-E", // Close popup when command exits
+						"-w",
+						"90%",
+						"-h",
+						"90%",
+						"--",
+						"sh",
+						"-c",
+						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+					],
+					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
 				)
 
-				// 5. Read edited content
+				// Block until the channel is signaled (editor closed)
+				Bun.spawnSync(["tmux", "wait-for", channel], {
+					stdin: "inherit",
+					stdout: "inherit",
+					stderr: "inherit",
+				})
+
+				// Clear popup tracking
+				activePopupChannel = null
+
+				// 6. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
 					Effect.mapError(
 						(error) =>
@@ -746,18 +855,17 @@ const EditorServiceImpl = Effect.gen(function* () {
 				const fields = yield* parseNewBeadTemplate(editedMarkdown)
 
 				// 7. Build bd create command
+				// Note: bd create doesn't support --status or --notes flags
 				const args: string[] = ["create", "--title", fields.title, "--type", fields.type]
 
 				if (fields.priority !== undefined) args.push("--priority", String(fields.priority))
-				if (fields.status) args.push("--status", fields.status)
 				if (fields.description) args.push("--description", fields.description)
 				if (fields.design) args.push("--design", fields.design)
-				if (fields.notes) args.push("--notes", fields.notes)
 				if (fields.acceptance) args.push("--acceptance", fields.acceptance)
 				if (fields.assignee) args.push("--assignee", fields.assignee)
 				if (fields.estimate !== undefined) args.push("--estimate", String(fields.estimate))
 				if (fields.labels && fields.labels.length > 0) {
-					fields.labels.forEach((label) => args.push("--label", label))
+					fields.labels.forEach((label) => args.push("--labels", label))
 				}
 
 				// 8. Execute bd create and capture output
@@ -782,7 +890,29 @@ const EditorServiceImpl = Effect.gen(function* () {
 				}
 				const beadId = idMatch![1]!
 
-				// 10. Clean up temp file
+				// 10. If status or notes were set, update the bead (bd create doesn't support these)
+				const needsUpdate =
+					(fields.status && fields.status !== "open") || fields.notes
+				if (needsUpdate) {
+					const updateArgs: string[] = ["update", beadId]
+					if (fields.status && fields.status !== "open") {
+						updateArgs.push("--status", fields.status)
+					}
+					if (fields.notes) {
+						updateArgs.push("--notes", fields.notes)
+					}
+					const updateCommand = Command.make("bd", ...updateArgs)
+					yield* Command.exitCode(updateCommand).pipe(
+						Effect.mapError(
+							(error) =>
+								new EditorError({
+									message: `Failed to update bead status/notes: ${error}`,
+								}),
+						),
+					)
+				}
+
+				// 11. Clean up temp file
 				yield* Effect.ignoreLogged(
 					fs.remove(tempFile).pipe(
 						Effect.mapError(

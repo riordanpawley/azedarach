@@ -151,6 +151,18 @@ export interface BeadsClientService {
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
+	 * Delete an issue permanently
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.delete("az-05y")
+	 * ```
+	 */
+	readonly delete: (
+		id: string,
+	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+
+	/**
 	 * Sync beads database (push/pull)
 	 *
 	 * @example
@@ -349,6 +361,11 @@ const BeadsClientServiceImpl = Effect.gen(function* () {
 				yield* runBd(args)
 			}),
 
+		delete: (id) =>
+			Effect.gen(function* () {
+				yield* runBd(["delete", id, "--force"])
+			}),
+
 		sync: (cwd) =>
 			Effect.gen(function* () {
 				const output = yield* runBd(["sync"], cwd)
@@ -480,6 +497,14 @@ export const close = (
 	reason?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.close(id, reason))
+
+/**
+ * Delete an issue permanently
+ */
+export const deleteBead = (
+	id: string,
+): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.delete(id))
 
 /**
  * Sync beads database

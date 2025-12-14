@@ -6,6 +6,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
 import {
 	attachExternalAtom,
@@ -16,6 +17,7 @@ import {
 	createBeadViaEditorAtom,
 	createPRAtom,
 	createTaskAtom,
+	deleteBeadAtom,
 	editBeadAtom,
 	moveTaskAtom,
 	moveTasksAtom,
@@ -96,6 +98,7 @@ export const App = () => {
 	const [, editBead] = useAtom(editBeadAtom, { mode: "promise" })
 	const [, createPR] = useAtom(createPRAtom, { mode: "promise" })
 	const [, cleanup] = useAtom(cleanupAtom, { mode: "promise" })
+	const [, deleteBead] = useAtom(deleteBeadAtom, { mode: "promise" })
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
 	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
@@ -569,7 +572,25 @@ export const App = () => {
 					break
 				}
 				case "d": {
-					// Cleanup/delete worktree and branches
+					// d = Cleanup worktree, Shift-D = Delete bead permanently
+					// Note: keyboard lib reports event.name as lowercase, use event.shift for capitals
+					if (event.shift) {
+						// Shift-D: Delete bead permanently
+						if (selectedTask) {
+							showInfo(`Deleting ${selectedTask.id}...`)
+							deleteBead(selectedTask.id)
+								.then(() => {
+									refreshTasks()
+									showSuccess(`Deleted ${selectedTask.id}`)
+								})
+								.catch((error) => {
+									showError(`Failed to delete: ${error}`)
+								})
+						}
+						dispatch({ type: "EXIT_TO_NORMAL" })
+						break
+					}
+					// d: Cleanup/delete worktree and branches
 					if (selectedTask) {
 						if (selectedTask.sessionState === "idle") {
 							showError(`No worktree to delete for ${selectedTask.id}`)
@@ -832,7 +853,8 @@ export const App = () => {
 				break
 			}
 			case "q": {
-				// Quit
+				// Quit - clean up any active popup first
+				killActivePopup()
 				process.exit(0)
 				break
 			}
@@ -856,8 +878,17 @@ export const App = () => {
 						refreshTasks()
 						showSuccess(`Created: ${result.id} - ${result.title}`)
 					})
-					.catch((error) => {
-						showError(`Failed to create bead: ${error}`)
+					.catch((error: unknown) => {
+						const getErrorMessage = (e: unknown): string => {
+							if (e && typeof e === "object" && "_tag" in e && "message" in e) {
+								const tag = e._tag
+								const message = e.message
+								if (tag === "ParseMarkdownError") return `Invalid format: ${message}`
+								if (tag === "EditorError") return `Editor error: ${message}`
+							}
+							return `Failed to create: ${e}`
+						}
+						showError(getErrorMessage(error))
 					})
 				break
 			}

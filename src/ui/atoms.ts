@@ -363,6 +363,19 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 )
 
 /**
+ * Delete a bead permanently
+ *
+ * Usage: const deleteBead = useAtom(deleteBeadAtom, { mode: "promise" })
+ *        await deleteBead(beadId)
+ */
+export const deleteBeadAtom = appRuntime.fn((beadId: string) =>
+	Effect.gen(function* () {
+		const client = yield* BeadsClient
+		yield* client.delete(beadId)
+	}),
+)
+
+/**
  * Check if gh CLI is available and authenticated
  *
  * Usage: const ghAvailable = useAtomValue(ghCLIAvailableAtom)

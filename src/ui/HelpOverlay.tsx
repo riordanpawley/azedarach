@@ -96,6 +96,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="s" description="Start session" />
 				<KeyLine keys="a" description="Attach to session" />
 				<KeyLine keys="p" description="Pause session" />
+				<KeyLine keys="D" description="Delete bead permanently" />
 				<text> </text>
 
 				{/* Create/Edit section */}
