@@ -6,7 +6,7 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { BunContext } from "@effect/platform-bun"
 import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
-import { AppConfigLiveWithPlatform } from "../config/index"
+import { AppConfig, AppConfigLiveWithPlatform } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
 import { EditorService } from "../core/EditorService"
@@ -333,6 +333,79 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
 	}),
 )
 
+/**
+ * Create a new bead via $EDITOR
+ *
+ * Opens a template in $EDITOR, parses the result, and creates a new bead.
+ *
+ * Usage: const createBead = useAtom(createBeadViaEditorAtom, { mode: "promise" })
+ *        const { id, title } = await createBead()
+ */
+export const createBeadViaEditorAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* EditorService
+		return yield* editor.createBead()
+	}),
+)
+
+/**
+ * Create a Claude session to generate a bead from natural language
+ *
+ * Spawns a tmux session with Claude in the main project directory,
+ * sends a prompt asking Claude to create a bead from the description,
+ * and leaves the session open for the user to continue working.
+ *
+ * Returns the session name so the UI can inform the user.
+ *
+ * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
+ *        const sessionName = await claudeCreate("Add dark mode toggle to settings")
+ */
+export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const { config } = yield* AppConfig
+
+		// Generate unique session name with timestamp
+		const timestamp = Date.now().toString(36)
+		const sessionName = `claude-create-${timestamp}`
+		const projectPath = process.cwd()
+
+		// Build the Claude command with session settings
+		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
+		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+
+		// Create the tmux session
+		yield* tmux.newSession(sessionName, {
+			cwd: projectPath,
+			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
+			prefix: tmuxPrefix,
+		})
+
+		// Wait briefly for Claude to start up
+		yield* Effect.sleep("1500 millis")
+
+		// Build the prompt for Claude with explicit bd create instructions
+		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
+
+**Task description:**
+${description}
+
+**Instructions:**
+1. Use \`bd create --title="..." --type=task|bug|feature --priority=1|2|3\`
+2. Add a description if the task needs more detail
+3. The issue ID will be returned - note it for the user
+4. After creating, you may start working on it or wait for further instructions
+
+Please create the bead now.`
+
+		// Send the prompt to Claude via tmux
+		yield* tmux.sendKeys(sessionName, prompt)
+		yield* tmux.sendKeys(sessionName, "Enter")
+
+		return sessionName
+	}),
+)
+
 // ============================================================================
 // PR Workflow Atoms
 // ============================================================================
@@ -366,6 +439,19 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 			beadId,
 			projectPath: process.cwd(),
 		})
+	}),
+)
+
+/**
+ * Delete a bead entirely
+ *
+ * Usage: const deleteBead = useAtom(deleteBeadAtom, { mode: "promise" })
+ *        await deleteBead(beadId)
+ */
+export const deleteBeadAtom = appRuntime.fn((beadId: string) =>
+	Effect.gen(function* () {
+		const client = yield* BeadsClient
+		yield* client.delete(beadId)
 	}),
 )
 
@@ -787,6 +873,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			| { readonly _tag: "help" }
 			| { readonly _tag: "detail"; readonly taskId: string }
 			| { readonly _tag: "create" }
+			| { readonly _tag: "claudeCreate" }
 			| { readonly _tag: "settings" }
 			| {
 					readonly _tag: "confirm"

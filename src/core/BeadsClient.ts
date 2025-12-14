@@ -208,6 +208,18 @@ export interface BeadsClientService {
 		priority?: number
 		description?: string
 	}) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Delete an issue entirely
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.delete("az-05y")
+	 * ```
+	 */
+	readonly delete: (
+		id: string,
+	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 }
 
 
@@ -424,6 +436,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					return parsed[0]!
 				}),
+
+			delete: (id: string) =>
+				Effect.gen(function* () {
+					yield* runBd(["delete", id])
+				}),
 		}
 	}),
 }) {}
@@ -523,3 +540,11 @@ export const create = (params: {
 	description?: string
 }): Effect.Effect<Issue, BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.create(params))
+
+/**
+ * Delete an issue
+ */
+export const deleteIssue = (
+	id: string,
+): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.delete(id))

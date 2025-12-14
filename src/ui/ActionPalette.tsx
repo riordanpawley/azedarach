@@ -37,6 +37,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "d": // Cleanup/Delete worktree - only if session exists
 				return sessionState !== "idle"
+			case "D": // Delete bead - always available
+				return true
 			case "h": // Move left - always available
 			case "l": // Move right - always available
 				return true
@@ -91,6 +93,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				{/* Git/PR */}
 				<ActionLine keyName="P" description="PR" />
 				<ActionLine keyName="d" description="cleanup" />
+				<ActionLine keyName="D" description="delete" />
 			</box>
 		</box>
 	)

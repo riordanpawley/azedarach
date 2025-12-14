@@ -8,13 +8,17 @@ import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useCallback, useEffect, useMemo } from "react"
+import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
 import {
 	attachExternalAtom,
 	attachInlineAtom,
+	claudeCreateSessionAtom,
 	cleanupAtom,
+	createBeadViaEditorAtom,
 	createPRAtom,
 	createTaskAtom,
+	deleteBeadAtom,
 	editBeadAtom,
 	moveTaskAtom,
 	moveTasksAtom,
@@ -28,6 +32,7 @@ import {
 	vcStatusAtom,
 } from "./atoms"
 import { Board } from "./Board"
+import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
@@ -64,10 +69,12 @@ export const App = () => {
 		showHelp,
 		showDetail,
 		showCreate,
+		showClaudeCreate,
 		dismiss: dismissOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
+		showingClaudeCreate,
 	} = useOverlays()
 
 	const {
@@ -119,8 +126,11 @@ export const App = () => {
 	const [, stopSession] = useAtom(stopSessionAtom, { mode: "promise" })
 	const [, createTask] = useAtom(createTaskAtom, { mode: "promise" })
 	const [, editBead] = useAtom(editBeadAtom, { mode: "promise" })
+	const [, createBeadViaEditor] = useAtom(createBeadViaEditorAtom, { mode: "promise" })
+	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
 	const [, createPR] = useAtom(createPRAtom, { mode: "promise" })
 	const [, cleanup] = useAtom(cleanupAtom, { mode: "promise" })
+	const [, deleteBead] = useAtom(deleteBeadAtom, { mode: "promise" })
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
 
@@ -250,6 +260,12 @@ export const App = () => {
 		// DEBUG: Log every keypress and current mode
 		console.error(`[KEY] "${event.name}" | mode=${mode._tag}`)
 
+		// Ctrl-C: Kill active editor popup (MUST be first - works in any state)
+		if (event.ctrl && event.name === "c") {
+			killActivePopup()
+			return
+		}
+
 		// Help overlay handling - dismiss on any key
 		if (showingHelp) {
 			dismissOverlay()
@@ -266,6 +282,11 @@ export const App = () => {
 
 		// Create prompt handling - CreateTaskPrompt handles its own keyboard input
 		if (showingCreate) {
+			return
+		}
+
+		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
+		if (showingClaudeCreate) {
 			return
 		}
 
@@ -550,6 +571,21 @@ export const App = () => {
 					exitToNormal()
 					break
 				}
+				case "D": {
+					// Delete bead entirely
+					if (selectedTask) {
+						deleteBead(selectedTask.id)
+							.then(() => {
+								refreshTasks()
+								showSuccess(`Deleted ${selectedTask.id}`)
+							})
+							.catch((error) => {
+								showError(`Failed to delete: ${error}`)
+							})
+					}
+					exitToNormal()
+					break
+				}
 			}
 		},
 		[
@@ -572,6 +608,7 @@ export const App = () => {
 			editBead,
 			createPR,
 			cleanup,
+			deleteBead,
 			exitToNormal,
 		],
 	)
@@ -766,6 +803,27 @@ export const App = () => {
 				case "c":
 					showCreate()
 					break
+				case "C":
+					showClaudeCreate()
+					break
+				case "E": {
+					// Create new bead via editor
+					createBeadViaEditor()
+						.then((result) => {
+							refreshTasks()
+							showSuccess(`Created ${result.id}`)
+						})
+						.catch((error: any) => {
+							const msg =
+								error && typeof error === "object" && error._tag === "ParseMarkdownError"
+									? `Invalid format: ${error.message}`
+									: error && typeof error === "object" && error._tag === "EditorError"
+										? `Editor error: ${error.message}`
+										: `Failed to create: ${error}`
+							showError(msg)
+						})
+					break
+				}
 				case "a":
 					toggleVCAutoPilot()
 						.then((status) => {
@@ -813,6 +871,9 @@ export const App = () => {
 			showHelp,
 			showDetail,
 			showCreate,
+			showClaudeCreate,
+			createBeadViaEditor,
+			refreshTasks,
 			selectedTask,
 			toggleVCAutoPilot,
 			refreshVCStatus,
@@ -939,6 +1000,25 @@ export const App = () => {
 							.catch((error) => {
 								dismissOverlay()
 								showError(`Failed to create task: ${error}`)
+							})
+					}}
+					onCancel={() => dismissOverlay()}
+				/>
+			)}
+
+			{/* Claude create prompt */}
+			{showingClaudeCreate && (
+				<ClaudeCreatePrompt
+					onSubmit={(description) => {
+						claudeCreateSession(description)
+							.then((sessionName: string) => {
+								dismissOverlay()
+								showSuccess(`Claude session started: ${sessionName}`)
+								showInfo(`Attach with: tmux attach -t ${sessionName}`)
+							})
+							.catch((error) => {
+								dismissOverlay()
+								showError(`Failed to start Claude session: ${error}`)
 							})
 					}}
 					onCancel={() => dismissOverlay()}

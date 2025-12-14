@@ -6,6 +6,7 @@ export type Overlay =
   | { readonly _tag: "help" }
   | { readonly _tag: "detail"; readonly taskId: string }
   | { readonly _tag: "create" }
+  | { readonly _tag: "claudeCreate" }
   | { readonly _tag: "settings" }
   | { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: Effect.Effect<void> }
 

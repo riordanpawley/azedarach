@@ -1,5 +1,7 @@
 # Refactoring App State to Atomic Effect Services
 
+> **Status: COMPLETE** - Implemented in PR #10 (az-vpz branch)
+
 ## Overview
 
 This is an alternative to the [Redux-like plan](./state-refactor-plan.md). Instead of a unified state tree with message passing, we use **atomic Effect services** where each domain owns its state via fine-grained `Ref`s.
