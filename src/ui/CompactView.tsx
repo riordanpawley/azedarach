@@ -50,6 +50,44 @@ function getStatusLabel(status: string): string {
 }
 
 /**
+ * Get short type label
+ */
+function getTypeLabel(type: string): string {
+	switch (type) {
+		case "task":
+			return "task"
+		case "bug":
+			return "bug "
+		case "feature":
+			return "feat"
+		case "epic":
+			return "epic"
+		case "chore":
+			return "chor"
+		default:
+			return type.slice(0, 4)
+	}
+}
+
+/**
+ * Get type color
+ */
+function getTypeColor(type: string): string {
+	switch (type) {
+		case "bug":
+			return theme.red
+		case "feature":
+			return theme.green
+		case "epic":
+			return theme.mauve
+		case "chore":
+			return theme.overlay0
+		default:
+			return theme.blue
+	}
+}
+
+/**
  * CompactRow - displays a single task as a compact row
  */
 interface CompactRowProps {
@@ -65,6 +103,8 @@ const CompactRow = (props: CompactRowProps) => {
 	const priorityLabel = `P${props.task.priority}`
 	const statusLabel = getStatusLabel(props.task.status)
 	const statusColor = getStatusColor(props.task.status)
+	const typeLabel = getTypeLabel(props.task.issue_type)
+	const typeColor = getTypeColor(props.task.issue_type)
 
 	// Background color based on selection state
 	const getBackgroundColor = () => {
@@ -74,7 +114,7 @@ const CompactRow = (props: CompactRowProps) => {
 	}
 
 	// Truncate title to fit in available space
-	const maxTitleLength = 50
+	const maxTitleLength = 45
 	const truncatedTitle =
 		props.task.title.length > maxTitleLength
 			? props.task.title.slice(0, maxTitleLength - 1) + "…"
@@ -96,6 +136,9 @@ const CompactRow = (props: CompactRowProps) => {
 
 			{/* Status */}
 			<text fg={statusColor}>{statusLabel}</text>
+
+			{/* Type */}
+			<text fg={typeColor}>{typeLabel}</text>
 
 			{/* Session indicator */}
 			<text>{indicator || " "}</text>
@@ -186,6 +229,7 @@ export const CompactView = (props: CompactViewProps) => {
 				{props.jumpLabels && <text fg={theme.overlay0}>{"  "}</text>}
 				<text fg={theme.overlay0}>Pri</text>
 				<text fg={theme.overlay0}>Stat</text>
+				<text fg={theme.overlay0}>Type</text>
 				<text fg={theme.overlay0}> </text>
 				<text fg={theme.overlay0}>ID</text>
 				<text fg={theme.overlay0}>{"       "}</text>
