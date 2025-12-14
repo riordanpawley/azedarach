@@ -1,11 +1,11 @@
 /**
  * NavigationService - Cursor navigation and focus management
  *
- * Manages keyboard navigation state using fine-grained Effect Refs.
+ * Manages keyboard navigation state using SubscriptionRef for reactive updates.
  * Provides methods for cursor movement, task jumping, and follow mode.
  */
 
-import { Effect, Ref } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Types
@@ -32,25 +32,14 @@ export class NavigationService extends Effect.Service<NavigationService>()(
 	"NavigationService",
 	{
 		effect: Effect.gen(function* () {
-			// Fine-grained state refs
-			const columnIndex = yield* Ref.make(0)
-			const taskIndex = yield* Ref.make(0)
-			const focusedTaskId = yield* Ref.make<string | null>(null)
-			const followTaskId = yield* Ref.make<string | null>(null)
-
-			/**
-			 * Get current cursor position
-			 */
-			const getCursor = (): Effect.Effect<Cursor> =>
-				Effect.all({
-					columnIndex: Ref.get(columnIndex),
-					taskIndex: Ref.get(taskIndex),
-				})
+			// Single SubscriptionRef for cursor - enables reactive subscriptions
+			const cursor = yield* SubscriptionRef.make<Cursor>({ columnIndex: 0, taskIndex: 0 })
+			const focusedTaskId = yield* SubscriptionRef.make<string | null>(null)
+			const followTaskId = yield* SubscriptionRef.make<string | null>(null)
 
 			return {
-				// State refs (fine-grained for external subscription)
-				columnIndex,
-				taskIndex,
+				// Expose SubscriptionRefs for atom subscription
+				cursor,
 				focusedTaskId,
 				followTaskId,
 
@@ -61,22 +50,16 @@ export class NavigationService extends Effect.Service<NavigationService>()(
 				 * - left/right: Change column index and reset task index
 				 */
 				move: (direction: Direction): Effect.Effect<void> =>
-					Effect.gen(function* () {
+					SubscriptionRef.update(cursor, (c) => {
 						switch (direction) {
 							case "up":
-								yield* Ref.update(taskIndex, (i) => Math.max(0, i - 1))
-								break
+								return { ...c, taskIndex: Math.max(0, c.taskIndex - 1) }
 							case "down":
-								yield* Ref.update(taskIndex, (i) => i + 1) // Clamp in UI
-								break
+								return { ...c, taskIndex: c.taskIndex + 1 } // Clamp in UI
 							case "left":
-								yield* Ref.update(columnIndex, (i) => Math.max(0, i - 1))
-								yield* Ref.set(taskIndex, 0)
-								break
+								return { columnIndex: Math.max(0, c.columnIndex - 1), taskIndex: 0 }
 							case "right":
-								yield* Ref.update(columnIndex, (i) => i + 1) // Clamp in UI
-								yield* Ref.set(taskIndex, 0)
-								break
+								return { columnIndex: c.columnIndex + 1, taskIndex: 0 } // Clamp in UI
 						}
 					}),
 
@@ -84,9 +67,7 @@ export class NavigationService extends Effect.Service<NavigationService>()(
 				 * Jump to specific column and task position
 				 */
 				jumpTo: (column: number, task: number): Effect.Effect<void> =>
-					Effect.all([Ref.set(columnIndex, column), Ref.set(taskIndex, task)]).pipe(
-						Effect.asVoid,
-					),
+					SubscriptionRef.set(cursor, { columnIndex: column, taskIndex: task }),
 
 				/**
 				 * Jump to specific task by ID
@@ -96,7 +77,7 @@ export class NavigationService extends Effect.Service<NavigationService>()(
 				 * to scroll/highlight the task.
 				 */
 				jumpToTask: (taskId: string): Effect.Effect<void> =>
-					Ref.set(focusedTaskId, taskId),
+					SubscriptionRef.set(focusedTaskId, taskId),
 
 				/**
 				 * Jump to the end of the board
@@ -114,12 +95,12 @@ export class NavigationService extends Effect.Service<NavigationService>()(
 				 * that task as it moves between columns. Set to null to disable.
 				 */
 				setFollow: (taskId: string | null): Effect.Effect<void> =>
-					Ref.set(followTaskId, taskId),
+					SubscriptionRef.set(followTaskId, taskId),
 
 				/**
-				 * Get current cursor position
+				 * Get current cursor position (for non-reactive reads)
 				 */
-				getCursor,
+				getCursor: (): Effect.Effect<Cursor> => SubscriptionRef.get(cursor),
 			}
 		}),
 	},

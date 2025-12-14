@@ -5,7 +5,6 @@
  * Manages help, detail, create, and confirm overlays.
  */
 
-import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import { useCallback, useMemo } from "react"
 import { Effect } from "effect"
@@ -40,14 +39,10 @@ export type OverlayType =
  * ```
  */
 export function useOverlays() {
-	const currentOverlayResult = useAtomValue(currentOverlayAtom)
+	// currentOverlayAtom is now a derived plain value (not Result-wrapped)
+	const currentOverlay = useAtomValue(currentOverlayAtom)
 	const [, push] = useAtom(pushOverlayAtom, { mode: "promise" })
 	const [, pop] = useAtom(popOverlayAtom, { mode: "promise" })
-
-	// Unwrap Result with default (undefined = no overlay)
-	const currentOverlay = Result.isSuccess(currentOverlayResult)
-		? currentOverlayResult.value
-		: undefined
 
 	// Actions (memoized)
 	const actions = useMemo(

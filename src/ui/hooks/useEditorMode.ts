@@ -49,17 +49,16 @@ const DEFAULT_MODE = { _tag: "normal" } as const
  * ```
  */
 export function useEditorMode() {
-	// State (Result types)
+	// State - modeResult is Result-wrapped, derived atoms are plain values
 	const modeResult = useAtomValue(modeAtom)
-	const selectedIdsResult = useAtomValue(selectedIdsAtom)
-	const searchQueryResult = useAtomValue(searchQueryAtom)
-	const commandInputResult = useAtomValue(commandInputAtom)
 
-	// Unwrap Result types with defaults
+	// Derived atoms (selectedIdsAtom, etc.) now return plain values, not Result
+	const selectedIds = useAtomValue(selectedIdsAtom)
+	const searchQuery = useAtomValue(searchQueryAtom)
+	const commandInput = useAtomValue(commandInputAtom)
+
+	// Unwrap mode Result with default
 	const mode = Result.isSuccess(modeResult) ? modeResult.value : DEFAULT_MODE
-	const selectedIds = Result.isSuccess(selectedIdsResult) ? selectedIdsResult.value : []
-	const searchQuery = Result.isSuccess(searchQueryResult) ? searchQueryResult.value : ""
-	const commandInput = Result.isSuccess(commandInputResult) ? commandInputResult.value : ""
 
 	// Action atoms
 	const [, enterSelect] = useAtom(enterSelectAtom, { mode: "promise" })

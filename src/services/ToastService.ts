@@ -2,12 +2,12 @@
  * ToastService - Toast notification management with auto-expiration
  *
  * Manages toast notifications using Effect.Service pattern with:
- * - Fine-grained Refs for state management
+ * - SubscriptionRef for reactive toasts array
  * - Auto-expiration fiber for cleaning up expired toasts
  * - Methods for showing, dismissing, and clearing toasts
  */
 
-import { Effect, Ref } from "effect"
+import { Effect, Ref, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Types
@@ -26,8 +26,9 @@ export interface Toast {
 
 export class ToastService extends Effect.Service<ToastService>()("ToastService", {
 	scoped: Effect.gen(function* () {
-		// Initialize fine-grained refs
-		const toasts = yield* Ref.make<ReadonlyArray<Toast>>([])
+		// SubscriptionRef for reactive toasts array
+		const toasts = yield* SubscriptionRef.make<ReadonlyArray<Toast>>([])
+		// Config refs (don't need reactivity)
 		const duration = yield* Ref.make(5000)
 		const maxVisible = yield* Ref.make(3)
 
@@ -38,7 +39,7 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 					yield* Effect.sleep("100 millis")
 					const now = Date.now()
 					const durationMs = yield* Ref.get(duration)
-					yield* Ref.update(toasts, (ts) =>
+					yield* SubscriptionRef.update(toasts, (ts) =>
 						ts.filter((t) => now - t.createdAt < durationMs),
 					)
 				}),
@@ -46,7 +47,7 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 		)
 
 		return {
-			// State refs (fine-grained)
+			// Expose SubscriptionRef for atom subscription
 			toasts,
 			duration,
 			maxVisible,
@@ -61,14 +62,14 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 						createdAt: Date.now(),
 					}
 					const max = yield* Ref.get(maxVisible)
-					yield* Ref.update(toasts, (ts) => [...ts.slice(-(max - 1)), toast])
+					yield* SubscriptionRef.update(toasts, (ts) => [...ts.slice(-(max - 1)), toast])
 					return toast
 				}),
 
 			dismiss: (id: string) =>
-				Ref.update(toasts, (ts) => ts.filter((t) => t.id !== id)),
+				SubscriptionRef.update(toasts, (ts) => ts.filter((t) => t.id !== id)),
 
-			clear: () => Ref.set(toasts, []),
+			clear: () => SubscriptionRef.set(toasts, []),
 		}
 	}),
 }) {}

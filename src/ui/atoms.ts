@@ -3,9 +3,9 @@
  *
  * Uses effect-atom for reactive state management with Effect integration.
  */
-import { Atom } from "@effect-atom/atom"
+import { Atom, Result } from "@effect-atom/atom"
 import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer, pipe, Ref, Schedule, Stream, SubscriptionRef } from "effect"
+import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
 import { AppConfigLiveWithPlatform } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
@@ -426,108 +426,110 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 // ============================================================================
 
 /**
- * Editor mode atom - subscribes to ModeService state
+ * Editor mode atom - subscribes to ModeService mode changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
  * Usage: const mode = useAtomValue(modeAtom)
  */
-export const modeAtom = appRuntime.atom(
+export const modeAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const editor = yield* ModeService
-		return yield* editor.getMode()
+		return editor.mode
 	}),
-	{ initialValue: { _tag: "normal" } as const },
 )
 
 /**
- * Selected task IDs atom - derived from ModeService
+ * Selected task IDs atom - derived from modeAtom
  *
  * Usage: const selectedIds = useAtomValue(selectedIdsAtom)
  */
-export const selectedIdsAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const editor = yield* ModeService
-		return yield* editor.getSelectedIds()
-	}),
-	{ initialValue: [] },
-)
+export const selectedIdsAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return []
+	const mode = modeResult.value
+	return mode._tag === "select" ? mode.selectedIds : []
+})
 
 /**
- * Search query atom - derived from ModeService
+ * Search query atom - derived from modeAtom
  *
  * Usage: const searchQuery = useAtomValue(searchQueryAtom)
  */
-export const searchQueryAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const editor = yield* ModeService
-		return yield* editor.getSearchQuery()
-	}),
-	{ initialValue: "" },
-)
+export const searchQueryAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return ""
+	const mode = modeResult.value
+	return mode._tag === "search" ? mode.query : ""
+})
 
 /**
- * Command input atom - derived from ModeService
+ * Command input atom - derived from modeAtom
  *
  * Usage: const commandInput = useAtomValue(commandInputAtom)
  */
-export const commandInputAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const editor = yield* ModeService
-		return yield* editor.getCommandInput()
-	}),
-	{ initialValue: "" },
-)
+export const commandInputAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return ""
+	const mode = modeResult.value
+	return mode._tag === "command" ? mode.input : ""
+})
 
 /**
- * Navigation cursor atom - subscribes to NavigationService
+ * Navigation cursor atom - subscribes to NavigationService cursor changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
  * Usage: const cursor = useAtomValue(cursorAtom)
  */
-export const cursorAtom = appRuntime.atom(
+export const cursorAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
-		return yield* nav.getCursor()
+		return nav.cursor
 	}),
-	{ initialValue: { columnIndex: 0, taskIndex: 0 } },
 )
 
 /**
- * Toast notifications atom - subscribes to ToastService
+ * Toast notifications atom - subscribes to ToastService toasts changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
  * Usage: const toasts = useAtomValue(toastsAtom)
  */
-export const toastsAtom = appRuntime.atom(
+export const toastsAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const toast = yield* ToastService
-		return yield* Ref.get(toast.toasts)
+		return toast.toasts
 	}),
-	{ initialValue: [] },
 )
 
 /**
- * Overlay stack atom - subscribes to OverlayService
+ * Overlay stack atom - subscribes to OverlayService stack changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
  * Usage: const overlays = useAtomValue(overlaysAtom)
  */
-export const overlaysAtom = appRuntime.atom(
+export const overlaysAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const overlay = yield* OverlayService
-		return yield* Ref.get(overlay.stack)
+		return overlay.stack
 	}),
-	{ initialValue: [] },
 )
 
 /**
  * Current overlay atom - the top of the overlay stack
  *
+ * Derived from overlaysAtom for automatic reactivity.
+ *
  * Usage: const currentOverlay = useAtomValue(currentOverlayAtom)
  */
-export const currentOverlayAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const overlay = yield* OverlayService
-		return yield* overlay.current()
-	}),
-	{ initialValue: undefined },
-)
+export const currentOverlayAtom = Atom.readable((get) => {
+	const overlaysResult = get(overlaysAtom)
+	if (!Result.isSuccess(overlaysResult)) return undefined
+	const overlays = overlaysResult.value
+	return overlays.length > 0 ? overlays[overlays.length - 1] : undefined
+})
 
 // ============================================================================
 // Atomic Service Action Atoms
