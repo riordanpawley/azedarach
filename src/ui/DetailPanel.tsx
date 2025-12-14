@@ -55,6 +55,50 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		}
 	}
 
+	// Context % color based on health thresholds
+	// lavender (<70%), yellow (70-90%), red (>90%)
+	const getContextColor = (percent: number) => {
+		if (percent >= 90) return theme.red
+		if (percent >= 70) return theme.yellow
+		return theme.lavender
+	}
+
+	// Format session duration from start time
+	const formatDuration = (startedAt: string) => {
+		try {
+			const start = new Date(startedAt)
+			const now = new Date()
+			const diffMs = now.getTime() - start.getTime()
+			const diffMins = Math.floor(diffMs / 60000)
+			const hours = Math.floor(diffMins / 60)
+			const mins = diffMins % 60
+			if (hours > 0) {
+				return `${hours}h ${mins}m`
+			}
+			return `${mins}m`
+		} catch {
+			return "Unknown"
+		}
+	}
+
+	// Format token count with K suffix
+	const formatTokens = (tokens: number) => {
+		if (tokens >= 1000) {
+			return `${(tokens / 1000).toFixed(1)}K`
+		}
+		return tokens.toString()
+	}
+
+	// Check if session is active (not idle)
+	const isSessionActive = props.task.sessionState !== "idle"
+
+	// Check if we have any session metrics to display
+	const hasSessionMetrics =
+		isSessionActive &&
+		(props.task.contextPercent !== undefined ||
+			props.task.sessionStartedAt !== undefined ||
+			props.task.estimatedTokens !== undefined)
+
 	// Available actions based on task state
 	const availableActions = useMemo(() => {
 		const actions: string[] = []
@@ -176,6 +220,32 @@ export const DetailPanel = (props: DetailPanelProps) => {
 					<text fg={theme.subtext0}>{"Closed: " + formatDate(props.task.closed_at)}</text>
 				)}
 				<text> </text>
+
+				{/* Session Metrics - only when session is active */}
+				{hasSessionMetrics && (
+					<box flexDirection="column">
+						<text fg={theme.blue} attributes={ATTR_BOLD}>
+							{"Session Metrics:"}
+						</text>
+						<box flexDirection="row" gap={2}>
+							{props.task.contextPercent !== undefined && (
+								<text fg={getContextColor(props.task.contextPercent)}>
+									{"Context: " +
+										props.task.contextPercent +
+										"%" +
+										(props.task.contextPercent >= 90 ? " ⚠️" : "")}
+								</text>
+							)}
+							{props.task.sessionStartedAt !== undefined && (
+								<text fg={theme.text}>{"Duration: " + formatDuration(props.task.sessionStartedAt)}</text>
+							)}
+							{props.task.estimatedTokens !== undefined && (
+								<text fg={theme.text}>{"Tokens: " + formatTokens(props.task.estimatedTokens)}</text>
+							)}
+						</box>
+						<text> </text>
+					</box>
+				)}
 
 				{/* Available actions */}
 				<text fg={theme.blue} attributes={ATTR_BOLD}>
