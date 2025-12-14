@@ -39,12 +39,12 @@ export const TaskCard = (props: TaskCardProps) => {
 		return theme.lavender
 	}
 
-	// Border color: context health takes priority, then selection state
+	// Border color: selection takes priority, then context health
 	const getBorderColor = () => {
-		const healthColor = getContextHealthColor()
-		if (healthColor) return healthColor
 		if (props.isMultiSelected) return theme.mauve
 		if (props.isSelected) return theme.lavender
+		const healthColor = getContextHealthColor()
+		if (healthColor) return healthColor
 		return theme.surface1
 	}
 
