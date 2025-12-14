@@ -8,8 +8,8 @@
  * (src/services/EditorService.ts which handles editor modes in the UI)
  */
 
-import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Context, Data, Effect, Layer } from "effect"
+import { type CommandExecutor, FileSystem } from "@effect/platform"
+import { Data, Effect } from "effect"
 import type { Issue } from "./BeadsClient"
 import { BeadsClient } from "./BeadsClient"
 
@@ -64,7 +64,7 @@ export const killActivePopup = (): void => {
 					for (const pidStr of pids) {
 						const pid = parseInt(pidStr, 10)
 						// Don't kill ourselves!
-						if (!isNaN(pid) && pid > 0 && pid !== process.pid) {
+						if (!Number.isNaN(pid) && pid > 0 && pid !== process.pid) {
 							try {
 								process.kill(pid, "SIGTERM")
 							} catch {
@@ -629,7 +629,7 @@ const parseMarkdownToNewBead = (
 					const estimateValue = extractFieldValue(line, "Estimate")
 					if (estimateValue) {
 						const parsedEstimate = parseInt(estimateValue, 10)
-						if (!isNaN(parsedEstimate)) {
+						if (!Number.isNaN(parsedEstimate)) {
 							fields.estimate = parsedEstimate
 						}
 					}
@@ -687,156 +687,123 @@ const parseMarkdownToNewBead = (
  * }).pipe(Effect.provide(BeadEditorService.Default))
  * ```
  */
-export class BeadEditorService extends Effect.Service<BeadEditorService>()(
-	"BeadEditorService",
-	{
-		dependencies: [BeadsClient.Default],
-		effect: Effect.gen(function* () {
-			return {
-				editBead: (bead: Issue) =>
-					Effect.gen(function* () {
-				const client = yield* BeadsClient
-				const fs = yield* FileSystem.FileSystem
+export class BeadEditorService extends Effect.Service<BeadEditorService>()("BeadEditorService", {
+	dependencies: [BeadsClient.Default],
+	effect: Effect.gen(function* () {
+		const client = yield* BeadsClient
+		return {
+			editBead: (bead: Issue) =>
+				Effect.gen(function* () {
+					const fs = yield* FileSystem.FileSystem
 
-				// 1. Serialize to markdown
-				const markdown = serializeBeadToMarkdown(bead)
+					// 1. Serialize to markdown
+					const markdown = serializeBeadToMarkdown(bead)
 
-				// 2. Write to temp file
-				const tempFile = `/tmp/azedarach-${bead.id}.md`
-				yield* fs.writeFileString(tempFile, markdown).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to write temp file: ${error}`,
-							}),
-					),
-				)
-
-				// 3. Get $EDITOR from environment (default to vim)
-				const editor = process.env.EDITOR || "vim"
-
-				// 4. Open editor in tmux popup with synchronization
-				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
-				// 1. Create popup that signals a channel when done
-				// 2. Wait on that channel
-				const channel = `az-editor-${Date.now()}`
-
-				// Track state for cleanup on SIGINT
-				activeEditorState = { channel, tempFile }
-
-				// Launch popup - when editor exits, it signals the channel
-				Bun.spawnSync(
-					[
-						"tmux",
-						"display-popup",
-						"-E", // Close popup when command exits
-						"-w",
-						"90%",
-						"-h",
-						"90%",
-						"-T",
-						` Edit: ${bead.id} `,
-						"--",
-						"sh",
-						"-c",
-						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
-					],
-					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
-				)
-
-				// Block until the channel is signaled (editor closed)
-				Bun.spawnSync(["tmux", "wait-for", channel], {
-					stdin: "inherit",
-					stdout: "inherit",
-					stderr: "inherit",
-				})
-
-				activeEditorState = null
-
-				// 5. Read edited content
-				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to read edited file: ${error}`,
-							}),
-					),
-				)
-
-				// 6. Parse changes
-				const updates = yield* parseMarkdownToBead(editedMarkdown, bead)
-
-				// 7. Apply updates
-				const hasChanges = Object.keys(updates).length > 0
-				if (!hasChanges) {
-					// No changes - just return
-					return
-				}
-
-				// 8. Handle type change specially (requires delete+create)
-				if (updates.type) {
-					// TODO: Implement type change (delete old, create new, preserve deps)
-					// For now, just throw an error
-					yield* Effect.fail(
-						new EditorError({
-							message: "Type changes not yet implemented. Please use bd CLI directly.",
-						}),
+					// 2. Write to temp file
+					const tempFile = `/tmp/azedarach-${bead.id}.md`
+					yield* fs.writeFileString(tempFile, markdown).pipe(
+						Effect.mapError(
+							(error) =>
+								new EditorError({
+									message: `Failed to write temp file: ${error}`,
+								}),
+						),
 					)
-				}
 
-				// 9. Apply updates via bd update
-				// bd update supports these flags:
-				const updateArgs: {
-					status?: string
-					notes?: string
-					priority?: number
-					title?: string
-					description?: string
-					design?: string
-					acceptance?: string
-					assignee?: string
-					estimate?: number
-				} = {}
+					// 3. Get $EDITOR from environment (default to vim)
+					const editor = process.env.EDITOR || "vim"
 
-				if (updates.status) updateArgs.status = updates.status
-				if (updates.notes) updateArgs.notes = updates.notes
-				if (updates.priority !== undefined) updateArgs.priority = updates.priority
-				if (updates.title) updateArgs.title = updates.title
-				if (updates.description) updateArgs.description = updates.description
-				if (updates.design) updateArgs.design = updates.design
-				if (updates.acceptance) updateArgs.acceptance = updates.acceptance
-				if (updates.assignee !== undefined) updateArgs.assignee = updates.assignee
-				if (updates.estimate !== undefined) updateArgs.estimate = updates.estimate
+					// 4. Open editor in tmux popup with synchronization
+					// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+					// 1. Create popup that signals a channel when done
+					// 2. Wait on that channel
+					const channel = `az-editor-${Date.now()}`
 
-				// Build bd update command args
-				const args: string[] = ["update", bead.id]
-				if (updateArgs.status) args.push("--status", updateArgs.status)
-				if (updateArgs.priority !== undefined) args.push("--priority", String(updateArgs.priority))
-				if (updateArgs.title) args.push("--title", updateArgs.title)
-				if (updateArgs.description) args.push("--description", updateArgs.description)
-				if (updateArgs.design) args.push("--design", updateArgs.design)
-				if (updateArgs.notes) args.push("--notes", updateArgs.notes)
-				if (updateArgs.acceptance) args.push("--acceptance", updateArgs.acceptance)
-				if (updateArgs.assignee) args.push("--assignee", updateArgs.assignee)
-				if (updateArgs.estimate !== undefined) args.push("--estimate", String(updateArgs.estimate))
+					// Track state for cleanup on SIGINT
+					activeEditorState = { channel, tempFile }
 
-				// Handle labels separately (--set-labels)
-				if (updates.labels) {
-					updates.labels.forEach((label) => {
-						args.push("--set-labels", label)
+					// Launch popup - when editor exits, it signals the channel
+					Bun.spawnSync(
+						[
+							"tmux",
+							"display-popup",
+							"-E", // Close popup when command exits
+							"-w",
+							"90%",
+							"-h",
+							"90%",
+							"-T",
+							` Edit: ${bead.id} `,
+							"--",
+							"sh",
+							"-c",
+							`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+						],
+						{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+					)
+
+					// Block until the channel is signaled (editor closed)
+					Bun.spawnSync(["tmux", "wait-for", channel], {
+						stdin: "inherit",
+						stdout: "inherit",
+						stderr: "inherit",
 					})
-				}
 
-				// Execute bd update
-				const updateCommand = Command.make("bd", ...args)
-				yield* Command.exitCode(updateCommand).pipe(
-					Effect.mapError(
-						(error) =>
+					activeEditorState = null
+
+					// 5. Read edited content
+					const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
+						Effect.mapError(
+							(error) =>
+								new EditorError({
+									message: `Failed to read edited file: ${error}`,
+								}),
+						),
+					)
+
+					// 6. Parse changes
+					const updates = yield* parseMarkdownToBead(editedMarkdown, bead)
+
+					// 7. Apply updates
+					const hasChanges = Object.keys(updates).length > 0
+					if (!hasChanges) {
+						// No changes - just return
+						return
+					}
+
+					// 8. Handle type change specially (requires delete+create)
+					if (updates.type) {
+						// TODO: Implement type change (delete old, create new, preserve deps)
+						// For now, just throw an error
+						yield* Effect.fail(
 							new EditorError({
-								message: `Failed to update bead: ${error}`,
+								message: "Type changes not yet implemented. Please use bd CLI directly.",
 							}),
-					),
-				)
+						)
+					}
+
+					// 9. Apply updates via BeadsClient
+					yield* client
+						.update(bead.id, {
+							status: updates.status,
+							notes: updates.notes,
+							priority: updates.priority,
+							title: updates.title,
+							description: updates.description,
+							design: updates.design,
+							acceptance: updates.acceptance,
+							assignee: updates.assignee,
+							estimate: updates.estimate,
+							labels: updates.labels,
+						})
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to update bead: ${error.message}`,
+									}),
+							),
+						)
 
 					// Clean up temp file
 					yield* Effect.ignoreLogged(
@@ -851,161 +818,138 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 					)
 				}),
 
-				createBead: () =>
-					Effect.gen(function* () {
-						const client = yield* BeadsClient
-						const fs = yield* FileSystem.FileSystem
+			createBead: () =>
+				Effect.gen(function* () {
+					const fs = yield* FileSystem.FileSystem
 
-						// 1. Create blank template
-						const markdown = createBlankBeadTemplate()
+					// 1. Create blank template
+					const markdown = createBlankBeadTemplate()
 
-						// 2. Write to temp file
-						const tempFile = `/tmp/azedarach-new.md`
-						yield* fs.writeFileString(tempFile, markdown).pipe(
-							Effect.mapError(
-								(error) =>
-									new EditorError({
-										message: `Failed to write temp file: ${error}`,
-									}),
-							),
-						)
-
-						// 3. Get $EDITOR from environment (default to vim)
-						const editor = process.env.EDITOR || "vim"
-
-						// 4. Open editor in tmux popup with synchronization
-						// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
-						// 1. Create popup that signals a channel when done
-						// 2. Wait on that channel
-						const channel = `az-editor-${Date.now()}`
-
-						// Track state for cleanup on SIGINT
-						activeEditorState = { channel, tempFile }
-
-						// Launch popup - when editor exits, it signals the channel
-						Bun.spawnSync(
-							[
-								"tmux",
-								"display-popup",
-								"-E", // Close popup when command exits
-								"-w",
-								"90%",
-								"-h",
-								"90%",
-								"-T",
-								" Create New Bead ",
-								"--",
-								"sh",
-								"-c",
-								`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
-							],
-							{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
-						)
-
-						// Block until the channel is signaled (editor closed)
-						Bun.spawnSync(["tmux", "wait-for", channel], {
-							stdin: "inherit",
-							stdout: "inherit",
-							stderr: "inherit",
-						})
-
-						activeEditorState = null
-
-						// 5. Read edited content
-						const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
-							Effect.mapError(
-								(error) =>
-									new EditorError({
-										message: `Failed to read edited file: ${error}`,
-									}),
-							),
-						)
-
-						// 6. Parse new bead fields
-						const fields = yield* parseMarkdownToNewBead(editedMarkdown)
-
-						// 7. Create bead via bd create
-						// Note: bd create doesn't support --status or --notes, those require a follow-up update
-						const createArgs: string[] = ["create", "--title", fields.title, "--type", fields.type]
-
-						if (fields.priority !== undefined) createArgs.push("--priority", String(fields.priority))
-						if (fields.description) createArgs.push("--description", fields.description)
-						if (fields.design) createArgs.push("--design", fields.design)
-						if (fields.acceptance) createArgs.push("--acceptance", fields.acceptance)
-						if (fields.assignee) createArgs.push("--assignee", fields.assignee)
-						if (fields.estimate !== undefined) createArgs.push("--estimate", String(fields.estimate))
-
-						// Handle labels (bd create uses -l/--labels, not --set-labels)
-						if (fields.labels && fields.labels.length > 0) {
-							createArgs.push("--labels", fields.labels.join(","))
-						}
-
-						// Execute bd create and capture output to get the ID
-						const createCommand = Command.make("bd", ...createArgs)
-						const output = yield* Command.string(createCommand).pipe(
-							Effect.mapError(
-								(error) =>
-									new EditorError({
-										message: `Failed to create bead: ${error}`,
-									}),
-							),
-						)
-
-						// Parse the ID from output (bd create returns "Created issue: {id}")
-						const idMatch = output.match(/Created\s+(?:issue:\s+)?([A-Z]+-[a-z0-9]+)/i)
-						if (!idMatch || !idMatch[1]) {
-							return yield* Effect.fail(
+					// 2. Write to temp file
+					const tempFile = `/tmp/azedarach-new.md`
+					yield* fs.writeFileString(tempFile, markdown).pipe(
+						Effect.mapError(
+							(error) =>
 								new EditorError({
-									message: `Failed to parse created bead ID from output: ${output}`,
+									message: `Failed to write temp file: ${error}`,
 								}),
-							)
-						}
+						),
+					)
 
-						const createdId = idMatch[1]
+					// 3. Get $EDITOR from environment (default to vim)
+					const editor = process.env.EDITOR || "vim"
 
-						// 8. If status or notes were set, update the bead (bd create doesn't support these)
-						const needsUpdate =
-							(fields.status && fields.status !== "open") || fields.notes
-						if (needsUpdate) {
-							const updateArgs: string[] = ["update", createdId]
-							if (fields.status && fields.status !== "open") {
-								updateArgs.push("--status", fields.status)
-							}
-							if (fields.notes) {
-								updateArgs.push("--notes", fields.notes)
-							}
-							const updateCommand = Command.make("bd", ...updateArgs)
-							yield* Command.exitCode(updateCommand).pipe(
-								Effect.mapError(
-									(error) =>
-										new EditorError({
-											message: `Failed to update bead status/notes: ${error}`,
-										}),
-								),
-							)
-						}
+					// 4. Open editor in tmux popup with synchronization
+					// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+					// 1. Create popup that signals a channel when done
+					// 2. Wait on that channel
+					const channel = `az-editor-${Date.now()}`
 
-						// 9. Clean up temp file
-						yield* Effect.ignoreLogged(
-							fs.remove(tempFile).pipe(
-								Effect.mapError(
-									(error) =>
-										new EditorError({
-											message: `Failed to remove temp file: ${error}`,
-										}),
-								),
+					// Track state for cleanup on SIGINT
+					activeEditorState = { channel, tempFile }
+
+					// Launch popup - when editor exits, it signals the channel
+					Bun.spawnSync(
+						[
+							"tmux",
+							"display-popup",
+							"-E", // Close popup when command exits
+							"-w",
+							"90%",
+							"-h",
+							"90%",
+							"-T",
+							" Create New Bead ",
+							"--",
+							"sh",
+							"-c",
+							`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+						],
+						{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+					)
+
+					// Block until the channel is signaled (editor closed)
+					Bun.spawnSync(["tmux", "wait-for", channel], {
+						stdin: "inherit",
+						stdout: "inherit",
+						stderr: "inherit",
+					})
+
+					activeEditorState = null
+
+					// 5. Read edited content
+					const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
+						Effect.mapError(
+							(error) =>
+								new EditorError({
+									message: `Failed to read edited file: ${error}`,
+								}),
+						),
+					)
+
+					// 6. Parse new bead fields
+					const fields = yield* parseMarkdownToNewBead(editedMarkdown)
+
+					// 7. Create bead via BeadsClient
+					const createdIssue = yield* client
+						.create({
+							title: fields.title,
+							type: fields.type,
+							priority: fields.priority,
+							description: fields.description,
+							design: fields.design,
+							acceptance: fields.acceptance,
+							assignee: fields.assignee,
+							estimate: fields.estimate,
+							labels: fields.labels,
+						})
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to create bead: ${error.message}`,
+									}),
 							),
 						)
 
-						return {
-							id: createdId,
-							title: fields.title,
-						}
-					}),
-			}
-		}),
-	},
-) {}
+					// 8. If status or notes were set, update the bead (bd create doesn't support these)
+					const needsUpdate = (fields.status && fields.status !== "open") || fields.notes
+					if (needsUpdate) {
+						yield* client
+							.update(createdIssue.id, {
+								status: fields.status !== "open" ? fields.status : undefined,
+								notes: fields.notes,
+							})
+							.pipe(
+								Effect.mapError(
+									(error) =>
+										new EditorError({
+											message: `Failed to update bead status/notes: ${error.message}`,
+										}),
+								),
+							)
+					}
+
+					// 9. Clean up temp file
+					yield* Effect.ignoreLogged(
+						fs.remove(tempFile).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to remove temp file: ${error}`,
+									}),
+							),
+						),
+					)
+
+					return {
+						id: createdIssue.id,
+						title: createdIssue.title,
+					}
+				}),
+		}
+	}),
+}) {}
 
 /**
  * Legacy alias for BeadEditorService

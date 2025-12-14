@@ -21,11 +21,7 @@ import {
 } from "./BeadsClient.js"
 import { type SessionError, SessionManager } from "./SessionManager.js"
 import type { TmuxError } from "./TmuxService.js"
-import {
-	GitError,
-	type NotAGitRepoError,
-	WorktreeManager,
-} from "./WorktreeManager.js"
+import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 
 // ============================================================================
 // Type Definitions
@@ -187,7 +183,6 @@ export interface PRWorkflowService {
 	readonly checkGHCLI: () => Effect.Effect<boolean, never, CommandExecutor.CommandExecutor>
 }
 
-
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
@@ -317,145 +312,141 @@ const parsePRJson = (json: string): PR => {
  * ```
  */
 export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
-	dependencies: [
-		WorktreeManager.Default,
-		BeadsClient.Default,
-		SessionManager.Default,
-	],
+	dependencies: [WorktreeManager.Default, BeadsClient.Default, SessionManager.Default],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
 
 		return {
-		createPR: (options: CreatePROptions) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath, draft = true, baseBranch = "main" } = options
+			createPR: (options: CreatePROptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, draft = true, baseBranch = "main" } = options
 
-				// Get bead info for PR title/body
-				const bead = yield* beadsClient.show(beadId)
+					// Get bead info for PR title/body
+					const bead = yield* beadsClient.show(beadId)
 
-				// Get worktree info
-				const worktree = yield* worktreeManager.get({ beadId, projectPath })
-				if (!worktree) {
-					return yield* Effect.fail(
-						new PRError({
-							message: `No worktree found for ${beadId}`,
-							beadId,
-						}),
-					)
-				}
-
-				// Sync beads changes
-				yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
-
-				// Stage and commit any changes
-				yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
-
-				yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
-					Effect.catchAll(() => Effect.void),
-				) // Ignore if nothing to commit
-
-				// Push branch to origin
-				yield* runGit(["push", "-u", "origin", beadId], worktree.path).pipe(
-					Effect.mapError(
-						(e) =>
-							new GitError({
-								message: `Failed to push branch: ${e.message}`,
-								command: "git push",
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
 							}),
-					),
-				)
+						)
+					}
 
-				// Generate PR title and body
-				const title = options.title ?? generatePRTitle(bead)
-				const body = options.body ?? generatePRBody(bead)
+					// Sync beads changes
+					yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
 
-				// Create PR via gh CLI
-				const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]
-				if (draft) {
-					ghArgs.push("--draft")
-				}
+					// Stage and commit any changes
+					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
 
-				const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
-					Effect.map((output) => output.trim()),
-				)
+					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
+						Effect.catchAll(() => Effect.void),
+					) // Ignore if nothing to commit
 
-				// Extract PR number from URL
-				const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
-				const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0
+					// Push branch to origin
+					yield* runGit(["push", "-u", "origin", beadId], worktree.path).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to push branch: ${e.message}`,
+									command: "git push",
+								}),
+						),
+					)
 
-				// Link PR back to bead
-				yield* beadsClient
-					.update(beadId, {
-						notes: `PR: ${prUrl}`,
-					})
-					.pipe(Effect.catchAll(() => Effect.void))
+					// Generate PR title and body
+					const title = options.title ?? generatePRTitle(bead)
+					const body = options.body ?? generatePRBody(bead)
 
-				return {
-					number: prNumber,
-					url: prUrl,
-					title,
-					state: "open" as const,
-					draft,
-					branch: beadId,
-				}
-			}),
+					// Create PR via gh CLI
+					const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]
+					if (draft) {
+						ghArgs.push("--draft")
+					}
 
-		getPR: (options: { beadId: string; projectPath: string }) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath } = options
+					const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
+						Effect.map((output) => output.trim()),
+					)
 
-				// Try to get PR info for the branch
-				const result = yield* runGH(
-					["pr", "view", beadId, "--json", "number,url,title,state,isDraft,headRefName"],
-					projectPath,
-				).pipe(
-					Effect.map((output) => Option.some(parsePRJson(output))),
-					Effect.catchAll(() => Effect.succeed(Option.none<PR>())),
-				)
+					// Extract PR number from URL
+					const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
+					const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0
 
-				return result
-			}),
+					// Link PR back to bead
+					yield* beadsClient
+						.update(beadId, {
+							notes: `PR: ${prUrl}`,
+						})
+						.pipe(Effect.catchAll(() => Effect.void))
 
-		cleanup: (options: CleanupOptions) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
+					return {
+						number: prNumber,
+						url: prUrl,
+						title,
+						state: "open" as const,
+						draft,
+						branch: beadId,
+					}
+				}),
 
-				// 1. Stop any running session (ignore errors)
-				yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+			getPR: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
 
-				// 2. Delete worktree
-				yield* worktreeManager.remove({ beadId, projectPath })
+					// Try to get PR info for the branch
+					const result = yield* runGH(
+						["pr", "view", beadId, "--json", "number,url,title,state,isDraft,headRefName"],
+						projectPath,
+					).pipe(
+						Effect.map((output) => Option.some(parsePRJson(output))),
+						Effect.catchAll(() => Effect.succeed(Option.none<PR>())),
+					)
 
-				// 3. Delete remote branch (optional)
-				if (deleteRemoteBranch) {
-					yield* runGit(["push", "origin", "--delete", beadId], projectPath).pipe(
+					return result
+				}),
+
+			cleanup: (options: CleanupOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
+
+					// 1. Stop any running session (ignore errors)
+					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+
+					// 2. Delete worktree
+					yield* worktreeManager.remove({ beadId, projectPath })
+
+					// 3. Delete remote branch (optional)
+					if (deleteRemoteBranch) {
+						yield* runGit(["push", "origin", "--delete", beadId], projectPath).pipe(
+							Effect.catchAll(() => Effect.void), // Ignore if already deleted
+						)
+					}
+
+					// 4. Delete local branch
+					yield* runGit(["branch", "-D", beadId], projectPath).pipe(
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
-				}
 
-				// 4. Delete local branch
-				yield* runGit(["branch", "-D", beadId], projectPath).pipe(
-					Effect.catchAll(() => Effect.void), // Ignore if already deleted
-				)
+					// 5. Close bead issue (optional)
+					if (closeBead) {
+						yield* beadsClient
+							.update(beadId, { status: "closed" })
+							.pipe(Effect.catchAll(() => Effect.void))
+					}
+				}),
 
-				// 5. Close bead issue (optional)
-				if (closeBead) {
-					yield* beadsClient
-						.update(beadId, { status: "closed" })
-						.pipe(Effect.catchAll(() => Effect.void))
-				}
-			}),
-
-		checkGHCLI: () =>
-			Effect.gen(function* () {
-				const command = Command.make("gh", "auth", "status")
-				const exitCode = yield* Command.exitCode(command).pipe(
-					Effect.catchAll(() => Effect.succeed(1)),
-				)
-				return exitCode === 0
-			}),
+			checkGHCLI: () =>
+				Effect.gen(function* () {
+					const command = Command.make("gh", "auth", "status")
+					const exitCode = yield* Command.exitCode(command).pipe(
+						Effect.catchAll(() => Effect.succeed(1)),
+					)
+					return exitCode === 0
+				}),
 		}
 	}),
 }) {}

@@ -6,8 +6,8 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunCommandExecutor, BunContext, BunRuntime } from "@effect/platform-bun"
-import { Context, Data, Effect, Layer } from "effect"
+import { BunContext } from "@effect/platform-bun"
+import { Data, Effect } from "effect"
 import * as Schema from "effect/Schema"
 
 // ============================================================================
@@ -124,7 +124,8 @@ export interface BeadsClientService {
 	 * ```ts
 	 * BeadsClient.update("az-05y", {
 	 *   status: "in_progress",
-	 *   notes: "Started working on this"
+	 *   notes: "Started working on this",
+	 *   title: "Updated title"
 	 * })
 	 * ```
 	 */
@@ -134,6 +135,13 @@ export interface BeadsClientService {
 			status?: string
 			notes?: string
 			priority?: number
+			title?: string
+			description?: string
+			design?: string
+			acceptance?: string
+			assignee?: string
+			estimate?: number
+			labels?: string[]
 		},
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
@@ -198,7 +206,8 @@ export interface BeadsClientService {
 	 * BeadsClient.create({
 	 *   title: "Implement feature X",
 	 *   type: "task",
-	 *   priority: 2
+	 *   priority: 2,
+	 *   design: "Use existing auth patterns"
 	 * })
 	 * ```
 	 */
@@ -207,6 +216,11 @@ export interface BeadsClientService {
 		type?: string
 		priority?: number
 		description?: string
+		design?: string
+		acceptance?: string
+		assignee?: string
+		estimate?: number
+		labels?: string[]
 	}) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -217,11 +231,8 @@ export interface BeadsClientService {
 	 * BeadsClient.delete("az-05y")
 	 * ```
 	 */
-	readonly delete: (
-		id: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	readonly delete: (id: string) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 }
-
 
 // ============================================================================
 // Implementation Helpers
@@ -337,11 +348,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 	dependencies: [BunContext.layer],
 	effect: Effect.gen(function* () {
 		return {
-			list: (filters?: {
-				status?: string
-				priority?: number
-				type?: string
-			}) =>
+			list: (filters?: { status?: string; priority?: number; type?: string }) =>
 				Effect.gen(function* () {
 					const args: string[] = ["list"]
 
@@ -387,6 +394,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					status?: string
 					notes?: string
 					priority?: number
+					title?: string
+					description?: string
+					design?: string
+					acceptance?: string
+					assignee?: string
+					estimate?: number
+					labels?: string[]
 				},
 			) =>
 				Effect.gen(function* () {
@@ -400,6 +414,30 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 					if (fields.priority !== undefined) {
 						args.push("--priority", String(fields.priority))
+					}
+					if (fields.title) {
+						args.push("--title", fields.title)
+					}
+					if (fields.description) {
+						args.push("--description", fields.description)
+					}
+					if (fields.design) {
+						args.push("--design", fields.design)
+					}
+					if (fields.acceptance) {
+						args.push("--acceptance", fields.acceptance)
+					}
+					if (fields.assignee !== undefined) {
+						args.push("--assignee", fields.assignee)
+					}
+					if (fields.estimate !== undefined) {
+						args.push("--estimate", String(fields.estimate))
+					}
+					if (fields.labels && fields.labels.length > 0) {
+						// bd update uses --set-labels for each label
+						for (const label of fields.labels) {
+							args.push("--set-labels", label)
+						}
 					}
 
 					yield* runBd(args)
@@ -445,6 +483,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				type?: string
 				priority?: number
 				description?: string
+				design?: string
+				acceptance?: string
+				assignee?: string
+				estimate?: number
+				labels?: string[]
 			}) =>
 				Effect.gen(function* () {
 					const args: string[] = ["create", params.title]
@@ -457,6 +500,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 					if (params.description) {
 						args.push("--description", params.description)
+					}
+					if (params.design) {
+						args.push("--design", params.design)
+					}
+					if (params.acceptance) {
+						args.push("--acceptance", params.acceptance)
+					}
+					if (params.assignee) {
+						args.push("--assignee", params.assignee)
+					}
+					if (params.estimate !== undefined) {
+						args.push("--estimate", String(params.estimate))
+					}
+					if (params.labels && params.labels.length > 0) {
+						// bd create uses --labels with comma-separated values
+						args.push("--labels", params.labels.join(","))
 					}
 
 					const output = yield* runBd(args)
@@ -531,6 +590,13 @@ export const update = (
 		status?: string
 		notes?: string
 		priority?: number
+		title?: string
+		description?: string
+		design?: string
+		acceptance?: string
+		assignee?: string
+		estimate?: number
+		labels?: string[]
 	},
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.update(id, fields))
@@ -580,6 +646,11 @@ export const create = (params: {
 	type?: string
 	priority?: number
 	description?: string
+	design?: string
+	acceptance?: string
+	assignee?: string
+	estimate?: number
+	labels?: string[]
 }): Effect.Effect<Issue, BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.create(params))
 

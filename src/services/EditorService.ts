@@ -6,9 +6,9 @@ import { Effect, SubscriptionRef } from "effect"
  * Jump target for goto mode
  */
 export interface JumpTarget {
-  readonly taskId: string
-  readonly columnIndex: number
-  readonly taskIndex: number
+	readonly taskId: string
+	readonly columnIndex: number
+	readonly taskIndex: number
 }
 
 /**
@@ -34,164 +34,166 @@ export type GotoSubMode = "pending" | "jump"
  * - command: VC command input mode triggered by ':'
  */
 export type EditorMode =
-  | { readonly _tag: "normal" }
-  | { readonly _tag: "select"; readonly selectedIds: ReadonlyArray<string> }
-  | {
-      readonly _tag: "goto"
-      readonly gotoSubMode: GotoSubMode
-      readonly jumpLabels: ReadonlyMap<string, JumpTarget> | null
-      readonly pendingJumpKey: string | null
-    }
-  | { readonly _tag: "action" }
-  | { readonly _tag: "search"; readonly query: string }
-  | { readonly _tag: "command"; readonly input: string }
+	| { readonly _tag: "normal" }
+	| { readonly _tag: "select"; readonly selectedIds: ReadonlyArray<string> }
+	| {
+			readonly _tag: "goto"
+			readonly gotoSubMode: GotoSubMode
+			readonly jumpLabels: ReadonlyMap<string, JumpTarget> | null
+			readonly pendingJumpKey: string | null
+	  }
+	| { readonly _tag: "action" }
+	| { readonly _tag: "search"; readonly query: string }
+	| { readonly _tag: "command"; readonly input: string }
 
 export class EditorService extends Effect.Service<EditorService>()("EditorService", {
-  effect: Effect.gen(function* () {
-    const mode = yield* SubscriptionRef.make<EditorMode>({ _tag: "normal" })
+	effect: Effect.gen(function* () {
+		const mode = yield* SubscriptionRef.make<EditorMode>({ _tag: "normal" })
 
-    return {
-      // Expose SubscriptionRef for atom subscription
-      mode,
+		return {
+			// Expose SubscriptionRef for atom subscription
+			mode,
 
-      // ========================================================================
-      // Mode Getters
-      // ========================================================================
+			// ========================================================================
+			// Mode Getters
+			// ========================================================================
 
-      getMode: () => SubscriptionRef.get(mode),
+			getMode: () => SubscriptionRef.get(mode),
 
-      /**
-       * Get currently selected task IDs (only in select mode)
-       */
-      getSelectedIds: (): Effect.Effect<ReadonlyArray<string>> =>
-        Effect.gen(function* () {
-          const m = yield* SubscriptionRef.get(mode)
-          return m._tag === "select" ? m.selectedIds : []
-        }),
+			/**
+			 * Get currently selected task IDs (only in select mode)
+			 */
+			getSelectedIds: (): Effect.Effect<ReadonlyArray<string>> =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					return m._tag === "select" ? m.selectedIds : []
+				}),
 
-      /**
-       * Get current search query (only in search mode or normal mode with active filter)
-       */
-      getSearchQuery: (): Effect.Effect<string> =>
-        Effect.gen(function* () {
-          const m = yield* SubscriptionRef.get(mode)
-          return m._tag === "search" ? m.query : ""
-        }),
+			/**
+			 * Get current search query (only in search mode or normal mode with active filter)
+			 */
+			getSearchQuery: (): Effect.Effect<string> =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					return m._tag === "search" ? m.query : ""
+				}),
 
-      /**
-       * Get current command input (only in command mode)
-       */
-      getCommandInput: (): Effect.Effect<string> =>
-        Effect.gen(function* () {
-          const m = yield* SubscriptionRef.get(mode)
-          return m._tag === "command" ? m.input : ""
-        }),
+			/**
+			 * Get current command input (only in command mode)
+			 */
+			getCommandInput: (): Effect.Effect<string> =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					return m._tag === "command" ? m.input : ""
+				}),
 
-      // ========================================================================
-      // Normal Mode
-      // ========================================================================
+			// ========================================================================
+			// Normal Mode
+			// ========================================================================
 
-      exitToNormal: () => SubscriptionRef.set(mode, { _tag: "normal" }),
+			exitToNormal: () => SubscriptionRef.set(mode, { _tag: "normal" }),
 
-      // ========================================================================
-      // Select Mode
-      // ========================================================================
+			// ========================================================================
+			// Select Mode
+			// ========================================================================
 
-      enterSelect: () => SubscriptionRef.set(mode, { _tag: "select", selectedIds: [] }),
+			enterSelect: () => SubscriptionRef.set(mode, { _tag: "select", selectedIds: [] }),
 
-      exitSelect: (clearSelections = false): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const m = yield* SubscriptionRef.get(mode)
-          if (m._tag !== "select") {
-            yield* SubscriptionRef.set(mode, { _tag: "normal" })
-            return
-          }
-          // If clearSelections is false, preserve selectedIds by re-entering select mode
-          // This matches the editorFSM behavior where selections can persist
-          if (clearSelections) {
-            yield* SubscriptionRef.set(mode, { _tag: "normal" })
-          } else {
-            yield* SubscriptionRef.set(mode, { _tag: "select", selectedIds: m.selectedIds })
-          }
-        }),
+			exitSelect: (clearSelections = false): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					if (m._tag !== "select") {
+						yield* SubscriptionRef.set(mode, { _tag: "normal" })
+						return
+					}
+					// If clearSelections is false, preserve selectedIds by re-entering select mode
+					// This matches the editorFSM behavior where selections can persist
+					if (clearSelections) {
+						yield* SubscriptionRef.set(mode, { _tag: "normal" })
+					} else {
+						yield* SubscriptionRef.set(mode, { _tag: "select", selectedIds: m.selectedIds })
+					}
+				}),
 
-      toggleSelection: (taskId: string) =>
-        SubscriptionRef.update(mode, (m): EditorMode => {
-          if (m._tag !== "select") return m
-          const has = m.selectedIds.includes(taskId)
-          return {
-            _tag: "select" as const,
-            selectedIds: has
-              ? m.selectedIds.filter((id) => id !== taskId)
-              : [...m.selectedIds, taskId],
-          }
-        }),
+			toggleSelection: (taskId: string) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "select") return m
+					const has = m.selectedIds.includes(taskId)
+					return {
+						_tag: "select" as const,
+						selectedIds: has
+							? m.selectedIds.filter((id) => id !== taskId)
+							: [...m.selectedIds, taskId],
+					}
+				}),
 
-      // ========================================================================
-      // Goto Mode
-      // ========================================================================
+			// ========================================================================
+			// Goto Mode
+			// ========================================================================
 
-      enterGoto: () =>
-        SubscriptionRef.set(mode, {
-          _tag: "goto",
-          gotoSubMode: "pending",
-          jumpLabels: null,
-          pendingJumpKey: null,
-        }),
+			enterGoto: () =>
+				SubscriptionRef.set(mode, {
+					_tag: "goto",
+					gotoSubMode: "pending",
+					jumpLabels: null,
+					pendingJumpKey: null,
+				}),
 
-      enterJump: (labels: Map<string, JumpTarget>) =>
-        SubscriptionRef.set(mode, {
-          _tag: "goto",
-          gotoSubMode: "jump",
-          jumpLabels: labels,
-          pendingJumpKey: null,
-        }),
+			enterJump: (labels: Map<string, JumpTarget>) =>
+				SubscriptionRef.set(mode, {
+					_tag: "goto",
+					gotoSubMode: "jump",
+					jumpLabels: labels,
+					pendingJumpKey: null,
+				}),
 
-      setPendingJumpKey: (key: string) =>
-        SubscriptionRef.update(mode, (m): EditorMode => {
-          if (m._tag !== "goto") return m
-          return { ...m, pendingJumpKey: key }
-        }),
+			setPendingJumpKey: (key: string) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "goto") return m
+					return { ...m, pendingJumpKey: key }
+				}),
 
-      // ========================================================================
-      // Action Mode
-      // ========================================================================
+			// ========================================================================
+			// Action Mode
+			// ========================================================================
 
-      enterAction: () => SubscriptionRef.set(mode, { _tag: "action" }),
+			enterAction: () => SubscriptionRef.set(mode, { _tag: "action" }),
 
-      // ========================================================================
-      // Search Mode
-      // ========================================================================
+			// ========================================================================
+			// Search Mode
+			// ========================================================================
 
-      enterSearch: () => SubscriptionRef.set(mode, { _tag: "search", query: "" }),
+			enterSearch: () => SubscriptionRef.set(mode, { _tag: "search", query: "" }),
 
-      updateSearch: (query: string) =>
-        SubscriptionRef.update(mode, (m): EditorMode =>
-          m._tag === "search" ? { ...m, query } : m
-        ),
+			updateSearch: (query: string) =>
+				SubscriptionRef.update(
+					mode,
+					(m): EditorMode => (m._tag === "search" ? { ...m, query } : m),
+				),
 
-      clearSearch: () => SubscriptionRef.set(mode, { _tag: "normal" }),
+			clearSearch: () => SubscriptionRef.set(mode, { _tag: "normal" }),
 
-      // ========================================================================
-      // Command Mode
-      // ========================================================================
+			// ========================================================================
+			// Command Mode
+			// ========================================================================
 
-      enterCommand: () => SubscriptionRef.set(mode, { _tag: "command", input: "" }),
+			enterCommand: () => SubscriptionRef.set(mode, { _tag: "command", input: "" }),
 
-      updateCommand: (input: string) =>
-        SubscriptionRef.update(mode, (m): EditorMode =>
-          m._tag === "command" ? { ...m, input } : m
-        ),
+			updateCommand: (input: string) =>
+				SubscriptionRef.update(
+					mode,
+					(m): EditorMode => (m._tag === "command" ? { ...m, input } : m),
+				),
 
-      clearCommand: () => SubscriptionRef.set(mode, { _tag: "normal" }),
+			clearCommand: () => SubscriptionRef.set(mode, { _tag: "normal" }),
 
-      executeCommand: () =>
-        Effect.gen(function* () {
-          const m = yield* SubscriptionRef.get(mode)
-          if (m._tag !== "command") return
-          // Command execution logic here (implemented in KeyboardService or App)
-          yield* SubscriptionRef.set(mode, { _tag: "normal" })
-        }),
-    }
-  }),
+			executeCommand: () =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					if (m._tag !== "command") return
+					// Command execution logic here (implemented in KeyboardService or App)
+					yield* SubscriptionRef.set(mode, { _tag: "normal" })
+				}),
+		}
+	}),
 }) {}

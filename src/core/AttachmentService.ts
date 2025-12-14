@@ -110,7 +110,6 @@ export interface AttachmentServiceI {
 	readonly hasAttached: (sessionId: string) => Effect.Effect<boolean, never>
 }
 
-
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -149,75 +148,75 @@ export class AttachmentService extends Effect.Service<AttachmentService>()("Atta
 		}
 
 		return {
-		attachExternal: (sessionId: string) =>
-			Effect.gen(function* () {
-				// Check if session exists
-				const sessionExists = yield* tmux.hasSession(sessionId).pipe(
-					Effect.mapError(
-						(error: unknown) =>
-							new AttachmentError({
-								message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
-								sessionId,
-								cause: error,
-							}),
-					),
-				)
+			attachExternal: (sessionId: string) =>
+				Effect.gen(function* () {
+					// Check if session exists
+					const sessionExists = yield* tmux.hasSession(sessionId).pipe(
+						Effect.mapError(
+							(error: unknown) =>
+								new AttachmentError({
+									message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
+									sessionId,
+									cause: error,
+								}),
+						),
+					)
 
-				if (!sessionExists) {
-					return yield* Effect.fail(new SessionNotFoundError({ sessionId }))
-				}
+					if (!sessionExists) {
+						return yield* Effect.fail(new SessionNotFoundError({ sessionId }))
+					}
 
-				// Switch to the Claude session
-				// Claude sessions use Ctrl-a prefix (not Ctrl-b) so users can switch back
-				yield* tmux.switchClient(sessionId).pipe(
-					Effect.mapError(
-						(error) =>
-							new AttachmentError({
-								message: `Failed to switch to session: ${error}`,
-								sessionId,
-								cause: error,
-							}),
-					),
-				)
+					// Switch to the Claude session
+					// Claude sessions use Ctrl-a prefix (not Ctrl-b) so users can switch back
+					yield* tmux.switchClient(sessionId).pipe(
+						Effect.mapError(
+							(error) =>
+								new AttachmentError({
+									message: `Failed to switch to session: ${error}`,
+									sessionId,
+									cause: error,
+								}),
+						),
+					)
 
-				// Record the attachment
-				yield* Effect.sync(() => recordAttachment(sessionId, "external"))
-			}),
+					// Record the attachment
+					yield* Effect.sync(() => recordAttachment(sessionId, "external"))
+				}),
 
-		attachInline: (sessionId: string) =>
-			Effect.gen(function* () {
-				// Check if session exists
-				const sessionExists = yield* tmux.hasSession(sessionId).pipe(
-					Effect.mapError(
-						(error: unknown) =>
-							new AttachmentError({
-								message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
-								sessionId,
-								cause: error,
-							}),
-					),
-				)
+			attachInline: (sessionId: string) =>
+				Effect.gen(function* () {
+					// Check if session exists
+					const sessionExists = yield* tmux.hasSession(sessionId).pipe(
+						Effect.mapError(
+							(error: unknown) =>
+								new AttachmentError({
+									message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
+									sessionId,
+									cause: error,
+								}),
+						),
+					)
 
-				if (!sessionExists) {
-					return yield* Effect.fail(new SessionNotFoundError({ sessionId }))
-				}
+					if (!sessionExists) {
+						return yield* Effect.fail(new SessionNotFoundError({ sessionId }))
+					}
 
-				// TODO: Implement inline attachment
-				// This will require:
-				// 1. Suspending the TUI renderer
-				// 2. Attaching to the tmux session in the current terminal
-				// 3. Handling detach (Ctrl-b d) to return to TUI
-				// 4. Resuming the TUI renderer
-				//
-				// For now, return an error indicating it's not implemented
-				return yield* Effect.fail(
-					new AttachmentError({
-						message:
-							"Inline attachment not yet implemented. Use external attachment (key 'a') instead.",
-						sessionId,
-					}),
-				)
-			}),
+					// TODO: Implement inline attachment
+					// This will require:
+					// 1. Suspending the TUI renderer
+					// 2. Attaching to the tmux session in the current terminal
+					// 3. Handling detach (Ctrl-b d) to return to TUI
+					// 4. Resuming the TUI renderer
+					//
+					// For now, return an error indicating it's not implemented
+					return yield* Effect.fail(
+						new AttachmentError({
+							message:
+								"Inline attachment not yet implemented. Use external attachment (key 'a') instead.",
+							sessionId,
+						}),
+					)
+				}),
 
 			getAttachmentHistory: () => Effect.succeed([...attachmentHistory]),
 

@@ -348,7 +348,8 @@ export class FileLockManager extends Effect.Service<FileLockManager>()("FileLock
 					const locks = yield* Ref.get(locksRef)
 					const existingState = HashMap.get(locks, path)
 
-					const state = existingState._tag === "Some" ? existingState.value : createInitialLockState()
+					const state =
+						existingState._tag === "Some" ? existingState.value : createInitialLockState()
 
 					// Check if we can grant the lock immediately
 					if (canGrantLock(state, type)) {

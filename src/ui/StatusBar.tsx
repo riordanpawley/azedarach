@@ -180,7 +180,8 @@ export const StatusBar = (props: StatusBarProps) => {
 	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12)
 	const fixedLeftWidth = 25
 	const fixedRightWidth = 40 // Approximate, includes stats and potential VC status
-	const modeDisplayWidth = shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
+	const modeDisplayWidth =
+		shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
 	const availableWidth = terminalWidth - fixedLeftWidth - fixedRightWidth - modeDisplayWidth
 
 	// Get keybindings for current mode and calculate how many fit
