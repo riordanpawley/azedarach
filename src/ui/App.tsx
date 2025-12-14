@@ -528,6 +528,15 @@ export const App = () => {
 					exitToNormal()
 					break
 				}
+				case "E": {
+					// Edit bead via Claude (AI-assisted)
+					if (selectedTask) {
+						// TODO: Implement Claude edit session
+						showError("Claude edit not yet implemented - use 'e' for $EDITOR")
+					}
+					exitToNormal()
+					break
+				}
 				case "P": {
 					// Create PR
 					if (selectedTask) {
@@ -800,14 +809,8 @@ export const App = () => {
 						showDetail(selectedTask.id)
 					}
 					break
-				case "c":
-					showCreate()
-					break
-				case "C":
-					showClaudeCreate()
-					break
-				case "E": {
-					// Create new bead via editor
+				case "c": {
+					// Create new bead via $EDITOR
 					createBeadViaEditor()
 						.then((result) => {
 							refreshTasks()
@@ -824,6 +827,10 @@ export const App = () => {
 						})
 					break
 				}
+				case "C":
+					// Create bead via Claude (natural language)
+					showClaudeCreate()
+					break
 				case "a":
 					toggleVCAutoPilot()
 						.then((status) => {
