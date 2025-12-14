@@ -10,6 +10,7 @@ import { useKeyboard } from "@opentui/react"
 import { useCallback, useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
+import { SortMenu } from "./SortMenu"
 import {
 	attachExternalAtom,
 	attachInlineAtom,
@@ -84,6 +85,7 @@ export const App = () => {
 		commandInput,
 		pendingJumpKey,
 		jumpLabels,
+		sortConfig,
 		isNormal,
 		isSelect,
 		isGoto,
@@ -92,6 +94,7 @@ export const App = () => {
 		isAction,
 		isSearch,
 		isCommand,
+		isSort,
 		enterSelect,
 		exitSelect,
 		toggleSelection,
@@ -106,6 +109,8 @@ export const App = () => {
 		updateCommand,
 		clearCommand,
 		exitToNormal,
+		enterSort,
+		cycleSort,
 	} = useEditorMode()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -144,14 +149,72 @@ export const App = () => {
 	// Task Grouping and Filtering
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	// Group tasks by column for navigation, filtering by search query
+	// Sorting functions
+	const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
+		// Active sessions (busy, waiting) first, then paused, then done/error, then idle
+		switch (state) {
+			case "busy":
+				return 0
+			case "waiting":
+				return 1
+			case "paused":
+				return 2
+			case "done":
+				return 3
+			case "error":
+				return 4
+			case "idle":
+				return 5
+		}
+	}
+
+	const sortTasks = (tasks: TaskWithSession[]): TaskWithSession[] => {
+		return [...tasks].sort((a, b) => {
+			const direction = sortConfig.direction === "desc" ? -1 : 1
+
+			switch (sortConfig.field) {
+				case "session": {
+					// Sort by session status (active first when desc)
+					const sessionDiff = getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+					if (sessionDiff !== 0) return sessionDiff * direction
+					// Then by priority (lower number = higher priority)
+					const priorityDiff = a.priority - b.priority
+					if (priorityDiff !== 0) return priorityDiff
+					// Then by updated_at (more recent first)
+					return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+				}
+				case "priority": {
+					// Sort by priority (lower number = higher priority, so desc shows P1 first)
+					const priorityDiff = a.priority - b.priority
+					if (priorityDiff !== 0) return priorityDiff * direction
+					// Then by session status
+					const sessionDiff = getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+					if (sessionDiff !== 0) return sessionDiff
+					// Then by updated_at
+					return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+				}
+				case "updated": {
+					// Sort by updated_at (desc = most recent first)
+					const dateDiff = new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+					if (dateDiff !== 0) return dateDiff * direction
+					// Then by session status
+					const sessionDiff = getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+					if (sessionDiff !== 0) return sessionDiff
+					// Then by priority
+					return a.priority - b.priority
+				}
+			}
+		})
+	}
+
+	// Group tasks by column for navigation, filtering by search query, then sorting
 	const tasksByColumn = useMemo(() => {
 		if (!Result.isSuccess(tasksResult)) return []
 
 		const query = searchQuery.toLowerCase().trim()
 
-		return COLUMNS.map((col) =>
-			tasksResult.value.filter((task) => {
+		return COLUMNS.map((col) => {
+			const filtered = tasksResult.value.filter((task) => {
 				// First filter by status
 				if (task.status !== col.status) return false
 				// Then filter by search query if present
@@ -161,9 +224,11 @@ export const App = () => {
 					return titleMatch || idMatch
 				}
 				return true
-			}),
-		)
-	}, [tasksResult, searchQuery])
+			})
+			// Apply sorting
+			return sortTasks(filtered)
+		})
+	}, [tasksResult, searchQuery, sortConfig])
 
 	// Navigation hook (needs tasksByColumn)
 	const {
@@ -325,6 +390,12 @@ export const App = () => {
 		// Handle command mode
 		if (isCommand) {
 			handleCommandMode(event)
+			return
+		}
+
+		// Handle sort mode
+		if (isSort) {
+			handleSortMode(event)
 			return
 		}
 
@@ -738,6 +809,29 @@ export const App = () => {
 		[vcStatusResult, commandInput, sendVCCommand, showSuccess, showError, clearCommand, updateCommand],
 	)
 
+	const handleSortMode = useCallback(
+		(event: any) => {
+			switch (event.name) {
+				case "s":
+					// Sort by session status (active sessions first)
+					cycleSort("session")
+					break
+				case "p":
+					// Sort by priority
+					cycleSort("priority")
+					break
+				case "u":
+					// Sort by updated at
+					cycleSort("updated")
+					break
+				default:
+					// Any other key exits sort mode
+					exitToNormal()
+			}
+		},
+		[cycleSort, exitToNormal],
+	)
+
 	const handleSelectMode = useCallback(
 		(event: any) => {
 			switch (event.name) {
@@ -857,6 +951,12 @@ export const App = () => {
 				return
 			}
 
+			// "," to enter sort mode
+			if (event.sequence === ",") {
+				enterSort()
+				return
+			}
+
 			// Ctrl-d: half page down
 			if (event.ctrl && event.name === "d") {
 				halfPageDown()
@@ -888,6 +988,7 @@ export const App = () => {
 			showError,
 			enterSearch,
 			enterCommand,
+			enterSort,
 			halfPageDown,
 			halfPageUp,
 		],
@@ -924,6 +1025,8 @@ export const App = () => {
 				return "search"
 			case "select":
 				return `select (${selectedIds.length})`
+			case "sort":
+				return "sort"
 		}
 	}, [mode, searchQuery, selectedIds])
 
@@ -984,6 +1087,9 @@ export const App = () => {
 
 			{/* Action palette */}
 			{isAction && <ActionPalette task={selectedTask} />}
+
+			{/* Sort menu */}
+			{isSort && <SortMenu currentSort={sortConfig} />}
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}

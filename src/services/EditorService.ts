@@ -23,6 +23,24 @@ export interface JumpTarget {
 export type GotoSubMode = "pending" | "jump"
 
 /**
+ * Sort criteria for tasks
+ */
+export type SortField = "session" | "priority" | "updated"
+
+/**
+ * Sort direction
+ */
+export type SortDirection = "asc" | "desc"
+
+/**
+ * Sort configuration
+ */
+export interface SortConfig {
+  readonly field: SortField
+  readonly direction: SortDirection
+}
+
+/**
  * Editor mode with full state for Helix-style modal editing
  *
  * Maps directly to editorFSM.ts modes:
@@ -32,6 +50,7 @@ export type GotoSubMode = "pending" | "jump"
  * - action: Action menu mode triggered by Space
  * - search: Search/filter mode triggered by '/'
  * - command: VC command input mode triggered by ':'
+ * - sort: Sort menu mode triggered by ','
  */
 export type EditorMode =
   | { readonly _tag: "normal" }
@@ -45,14 +64,25 @@ export type EditorMode =
   | { readonly _tag: "action" }
   | { readonly _tag: "search"; readonly query: string }
   | { readonly _tag: "command"; readonly input: string }
+  | { readonly _tag: "sort" }
+
+/**
+ * Default sort configuration: session status > priority > updated_at
+ */
+export const DEFAULT_SORT_CONFIG: SortConfig = {
+  field: "session",
+  direction: "desc",
+}
 
 export class EditorService extends Effect.Service<EditorService>()("EditorService", {
   effect: Effect.gen(function* () {
     const mode = yield* SubscriptionRef.make<EditorMode>({ _tag: "normal" })
+    const sortConfig = yield* SubscriptionRef.make<SortConfig>(DEFAULT_SORT_CONFIG)
 
     return {
       // Expose SubscriptionRef for atom subscription
       mode,
+      sortConfig,
 
       // ========================================================================
       // Mode Getters
@@ -190,6 +220,47 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
           const m = yield* SubscriptionRef.get(mode)
           if (m._tag !== "command") return
           // Command execution logic here (implemented in KeyboardService or App)
+          yield* SubscriptionRef.set(mode, { _tag: "normal" })
+        }),
+
+      // ========================================================================
+      // Sort Mode
+      // ========================================================================
+
+      /**
+       * Enter sort menu mode
+       */
+      enterSort: () => SubscriptionRef.set(mode, { _tag: "sort" }),
+
+      /**
+       * Get current sort configuration
+       */
+      getSortConfig: () => SubscriptionRef.get(sortConfig),
+
+      /**
+       * Update sort configuration and exit to normal mode
+       */
+      setSort: (field: SortField, direction: SortDirection) =>
+        Effect.gen(function* () {
+          yield* SubscriptionRef.set(sortConfig, { field, direction })
+          yield* SubscriptionRef.set(mode, { _tag: "normal" })
+        }),
+
+      /**
+       * Cycle sort direction for a field
+       * If already sorted by this field, toggle direction
+       * Otherwise, set to this field with default direction
+       */
+      cycleSort: (field: SortField) =>
+        Effect.gen(function* () {
+          const current = yield* SubscriptionRef.get(sortConfig)
+          const newDirection: SortDirection =
+            current.field === field
+              ? current.direction === "desc"
+                ? "asc"
+                : "desc"
+              : "desc"
+          yield* SubscriptionRef.set(sortConfig, { field, direction: newDirection })
           yield* SubscriptionRef.set(mode, { _tag: "normal" })
         }),
     }

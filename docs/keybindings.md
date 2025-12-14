@@ -7,18 +7,18 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                       NORMAL MODE (NOR)                                │
-│  hjkl: navigate  g: goto  v: select  Space: act  /: search  :: cmd    │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  :: cmd    │
 └────────────────────────────────────────────────────────────────────────┘
-         │           │           │           │           │           │
-         │           ▼           ▼           ▼           ▼           ▼
-         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ COMMAND  │
-         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (CMD)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ send to  │
-         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ VC REPL  │
-         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘
-         │         │             │           │             │            │
-         └─────────┴─────────────┴───────────┴─────────────┴────────────┘
+         │           │           │           │           │           │           │
+         │           ▼           ▼           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ COMMAND  │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (CMD)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ send to  │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ VC REPL  │
+         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │            │            │
+         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┘
                               Esc: return to Normal
 ```
 
@@ -47,6 +47,7 @@ The default mode for navigation and basic actions.
 |-----|--------|-------|
 | `Enter` | Show task details | Modal overlay |
 | `Space` | Enter Action mode | Prefix for commands |
+| `,` | Enter Sort mode | Change task sort order |
 | `/` | Enter Search mode | Filter tasks by title/ID |
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
@@ -280,6 +281,41 @@ Press `:` to enter command mode for sending commands to the VC REPL.
 - `Let's continue working` - Resume work on current task
 - `Add Docker support` - Request a new feature
 - `Run tests` - Ask VC to run tests
+
+## Sort Mode
+
+Press `,` to enter sort mode for changing how tasks are ordered within each column.
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `s` | Sort by Session | Active sessions first (busy, waiting, paused, then idle) |
+| `p` | Sort by Priority | Higher priority tasks first (P1 > P2 > P3 > P4) |
+| `u` | Sort by Updated | Most recently updated tasks first |
+| `Esc` | Cancel | Exit sort mode without changing |
+
+### How Sort Works
+
+- **Default sort**: Session status (active first) → Priority → Updated at
+- **Toggle direction**: Pressing the same sort key again reverses the direction (↓ to ↑)
+- **Visual indicator**: The SortMenu shows the current sort with a ↓ (descending) or ↑ (ascending) arrow
+- **Multi-level sorting**: Each sort option has secondary and tertiary sort criteria for stable ordering
+
+### Sort Criteria Details
+
+**Session Status Sort (s)**:
+1. Primary: Session state (busy → waiting → paused → done → error → idle)
+2. Secondary: Priority (P1 first)
+3. Tertiary: Updated at (most recent first)
+
+**Priority Sort (p)**:
+1. Primary: Priority number (lower = higher priority)
+2. Secondary: Session state
+3. Tertiary: Updated at
+
+**Updated Sort (u)**:
+1. Primary: Updated timestamp (most recent first)
+2. Secondary: Session state
+3. Tertiary: Priority
 
 ## Action Mode
 

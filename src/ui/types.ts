@@ -88,7 +88,7 @@ export interface NavigationState {
  * - search: Search/filter mode triggered by '/'
  * - select: Multi-selection mode triggered by 'v'
  */
-export type EditorMode = "action" | "command" | "goto" | "normal" | "search" | "select"
+export type EditorMode = "action" | "command" | "goto" | "normal" | "search" | "select" | "sort"
 
 /**
  * Goto mode sub-state
