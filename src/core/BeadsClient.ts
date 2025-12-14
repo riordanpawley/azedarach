@@ -257,6 +257,36 @@ const runBd = (
 	})
 
 /**
+ * Execute a bd command directly (bypasses daemon, no JSON output)
+ * Used for commands like delete that aren't supported by the daemon
+ */
+const runBdDirect = (
+	args: readonly string[],
+	cwd?: string,
+): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		// Add --no-daemon to bypass daemon (daemon doesn't support all operations)
+		const allArgs = ["--no-daemon", ...args]
+
+		const command = cwd
+			? Command.make("bd", ...allArgs).pipe(Command.workingDirectory(cwd))
+			: Command.make("bd", ...allArgs)
+
+		const result = yield* Command.string(command).pipe(
+			Effect.mapError((error) => {
+				const stderr = "stderr" in error ? String(error.stderr) : String(error)
+				return new BeadsError({
+					message: `bd command failed: ${stderr}`,
+					command: `bd ${allArgs.join(" ")}`,
+					stderr,
+				})
+			}),
+		)
+
+		return result
+	})
+
+/**
  * Parse JSON output with schema validation
  */
 const parseJson = <A, I, R>(
@@ -448,7 +478,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			delete: (id: string) =>
 				Effect.gen(function* () {
-					yield* runBd(["delete", id])
+					// Use runBdDirect because:
+					// 1. The daemon doesn't support the delete operation
+					// 2. --force is required to actually delete (not just preview)
+					yield* runBdDirect(["delete", id, "--force"])
 				}),
 		}
 	}),
