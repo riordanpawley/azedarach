@@ -1,9 +1,14 @@
 /**
  * Board component - main Kanban board layout
+ *
+ * Supports two view modes:
+ * - kanban: Traditional column-based view with task cards
+ * - compact: Linear list view with minimal row height
  */
 import { useMemo } from "react"
 import { Column } from "./Column"
-import type { ColumnStatus, JumpTarget, TaskWithSession } from "./types"
+import { CompactView } from "./CompactView"
+import type { ColumnStatus, JumpTarget, TaskWithSession, ViewMode } from "./types"
 import { COLUMNS } from "./types"
 
 export interface BoardProps {
@@ -15,16 +20,19 @@ export interface BoardProps {
 	jumpLabels?: ReadonlyMap<string, JumpTarget> | null
 	pendingJumpKey?: string | null
 	terminalHeight?: number
+	viewMode?: ViewMode
 }
 
 /**
  * Board component
  *
- * Displays a horizontal flexbox layout of columns, one per status.
- * Tasks are grouped by status and displayed in their respective columns.
+ * Displays tasks in either Kanban (columns) or Compact (linear list) view.
+ * The view mode is controlled by the viewMode prop.
  */
 export const Board = (props: BoardProps) => {
-	// Group tasks by status for efficient rendering
+	const viewMode = props.viewMode ?? "kanban"
+
+	// Group tasks by status for Kanban view
 	const tasksByStatus = useMemo(() => {
 		const grouped = new Map<string, TaskWithSession[]>()
 
@@ -55,6 +63,23 @@ export const Board = (props: BoardProps) => {
 		return taskToLabel
 	}, [props.jumpLabels])
 
+	// Render compact view
+	if (viewMode === "compact") {
+		return (
+			<CompactView
+				tasks={props.tasks}
+				selectedTaskId={props.selectedTaskId}
+				activeColumnIndex={props.activeColumnIndex}
+				activeTaskIndex={props.activeTaskIndex}
+				selectedIds={props.selectedIds}
+				jumpLabels={props.jumpLabels}
+				pendingJumpKey={props.pendingJumpKey}
+				terminalHeight={props.terminalHeight}
+			/>
+		)
+	}
+
+	// Render Kanban view (default)
 	return (
 		<box flexDirection="row" width="100%" height="100%" padding={1}>
 			{COLUMNS.map((column, index) => (
