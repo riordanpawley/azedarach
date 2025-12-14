@@ -51,12 +51,57 @@ The default mode for navigation and basic actions.
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
+| `Tab` | Toggle view mode | Switch between Kanban and Compact views |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
+
+## View Modes
+
+Azedarach supports two view modes that can be toggled with `Tab`:
+
+### Kanban View (Default)
+
+The traditional column-based view showing tasks organized by status:
+
+```
+┌─────────────┬─────────────┬─────────────┬─────────────┐
+│    OPEN     │ IN PROGRESS │   BLOCKED   │   CLOSED    │
+├─────────────┼─────────────┼─────────────┼─────────────┤
+│ ┌─────────┐ │ ┌─────────┐ │ ┌─────────┐ │ ┌─────────┐ │
+│ │ P1 az-1 │ │ │ P2 az-4 │ │ │ P1 az-7 │ │ │ P3 az-9 │ │
+│ │ Task 1  │ │ │ Task 4  │ │ │ Task 7  │ │ │ Task 9  │ │
+│ └─────────┘ │ └─────────┘ │ └─────────┘ │ └─────────┘ │
+└─────────────┴─────────────┴─────────────┴─────────────┘
+```
+
+- **Navigation**: `h/l` moves between columns, `j/k` moves within column
+- **Best for**: Visualizing workflow stages, status overview
+
+### Compact View
+
+A linear list showing all tasks sorted by status then priority:
+
+```
+Pri Stat   ID       Title
+P1  OPEN 🔵 az-123  Fix authentication bug
+P2  OPEN   az-124  Add dark mode toggle
+P1  PROG 🟡 az-125  Refactor database layer
+P2  BLKD   az-126  Update API documentation
+P3  DONE ✅ az-127  Fix typo in README
+```
+
+- **Navigation**: `j/k` moves through the full list, `h/l` has no effect
+- **Best for**: Seeing more tasks at once, priority-based scanning
+
+### Visual Indicator
+
+The status bar shows the current view mode:
+- **KAN**: Kanban view (columns)
+- **LST**: Compact list view (linear)
 
 ## Create & Edit Modes
 

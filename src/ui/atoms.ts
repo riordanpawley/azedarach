@@ -15,7 +15,7 @@ import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
-import type { TaskWithSession } from "./types"
+import type { TaskWithSession, ViewMode } from "./types"
 
 // New atomic Effect services
 import { ToastService } from "../services/ToastService"
@@ -201,6 +201,16 @@ export const selectedTaskIdAtom = Atom.make<string | undefined>(undefined)
  * Atom for UI error state
  */
 export const errorAtom = Atom.make<string | undefined>(undefined)
+
+/**
+ * Atom for board view mode (kanban vs compact)
+ *
+ * - kanban: Traditional column-based view with task cards
+ * - compact: Linear list view with minimal row height
+ *
+ * Usage: const [viewMode, setViewMode] = useAtom(viewModeAtom)
+ */
+export const viewModeAtom = Atom.make<ViewMode>("kanban")
 
 // ============================================================================
 // Action Atoms (using runtime.fn for proper effect-atom integration)
