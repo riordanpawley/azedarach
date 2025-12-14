@@ -110,50 +110,53 @@ export interface AttachmentServiceI {
 	readonly hasAttached: (sessionId: string) => Effect.Effect<boolean, never>
 }
 
-/**
- * AttachmentService tag
- */
-export class AttachmentService extends Context.Tag("AttachmentService")<
-	AttachmentService,
-	AttachmentServiceI
->() {}
 
 // ============================================================================
-// Implementation
+// Service Implementation
 // ============================================================================
 
 /**
- * Live AttachmentService implementation
+ * AttachmentService
  *
  * Depends on TmuxService and TerminalService for session and terminal operations.
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const attachment = yield* AttachmentService
+ *   yield* attachment.attachExternal("az-123-session")
+ * }).pipe(Effect.provide(AttachmentService.Default))
+ * ```
  */
-const AttachmentServiceImpl = Effect.gen(function* () {
-	const tmux = yield* TmuxService
-	const terminal = yield* TerminalService
+export class AttachmentService extends Effect.Service<AttachmentService>()("AttachmentService", {
+	dependencies: [TmuxService.Default, TerminalService.Default],
+	effect: Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const terminal = yield* TerminalService
 
-	// Track attachment history
-	const attachmentHistory: AttachmentEvent[] = []
+		// Track attachment history
+		const attachmentHistory: AttachmentEvent[] = []
 
-	/**
-	 * Record an attachment event
-	 */
-	const recordAttachment = (sessionId: string, mode: AttachmentMode): void => {
-		attachmentHistory.push({
-			sessionId,
-			mode,
-			timestamp: new Date(),
-		})
-	}
+		/**
+		 * Record an attachment event
+		 */
+		const recordAttachment = (sessionId: string, mode: AttachmentMode): void => {
+			attachmentHistory.push({
+				sessionId,
+				mode,
+				timestamp: new Date(),
+			})
+		}
 
-	return AttachmentService.of({
+		return {
 		attachExternal: (sessionId: string) =>
 			Effect.gen(function* () {
 				// Check if session exists
 				const sessionExists = yield* tmux.hasSession(sessionId).pipe(
 					Effect.mapError(
-						(error) =>
+						(error: unknown) =>
 							new AttachmentError({
-								message: `Failed to check session existence: ${error.message}`,
+								message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
 								sessionId,
 								cause: error,
 							}),
@@ -186,9 +189,9 @@ const AttachmentServiceImpl = Effect.gen(function* () {
 				// Check if session exists
 				const sessionExists = yield* tmux.hasSession(sessionId).pipe(
 					Effect.mapError(
-						(error) =>
+						(error: unknown) =>
 							new AttachmentError({
-								message: `Failed to check session existence: ${error.message}`,
+								message: `Failed to check session existence: ${error instanceof Error ? error.message : String(error)}`,
 								sessionId,
 								cause: error,
 							}),
@@ -216,65 +219,17 @@ const AttachmentServiceImpl = Effect.gen(function* () {
 				)
 			}),
 
-		getAttachmentHistory: () => Effect.succeed([...attachmentHistory]),
+			getAttachmentHistory: () => Effect.succeed([...attachmentHistory]),
 
-		hasAttached: (sessionId: string) =>
-			Effect.succeed(attachmentHistory.some((event) => event.sessionId === sessionId)),
-	})
-})
-
-// ============================================================================
-// Layers
-// ============================================================================
+			hasAttached: (sessionId: string) =>
+				Effect.succeed(attachmentHistory.some((event) => event.sessionId === sessionId)),
+		}
+	}),
+}) {}
 
 /**
- * Live AttachmentService layer (without platform dependencies)
+ * Legacy layer export
  *
- * Requires TmuxService and TerminalService to be provided.
+ * @deprecated Use AttachmentService.Default instead
  */
-export const AttachmentServiceLive = Layer.effect(AttachmentService, AttachmentServiceImpl)
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Attach to a session externally (convenience function)
- *
- * @example
- * ```ts
- * yield* attachExternal("claude-az-05y")
- * ```
- */
-export const attachExternal = (
-	sessionId: string,
-): Effect.Effect<void, AttachmentError | SessionNotFoundError, AttachmentService> =>
-	Effect.flatMap(AttachmentService, (service) => service.attachExternal(sessionId))
-
-/**
- * Attach to a session inline (convenience function)
- *
- * @example
- * ```ts
- * yield* attachInline("claude-az-05y")
- * ```
- */
-export const attachInline = (
-	sessionId: string,
-): Effect.Effect<void, AttachmentError | SessionNotFoundError, AttachmentService> =>
-	Effect.flatMap(AttachmentService, (service) => service.attachInline(sessionId))
-
-/**
- * Get attachment history (convenience function)
- */
-export const getAttachmentHistory = (): Effect.Effect<
-	readonly AttachmentEvent[],
-	never,
-	AttachmentService
-> => Effect.flatMap(AttachmentService, (service) => service.getAttachmentHistory())
-
-/**
- * Check if session has been attached (convenience function)
- */
-export const hasAttached = (sessionId: string): Effect.Effect<boolean, never, AttachmentService> =>
-	Effect.flatMap(AttachmentService, (service) => service.hasAttached(sessionId))
+export const AttachmentServiceLive = AttachmentService.Default

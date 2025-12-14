@@ -19,7 +19,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Context, Data, Effect, Layer, Option, Ref } from "effect"
-import { type TmuxError, TmuxService, TmuxServiceLive } from "./TmuxService.js"
+import { type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
 // Constants
@@ -224,20 +224,27 @@ export interface VCServiceImpl {
 	>
 }
 
-/**
- * VCService tag
- */
-export class VCService extends Context.Tag("VCService")<VCService, VCServiceImpl>() {}
 
 // ============================================================================
 // Implementation
 // ============================================================================
 
 /**
- * Live VCService implementation
+ * VCService
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const vc = yield* VCService
+ *   const status = yield* vc.getStatus()
+ *   return status
+ * }).pipe(Effect.provide(VCService.Default))
+ * ```
  */
-const VCServiceLiveImpl = Effect.gen(function* () {
-	const tmux = yield* TmuxService
+export class VCService extends Effect.Service<VCService>()("VCService", {
+	dependencies: [TmuxService.Default, BunContext.layer],
+	effect: Effect.gen(function* () {
+		const tmux = yield* TmuxService
 
 	// Track executor state
 	const executorStateRef = yield* Ref.make<VCExecutorInfo>({
@@ -269,7 +276,7 @@ const VCServiceLiveImpl = Effect.gen(function* () {
 			...update,
 		}))
 
-	return VCService.of({
+	return {
 		isAvailable: () => checkVCInstalled(),
 
 		getVersion: () =>
@@ -426,7 +433,7 @@ const VCServiceLiveImpl = Effect.gen(function* () {
 				return current
 			}),
 
-		sendCommand: (command) =>
+		sendCommand: (command: string) =>
 			Effect.gen(function* () {
 				const hasSession = yield* tmux
 					.hasSession(VC_SESSION_NAME)
@@ -523,112 +530,13 @@ const VCServiceLiveImpl = Effect.gen(function* () {
 
 				return yield* updateState({ status: "error" })
 			}),
-	})
-})
-
-// ============================================================================
-// Layer
-// ============================================================================
+		}
+	}),
+}) {}
 
 /**
- * Base VCService layer (requires TmuxService and BunContext)
- */
-const VCServiceBase = Layer.effect(VCService, VCServiceLiveImpl)
-
-/**
- * Live VCService layer with all dependencies
+ * Legacy layer export
  *
- * Provides VCService along with TmuxService and BunContext (CommandExecutor).
- * Use this layer in applications - it includes everything needed.
+ * @deprecated Use VCService.Default instead
  */
-export const VCServiceLive = Layer.provideMerge(
-	Layer.provideMerge(VCServiceBase, TmuxServiceLive),
-	BunContext.layer,
-)
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Check if VC is available
- */
-export const isAvailable = (): Effect.Effect<
-	boolean,
-	never,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.isAvailable())
-
-/**
- * Get VC version
- */
-export const getVersion = (): Effect.Effect<
-	string,
-	VCNotInstalledError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.getVersion())
-
-/**
- * Start auto-pilot
- */
-export const startAutoPilot = (): Effect.Effect<
-	VCExecutorInfo,
-	VCNotInstalledError | VCError | TmuxError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.startAutoPilot())
-
-/**
- * Stop auto-pilot
- */
-export const stopAutoPilot = (): Effect.Effect<
-	void,
-	VCError | TmuxError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.stopAutoPilot())
-
-/**
- * Check if auto-pilot is running
- */
-export const isAutoPilotRunning = (): Effect.Effect<
-	boolean,
-	never,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.isAutoPilotRunning())
-
-/**
- * Get executor status
- */
-export const getStatus = (): Effect.Effect<
-	VCExecutorInfo,
-	never,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.getStatus())
-
-/**
- * Send command to VC REPL
- */
-export const sendCommand = (
-	command: string,
-): Effect.Effect<
-	void,
-	VCNotRunningError | TmuxError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.sendCommand(command))
-
-/**
- * Get attach command
- */
-export const getAttachCommand = (): Effect.Effect<
-	string,
-	VCNotRunningError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.getAttachCommand())
-
-/**
- * Toggle auto-pilot
- */
-export const toggleAutoPilot = (): Effect.Effect<
-	VCExecutorInfo,
-	VCNotInstalledError | VCError | TmuxError,
-	VCService | CommandExecutor.CommandExecutor
-> => Effect.flatMap(VCService, (svc) => svc.toggleAutoPilot())
+export const VCServiceLive = VCService.Default

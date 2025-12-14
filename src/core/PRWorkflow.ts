@@ -14,19 +14,17 @@ import { BunContext } from "@effect/platform-bun"
 import { Context, Data, Effect, Layer, Option } from "effect"
 import {
 	BeadsClient,
-	BeadsClientLive,
 	type BeadsError,
 	type Issue,
 	type NotFoundError,
 	type ParseError,
 } from "./BeadsClient.js"
-import { type SessionError, SessionManager, SessionManagerLive } from "./SessionManager.js"
+import { type SessionError, SessionManager } from "./SessionManager.js"
 import type { TmuxError } from "./TmuxService.js"
 import {
 	GitError,
 	type NotAGitRepoError,
 	WorktreeManager,
-	WorktreeManagerLive,
 } from "./WorktreeManager.js"
 
 // ============================================================================
@@ -189,10 +187,6 @@ export interface PRWorkflowService {
 	readonly checkGHCLI: () => Effect.Effect<boolean, never, CommandExecutor.CommandExecutor>
 }
 
-/**
- * PRWorkflow service tag
- */
-export class PRWorkflow extends Context.Tag("PRWorkflow")<PRWorkflow, PRWorkflowService>() {}
 
 // ============================================================================
 // Implementation Helpers
@@ -304,16 +298,37 @@ const parsePRJson = (json: string): PR => {
 }
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
-const PRWorkflowServiceImpl = Effect.gen(function* () {
-	const worktreeManager = yield* WorktreeManager
-	const beadsClient = yield* BeadsClient
-	const sessionManager = yield* SessionManager
+/**
+ * PRWorkflow service
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const prWorkflow = yield* PRWorkflow
+ *   const pr = yield* prWorkflow.createPR({
+ *     beadId: "az-123",
+ *     projectPath: process.cwd()
+ *   })
+ *   return pr
+ * }).pipe(Effect.provide(PRWorkflow.Default))
+ * ```
+ */
+export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
+	dependencies: [
+		WorktreeManager.Default,
+		BeadsClient.Default,
+		SessionManager.Default,
+	],
+	effect: Effect.gen(function* () {
+		const worktreeManager = yield* WorktreeManager
+		const beadsClient = yield* BeadsClient
+		const sessionManager = yield* SessionManager
 
-	return PRWorkflow.of({
-		createPR: (options) =>
+		return {
+		createPR: (options: CreatePROptions) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath, draft = true, baseBranch = "main" } = options
 
@@ -387,7 +402,7 @@ const PRWorkflowServiceImpl = Effect.gen(function* () {
 				}
 			}),
 
-		getPR: (options) =>
+		getPR: (options: { beadId: string; projectPath: string }) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath } = options
 
@@ -403,7 +418,7 @@ const PRWorkflowServiceImpl = Effect.gen(function* () {
 				return result
 			}),
 
-		cleanup: (options) =>
+		cleanup: (options: CleanupOptions) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
 
@@ -441,64 +456,13 @@ const PRWorkflowServiceImpl = Effect.gen(function* () {
 				)
 				return exitCode === 0
 			}),
-	})
-})
-
-// ============================================================================
-// Layers
-// ============================================================================
+		}
+	}),
+}) {}
 
 /**
- * Live PRWorkflow layer with all dependencies
+ * Legacy layer export
+ *
+ * @deprecated Use PRWorkflow.Default instead
  */
-export const PRWorkflowLive = Layer.effect(PRWorkflow, PRWorkflowServiceImpl).pipe(
-	Layer.provide(Layer.mergeAll(WorktreeManagerLive, BeadsClientLive, SessionManagerLive)),
-	Layer.provide(BunContext.layer),
-)
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Create a PR for a bead
- */
-export const createPR = (
-	options: CreatePROptions,
-): Effect.Effect<
-	PR,
-	PRError | GHCLIError | GitError | NotAGitRepoError | BeadsError | NotFoundError | ParseError,
-	PRWorkflow | CommandExecutor.CommandExecutor
-> => Effect.flatMap(PRWorkflow, (service) => service.createPR(options))
-
-/**
- * Get PR info for a bead
- */
-export const getPR = (options: {
-	beadId: string
-	projectPath: string
-}): Effect.Effect<
-	Option.Option<PR>,
-	PRError | GHCLIError | GitError,
-	PRWorkflow | CommandExecutor.CommandExecutor
-> => Effect.flatMap(PRWorkflow, (service) => service.getPR(options))
-
-/**
- * Cleanup worktree and branches
- */
-export const cleanup = (
-	options: CleanupOptions,
-): Effect.Effect<
-	void,
-	PRError | GitError | NotAGitRepoError | SessionError | TmuxError | BeadsError,
-	PRWorkflow | CommandExecutor.CommandExecutor
-> => Effect.flatMap(PRWorkflow, (service) => service.cleanup(options))
-
-/**
- * Check if gh CLI is available
- */
-export const checkGHCLI = (): Effect.Effect<
-	boolean,
-	never,
-	PRWorkflow | CommandExecutor.CommandExecutor
-> => Effect.flatMap(PRWorkflow, (service) => service.checkGHCLI())
+export const PRWorkflowLive = PRWorkflow.Default
