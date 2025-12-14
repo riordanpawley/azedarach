@@ -64,10 +64,13 @@ export const Column = (props: ColumnProps) => {
 	return (
 		<box flexDirection="column" width="25%" marginRight={1}>
 			{/* Column header */}
-			<box paddingLeft={1}>
+			<box paddingLeft={1} flexDirection="column">
 				<text fg={headerColor} attributes={props.isActiveColumn ? ATTR_BOLD : 0}>
 					{headerText}
 				</text>
+				{props.isActiveColumn && (
+					<text fg={headerColor}>{"─".repeat(headerText.length)}</text>
+				)}
 			</box>
 
 			{/* Scroll indicator - top */}
