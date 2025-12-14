@@ -62,9 +62,14 @@
             ELF_PATH = "${elf}";
 
             shellHook = ''
-              # ELF is available at $ELF_PATH
-              # Run install: bash $ELF_PATH/install.sh
-              # Or link: ln -sfn $ELF_PATH ~/.claude/elf
+              # Auto-install ELF if not already installed
+              if [ ! -d "$HOME/.claude/emergent-learning" ]; then
+                echo "🧠 Installing Emergent Learning Framework (ELF)..."
+                # Non-interactive install: skip optional swarm (n) and dashboard (n)
+                echo -e "n\nn" | bash "$ELF_PATH/install.sh"
+                echo "✓ ELF installed! Start Claude sessions with 'check in'"
+                echo "  For full install with dashboard/swarm: bash \$ELF_PATH/install.sh"
+              fi
             '';
           };
         };
