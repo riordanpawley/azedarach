@@ -964,6 +964,12 @@ export const App = () => {
 				setNav({ columnIndex, taskIndex: newIndex })
 			}
 		}
+
+		// Ctrl-c: quit (explicit handler since terminal may be in raw mode)
+		if (event.ctrl && event.name === "c") {
+			killActivePopup()
+			process.exit(0)
+		}
 	})
 
 	// Computed values (only when we have success)
