@@ -15,35 +15,52 @@ import { BeadsClient } from "./BeadsClient"
 // ============================================================================
 
 /**
- * Track active tmux popup channel for cleanup on process exit.
- * When a popup is active, we store the channel name so it can be killed.
+ * Track active editor popup state for cleanup on process exit.
+ * Stores both channel name and temp file path so we can kill the editor.
  */
-let activePopupChannel: string | null = null
+let activeEditorState: { channel: string; tempFile: string } | null = null
 
 /**
- * Kill any active tmux popup by sending Ctrl-C to close it.
+ * Kill any active tmux popup by terminating the editor process.
  * Called on SIGINT to prevent orphaned popups.
+ *
+ * The popup is created with `-E` flag, so it closes when its command exits.
+ * By killing the editor (which has the temp file open), we cause the popup to close.
  */
 export const killActivePopup = (): void => {
-	if (activePopupChannel) {
-		// Send Ctrl-C to the current tmux client to close any popup
-		// This works because popups close on Ctrl-C by default
+	if (activeEditorState) {
+		const { tempFile } = activeEditorState
 		try {
-			Bun.spawnSync(["tmux", "send-keys", "-t", "", "C-c"], {
+			// Use lsof to find PIDs of processes with the temp file open, then kill them
+			// This works on both macOS and Linux
+			// lsof -t returns just PIDs, one per line
+			const result = Bun.spawnSync(["lsof", "-t", tempFile], {
 				stdin: "ignore",
-				stdout: "ignore",
+				stdout: "pipe",
 				stderr: "ignore",
 			})
-			// Also signal the wait-for channel to unblock any waiters
-			Bun.spawnSync(["tmux", "wait-for", "-S", activePopupChannel], {
-				stdin: "ignore",
-				stdout: "ignore",
-				stderr: "ignore",
-			})
+
+			if (result.stdout) {
+				const output = Buffer.isBuffer(result.stdout)
+					? result.stdout.toString()
+					: String(result.stdout)
+				const pids = output.trim().split("\n").filter(Boolean)
+
+				for (const pidStr of pids) {
+					const pid = parseInt(pidStr, 10)
+					if (!isNaN(pid) && pid > 0) {
+						try {
+							process.kill(pid, "SIGTERM")
+						} catch {
+							// Process may have already exited
+						}
+					}
+				}
+			}
 		} catch {
-			// Ignore errors during cleanup
+			// lsof may not be available or other error - ignore during cleanup
 		}
-		activePopupChannel = null
+		activeEditorState = null
 	}
 }
 
@@ -654,8 +671,8 @@ const EditorServiceImpl = Effect.gen(function* () {
 				// 2. Wait on that channel
 				const channel = `az-editor-${Date.now()}`
 
-				// Track popup for cleanup on SIGINT
-				activePopupChannel = channel
+				// Track popup for cleanup on SIGINT (store both channel and tempFile for killing)
+				activeEditorState = { channel, tempFile }
 
 				// Launch popup - when editor exits, it signals the channel
 				Bun.spawnSync(
@@ -676,14 +693,17 @@ const EditorServiceImpl = Effect.gen(function* () {
 				)
 
 				// Block until the channel is signaled (editor closed)
-				Bun.spawnSync(["tmux", "wait-for", channel], {
+				const waitResult = Bun.spawnSync(["tmux", "wait-for", channel], {
 					stdin: "inherit",
 					stdout: "inherit",
 					stderr: "inherit",
 				})
 
-				// Clear popup tracking
-				activePopupChannel = null
+				// Only clear tracking if wait completed successfully (exit code 0)
+				// If interrupted (non-zero exit), leave state set so SIGINT handler can clean up
+				if (waitResult.exitCode === 0) {
+					activeEditorState = null
+				}
 
 				// 6. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
@@ -810,8 +830,8 @@ const EditorServiceImpl = Effect.gen(function* () {
 				// 2. Wait on that channel
 				const channel = `az-editor-${Date.now()}`
 
-				// Track popup for cleanup on SIGINT
-				activePopupChannel = channel
+				// Track popup for cleanup on SIGINT (store both channel and tempFile for killing)
+				activeEditorState = { channel, tempFile }
 
 				// Launch popup - when editor exits, it signals the channel
 				Bun.spawnSync(
@@ -832,14 +852,17 @@ const EditorServiceImpl = Effect.gen(function* () {
 				)
 
 				// Block until the channel is signaled (editor closed)
-				Bun.spawnSync(["tmux", "wait-for", channel], {
+				const waitResult = Bun.spawnSync(["tmux", "wait-for", channel], {
 					stdin: "inherit",
 					stdout: "inherit",
 					stderr: "inherit",
 				})
 
-				// Clear popup tracking
-				activePopupChannel = null
+				// Only clear tracking if wait completed successfully (exit code 0)
+				// If interrupted (non-zero exit), leave state set so SIGINT handler can clean up
+				if (waitResult.exitCode === 0) {
+					activeEditorState = null
+				}
 
 				// 6. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
