@@ -12,7 +12,7 @@
  * - Parses git worktree list --porcelain output
  */
 
-import { Command, type CommandExecutor } from "@effect/platform"
+import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Context, Data, Effect, Layer, Ref, type Scope } from "effect"
 import { getWorktreePath } from "./paths.js"
@@ -310,8 +310,50 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
 export class WorktreeManager extends Effect.Service<WorktreeManager>()("WorktreeManager", {
 	dependencies: [BunContext.layer],
 	effect: Effect.gen(function* () {
+		// Grab platform services at layer construction
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+
 		// Track active worktrees in memory for fast lookups
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
+
+		/**
+		 * Copy Claude's local settings to a new worktree
+		 *
+		 * Claude Code stores personal permission grants in .claude/settings.local.json,
+		 * which is globally gitignored and thus not copied when git creates a worktree.
+		 * This function copies that file so users don't have to re-grant permissions.
+		 */
+		const copyClaudeLocalSettings = (
+			sourceProjectPath: string,
+			targetWorktreePath: string,
+		): Effect.Effect<void, never, never> =>
+			Effect.gen(function* () {
+				const sourceSettings = pathService.join(sourceProjectPath, ".claude", "settings.local.json")
+				const targetClaudeDir = pathService.join(targetWorktreePath, ".claude")
+				const targetSettings = pathService.join(targetClaudeDir, "settings.local.json")
+
+				// Check if source settings exist
+				const sourceExists = yield* fs.exists(sourceSettings)
+				if (!sourceExists) {
+					// No local settings to copy - this is fine
+					return
+				}
+
+				// Ensure target .claude directory exists (it should from git, but be safe)
+				const targetDirExists = yield* fs.exists(targetClaudeDir)
+				if (!targetDirExists) {
+					yield* fs.makeDirectory(targetClaudeDir, { recursive: true })
+				}
+
+				// Copy the settings file
+				yield* fs.copyFile(sourceSettings, targetSettings)
+			}).pipe(
+				// Don't fail worktree creation if settings copy fails - just log and continue
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Failed to copy Claude local settings: ${error}`),
+				),
+			)
 
 		// Helper to refresh worktrees cache
 		const refreshWorktrees = (
@@ -364,6 +406,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				// Create new branch and worktree
 				// git worktree add -b <branch-name> <path> <start-point>
 				yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
+
+				// Copy Claude's local settings to preserve permission grants
+				yield* copyClaudeLocalSettings(projectPath, worktreePath)
 
 				// Refresh cache to get the new worktree info
 				yield* refreshWorktrees(projectPath)
