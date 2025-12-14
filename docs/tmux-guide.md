@@ -139,10 +139,17 @@ I'll write this as: `Ctrl-a d`
 │   Ctrl-a o     Switch to next pane                     │
 │   Ctrl-a x     Close current pane                      │
 ├────────────────────────────────────────────────────────┤
-│ Other:                                                  │
+│ Special:                                                │
+│   Ctrl-a `     Popup terminal (floating shell)         │
 │   Ctrl-a ?     Help (list all keybindings)             │
 │   Ctrl-a :     Command prompt                          │
-│   Ctrl-a [     Scroll mode (q to exit)                 │
+├────────────────────────────────────────────────────────┤
+│ Copy Mode (scrolling):                                  │
+│   Ctrl-a u     Enter scroll mode + page up             │
+│   Ctrl-a Escape Enter scroll mode                      │
+│   Ctrl-u/d     Page up/down (in scroll mode)           │
+│   j/k          Line up/down (in scroll mode)           │
+│   q or Escape  Exit scroll mode                        │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -195,9 +202,26 @@ When viewing a Claude session:
 
 If you want to scroll through Claude's output:
 1. Attach to the session
-2. Press `Ctrl-a` then `[` to enter scroll mode
-3. Use arrow keys or `Page Up`/`Page Down` to scroll
-4. Press `q` to exit scroll mode
+2. Enter scroll mode using one of:
+   - `Ctrl-a u` - enters scroll mode and pages up
+   - `Ctrl-a Escape` - enters scroll mode
+   - Trackpad scroll - auto-enters scroll mode
+3. Navigate with:
+   - `Ctrl-u` / `Ctrl-d` - page up/down
+   - `j` / `k` - line by line
+   - `/` - search forward
+4. Press `q` or `Escape` to exit scroll mode
+
+### Popup Terminal
+
+Need a quick shell without leaving your current view?
+
+Press `` Ctrl-a ` `` (backtick) to open a floating popup terminal. It:
+- Opens at 80% size in the center of your screen
+- Uses your current directory
+- Closes when you exit (`Ctrl-d` or `exit`)
+
+Great for quick `git status`, `bd ready`, or any one-off command!
 
 ## Common Workflows
 
@@ -357,11 +381,12 @@ reset
 
 ### Recommended .tmux.conf
 
-Create `~/.tmux.conf` for Azedarach compatibility:
+For the full recommended tmux configuration with all features (popup terminal, FZF integration, session persistence, etc.), see **[tmux-config.md](tmux-config.md)**.
+
+**Minimal config** for basic Azedarach compatibility:
 
 ```bash
 # Use Ctrl-a instead of Ctrl-b (easier to reach)
-# This is required for the keybindings documented above
 set -g prefix C-a
 unbind C-b
 bind C-a send-prefix
@@ -370,18 +395,25 @@ bind C-a send-prefix
 set -g mouse on
 
 # Better colors
-set -g default-terminal "screen-256color"
+set -g default-terminal "tmux-256color"
 set -ga terminal-overrides ",*256col*:Tc"
 
 # Start window numbering at 1
 set -g base-index 1
 setw -g pane-base-index 1
 
-# Faster key repetition
+# Faster key repetition (critical for editors)
 set -s escape-time 0
 
 # Increase scrollback buffer
 set -g history-limit 50000
+
+# Popup terminal (Ctrl-a `)
+bind ` display-popup -E -w 80% -h 80% -d "#{pane_current_path}"
+
+# Better scroll mode entry
+bind u copy-mode -eu
+bind Escape copy-mode
 ```
 
 After creating/editing, reload with:

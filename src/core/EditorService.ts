@@ -1,8 +1,11 @@
 /**
- * EditorService - Bead editor using $EDITOR
+ * BeadEditorService - Bead editor using $EDITOR
  *
  * Serializes beads to structured markdown, opens $EDITOR, parses changes,
  * and applies updates via BeadsClient.
+ *
+ * NOTE: Renamed from EditorService to avoid collision with ModeService
+ * (src/services/EditorService.ts which handles editor modes in the UI)
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
@@ -33,7 +36,6 @@ let activeEditorState: { channel: string; tempFile: string } | null = null
 export const killActivePopup = (): void => {
 	if (activeEditorState) {
 		const { tempFile } = activeEditorState
-		const myPid = process.pid
 
 		try {
 			// Use pkill to kill any process with the temp file in its command line
@@ -62,7 +64,7 @@ export const killActivePopup = (): void => {
 					for (const pidStr of pids) {
 						const pid = parseInt(pidStr, 10)
 						// Don't kill ourselves!
-						if (!isNaN(pid) && pid > 0 && pid !== myPid) {
+						if (!isNaN(pid) && pid > 0 && pid !== process.pid) {
 							try {
 								process.kill(pid, "SIGTERM")
 							} catch {
@@ -72,9 +74,11 @@ export const killActivePopup = (): void => {
 					}
 				}
 			} catch {
-				// Ignore errors during cleanup
+				// Fallback failed too
 			}
 		}
+
+		// Clear the state
 		activeEditorState = null
 	}
 }
@@ -99,7 +103,7 @@ export class EditorError extends Data.TaggedError("EditorError")<{
 }> {}
 
 // ============================================================================
-// Service Definition
+// Created Bead Result
 // ============================================================================
 
 /**
@@ -108,10 +112,13 @@ export class EditorError extends Data.TaggedError("EditorError")<{
 export interface CreatedBead {
 	readonly id: string
 	readonly title: string
-	readonly type: string
 }
 
-export interface EditorServiceImpl {
+// ============================================================================
+// Service Definition
+// ============================================================================
+
+export interface BeadEditorServiceImpl {
 	/**
 	 * Edit a bead in $EDITOR
 	 *
@@ -134,25 +141,18 @@ export interface EditorServiceImpl {
 	/**
 	 * Create a new bead via $EDITOR
 	 *
-	 * 1. Creates blank template with all fields
+	 * 1. Creates blank template
 	 * 2. Writes to /tmp/azedarach-new.md
 	 * 3. Opens $EDITOR (blocking)
 	 * 4. Parses result
 	 * 5. Creates bead via bd create
-	 *
-	 * Returns the created bead ID and title.
 	 */
 	readonly createBead: () => Effect.Effect<
 		CreatedBead,
 		ParseMarkdownError | EditorError,
-		CommandExecutor.CommandExecutor | FileSystem.FileSystem
+		CommandExecutor.CommandExecutor | BeadsClient | FileSystem.FileSystem
 	>
 }
-
-export class EditorService extends Context.Tag("EditorService")<
-	EditorService,
-	EditorServiceImpl
->() {}
 
 // ============================================================================
 // Markdown Serialization
@@ -220,215 +220,6 @@ const serializeBeadToMarkdown = (bead: Issue): string => {
 
 	return lines.join("\n")
 }
-
-/**
- * Create a blank template for new bead creation
- */
-// Anchor placeholders - single words for easy Helix navigation (gw, w, b, e)
-const ANCHORS = {
-	TITLE: "TITLE",
-	DESCRIPTION: "DESCRIPTION",
-	DESIGN: "DESIGN",
-	NOTES: "NOTES",
-	ACCEPTANCE: "ACCEPTANCE",
-} as const
-
-const createBlankBeadTemplate = (): string => {
-	const lines: string[] = []
-
-	// Header with single-word anchor for easy selection
-	lines.push(`# ${ANCHORS.TITLE}`)
-	lines.push("───────────────────────────────────────────────────")
-	lines.push("")
-
-	// Metadata section - user fills in these values
-	lines.push("Type:     task        (task | bug | feature | epic | chore)")
-	lines.push("Priority: P2          (P0 = highest, P4 = lowest)")
-	lines.push("Status:   open        (open | in_progress | blocked | closed)")
-	lines.push("Assignee: ")
-	lines.push("Labels:   ")
-	lines.push("Estimate: ")
-	lines.push("")
-
-	// Description
-	lines.push("───────────────────────────────────────────────────")
-	lines.push("## Description")
-	lines.push("")
-	lines.push(ANCHORS.DESCRIPTION)
-	lines.push("")
-
-	// Design
-	lines.push("───────────────────────────────────────────────────")
-	lines.push("## Design")
-	lines.push("")
-	lines.push(ANCHORS.DESIGN)
-	lines.push("")
-
-	// Notes
-	lines.push("───────────────────────────────────────────────────")
-	lines.push("## Notes")
-	lines.push("")
-	lines.push(ANCHORS.NOTES)
-	lines.push("")
-
-	// Acceptance Criteria
-	lines.push("───────────────────────────────────────────────────")
-	lines.push("## Acceptance Criteria")
-	lines.push("")
-	lines.push(ANCHORS.ACCEPTANCE)
-	lines.push("")
-
-	return lines.join("\n")
-}
-
-/**
- * Fields parsed from a new bead template
- */
-interface NewBeadFields {
-	title: string
-	type: string
-	priority: number
-	status: string
-	assignee?: string
-	labels?: string[]
-	estimate?: number
-	description?: string
-	design?: string
-	notes?: string
-	acceptance?: string
-}
-
-/**
- * Parse new bead template markdown
- */
-const parseNewBeadTemplate = (
-	markdown: string,
-): Effect.Effect<NewBeadFields, ParseMarkdownError> =>
-	Effect.try({
-		try: () => {
-			const lines = markdown.split("\n")
-
-			// Parse header for title
-			const headerLine = lines[0]
-			if (!headerLine?.startsWith("#")) {
-				throw new Error("Missing header line")
-			}
-			const headerMatch = headerLine.match(/^#\s+(?:NEW:\s+)?(.+)$/)
-			if (!headerMatch) {
-				throw new Error("Invalid header format. Expected: # NEW: {title} or # {title}")
-			}
-			const title = headerMatch[1]!.trim()
-			if (!title || title === ANCHORS.TITLE) {
-				throw new Error("Please enter a title for the bead")
-			}
-
-			// Find metadata section
-			const metadataLines: string[] = []
-			let inMetadata = false
-			let separatorCount = 0
-
-			for (const line of lines) {
-				if (line.startsWith("───")) {
-					separatorCount++
-					if (separatorCount === 1) {
-						inMetadata = true
-						continue
-					}
-					if (separatorCount === 2) {
-						break
-					}
-				}
-				if (inMetadata) {
-					metadataLines.push(line)
-				}
-			}
-
-			// Parse metadata fields
-			let type = "task"
-			let priority = 2
-			let status = "open"
-			let assignee: string | undefined
-			let labels: string[] | undefined
-			let estimate: number | undefined
-
-			for (const line of metadataLines) {
-				if (line.startsWith("Type:")) {
-					const typeValue = line.replace(/^Type:\s*/, "").split("(")[0]!.trim()
-					const parsedType = parseTypeLabel(typeValue)
-					if (parsedType) type = parsedType
-				}
-				if (line.startsWith("Priority:")) {
-					const priorityValue = line.replace(/^Priority:\s*/, "").split("(")[0]!.trim()
-					const parsedPriority = parsePriorityLabel(priorityValue)
-					if (parsedPriority !== null) priority = parsedPriority
-				}
-				if (line.startsWith("Status:")) {
-					const statusValue = line.replace(/^Status:\s*/, "").split("(")[0]!.trim()
-					if (statusValue) status = statusValue
-				}
-				if (line.startsWith("Assignee:")) {
-					const assigneeValue = line.replace(/^Assignee:\s*/, "").trim()
-					if (assigneeValue) assignee = assigneeValue
-				}
-				if (line.startsWith("Labels:")) {
-					const labelsValue = line.replace(/^Labels:\s*/, "").trim()
-					if (labelsValue) {
-						labels = labelsValue
-							.split(",")
-							.map((l) => l.trim())
-							.filter(Boolean)
-					}
-				}
-				if (line.startsWith("Estimate:")) {
-					const estimateValue = line.replace(/^Estimate:\s*/, "").trim()
-					if (estimateValue) {
-						const parsed = parseInt(estimateValue, 10)
-						if (!isNaN(parsed)) estimate = parsed
-					}
-				}
-			}
-
-			// Parse sections
-			const description = parseSection(markdown, "Description")
-			const design = parseSection(markdown, "Design")
-			const notes = parseSection(markdown, "Notes")
-			const acceptance = parseSection(markdown, "Acceptance Criteria")
-
-			// Filter out unchanged anchor placeholders
-			const cleanDescription =
-				description === ANCHORS.DESCRIPTION ? undefined : description || undefined
-			const cleanDesign = design === ANCHORS.DESIGN ? undefined : design || undefined
-			const cleanNotes = notes === ANCHORS.NOTES ? undefined : notes || undefined
-			const cleanAcceptance =
-				acceptance === ANCHORS.ACCEPTANCE ? undefined : acceptance || undefined
-
-			return {
-				title,
-				type,
-				priority,
-				status,
-				assignee,
-				labels,
-				estimate,
-				description: cleanDescription,
-				design: cleanDesign,
-				notes: cleanNotes,
-				acceptance: cleanAcceptance,
-			}
-		},
-		catch: (error) => {
-			const errorMessage =
-				error instanceof Error
-					? error.message
-					: typeof error === "string"
-						? error
-						: "Unknown error"
-			return new ParseMarkdownError({
-				message: errorMessage,
-				markdown,
-			})
-		},
-	})
 
 // ============================================================================
 // Markdown Parsing
@@ -653,13 +444,247 @@ const parseMarkdownToBead = (
 	})
 
 // ============================================================================
-// Live Implementation
+// Blank Template Creation
 // ============================================================================
 
-const EditorServiceImpl = Effect.gen(function* () {
-	return EditorService.of({
-		editBead: (bead) =>
-			Effect.gen(function* () {
+/**
+ * Create a blank bead template for editor creation
+ */
+const createBlankBeadTemplate = (): string => {
+	const lines: string[] = []
+
+	// Header - user fills in title
+	lines.push("# NEW: [Enter title here]")
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("")
+
+	// Metadata section with defaults
+	lines.push("Type:     task")
+	lines.push("Priority: P2")
+	lines.push("Status:   backlog")
+	lines.push("Assignee: ")
+	lines.push("Labels:   ")
+	lines.push("Estimate: ")
+	lines.push("")
+
+	// Description
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Description")
+	lines.push("")
+	lines.push("")
+	lines.push("")
+
+	// Design
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Design")
+	lines.push("")
+	lines.push("")
+	lines.push("")
+
+	// Notes
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Notes")
+	lines.push("")
+	lines.push("")
+	lines.push("")
+
+	// Acceptance Criteria
+	lines.push("───────────────────────────────────────────────────")
+	lines.push("## Acceptance Criteria")
+	lines.push("")
+	lines.push("")
+	lines.push("")
+
+	return lines.join("\n")
+}
+
+/**
+ * New bead fields parsed from template
+ */
+interface NewBeadFields {
+	title: string
+	type: string
+	priority: number
+	status: string
+	assignee?: string
+	labels?: string[]
+	estimate?: number
+	description?: string
+	design?: string
+	notes?: string
+	acceptance?: string
+}
+
+/**
+ * Parse markdown to extract new bead fields
+ */
+const parseMarkdownToNewBead = (
+	markdown: string,
+): Effect.Effect<NewBeadFields, ParseMarkdownError> =>
+	Effect.try({
+		try: () => {
+			const lines = markdown.split("\n")
+			const fields: Partial<NewBeadFields> = {}
+
+			// Parse header for title
+			const headerLine = lines[0]
+			if (!headerLine?.startsWith("#")) {
+				throw new Error("Missing header line")
+			}
+			const headerMatch = headerLine.match(/^#\s+NEW:\s+(.+)$/)
+			if (!headerMatch) {
+				throw new Error("Invalid header format. Expected: # NEW: [title]")
+			}
+			const parsedTitle = headerMatch[1]!.trim()
+			if (!parsedTitle || parsedTitle === "[Enter title here]") {
+				throw new Error("Title is required")
+			}
+			fields.title = parsedTitle
+
+			// Find metadata section
+			const metadataLines: string[] = []
+			let inMetadata = false
+			let separatorCount = 0
+
+			for (const line of lines) {
+				if (line.startsWith("───")) {
+					separatorCount++
+					if (separatorCount === 1) {
+						inMetadata = true
+						continue
+					}
+					if (separatorCount === 2) {
+						break
+					}
+				}
+				if (inMetadata) {
+					metadataLines.push(line)
+				}
+			}
+
+			// Parse metadata fields
+			for (const line of metadataLines) {
+				// Type
+				if (line.startsWith("Type:")) {
+					const typeValue = extractFieldValue(line, "Type").split("(")[0]!.trim()
+					const parsedType = parseTypeLabel(typeValue)
+					if (!parsedType) {
+						throw new Error(`Invalid type: ${typeValue}`)
+					}
+					fields.type = parsedType
+				}
+
+				// Priority
+				if (line.startsWith("Priority:")) {
+					const priorityValue = extractFieldValue(line, "Priority")
+					const parsedPriority = parsePriorityLabel(priorityValue)
+					if (parsedPriority === null) {
+						throw new Error(`Invalid priority: ${priorityValue}`)
+					}
+					fields.priority = parsedPriority
+				}
+
+				// Status
+				if (line.startsWith("Status:")) {
+					const statusValue = extractFieldValue(line, "Status")
+					if (statusValue) {
+						fields.status = statusValue
+					}
+				}
+
+				// Assignee
+				if (line.startsWith("Assignee:")) {
+					const assigneeValue = extractFieldValue(line, "Assignee")
+					if (assigneeValue) {
+						fields.assignee = assigneeValue
+					}
+				}
+
+				// Labels
+				if (line.startsWith("Labels:")) {
+					const labelsValue = extractFieldValue(line, "Labels")
+					if (labelsValue) {
+						const parsedLabels = labelsValue
+							.split(",")
+							.map((l) => l.trim())
+							.filter(Boolean)
+						if (parsedLabels.length > 0) {
+							fields.labels = parsedLabels
+						}
+					}
+				}
+
+				// Estimate
+				if (line.startsWith("Estimate:")) {
+					const estimateValue = extractFieldValue(line, "Estimate")
+					if (estimateValue) {
+						const parsedEstimate = parseInt(estimateValue, 10)
+						if (!isNaN(parsedEstimate)) {
+							fields.estimate = parsedEstimate
+						}
+					}
+				}
+			}
+
+			// Parse sections
+			const description = parseSection(markdown, "Description")
+			if (description) {
+				fields.description = description
+			}
+
+			const design = parseSection(markdown, "Design")
+			if (design) {
+				fields.design = design
+			}
+
+			const notes = parseSection(markdown, "Notes")
+			if (notes) {
+				fields.notes = notes
+			}
+
+			const acceptance = parseSection(markdown, "Acceptance Criteria")
+			if (acceptance) {
+				fields.acceptance = acceptance
+			}
+
+			// Validate required fields
+			if (!fields.title) throw new Error("Title is required")
+			if (!fields.type) throw new Error("Type is required")
+			if (fields.priority === undefined) throw new Error("Priority is required")
+			if (!fields.status) throw new Error("Status is required")
+
+			return fields as NewBeadFields
+		},
+		catch: (error) =>
+			new ParseMarkdownError({
+				message: `Failed to parse new bead markdown: ${error}`,
+				markdown,
+			}),
+	})
+
+// ============================================================================
+// Service Implementation
+// ============================================================================
+
+/**
+ * BeadEditorService
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const editor = yield* BeadEditorService
+ *   yield* editor.editBead(bead)
+ * }).pipe(Effect.provide(BeadEditorService.Default))
+ * ```
+ */
+export class BeadEditorService extends Effect.Service<BeadEditorService>()(
+	"BeadEditorService",
+	{
+		dependencies: [BeadsClient.Default],
+		effect: Effect.gen(function* () {
+			return {
+				editBead: (bead: Issue) =>
+					Effect.gen(function* () {
 				const client = yield* BeadsClient
 				const fs = yield* FileSystem.FileSystem
 
@@ -680,47 +705,18 @@ const EditorServiceImpl = Effect.gen(function* () {
 				// 3. Get $EDITOR from environment (default to vim)
 				const editor = process.env.EDITOR || "vim"
 
-				// 4. Open editor in tmux popup with synchronization
-				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
-				// 1. Create popup that signals a channel when done
-				// 2. Wait on that channel
-				const channel = `az-editor-${Date.now()}`
-
-				// Track popup for cleanup on SIGINT (store both channel and tempFile for killing)
-				activeEditorState = { channel, tempFile }
-
-				// Launch popup - when editor exits, it signals the channel
-				Bun.spawnSync(
-					[
-						"tmux",
-						"display-popup",
-						"-E", // Close popup when command exits
-						"-w",
-						"90%",
-						"-h",
-						"90%",
-						"--",
-						"sh",
-						"-c",
-						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
-					],
-					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+				// 4. Open editor (blocking)
+				const command = Command.make(editor, tempFile)
+				yield* Command.exitCode(command).pipe(
+					Effect.mapError(
+						(error) =>
+							new EditorError({
+								message: `Failed to open editor: ${error}`,
+							}),
+					),
 				)
 
-				// Block until the channel is signaled (editor closed)
-				const waitResult = Bun.spawnSync(["tmux", "wait-for", channel], {
-					stdin: "inherit",
-					stdout: "inherit",
-					stderr: "inherit",
-				})
-
-				// Only clear tracking if wait completed successfully (exit code 0)
-				// If interrupted (non-zero exit), leave state set so SIGINT handler can clean up
-				if (waitResult.exitCode === 0) {
-					activeEditorState = null
-				}
-
-				// 6. Read edited content
+				// 5. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
 					Effect.mapError(
 						(error) =>
@@ -805,173 +801,139 @@ const EditorServiceImpl = Effect.gen(function* () {
 					),
 				)
 
-				// Clean up temp file
-				yield* Effect.ignoreLogged(
-					fs.remove(tempFile).pipe(
-						Effect.mapError(
-							(error) =>
-								new EditorError({
-									message: `Failed to remove temp file: ${error}`,
-								}),
-						),
-					),
-				)
-			}),
-
-		createBead: () =>
-			Effect.gen(function* () {
-				const fs = yield* FileSystem.FileSystem
-
-				// 1. Create blank template
-				const markdown = createBlankBeadTemplate()
-
-				// 2. Write to temp file
-				const tempFile = `/tmp/azedarach-new.md`
-				yield* fs.writeFileString(tempFile, markdown).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to write temp file: ${error}`,
-							}),
-					),
-				)
-
-				// 3. Get $EDITOR from environment (default to vim)
-				const editor = process.env.EDITOR || "vim"
-
-				// 4. Open editor in tmux popup with synchronization
-				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
-				// 1. Create popup that signals a channel when done
-				// 2. Wait on that channel
-				const channel = `az-editor-${Date.now()}`
-
-				// Track popup for cleanup on SIGINT (store both channel and tempFile for killing)
-				activeEditorState = { channel, tempFile }
-
-				// Launch popup - when editor exits, it signals the channel
-				Bun.spawnSync(
-					[
-						"tmux",
-						"display-popup",
-						"-E", // Close popup when command exits
-						"-w",
-						"90%",
-						"-h",
-						"90%",
-						"--",
-						"sh",
-						"-c",
-						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
-					],
-					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
-				)
-
-				// Block until the channel is signaled (editor closed)
-				const waitResult = Bun.spawnSync(["tmux", "wait-for", channel], {
-					stdin: "inherit",
-					stdout: "inherit",
-					stderr: "inherit",
-				})
-
-				// Only clear tracking if wait completed successfully (exit code 0)
-				// If interrupted (non-zero exit), leave state set so SIGINT handler can clean up
-				if (waitResult.exitCode === 0) {
-					activeEditorState = null
-				}
-
-				// 6. Read edited content
-				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to read edited file: ${error}`,
-							}),
-					),
-				)
-
-				// 6. Parse the template
-				const fields = yield* parseNewBeadTemplate(editedMarkdown)
-
-				// 7. Build bd create command
-				// Note: bd create doesn't support --status or --notes flags
-				const args: string[] = ["create", "--title", fields.title, "--type", fields.type]
-
-				if (fields.priority !== undefined) args.push("--priority", String(fields.priority))
-				if (fields.description) args.push("--description", fields.description)
-				if (fields.design) args.push("--design", fields.design)
-				if (fields.acceptance) args.push("--acceptance", fields.acceptance)
-				if (fields.assignee) args.push("--assignee", fields.assignee)
-				if (fields.estimate !== undefined) args.push("--estimate", String(fields.estimate))
-				if (fields.labels && fields.labels.length > 0) {
-					fields.labels.forEach((label) => args.push("--labels", label))
-				}
-
-				// 8. Execute bd create and capture output
-				const createCommand = Command.make("bd", ...args)
-				const output = yield* Command.string(createCommand).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to create bead: ${error}`,
-							}),
-					),
-				)
-
-				// 9. Parse the bead ID from output (format: "Created issue: az-xxx")
-				const idMatch = output.match(/Created issue:\s*(\S+)/i)
-				if (!idMatch) {
-					yield* Effect.fail(
-						new EditorError({
-							message: `Could not parse bead ID from output: ${output}`,
-						}),
-					)
-				}
-				const beadId = idMatch![1]!
-
-				// 10. If status or notes were set, update the bead (bd create doesn't support these)
-				const needsUpdate =
-					(fields.status && fields.status !== "open") || fields.notes
-				if (needsUpdate) {
-					const updateArgs: string[] = ["update", beadId]
-					if (fields.status && fields.status !== "open") {
-						updateArgs.push("--status", fields.status)
-					}
-					if (fields.notes) {
-						updateArgs.push("--notes", fields.notes)
-					}
-					const updateCommand = Command.make("bd", ...updateArgs)
-					yield* Command.exitCode(updateCommand).pipe(
-						Effect.mapError(
-							(error) =>
-								new EditorError({
-									message: `Failed to update bead status/notes: ${error}`,
-								}),
+					// Clean up temp file
+					yield* Effect.ignoreLogged(
+						fs.remove(tempFile).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to remove temp file: ${error}`,
+									}),
+							),
 						),
 					)
-				}
+				}),
 
-				// 11. Clean up temp file
-				yield* Effect.ignoreLogged(
-					fs.remove(tempFile).pipe(
-						Effect.mapError(
-							(error) =>
+				createBead: () =>
+					Effect.gen(function* () {
+						const client = yield* BeadsClient
+						const fs = yield* FileSystem.FileSystem
+
+						// 1. Create blank template
+						const markdown = createBlankBeadTemplate()
+
+						// 2. Write to temp file
+						const tempFile = `/tmp/azedarach-new.md`
+						yield* fs.writeFileString(tempFile, markdown).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to write temp file: ${error}`,
+									}),
+							),
+						)
+
+						// 3. Get $EDITOR from environment (default to vim)
+						const editor = process.env.EDITOR || "vim"
+
+						// 4. Open editor (blocking)
+						const command = Command.make(editor, tempFile)
+						yield* Command.exitCode(command).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to open editor: ${error}`,
+									}),
+							),
+						)
+
+						// 5. Read edited content
+						const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to read edited file: ${error}`,
+									}),
+							),
+						)
+
+						// 6. Parse new bead fields
+						const fields = yield* parseMarkdownToNewBead(editedMarkdown)
+
+						// 7. Create bead via bd create
+						const createArgs: string[] = ["create", "--title", fields.title, "--type", fields.type]
+
+						if (fields.priority !== undefined) createArgs.push("--priority", String(fields.priority))
+						if (fields.status) createArgs.push("--status", fields.status)
+						if (fields.description) createArgs.push("--description", fields.description)
+						if (fields.design) createArgs.push("--design", fields.design)
+						if (fields.notes) createArgs.push("--notes", fields.notes)
+						if (fields.acceptance) createArgs.push("--acceptance", fields.acceptance)
+						if (fields.assignee) createArgs.push("--assignee", fields.assignee)
+						if (fields.estimate !== undefined) createArgs.push("--estimate", String(fields.estimate))
+
+						// Handle labels
+						if (fields.labels && fields.labels.length > 0) {
+							fields.labels.forEach((label) => {
+								createArgs.push("--set-labels", label)
+							})
+						}
+
+						// Execute bd create and capture output to get the ID
+						const createCommand = Command.make("bd", ...createArgs)
+						const output = yield* Command.string(createCommand).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to create bead: ${error}`,
+									}),
+							),
+						)
+
+						// Parse the ID from output (bd create returns "Created {id}")
+						const idMatch = output.match(/Created\s+([A-Z]+-[a-z0-9]+)/i)
+						if (!idMatch || !idMatch[1]) {
+							return yield* Effect.fail(
 								new EditorError({
-									message: `Failed to remove temp file: ${error}`,
+									message: `Failed to parse created bead ID from output: ${output}`,
 								}),
-						),
-					),
-				)
+							)
+						}
 
-				return {
-					id: beadId,
-					title: fields.title,
-					type: fields.type,
-				}
-			}),
-	})
-})
+						const createdId = idMatch[1]
+
+						// Clean up temp file
+						yield* Effect.ignoreLogged(
+							fs.remove(tempFile).pipe(
+								Effect.mapError(
+									(error) =>
+										new EditorError({
+											message: `Failed to remove temp file: ${error}`,
+										}),
+								),
+							),
+						)
+
+						return {
+							id: createdId,
+							title: fields.title,
+						}
+					}),
+			}
+		}),
+	},
+) {}
 
 /**
- * Live EditorService layer
+ * Legacy alias for BeadEditorService
+ *
+ * @deprecated Use BeadEditorService instead
  */
-export const EditorServiceLive = Layer.effect(EditorService, EditorServiceImpl)
+export const EditorService = BeadEditorService
+
+/**
+ * Legacy layer export
+ *
+ * @deprecated Use BeadEditorService.Default instead
+ */
+export const EditorServiceLive = BeadEditorService.Default

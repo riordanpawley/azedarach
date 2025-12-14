@@ -136,14 +136,6 @@ export interface StateDetectorService {
 	readonly createDetector: () => Effect.Effect<(chunk: string) => SessionState | null, never>
 }
 
-/**
- * StateDetector service tag
- */
-export class StateDetector extends Context.Tag("StateDetector")<
-	StateDetector,
-	StateDetectorService
->() {}
-
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
@@ -236,27 +228,13 @@ const createStatefulDetector = (): ((chunk: string) => SessionState | null) => {
 }
 
 // ============================================================================
-// Live Implementation
+// Service Definition
 // ============================================================================
 
 /**
- * Live StateDetector implementation
+ * StateDetector service
  *
  * Provides stateless pattern matching and stateful detector creation.
- */
-const StateDetectorServiceImpl = Effect.gen(function* () {
-	return StateDetector.of({
-		detectFromChunk: (chunk) => Effect.sync(() => detectState(chunk)),
-
-		createDetector: () => Effect.sync(() => createStatefulDetector()),
-	})
-})
-
-/**
- * Live StateDetector layer
- *
- * This layer provides the StateDetector service with no dependencies.
- * It can be used directly in any Effect program.
  *
  * @example
  * ```ts
@@ -264,10 +242,16 @@ const StateDetectorServiceImpl = Effect.gen(function* () {
  *   const detector = yield* StateDetector
  *   const state = yield* detector.detectFromChunk("Error: something went wrong")
  *   return state // "error"
- * }).pipe(Effect.provide(StateDetectorLive))
+ * }).pipe(Effect.provide(StateDetector.Default))
  * ```
  */
-export const StateDetectorLive = Layer.effect(StateDetector, StateDetectorServiceImpl)
+export class StateDetector extends Effect.Service<StateDetector>()("StateDetector", {
+	effect: Effect.succeed({
+		detectFromChunk: (chunk: string) => Effect.sync(() => detectState(chunk)),
+
+		createDetector: () => Effect.sync(() => createStatefulDetector()),
+	}),
+}) {}
 
 // ============================================================================
 // Convenience Functions

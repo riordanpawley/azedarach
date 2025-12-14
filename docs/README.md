@@ -18,6 +18,7 @@
 |-------|-------------|
 | [Keybindings Reference](keybindings.md) | Complete keyboard shortcut reference |
 | [tmux Guide](tmux-guide.md) | **New to tmux?** Start here! |
+| [tmux Config](tmux-config.md) | Recommended tmux configuration + cheatsheet |
 | [Services Architecture](services.md) | Effect services and architecture |
 | [Testing Guide](testing.md) | How to test each feature |
 
