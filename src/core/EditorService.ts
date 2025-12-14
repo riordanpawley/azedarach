@@ -143,7 +143,7 @@ export interface BeadEditorServiceImpl {
 	 *
 	 * 1. Creates blank template
 	 * 2. Writes to /tmp/azedarach-new.md
-	 * 3. Opens $EDITOR (blocking)
+	 * 3. Opens $EDITOR in tmux popup (blocking via tmux wait-for)
 	 * 4. Parses result
 	 * 5. Creates bead via bd create
 	 */
@@ -438,7 +438,7 @@ const parseMarkdownToBead = (
 		},
 		catch: (error) =>
 			new ParseMarkdownError({
-				message: `Failed to parse markdown: ${error}`,
+				message: error instanceof Error ? error.message : String(error),
 				markdown,
 			}),
 	})
@@ -447,21 +447,30 @@ const parseMarkdownToBead = (
 // Blank Template Creation
 // ============================================================================
 
+// Anchor placeholders - single words for easy Helix navigation (w, b, e, ciw)
+const ANCHORS = {
+	TITLE: "TITLE",
+	DESCRIPTION: "DESCRIPTION",
+	DESIGN: "DESIGN",
+	NOTES: "NOTES",
+	ACCEPTANCE: "ACCEPTANCE",
+} as const
+
 /**
  * Create a blank bead template for editor creation
  */
 const createBlankBeadTemplate = (): string => {
 	const lines: string[] = []
 
-	// Header - user fills in title
-	lines.push("# NEW: [Enter title here]")
+	// Header with single-word anchor for easy selection
+	lines.push(`# ${ANCHORS.TITLE}`)
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("")
 
-	// Metadata section with defaults
-	lines.push("Type:     task")
-	lines.push("Priority: P2")
-	lines.push("Status:   backlog")
+	// Metadata section - user fills in these values
+	lines.push("Type:     task        (task | bug | feature | epic | chore)")
+	lines.push("Priority: P2          (P0 = highest, P4 = lowest)")
+	lines.push("Status:   open        (open | in_progress | blocked | closed)")
 	lines.push("Assignee: ")
 	lines.push("Labels:   ")
 	lines.push("Estimate: ")
@@ -471,28 +480,28 @@ const createBlankBeadTemplate = (): string => {
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Description")
 	lines.push("")
-	lines.push("")
+	lines.push(ANCHORS.DESCRIPTION)
 	lines.push("")
 
 	// Design
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Design")
 	lines.push("")
-	lines.push("")
+	lines.push(ANCHORS.DESIGN)
 	lines.push("")
 
 	// Notes
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Notes")
 	lines.push("")
-	lines.push("")
+	lines.push(ANCHORS.NOTES)
 	lines.push("")
 
 	// Acceptance Criteria
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Acceptance Criteria")
 	lines.push("")
-	lines.push("")
+	lines.push(ANCHORS.ACCEPTANCE)
 	lines.push("")
 
 	return lines.join("\n")
@@ -526,17 +535,18 @@ const parseMarkdownToNewBead = (
 			const lines = markdown.split("\n")
 			const fields: Partial<NewBeadFields> = {}
 
-			// Parse header for title
+			// Parse header for title (format: "# Title text")
 			const headerLine = lines[0]
 			if (!headerLine?.startsWith("#")) {
 				throw new Error("Missing header line")
 			}
-			const headerMatch = headerLine.match(/^#\s+NEW:\s+(.+)$/)
+			const headerMatch = headerLine.match(/^#\s+(.+)$/)
 			if (!headerMatch) {
-				throw new Error("Invalid header format. Expected: # NEW: [title]")
+				throw new Error("Invalid header format. Expected: # Title")
 			}
 			const parsedTitle = headerMatch[1]!.trim()
-			if (!parsedTitle || parsedTitle === "[Enter title here]") {
+			// Check for unchanged anchor placeholder
+			if (!parsedTitle || parsedTitle === ANCHORS.TITLE) {
 				throw new Error("Title is required")
 			}
 			fields.title = parsedTitle
@@ -574,9 +584,9 @@ const parseMarkdownToNewBead = (
 					fields.type = parsedType
 				}
 
-				// Priority
+				// Priority (strip hint like "(P0 = highest, P4 = lowest)")
 				if (line.startsWith("Priority:")) {
-					const priorityValue = extractFieldValue(line, "Priority")
+					const priorityValue = extractFieldValue(line, "Priority").split("(")[0]!.trim()
 					const parsedPriority = parsePriorityLabel(priorityValue)
 					if (parsedPriority === null) {
 						throw new Error(`Invalid priority: ${priorityValue}`)
@@ -584,9 +594,9 @@ const parseMarkdownToNewBead = (
 					fields.priority = parsedPriority
 				}
 
-				// Status
+				// Status (strip hint like "(open | in_progress | blocked | closed)")
 				if (line.startsWith("Status:")) {
-					const statusValue = extractFieldValue(line, "Status")
+					const statusValue = extractFieldValue(line, "Status").split("(")[0]!.trim()
 					if (statusValue) {
 						fields.status = statusValue
 					}
@@ -626,24 +636,24 @@ const parseMarkdownToNewBead = (
 				}
 			}
 
-			// Parse sections
+			// Parse sections (filter out unchanged anchor placeholders)
 			const description = parseSection(markdown, "Description")
-			if (description) {
+			if (description && description !== ANCHORS.DESCRIPTION) {
 				fields.description = description
 			}
 
 			const design = parseSection(markdown, "Design")
-			if (design) {
+			if (design && design !== ANCHORS.DESIGN) {
 				fields.design = design
 			}
 
 			const notes = parseSection(markdown, "Notes")
-			if (notes) {
+			if (notes && notes !== ANCHORS.NOTES) {
 				fields.notes = notes
 			}
 
 			const acceptance = parseSection(markdown, "Acceptance Criteria")
-			if (acceptance) {
+			if (acceptance && acceptance !== ANCHORS.ACCEPTANCE) {
 				fields.acceptance = acceptance
 			}
 
@@ -657,7 +667,7 @@ const parseMarkdownToNewBead = (
 		},
 		catch: (error) =>
 			new ParseMarkdownError({
-				message: `Failed to parse new bead markdown: ${error}`,
+				message: error instanceof Error ? error.message : String(error),
 				markdown,
 			}),
 	})
@@ -705,16 +715,43 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 				// 3. Get $EDITOR from environment (default to vim)
 				const editor = process.env.EDITOR || "vim"
 
-				// 4. Open editor (blocking)
-				const command = Command.make(editor, tempFile)
-				yield* Command.exitCode(command).pipe(
-					Effect.mapError(
-						(error) =>
-							new EditorError({
-								message: `Failed to open editor: ${error}`,
-							}),
-					),
+				// 4. Open editor in tmux popup with synchronization
+				// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+				// 1. Create popup that signals a channel when done
+				// 2. Wait on that channel
+				const channel = `az-editor-${Date.now()}`
+
+				// Track state for cleanup on SIGINT
+				activeEditorState = { channel, tempFile }
+
+				// Launch popup - when editor exits, it signals the channel
+				Bun.spawnSync(
+					[
+						"tmux",
+						"display-popup",
+						"-E", // Close popup when command exits
+						"-w",
+						"90%",
+						"-h",
+						"90%",
+						"-T",
+						` Edit: ${bead.id} `,
+						"--",
+						"sh",
+						"-c",
+						`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+					],
+					{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
 				)
+
+				// Block until the channel is signaled (editor closed)
+				Bun.spawnSync(["tmux", "wait-for", channel], {
+					stdin: "inherit",
+					stdout: "inherit",
+					stderr: "inherit",
+				})
+
+				activeEditorState = null
 
 				// 5. Read edited content
 				const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
@@ -836,16 +873,43 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 						// 3. Get $EDITOR from environment (default to vim)
 						const editor = process.env.EDITOR || "vim"
 
-						// 4. Open editor (blocking)
-						const command = Command.make(editor, tempFile)
-						yield* Command.exitCode(command).pipe(
-							Effect.mapError(
-								(error) =>
-									new EditorError({
-										message: `Failed to open editor: ${error}`,
-									}),
-							),
+						// 4. Open editor in tmux popup with synchronization
+						// tmux display-popup returns immediately, so we use wait-for to block until editor exits:
+						// 1. Create popup that signals a channel when done
+						// 2. Wait on that channel
+						const channel = `az-editor-${Date.now()}`
+
+						// Track state for cleanup on SIGINT
+						activeEditorState = { channel, tempFile }
+
+						// Launch popup - when editor exits, it signals the channel
+						Bun.spawnSync(
+							[
+								"tmux",
+								"display-popup",
+								"-E", // Close popup when command exits
+								"-w",
+								"90%",
+								"-h",
+								"90%",
+								"-T",
+								" Create New Bead ",
+								"--",
+								"sh",
+								"-c",
+								`${editor} "${tempFile}"; tmux wait-for -S ${channel}`,
+							],
+							{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
 						)
+
+						// Block until the channel is signaled (editor closed)
+						Bun.spawnSync(["tmux", "wait-for", channel], {
+							stdin: "inherit",
+							stdout: "inherit",
+							stderr: "inherit",
+						})
+
+						activeEditorState = null
 
 						// 5. Read edited content
 						const editedMarkdown = yield* fs.readFileString(tempFile).pipe(
@@ -861,22 +925,19 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 						const fields = yield* parseMarkdownToNewBead(editedMarkdown)
 
 						// 7. Create bead via bd create
+						// Note: bd create doesn't support --status or --notes, those require a follow-up update
 						const createArgs: string[] = ["create", "--title", fields.title, "--type", fields.type]
 
 						if (fields.priority !== undefined) createArgs.push("--priority", String(fields.priority))
-						if (fields.status) createArgs.push("--status", fields.status)
 						if (fields.description) createArgs.push("--description", fields.description)
 						if (fields.design) createArgs.push("--design", fields.design)
-						if (fields.notes) createArgs.push("--notes", fields.notes)
 						if (fields.acceptance) createArgs.push("--acceptance", fields.acceptance)
 						if (fields.assignee) createArgs.push("--assignee", fields.assignee)
 						if (fields.estimate !== undefined) createArgs.push("--estimate", String(fields.estimate))
 
-						// Handle labels
+						// Handle labels (bd create uses -l/--labels, not --set-labels)
 						if (fields.labels && fields.labels.length > 0) {
-							fields.labels.forEach((label) => {
-								createArgs.push("--set-labels", label)
-							})
+							createArgs.push("--labels", fields.labels.join(","))
 						}
 
 						// Execute bd create and capture output to get the ID
@@ -902,7 +963,29 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 
 						const createdId = idMatch[1]
 
-						// Clean up temp file
+						// 8. If status or notes were set, update the bead (bd create doesn't support these)
+						const needsUpdate =
+							(fields.status && fields.status !== "open") || fields.notes
+						if (needsUpdate) {
+							const updateArgs: string[] = ["update", createdId]
+							if (fields.status && fields.status !== "open") {
+								updateArgs.push("--status", fields.status)
+							}
+							if (fields.notes) {
+								updateArgs.push("--notes", fields.notes)
+							}
+							const updateCommand = Command.make("bd", ...updateArgs)
+							yield* Command.exitCode(updateCommand).pipe(
+								Effect.mapError(
+									(error) =>
+										new EditorError({
+											message: `Failed to update bead status/notes: ${error}`,
+										}),
+								),
+							)
+						}
+
+						// 9. Clean up temp file
 						yield* Effect.ignoreLogged(
 							fs.remove(tempFile).pipe(
 								Effect.mapError(
