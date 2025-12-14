@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "elf": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1765693298,
+        "narHash": "sha256-kV/ganPYExPulclc5yQA6UV8cIbhz5IRDXmP9Pf7kUE=",
+        "owner": "Spacehunterz",
+        "repo": "Emergent-Learning-Framework_ELF",
+        "rev": "14421597171994bba8b09c0984c8ee3827da3fc0",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Spacehunterz",
+        "repo": "Emergent-Learning-Framework_ELF",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -36,6 +52,7 @@
     },
     "root": {
       "inputs": {
+        "elf": "elf",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs"
       }
