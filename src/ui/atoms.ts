@@ -16,6 +16,15 @@ import { TmuxServiceLive } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService, VCServiceLive } from "../core/VCService"
 import type { TaskWithSession } from "./types"
 
+// New atomic Effect services
+import { ToastService } from "../services/ToastService"
+import { OverlayService } from "../services/OverlayService"
+import { NavigationService } from "../services/NavigationService"
+import { EditorService as ModeService } from "../services/EditorService"
+import { BoardService } from "../services/BoardService"
+import { SessionService } from "../services/SessionService"
+import { KeyboardService } from "../services/KeyboardService"
+
 /**
  * Combined runtime layer with all services
  *
@@ -31,12 +40,46 @@ const baseLayer = Layer.mergeAll(
 	configLayer,
 )
 
-const appLayer = baseLayer.pipe(
+// Core services layer (existing)
+const coreServicesLayer = baseLayer.pipe(
 	Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
 	Layer.merge(SessionManagerLive),
 	Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
 	Layer.merge(PRWorkflowLive),
 	Layer.merge(VCServiceLive),
+)
+
+// Atomic services layer (new Effect.Service pattern)
+// Independent services with no deps
+const independentServicesLayer = Layer.mergeAll(
+	ToastService.Default,
+	OverlayService.Default,
+	NavigationService.Default,
+	ModeService.Default,
+)
+
+// BoardService needs BeadsClient & SessionManager from coreServicesLayer
+// SessionService needs ToastService, NavigationService, BoardService
+// KeyboardService needs ToastService, OverlayService, NavigationService, ModeService, BoardService
+const dependentServicesLayer = Layer.mergeAll(
+	BoardService.Default,
+	SessionService.Default,
+	KeyboardService.Default,
+)
+
+// Combine core and independent services first
+const baseWithIndependent = coreServicesLayer.pipe(
+	Layer.merge(independentServicesLayer),
+)
+
+// Dependent services need context from baseWithIndependent
+// Use Layer.provide to satisfy their requirements, then merge outputs
+const dependentServicesWithDeps = dependentServicesLayer.pipe(
+	Layer.provide(baseWithIndependent),
+)
+
+const appLayer = baseWithIndependent.pipe(
+	Layer.merge(dependentServicesWithDeps),
 )
 
 /**
