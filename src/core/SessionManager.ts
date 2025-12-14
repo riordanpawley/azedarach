@@ -30,17 +30,15 @@ import {
 import type { SessionState } from "../ui/types.js"
 import {
 	BeadsClient,
-	BeadsClientLive,
 	type BeadsError,
 	type NotFoundError,
 	type ParseError,
 } from "./BeadsClient.js"
 import { getSessionName } from "./paths.js"
-import { StateDetector, StateDetectorLive } from "./StateDetector.js"
+import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
 	TmuxService,
-	TmuxServiceLive,
 	type SessionNotFoundError as TmuxSessionNotFoundError,
 } from "./TmuxService.js"
 import {
@@ -48,7 +46,6 @@ import {
 	type NotAGitRepoError,
 	type Worktree,
 	WorktreeManager,
-	WorktreeManagerLive,
 } from "./WorktreeManager.js"
 
 // ============================================================================
@@ -249,68 +246,80 @@ export interface SessionManagerService {
 	>
 }
 
-/**
- * SessionManager service tag
- */
-export class SessionManager extends Context.Tag("SessionManager")<
-	SessionManager,
-	SessionManagerService
->() {}
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
 /**
- * Live SessionManager implementation
+ * SessionManager service
  *
  * Creates a service implementation with stateful session tracking via Ref<HashMap>.
  * Composes WorktreeManager, TmuxService, BeadsClient, and StateDetector services.
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const manager = yield* SessionManager
+ *   const session = yield* manager.start({
+ *     beadId: "az-123",
+ *     projectPath: process.cwd()
+ *   })
+ *   return session
+ * }).pipe(Effect.provide(SessionManager.Default))
+ * ```
  */
-const SessionManagerServiceImpl = Effect.gen(function* () {
-	// Get dependencies
-	const worktreeManager = yield* WorktreeManager
-	const tmuxService = yield* TmuxService
-	const beadsClient = yield* BeadsClient
-	const stateDetector = yield* StateDetector
+export class SessionManager extends Effect.Service<SessionManager>()("SessionManager", {
+	dependencies: [
+		WorktreeManager.Default,
+		TmuxService.Default,
+		BeadsClient.Default,
+		StateDetector.Default,
+	],
+	effect: Effect.gen(function* () {
+		// Get dependencies
+		const worktreeManager = yield* WorktreeManager
+		const tmuxService = yield* TmuxService
+		const beadsClient = yield* BeadsClient
+		const stateDetector = yield* StateDetector
 
-	// AppConfig is optional - use defaults if not provided
-	const appConfigOption = yield* Effect.serviceOption(AppConfig)
-	const resolvedConfig: ResolvedConfig =
-		appConfigOption._tag === "Some"
-			? appConfigOption.value.config
-			: {
-					worktree: { ...DEFAULT_CONFIG.worktree },
-					session: { ...DEFAULT_CONFIG.session },
-					patterns: { ...DEFAULT_CONFIG.patterns },
-					pr: { ...DEFAULT_CONFIG.pr },
-					notifications: { ...DEFAULT_CONFIG.notifications },
-				}
+		// AppConfig is optional - use defaults if not provided
+		const appConfigOption = yield* Effect.serviceOption(AppConfig)
+		const resolvedConfig: ResolvedConfig =
+			appConfigOption._tag === "Some"
+				? appConfigOption.value.config
+				: {
+						worktree: { ...DEFAULT_CONFIG.worktree },
+						session: { ...DEFAULT_CONFIG.session },
+						patterns: { ...DEFAULT_CONFIG.patterns },
+						pr: { ...DEFAULT_CONFIG.pr },
+						notifications: { ...DEFAULT_CONFIG.notifications },
+					}
 
-	// Track active sessions in memory
-	const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
+		// Track active sessions in memory
+		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
 
-	// PubSub for state change events
-	const stateChangeHub = yield* PubSub.unbounded<SessionStateChange>()
+		// PubSub for state change events
+		const stateChangeHub = yield* PubSub.unbounded<SessionStateChange>()
 
-	// Helper: Publish state change event
-	const publishStateChange = (
-		beadId: string,
-		oldState: SessionState,
-		newState: SessionState,
-	): Effect.Effect<void, never, never> =>
-		PubSub.publish(stateChangeHub, {
-			beadId,
-			oldState,
-			newState,
-			timestamp: new Date(),
-		}).pipe(
-			Effect.asVoid,
-			Effect.orElseSucceed(() => undefined),
-		)
+		// Helper: Publish state change event
+		const publishStateChange = (
+			beadId: string,
+			oldState: SessionState,
+			newState: SessionState,
+		): Effect.Effect<void, never, never> =>
+			PubSub.publish(stateChangeHub, {
+				beadId,
+				oldState,
+				newState,
+				timestamp: new Date(),
+			}).pipe(
+				Effect.asVoid,
+				Effect.orElseSucceed(() => undefined),
+			)
 
-	return SessionManager.of({
-		start: (options) =>
+		return {
+		start: (options: StartSessionOptions) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath, baseBranch } = options
 
@@ -410,7 +419,7 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				return session
 			}),
 
-		stop: (beadId) =>
+		stop: (beadId: string) =>
 			Effect.gen(function* () {
 				const sessions = yield* Ref.get(sessionsRef)
 				const sessionOpt = HashMap.get(sessions, beadId)
@@ -447,7 +456,7 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				yield* publishStateChange(beadId, oldState, "idle")
 			}),
 
-		pause: (beadId) =>
+		pause: (beadId: string) =>
 			Effect.gen(function* () {
 				const sessions = yield* Ref.get(sessionsRef)
 				const sessionOpt = HashMap.get(sessions, beadId)
@@ -519,7 +528,7 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				yield* publishStateChange(beadId, oldState, "paused")
 			}),
 
-		resume: (beadId) =>
+		resume: (beadId: string) =>
 			Effect.gen(function* () {
 				const sessions = yield* Ref.get(sessionsRef)
 				const sessionOpt = HashMap.get(sessions, beadId)
@@ -559,7 +568,7 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				yield* publishStateChange(beadId, "paused", "busy")
 			}),
 
-		getState: (beadId) =>
+		getState: (beadId: string) =>
 			Effect.gen(function* () {
 				const sessions = yield* Ref.get(sessionsRef)
 				const sessionOpt = HashMap.get(sessions, beadId)
@@ -611,7 +620,7 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				return Array.from(HashMap.values(updatedSessions))
 			}),
 
-		updateState: (beadId, newState) =>
+		updateState: (beadId: string, newState: SessionState) =>
 			Effect.gen(function* () {
 				const sessions = yield* Ref.get(sessionsRef)
 				const sessionOpt = HashMap.get(sessions, beadId)
@@ -634,121 +643,29 @@ const SessionManagerServiceImpl = Effect.gen(function* () {
 				yield* publishStateChange(beadId, oldState, newState)
 			}),
 
-		subscribeToStateChanges: () => Effect.succeed(stateChangeHub),
-	})
-})
+			subscribeToStateChanges: () => Effect.succeed(stateChangeHub),
+		}
+	}),
+}) {}
 
 /**
- * Base SessionManager layer (requires AppConfig to be provided externally)
+ * Legacy layer export
  *
- * Use SessionManagerLiveWithConfig(projectPath) for a self-contained layer.
+ * @deprecated Use SessionManager.Default instead
  */
-export const SessionManagerLive = Layer.effect(SessionManager, SessionManagerServiceImpl).pipe(
-	Layer.provide(
-		Layer.mergeAll(WorktreeManagerLive, TmuxServiceLive, BeadsClientLive, StateDetectorLive),
-	),
-	Layer.provide(BunContext.layer),
-)
+export const SessionManagerLive = SessionManager.Default
 
 /**
- * SessionManager layer with AppConfig included
+ * SessionManager layer with AppConfig included (legacy)
  *
- * This is the recommended layer to use. It creates AppConfig with the given
- * projectPath and provides it to SessionManager.
- *
- * @example
- * ```ts
- * const program = Effect.gen(function* () {
- *   const manager = yield* SessionManager
- *   const session = yield* manager.start({
- *     beadId: "az-05y",
- *     projectPath: "/Users/user/project"
- *   })
- *   return session
- * }).pipe(Effect.provide(SessionManagerLiveWithConfig(process.cwd())))
- * ```
+ * @deprecated Use SessionManager.Default with AppConfig layer instead
  */
 export const SessionManagerLiveWithConfig = (projectPath: string, configPath?: string) =>
-	Layer.provideMerge(SessionManagerLive, AppConfigLiveWithPlatform(projectPath, configPath))
+	Layer.provideMerge(SessionManager.Default, AppConfigLiveWithPlatform(projectPath, configPath))
 
 /**
- * Alias for backwards compatibility - use SessionManagerLiveWithConfig for new code
+ * Alias for backwards compatibility
+ *
+ * @deprecated Use SessionManager.Default instead
  */
-export const SessionManagerLiveWithPlatform = SessionManagerLive
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Start a new Claude session
- */
-export const start = (
-	options: StartSessionOptions,
-): Effect.Effect<
-	Session,
-	SessionError | GitError | NotAGitRepoError | TmuxError | BeadsError | NotFoundError | ParseError,
-	SessionManager | CommandExecutor.CommandExecutor
-> => Effect.flatMap(SessionManager, (manager) => manager.start(options))
-
-/**
- * Stop a running session
- */
-export const stop = (
-	beadId: string,
-): Effect.Effect<
-	void,
-	SessionError | TmuxError,
-	SessionManager | CommandExecutor.CommandExecutor
-> => Effect.flatMap(SessionManager, (manager) => manager.stop(beadId))
-
-/**
- * Pause a running session
- */
-export const pause = (
-	beadId: string,
-): Effect.Effect<
-	void,
-	SessionError | TmuxSessionNotFoundError | TmuxError | GitError,
-	SessionManager | CommandExecutor.CommandExecutor
-> => Effect.flatMap(SessionManager, (manager) => manager.pause(beadId))
-
-/**
- * Resume a paused session
- */
-export const resume = (
-	beadId: string,
-): Effect.Effect<void, SessionError | InvalidStateError, SessionManager> =>
-	Effect.flatMap(SessionManager, (manager) => manager.resume(beadId))
-
-/**
- * Get current session state
- */
-export const getState = (
-	beadId: string,
-): Effect.Effect<SessionState, SessionNotFoundError, SessionManager> =>
-	Effect.flatMap(SessionManager, (manager) => manager.getState(beadId))
-
-/**
- * List all active sessions
- */
-export const listActive = (): Effect.Effect<Session[], never, SessionManager> =>
-	Effect.flatMap(SessionManager, (manager) => manager.listActive())
-
-/**
- * Update session state
- */
-export const updateState = (
-	beadId: string,
-	newState: SessionState,
-): Effect.Effect<void, SessionNotFoundError, SessionManager> =>
-	Effect.flatMap(SessionManager, (manager) => manager.updateState(beadId, newState))
-
-/**
- * Subscribe to state change events
- */
-export const subscribeToStateChanges = (): Effect.Effect<
-	PubSub.PubSub<SessionStateChange>,
-	never,
-	SessionManager
-> => Effect.flatMap(SessionManager, (manager) => manager.subscribeToStateChanges())
+export const SessionManagerLiveWithPlatform = SessionManager.Default

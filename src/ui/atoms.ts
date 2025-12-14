@@ -4,16 +4,17 @@
  * Uses effect-atom for reactive state management with Effect integration.
  */
 import { Atom } from "@effect-atom/atom"
-import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Layer, pipe, Ref, Schedule, Stream, SubscriptionRef } from "effect"
 import { AppConfigLiveWithPlatform } from "../config/index"
-import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentService"
-import { BeadsClient, BeadsClientLiveWithPlatform } from "../core/BeadsClient"
-import { EditorService, EditorServiceLive } from "../core/EditorService"
-import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
-import { SessionManager, SessionManagerLive } from "../core/SessionManager"
-import { TerminalServiceLive } from "../core/TerminalService"
-import { TmuxServiceLive } from "../core/TmuxService"
-import { type VCExecutorInfo, VCService, VCServiceLive } from "../core/VCService"
+import { AttachmentService } from "../core/AttachmentService"
+import { BeadsClient } from "../core/BeadsClient"
+import { EditorService } from "../core/EditorService"
+import { PRWorkflow } from "../core/PRWorkflow"
+import { SessionManager } from "../core/SessionManager"
+import { TerminalService } from "../core/TerminalService"
+import { TmuxService } from "../core/TmuxService"
+import { type VCExecutorInfo, VCService } from "../core/VCService"
 import type { TaskWithSession } from "./types"
 
 // New atomic Effect services
@@ -33,20 +34,24 @@ import { KeyboardService } from "../services/KeyboardService"
  */
 const configLayer = AppConfigLiveWithPlatform(process.cwd())
 
+// Platform layer provides CommandExecutor which services need
+const platformLayer = BunContext.layer
+
 const baseLayer = Layer.mergeAll(
-	BeadsClientLiveWithPlatform,
-	TmuxServiceLive,
-	TerminalServiceLive,
+	BeadsClient.Default,
+	TmuxService.Default,
+	TerminalService.Default,
 	configLayer,
+	platformLayer,
 )
 
 // Core services layer (existing)
 const coreServicesLayer = baseLayer.pipe(
-	Layer.merge(AttachmentServiceLive.pipe(Layer.provide(baseLayer))),
-	Layer.merge(SessionManagerLive),
-	Layer.merge(EditorServiceLive.pipe(Layer.provide(baseLayer))),
-	Layer.merge(PRWorkflowLive),
-	Layer.merge(VCServiceLive),
+	Layer.merge(AttachmentService.Default),
+	Layer.merge(SessionManager.Default),
+	Layer.merge(EditorService.Default),
+	Layer.merge(PRWorkflow.Default),
+	Layer.merge(VCService.Default),
 )
 
 // Atomic services layer (new Effect.Service pattern)
@@ -87,7 +92,7 @@ const appLayer = baseWithIndependent.pipe(
  *
  * This creates a runtime that all other async atoms can use.
  */
-export const appRuntime = Atom.runtime(appLayer)
+export const appRuntime = Atom.runtime(() => appLayer)
 
 /**
  * Async atom that fetches all tasks from BeadsClient
@@ -413,5 +418,395 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 	Effect.gen(function* () {
 		const vcService = yield* VCService
 		yield* vcService.sendCommand(command)
+	}),
+)
+
+// ============================================================================
+// Atomic Service State Atoms (ModeService, NavigationService, etc.)
+// ============================================================================
+
+/**
+ * Editor mode atom - subscribes to ModeService state
+ *
+ * Usage: const mode = useAtomValue(modeAtom)
+ */
+export const modeAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return yield* editor.getMode()
+	}),
+	{ initialValue: { _tag: "normal" } as const },
+)
+
+/**
+ * Selected task IDs atom - derived from ModeService
+ *
+ * Usage: const selectedIds = useAtomValue(selectedIdsAtom)
+ */
+export const selectedIdsAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return yield* editor.getSelectedIds()
+	}),
+	{ initialValue: [] },
+)
+
+/**
+ * Search query atom - derived from ModeService
+ *
+ * Usage: const searchQuery = useAtomValue(searchQueryAtom)
+ */
+export const searchQueryAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return yield* editor.getSearchQuery()
+	}),
+	{ initialValue: "" },
+)
+
+/**
+ * Command input atom - derived from ModeService
+ *
+ * Usage: const commandInput = useAtomValue(commandInputAtom)
+ */
+export const commandInputAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return yield* editor.getCommandInput()
+	}),
+	{ initialValue: "" },
+)
+
+/**
+ * Navigation cursor atom - subscribes to NavigationService
+ *
+ * Usage: const cursor = useAtomValue(cursorAtom)
+ */
+export const cursorAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return yield* nav.getCursor()
+	}),
+	{ initialValue: { columnIndex: 0, taskIndex: 0 } },
+)
+
+/**
+ * Toast notifications atom - subscribes to ToastService
+ *
+ * Usage: const toasts = useAtomValue(toastsAtom)
+ */
+export const toastsAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const toast = yield* ToastService
+		return yield* Ref.get(toast.toasts)
+	}),
+	{ initialValue: [] },
+)
+
+/**
+ * Overlay stack atom - subscribes to OverlayService
+ *
+ * Usage: const overlays = useAtomValue(overlaysAtom)
+ */
+export const overlaysAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return yield* Ref.get(overlay.stack)
+	}),
+	{ initialValue: [] },
+)
+
+/**
+ * Current overlay atom - the top of the overlay stack
+ *
+ * Usage: const currentOverlay = useAtomValue(currentOverlayAtom)
+ */
+export const currentOverlayAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return yield* overlay.current()
+	}),
+	{ initialValue: undefined },
+)
+
+// ============================================================================
+// Atomic Service Action Atoms
+// ============================================================================
+
+// --- ModeService Actions ---
+
+/**
+ * Enter select mode
+ *
+ * Usage: const [, enterSelect] = useAtom(enterSelectAtom, { mode: "promise" })
+ *        await enterSelect()
+ */
+export const enterSelectAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSelect()
+	}),
+)
+
+/**
+ * Exit select mode
+ *
+ * Usage: const [, exitSelect] = useAtom(exitSelectAtom, { mode: "promise" })
+ *        await exitSelect(true) // clearSelections
+ */
+export const exitSelectAtom = appRuntime.fn((clearSelections: boolean | undefined) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.exitSelect(clearSelections ?? false)
+	}),
+)
+
+/**
+ * Toggle selection of a task
+ *
+ * Usage: const [, toggleSelection] = useAtom(toggleSelectionAtom, { mode: "promise" })
+ *        await toggleSelection(taskId)
+ */
+export const toggleSelectionAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.toggleSelection(taskId)
+	}),
+)
+
+/**
+ * Enter goto mode
+ *
+ * Usage: const [, enterGoto] = useAtom(enterGotoAtom, { mode: "promise" })
+ *        await enterGoto()
+ */
+export const enterGotoAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterGoto()
+	}),
+)
+
+/**
+ * Enter jump mode with labels
+ *
+ * Usage: const [, enterJump] = useAtom(enterJumpAtom, { mode: "promise" })
+ *        await enterJump(labelsMap)
+ */
+export const enterJumpAtom = appRuntime.fn(
+	(labels: Map<string, { taskId: string; columnIndex: number; taskIndex: number }>) =>
+		Effect.gen(function* () {
+			const editor = yield* ModeService
+			yield* editor.enterJump(labels)
+		}),
+)
+
+/**
+ * Set pending jump key
+ *
+ * Usage: const [, setPendingJumpKey] = useAtom(setPendingJumpKeyAtom, { mode: "promise" })
+ *        await setPendingJumpKey("a")
+ */
+export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.setPendingJumpKey(key)
+	}),
+)
+
+/**
+ * Enter action mode
+ *
+ * Usage: const [, enterAction] = useAtom(enterActionAtom, { mode: "promise" })
+ *        await enterAction()
+ */
+export const enterActionAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterAction()
+	}),
+)
+
+/**
+ * Enter search mode
+ *
+ * Usage: const [, enterSearch] = useAtom(enterSearchAtom, { mode: "promise" })
+ *        await enterSearch()
+ */
+export const enterSearchAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSearch()
+	}),
+)
+
+/**
+ * Update search query
+ *
+ * Usage: const [, updateSearch] = useAtom(updateSearchAtom, { mode: "promise" })
+ *        await updateSearch("new query")
+ */
+export const updateSearchAtom = appRuntime.fn((query: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.updateSearch(query)
+	}),
+)
+
+/**
+ * Clear search and return to normal mode
+ *
+ * Usage: const [, clearSearch] = useAtom(clearSearchAtom, { mode: "promise" })
+ *        await clearSearch()
+ */
+export const clearSearchAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.clearSearch()
+	}),
+)
+
+/**
+ * Enter command mode
+ *
+ * Usage: const [, enterCommand] = useAtom(enterCommandAtom, { mode: "promise" })
+ *        await enterCommand()
+ */
+export const enterCommandAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterCommand()
+	}),
+)
+
+/**
+ * Update command input
+ *
+ * Usage: const [, updateCommand] = useAtom(updateCommandAtom, { mode: "promise" })
+ *        await updateCommand("new command")
+ */
+export const updateCommandAtom = appRuntime.fn((input: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.updateCommand(input)
+	}),
+)
+
+/**
+ * Clear command and return to normal mode
+ *
+ * Usage: const [, clearCommand] = useAtom(clearCommandAtom, { mode: "promise" })
+ *        await clearCommand()
+ */
+export const clearCommandAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.clearCommand()
+	}),
+)
+
+/**
+ * Exit to normal mode
+ *
+ * Usage: const [, exitToNormal] = useAtom(exitToNormalAtom, { mode: "promise" })
+ *        await exitToNormal()
+ */
+export const exitToNormalAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.exitToNormal()
+	}),
+)
+
+// --- NavigationService Actions ---
+
+/**
+ * Navigate cursor atom - move cursor in a direction
+ *
+ * Usage: const [, navigate] = useAtom(navigateAtom, { mode: "promise" })
+ *        await navigate("down")
+ */
+export const navigateAtom = appRuntime.fn((direction: "up" | "down" | "left" | "right") =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.move(direction)
+	}),
+)
+
+/**
+ * Jump to position atom - jump cursor to specific column/task
+ *
+ * Usage: const [, jumpTo] = useAtom(jumpToAtom, { mode: "promise" })
+ *        await jumpTo({ column: 0, task: 5 })
+ */
+export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; task: number }) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.jumpTo(column, task)
+	}),
+)
+
+/**
+ * Show toast atom - display a toast notification
+ *
+ * Usage: const [, showToast] = useAtom(showToastAtom, { mode: "promise" })
+ *        await showToast({ type: "success", message: "Task completed!" })
+ */
+export const showToastAtom = appRuntime.fn(
+	({ type, message }: { type: "success" | "error" | "info"; message: string }) =>
+		Effect.gen(function* () {
+			const toast = yield* ToastService
+			yield* toast.show(type, message)
+		}),
+)
+
+/**
+ * Dismiss toast atom - remove a toast by ID
+ *
+ * Usage: const [, dismissToast] = useAtom(dismissToastAtom, { mode: "promise" })
+ *        await dismissToast(toastId)
+ */
+export const dismissToastAtom = appRuntime.fn((toastId: string) =>
+	Effect.gen(function* () {
+		const toast = yield* ToastService
+		yield* toast.dismiss(toastId)
+	}),
+)
+
+/**
+ * Push overlay atom - add overlay to stack
+ *
+ * Usage: const [, pushOverlay] = useAtom(pushOverlayAtom, { mode: "promise" })
+ *        await pushOverlay({ _tag: "help" })
+ */
+export const pushOverlayAtom = appRuntime.fn(
+	(
+		overlay:
+			| { readonly _tag: "help" }
+			| { readonly _tag: "detail"; readonly taskId: string }
+			| { readonly _tag: "create" }
+			| { readonly _tag: "settings" }
+			| {
+					readonly _tag: "confirm"
+					readonly message: string
+					readonly onConfirm: Effect.Effect<void>
+			  },
+	) =>
+		Effect.gen(function* () {
+			const overlayService = yield* OverlayService
+			yield* overlayService.push(overlay)
+		}),
+)
+
+/**
+ * Pop overlay atom - remove top overlay from stack
+ *
+ * Usage: const [, popOverlay] = useAtom(popOverlayAtom, { mode: "promise" })
+ *        await popOverlay()
+ */
+export const popOverlayAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		yield* overlay.pop()
 	}),
 )

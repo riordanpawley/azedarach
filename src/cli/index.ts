@@ -127,9 +127,12 @@ const startHandler = (args: {
 		// Validate beads database
 		yield* validateBeadsDatabase(cwd)
 
-		// Create the combined layer with config
+		// Create the combined layer with config and platform dependencies
 		const appConfigLayer = AppConfigLiveWithPlatform(cwd, configPath)
-		const fullLayer = Layer.provideMerge(SessionManagerLive, appConfigLayer)
+		const fullLayer = Layer.provideMerge(
+			SessionManagerLive,
+			Layer.merge(appConfigLayer, BunContext.layer),
+		)
 
 		// Start the session using SessionManager
 		const session = yield* Effect.gen(function* () {

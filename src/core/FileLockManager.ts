@@ -159,14 +159,6 @@ export interface FileLockManagerService {
 	>
 }
 
-/**
- * FileLockManager service tag
- */
-export class FileLockManager extends Context.Tag("FileLockManager")<
-	FileLockManager,
-	FileLockManagerService
->() {}
-
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
@@ -308,7 +300,7 @@ const processWaitQueue = (
 	})
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
 /**
@@ -317,143 +309,10 @@ const processWaitQueue = (
 const DEFAULT_TIMEOUT = Duration.seconds(30)
 
 /**
- * Live FileLockManager implementation
+ * FileLockManager service
  *
  * Maintains lock state in-memory using Ref<HashMap>.
  * Automatically cleans up locks on fiber interruption.
- */
-const FileLockManagerServiceImpl = Effect.gen(function* () {
-	// Track locks per normalized path
-	const locksRef = yield* Ref.make<HashMap.HashMap<string, LockState>>(HashMap.empty())
-
-	return FileLockManager.of({
-		acquireLock: (options) =>
-			Effect.gen(function* () {
-				const { path: rawPath, type, timeout = DEFAULT_TIMEOUT, sessionId } = options
-				const path = normalizePath(rawPath)
-				const lockId = sessionId ? `${sessionId}-${generateLockId()}` : generateLockId()
-
-				// Get or create lock state for this path
-				const locks = yield* Ref.get(locksRef)
-				const existingState = HashMap.get(locks, path)
-
-				const state = existingState._tag === "Some" ? existingState.value : createInitialLockState()
-
-				// Check if we can grant the lock immediately
-				if (canGrantLock(state, type)) {
-					const newState = grantLock(state, lockId, type)
-					yield* Ref.update(locksRef, HashMap.set(path, newState))
-
-					const lock: Lock = {
-						id: lockId,
-						path,
-						type,
-						acquiredAt: new Date(),
-						sessionId: sessionId || lockId.split("-")[0] || "unknown",
-					}
-
-					return lock
-				}
-
-				// Can't grant immediately - add to wait queue with deferred
-				const deferred = yield* Deferred.make<Lock, LockError>()
-
-				const waitEntry = {
-					lockId,
-					type,
-					deferred,
-				}
-
-				const stateWithWait = {
-					...state,
-					waitQueue: [...state.waitQueue, waitEntry],
-				}
-
-				yield* Ref.update(locksRef, HashMap.set(path, stateWithWait))
-
-				// Wait for the lock to be granted or timeout
-				const lock = yield* Deferred.await(deferred).pipe(
-					Effect.timeoutFail({
-						duration: timeout,
-						onTimeout: () =>
-							new LockTimeoutError({
-								path,
-								timeout,
-							}),
-					}),
-					Effect.ensuring(
-						// If we timeout or are interrupted, remove ourselves from wait queue
-						Effect.gen(function* () {
-							yield* Ref.update(
-								locksRef,
-								HashMap.modify(path, (s) => ({
-									...s,
-									waitQueue: s.waitQueue.filter((w) => w.lockId !== lockId),
-								})),
-							)
-						}),
-					),
-				)
-
-				return lock
-			}),
-
-		releaseLock: (lock) =>
-			Effect.gen(function* () {
-				const path = normalizePath(lock.path)
-				const locks = yield* Ref.get(locksRef)
-				const state = HashMap.get(locks, path)
-
-				if (state._tag === "None") {
-					// Lock already released, idempotent
-					return
-				}
-
-				// Release the lock
-				const newState = releaseLockFromState(state.value, lock.id)
-				yield* Ref.update(locksRef, HashMap.set(path, newState))
-
-				// Process wait queue to grant pending locks
-				yield* processWaitQueue(locksRef, path)
-
-				// Clean up empty lock states
-				const updatedLocks = yield* Ref.get(locksRef)
-				const updatedState = HashMap.get(updatedLocks, path)
-
-				if (
-					updatedState._tag === "Some" &&
-					updatedState.value.exclusiveHolder === null &&
-					updatedState.value.sharedHolders.size === 0 &&
-					updatedState.value.waitQueue.length === 0
-				) {
-					yield* Ref.update(locksRef, HashMap.remove(path))
-				}
-			}),
-
-		getLockState: (rawPath) =>
-			Effect.gen(function* () {
-				const path = normalizePath(rawPath)
-				const locks = yield* Ref.get(locksRef)
-				const state = HashMap.get(locks, path)
-
-				if (state._tag === "None") {
-					return null
-				}
-
-				return {
-					exclusiveHolder: state.value.exclusiveHolder,
-					sharedHolders: Array.from(state.value.sharedHolders),
-					waitingCount: state.value.waitQueue.length,
-				}
-			}),
-	})
-})
-
-/**
- * Live FileLockManager layer
- *
- * This layer provides the FileLockManager service with no dependencies.
- * It can be used directly in any Effect program.
  *
  * @example
  * ```ts
@@ -465,10 +324,142 @@ const FileLockManagerServiceImpl = Effect.gen(function* () {
  *       // ... work with file ...
  *     })
  *   )
- * }).pipe(Effect.provide(FileLockManagerLive))
+ * }).pipe(Effect.provide(FileLockManager.Default))
  * ```
  */
-export const FileLockManagerLive = Layer.effect(FileLockManager, FileLockManagerServiceImpl)
+export class FileLockManager extends Effect.Service<FileLockManager>()("FileLockManager", {
+	effect: Effect.gen(function* () {
+		// Track locks per normalized path
+		const locksRef = yield* Ref.make<HashMap.HashMap<string, LockState>>(HashMap.empty())
+
+		return {
+			acquireLock: (options: {
+				path: string
+				type: LockType
+				timeout?: Duration.Duration
+				sessionId?: string
+			}) =>
+				Effect.gen(function* () {
+					const { path: rawPath, type, timeout = DEFAULT_TIMEOUT, sessionId } = options
+					const path = normalizePath(rawPath)
+					const lockId = sessionId ? `${sessionId}-${generateLockId()}` : generateLockId()
+
+					// Get or create lock state for this path
+					const locks = yield* Ref.get(locksRef)
+					const existingState = HashMap.get(locks, path)
+
+					const state = existingState._tag === "Some" ? existingState.value : createInitialLockState()
+
+					// Check if we can grant the lock immediately
+					if (canGrantLock(state, type)) {
+						const newState = grantLock(state, lockId, type)
+						yield* Ref.update(locksRef, HashMap.set(path, newState))
+
+						const lock: Lock = {
+							id: lockId,
+							path,
+							type,
+							acquiredAt: new Date(),
+							sessionId: sessionId || lockId.split("-")[0] || "unknown",
+						}
+
+						return lock
+					}
+
+					// Can't grant immediately - add to wait queue with deferred
+					const deferred = yield* Deferred.make<Lock, LockError>()
+
+					const waitEntry = {
+						lockId,
+						type,
+						deferred,
+					}
+
+					const stateWithWait = {
+						...state,
+						waitQueue: [...state.waitQueue, waitEntry],
+					}
+
+					yield* Ref.update(locksRef, HashMap.set(path, stateWithWait))
+
+					// Wait for the lock to be granted or timeout
+					const lock = yield* Deferred.await(deferred).pipe(
+						Effect.timeoutFail({
+							duration: timeout,
+							onTimeout: () =>
+								new LockTimeoutError({
+									path,
+									timeout,
+								}),
+						}),
+						Effect.ensuring(
+							// If we timeout or are interrupted, remove ourselves from wait queue
+							Effect.gen(function* () {
+								yield* Ref.update(
+									locksRef,
+									HashMap.modify(path, (s) => ({
+										...s,
+										waitQueue: s.waitQueue.filter((w) => w.lockId !== lockId),
+									})),
+								)
+							}),
+						),
+					)
+
+					return lock
+				}),
+
+			releaseLock: (lock: Lock) =>
+				Effect.gen(function* () {
+					const path = normalizePath(lock.path)
+					const locks = yield* Ref.get(locksRef)
+					const state = HashMap.get(locks, path)
+
+					if (state._tag === "None") {
+						// Lock already released, idempotent
+						return
+					}
+
+					// Release the lock
+					const newState = releaseLockFromState(state.value, lock.id)
+					yield* Ref.update(locksRef, HashMap.set(path, newState))
+
+					// Process wait queue to grant pending locks
+					yield* processWaitQueue(locksRef, path)
+
+					// Clean up empty lock states
+					const updatedLocks = yield* Ref.get(locksRef)
+					const updatedState = HashMap.get(updatedLocks, path)
+
+					if (
+						updatedState._tag === "Some" &&
+						updatedState.value.exclusiveHolder === null &&
+						updatedState.value.sharedHolders.size === 0 &&
+						updatedState.value.waitQueue.length === 0
+					) {
+						yield* Ref.update(locksRef, HashMap.remove(path))
+					}
+				}),
+
+			getLockState: (rawPath: string) =>
+				Effect.gen(function* () {
+					const path = normalizePath(rawPath)
+					const locks = yield* Ref.get(locksRef)
+					const state = HashMap.get(locks, path)
+
+					if (state._tag === "None") {
+						return null
+					}
+
+					return {
+						exclusiveHolder: state.value.exclusiveHolder,
+						sharedHolders: Array.from(state.value.sharedHolders),
+						waitingCount: state.value.waitQueue.length,
+					}
+				}),
+		}
+	}),
+}) {}
 
 // ============================================================================
 // Convenience Functions

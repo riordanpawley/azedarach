@@ -1,8 +1,11 @@
 /**
- * EditorService - Bead editor using $EDITOR
+ * BeadEditorService - Bead editor using $EDITOR
  *
  * Serializes beads to structured markdown, opens $EDITOR, parses changes,
  * and applies updates via BeadsClient.
+ *
+ * NOTE: Renamed from EditorService to avoid collision with ModeService
+ * (src/services/EditorService.ts which handles editor modes in the UI)
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
@@ -33,7 +36,7 @@ export class EditorError extends Data.TaggedError("EditorError")<{
 // Service Definition
 // ============================================================================
 
-export interface EditorServiceImpl {
+export interface BeadEditorServiceImpl {
 	/**
 	 * Edit a bead in $EDITOR
 	 *
@@ -53,11 +56,6 @@ export interface EditorServiceImpl {
 		CommandExecutor.CommandExecutor | BeadsClient | FileSystem.FileSystem
 	>
 }
-
-export class EditorService extends Context.Tag("EditorService")<
-	EditorService,
-	EditorServiceImpl
->() {}
 
 // ============================================================================
 // Markdown Serialization
@@ -349,13 +347,28 @@ const parseMarkdownToBead = (
 	})
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
-const EditorServiceImpl = Effect.gen(function* () {
-	return EditorService.of({
-		editBead: (bead) =>
-			Effect.gen(function* () {
+/**
+ * BeadEditorService
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const editor = yield* BeadEditorService
+ *   yield* editor.editBead(bead)
+ * }).pipe(Effect.provide(BeadEditorService.Default))
+ * ```
+ */
+export class BeadEditorService extends Effect.Service<BeadEditorService>()(
+	"BeadEditorService",
+	{
+		dependencies: [BeadsClient.Default],
+		effect: Effect.gen(function* () {
+			return {
+				editBead: (bead: Issue) =>
+					Effect.gen(function* () {
 				const client = yield* BeadsClient
 				const fs = yield* FileSystem.FileSystem
 
@@ -472,22 +485,33 @@ const EditorServiceImpl = Effect.gen(function* () {
 					),
 				)
 
-				// Clean up temp file
-				yield* Effect.ignoreLogged(
-					fs.remove(tempFile).pipe(
-						Effect.mapError(
-							(error) =>
-								new EditorError({
-									message: `Failed to remove temp file: ${error}`,
-								}),
+					// Clean up temp file
+					yield* Effect.ignoreLogged(
+						fs.remove(tempFile).pipe(
+							Effect.mapError(
+								(error) =>
+									new EditorError({
+										message: `Failed to remove temp file: ${error}`,
+									}),
+							),
 						),
-					),
-				)
-			}),
-	})
-})
+					)
+				}),
+			}
+		}),
+	},
+) {}
 
 /**
- * Live EditorService layer
+ * Legacy alias for BeadEditorService
+ *
+ * @deprecated Use BeadEditorService instead
  */
-export const EditorServiceLive = Layer.effect(EditorService, EditorServiceImpl)
+export const EditorService = BeadEditorService
+
+/**
+ * Legacy layer export
+ *
+ * @deprecated Use BeadEditorService.Default instead
+ */
+export const EditorServiceLive = BeadEditorService.Default

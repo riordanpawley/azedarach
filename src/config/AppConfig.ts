@@ -71,6 +71,10 @@ export interface AppConfigService {
 
 /**
  * AppConfig service tag
+ *
+ * Note: AppConfig uses Context.Tag with factory functions (AppConfigLive)
+ * because it requires runtime parameters (projectPath, configPath).
+ * It cannot use Effect.Service pattern without additional indirection.
  */
 export class AppConfig extends Context.Tag("AppConfig")<AppConfig, AppConfigService>() {}
 
