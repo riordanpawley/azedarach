@@ -12,7 +12,8 @@
 		"type-check": "tsc --noEmit",
 		"lint": "biome lint src bin",
 		"format": "biome format --write src bin",
-		"check": "biome check --write src bin"
+		"check": "biome check --write src bin",
+		"prepare": "git config core.hooksPath .githooks"
 	},
 	"keywords": [
 		"tui",

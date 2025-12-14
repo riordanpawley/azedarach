@@ -735,7 +735,15 @@ export const App = () => {
 				updateCommand(commandInput + event.sequence)
 			}
 		},
-		[vcStatusResult, commandInput, sendVCCommand, showSuccess, showError, clearCommand, updateCommand],
+		[
+			vcStatusResult,
+			commandInput,
+			sendVCCommand,
+			showSuccess,
+			showError,
+			clearCommand,
+			updateCommand,
+		],
 	)
 
 	const handleSelectMode = useCallback(
@@ -957,7 +965,7 @@ export const App = () => {
 					activeColumnIndex={columnIndex}
 					activeTaskIndex={taskIndex}
 					selectedIds={new Set(selectedIds)}
-					jumpLabels={isJump ? jumpLabels ?? null : null}
+					jumpLabels={isJump ? (jumpLabels ?? null) : null}
 					pendingJumpKey={pendingJumpKey ?? null}
 					terminalHeight={maxVisibleTasks}
 				/>

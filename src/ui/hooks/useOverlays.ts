@@ -6,8 +6,8 @@
  */
 
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
-import { useCallback, useMemo } from "react"
-import { Effect } from "effect"
+import type { Effect } from "effect"
+import { useMemo } from "react"
 import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms"
 
 export type OverlayType =

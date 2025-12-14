@@ -6,7 +6,7 @@
  */
 
 import { Effect, SubscriptionRef } from "effect"
-import { BeadsClient, type Issue } from "../core/BeadsClient"
+import { BeadsClient } from "../core/BeadsClient"
 import { SessionManager } from "../core/SessionManager"
 import type { TaskWithSession } from "../ui/types"
 import { COLUMNS } from "../ui/types"
@@ -47,9 +47,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
-		const tasksByColumn = yield* SubscriptionRef.make<
-			ReadonlyMap<string, ReadonlyArray<TaskWithSession>>
-		>(new Map())
+		const tasksByColumn = yield* SubscriptionRef.make<ReadonlyMap<string, ReadonlyArray<TaskWithSession>>>(
+			new Map(),
+		)
 
 		/**
 		 * Load tasks from BeadsClient and merge with session state
@@ -122,16 +122,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			/**
 			 * Get tasks grouped by column
 			 */
-			getTasksByColumn: (): Effect.Effect<
-				ReadonlyMap<string, ReadonlyArray<TaskWithSession>>
-			> => SubscriptionRef.get(tasksByColumn),
+			getTasksByColumn: (): Effect.Effect<ReadonlyMap<string, ReadonlyArray<TaskWithSession>>> =>
+				SubscriptionRef.get(tasksByColumn),
 
 			/**
 			 * Get tasks for a specific column by index
 			 */
-			getColumnTasks: (
-				columnIndex: number,
-			): Effect.Effect<ReadonlyArray<TaskWithSession>> =>
+			getColumnTasks: (columnIndex: number): Effect.Effect<ReadonlyArray<TaskWithSession>> =>
 				Effect.gen(function* () {
 					if (columnIndex < 0 || columnIndex >= COLUMNS.length) {
 						return []
@@ -170,9 +167,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			/**
 			 * Find task by ID
 			 */
-			findTaskById: (
-				taskId: string,
-			): Effect.Effect<TaskWithSession | undefined> =>
+			findTaskById: (taskId: string): Effect.Effect<TaskWithSession | undefined> =>
 				Effect.gen(function* () {
 					const allTasks = yield* SubscriptionRef.get(tasks)
 					return allTasks.find((task) => task.id === taskId)
@@ -206,6 +201,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			 * Get column info by index
 			 */
 			getColumnInfo: (columnIndex: number): Effect.Effect<ColumnInfo | undefined> =>
+				// biome-ignore lint/correctness/useYield: <eh>
 				Effect.gen(function* () {
 					if (columnIndex < 0 || columnIndex >= COLUMNS.length) {
 						return undefined

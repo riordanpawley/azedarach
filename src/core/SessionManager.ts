@@ -27,12 +27,7 @@ import {
 	type ResolvedConfig,
 } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
-import {
-	BeadsClient,
-	type BeadsError,
-	type NotFoundError,
-	type ParseError,
-} from "./BeadsClient.js"
+import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getSessionName } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
@@ -245,7 +240,6 @@ export interface SessionManagerService {
 	>
 }
 
-
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -307,20 +301,20 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 			)
 
 		return {
-		start: (options: StartSessionOptions) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath, baseBranch } = options
+			start: (options: StartSessionOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, baseBranch } = options
 
-				// Check if session already exists (idempotent)
-				const sessions = yield* Ref.get(sessionsRef)
-				const existingSession = HashMap.get(sessions, beadId)
+					// Check if session already exists (idempotent)
+					const sessions = yield* Ref.get(sessionsRef)
+					const existingSession = HashMap.get(sessions, beadId)
 
-				if (existingSession._tag === "Some") {
-					return existingSession.value
-				}
+					if (existingSession._tag === "Some") {
+						return existingSession.value
+					}
 
-				// Get bead info to verify it exists
-				const bead = yield* beadsClient.show(beadId)
+					// Get bead info to verify it exists
+					const bead = yield* beadsClient.show(beadId)
 
 				// Create worktree (idempotent - returns existing if present)
 				const worktree = yield* worktreeManager.create({
@@ -338,307 +332,313 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					Effect.catchAll(() => Effect.void), // Non-critical if .claude doesn't exist
 				)
 
-				// Get configuration for init commands and session settings
-				const worktreeConfig = resolvedConfig.worktree
-				const sessionConfig = resolvedConfig.session
+					// Get configuration for init commands and session settings
+					const worktreeConfig = resolvedConfig.worktree
+					const sessionConfig = resolvedConfig.session
 
-				// Run init commands after worktree creation (e.g., "direnv allow", "bun install")
-				const { initCommands, env, continueOnFailure, parallel } = worktreeConfig
-				if (initCommands.length > 0) {
-					const runInitCommand = (cmd: string) =>
-						Effect.gen(function* () {
-							const initCmd = Command.make("sh", "-c", cmd).pipe(
-								Command.workingDirectory(worktree.path),
-								Command.env(env),
-							)
-							const exitCode = yield* Command.exitCode(initCmd).pipe(
-								Effect.catchAll(() => Effect.succeed(1)),
-							)
-							if (exitCode !== 0) {
-								yield* Effect.logWarning(`Init command failed: ${cmd}`)
-								if (!continueOnFailure) {
-									return yield* Effect.fail(
-										new SessionError({
-											message: `Init command failed: ${cmd}`,
-											beadId,
-										}),
-									)
+					// Run init commands after worktree creation (e.g., "direnv allow", "bun install")
+					const { initCommands, env, continueOnFailure, parallel } = worktreeConfig
+					if (initCommands.length > 0) {
+						const runInitCommand = (cmd: string) =>
+							Effect.gen(function* () {
+								const initCmd = Command.make("sh", "-c", cmd).pipe(
+									Command.workingDirectory(worktree.path),
+									Command.env(env),
+								)
+								const exitCode = yield* Command.exitCode(initCmd).pipe(
+									Effect.catchAll(() => Effect.succeed(1)),
+								)
+								if (exitCode !== 0) {
+									yield* Effect.logWarning(`Init command failed: ${cmd}`)
+									if (!continueOnFailure) {
+										return yield* Effect.fail(
+											new SessionError({
+												message: `Init command failed: ${cmd}`,
+												beadId,
+											}),
+										)
+									}
 								}
-							}
-						})
+							})
 
-					if (parallel) {
-						// Run all commands in parallel
-						yield* Effect.all(initCommands.map(runInitCommand), { concurrency: "unbounded" })
-					} else {
-						// Run commands sequentially (default)
-						for (const cmd of initCommands) {
-							yield* runInitCommand(cmd)
+						if (parallel) {
+							// Run all commands in parallel
+							yield* Effect.all(initCommands.map(runInitCommand), { concurrency: "unbounded" })
+						} else {
+							// Run commands sequentially (default)
+							for (const cmd of initCommands) {
+								yield* runInitCommand(cmd)
+							}
 						}
 					}
-				}
 
-				// Generate tmux session name
-				const tmuxSessionName = getSessionName(beadId)
+					// Generate tmux session name
+					const tmuxSessionName = getSessionName(beadId)
 
-				// Check if tmux session already exists
-				const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
+					// Check if tmux session already exists
+					const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
-				if (!hasSession) {
-					// Create tmux session in the worktree directory
-					// Use user's shell that runs claude so:
-					// 1. tmux prefix keys work (shell handles them, not claude)
-					// 2. If claude exits, you're left in a shell (session doesn't die)
-					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
-					yield* tmuxService.newSession(tmuxSessionName, {
-						cwd: worktree.path,
-						command: `${shell} -c '${claudeCommand}; exec ${shell}'`,
-						prefix: tmuxPrefix,
-					})
-				}
+					if (!hasSession) {
+						// Create tmux session in the worktree directory
+						// Use user's shell that runs claude so:
+						// 1. tmux prefix keys work (shell handles them, not claude)
+						// 2. If claude exits, you're left in a shell (session doesn't die)
+						const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+						yield* tmuxService.newSession(tmuxSessionName, {
+							cwd: worktree.path,
+							command: `${shell} -c '${claudeCommand}; exec ${shell}'`,
+							prefix: tmuxPrefix,
+						})
+					}
 
-				// Create session object
-				const session: Session = {
-					beadId,
-					worktreePath: worktree.path,
-					tmuxSessionName,
-					state: "busy",
-					startedAt: new Date(),
-					projectPath,
-				}
+					// Create session object
+					const session: Session = {
+						beadId,
+						worktreePath: worktree.path,
+						tmuxSessionName,
+						state: "busy",
+						startedAt: new Date(),
+						projectPath,
+					}
 
-				// Store session in registry
-				yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, session))
+					// Store session in registry
+					yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, session))
 
-				// Publish state change event (from idle to busy)
-				yield* publishStateChange(beadId, "idle", "busy")
+					// Publish state change event (from idle to busy)
+					yield* publishStateChange(beadId, "idle", "busy")
 
-				return session
-			}),
+					return session
+				}),
 
-		stop: (beadId: string) =>
-			Effect.gen(function* () {
-				const sessions = yield* Ref.get(sessionsRef)
-				const sessionOpt = HashMap.get(sessions, beadId)
+			stop: (beadId: string) =>
+				Effect.gen(function* () {
+					const sessions = yield* Ref.get(sessionsRef)
+					const sessionOpt = HashMap.get(sessions, beadId)
 
-				if (sessionOpt._tag === "None") {
-					return yield* Effect.fail(
-						new SessionError({
-							message: "Session not found",
-							beadId,
-						}),
-					)
-				}
-
-				const session = sessionOpt.value
-
-				// Sync beads changes from worktree before killing session
-				// This ensures any bd update/close commands run in the worktree get synced back to main
-				yield* beadsClient.sync(session.worktreePath).pipe(
-					Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
-				)
-
-				// Kill tmux session (ignore error if already dead)
-				yield* tmuxService
-					.killSession(session.tmuxSessionName)
-					.pipe(Effect.catchAll(() => Effect.void))
-
-				// Get old state for event
-				const oldState = session.state
-
-				// Remove from registry
-				yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, beadId))
-
-				// Publish state change event
-				yield* publishStateChange(beadId, oldState, "idle")
-			}),
-
-		pause: (beadId: string) =>
-			Effect.gen(function* () {
-				const sessions = yield* Ref.get(sessionsRef)
-				const sessionOpt = HashMap.get(sessions, beadId)
-
-				if (sessionOpt._tag === "None") {
-					return yield* Effect.fail(
-						new SessionError({
-							message: "Session not found",
-							beadId,
-						}),
-					)
-				}
-
-				const session = sessionOpt.value
-
-				// Send Ctrl+C to interrupt Claude
-				yield* tmuxService.sendKeys(session.tmuxSessionName, "C-c")
-
-				// Wait a moment for interrupt to process
-				yield* Effect.sleep("500 millis")
-
-				// Sync beads changes from worktree before creating WIP commit
-				// This ensures any bd update/close commands are synced before we pause
-				yield* beadsClient.sync(session.worktreePath).pipe(
-					Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
-				)
-
-				// Create WIP commit in worktree
-				// Git add all changes (including synced .beads/ directory)
-				const addCmd = Command.make("git", "add", "-A").pipe(
-					Command.workingDirectory(session.worktreePath),
-				)
-				yield* Command.exitCode(addCmd).pipe(
-					Effect.mapError(
-						(e) =>
-							new GitError({
-								message: `Failed to stage changes: ${e}`,
-								command: "git add -A",
+					if (sessionOpt._tag === "None") {
+						return yield* Effect.fail(
+							new SessionError({
+								message: "Session not found",
+								beadId,
 							}),
-					),
-				)
-
-				// Git commit with WIP message
-				const commitCmd = Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
-					Command.workingDirectory(session.worktreePath),
-				)
-				yield* Command.exitCode(commitCmd).pipe(
-					Effect.mapError(
-						(e) =>
-							new GitError({
-								message: `Failed to create WIP commit: ${e}`,
-								command: "git commit -m 'WIP: Paused session'",
-							}),
-					),
-					// Ignore error if nothing to commit
-					Effect.catchAll(() => Effect.succeed(0)),
-				)
-
-				// Update session state to paused
-				const oldState = session.state
-				const updatedSession: Session = {
-					...session,
-					state: "paused",
-				}
-
-				yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, updatedSession))
-
-				// Publish state change
-				yield* publishStateChange(beadId, oldState, "paused")
-			}),
-
-		resume: (beadId: string) =>
-			Effect.gen(function* () {
-				const sessions = yield* Ref.get(sessionsRef)
-				const sessionOpt = HashMap.get(sessions, beadId)
-
-				if (sessionOpt._tag === "None") {
-					return yield* Effect.fail(
-						new SessionError({
-							message: "Session not found",
-							beadId,
-						}),
-					)
-				}
-
-				const session = sessionOpt.value
-
-				// Verify session is paused
-				if (session.state !== "paused") {
-					return yield* Effect.fail(
-						new InvalidStateError({
-							beadId,
-							currentState: session.state,
-							expectedState: "paused",
-							operation: "resume",
-						}),
-					)
-				}
-
-				// Update state to busy (user will manually reattach to tmux)
-				const updatedSession: Session = {
-					...session,
-					state: "busy",
-				}
-
-				yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, updatedSession))
-
-				// Publish state change
-				yield* publishStateChange(beadId, "paused", "busy")
-			}),
-
-		getState: (beadId: string) =>
-			Effect.gen(function* () {
-				const sessions = yield* Ref.get(sessionsRef)
-				const sessionOpt = HashMap.get(sessions, beadId)
-
-				if (sessionOpt._tag === "None") {
-					return yield* Effect.fail(new SessionNotFoundError({ beadId }))
-				}
-
-				return sessionOpt.value.state
-			}),
-
-		listActive: () =>
-			Effect.gen(function* () {
-				// Get in-memory sessions
-				const inMemorySessions = yield* Ref.get(sessionsRef)
-
-				// Query tmux for actual running sessions
-				const tmuxSessions = yield* tmuxService.listSessions().pipe(
-					Effect.catchAll(() => Effect.succeed([])), // If tmux fails, just use in-memory
-				)
-
-				// Find tmux sessions that look like bead IDs (az-xxx pattern) but aren't tracked in memory
-				// Our session names are just the bead ID (see getSessionName in paths.ts)
-				const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
-
-				for (const tmuxSession of tmuxSessions) {
-					// Check if this looks like a bead ID and isn't already tracked
-					if (
-						beadIdPattern.test(tmuxSession.name) &&
-						!HashMap.has(inMemorySessions, tmuxSession.name)
-					) {
-						// This is an orphaned session - add it to our tracking as "busy"
-						const orphanedSession: Session = {
-							beadId: tmuxSession.name,
-							worktreePath: "", // Unknown - would need to query worktree
-							tmuxSessionName: tmuxSession.name,
-							state: "busy",
-							startedAt: tmuxSession.created,
-							projectPath: process.cwd(), // Assume current project
-						}
-						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, tmuxSession.name, orphanedSession),
 						)
 					}
-				}
 
-				// Return updated list
-				const updatedSessions = yield* Ref.get(sessionsRef)
-				return Array.from(HashMap.values(updatedSessions))
-			}),
+					const session = sessionOpt.value
 
-		updateState: (beadId: string, newState: SessionState) =>
-			Effect.gen(function* () {
-				const sessions = yield* Ref.get(sessionsRef)
-				const sessionOpt = HashMap.get(sessions, beadId)
+					// Sync beads changes from worktree before killing session
+					// This ensures any bd update/close commands run in the worktree get synced back to main
+					yield* beadsClient.sync(session.worktreePath).pipe(
+						Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
+					)
 
-				if (sessionOpt._tag === "None") {
-					return yield* Effect.fail(new SessionNotFoundError({ beadId }))
-				}
+					// Kill tmux session (ignore error if already dead)
+					yield* tmuxService
+						.killSession(session.tmuxSessionName)
+						.pipe(Effect.catchAll(() => Effect.void))
 
-				const session = sessionOpt.value
-				const oldState = session.state
+					// Get old state for event
+					const oldState = session.state
 
-				const updatedSession: Session = {
-					...session,
-					state: newState,
-				}
+					// Remove from registry
+					yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, beadId))
 
-				yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, updatedSession))
+					// Publish state change event
+					yield* publishStateChange(beadId, oldState, "idle")
+				}),
 
-				// Publish state change
-				yield* publishStateChange(beadId, oldState, newState)
-			}),
+			pause: (beadId: string) =>
+				Effect.gen(function* () {
+					const sessions = yield* Ref.get(sessionsRef)
+					const sessionOpt = HashMap.get(sessions, beadId)
+
+					if (sessionOpt._tag === "None") {
+						return yield* Effect.fail(
+							new SessionError({
+								message: "Session not found",
+								beadId,
+							}),
+						)
+					}
+
+					const session = sessionOpt.value
+
+					// Send Ctrl+C to interrupt Claude
+					yield* tmuxService.sendKeys(session.tmuxSessionName, "C-c")
+
+					// Wait a moment for interrupt to process
+					yield* Effect.sleep("500 millis")
+
+					// Sync beads changes from worktree before creating WIP commit
+					// This ensures any bd update/close commands are synced before we pause
+					yield* beadsClient.sync(session.worktreePath).pipe(
+						Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
+					)
+
+					// Create WIP commit in worktree
+					// Git add all changes (including synced .beads/ directory)
+					const addCmd = Command.make("git", "add", "-A").pipe(
+						Command.workingDirectory(session.worktreePath),
+					)
+					yield* Command.exitCode(addCmd).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to stage changes: ${e}`,
+									command: "git add -A",
+								}),
+						),
+					)
+
+					// Git commit with WIP message
+					const commitCmd = Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
+						Command.workingDirectory(session.worktreePath),
+					)
+					yield* Command.exitCode(commitCmd).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to create WIP commit: ${e}`,
+									command: "git commit -m 'WIP: Paused session'",
+								}),
+						),
+						// Ignore error if nothing to commit
+						Effect.catchAll(() => Effect.succeed(0)),
+					)
+
+					// Update session state to paused
+					const oldState = session.state
+					const updatedSession: Session = {
+						...session,
+						state: "paused",
+					}
+
+					yield* Ref.update(sessionsRef, (sessions) =>
+						HashMap.set(sessions, beadId, updatedSession),
+					)
+
+					// Publish state change
+					yield* publishStateChange(beadId, oldState, "paused")
+				}),
+
+			resume: (beadId: string) =>
+				Effect.gen(function* () {
+					const sessions = yield* Ref.get(sessionsRef)
+					const sessionOpt = HashMap.get(sessions, beadId)
+
+					if (sessionOpt._tag === "None") {
+						return yield* Effect.fail(
+							new SessionError({
+								message: "Session not found",
+								beadId,
+							}),
+						)
+					}
+
+					const session = sessionOpt.value
+
+					// Verify session is paused
+					if (session.state !== "paused") {
+						return yield* Effect.fail(
+							new InvalidStateError({
+								beadId,
+								currentState: session.state,
+								expectedState: "paused",
+								operation: "resume",
+							}),
+						)
+					}
+
+					// Update state to busy (user will manually reattach to tmux)
+					const updatedSession: Session = {
+						...session,
+						state: "busy",
+					}
+
+					yield* Ref.update(sessionsRef, (sessions) =>
+						HashMap.set(sessions, beadId, updatedSession),
+					)
+
+					// Publish state change
+					yield* publishStateChange(beadId, "paused", "busy")
+				}),
+
+			getState: (beadId: string) =>
+				Effect.gen(function* () {
+					const sessions = yield* Ref.get(sessionsRef)
+					const sessionOpt = HashMap.get(sessions, beadId)
+
+					if (sessionOpt._tag === "None") {
+						return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+					}
+
+					return sessionOpt.value.state
+				}),
+
+			listActive: () =>
+				Effect.gen(function* () {
+					// Get in-memory sessions
+					const inMemorySessions = yield* Ref.get(sessionsRef)
+
+					// Query tmux for actual running sessions
+					const tmuxSessions = yield* tmuxService.listSessions().pipe(
+						Effect.catchAll(() => Effect.succeed([])), // If tmux fails, just use in-memory
+					)
+
+					// Find tmux sessions that look like bead IDs (az-xxx pattern) but aren't tracked in memory
+					// Our session names are just the bead ID (see getSessionName in paths.ts)
+					const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+
+					for (const tmuxSession of tmuxSessions) {
+						// Check if this looks like a bead ID and isn't already tracked
+						if (
+							beadIdPattern.test(tmuxSession.name) &&
+							!HashMap.has(inMemorySessions, tmuxSession.name)
+						) {
+							// This is an orphaned session - add it to our tracking as "busy"
+							const orphanedSession: Session = {
+								beadId: tmuxSession.name,
+								worktreePath: "", // Unknown - would need to query worktree
+								tmuxSessionName: tmuxSession.name,
+								state: "busy",
+								startedAt: tmuxSession.created,
+								projectPath: process.cwd(), // Assume current project
+							}
+							yield* Ref.update(sessionsRef, (sessions) =>
+								HashMap.set(sessions, tmuxSession.name, orphanedSession),
+							)
+						}
+					}
+
+					// Return updated list
+					const updatedSessions = yield* Ref.get(sessionsRef)
+					return Array.from(HashMap.values(updatedSessions))
+				}),
+
+			updateState: (beadId: string, newState: SessionState) =>
+				Effect.gen(function* () {
+					const sessions = yield* Ref.get(sessionsRef)
+					const sessionOpt = HashMap.get(sessions, beadId)
+
+					if (sessionOpt._tag === "None") {
+						return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+					}
+
+					const session = sessionOpt.value
+					const oldState = session.state
+
+					const updatedSession: Session = {
+						...session,
+						state: newState,
+					}
+
+					yield* Ref.update(sessionsRef, (sessions) =>
+						HashMap.set(sessions, beadId, updatedSession),
+					)
+
+					// Publish state change
+					yield* publishStateChange(beadId, oldState, newState)
+				}),
 
 			subscribeToStateChanges: () => Effect.succeed(stateChangeHub),
 		}

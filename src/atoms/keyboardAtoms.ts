@@ -7,8 +7,8 @@
  */
 
 import { Effect } from "effect"
-import { appRuntime } from "../ui/atoms"
 import { KeyboardService } from "../services/KeyboardService"
+import { appRuntime } from "../ui/atoms"
 
 /**
  * Action atom to handle a key press
@@ -66,10 +66,7 @@ export const registerKeyAtom = appRuntime.fn(
  * ```
  */
 export const unregisterKeyAtom = appRuntime.fn(
-	(params: {
-		key: string
-		mode: "normal" | "select" | "command" | "search" | "overlay" | "*"
-	}) =>
+	(params: { key: string; mode: "normal" | "select" | "command" | "search" | "overlay" | "*" }) =>
 		Effect.gen(function* () {
 			const keyboard = yield* KeyboardService
 			yield* keyboard.unregister(params.key, params.mode)

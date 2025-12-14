@@ -3,8 +3,9 @@
  *
  * Uses effect-atom for reactive state management with Effect integration.
  */
-import { Atom, Result } from "@effect-atom/atom"
+
 import { BunContext } from "@effect/platform-bun"
+import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
 import { AppConfig, AppConfigLiveWithPlatform } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
@@ -15,16 +16,15 @@ import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
-import type { TaskWithSession } from "./types"
-
+import { BoardService } from "../services/BoardService"
+import { EditorService as ModeService } from "../services/EditorService"
+import { KeyboardService } from "../services/KeyboardService"
+import { NavigationService } from "../services/NavigationService"
+import { OverlayService } from "../services/OverlayService"
+import { SessionService } from "../services/SessionService"
 // New atomic Effect services
 import { ToastService } from "../services/ToastService"
-import { OverlayService } from "../services/OverlayService"
-import { NavigationService } from "../services/NavigationService"
-import { EditorService as ModeService } from "../services/EditorService"
-import { BoardService } from "../services/BoardService"
-import { SessionService } from "../services/SessionService"
-import { KeyboardService } from "../services/KeyboardService"
+import type { TaskWithSession } from "./types"
 
 /**
  * Combined runtime layer with all services
@@ -55,36 +55,41 @@ const coreServicesLayer = baseLayer.pipe(
 )
 
 // Atomic services layer (new Effect.Service pattern)
-// Independent services with no deps
+// Tier 1: Truly independent services (no deps beyond platform)
 const independentServicesLayer = Layer.mergeAll(
 	ToastService.Default,
 	OverlayService.Default,
-	NavigationService.Default,
 	ModeService.Default,
 )
 
-// BoardService needs BeadsClient & SessionManager from coreServicesLayer
+// Tier 2: BoardService needs BeadsClient & SessionManager from coreServicesLayer
+const boardServiceLayer = BoardService.Default
+
+// Tier 3: NavigationService needs BoardService
+const navigationServiceLayer = NavigationService.Default
+
+// Tier 4: Services that need NavigationService, BoardService, etc.
 // SessionService needs ToastService, NavigationService, BoardService
 // KeyboardService needs ToastService, OverlayService, NavigationService, ModeService, BoardService
-const dependentServicesLayer = Layer.mergeAll(
-	BoardService.Default,
-	SessionService.Default,
-	KeyboardService.Default,
+const highLevelServicesLayer = Layer.mergeAll(SessionService.Default, KeyboardService.Default)
+
+// Build layers in dependency order:
+// 1. core + independent (no cross-deps)
+const baseWithIndependent = coreServicesLayer.pipe(Layer.merge(independentServicesLayer))
+
+// 2. Add BoardService (needs core)
+const withBoardService = baseWithIndependent.pipe(
+	Layer.merge(boardServiceLayer.pipe(Layer.provide(baseWithIndependent))),
 )
 
-// Combine core and independent services first
-const baseWithIndependent = coreServicesLayer.pipe(
-	Layer.merge(independentServicesLayer),
+// 3. Add NavigationService (needs BoardService)
+const withNavigation = withBoardService.pipe(
+	Layer.merge(navigationServiceLayer.pipe(Layer.provide(withBoardService))),
 )
 
-// Dependent services need context from baseWithIndependent
-// Use Layer.provide to satisfy their requirements, then merge outputs
-const dependentServicesWithDeps = dependentServicesLayer.pipe(
-	Layer.provide(baseWithIndependent),
-)
-
-const appLayer = baseWithIndependent.pipe(
-	Layer.merge(dependentServicesWithDeps),
+// 4. Add high-level services (need everything above)
+const appLayer = withNavigation.pipe(
+	Layer.merge(highLevelServicesLayer.pipe(Layer.provide(withNavigation))),
 )
 
 /**

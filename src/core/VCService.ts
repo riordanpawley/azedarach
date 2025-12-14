@@ -18,7 +18,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Context, Data, Effect, Layer, Option, Ref } from "effect"
+import { Data, Effect, Ref, Schedule } from "effect"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -224,7 +224,6 @@ export interface VCServiceImpl {
 	>
 }
 
-
 // ============================================================================
 // Implementation
 // ============================================================================
@@ -246,290 +245,294 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 	effect: Effect.gen(function* () {
 		const tmux = yield* TmuxService
 
-	// Track executor state
-	const executorStateRef = yield* Ref.make<VCExecutorInfo>({
-		status: "stopped",
-		sessionName: VC_SESSION_NAME,
-	})
-
-	/**
-	 * Check if vc binary exists
-	 */
-	const checkVCInstalled = (): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
-		Effect.gen(function* () {
-			const cmd = Command.make("which", "vc")
-			const result = yield* Command.exitCode(cmd).pipe(
-				Effect.map((code) => code === 0),
-				Effect.catchAll(() => Effect.succeed(false)),
-			)
-			return result
+		// Track executor state
+		const executorStateRef = yield* Ref.make<VCExecutorInfo>({
+			status: "stopped",
+			sessionName: VC_SESSION_NAME,
 		})
 
-	/**
-	 * Update executor state
-	 */
-	const updateState = (
-		update: Partial<VCExecutorInfo>,
-	): Effect.Effect<VCExecutorInfo, never, never> =>
-		Ref.updateAndGet(executorStateRef, (current) => ({
-			...current,
-			...update,
-		}))
-
-	return {
-		isAvailable: () => checkVCInstalled(),
-
-		getVersion: () =>
+		/**
+		 * Check if vc binary exists
+		 */
+		const checkVCInstalled = (): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				const installed = yield* checkVCInstalled()
-				if (!installed) {
-					return yield* Effect.fail(
-						new VCNotInstalledError({
-							message:
-								"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
-						}),
-					)
-				}
-
-				const cmd = Command.make("vc", "--version")
-				const version = yield* Command.string(cmd).pipe(
-					Effect.map((s) => s.trim()),
-					Effect.mapError(
-						(e) =>
-							new VCNotInstalledError({
-								message: `Failed to get VC version: ${e}`,
-							}),
-					),
+				const cmd = Command.make("which", "vc")
+				const result = yield* Command.exitCode(cmd).pipe(
+					Effect.map((code) => code === 0),
+					Effect.catchAll(() => Effect.succeed(false)),
 				)
+				return result
+			})
 
-				return version
-			}),
+		/**
+		 * Update executor state
+		 */
+		const updateState = (
+			update: Partial<VCExecutorInfo>,
+		): Effect.Effect<VCExecutorInfo, never, never> =>
+			Ref.updateAndGet(executorStateRef, (current) => ({
+				...current,
+				...update,
+			}))
 
-		startAutoPilot: () =>
-			Effect.gen(function* () {
-				// Check if VC is installed
-				const installed = yield* checkVCInstalled()
-				if (!installed) {
-					return yield* Effect.fail(
-						new VCNotInstalledError({
-							message:
-								"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
-						}),
-					)
-				}
+		yield* Effect.scheduleForked(Schedule.spaced(STATUS_POLL_INTERVAL))(
+			Effect.log("todo: poll vc status"),
+		)
 
-				// Check if already running
-				const hasSession = yield* tmux.hasSession(VC_SESSION_NAME)
-				if (hasSession) {
-					// Already running, just return current state
-					return yield* updateState({
-						status: "running",
-						lastActivity: new Date(),
-					})
-				}
+		return {
+			isAvailable: () => checkVCInstalled(),
 
-				// Update state to starting
-				yield* updateState({ status: "starting" })
-
-				// Start VC in a new tmux session
-				// VC's REPL will handle the event loop
-				yield* tmux.newSession(VC_SESSION_NAME, {
-					command: "vc",
-				})
-
-				// Give it a moment to start
-				yield* Effect.sleep("1 second")
-
-				// Verify it's running
-				const running = yield* tmux.hasSession(VC_SESSION_NAME)
-				if (!running) {
-					yield* updateState({ status: "error" })
-					return yield* Effect.fail(
-						new VCError({
-							message: "Failed to start VC session",
-						}),
-					)
-				}
-
-				// Update state to running
-				return yield* updateState({
-					status: "running",
-					startedAt: new Date(),
-					lastActivity: new Date(),
-				})
-			}),
-
-		stopAutoPilot: () =>
-			Effect.gen(function* () {
-				const hasSession = yield* tmux.hasSession(VC_SESSION_NAME)
-				if (!hasSession) {
-					// Already stopped
-					yield* updateState({ status: "stopped" })
-					return
-				}
-
-				// Send exit command gracefully first
-				yield* tmux.sendKeys(VC_SESSION_NAME, "/exit").pipe(Effect.catchAll(() => Effect.void))
-
-				// Wait a moment for graceful shutdown
-				yield* Effect.sleep("500 millis")
-
-				// Force kill if still running
-				const stillRunning = yield* tmux.hasSession(VC_SESSION_NAME)
-				if (stillRunning) {
-					yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
-				}
-
-				yield* updateState({
-					status: "stopped",
-					startedAt: undefined,
-					pid: undefined,
-				})
-			}),
-
-		isAutoPilotRunning: () =>
-			Effect.gen(function* () {
-				const hasSession = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
-
-				// Sync our state with reality
-				if (hasSession) {
-					yield* updateState({ status: "running", lastActivity: new Date() })
-				} else {
-					const current = yield* Ref.get(executorStateRef)
-					if (current.status === "running") {
-						yield* updateState({ status: "stopped" })
+			getVersion: () =>
+				Effect.gen(function* () {
+					const installed = yield* checkVCInstalled()
+					if (!installed) {
+						return yield* Effect.fail(
+							new VCNotInstalledError({
+								message:
+									"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
+							}),
+						)
 					}
-				}
 
-				return hasSession
-			}),
-
-		getStatus: () =>
-			Effect.gen(function* () {
-				// Check actual tmux session state
-				const hasSession = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
-
-				// Check if VC is installed
-				const installed = yield* checkVCInstalled()
-
-				if (!installed) {
-					return yield* updateState({ status: "not_installed" })
-				}
-
-				if (hasSession) {
-					return yield* updateState({ status: "running", lastActivity: new Date() })
-				}
-
-				const current = yield* Ref.get(executorStateRef)
-				if (current.status === "running" || current.status === "starting") {
-					// Session died unexpectedly
-					return yield* updateState({ status: "stopped" })
-				}
-
-				return current
-			}),
-
-		sendCommand: (command: string) =>
-			Effect.gen(function* () {
-				const hasSession = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
-
-				if (!hasSession) {
-					return yield* Effect.fail(
-						new VCNotRunningError({
-							message: "VC auto-pilot is not running. Start it first with toggleAutoPilot()",
-						}),
-					)
-				}
-
-				// Send the command to VC's REPL via tmux
-				// Map SessionNotFoundError to VCNotRunningError for consistency
-				yield* tmux
-					.sendKeys(VC_SESSION_NAME, command)
-					.pipe(
-						Effect.catchTag("SessionNotFoundError", () =>
-							Effect.fail(new VCNotRunningError({ message: "VC session not found" })),
-						),
-					)
-				yield* tmux
-					.sendKeys(VC_SESSION_NAME, "Enter")
-					.pipe(
-						Effect.catchTag("SessionNotFoundError", () =>
-							Effect.fail(new VCNotRunningError({ message: "VC session not found" })),
+					const cmd = Command.make("vc", "--version")
+					const version = yield* Command.string(cmd).pipe(
+						Effect.map((s) => s.trim()),
+						Effect.mapError(
+							(e) =>
+								new VCNotInstalledError({
+									message: `Failed to get VC version: ${e}`,
+								}),
 						),
 					)
 
-				yield* updateState({ lastActivity: new Date() })
-			}),
+					return version
+				}),
 
-		getAttachCommand: () =>
-			Effect.gen(function* () {
-				const hasSession = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+			startAutoPilot: () =>
+				Effect.gen(function* () {
+					// Check if VC is installed
+					const installed = yield* checkVCInstalled()
+					if (!installed) {
+						return yield* Effect.fail(
+							new VCNotInstalledError({
+								message:
+									"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
+							}),
+						)
+					}
 
-				if (!hasSession) {
-					return yield* Effect.fail(
-						new VCNotRunningError({
-							message: "VC auto-pilot is not running",
-						}),
-					)
-				}
+					// Check if already running
+					const hasSession = yield* tmux.hasSession(VC_SESSION_NAME)
+					if (hasSession) {
+						// Already running, just return current state
+						return yield* updateState({
+							status: "running",
+							lastActivity: new Date(),
+						})
+					}
 
-				return `tmux attach -t ${VC_SESSION_NAME}`
-			}),
+					// Update state to starting
+					yield* updateState({ status: "starting" })
 
-		toggleAutoPilot: () =>
-			Effect.gen(function* () {
-				const hasSession = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					// Start VC in a new tmux session
+					// VC's REPL will handle the event loop
+					yield* tmux.newSession(VC_SESSION_NAME, {
+						command: "vc",
+					})
 
-				if (hasSession) {
-					// Stop it
-					yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
-					return yield* updateState({ status: "stopped" })
-				}
+					// Give it a moment to start
+					yield* Effect.sleep("1 second")
 
-				// Check if VC is installed first
-				const installed = yield* checkVCInstalled()
-				if (!installed) {
-					return yield* Effect.fail(
-						new VCNotInstalledError({
-							message:
-								"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
-						}),
-					)
-				}
+					// Verify it's running
+					const running = yield* tmux.hasSession(VC_SESSION_NAME)
+					if (!running) {
+						yield* updateState({ status: "error" })
+						return yield* Effect.fail(
+							new VCError({
+								message: "Failed to start VC session",
+							}),
+						)
+					}
 
-				// Start it
-				yield* updateState({ status: "starting" })
-
-				yield* tmux.newSession(VC_SESSION_NAME, {
-					command: "vc",
-				})
-
-				yield* Effect.sleep("1 second")
-
-				const running = yield* tmux
-					.hasSession(VC_SESSION_NAME)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
-
-				if (running) {
+					// Update state to running
 					return yield* updateState({
 						status: "running",
 						startedAt: new Date(),
 						lastActivity: new Date(),
 					})
-				}
+				}),
 
-				return yield* updateState({ status: "error" })
-			}),
+			stopAutoPilot: () =>
+				Effect.gen(function* () {
+					const hasSession = yield* tmux.hasSession(VC_SESSION_NAME)
+					if (!hasSession) {
+						// Already stopped
+						yield* updateState({ status: "stopped" })
+						return
+					}
+
+					// Send exit command gracefully first
+					yield* tmux.sendKeys(VC_SESSION_NAME, "/exit").pipe(Effect.catchAll(() => Effect.void))
+
+					// Wait a moment for graceful shutdown
+					yield* Effect.sleep("500 millis")
+
+					// Force kill if still running
+					const stillRunning = yield* tmux.hasSession(VC_SESSION_NAME)
+					if (stillRunning) {
+						yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
+					}
+
+					yield* updateState({
+						status: "stopped",
+						startedAt: undefined,
+						pid: undefined,
+					})
+				}),
+
+			isAutoPilotRunning: () =>
+				Effect.gen(function* () {
+					const hasSession = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					// Sync our state with reality
+					if (hasSession) {
+						yield* updateState({ status: "running", lastActivity: new Date() })
+					} else {
+						const current = yield* Ref.get(executorStateRef)
+						if (current.status === "running") {
+							yield* updateState({ status: "stopped" })
+						}
+					}
+
+					return hasSession
+				}),
+
+			getStatus: () =>
+				Effect.gen(function* () {
+					// Check actual tmux session state
+					const hasSession = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					// Check if VC is installed
+					const installed = yield* checkVCInstalled()
+
+					if (!installed) {
+						return yield* updateState({ status: "not_installed" })
+					}
+
+					if (hasSession) {
+						return yield* updateState({ status: "running", lastActivity: new Date() })
+					}
+
+					const current = yield* Ref.get(executorStateRef)
+					if (current.status === "running" || current.status === "starting") {
+						// Session died unexpectedly
+						return yield* updateState({ status: "stopped" })
+					}
+
+					return current
+				}),
+
+			sendCommand: (command: string) =>
+				Effect.gen(function* () {
+					const hasSession = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					if (!hasSession) {
+						return yield* Effect.fail(
+							new VCNotRunningError({
+								message: "VC auto-pilot is not running. Start it first with toggleAutoPilot()",
+							}),
+						)
+					}
+
+					// Send the command to VC's REPL via tmux
+					// Map SessionNotFoundError to VCNotRunningError for consistency
+					yield* tmux
+						.sendKeys(VC_SESSION_NAME, command)
+						.pipe(
+							Effect.catchTag("SessionNotFoundError", () =>
+								Effect.fail(new VCNotRunningError({ message: "VC session not found" })),
+							),
+						)
+					yield* tmux
+						.sendKeys(VC_SESSION_NAME, "Enter")
+						.pipe(
+							Effect.catchTag("SessionNotFoundError", () =>
+								Effect.fail(new VCNotRunningError({ message: "VC session not found" })),
+							),
+						)
+
+					yield* updateState({ lastActivity: new Date() })
+				}),
+
+			getAttachCommand: () =>
+				Effect.gen(function* () {
+					const hasSession = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					if (!hasSession) {
+						return yield* Effect.fail(
+							new VCNotRunningError({
+								message: "VC auto-pilot is not running",
+							}),
+						)
+					}
+
+					return `tmux attach -t ${VC_SESSION_NAME}`
+				}),
+
+			toggleAutoPilot: () =>
+				Effect.gen(function* () {
+					const hasSession = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					if (hasSession) {
+						// Stop it
+						yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
+						return yield* updateState({ status: "stopped" })
+					}
+
+					// Check if VC is installed first
+					const installed = yield* checkVCInstalled()
+					if (!installed) {
+						return yield* Effect.fail(
+							new VCNotInstalledError({
+								message:
+									"VC is not installed. Install with: brew tap steveyegge/vc && brew install vc",
+							}),
+						)
+					}
+
+					// Start it
+					yield* updateState({ status: "starting" })
+
+					yield* tmux.newSession(VC_SESSION_NAME, {
+						command: "vc",
+					})
+
+					yield* Effect.sleep("1 second")
+
+					const running = yield* tmux
+						.hasSession(VC_SESSION_NAME)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+					if (running) {
+						return yield* updateState({
+							status: "running",
+							startedAt: new Date(),
+							lastActivity: new Date(),
+						})
+					}
+
+					return yield* updateState({ status: "error" })
+				}),
 		}
 	}),
 }) {}

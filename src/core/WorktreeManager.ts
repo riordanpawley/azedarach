@@ -14,7 +14,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Context, Data, Effect, Layer, Ref, type Scope } from "effect"
+import { Data, Effect, Ref, type Scope } from "effect"
 import { getWorktreePath } from "./paths.js"
 
 // ============================================================================
@@ -165,7 +165,6 @@ export interface WorktreeManagerService {
 		projectPath: string
 	}) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
-
 
 // ============================================================================
 // Implementation Helpers
@@ -335,97 +334,97 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			})
 
 		return {
-		create: (options: CreateWorktreeOptions) =>
-			Effect.gen(function* () {
-				const { beadId, baseBranch, projectPath } = options
+			create: (options: CreateWorktreeOptions) =>
+				Effect.gen(function* () {
+					const { beadId, baseBranch, projectPath } = options
 
-				// Check if git repo
-				const isRepo = yield* isGitRepo(projectPath)
-				if (!isRepo) {
-					return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-				}
+					// Check if git repo
+					const isRepo = yield* isGitRepo(projectPath)
+					if (!isRepo) {
+						return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+					}
 
-				// Get expected worktree path
-				const worktreePath = getWorktreePath(projectPath, beadId)
+					// Get expected worktree path
+					const worktreePath = getWorktreePath(projectPath, beadId)
 
-				// Refresh cache and check if already exists
-				yield* refreshWorktrees(projectPath)
-				const existing = yield* Ref.get(worktreesRef)
-				const existingWorktree = existing.get(beadId)
+					// Refresh cache and check if already exists
+					yield* refreshWorktrees(projectPath)
+					const existing = yield* Ref.get(worktreesRef)
+					const existingWorktree = existing.get(beadId)
 
-				if (existingWorktree) {
-					// Idempotent: worktree already exists
-					return existingWorktree
-				}
+					if (existingWorktree) {
+						// Idempotent: worktree already exists
+						return existingWorktree
+					}
 
-				// Determine base branch
-				const base = baseBranch || (yield* getCurrentBranch(projectPath))
+					// Determine base branch
+					const base = baseBranch || (yield* getCurrentBranch(projectPath))
 
-				// Create new branch and worktree
-				// git worktree add -b <branch-name> <path> <start-point>
-				yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
+					// Create new branch and worktree
+					// git worktree add -b <branch-name> <path> <start-point>
+					yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
 
-				// Refresh cache to get the new worktree info
-				yield* refreshWorktrees(projectPath)
-				const updated = yield* Ref.get(worktreesRef)
-				const newWorktree = updated.get(beadId)
+					// Refresh cache to get the new worktree info
+					yield* refreshWorktrees(projectPath)
+					const updated = yield* Ref.get(worktreesRef)
+					const newWorktree = updated.get(beadId)
 
-				if (!newWorktree) {
-					// This shouldn't happen, but handle it gracefully
-					return yield* Effect.fail(
-						new GitError({
-							message: "Worktree created but not found in list",
-							command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
-						}),
-					)
-				}
+					if (!newWorktree) {
+						// This shouldn't happen, but handle it gracefully
+						return yield* Effect.fail(
+							new GitError({
+								message: "Worktree created but not found in list",
+								command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
+							}),
+						)
+					}
 
-				return newWorktree
-			}),
+					return newWorktree
+				}),
 
-		remove: (options: { beadId: string; projectPath: string }) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath } = options
+			remove: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
 
-				// Refresh cache
-				yield* refreshWorktrees(projectPath)
-				const worktrees = yield* Ref.get(worktreesRef)
-				const worktree = worktrees.get(beadId)
+					// Refresh cache
+					yield* refreshWorktrees(projectPath)
+					const worktrees = yield* Ref.get(worktreesRef)
+					const worktree = worktrees.get(beadId)
 
-				if (!worktree) {
-					// Safe no-op if doesn't exist
-					return
-				}
+					if (!worktree) {
+						// Safe no-op if doesn't exist
+						return
+					}
 
-				// Remove worktree
-				yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
+					// Remove worktree
+					yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
 
-				// Refresh cache
-				yield* refreshWorktrees(projectPath)
-			}),
+					// Refresh cache
+					yield* refreshWorktrees(projectPath)
+				}),
 
-		list: (projectPath: string) =>
-			Effect.gen(function* () {
-				yield* refreshWorktrees(projectPath)
-				const worktrees = yield* Ref.get(worktreesRef)
-				return Array.from(worktrees.values())
-			}),
+			list: (projectPath: string) =>
+				Effect.gen(function* () {
+					yield* refreshWorktrees(projectPath)
+					const worktrees = yield* Ref.get(worktreesRef)
+					return Array.from(worktrees.values())
+				}),
 
-		exists: (options: { beadId: string; projectPath: string }) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath } = options
-				yield* refreshWorktrees(projectPath)
-				const worktrees = yield* Ref.get(worktreesRef)
-				return worktrees.has(beadId)
-			}),
+			exists: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+					yield* refreshWorktrees(projectPath)
+					const worktrees = yield* Ref.get(worktreesRef)
+					return worktrees.has(beadId)
+				}),
 
-		get: (options: { beadId: string; projectPath: string }) =>
-			Effect.gen(function* () {
-				const { beadId, projectPath } = options
-				yield* refreshWorktrees(projectPath)
-				const worktrees = yield* Ref.get(worktreesRef)
-				return worktrees.get(beadId) || null
-			}),
+			get: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+					yield* refreshWorktrees(projectPath)
+					const worktrees = yield* Ref.get(worktreesRef)
+					return worktrees.get(beadId) || null
+				}),
 		}
 	}),
 }) {}

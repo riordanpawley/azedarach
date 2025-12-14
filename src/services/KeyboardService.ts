@@ -4,303 +4,1066 @@
  * Manages keyboard bindings using a data-driven approach with Effect.Service pattern.
  * Keybindings are stored as data structures with associated Effect actions,
  * allowing for dynamic registration, mode-based filtering, and overlay precedence.
+ *
+ * This service handles ALL keyboard input for the application, replacing the
+ * inline useKeyboard handlers that were previously in App.tsx.
  */
 
+import type { CommandExecutor } from "@effect/platform/CommandExecutor"
+import type { FileSystem } from "@effect/platform/FileSystem"
 import { Effect, Ref } from "effect"
-import { ToastService } from "./ToastService"
-import { OverlayService } from "./OverlayService"
-import { NavigationService } from "./NavigationService"
-import { EditorService } from "./EditorService"
+import { AttachmentService } from "../core/AttachmentService"
+import { BeadsClient, type BeadsError } from "../core/BeadsClient"
+import { BeadEditorService } from "../core/EditorService"
+import { PRWorkflow } from "../core/PRWorkflow"
+import { SessionManager } from "../core/SessionManager"
+import { VCService } from "../core/VCService"
+import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
+import { EditorService, type JumpTarget } from "./EditorService"
+import { NavigationService } from "./NavigationService"
+import { OverlayService } from "./OverlayService"
+import { ToastService } from "./ToastService"
 
 // ============================================================================
 // Types
 // ============================================================================
 
 /**
+ * Keyboard mode for keybinding matching
+ *
+ * Modes map to EditorService modes:
+ * - normal: Default navigation
+ * - select: Multi-selection
+ * - action: Action palette (Space menu)
+ * - goto-pending: Waiting for second key after 'g'
+ * - goto-jump: Jump label mode (2-char input)
+ * - search: Search/filter with text input
+ * - command: VC command with text input
+ * - overlay: Any overlay is open
+ * - *: Universal (matches any mode)
+ */
+export type KeyMode =
+	| "normal"
+	| "select"
+	| "action"
+	| "goto-pending"
+	| "goto-jump"
+	| "search"
+	| "command"
+	| "overlay"
+	| "*"
+
+/**
+ * Platform dependencies that keybinding actions may require.
+ * These are provided by BunContext.layer at runtime.
+ */
+export type KeybindingDeps = CommandExecutor | FileSystem
+
+/**
  * Keybinding definition with mode-specific action
+ *
+ * Actions may have platform requirements (CommandExecutor, FileSystem, BeadsClient)
+ * which are satisfied by the runtime layer when KeyboardService is used.
  */
 export interface Keybinding {
 	readonly key: string
-	readonly mode: "normal" | "select" | "command" | "search" | "overlay" | "*"
+	readonly mode: KeyMode
 	readonly description: string
-	readonly action: Effect.Effect<void>
+	readonly action: Effect.Effect<void, BeadsError, KeybindingDeps>
 }
 
 // ============================================================================
 // Service Definition
 // ============================================================================
 
-export class KeyboardService extends Effect.Service<KeyboardService>()(
-	"KeyboardService",
-	{
-		// Declare dependencies - Effect handles the wiring
-		dependencies: [
-			ToastService.Default,
-			OverlayService.Default,
-			NavigationService.Default,
-			EditorService.Default,
-			BoardService.Default,
-		],
+export class KeyboardService extends Effect.Service<KeyboardService>()("KeyboardService", {
+	// Declare ALL dependencies - Effect resolves the full graph
+	dependencies: [
+		ToastService.Default,
+		OverlayService.Default,
+		NavigationService.Default,
+		EditorService.Default,
+		BoardService.Default,
+		SessionManager.Default,
+		AttachmentService.Default,
+		PRWorkflow.Default,
+		VCService.Default,
+		BeadsClient.Default,
+		BeadEditorService.Default,
+	],
 
-		effect: Effect.gen(function* () {
-			// Inject all services we need for actions
-			const toast = yield* ToastService
-			const overlay = yield* OverlayService
-			const nav = yield* NavigationService
-			const editor = yield* EditorService
-			const board = yield* BoardService
+	effect: Effect.gen(function* () {
+		// Inject ALL services at construction time
+		const toast = yield* ToastService
+		const overlay = yield* OverlayService
+		const nav = yield* NavigationService
+		const editor = yield* EditorService
+		const board = yield* BoardService
+		const sessionManager = yield* SessionManager
+		const attachment = yield* AttachmentService
+		const prWorkflow = yield* PRWorkflow
+		const vc = yield* VCService
+		const beadsClient = yield* BeadsClient
+		const beadEditor = yield* BeadEditorService
 
-			/**
-			 * Helper: Open detail overlay for current cursor position
-			 */
-			const openCurrentDetail = (): Effect.Effect<void> =>
-				Effect.gen(function* () {
-					const cursor = yield* nav.getCursor()
-					const task = yield* board.getTaskAt(cursor.columnIndex, cursor.taskIndex)
-					if (task) {
-						yield* overlay.push({ _tag: "detail", taskId: task.id })
+		// ========================================================================
+		// Helper Functions
+		// ========================================================================
+
+		/**
+		 * Get currently selected task based on cursor position
+		 */
+		const getSelectedTask = () =>
+			Effect.gen(function* () {
+				const cursor = yield* nav.getCursor()
+				return yield* board.getTaskAt(cursor.columnIndex, cursor.taskIndex)
+			})
+
+		/**
+		 * Get current cursor column index
+		 */
+		const getColumnIndex = () =>
+			Effect.gen(function* () {
+				const cursor = yield* nav.getCursor()
+				return cursor.columnIndex
+			})
+
+		/**
+		 * Show error toast for any failure
+		 */
+		const showErrorToast =
+			(prefix: string) =>
+			(error: unknown): Effect.Effect<void> => {
+				const message =
+					error && typeof error === "object" && "message" in error
+						? String((error as { message: string }).message)
+						: String(error)
+				return toast.show("error", `${prefix}: ${message}`)
+			}
+
+		/**
+		 * Open detail overlay for current cursor position
+		 */
+		const openCurrentDetail = (): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (task) {
+					yield* overlay.push({ _tag: "detail", taskId: task.id })
+				}
+			})
+
+		/**
+		 * Toggle selection for task at current cursor position
+		 */
+		const toggleCurrentSelection = (): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (task) {
+					yield* editor.toggleSelection(task.id)
+				}
+			})
+
+		/**
+		 * Handle escape key based on current context
+		 *
+		 * Priority:
+		 * 1. Close overlay if one is open
+		 * 2. Exit to normal mode if in another mode
+		 */
+		const handleEscape = (): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const hasOverlay = yield* overlay.isOpen()
+				if (hasOverlay) {
+					yield* overlay.pop()
+					return
+				}
+				const mode = yield* editor.getMode()
+				if (mode._tag !== "normal") {
+					yield* editor.exitToNormal()
+				}
+			})
+
+		/**
+		 * Compute jump labels for all visible tasks
+		 */
+		const computeJumpLabels = (): Effect.Effect<Map<string, JumpTarget>> =>
+			Effect.gen(function* () {
+				const tasksByColumn = yield* board.getTasksByColumn()
+
+				// Flatten tasks with position info
+				const allTasks: Array<{
+					taskId: string
+					columnIndex: number
+					taskIndex: number
+				}> = []
+
+				COLUMNS.forEach((col, colIdx) => {
+					const tasks = tasksByColumn.get(col.status) ?? []
+					tasks.forEach((task, taskIdx) => {
+						allTasks.push({
+							taskId: task.id,
+							columnIndex: colIdx,
+							taskIndex: taskIdx,
+						})
+					})
+				})
+
+				// Generate label strings and build the Map
+				const labels = generateJumpLabels(allTasks.length)
+				const labelMap = new Map<string, JumpTarget>()
+
+				allTasks.forEach(({ taskId, columnIndex, taskIndex }, i) => {
+					if (labels[i]) {
+						labelMap.set(labels[i]!, { taskId, columnIndex, taskIndex })
 					}
 				})
 
-			/**
-			 * Helper: Toggle selection for task at current cursor position
-			 */
-			const toggleCurrentSelection = (): Effect.Effect<void> =>
-				Effect.gen(function* () {
-					const cursor = yield* nav.getCursor()
-					const task = yield* board.getTaskAt(cursor.columnIndex, cursor.taskIndex)
-					if (task) {
-						yield* editor.toggleSelection(task.id)
+				return labelMap
+			})
+
+		/**
+		 * Handle jump label input (2-char sequence)
+		 */
+		const handleJumpInput = (key: string): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const mode = yield* editor.getMode()
+				if (mode._tag !== "goto" || mode.gotoSubMode !== "jump") return
+
+				if (!mode.pendingJumpKey) {
+					// First character
+					yield* editor.setPendingJumpKey(key)
+				} else {
+					// Second character - lookup and jump
+					const label = mode.pendingJumpKey + key
+					const target = mode.jumpLabels?.get(label)
+					if (target) {
+						yield* nav.jumpTo(target.columnIndex, target.taskIndex)
 					}
-				})
+					yield* editor.exitToNormal()
+				}
+			})
 
-			/**
-			 * Helper: Handle escape key based on current context
-			 *
-			 * Priority:
-			 * 1. Close overlay if one is open
-			 * 2. Exit to normal mode if in another mode
-			 */
-			const handleEscape = (): Effect.Effect<void> =>
-				Effect.gen(function* () {
-					const hasOverlay = yield* overlay.isOpen()
-					if (hasOverlay) {
-						yield* overlay.pop()
-						return
+		/**
+		 * Move task(s) to adjacent column
+		 */
+		const moveTasksToColumn = (direction: "left" | "right") =>
+			Effect.gen(function* () {
+				const columnIndex = yield* getColumnIndex()
+				const targetColIdx = direction === "left" ? columnIndex - 1 : columnIndex + 1
+
+				// Bounds check
+				if (targetColIdx < 0 || targetColIdx >= COLUMNS.length) return
+
+				const targetStatus = COLUMNS[targetColIdx]?.status
+				if (!targetStatus) return
+
+				// Get selected IDs or current task
+				const mode = yield* editor.getMode()
+				const selectedIds = mode._tag === "select" ? mode.selectedIds : []
+				const task = yield* getSelectedTask()
+
+				const taskIdsToMove = selectedIds.length > 0 ? [...selectedIds] : task ? [task.id] : []
+				const firstTaskId = taskIdsToMove[0]
+
+				if (taskIdsToMove.length > 0) {
+					// Use injected beadsClient (no yield* needed)
+					yield* Effect.all(
+						taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
+					)
+					// Follow the first task
+					if (firstTaskId) {
+						yield* nav.setFollow(firstTaskId)
 					}
-					const mode = yield* editor.getMode()
-					if (mode._tag !== "normal") {
-						yield* editor.exitToNormal()
-					}
-				})
+				}
+			})
 
-			// Default keybindings - defined as data, not switch statements
-			// Actions are Effect values that can be executed when the key is pressed
-			const defaultBindings: ReadonlyArray<Keybinding> = [
-				// Navigation (normal mode)
-				{
-					key: "j",
-					mode: "normal",
-					description: "Move down",
-					action: Effect.suspend(() => nav.move("down")),
-				},
-				{
-					key: "k",
-					mode: "normal",
-					description: "Move up",
-					action: Effect.suspend(() => nav.move("up")),
-				},
-				{
-					key: "h",
-					mode: "normal",
-					description: "Move left",
-					action: Effect.suspend(() => nav.move("left")),
-				},
-				{
-					key: "l",
-					mode: "normal",
-					description: "Move right",
-					action: Effect.suspend(() => nav.move("right")),
-				},
-				{
-					key: "g",
-					mode: "normal",
-					description: "Go to top",
-					action: Effect.suspend(() => nav.jumpTo(0, 0)),
-				},
-				{
-					key: "G",
-					mode: "normal",
-					description: "Go to bottom",
-					action: Effect.suspend(() => nav.jumpToEnd()),
-				},
+		// ========================================================================
+		// Action Mode Handlers - Use injected services directly
+		// ========================================================================
 
-				// Overlays
-				{
-					key: "?",
-					mode: "normal",
-					description: "Show help",
-					action: Effect.suspend(() => overlay.push({ _tag: "help" })),
-				},
-				{
-					key: "c",
-					mode: "normal",
-					description: "Create task",
-					action: Effect.suspend(() => overlay.push({ _tag: "create" })),
-				},
-				{
-					key: "Enter",
-					mode: "normal",
-					description: "View detail",
-					action: Effect.suspend(() => openCurrentDetail()),
-				},
-				{
-					key: ",",
-					mode: "normal",
-					description: "Settings",
-					action: Effect.suspend(() => overlay.push({ _tag: "settings" })),
-				},
+		/**
+		 * Start session action (Space+s)
+		 */
+		const actionStartSession = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
 
-				// Mode transitions
-				{
-					key: "v",
-					mode: "normal",
-					description: "Select mode",
-					action: Effect.suspend(() => editor.enterSelect()),
-				},
-				{
-					key: ":",
-					mode: "normal",
-					description: "Command mode",
-					action: Effect.suspend(() => editor.enterCommand()),
-				},
-				{
-					key: "/",
-					mode: "normal",
-					description: "Search",
-					action: Effect.suspend(() => editor.enterSearch()),
-				},
+				if (task.sessionState !== "idle") {
+					yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					return
+				}
 
-				// Universal escape
-				{
-					key: "Escape",
-					mode: "*",
-					description: "Exit/cancel",
-					action: Effect.suspend(() => handleEscape()),
-				},
+				yield* sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to start")),
+				)
+			})
 
-				// Select mode
-				{
-					key: "Space",
-					mode: "select",
-					description: "Toggle selection",
-					action: Effect.suspend(() => toggleCurrentSelection()),
-				},
-				{
-					key: "j",
-					mode: "select",
-					description: "Move down",
-					action: Effect.suspend(() => nav.move("down")),
-				},
-				{
-					key: "k",
-					mode: "select",
-					description: "Move up",
-					action: Effect.suspend(() => nav.move("up")),
-				},
+		/**
+		 * Attach external action (Space+a)
+		 */
+		const actionAttachExternal = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
 
-				// Overlay mode
-				{
-					key: "Escape",
-					mode: "overlay",
-					description: "Close overlay",
-					action: Effect.suspend(() => overlay.pop()),
-				},
-			]
+				yield* attachment.attachExternal(task.id).pipe(
+					Effect.tap(() => toast.show("info", "Switched! Ctrl-a ) to return")),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error
+								? error._tag === "SessionNotFoundError"
+									? `No session for ${task.id} - press Space+s to start`
+									: String((error as { message?: string }).message || error)
+								: String(error)
+						return toast.show("error", msg)
+					}),
+				)
+			})
 
-			const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(
-				defaultBindings,
+		/**
+		 * Attach inline action (Space+A)
+		 */
+		const actionAttachInline = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				yield* attachment
+					.attachInline(task.id)
+					.pipe(Effect.catchAll(showErrorToast("Failed to attach")))
+			})
+
+		/**
+		 * Pause session action (Space+p)
+		 */
+		const actionPauseSession = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "busy") {
+					yield* toast.show("error", `Cannot pause: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager.pause(task.id).pipe(
+					Effect.tap(() => toast.show("success", `Paused session for ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to pause")),
+				)
+			})
+
+		/**
+		 * Resume session action (Space+r)
+		 */
+		const actionResumeSession = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "paused") {
+					yield* toast.show("error", `Cannot resume: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager.resume(task.id).pipe(
+					Effect.tap(() => toast.show("success", `Resumed session for ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to resume")),
+				)
+			})
+
+		/**
+		 * Stop session action (Space+x)
+		 */
+		const actionStopSession = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", "No session to stop")
+					return
+				}
+
+				yield* sessionManager.stop(task.id).pipe(
+					Effect.tap(() => toast.show("success", `Stopped session for ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to stop")),
+				)
+			})
+
+		/**
+		 * Edit bead action (Space+e)
+		 */
+		const actionEditBead = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				yield* beadEditor.editBead(task).pipe(
+					Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error
+								? error._tag === "ParseMarkdownError"
+									? `Invalid format: ${(error as { message: string }).message}`
+									: error._tag === "EditorError"
+										? `Editor error: ${(error as { message: string }).message}`
+										: `Failed to edit: ${error}`
+								: `Failed to edit: ${error}`
+						return toast.show("error", msg)
+					}),
+				)
+			})
+
+		/**
+		 * Create bead via $EDITOR action (c key)
+		 */
+		const actionCreateBead = () =>
+			Effect.gen(function* () {
+				yield* beadEditor.createBead().pipe(
+					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error
+								? error._tag === "ParseMarkdownError"
+									? `Invalid format: ${(error as { message: string }).message}`
+									: error._tag === "EditorError"
+										? `Editor error: ${(error as { message: string }).message}`
+										: `Failed to create: ${error}`
+								: `Failed to create: ${error}`
+						return toast.show("error", msg)
+					}),
+				)
+			})
+
+		/**
+		 * Create PR action (Space+P)
+		 */
+		const actionCreatePR = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				yield* toast.show("info", `Creating PR for ${task.id}...`)
+
+				yield* prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error && error._tag === "GHCLIError"
+								? String((error as { message: string }).message)
+								: `Failed to create PR: ${error}`
+						return toast.show("error", msg)
+					}),
+				)
+			})
+
+		/**
+		 * Cleanup worktree action (Space+d)
+		 */
+		const actionCleanup = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree to delete for ${task.id}`)
+					return
+				}
+
+				yield* toast.show("info", `Cleaning up ${task.id}...`)
+
+				yield* prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap(() => toast.show("success", `Cleaned up ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to cleanup")),
+				)
+			})
+
+		/**
+		 * Delete bead action (Space+D)
+		 */
+		const actionDeleteBead = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				yield* beadsClient.delete(task.id).pipe(
+					Effect.tap(() => toast.show("success", `Deleted ${task.id}`)),
+					Effect.catchAll(showErrorToast("Failed to delete")),
+				)
+			})
+
+		/**
+		 * Toggle VC auto-pilot action (a key)
+		 */
+		const actionToggleVC = () =>
+			vc.toggleAutoPilot().pipe(
+				Effect.tap((status) => {
+					const message =
+						status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
+					return toast.show("success", message)
+				}),
+				Effect.catchAll(showErrorToast("Failed to toggle VC")),
 			)
 
-			/**
-			 * Helper: Get current context for keybinding matching
-			 */
-			const getContext = () =>
-				Effect.gen(function* () {
-					const mode = yield* editor.getMode()
-					const hasOverlay = yield* overlay.isOpen()
-					return { mode, hasOverlay }
-				})
+		/**
+		 * Handle text input for search/command modes
+		 *
+		 * Returns true if the key was handled as text input
+		 */
+		const handleTextInput = (key: string) =>
+			Effect.gen(function* () {
+				const mode = yield* editor.getMode()
 
-			/**
-			 * Helper: Find matching keybinding for key and context
-			 *
-			 * Priority: overlay > specific mode > wildcard "*"
-			 */
-			const findBinding = (
-				key: string,
-				mode: string,
-				hasOverlay: boolean,
-			): Effect.Effect<Keybinding | undefined> =>
-				Effect.gen(function* () {
-					const bindings = yield* Ref.get(keybindings)
-
-					// Priority: overlay > specific mode > wildcard
-					const effectiveMode = hasOverlay ? "overlay" : mode
-
-					return (
-						bindings.find((b) => b.key === key && b.mode === effectiveMode) ??
-						bindings.find((b) => b.key === key && b.mode === "*")
-					)
-				})
-
-			return {
-				// State refs
-				keybindings,
-
-				/**
-				 * Handle a key press
-				 *
-				 * Gets current context (mode, overlay status), finds matching binding,
-				 * and executes its action if found.
-				 */
-				handleKey: (key: string): Effect.Effect<void> =>
-					Effect.gen(function* () {
-						const { mode, hasOverlay } = yield* getContext()
-						const binding = yield* findBinding(key, mode._tag, hasOverlay)
-
-						if (binding) {
-							yield* binding.action
+				// Search mode text input
+				if (mode._tag === "search") {
+					if (key === "Enter") {
+						yield* editor.exitToNormal()
+						return true
+					}
+					if (key === "Backspace") {
+						if (mode.query.length > 0) {
+							yield* editor.updateSearch(mode.query.slice(0, -1))
 						}
-						// Unknown key - ignore (or could show toast in debug mode)
-					}),
+						return true
+					}
+					// Single printable character
+					if (key.length === 1 && !key.startsWith("C-")) {
+						yield* editor.updateSearch(mode.query + key)
+						return true
+					}
+					return false
+				}
 
-				/**
-				 * Register a new keybinding
-				 *
-				 * Adds the binding to the end of the keybindings array.
-				 * If you want to override an existing binding, unregister it first.
-				 */
-				register: (binding: Keybinding): Effect.Effect<void> =>
-					Ref.update(keybindings, (bs) => [...bs, binding]),
+				// Command mode text input
+				if (mode._tag === "command") {
+					if (key === "Enter") {
+						if (!mode.input.trim()) {
+							yield* editor.clearCommand()
+							return true
+						}
 
-				/**
-				 * Unregister a keybinding
-				 *
-				 * Removes all keybindings matching the given key and mode.
-				 */
-				unregister: (key: string, mode: Keybinding["mode"]): Effect.Effect<void> =>
-					Ref.update(keybindings, (bs) =>
-						bs.filter((b) => !(b.key === key && b.mode === mode)),
-					),
+						// Send command to VC using injected service
+						yield* vc.sendCommand(mode.input).pipe(
+							Effect.tap(() => toast.show("success", `Sent to VC: ${mode.input}`)),
+							Effect.catchAll((error) => {
+								const msg =
+									error && typeof error === "object" && "_tag" in error
+										? error._tag === "VCNotRunningError"
+											? "VC is not running - start it with 'a' key"
+											: String((error as { message?: string }).message || error)
+										: String(error)
+								return toast.show("error", msg)
+							}),
+						)
+						yield* editor.clearCommand()
+						return true
+					}
+					if (key === "Backspace") {
+						if (mode.input.length > 0) {
+							yield* editor.updateCommand(mode.input.slice(0, -1))
+						}
+						return true
+					}
+					// Single printable character
+					if (key.length === 1 && !key.startsWith("C-")) {
+						yield* editor.updateCommand(mode.input + key)
+						return true
+					}
+					return false
+				}
 
-				/**
-				 * Get all registered keybindings
-				 */
-				getBindings: (): Effect.Effect<ReadonlyArray<Keybinding>> =>
-					Ref.get(keybindings),
-			}
-		}),
-	},
-) {}
+				return false
+			})
+
+		// ========================================================================
+		// Default Keybindings
+		// ========================================================================
+
+		const defaultBindings: ReadonlyArray<Keybinding> = [
+			// ======================================================================
+			// Normal Mode - Navigation
+			// ======================================================================
+			{
+				key: "j",
+				mode: "normal",
+				description: "Move down",
+				action: nav.move("down"),
+			},
+			{
+				key: "k",
+				mode: "normal",
+				description: "Move up",
+				action: nav.move("up"),
+			},
+			{
+				key: "h",
+				mode: "normal",
+				description: "Move left",
+				action: nav.move("left"),
+			},
+			{
+				key: "l",
+				mode: "normal",
+				description: "Move right",
+				action: nav.move("right"),
+			},
+			{
+				key: "Down",
+				mode: "normal",
+				description: "Move down",
+				action: nav.move("down"),
+			},
+			{
+				key: "Up",
+				mode: "normal",
+				description: "Move up",
+				action: nav.move("up"),
+			},
+			{
+				key: "Left",
+				mode: "normal",
+				description: "Move left",
+				action: nav.move("left"),
+			},
+			{
+				key: "Right",
+				mode: "normal",
+				description: "Move right",
+				action: nav.move("right"),
+			},
+			{
+				key: "C-d",
+				mode: "normal",
+				description: "Half page down",
+				action: nav.halfPageDown(),
+			},
+			{
+				key: "C-u",
+				mode: "normal",
+				description: "Half page up",
+				action: nav.halfPageUp(),
+			},
+
+			// ======================================================================
+			// Normal Mode - Mode Transitions
+			// ======================================================================
+			{
+				key: "g",
+				mode: "normal",
+				description: "Enter goto mode",
+				action: editor.enterGoto(),
+			},
+			{
+				key: "v",
+				mode: "normal",
+				description: "Enter select mode",
+				action: editor.enterSelect(),
+			},
+			{
+				key: "Space",
+				mode: "normal",
+				description: "Enter action mode",
+				action: editor.enterAction(),
+			},
+			{
+				key: "/",
+				mode: "normal",
+				description: "Enter search mode",
+				action: editor.enterSearch(),
+			},
+			{
+				key: ":",
+				mode: "normal",
+				description: "Enter command mode",
+				action: editor.enterCommand(),
+			},
+
+			// ======================================================================
+			// Normal Mode - Actions
+			// ======================================================================
+			{
+				key: "q",
+				mode: "normal",
+				description: "Quit",
+				action: Effect.sync(() => process.exit(0)),
+			},
+			{
+				key: "?",
+				mode: "normal",
+				description: "Show help",
+				action: overlay.push({ _tag: "help" }),
+			},
+			{
+				key: "Enter",
+				mode: "normal",
+				description: "View detail",
+				action: Effect.suspend(() => openCurrentDetail()),
+			},
+			{
+				key: "c",
+				mode: "normal",
+				description: "Create bead via $EDITOR",
+				action: Effect.suspend(() => actionCreateBead()),
+			},
+			{
+				key: "C",
+				mode: "normal",
+				description: "Create bead via Claude",
+				action: overlay.push({ _tag: "claudeCreate" }),
+			},
+			{
+				key: "a",
+				mode: "normal",
+				description: "Toggle VC auto-pilot",
+				action: Effect.suspend(() => actionToggleVC()),
+			},
+
+			// ======================================================================
+			// Action Mode (Space menu)
+			// ======================================================================
+			{
+				key: "h",
+				mode: "action",
+				description: "Move task left",
+				action: Effect.suspend(() =>
+					moveTasksToColumn("left").pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "l",
+				mode: "action",
+				description: "Move task right",
+				action: Effect.suspend(() =>
+					moveTasksToColumn("right").pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "Left",
+				mode: "action",
+				description: "Move task left",
+				action: Effect.suspend(() =>
+					moveTasksToColumn("left").pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "Right",
+				mode: "action",
+				description: "Move task right",
+				action: Effect.suspend(() =>
+					moveTasksToColumn("right").pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "s",
+				mode: "action",
+				description: "Start session",
+				action: Effect.suspend(() =>
+					actionStartSession().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "a",
+				mode: "action",
+				description: "Attach to session",
+				action: Effect.suspend(() =>
+					actionAttachExternal().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "A",
+				mode: "action",
+				description: "Attach inline",
+				action: Effect.suspend(() =>
+					actionAttachInline().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "p",
+				mode: "action",
+				description: "Pause session",
+				action: Effect.suspend(() =>
+					actionPauseSession().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "r",
+				mode: "action",
+				description: "Resume session",
+				action: Effect.suspend(() =>
+					actionResumeSession().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "x",
+				mode: "action",
+				description: "Stop session",
+				action: Effect.suspend(() =>
+					actionStopSession().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "e",
+				mode: "action",
+				description: "Edit bead ($EDITOR)",
+				action: Effect.suspend(() =>
+					actionEditBead().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "E",
+				mode: "action",
+				description: "Edit bead (Claude)",
+				action: Effect.suspend(() =>
+					toast
+						.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR")
+						.pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "P",
+				mode: "action",
+				description: "Create PR",
+				action: Effect.suspend(() =>
+					actionCreatePR().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "d",
+				mode: "action",
+				description: "Cleanup worktree",
+				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
+			},
+			{
+				key: "D",
+				mode: "action",
+				description: "Delete bead",
+				action: Effect.suspend(() =>
+					actionDeleteBead().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+
+			// ======================================================================
+			// Goto-Pending Mode (after pressing 'g')
+			// ======================================================================
+			{
+				key: "g",
+				mode: "goto-pending",
+				description: "Go to first",
+				action: nav.goToFirst().pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "e",
+				mode: "goto-pending",
+				description: "Go to last",
+				action: nav.goToLast().pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "h",
+				mode: "goto-pending",
+				description: "Go to first column",
+				action: nav.goToFirstColumn().pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "l",
+				mode: "goto-pending",
+				description: "Go to last column",
+				action: nav.goToLastColumn().pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "w",
+				mode: "goto-pending",
+				description: "Enter jump mode",
+				action: Effect.gen(function* () {
+					const labels = yield* computeJumpLabels()
+					yield* editor.enterJump(labels)
+				}),
+			},
+
+			// ======================================================================
+			// Select Mode
+			// ======================================================================
+			{
+				key: "j",
+				mode: "select",
+				description: "Move down",
+				action: nav.move("down"),
+			},
+			{
+				key: "k",
+				mode: "select",
+				description: "Move up",
+				action: nav.move("up"),
+			},
+			{
+				key: "h",
+				mode: "select",
+				description: "Move left",
+				action: nav.move("left"),
+			},
+			{
+				key: "l",
+				mode: "select",
+				description: "Move right",
+				action: nav.move("right"),
+			},
+			{
+				key: "Down",
+				mode: "select",
+				description: "Move down",
+				action: nav.move("down"),
+			},
+			{
+				key: "Up",
+				mode: "select",
+				description: "Move up",
+				action: nav.move("up"),
+			},
+			{
+				key: "Left",
+				mode: "select",
+				description: "Move left",
+				action: nav.move("left"),
+			},
+			{
+				key: "Right",
+				mode: "select",
+				description: "Move right",
+				action: nav.move("right"),
+			},
+			{
+				key: "Space",
+				mode: "select",
+				description: "Toggle selection",
+				action: Effect.suspend(() => toggleCurrentSelection()),
+			},
+			{
+				key: "v",
+				mode: "select",
+				description: "Exit select mode",
+				action: editor.exitSelect(),
+			},
+
+			// ======================================================================
+			// Universal (*)
+			// ======================================================================
+			{
+				key: "Escape",
+				mode: "*",
+				description: "Exit/cancel",
+				action: Effect.suspend(() => handleEscape()),
+			},
+
+			// ======================================================================
+			// Overlay Mode
+			// ======================================================================
+			{
+				key: "Escape",
+				mode: "overlay",
+				description: "Close overlay",
+				action: overlay.pop().pipe(Effect.asVoid),
+			},
+		]
+
+		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)
+
+		/**
+		 * Get effective mode for keybinding matching
+		 */
+		const getEffectiveMode = (): Effect.Effect<KeyMode> =>
+			Effect.gen(function* () {
+				const hasOverlay = yield* overlay.isOpen()
+				if (hasOverlay) return "overlay"
+
+				const mode = yield* editor.getMode()
+				switch (mode._tag) {
+					case "normal":
+						return "normal"
+					case "select":
+						return "select"
+					case "action":
+						return "action"
+					case "goto":
+						return mode.gotoSubMode === "pending" ? "goto-pending" : "goto-jump"
+					case "search":
+						return "search"
+					case "command":
+						return "command"
+				}
+			})
+
+		/**
+		 * Find matching keybinding for key and mode
+		 *
+		 * Priority: specific mode > wildcard "*"
+		 */
+		const findBinding = (
+			key: string,
+			effectiveMode: KeyMode,
+		): Effect.Effect<Keybinding | undefined> =>
+			Effect.gen(function* () {
+				const bindings = yield* Ref.get(keybindings)
+				return (
+					bindings.find((b) => b.key === key && b.mode === effectiveMode) ??
+					bindings.find((b) => b.key === key && b.mode === "*")
+				)
+			})
+
+		return {
+			// State refs
+			keybindings,
+
+			/**
+			 * Handle a key press
+			 *
+			 * Gets current context (mode, overlay status), finds matching binding,
+			 * and executes its action if found.
+			 */
+			handleKey: (key: string) =>
+				Effect.gen(function* () {
+					const effectiveMode = yield* getEffectiveMode()
+
+					// Special handling for goto-jump mode (any key is label input)
+					if (effectiveMode === "goto-jump") {
+						yield* handleJumpInput(key)
+						return
+					}
+
+					// Check for text input handling (search/command modes)
+					const handledAsText = yield* handleTextInput(key)
+					if (handledAsText) return
+
+					// Find and execute keybinding
+					const binding = yield* findBinding(key, effectiveMode)
+					if (binding) {
+						yield* binding.action
+					}
+					// Unknown key - ignore
+				}),
+
+			/**
+			 * Register a new keybinding
+			 */
+			register: (binding: Keybinding): Effect.Effect<void> =>
+				Ref.update(keybindings, (bs) => [...bs, binding]),
+
+			/**
+			 * Unregister a keybinding
+			 */
+			unregister: (key: string, mode: KeyMode): Effect.Effect<void> =>
+				Ref.update(keybindings, (bs) => bs.filter((b) => !(b.key === key && b.mode === mode))),
+
+			/**
+			 * Get all registered keybindings
+			 */
+			getBindings: (): Effect.Effect<ReadonlyArray<Keybinding>> => Ref.get(keybindings),
+		}
+	}),
+}) {}

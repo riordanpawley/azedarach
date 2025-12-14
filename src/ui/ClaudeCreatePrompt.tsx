@@ -61,13 +61,14 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 
 		// Tab: Convert to space (for accessibility)
 		if (event.name === "tab") {
-			setDescription((prev) => prev + " ")
+			setDescription((prev) => `${prev} `)
 			return
 		}
 
 		// Handle paste and multi-character input (sequence > 1 char)
 		if (event.sequence && event.sequence.length > 1 && !event.ctrl && !event.meta) {
 			// Filter to printable characters only
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: Intentionally filtering control chars
 			const printable = event.sequence.replace(/[\x00-\x1F\x7F]/g, "")
 			if (printable) {
 				setDescription((prev) => prev + printable)
@@ -96,7 +97,7 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 			bottom={0}
 			alignItems="center"
 			justifyContent="center"
-			backgroundColor={theme.crust + "CC"}
+			backgroundColor={`${theme.crust}CC`}
 		>
 			<box
 				borderStyle="rounded"
@@ -135,7 +136,7 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				{/* Help text */}
 				<box marginTop={1}>
 					<text fg={theme.overlay0}>
-						Enter: submit  Esc: cancel  Ctrl-U: clear  Ctrl-W: delete word
+						Enter: submit Esc: cancel Ctrl-U: clear Ctrl-W: delete word
 					</text>
 				</box>
 			</box>

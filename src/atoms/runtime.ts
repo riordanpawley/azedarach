@@ -9,14 +9,14 @@
  */
 
 import { Layer } from "effect"
-import { ToastService } from "../services/ToastService"
-import { OverlayService } from "../services/OverlayService"
-import { NavigationService } from "../services/NavigationService"
+import { BoardService } from "../services/BoardService"
 // Alias to avoid collision with core/EditorService (external $EDITOR)
 import { EditorService as ModeService } from "../services/EditorService"
-import { BoardService } from "../services/BoardService"
-import { SessionService } from "../services/SessionService"
 import { KeyboardService } from "../services/KeyboardService"
+import { NavigationService } from "../services/NavigationService"
+import { OverlayService } from "../services/OverlayService"
+import { SessionService } from "../services/SessionService"
+import { ToastService } from "../services/ToastService"
 
 // ============================================================================
 // Layer Composition
