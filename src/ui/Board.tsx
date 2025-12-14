@@ -12,7 +12,7 @@ export interface BoardProps {
 	activeColumnIndex?: number
 	activeTaskIndex?: number
 	selectedIds?: Set<string>
-	jumpLabels?: Map<string, JumpTarget> | null
+	jumpLabels?: ReadonlyMap<string, JumpTarget> | null
 	pendingJumpKey?: string | null
 	terminalHeight?: number
 }

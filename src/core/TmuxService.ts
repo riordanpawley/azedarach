@@ -114,10 +114,13 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			hasSession: (name: string) =>
 				Effect.gen(function* () {
-					const service = yield* TmuxService
-					const sessions = yield* service.listSessions()
-					return sessions.some((s: TmuxSession) => s.name === name)
-				}),
+					// Query tmux directly for session names (avoids circular service reference)
+					const output = yield* runTmux(["list-sessions", "-F", "#{session_name}"])
+					const sessions = output.trim().split("\n").filter(Boolean)
+					return sessions.includes(name)
+				}).pipe(
+					Effect.catchAll(() => Effect.succeed(false)), // No sessions = doesn't exist
+				),
 
 			sendKeys: (session: string, keys: string) =>
 				runTmux(["send-keys", "-t", session, keys, "Enter"]).pipe(
