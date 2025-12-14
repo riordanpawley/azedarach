@@ -21,7 +21,7 @@ import type { TaskWithSession } from "./types"
 import { ToastService } from "../services/ToastService"
 import { OverlayService } from "../services/OverlayService"
 import { NavigationService } from "../services/NavigationService"
-import { EditorService as ModeService } from "../services/EditorService"
+import { EditorService as ModeService, type SortField } from "../services/EditorService"
 import { BoardService } from "../services/BoardService"
 import { SessionService } from "../services/SessionService"
 import { KeyboardService } from "../services/KeyboardService"
@@ -562,6 +562,18 @@ export const commandInputAtom = Atom.readable((get) => {
 })
 
 /**
+ * Sort configuration atom - subscribes to ModeService sortConfig changes
+ *
+ * Usage: const sortConfig = useAtomValue(sortConfigAtom)
+ */
+export const sortConfigAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return editor.sortConfig
+	}),
+)
+
+/**
  * Navigation cursor atom - subscribes to NavigationService cursor changes
  *
  * Uses appRuntime.subscriptionRef() for automatic reactive updates.
@@ -803,6 +815,32 @@ export const exitToNormalAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.exitToNormal()
+	}),
+)
+
+/**
+ * Enter sort mode
+ *
+ * Usage: const [, enterSort] = useAtom(enterSortAtom, { mode: "promise" })
+ *        await enterSort()
+ */
+export const enterSortAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSort()
+	}),
+)
+
+/**
+ * Cycle sort configuration for a field
+ *
+ * Usage: const [, cycleSort] = useAtom(cycleSortAtom, { mode: "promise" })
+ *        await cycleSort("priority")
+ */
+export const cycleSortAtom = appRuntime.fn((field: SortField) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.cycleSort(field)
 	}),
 )
 

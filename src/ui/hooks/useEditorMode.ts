@@ -12,26 +12,33 @@ import {
 	clearCommandAtom,
 	clearSearchAtom,
 	commandInputAtom,
+	cycleSortAtom,
 	enterActionAtom,
 	enterCommandAtom,
 	enterGotoAtom,
 	enterJumpAtom,
 	enterSearchAtom,
 	enterSelectAtom,
+	enterSortAtom,
 	exitSelectAtom,
 	exitToNormalAtom,
 	modeAtom,
 	searchQueryAtom,
 	selectedIdsAtom,
 	setPendingJumpKeyAtom,
+	sortConfigAtom,
 	toggleSelectionAtom,
 	updateCommandAtom,
 	updateSearchAtom,
 } from "../atoms"
+import type { SortConfig, SortField } from "../../services/EditorService"
 import type { JumpTarget } from "../types"
 
 // Default mode when loading
 const DEFAULT_MODE = { _tag: "normal" } as const
+
+// Default sort config when loading
+const DEFAULT_SORT_CONFIG: SortConfig = { field: "session", direction: "desc" }
 
 /**
  * Hook for managing editor mode state
@@ -51,6 +58,7 @@ const DEFAULT_MODE = { _tag: "normal" } as const
 export function useEditorMode() {
 	// State - modeResult is Result-wrapped, derived atoms are plain values
 	const modeResult = useAtomValue(modeAtom)
+	const sortConfigResult = useAtomValue(sortConfigAtom)
 
 	// Derived atoms (selectedIdsAtom, etc.) now return plain values, not Result
 	const selectedIds = useAtomValue(selectedIdsAtom)
@@ -59,6 +67,9 @@ export function useEditorMode() {
 
 	// Unwrap mode Result with default
 	const mode = Result.isSuccess(modeResult) ? modeResult.value : DEFAULT_MODE
+
+	// Unwrap sortConfig Result with default
+	const sortConfig = Result.isSuccess(sortConfigResult) ? sortConfigResult.value : DEFAULT_SORT_CONFIG
 
 	// Action atoms
 	const [, enterSelect] = useAtom(enterSelectAtom, { mode: "promise" })
@@ -75,6 +86,8 @@ export function useEditorMode() {
 	const [, updateCommand] = useAtom(updateCommandAtom, { mode: "promise" })
 	const [, clearCommand] = useAtom(clearCommandAtom, { mode: "promise" })
 	const [, exitToNormal] = useAtom(exitToNormalAtom, { mode: "promise" })
+	const [, enterSort] = useAtom(enterSortAtom, { mode: "promise" })
+	const [, cycleSort] = useAtom(cycleSortAtom, { mode: "promise" })
 
 	// Mode convenience checks (memoized)
 	const modeFlags = useMemo(
@@ -87,6 +100,7 @@ export function useEditorMode() {
 			isAction: mode._tag === "action",
 			isSearch: mode._tag === "search",
 			isCommand: mode._tag === "command",
+			isSort: mode._tag === "sort",
 		}),
 		[mode],
 	)
@@ -153,6 +167,14 @@ export function useEditorMode() {
 			exitToNormal: () => {
 				exitToNormal().catch(console.error)
 			},
+
+			enterSort: () => {
+				enterSort().catch(console.error)
+			},
+
+			cycleSort: (field: SortField) => {
+				cycleSort(field).catch(console.error)
+			},
 		}),
 		[
 			enterSelect,
@@ -169,6 +191,8 @@ export function useEditorMode() {
 			updateCommand,
 			clearCommand,
 			exitToNormal,
+			enterSort,
+			cycleSort,
 		],
 	)
 
@@ -180,6 +204,7 @@ export function useEditorMode() {
 		commandInput,
 		pendingJumpKey,
 		jumpLabels,
+		sortConfig,
 
 		// Mode checks
 		...modeFlags,
