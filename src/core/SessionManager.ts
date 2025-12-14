@@ -24,7 +24,6 @@ import {
 	AppConfig,
 	AppConfigLiveWithPlatform,
 	ConfigParseError,
-	DEFAULT_CONFIG,
 	type ResolvedConfig,
 } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
@@ -282,19 +281,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const tmuxService = yield* TmuxService
 		const beadsClient = yield* BeadsClient
 		const stateDetector = yield* StateDetector
-
-		// AppConfig is optional - use defaults if not provided
-		const appConfigOption = yield* Effect.serviceOption(AppConfig)
-		const resolvedConfig: ResolvedConfig =
-			appConfigOption._tag === "Some"
-				? appConfigOption.value.config
-				: {
-						worktree: { ...DEFAULT_CONFIG.worktree },
-						session: { ...DEFAULT_CONFIG.session },
-						patterns: { ...DEFAULT_CONFIG.patterns },
-						pr: { ...DEFAULT_CONFIG.pr },
-						notifications: { ...DEFAULT_CONFIG.notifications },
-					}
+		const appConfig = yield* AppConfig
+		const resolvedConfig: ResolvedConfig = appConfig.config
 
 		// Track active sessions in memory
 		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
