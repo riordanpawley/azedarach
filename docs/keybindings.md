@@ -51,8 +51,6 @@ The default mode for navigation and basic actions.
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
-| `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
-| `E` | Edit via Claude | AI-assisted editing |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
@@ -67,7 +65,7 @@ Azedarach provides both manual (via $EDITOR) and AI-assisted (via Claude) modes 
 | Action | Manual | AI-Assisted |
 |--------|--------|-------------|
 | Create | `c` (editor) | `C` (Claude) |
-| Edit | `e` (editor) | `E` (Claude) |
+| Edit | `Space` `e` (editor) | `Space` `E` (Claude) |
 
 ## Manual Create Mode (`c`)
 
@@ -311,11 +309,17 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `h` | Move left | Move task(s) to previous column |
 | `Space` `l` | Move right | Move task(s) to next column |
 
+### Edit Actions
+
+| Sequence | Action | Description |
+|----------|--------|-------------|
+| `Space` `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
+| `Space` `E` | Edit bead (Claude) | AI-assisted editing |
+
 ### Other Actions
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `Space` `e` | Edit bead | Opens in $EDITOR as markdown |
 | `Esc` | Cancel | Exit action mode |
 
 ### Batch Operations
