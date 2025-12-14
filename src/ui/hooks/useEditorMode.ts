@@ -95,63 +95,63 @@ export function useEditorMode() {
 	const pendingJumpKey = mode._tag === "goto" ? mode.pendingJumpKey : undefined
 	const jumpLabels = mode._tag === "goto" ? mode.jumpLabels : undefined
 
-	// Wrapped actions with error handling
+	// Wrapped actions - errors are logged in Effect layer
 	const actions = useMemo(
 		() => ({
 			enterSelect: () => {
-				enterSelect().catch(console.error)
+				enterSelect()
 			},
 
 			exitSelect: (clearSelections?: boolean) => {
-				exitSelect(clearSelections).catch(console.error)
+				exitSelect(clearSelections)
 			},
 
 			toggleSelection: (taskId: string) => {
-				toggleSelection(taskId).catch(console.error)
+				toggleSelection(taskId)
 			},
 
 			enterGoto: () => {
-				enterGoto().catch(console.error)
+				enterGoto()
 			},
 
 			enterJump: (labels: Map<string, JumpTarget>) => {
-				enterJump(labels).catch(console.error)
+				enterJump(labels)
 			},
 
 			setPendingJumpKey: (key: string) => {
-				setPendingJumpKey(key).catch(console.error)
+				setPendingJumpKey(key)
 			},
 
 			enterAction: () => {
-				enterAction().catch(console.error)
+				enterAction()
 			},
 
 			enterSearch: () => {
-				enterSearch().catch(console.error)
+				enterSearch()
 			},
 
 			updateSearch: (query: string) => {
-				updateSearch(query).catch(console.error)
+				updateSearch(query)
 			},
 
 			clearSearch: () => {
-				clearSearch().catch(console.error)
+				clearSearch()
 			},
 
 			enterCommand: () => {
-				enterCommand().catch(console.error)
+				enterCommand()
 			},
 
 			updateCommand: (input: string) => {
-				updateCommand(input).catch(console.error)
+				updateCommand(input)
 			},
 
 			clearCommand: () => {
-				clearCommand().catch(console.error)
+				clearCommand()
 			},
 
 			exitToNormal: () => {
-				exitToNormal().catch(console.error)
+				exitToNormal()
 			},
 		}),
 		[

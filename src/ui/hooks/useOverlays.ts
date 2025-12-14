@@ -45,35 +45,35 @@ export function useOverlays() {
 	const [, push] = useAtom(pushOverlayAtom, { mode: "promise" })
 	const [, pop] = useAtom(popOverlayAtom, { mode: "promise" })
 
-	// Actions (memoized)
+	// Actions (memoized) - errors are logged in Effect layer
 	const actions = useMemo(
 		() => ({
 			showHelp: () => {
-				push({ _tag: "help" }).catch(console.error)
+				push({ _tag: "help" })
 			},
 
 			showDetail: (taskId: string) => {
-				push({ _tag: "detail", taskId }).catch(console.error)
+				push({ _tag: "detail", taskId })
 			},
 
 			showCreate: () => {
-				push({ _tag: "create" }).catch(console.error)
+				push({ _tag: "create" })
 			},
 
 			showClaudeCreate: () => {
-				push({ _tag: "claudeCreate" }).catch(console.error)
+				push({ _tag: "claudeCreate" })
 			},
 
 			showSettings: () => {
-				push({ _tag: "settings" }).catch(console.error)
+				push({ _tag: "settings" })
 			},
 
 			showConfirm: (message: string, onConfirm: Effect.Effect<void>) => {
-				push({ _tag: "confirm", message, onConfirm }).catch(console.error)
+				push({ _tag: "confirm", message, onConfirm })
 			},
 
 			dismiss: () => {
-				pop().catch(console.error)
+				pop()
 			},
 		}),
 		[push, pop],
