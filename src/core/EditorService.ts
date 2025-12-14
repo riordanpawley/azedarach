@@ -951,8 +951,8 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()(
 							),
 						)
 
-						// Parse the ID from output (bd create returns "Created {id}")
-						const idMatch = output.match(/Created\s+([A-Z]+-[a-z0-9]+)/i)
+						// Parse the ID from output (bd create returns "Created issue: {id}")
+						const idMatch = output.match(/Created\s+(?:issue:\s+)?([A-Z]+-[a-z0-9]+)/i)
 						if (!idMatch || !idMatch[1]) {
 							return yield* Effect.fail(
 								new EditorError({
