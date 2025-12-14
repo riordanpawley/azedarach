@@ -5,7 +5,7 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
-import { Effect, Ref } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import { BeadsClient, type Issue } from "../core/BeadsClient"
 import { SessionManager } from "../core/SessionManager"
 import type { TaskWithSession } from "../ui/types"
@@ -45,9 +45,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
 
-		// Fine-grained state refs
-		const tasks = yield* Ref.make<ReadonlyArray<TaskWithSession>>([])
-		const tasksByColumn = yield* Ref.make<
+		// Fine-grained state refs with SubscriptionRef for reactive updates
+		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
+		const tasksByColumn = yield* SubscriptionRef.make<
 			ReadonlyMap<string, ReadonlyArray<TaskWithSession>>
 		>(new Map())
 
@@ -103,10 +103,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const refresh = () =>
 			Effect.gen(function* () {
 				const loadedTasks = yield* loadTasks()
-				yield* Ref.set(tasks, loadedTasks)
+				yield* SubscriptionRef.set(tasks, loadedTasks)
 
 				const grouped = groupTasksByColumn(loadedTasks)
-				yield* Ref.set(tasksByColumn, grouped)
+				yield* SubscriptionRef.set(tasksByColumn, grouped)
 			})
 
 		return {
@@ -117,14 +117,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			/**
 			 * Get all tasks
 			 */
-			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => Ref.get(tasks),
+			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => SubscriptionRef.get(tasks),
 
 			/**
 			 * Get tasks grouped by column
 			 */
 			getTasksByColumn: (): Effect.Effect<
 				ReadonlyMap<string, ReadonlyArray<TaskWithSession>>
-			> => Ref.get(tasksByColumn),
+			> => SubscriptionRef.get(tasksByColumn),
 
 			/**
 			 * Get tasks for a specific column by index
@@ -138,7 +138,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					}
 
 					const column = COLUMNS[columnIndex]!
-					const grouped = yield* Ref.get(tasksByColumn)
+					const grouped = yield* SubscriptionRef.get(tasksByColumn)
 					return grouped.get(column.status) ?? []
 				}),
 
@@ -157,7 +157,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					}
 
 					const column = COLUMNS[columnIndex]!
-					const grouped = yield* Ref.get(tasksByColumn)
+					const grouped = yield* SubscriptionRef.get(tasksByColumn)
 					const columnTasks = grouped.get(column.status) ?? []
 
 					if (taskIndex < 0 || taskIndex >= columnTasks.length) {
@@ -174,7 +174,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				taskId: string,
 			): Effect.Effect<TaskWithSession | undefined> =>
 				Effect.gen(function* () {
-					const allTasks = yield* Ref.get(tasks)
+					const allTasks = yield* SubscriptionRef.get(tasks)
 					return allTasks.find((task) => task.id === taskId)
 				}),
 
@@ -187,7 +187,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				taskId: string,
 			): Effect.Effect<{ columnIndex: number; taskIndex: number } | undefined> =>
 				Effect.gen(function* () {
-					const grouped = yield* Ref.get(tasksByColumn)
+					const grouped = yield* SubscriptionRef.get(tasksByColumn)
 
 					for (let colIndex = 0; colIndex < COLUMNS.length; colIndex++) {
 						const column = COLUMNS[colIndex]!
