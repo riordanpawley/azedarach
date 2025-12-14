@@ -234,29 +234,6 @@ const AttachmentServiceImpl = Effect.gen(function* () {
  */
 export const AttachmentServiceLive = Layer.effect(AttachmentService, AttachmentServiceImpl)
 
-/**
- * Complete AttachmentService layer with all dependencies
- *
- * Includes TmuxService, TerminalService, and BunContext.
- * This is the recommended layer to use in applications.
- *
- * Usage:
- * ```ts
- * const program = Effect.gen(function* () {
- *   const service = yield* AttachmentService
- *   yield* service.attachExternal("claude-az-05y")
- * }).pipe(Effect.provide(AttachmentServiceLiveWithDeps))
- * ```
- */
-export const AttachmentServiceLiveWithDeps = AttachmentServiceLive.pipe(
-	Layer.provide(
-		Layer.merge(
-			Layer.succeed(TmuxService, {} as any), // Will be properly provided by the app runtime
-			Layer.succeed(TerminalService, {} as any), // Will be properly provided by the app runtime
-		),
-	),
-)
-
 // ============================================================================
 // Convenience Functions
 // ============================================================================
