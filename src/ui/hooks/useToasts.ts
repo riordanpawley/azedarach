@@ -42,22 +42,23 @@ export function useToasts() {
 		}))
 	}, [toastsResult])
 
+	// Actions - errors are logged in Effect layer
 	const actions = useMemo(
 		() => ({
 			showError: (message: string) => {
-				showToast({ type: "error", message }).catch(console.error)
+				showToast({ type: "error", message })
 			},
 
 			showSuccess: (message: string) => {
-				showToast({ type: "success", message }).catch(console.error)
+				showToast({ type: "success", message })
 			},
 
 			showInfo: (message: string) => {
-				showToast({ type: "info", message }).catch(console.error)
+				showToast({ type: "info", message })
 			},
 
 			dismissToast: (id: string) => {
-				dismiss(id).catch(console.error)
+				dismiss(id)
 			},
 		}),
 		[showToast, dismiss],
