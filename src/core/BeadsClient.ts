@@ -21,7 +21,7 @@ const IssueSchema = Schema.Struct({
 	id: Schema.String,
 	title: Schema.String,
 	description: Schema.String.pipe(Schema.optional),
-	status: Schema.Literal("open", "in_progress", "blocked", "closed"),
+	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
 	priority: Schema.Number,
 	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore"),
 	created_at: Schema.String,
@@ -327,7 +327,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(args)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-					return [...parsed] as Issue[]
+					// Filter out tombstone (deleted) issues
+					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
 			show: (id: string) =>
@@ -341,7 +342,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						return yield* Effect.fail(new NotFoundError({ issueId: id }))
 					}
 
-					return parsed[0]!
+					const issue = parsed[0]!
+					// Tombstone issues are effectively deleted
+					if (issue.status === "tombstone") {
+						return yield* Effect.fail(new NotFoundError({ issueId: id }))
+					}
+
+					return issue
 				}),
 
 			update: (
@@ -391,14 +398,16 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				Effect.gen(function* () {
 					const output = yield* runBd(["ready"])
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-					return [...parsed] as Issue[]
+					// Filter out tombstone (deleted) issues
+					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
 			search: (query: string) =>
 				Effect.gen(function* () {
 					const output = yield* runBd(["search", query])
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-					return [...parsed] as Issue[]
+					// Filter out tombstone (deleted) issues
+					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
 			create: (params: {
