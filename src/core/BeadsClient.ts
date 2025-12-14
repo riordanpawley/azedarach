@@ -151,18 +151,6 @@ export interface BeadsClientService {
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
-	 * Delete an issue permanently
-	 *
-	 * @example
-	 * ```ts
-	 * BeadsClient.delete("az-05y")
-	 * ```
-	 */
-	readonly delete: (
-		id: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
-
-	/**
 	 * Sync beads database (push/pull)
 	 *
 	 * @example
@@ -220,12 +208,20 @@ export interface BeadsClientService {
 		priority?: number
 		description?: string
 	}) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Delete an issue entirely
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.delete("az-05y")
+	 * ```
+	 */
+	readonly delete: (
+		id: string,
+	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 }
 
-/**
- * BeadsClient service tag
- */
-export class BeadsClient extends Context.Tag("BeadsClient")<BeadsClient, BeadsClientService>() {}
 
 // ============================================================================
 // Implementation Helpers
@@ -289,164 +285,172 @@ const parseJson = <A, I, R>(
 	)
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
 /**
- * Live BeadsClient implementation - scoped version
+ * BeadsClient service
  *
  * Creates a service implementation that captures CommandExecutor from the scope.
  * The Layer automatically provides BunContext for command execution.
- */
-const BeadsClientServiceImpl = Effect.gen(function* () {
-	return BeadsClient.of({
-		list: (filters) =>
-			Effect.gen(function* () {
-				const args: string[] = ["list"]
-
-				if (filters?.status) {
-					args.push("--status", filters.status)
-				}
-				if (filters?.priority !== undefined) {
-					args.push("--priority", String(filters.priority))
-				}
-				if (filters?.type) {
-					args.push("--type", filters.type)
-				}
-
-				const output = yield* runBd(args)
-				const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-				return [...parsed] as Issue[]
-			}),
-
-		show: (id) =>
-			Effect.gen(function* () {
-				const output = yield* runBd(["show", id])
-
-				// bd returns an array with a single item for show command
-				const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-
-				if (parsed.length === 0) {
-					return yield* Effect.fail(new NotFoundError({ issueId: id }))
-				}
-
-				return parsed[0]!
-			}),
-
-		update: (id, fields) =>
-			Effect.gen(function* () {
-				const args: string[] = ["update", id]
-
-				if (fields.status) {
-					args.push("--status", fields.status)
-				}
-				if (fields.notes) {
-					args.push("--notes", fields.notes)
-				}
-				if (fields.priority !== undefined) {
-					args.push("--priority", String(fields.priority))
-				}
-
-				yield* runBd(args)
-			}),
-
-		close: (id, reason) =>
-			Effect.gen(function* () {
-				const args: string[] = ["close", id]
-
-				if (reason) {
-					args.push("--reason", reason)
-				}
-
-				yield* runBd(args)
-			}),
-
-		delete: (id) =>
-			Effect.gen(function* () {
-				yield* runBd(["delete", id, "--force"])
-			}),
-
-		sync: (cwd) =>
-			Effect.gen(function* () {
-				const output = yield* runBd(["sync"], cwd)
-
-				// Parse sync output - bd sync returns statistics
-				return yield* parseJson(SyncResultSchema, output)
-			}),
-
-		ready: () =>
-			Effect.gen(function* () {
-				const output = yield* runBd(["ready"])
-				const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-				return [...parsed] as Issue[]
-			}),
-
-		search: (query) =>
-			Effect.gen(function* () {
-				const output = yield* runBd(["search", query])
-				const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-				return [...parsed] as Issue[]
-			}),
-
-		create: (params) =>
-			Effect.gen(function* () {
-				const args: string[] = ["create", params.title]
-
-				if (params.type) {
-					args.push("--type", params.type)
-				}
-				if (params.priority !== undefined) {
-					args.push("--priority", String(params.priority))
-				}
-				if (params.description) {
-					args.push("--description", params.description)
-				}
-
-				const output = yield* runBd(args)
-
-				// bd create returns an array with the created issue
-				const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-
-				if (parsed.length === 0) {
-					return yield* Effect.fail(
-						new BeadsError({
-							message: "bd create returned no issue",
-							command: `bd ${args.join(" ")}`,
-						}),
-					)
-				}
-
-				return parsed[0]!
-			}),
-	})
-})
-
-/**
- * Live BeadsClient layer (without platform dependencies)
  *
- * This layer provides just the BeadsClient service but requires BunContext
- * (CommandExecutor, FileSystem, etc) to be provided separately.
- *
- * For convenience, use BeadsClientLiveWithPlatform which includes all deps.
- */
-export const BeadsClientLive = Layer.effect(BeadsClient, BeadsClientServiceImpl)
-
-/**
- * Complete BeadsClient layer with all platform dependencies
- *
- * Includes BunContext (CommandExecutor, FileSystem, Path, Terminal, WorkerManager).
- * This is the recommended layer to use in applications.
- *
- * Usage:
+ * @example
  * ```ts
  * const program = Effect.gen(function* () {
  *   const client = yield* BeadsClient
  *   const issues = yield* client.ready()
  *   return issues
- * }).pipe(Effect.provide(BeadsClientLiveWithPlatform))
+ * }).pipe(Effect.provide(BeadsClient.Default))
  * ```
  */
-export const BeadsClientLiveWithPlatform = Layer.provideMerge(BeadsClientLive, BunContext.layer)
+export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
+	dependencies: [BunContext.layer],
+	effect: Effect.gen(function* () {
+		return {
+			list: (filters?: {
+				status?: string
+				priority?: number
+				type?: string
+			}) =>
+				Effect.gen(function* () {
+					const args: string[] = ["list"]
+
+					if (filters?.status) {
+						args.push("--status", filters.status)
+					}
+					if (filters?.priority !== undefined) {
+						args.push("--priority", String(filters.priority))
+					}
+					if (filters?.type) {
+						args.push("--type", filters.type)
+					}
+
+					const output = yield* runBd(args)
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					return [...parsed] as Issue[]
+				}),
+
+			show: (id: string) =>
+				Effect.gen(function* () {
+					const output = yield* runBd(["show", id])
+
+					// bd returns an array with a single item for show command
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(new NotFoundError({ issueId: id }))
+					}
+
+					return parsed[0]!
+				}),
+
+			update: (
+				id: string,
+				fields: {
+					status?: string
+					notes?: string
+					priority?: number
+				},
+			) =>
+				Effect.gen(function* () {
+					const args: string[] = ["update", id]
+
+					if (fields.status) {
+						args.push("--status", fields.status)
+					}
+					if (fields.notes) {
+						args.push("--notes", fields.notes)
+					}
+					if (fields.priority !== undefined) {
+						args.push("--priority", String(fields.priority))
+					}
+
+					yield* runBd(args)
+				}),
+
+			close: (id: string, reason?: string) =>
+				Effect.gen(function* () {
+					const args: string[] = ["close", id]
+
+					if (reason) {
+						args.push("--reason", reason)
+					}
+
+					yield* runBd(args)
+				}),
+
+			sync: (cwd?: string) =>
+				Effect.gen(function* () {
+					const output = yield* runBd(["sync"], cwd)
+
+					// Parse sync output - bd sync returns statistics
+					return yield* parseJson(SyncResultSchema, output)
+				}),
+
+			ready: () =>
+				Effect.gen(function* () {
+					const output = yield* runBd(["ready"])
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					return [...parsed] as Issue[]
+				}),
+
+			search: (query: string) =>
+				Effect.gen(function* () {
+					const output = yield* runBd(["search", query])
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					return [...parsed] as Issue[]
+				}),
+
+			create: (params: {
+				title: string
+				type?: string
+				priority?: number
+				description?: string
+			}) =>
+				Effect.gen(function* () {
+					const args: string[] = ["create", params.title]
+
+					if (params.type) {
+						args.push("--type", params.type)
+					}
+					if (params.priority !== undefined) {
+						args.push("--priority", String(params.priority))
+					}
+					if (params.description) {
+						args.push("--description", params.description)
+					}
+
+					const output = yield* runBd(args)
+
+					// bd create returns an array with the created issue
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(
+							new BeadsError({
+								message: "bd create returned no issue",
+								command: `bd ${args.join(" ")}`,
+							}),
+						)
+					}
+
+					return parsed[0]!
+				}),
+
+			delete: (id: string) =>
+				Effect.gen(function* () {
+					yield* runBd(["delete", id])
+				}),
+		}
+	}),
+}) {}
+
+/**
+ * Complete BeadsClient layer with all platform dependencies (legacy alias)
+ *
+ * @deprecated Use BeadsClient.Default instead
+ */
+export const BeadsClientLiveWithPlatform = BeadsClient.Default
 
 // ============================================================================
 // Convenience Functions
@@ -499,14 +503,6 @@ export const close = (
 	Effect.flatMap(BeadsClient, (client) => client.close(id, reason))
 
 /**
- * Delete an issue permanently
- */
-export const deleteBead = (
-	id: string,
-): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.delete(id))
-
-/**
  * Sync beads database
  */
 export const sync = (
@@ -544,3 +540,11 @@ export const create = (params: {
 	description?: string
 }): Effect.Effect<Issue, BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.create(params))
+
+/**
+ * Delete an issue
+ */
+export const deleteIssue = (
+	id: string,
+): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.delete(id))

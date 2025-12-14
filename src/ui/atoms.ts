@@ -3,81 +3,88 @@
  *
  * Uses effect-atom for reactive state management with Effect integration.
  */
-import { Atom } from "@effect-atom/atom"
+import { Atom, Result } from "@effect-atom/atom"
+import { BunContext } from "@effect/platform-bun"
 import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
 import { AppConfig, AppConfigLiveWithPlatform } from "../config/index"
-import { AttachmentService, AttachmentServiceLive } from "../core/AttachmentService"
-import { BeadsClient, BeadsClientLiveWithPlatform } from "../core/BeadsClient"
-import { EditorService, EditorServiceLive } from "../core/EditorService"
-import { PRWorkflow, PRWorkflowLive } from "../core/PRWorkflow"
+import { AttachmentService } from "../core/AttachmentService"
+import { BeadsClient } from "../core/BeadsClient"
+import { EditorService } from "../core/EditorService"
+import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
-import { TerminalServiceLive } from "../core/TerminalService"
-import { TmuxService, TmuxServiceLive } from "../core/TmuxService"
-import { type VCExecutorInfo, VCService, VCServiceLive } from "../core/VCService"
+import { TerminalService } from "../core/TerminalService"
+import { TmuxService } from "../core/TmuxService"
+import { type VCExecutorInfo, VCService } from "../core/VCService"
 import type { TaskWithSession } from "./types"
 
-// ============================================================================
-// Layer Composition
-// ============================================================================
+// New atomic Effect services
+import { ToastService } from "../services/ToastService"
+import { OverlayService } from "../services/OverlayService"
+import { NavigationService } from "../services/NavigationService"
+import { EditorService as ModeService } from "../services/EditorService"
+import { BoardService } from "../services/BoardService"
+import { SessionService } from "../services/SessionService"
+import { KeyboardService } from "../services/KeyboardService"
 
 /**
- * AppConfig layer - contextual, needs project path
+ * Combined runtime layer with all services
+ *
+ * Merges BeadsClient, TmuxService, TerminalService, AttachmentService, SessionManager, and AppConfig.
+ * AppConfig is provided so SessionManager can use custom init commands and session settings.
  */
 const configLayer = AppConfigLiveWithPlatform(process.cwd())
 
-/**
- * Leaf services - no dependencies on other app services
- */
-const leafServices = Layer.mergeAll(
-	BeadsClientLiveWithPlatform,
-	TmuxServiceLive,
-	TerminalServiceLive,
-)
+// Platform layer provides CommandExecutor which services need
+const platformLayer = BunContext.layer
 
-/**
- * SessionManager.Default bundles its deps but requires AppConfig
- * Provide AppConfig to satisfy that requirement
- */
-const sessionManagerLayer = SessionManager.Default.pipe(
-	Layer.provide(configLayer),
-)
-
-/**
- * Services that need TmuxService and TerminalService
- */
-const attachmentLayer = AttachmentServiceLive.pipe(
-	Layer.provide(Layer.mergeAll(TmuxServiceLive, TerminalServiceLive)),
-)
-
-/**
- * EditorService needs BeadsClient
- */
-const editorLayer = EditorServiceLive.pipe(
-	Layer.provide(BeadsClientLiveWithPlatform),
-)
-
-/**
- * PRWorkflowLive uses SessionManagerLive which requires AppConfig
- */
-const prWorkflowLayer = PRWorkflowLive.pipe(
-	Layer.provide(configLayer),
-)
-
-/**
- * Combined app layer - all services merged
- *
- * Layer composition pattern:
- * - Leaf layers (no app deps): merge directly
- * - Layers with deps: provide those deps, then merge
- */
-const appLayer = Layer.mergeAll(
-	leafServices,
+const baseLayer = Layer.mergeAll(
+	BeadsClient.Default,
+	TmuxService.Default,
+	TerminalService.Default,
 	configLayer,
-	sessionManagerLayer,
-	attachmentLayer,
-	editorLayer,
-	prWorkflowLayer,
-	VCServiceLive,
+	platformLayer,
+)
+
+// Core services layer (existing)
+const coreServicesLayer = baseLayer.pipe(
+	Layer.merge(AttachmentService.Default),
+	Layer.merge(SessionManager.Default),
+	Layer.merge(EditorService.Default),
+	Layer.merge(PRWorkflow.Default),
+	Layer.merge(VCService.Default),
+)
+
+// Atomic services layer (new Effect.Service pattern)
+// Independent services with no deps
+const independentServicesLayer = Layer.mergeAll(
+	ToastService.Default,
+	OverlayService.Default,
+	NavigationService.Default,
+	ModeService.Default,
+)
+
+// BoardService needs BeadsClient & SessionManager from coreServicesLayer
+// SessionService needs ToastService, NavigationService, BoardService
+// KeyboardService needs ToastService, OverlayService, NavigationService, ModeService, BoardService
+const dependentServicesLayer = Layer.mergeAll(
+	BoardService.Default,
+	SessionService.Default,
+	KeyboardService.Default,
+)
+
+// Combine core and independent services first
+const baseWithIndependent = coreServicesLayer.pipe(
+	Layer.merge(independentServicesLayer),
+)
+
+// Dependent services need context from baseWithIndependent
+// Use Layer.provide to satisfy their requirements, then merge outputs
+const dependentServicesWithDeps = dependentServicesLayer.pipe(
+	Layer.provide(baseWithIndependent),
+)
+
+const appLayer = baseWithIndependent.pipe(
+	Layer.merge(dependentServicesWithDeps),
 )
 
 /**
@@ -85,7 +92,7 @@ const appLayer = Layer.mergeAll(
  *
  * This creates a runtime that all other async atoms can use.
  */
-export const appRuntime = Atom.runtime(appLayer)
+export const appRuntime = Atom.runtime(() => appLayer)
 
 /**
  * Async atom that fetches all tasks from BeadsClient
@@ -326,6 +333,79 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
 	}),
 )
 
+/**
+ * Create a new bead via $EDITOR
+ *
+ * Opens a template in $EDITOR, parses the result, and creates a new bead.
+ *
+ * Usage: const createBead = useAtom(createBeadViaEditorAtom, { mode: "promise" })
+ *        const { id, title } = await createBead()
+ */
+export const createBeadViaEditorAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* EditorService
+		return yield* editor.createBead()
+	}),
+)
+
+/**
+ * Create a Claude session to generate a bead from natural language
+ *
+ * Spawns a tmux session with Claude in the main project directory,
+ * sends a prompt asking Claude to create a bead from the description,
+ * and leaves the session open for the user to continue working.
+ *
+ * Returns the session name so the UI can inform the user.
+ *
+ * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
+ *        const sessionName = await claudeCreate("Add dark mode toggle to settings")
+ */
+export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
+	Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const { config } = yield* AppConfig
+
+		// Generate unique session name with timestamp
+		const timestamp = Date.now().toString(36)
+		const sessionName = `claude-create-${timestamp}`
+		const projectPath = process.cwd()
+
+		// Build the Claude command with session settings
+		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
+		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+
+		// Create the tmux session
+		yield* tmux.newSession(sessionName, {
+			cwd: projectPath,
+			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
+			prefix: tmuxPrefix,
+		})
+
+		// Wait briefly for Claude to start up
+		yield* Effect.sleep("1500 millis")
+
+		// Build the prompt for Claude with explicit bd create instructions
+		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
+
+**Task description:**
+${description}
+
+**Instructions:**
+1. Use \`bd create --title="..." --type=task|bug|feature --priority=1|2|3\`
+2. Add a description if the task needs more detail
+3. The issue ID will be returned - note it for the user
+4. After creating, you may start working on it or wait for further instructions
+
+Please create the bead now.`
+
+		// Send the prompt to Claude via tmux
+		yield* tmux.sendKeys(sessionName, prompt)
+		yield* tmux.sendKeys(sessionName, "Enter")
+
+		return sessionName
+	}),
+)
+
 // ============================================================================
 // PR Workflow Atoms
 // ============================================================================
@@ -363,7 +443,7 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 )
 
 /**
- * Delete a bead permanently
+ * Delete a bead entirely
  *
  * Usage: const deleteBead = useAtom(deleteBeadAtom, { mode: "promise" })
  *        await deleteBead(beadId)
@@ -428,171 +508,394 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 )
 
 // ============================================================================
-// Editor Create Atom (manual create via $EDITOR)
+// Atomic Service State Atoms (ModeService, NavigationService, etc.)
 // ============================================================================
 
 /**
- * Create a new bead via $EDITOR
+ * Editor mode atom - subscribes to ModeService mode changes
  *
- * Opens $EDITOR with a blank template, parses the result, and creates the bead.
- * Returns the created bead info.
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
- * Usage: const createBead = useAtom(createBeadViaEditorAtom, { mode: "promise" })
- *        const { id, title } = await createBead()
+ * Usage: const mode = useAtomValue(modeAtom)
  */
-export const createBeadViaEditorAtom = appRuntime.fn(() =>
+export const modeAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const editor = yield* EditorService
-		return yield* editor.createBead()
+		const editor = yield* ModeService
+		return editor.mode
 	}),
 )
 
-// ============================================================================
-// Claude Create Session Atom
-// ============================================================================
+/**
+ * Selected task IDs atom - derived from modeAtom
+ *
+ * Usage: const selectedIds = useAtomValue(selectedIdsAtom)
+ */
+export const selectedIdsAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return []
+	const mode = modeResult.value
+	return mode._tag === "select" ? mode.selectedIds : []
+})
 
 /**
- * Create a Claude session to generate a bead from natural language
+ * Search query atom - derived from modeAtom
  *
- * Spawns a tmux session with Claude in the main project directory,
- * sends a prompt asking Claude to create a bead from the description,
- * and leaves the session open for the user to continue working.
- *
- * Returns the session name so the UI can inform the user.
- *
- * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
- *        const sessionName = await claudeCreate("Add dark mode toggle to settings")
+ * Usage: const searchQuery = useAtomValue(searchQueryAtom)
  */
-export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
+export const searchQueryAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return ""
+	const mode = modeResult.value
+	return mode._tag === "search" ? mode.query : ""
+})
+
+/**
+ * Command input atom - derived from modeAtom
+ *
+ * Usage: const commandInput = useAtomValue(commandInputAtom)
+ */
+export const commandInputAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return ""
+	const mode = modeResult.value
+	return mode._tag === "command" ? mode.input : ""
+})
+
+/**
+ * Navigation cursor atom - subscribes to NavigationService cursor changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
+ *
+ * Usage: const cursor = useAtomValue(cursorAtom)
+ */
+export const cursorAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const tmux = yield* TmuxService
-		const { config } = yield* AppConfig
-
-		// Generate unique session name with timestamp
-		const timestamp = Date.now().toString(36)
-		const sessionName = `claude-create-${timestamp}`
-		const projectPath = process.cwd()
-
-		// Build the Claude command with session settings
-		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
-		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
-
-		// Warn if using dangerous permissions flag
-		if (dangerouslySkipPermissions) {
-			yield* Effect.logWarning(
-				"Running Claude with --dangerously-skip-permissions. All permission prompts will be bypassed.",
-			)
-		}
-
-		// Create the tmux session
-		yield* tmux.newSession(sessionName, {
-			cwd: projectPath,
-			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
-			prefix: tmuxPrefix,
-		})
-
-		// Wait briefly for Claude to start up
-		yield* Effect.sleep("1500 millis")
-
-		// Build the prompt for Claude with explicit bd create instructions
-		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
-
-**bd create syntax:**
-\`\`\`
-bd create --title="<title>" --type=<task|feature|bug> [--description="<description>"] [--priority=<1-5>]
-\`\`\`
-
-**Examples:**
-- \`bd create --title="Add dark mode" --type=feature --description="Toggle in settings"\`
-- \`bd create --title="Fix login bug" --type=bug --priority=1\`
-
-**Your task:**
-Based on the following description, create an appropriate bead:
-
-${description}
-
-After running \`bd create\`, tell me the bead ID that was created and ask if I'd like you to start working on it immediately.`
-
-		// Send the prompt to Claude
-		yield* tmux.sendKeys(sessionName, prompt)
-
-		return sessionName
+		const nav = yield* NavigationService
+		return nav.cursor
 	}),
 )
 
-// ============================================================================
-// Claude Edit Session Atom (AI edit mode)
-// ============================================================================
+/**
+ * Toast notifications atom - subscribes to ToastService toasts changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
+ *
+ * Usage: const toasts = useAtomValue(toastsAtom)
+ */
+export const toastsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const toast = yield* ToastService
+		return toast.toasts
+	}),
+)
 
 /**
- * Create a Claude session to edit an existing bead
+ * Overlay stack atom - subscribes to OverlayService stack changes
  *
- * Spawns a tmux session with Claude in the main project directory,
- * sends the bead details to Claude, and asks for editing guidance.
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
- * Returns the session name so the UI can inform the user.
- *
- * Usage: const claudeEdit = useAtom(claudeEditSessionAtom, { mode: "promise" })
- *        const sessionName = await claudeEdit(task)
+ * Usage: const overlays = useAtomValue(overlaysAtom)
  */
-export const claudeEditSessionAtom = appRuntime.fn((task: TaskWithSession) =>
+export const overlaysAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const tmux = yield* TmuxService
-		const { config } = yield* AppConfig
+		const overlay = yield* OverlayService
+		return overlay.stack
+	}),
+)
 
-		// Generate unique session name with bead ID
-		const sessionName = `claude-edit-${task.id}`
-		const projectPath = process.cwd()
+/**
+ * Current overlay atom - the top of the overlay stack
+ *
+ * Derived from overlaysAtom for automatic reactivity.
+ *
+ * Usage: const currentOverlay = useAtomValue(currentOverlayAtom)
+ */
+export const currentOverlayAtom = Atom.readable((get) => {
+	const overlaysResult = get(overlaysAtom)
+	if (!Result.isSuccess(overlaysResult)) return undefined
+	const overlays = overlaysResult.value
+	return overlays.length > 0 ? overlays[overlays.length - 1] : undefined
+})
 
-		// Build the Claude command with session settings
-		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
-		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+// ============================================================================
+// Atomic Service Action Atoms
+// ============================================================================
 
-		// Warn if using dangerous permissions flag
-		if (dangerouslySkipPermissions) {
-			yield* Effect.logWarning(
-				"Running Claude with --dangerously-skip-permissions. All permission prompts will be bypassed.",
-			)
-		}
+// --- ModeService Actions ---
 
-		// Create the tmux session
-		yield* tmux.newSession(sessionName, {
-			cwd: projectPath,
-			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
-			prefix: tmuxPrefix,
-		})
+/**
+ * Enter select mode
+ *
+ * Usage: const [, enterSelect] = useAtom(enterSelectAtom, { mode: "promise" })
+ *        await enterSelect()
+ */
+export const enterSelectAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSelect()
+	}),
+)
 
-		// Wait briefly for Claude to start up
-		yield* Effect.sleep("1500 millis")
+/**
+ * Exit select mode
+ *
+ * Usage: const [, exitSelect] = useAtom(exitSelectAtom, { mode: "promise" })
+ *        await exitSelect(true) // clearSelections
+ */
+export const exitSelectAtom = appRuntime.fn((clearSelections: boolean | undefined) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.exitSelect(clearSelections ?? false)
+	}),
+)
 
-		// Build the bead details for context
-		const beadDetails = `**Bead ID:** ${task.id}
-**Title:** ${task.title}
-**Type:** ${task.issue_type}
-**Status:** ${task.status}
-**Priority:** P${task.priority}
-**Description:** ${task.description || "(none)"}
-**Design:** ${task.design || "(none)"}
-**Notes:** ${task.notes || "(none)"}
-**Acceptance Criteria:** ${task.acceptance || "(none)"}`
+/**
+ * Toggle selection of a task
+ *
+ * Usage: const [, toggleSelection] = useAtom(toggleSelectionAtom, { mode: "promise" })
+ *        await toggleSelection(taskId)
+ */
+export const toggleSelectionAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.toggleSelection(taskId)
+	}),
+)
 
-		// Build the prompt for Claude with explicit bd update instructions
-		const prompt = `I want to edit the following bead. Here are its current details:
+/**
+ * Enter goto mode
+ *
+ * Usage: const [, enterGoto] = useAtom(enterGotoAtom, { mode: "promise" })
+ *        await enterGoto()
+ */
+export const enterGotoAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterGoto()
+	}),
+)
 
-${beadDetails}
+/**
+ * Enter jump mode with labels
+ *
+ * Usage: const [, enterJump] = useAtom(enterJumpAtom, { mode: "promise" })
+ *        await enterJump(labelsMap)
+ */
+export const enterJumpAtom = appRuntime.fn(
+	(labels: Map<string, { taskId: string; columnIndex: number; taskIndex: number }>) =>
+		Effect.gen(function* () {
+			const editor = yield* ModeService
+			yield* editor.enterJump(labels)
+		}),
+)
 
-**bd update syntax:**
-\`\`\`
-bd update <bead-id> [--title="<title>"] [--status=<status>] [--priority=<0-4>] [--description="<desc>"] [--notes="<notes>"] [--design="<design>"] [--acceptance="<criteria>"]
-\`\`\`
+/**
+ * Set pending jump key
+ *
+ * Usage: const [, setPendingJumpKey] = useAtom(setPendingJumpKeyAtom, { mode: "promise" })
+ *        await setPendingJumpKey("a")
+ */
+export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.setPendingJumpKey(key)
+	}),
+)
 
-**Available statuses:** backlog, ready, in_progress, review, done
+/**
+ * Enter action mode
+ *
+ * Usage: const [, enterAction] = useAtom(enterActionAtom, { mode: "promise" })
+ *        await enterAction()
+ */
+export const enterActionAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterAction()
+	}),
+)
 
-What would you like to change? Describe the edits you want and I'll help you update the bead using \`bd update ${task.id}\`.`
+/**
+ * Enter search mode
+ *
+ * Usage: const [, enterSearch] = useAtom(enterSearchAtom, { mode: "promise" })
+ *        await enterSearch()
+ */
+export const enterSearchAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSearch()
+	}),
+)
 
-		// Send the prompt to Claude
-		yield* tmux.sendKeys(sessionName, prompt)
+/**
+ * Update search query
+ *
+ * Usage: const [, updateSearch] = useAtom(updateSearchAtom, { mode: "promise" })
+ *        await updateSearch("new query")
+ */
+export const updateSearchAtom = appRuntime.fn((query: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.updateSearch(query)
+	}),
+)
 
-		return sessionName
+/**
+ * Clear search and return to normal mode
+ *
+ * Usage: const [, clearSearch] = useAtom(clearSearchAtom, { mode: "promise" })
+ *        await clearSearch()
+ */
+export const clearSearchAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.clearSearch()
+	}),
+)
+
+/**
+ * Enter command mode
+ *
+ * Usage: const [, enterCommand] = useAtom(enterCommandAtom, { mode: "promise" })
+ *        await enterCommand()
+ */
+export const enterCommandAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterCommand()
+	}),
+)
+
+/**
+ * Update command input
+ *
+ * Usage: const [, updateCommand] = useAtom(updateCommandAtom, { mode: "promise" })
+ *        await updateCommand("new command")
+ */
+export const updateCommandAtom = appRuntime.fn((input: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.updateCommand(input)
+	}),
+)
+
+/**
+ * Clear command and return to normal mode
+ *
+ * Usage: const [, clearCommand] = useAtom(clearCommandAtom, { mode: "promise" })
+ *        await clearCommand()
+ */
+export const clearCommandAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.clearCommand()
+	}),
+)
+
+/**
+ * Exit to normal mode
+ *
+ * Usage: const [, exitToNormal] = useAtom(exitToNormalAtom, { mode: "promise" })
+ *        await exitToNormal()
+ */
+export const exitToNormalAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.exitToNormal()
+	}),
+)
+
+// --- NavigationService Actions ---
+
+/**
+ * Navigate cursor atom - move cursor in a direction
+ *
+ * Usage: const [, navigate] = useAtom(navigateAtom, { mode: "promise" })
+ *        await navigate("down")
+ */
+export const navigateAtom = appRuntime.fn((direction: "up" | "down" | "left" | "right") =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.move(direction)
+	}),
+)
+
+/**
+ * Jump to position atom - jump cursor to specific column/task
+ *
+ * Usage: const [, jumpTo] = useAtom(jumpToAtom, { mode: "promise" })
+ *        await jumpTo({ column: 0, task: 5 })
+ */
+export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; task: number }) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.jumpTo(column, task)
+	}),
+)
+
+/**
+ * Show toast atom - display a toast notification
+ *
+ * Usage: const [, showToast] = useAtom(showToastAtom, { mode: "promise" })
+ *        await showToast({ type: "success", message: "Task completed!" })
+ */
+export const showToastAtom = appRuntime.fn(
+	({ type, message }: { type: "success" | "error" | "info"; message: string }) =>
+		Effect.gen(function* () {
+			const toast = yield* ToastService
+			yield* toast.show(type, message)
+		}),
+)
+
+/**
+ * Dismiss toast atom - remove a toast by ID
+ *
+ * Usage: const [, dismissToast] = useAtom(dismissToastAtom, { mode: "promise" })
+ *        await dismissToast(toastId)
+ */
+export const dismissToastAtom = appRuntime.fn((toastId: string) =>
+	Effect.gen(function* () {
+		const toast = yield* ToastService
+		yield* toast.dismiss(toastId)
+	}),
+)
+
+/**
+ * Push overlay atom - add overlay to stack
+ *
+ * Usage: const [, pushOverlay] = useAtom(pushOverlayAtom, { mode: "promise" })
+ *        await pushOverlay({ _tag: "help" })
+ */
+export const pushOverlayAtom = appRuntime.fn(
+	(
+		overlay:
+			| { readonly _tag: "help" }
+			| { readonly _tag: "detail"; readonly taskId: string }
+			| { readonly _tag: "create" }
+			| { readonly _tag: "claudeCreate" }
+			| { readonly _tag: "settings" }
+			| {
+					readonly _tag: "confirm"
+					readonly message: string
+					readonly onConfirm: Effect.Effect<void>
+			  },
+	) =>
+		Effect.gen(function* () {
+			const overlayService = yield* OverlayService
+			yield* overlayService.push(overlay)
+		}),
+)
+
+/**
+ * Pop overlay atom - remove top overlay from stack
+ *
+ * Usage: const [, popOverlay] = useAtom(popOverlayAtom, { mode: "promise" })
+ *        await popOverlay()
+ */
+export const popOverlayAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		yield* overlay.pop()
 	}),
 )

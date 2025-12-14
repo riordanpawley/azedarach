@@ -166,13 +166,6 @@ export interface WorktreeManagerService {
 	}) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
 
-/**
- * WorktreeManager service tag
- */
-export class WorktreeManager extends Context.Tag("WorktreeManager")<
-	WorktreeManager,
-	WorktreeManagerService
->() {}
 
 // ============================================================================
 // Implementation Helpers
@@ -293,41 +286,56 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
 }
 
 // ============================================================================
-// Live Implementation
+// Service Implementation
 // ============================================================================
 
 /**
- * Live WorktreeManager implementation
+ * WorktreeManager service
  *
  * Creates a service implementation with stateful tracking via Ref.
+ *
+ * @example
+ * ```ts
+ * const program = Effect.gen(function* () {
+ *   const manager = yield* WorktreeManager
+ *   const worktree = yield* manager.create({
+ *     beadId: "az-05y",
+ *     baseBranch: "main",
+ *     projectPath: "/Users/user/project"
+ *   })
+ *   return worktree
+ * }).pipe(Effect.provide(WorktreeManager.Default))
+ * ```
  */
-const WorktreeManagerServiceImpl = Effect.gen(function* () {
-	// Track active worktrees in memory for fast lookups
-	const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
+export class WorktreeManager extends Effect.Service<WorktreeManager>()("WorktreeManager", {
+	dependencies: [BunContext.layer],
+	effect: Effect.gen(function* () {
+		// Track active worktrees in memory for fast lookups
+		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
-	// Helper to refresh worktrees cache
-	const refreshWorktrees = (
-		projectPath: string,
-	): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
-		Effect.gen(function* () {
-			const isRepo = yield* isGitRepo(projectPath)
-			if (!isRepo) {
-				return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-			}
+		// Helper to refresh worktrees cache
+		const refreshWorktrees = (
+			projectPath: string,
+		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				const isRepo = yield* isGitRepo(projectPath)
+				if (!isRepo) {
+					return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+				}
 
-			const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
-			const worktrees = parseWorktreeList(output, projectPath)
+				const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
+				const worktrees = parseWorktreeList(output, projectPath)
 
-			const newMap = new Map<string, Worktree>()
-			for (const wt of worktrees) {
-				newMap.set(wt.beadId, wt)
-			}
+				const newMap = new Map<string, Worktree>()
+				for (const wt of worktrees) {
+					newMap.set(wt.beadId, wt)
+				}
 
-			yield* Ref.set(worktreesRef, newMap)
-		})
+				yield* Ref.set(worktreesRef, newMap)
+			})
 
-	return WorktreeManager.of({
-		create: (options) =>
+		return {
+		create: (options: CreateWorktreeOptions) =>
 			Effect.gen(function* () {
 				const { beadId, baseBranch, projectPath } = options
 
@@ -375,7 +383,7 @@ const WorktreeManagerServiceImpl = Effect.gen(function* () {
 				return newWorktree
 			}),
 
-		remove: (options) =>
+		remove: (options: { beadId: string; projectPath: string }) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath } = options
 
@@ -396,14 +404,14 @@ const WorktreeManagerServiceImpl = Effect.gen(function* () {
 				yield* refreshWorktrees(projectPath)
 			}),
 
-		list: (projectPath) =>
+		list: (projectPath: string) =>
 			Effect.gen(function* () {
 				yield* refreshWorktrees(projectPath)
 				const worktrees = yield* Ref.get(worktreesRef)
 				return Array.from(worktrees.values())
 			}),
 
-		exists: (options) =>
+		exists: (options: { beadId: string; projectPath: string }) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath } = options
 				yield* refreshWorktrees(projectPath)
@@ -411,49 +419,23 @@ const WorktreeManagerServiceImpl = Effect.gen(function* () {
 				return worktrees.has(beadId)
 			}),
 
-		get: (options) =>
+		get: (options: { beadId: string; projectPath: string }) =>
 			Effect.gen(function* () {
 				const { beadId, projectPath } = options
 				yield* refreshWorktrees(projectPath)
 				const worktrees = yield* Ref.get(worktreesRef)
 				return worktrees.get(beadId) || null
 			}),
-	})
-})
+		}
+	}),
+}) {}
 
 /**
- * Live WorktreeManager layer (without platform dependencies)
+ * Complete WorktreeManager layer with all platform dependencies (legacy alias)
  *
- * This layer provides just the WorktreeManager service but requires BunContext
- * (CommandExecutor) to be provided separately.
- *
- * For convenience, use WorktreeManagerLiveWithPlatform which includes all deps.
+ * @deprecated Use WorktreeManager.Default instead
  */
-export const WorktreeManagerLive = Layer.effect(WorktreeManager, WorktreeManagerServiceImpl)
-
-/**
- * Complete WorktreeManager layer with all platform dependencies
- *
- * Includes BunContext (CommandExecutor, FileSystem, Path, Terminal, WorkerManager).
- * This is the recommended layer to use in applications.
- *
- * Usage:
- * ```ts
- * const program = Effect.gen(function* () {
- *   const manager = yield* WorktreeManager
- *   const worktree = yield* manager.create({
- *     beadId: "az-05y",
- *     baseBranch: "main",
- *     projectPath: "/Users/user/project"
- *   })
- *   return worktree
- * }).pipe(Effect.provide(WorktreeManagerLiveWithPlatform))
- * ```
- */
-export const WorktreeManagerLiveWithPlatform = Layer.provideMerge(
-	WorktreeManagerLive,
-	BunContext.layer,
-)
+export const WorktreeManagerLiveWithPlatform = WorktreeManager.Default
 
 // ============================================================================
 // Convenience Functions

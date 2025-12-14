@@ -5,7 +5,7 @@
  */
 
 import { Console, Duration, Effect } from "effect"
-import { FileLockManager, FileLockManagerLive, withLock } from "./FileLockManager.js"
+import { FileLockManager, withLock } from "./FileLockManager.js"
 
 const test = Effect.gen(function* () {
 	yield* Console.log("Testing FileLockManager...")
@@ -84,6 +84,6 @@ const test = Effect.gen(function* () {
 	yield* Console.log("\n✓ All tests passed!")
 })
 
-const program = test.pipe(Effect.provide(FileLockManagerLive))
+const program = test.pipe(Effect.provide(FileLockManager.Default))
 
 Effect.runPromise(program).catch(console.error)

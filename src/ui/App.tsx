@@ -1,18 +1,19 @@
 /**
  * App component - root component with Helix-style modal keybindings
+ *
+ * Migrated to use atomic Effect services via custom hooks.
  */
 
 import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
 import {
 	attachExternalAtom,
 	attachInlineAtom,
 	claudeCreateSessionAtom,
-	claudeEditSessionAtom,
 	cleanupAtom,
 	createBeadViaEditorAtom,
 	createPRAtom,
@@ -35,53 +36,82 @@ import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
-import { type EditorAction, type EditorState, editorReducer, initialEditorState } from "./editorFSM"
 import { HelpOverlay } from "./HelpOverlay"
+import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
 import { SearchInput } from "./SearchInput"
 import { StatusBar } from "./StatusBar"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
-import { generateToastId, ToastContainer, type ToastMessage } from "./Toast"
+import { ToastContainer } from "./Toast"
 import { theme } from "./theme"
-import {
-	COLUMNS,
-	generateJumpLabels,
-	type JumpTarget,
-	type NavigationState,
-	type TaskWithSession,
-} from "./types"
+import { COLUMNS, generateJumpLabels, type JumpTarget, type TaskWithSession } from "./types"
 
-/**
- * App component
- *
- * Root component implementing Helix-style modal editing using FSM.
- */
+// ============================================================================
+// Constants
+// ============================================================================
+
 // UI chrome height: board padding (2) + status bar (3) + column header (1) = 6
 // Add 1 more row when running inside tmux to account for tmux status bar
 const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
 const CHROME_HEIGHT = 6 + TMUX_STATUS_BAR_HEIGHT
 
+// ============================================================================
+// App Component
+// ============================================================================
+
 export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
-	// FSM State - Single source of truth for editor mode
+	// Hooks - Atomic State Management
 	// ═══════════════════════════════════════════════════════════════════════════
-	const [editorState, baseDispatch] = useReducer(editorReducer, initialEditorState)
 
-	// Ref to current state so keyboard handler always has latest
-	const stateRef = useRef<EditorState>(editorState)
-	stateRef.current = editorState // Sync on every render
+	const { toasts, showError, showSuccess, showInfo, dismissToast } = useToasts()
+	const {
+		currentOverlay,
+		showHelp,
+		showDetail,
+		showCreate,
+		showClaudeCreate,
+		dismiss: dismissOverlay,
+		showingHelp,
+		showingDetail,
+		showingCreate,
+		showingClaudeCreate,
+	} = useOverlays()
 
-	// Dispatch wrapper that updates ref IMMEDIATELY before React re-renders
-	const dispatch = useCallback((action: EditorAction) => {
-		// Compute new state immediately
-		const newState = editorReducer(stateRef.current, action)
-		stateRef.current = newState // Update ref NOW (sync)
-		baseDispatch(action) // Trigger React re-render (async)
-		console.error(`[FSM] ${action.type} → mode=${newState.mode}`)
-	}, [])
+	const {
+		mode,
+		selectedIds,
+		searchQuery,
+		commandInput,
+		pendingJumpKey,
+		jumpLabels,
+		isNormal,
+		isSelect,
+		isGoto,
+		isGotoPending,
+		isJump,
+		isAction,
+		isSearch,
+		isCommand,
+		enterSelect,
+		exitSelect,
+		toggleSelection,
+		enterGoto,
+		enterJump,
+		setPendingJumpKey,
+		enterAction,
+		enterSearch,
+		updateSearch,
+		clearSearch,
+		enterCommand,
+		updateCommand,
+		clearCommand,
+		exitToNormal,
+	} = useEditorMode()
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Data Atoms
 	// ═══════════════════════════════════════════════════════════════════════════
+
 	const tasksResult = useAtomValue(tasksAtom)
 	const refreshTasks = useAtomRefresh(tasksAtom)
 	const vcStatusResult = useAtomValue(vcStatusAtom)
@@ -96,35 +126,13 @@ export const App = () => {
 	const [, stopSession] = useAtom(stopSessionAtom, { mode: "promise" })
 	const [, createTask] = useAtom(createTaskAtom, { mode: "promise" })
 	const [, editBead] = useAtom(editBeadAtom, { mode: "promise" })
+	const [, createBeadViaEditor] = useAtom(createBeadViaEditorAtom, { mode: "promise" })
+	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
 	const [, createPR] = useAtom(createPRAtom, { mode: "promise" })
 	const [, cleanup] = useAtom(cleanupAtom, { mode: "promise" })
 	const [, deleteBead] = useAtom(deleteBeadAtom, { mode: "promise" })
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
-	const [, claudeCreateSession] = useAtom(claudeCreateSessionAtom, { mode: "promise" })
-	const [, claudeEditSession] = useAtom(claudeEditSessionAtom, { mode: "promise" })
-	const [, createBeadViaEditor] = useAtom(createBeadViaEditorAtom, { mode: "promise" })
-
-	// ═══════════════════════════════════════════════════════════════════════════
-	// Navigation State (separate from FSM)
-	// ═══════════════════════════════════════════════════════════════════════════
-	const [nav, setNav] = useState<NavigationState>({ columnIndex: 0, taskIndex: 0 })
-	const navRef = useRef(nav)
-	navRef.current = nav
-
-	// UI overlay state
-	const [showHelp, setShowHelp] = useState(false)
-	const [showDetail, setShowDetail] = useState(false)
-	const [showCreatePrompt, setShowCreatePrompt] = useState(false)
-	const [showClaudeCreatePrompt, setShowClaudeCreatePrompt] = useState(false)
-	const showHelpRef = useRef(showHelp)
-	const showDetailRef = useRef(showDetail)
-	const showCreatePromptRef = useRef(showCreatePrompt)
-	const showClaudeCreatePromptRef = useRef(showClaudeCreatePrompt)
-	showHelpRef.current = showHelp
-	showDetailRef.current = showDetail
-	showCreatePromptRef.current = showCreatePrompt
-	showClaudeCreatePromptRef.current = showClaudeCreatePrompt
 
 	// Terminal size
 	const maxVisibleTasks = useMemo(() => {
@@ -132,47 +140,14 @@ export const App = () => {
 		return Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
 	}, [])
 
-	// Track task ID to follow after move operations
-	// This ensures we navigate to the task's new position after data refreshes
-	const [followTaskId, setFollowTaskId] = useState<string | null>(null)
-
-	// Toast notifications state
-	const [toasts, setToasts] = useState<ToastMessage[]>([])
-
-	// Helper to show an error toast
-	const showError = useCallback((message: string) => {
-		setToasts((prev) => [
-			...prev,
-			{ id: generateToastId(), message, type: "error", timestamp: Date.now() },
-		])
-	}, [])
-
-	// Helper to show a success toast
-	const showSuccess = useCallback((message: string) => {
-		setToasts((prev) => [
-			...prev,
-			{ id: generateToastId(), message, type: "success", timestamp: Date.now() },
-		])
-	}, [])
-
-	// Helper to show an info toast
-	const showInfo = useCallback((message: string) => {
-		setToasts((prev) => [
-			...prev,
-			{ id: generateToastId(), message, type: "info", timestamp: Date.now() },
-		])
-	}, [])
-
-	// Dismiss a toast by ID
-	const dismissToast = useCallback((id: string) => {
-		setToasts((prev) => prev.filter((t) => t.id !== id))
-	}, [])
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Task Grouping and Filtering
+	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Group tasks by column for navigation, filtering by search query
 	const tasksByColumn = useMemo(() => {
 		if (!Result.isSuccess(tasksResult)) return []
 
-		const { searchQuery } = editorState
 		const query = searchQuery.toLowerCase().trim()
 
 		return COLUMNS.map((col) =>
@@ -188,22 +163,42 @@ export const App = () => {
 				return true
 			}),
 		)
-	}, [tasksResult, editorState.searchQuery])
+	}, [tasksResult, searchQuery])
+
+	// Navigation hook (needs tasksByColumn)
+	const {
+		cursor,
+		columnIndex,
+		taskIndex,
+		selectedTask,
+		moveUp,
+		moveDown,
+		moveLeft,
+		moveRight,
+		jumpTo,
+		followTask,
+		halfPageDown,
+		halfPageUp,
+		goToFirst,
+		goToLast,
+		goToFirstColumn,
+		goToLastColumn,
+	} = useNavigation(tasksByColumn)
 
 	// Get all tasks as flat list for jump label generation
 	const allTasks = useMemo(() => {
 		const tasks: Array<{ task: TaskWithSession; columnIndex: number; taskIndex: number }> = []
 
-		tasksByColumn.forEach((column, columnIndex) => {
-			column.forEach((task, taskIndex) => {
-				tasks.push({ task, columnIndex, taskIndex })
+		tasksByColumn.forEach((column, colIdx) => {
+			column.forEach((task, taskIdx) => {
+				tasks.push({ task, columnIndex: colIdx, taskIndex: taskIdx })
 			})
 		})
 
 		return tasks
 	}, [tasksByColumn])
 
-	// Generate jump labels when entering goto mode
+	// Generate jump labels
 	const computeJumpLabels = useCallback(() => {
 		const labels = generateJumpLabels(allTasks.length)
 		const labelMap = new Map<string, JumpTarget>()
@@ -217,52 +212,6 @@ export const App = () => {
 		return labelMap
 	}, [allTasks])
 
-	// Get currently selected task
-	const selectedTask = useMemo((): TaskWithSession | undefined => {
-		const { columnIndex, taskIndex } = nav
-		const column = tasksByColumn[columnIndex]
-		return column?.[taskIndex]
-	}, [tasksByColumn, nav])
-
-	// Helper to clamp task index to column bounds
-	const clampTaskIndex = useCallback(
-		(colIdx: number, preferredIndex: number): number => {
-			const column = tasksByColumn[colIdx]
-			if (!column || column.length === 0) return 0
-			return Math.min(preferredIndex, column.length - 1)
-		},
-		[tasksByColumn],
-	)
-
-	// Navigate to a specific position
-	const navigateTo = useCallback(
-		(colIdx: number, taskIdx: number) => {
-			const clampedCol = Math.max(0, Math.min(colIdx, COLUMNS.length - 1))
-			const clampedTask = clampTaskIndex(clampedCol, taskIdx)
-			navRef.current = { columnIndex: clampedCol, taskIndex: clampedTask }
-			setNav({ columnIndex: clampedCol, taskIndex: clampedTask })
-		},
-		[clampTaskIndex],
-	)
-
-	// Effect to follow a task after move operations
-	// When followTaskId is set, find the task in the updated data and navigate to it
-	useEffect(() => {
-		if (!followTaskId) return
-
-		// Search all columns for the task
-		for (let colIdx = 0; colIdx < tasksByColumn.length; colIdx++) {
-			const taskIdx = tasksByColumn[colIdx].findIndex((t) => t.id === followTaskId)
-			if (taskIdx >= 0) {
-				navigateTo(colIdx, taskIdx)
-				setFollowTaskId(null)
-				return
-			}
-		}
-		// Task not found yet - keep waiting for tasksByColumn to update
-		// Don't clear followTaskId here; refreshTasks() is async and data may not have arrived
-	}, [followTaskId, tasksByColumn, navigateTo])
-
 	// Poll VC status every 5 seconds
 	useEffect(() => {
 		const interval = setInterval(() => {
@@ -272,15 +221,13 @@ export const App = () => {
 	}, [refreshVCStatus])
 
 	// ═══════════════════════════════════════════════════════════════════════════
-	// Jump input handler (for goto → jump mode)
+	// Jump Input Handler
 	// ═══════════════════════════════════════════════════════════════════════════
+
 	const handleJumpInput = useCallback(
 		(key: string) => {
-			const state = stateRef.current
-			const { pendingJumpKey, jumpLabels } = state
-
 			if (!jumpLabels) {
-				dispatch({ type: "EXIT_TO_NORMAL" })
+				exitToNormal()
 				return
 			}
 
@@ -289,135 +236,171 @@ export const App = () => {
 				const label = pendingJumpKey + key
 				const target = jumpLabels.get(label)
 				if (target) {
-					navigateTo(target.columnIndex, target.taskIndex)
+					jumpTo(target.columnIndex, target.taskIndex)
 				}
-				dispatch({ type: "EXIT_TO_NORMAL" })
+				exitToNormal()
 			} else {
 				// First key - check if any labels start with this key
 				const hasMatch = [...jumpLabels.keys()].some((l) => l.startsWith(key))
 				if (hasMatch) {
-					dispatch({ type: "SET_PENDING_JUMP_KEY", key })
+					setPendingJumpKey(key)
 				} else {
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 				}
 			}
 		},
-		[navigateTo, dispatch],
+		[jumpLabels, pendingJumpKey, jumpTo, exitToNormal, setPendingJumpKey],
 	)
 
-	// Keyboard navigation with Helix-style modal bindings
-	// Uses stateRef.current for reading (always fresh) and dispatch() for writing
-	useKeyboard((event) => {
-		// Read current state from ref (bypasses React closure issues)
-		const state = stateRef.current
-		const { mode, gotoSubMode, selectedIds } = state
-		const { columnIndex, taskIndex } = navRef.current
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Keyboard Handler
+	// ═══════════════════════════════════════════════════════════════════════════
 
+	useKeyboard((event) => {
 		// DEBUG: Log every keypress and current mode
-		console.error(`[KEY] "${event.name}" | mode=${mode}`)
+		console.error(`[KEY] "${event.name}" | mode=${mode._tag}`)
+
+		// Ctrl-C: Kill active editor popup (MUST be first - works in any state)
+		if (event.ctrl && event.name === "c") {
+			killActivePopup()
+			return
+		}
 
 		// Help overlay handling - dismiss on any key
-		if (showHelpRef.current) {
-			setShowHelp(false)
+		if (showingHelp) {
+			dismissOverlay()
 			return
 		}
 
 		// Detail panel handling - dismiss on Enter or Escape
-		if (showDetailRef.current) {
+		if (showingDetail) {
 			if (event.name === "return" || event.name === "escape") {
-				setShowDetail(false)
+				dismissOverlay()
 			}
 			return
 		}
 
 		// Create prompt handling - CreateTaskPrompt handles its own keyboard input
-		if (showCreatePromptRef.current) {
+		if (showingCreate) {
 			return
 		}
 
 		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
-		if (showClaudeCreatePromptRef.current) {
+		if (showingClaudeCreate) {
 			return
 		}
 
 		// Escape always returns to normal mode
 		if (event.name === "escape") {
-			if (mode === "search") {
-				// Clear search when exiting search mode
-				dispatch({ type: "CLEAR_SEARCH" })
-			} else if (mode === "command") {
-				// Clear command input when exiting command mode
-				dispatch({ type: "CLEAR_COMMAND" })
-			} else if (mode === "select") {
-				// Clear selections when exiting select mode
-				dispatch({ type: "EXIT_SELECT", clearSelections: true })
+			if (isSearch) {
+				clearSearch()
+			} else if (isCommand) {
+				clearCommand()
+			} else if (isSelect) {
+				exitSelect(true)
 			} else {
-				dispatch({ type: "EXIT_TO_NORMAL" })
+				exitToNormal()
 			}
 			return
 		}
 
 		// Handle action mode (Space menu)
-		// Stay in action mode after moves so user can continue moving h/l
-		// Press Escape to exit action mode
-		if (mode === "action") {
+		if (isAction) {
+			handleActionMode(event)
+			return
+		}
+
+		// Handle goto mode
+		if (isGoto) {
+			handleGotoMode(event)
+			return
+		}
+
+		// Handle search mode
+		if (isSearch) {
+			handleSearchMode(event)
+			return
+		}
+
+		// Handle command mode
+		if (isCommand) {
+			handleCommandMode(event)
+			return
+		}
+
+		// Handle select mode
+		if (isSelect) {
+			handleSelectMode(event)
+			return
+		}
+
+		// Normal mode
+		handleNormalMode(event)
+	})
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Mode-Specific Keyboard Handlers
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	const handleActionMode = useCallback(
+		(event: any) => {
 			switch (event.name) {
 				case "left":
 				case "h": {
 					// Move selected tasks (or current task) to previous column
 					if (columnIndex > 0) {
-						const targetColIdx = columnIndex - 1
-						const targetStatus = COLUMNS[targetColIdx]?.status
+						const targetStatus = COLUMNS[columnIndex - 1]?.status
 						if (targetStatus) {
-							// Optimistic update: move cursor immediately
-							navigateTo(targetColIdx, taskIndex)
-
-							if (selectedIds.size > 0) {
-								const firstTaskId = [...selectedIds][0]
-								setFollowTaskId(firstTaskId ?? null)
+							if (selectedIds.length > 0) {
+								const firstTaskId = selectedIds[0]
 								moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
-									.then(() => refreshTasks())
+									.then(() => {
+										followTask(firstTaskId ?? "")
+										refreshTasks()
+									})
 									.catch((error) => showError(`Move failed: ${error}`))
 							} else if (selectedTask) {
-								setFollowTaskId(selectedTask.id)
+								const taskToFollow = selectedTask.id
 								moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
-									.then(() => refreshTasks())
+									.then(() => {
+										followTask(taskToFollow)
+										refreshTasks()
+									})
 									.catch((error) => showError(`Move failed: ${error}`))
 							}
 						}
 					}
-					// Stay in action mode
 					break
 				}
 				case "right":
 				case "l": {
 					// Move selected tasks (or current task) to next column
 					if (columnIndex < COLUMNS.length - 1) {
-						const targetColIdx = columnIndex + 1
-						const targetStatus = COLUMNS[targetColIdx]?.status
+						const targetStatus = COLUMNS[columnIndex + 1]?.status
 						if (targetStatus) {
-							// Optimistic update: move cursor immediately
-							navigateTo(targetColIdx, taskIndex)
-
-							if (selectedIds.size > 0) {
-								const firstTaskId = [...selectedIds][0]
-								setFollowTaskId(firstTaskId ?? null)
+							if (selectedIds.length > 0) {
+								const firstTaskId = selectedIds[0]
 								moveTasks({ taskIds: [...selectedIds], newStatus: targetStatus })
-									.then(() => refreshTasks())
+									.then(() => {
+										followTask(firstTaskId ?? "")
+										refreshTasks()
+									})
 									.catch((error) => showError(`Move failed: ${error}`))
 							} else if (selectedTask) {
-								setFollowTaskId(selectedTask.id)
+								const taskToFollow = selectedTask.id
 								moveTask({ taskId: selectedTask.id, newStatus: targetStatus })
-									.then(() => refreshTasks())
+									.then(() => {
+										followTask(taskToFollow)
+										refreshTasks()
+									})
 									.catch((error) => showError(`Move failed: ${error}`))
 							}
 						}
 					}
-					// Stay in action mode
 					break
 				}
 				case "s": {
-					// Start a new session (only for idle tasks)
+					// Start a new session
 					if (selectedTask) {
 						if (selectedTask.sessionState !== "idle") {
 							showError(`Cannot start: task is ${selectedTask.sessionState}`)
@@ -432,16 +415,14 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "a": {
 					// Attach to session - switches tmux client to Claude session
-					// Claude sessions use Ctrl-a prefix, so Ctrl-a ) switches back
 					if (selectedTask) {
 						attachExternal(selectedTask.id)
 							.then(() => {
-								// Switched! Show reminder about how to get back
 								showInfo(`Switched! Ctrl-a ) to return`)
 							})
 							.catch((error: any) => {
@@ -452,12 +433,11 @@ export const App = () => {
 								showError(msg)
 							})
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "A": {
 					// Attach to session inline (replace TUI)
-					// Don't pre-check sessionState - it may be stale. Let AttachmentService check tmux directly.
 					if (selectedTask) {
 						attachInline(selectedTask.id).catch((error: any) => {
 							const msg =
@@ -467,11 +447,11 @@ export const App = () => {
 							showError(msg)
 						})
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "p": {
-					// Pause a running session (only for busy tasks)
+					// Pause a running session
 					if (selectedTask) {
 						if (selectedTask.sessionState !== "busy") {
 							showError(`Cannot pause: task is ${selectedTask.sessionState}`)
@@ -486,11 +466,11 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "r": {
-					// Resume a paused session (only for paused tasks)
+					// Resume a paused session
 					if (selectedTask) {
 						if (selectedTask.sessionState !== "paused") {
 							showError(`Cannot resume: task is ${selectedTask.sessionState}`)
@@ -505,7 +485,7 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "x": {
@@ -524,7 +504,7 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "e": {
@@ -545,11 +525,11 @@ export const App = () => {
 								showError(msg)
 							})
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "P": {
-					// Create PR (push branch + gh pr create)
+					// Create PR
 					if (selectedTask) {
 						if (selectedTask.sessionState === "idle") {
 							showError(`No worktree for ${selectedTask.id} - start a session first`)
@@ -568,34 +548,15 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
 				case "d": {
-					// d = Cleanup worktree, Shift-D = Delete bead permanently
-					// Note: keyboard lib reports event.name as lowercase, use event.shift for capitals
-					if (event.shift) {
-						// Shift-D: Delete bead permanently
-						if (selectedTask) {
-							showInfo(`Deleting ${selectedTask.id}...`)
-							deleteBead(selectedTask.id)
-								.then(() => {
-									refreshTasks()
-									showSuccess(`Deleted ${selectedTask.id}`)
-								})
-								.catch((error) => {
-									showError(`Failed to delete: ${error}`)
-								})
-						}
-						dispatch({ type: "EXIT_TO_NORMAL" })
-						break
-					}
-					// d: Cleanup/delete worktree and branches
+					// Cleanup/delete worktree
 					if (selectedTask) {
 						if (selectedTask.sessionState === "idle") {
 							showError(`No worktree to delete for ${selectedTask.id}`)
 						} else {
-							// TODO: Add confirmation dialog for destructive action
 							showInfo(`Cleaning up ${selectedTask.id}...`)
 							cleanup(selectedTask.id)
 								.then(() => {
@@ -607,118 +568,140 @@ export const App = () => {
 								})
 						}
 					}
-					dispatch({ type: "EXIT_TO_NORMAL" })
+					exitToNormal()
 					break
 				}
-				default:
-					// Unknown key in action mode - ignore (don't exit)
+				case "D": {
+					// Delete bead entirely
+					if (selectedTask) {
+						deleteBead(selectedTask.id)
+							.then(() => {
+								refreshTasks()
+								showSuccess(`Deleted ${selectedTask.id}`)
+							})
+							.catch((error) => {
+								showError(`Failed to delete: ${error}`)
+							})
+					}
+					exitToNormal()
 					break
+				}
 			}
-			return
-		}
+		},
+		[
+			columnIndex,
+			selectedIds,
+			selectedTask,
+			moveTasks,
+			moveTask,
+			followTask,
+			refreshTasks,
+			showError,
+			showSuccess,
+			showInfo,
+			startSession,
+			attachExternal,
+			attachInline,
+			pauseSession,
+			resumeSession,
+			stopSession,
+			editBead,
+			createPR,
+			cleanup,
+			deleteBead,
+			exitToNormal,
+		],
+	)
 
-		// Handle goto mode
-		if (mode === "goto") {
-			if (gotoSubMode === "pending") {
+	const handleGotoMode = useCallback(
+		(event: any) => {
+			if (isGotoPending) {
 				// Waiting for second key after 'g'
 				switch (event.name) {
 					case "w": {
-						// Enter jump mode with labels
 						const labels = computeJumpLabels()
-						dispatch({ type: "ENTER_JUMP", labels })
+						enterJump(labels)
 						break
 					}
-					case "g": {
-						// Go to first task in first column
-						navigateTo(0, 0)
-						dispatch({ type: "EXIT_TO_NORMAL" })
+					case "g":
+						goToFirst()
+						exitToNormal()
 						break
-					}
-					case "e": {
-						// Go to last task in last column
-						const lastColIdx = COLUMNS.length - 1
-						const lastCol = tasksByColumn[lastColIdx]
-						navigateTo(lastColIdx, lastCol ? lastCol.length - 1 : 0)
-						dispatch({ type: "EXIT_TO_NORMAL" })
+					case "e":
+						goToLast()
+						exitToNormal()
 						break
-					}
-					case "h": {
-						// Go to first column, keep task index
-						navigateTo(0, taskIndex)
-						dispatch({ type: "EXIT_TO_NORMAL" })
+					case "h":
+						goToFirstColumn()
+						exitToNormal()
 						break
-					}
-					case "l": {
-						// Go to last column, keep task index
-						navigateTo(COLUMNS.length - 1, taskIndex)
-						dispatch({ type: "EXIT_TO_NORMAL" })
+					case "l":
+						goToLastColumn()
+						exitToNormal()
 						break
-					}
 					default:
-						dispatch({ type: "EXIT_TO_NORMAL" })
+						exitToNormal()
 				}
-				return
-			}
-
-			if (gotoSubMode === "jump") {
-				// In jump mode - handle label input
+			} else if (isJump) {
 				handleJumpInput(event.name)
-				return
 			}
-			return
-		}
+		},
+		[
+			isGotoPending,
+			isJump,
+			computeJumpLabels,
+			enterJump,
+			goToFirst,
+			goToLast,
+			goToFirstColumn,
+			goToLastColumn,
+			exitToNormal,
+			handleJumpInput,
+		],
+	)
 
-		// Handle search mode
-		if (mode === "search") {
-			const { searchQuery } = state
-
+	const handleSearchMode = useCallback(
+		(event: any) => {
 			if (event.name === "return") {
-				// Confirm search - stay in normal mode with active filter
-				dispatch({ type: "EXIT_TO_NORMAL" })
+				exitToNormal()
 				return
 			}
 
 			if (event.name === "backspace") {
-				// Delete character from search query
 				if (searchQuery.length > 0) {
-					dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery.slice(0, -1) })
+					updateSearch(searchQuery.slice(0, -1))
 				}
 				return
 			}
 
 			// Regular character input
 			if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
-				dispatch({ type: "UPDATE_SEARCH_QUERY", query: searchQuery + event.sequence })
-				return
+				updateSearch(searchQuery + event.sequence)
 			}
+		},
+		[searchQuery, updateSearch, exitToNormal],
+	)
 
-			return
-		}
-
-		// Handle command mode
-		if (mode === "command") {
-			const { commandInput } = state
+	const handleCommandMode = useCallback(
+		(event: any) => {
 			const vcStatus = Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined
 
 			if (event.name === "return") {
-				// Send command to VC
 				if (!commandInput.trim()) {
-					// Empty command, just exit
-					dispatch({ type: "CLEAR_COMMAND" })
+					clearCommand()
 					return
 				}
 
 				if (vcStatus !== "running") {
 					showError("VC is not running - start it with 'a' key")
-					dispatch({ type: "CLEAR_COMMAND" })
+					clearCommand()
 					return
 				}
 
-				// Send the command
 				sendVCCommand(commandInput)
 					.then(() => {
 						showSuccess(`Sent to VC: ${commandInput}`)
-						dispatch({ type: "CLEAR_COMMAND" })
+						clearCommand()
 					})
 					.catch((error: any) => {
 						const msg =
@@ -726,253 +709,187 @@ export const App = () => {
 								? "VC is not running"
 								: `Failed to send command: ${error}`
 						showError(msg)
-						dispatch({ type: "CLEAR_COMMAND" })
+						clearCommand()
 					})
 				return
 			}
 
 			if (event.name === "backspace") {
-				// Delete character from command input
 				if (commandInput.length > 0) {
-					dispatch({ type: "UPDATE_COMMAND_INPUT", input: commandInput.slice(0, -1) })
+					updateCommand(commandInput.slice(0, -1))
 				}
 				return
 			}
 
 			// Regular character input
 			if (event.sequence && event.sequence.length === 1 && !event.ctrl && !event.meta) {
-				dispatch({ type: "UPDATE_COMMAND_INPUT", input: commandInput + event.sequence })
+				updateCommand(commandInput + event.sequence)
+			}
+		},
+		[vcStatusResult, commandInput, sendVCCommand, showSuccess, showError, clearCommand, updateCommand],
+	)
+
+	const handleSelectMode = useCallback(
+		(event: any) => {
+			switch (event.name) {
+				case "up":
+				case "k":
+					moveUp()
+					break
+				case "down":
+				case "j":
+					moveDown()
+					break
+				case "left":
+				case "h":
+					moveLeft()
+					break
+				case "right":
+				case "l":
+					moveRight()
+					break
+				case "space":
+					if (selectedTask) {
+						toggleSelection(selectedTask.id)
+					}
+					break
+				case "v":
+					exitSelect()
+					break
+			}
+		},
+		[moveUp, moveDown, moveLeft, moveRight, selectedTask, toggleSelection, exitSelect],
+	)
+
+	const handleNormalMode = useCallback(
+		(event: any) => {
+			switch (event.name) {
+				case "up":
+				case "k":
+					moveUp()
+					break
+				case "down":
+				case "j":
+					moveDown()
+					break
+				case "left":
+				case "h":
+					moveLeft()
+					break
+				case "right":
+				case "l":
+					moveRight()
+					break
+				case "g":
+					enterGoto()
+					break
+				case "v":
+					enterSelect()
+					break
+				case "space":
+					enterAction()
+					break
+				case "q":
+					process.exit(0)
+					break
+				case "?":
+					showHelp()
+					break
+				case "return":
+					if (selectedTask) {
+						showDetail(selectedTask.id)
+					}
+					break
+				case "c":
+					showCreate()
+					break
+				case "C":
+					showClaudeCreate()
+					break
+				case "E": {
+					// Create new bead via editor
+					createBeadViaEditor()
+						.then((result) => {
+							refreshTasks()
+							showSuccess(`Created ${result.id}`)
+						})
+						.catch((error: any) => {
+							const msg =
+								error && typeof error === "object" && error._tag === "ParseMarkdownError"
+									? `Invalid format: ${error.message}`
+									: error && typeof error === "object" && error._tag === "EditorError"
+										? `Editor error: ${error.message}`
+										: `Failed to create: ${error}`
+							showError(msg)
+						})
+					break
+				}
+				case "a":
+					toggleVCAutoPilot()
+						.then((status) => {
+							refreshVCStatus()
+							const message =
+								status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
+							showSuccess(message)
+						})
+						.catch((error) => {
+							showError(`Failed to toggle VC auto-pilot: ${error}`)
+						})
+					break
+			}
+
+			// "/" to enter search mode
+			if (event.sequence === "/") {
+				enterSearch()
 				return
 			}
 
-			return
-		}
+			// ":" to enter command mode
+			if (event.sequence === ":") {
+				enterCommand()
+				return
+			}
 
-		// Handle select mode
-		if (mode === "select") {
-			switch (event.name) {
-				case "up":
-				case "k": {
-					const column = tasksByColumn[columnIndex]
-					if (column && taskIndex > 0) {
-						navRef.current = { columnIndex, taskIndex: taskIndex - 1 }
-						setNav({ columnIndex, taskIndex: taskIndex - 1 })
-					}
-					break
-				}
-				case "down":
-				case "j": {
-					const column = tasksByColumn[columnIndex]
-					if (column && taskIndex < column.length - 1) {
-						navRef.current = { columnIndex, taskIndex: taskIndex + 1 }
-						setNav({ columnIndex, taskIndex: taskIndex + 1 })
-					}
-					break
-				}
-				case "left":
-				case "h": {
-					if (columnIndex > 0) {
-						navigateTo(columnIndex - 1, taskIndex)
-					}
-					break
-				}
-				case "right":
-				case "l": {
-					if (columnIndex < COLUMNS.length - 1) {
-						navigateTo(columnIndex + 1, taskIndex)
-					}
-					break
-				}
-				case "space": {
-					// Toggle selection of current task
-					if (selectedTask) {
-						dispatch({ type: "TOGGLE_SELECTION", taskId: selectedTask.id })
-					}
-					break
-				}
-				case "v": {
-					// Exit select mode (back to normal)
-					dispatch({ type: "EXIT_SELECT" })
-					break
-				}
+			// Ctrl-d: half page down
+			if (event.ctrl && event.name === "d") {
+				halfPageDown()
 			}
-			return
-		}
 
-		// Normal mode
-		switch (event.name) {
-			case "up":
-			case "k": {
-				// Move up in current column
-				const column = tasksByColumn[columnIndex]
-				if (column && taskIndex > 0) {
-					navRef.current = { columnIndex, taskIndex: taskIndex - 1 }
-					setNav({ columnIndex, taskIndex: taskIndex - 1 })
-				}
-				break
+			// Ctrl-u: half page up
+			if (event.ctrl && event.name === "u") {
+				halfPageUp()
 			}
-			case "down":
-			case "j": {
-				// Move down in current column
-				const column = tasksByColumn[columnIndex]
-				if (column && taskIndex < column.length - 1) {
-					navRef.current = { columnIndex, taskIndex: taskIndex + 1 }
-					setNav({ columnIndex, taskIndex: taskIndex + 1 })
-				}
-				break
-			}
-			case "left":
-			case "h": {
-				// Move to previous column
-				if (columnIndex > 0) {
-					navigateTo(columnIndex - 1, taskIndex)
-				}
-				break
-			}
-			case "right":
-			case "l": {
-				// Move to next column
-				if (columnIndex < COLUMNS.length - 1) {
-					navigateTo(columnIndex + 1, taskIndex)
-				}
-				break
-			}
-			case "g": {
-				// Enter goto mode (waiting for next key)
-				dispatch({ type: "ENTER_GOTO" })
-				break
-			}
-			case "v": {
-				// Enter select mode
-				dispatch({ type: "ENTER_SELECT" })
-				break
-			}
-			case "space": {
-				// Enter action mode (command palette)
-				dispatch({ type: "ENTER_ACTION" })
-				break
-			}
-			case "q": {
-				// Quit - clean up any active popup first
-				killActivePopup()
-				process.exit(0)
-				break
-			}
-			case "?": {
-				// Toggle help overlay
-				setShowHelp(true)
-				break
-			}
-			case "return": {
-				// Show detail panel for selected task
-				if (selectedTask) {
-					setShowDetail(true)
-				}
-				break
-			}
-			case "c": {
-				// Create new task via $EDITOR (manual)
-				showInfo("Opening editor...")
-				createBeadViaEditor()
-					.then((result) => {
-						refreshTasks()
-						showSuccess(`Created: ${result.id} - ${result.title}`)
-					})
-					.catch((error: unknown) => {
-						const getErrorMessage = (e: unknown): string => {
-							if (e && typeof e === "object" && "_tag" in e && "message" in e) {
-								const tag = e._tag
-								const message = e.message
-								if (tag === "ParseMarkdownError") return `Invalid format: ${message}`
-								if (tag === "EditorError") return `Editor error: ${message}`
-							}
-							return `Failed to create: ${e}`
-						}
-						showError(getErrorMessage(error))
-					})
-				break
-			}
-			case "C": {
-				// Create task via Claude (natural language)
-				setShowClaudeCreatePrompt(true)
-				break
-			}
-			case "E": {
-				// Edit task via Claude (AI edit mode)
-				if (selectedTask) {
-					showInfo("Launching Claude edit session...")
-					claudeEditSession(selectedTask)
-						.then((sessionName) => {
-							showSuccess(`Edit session started: ${sessionName}`)
-							showInfo(`Attach with: tmux attach -t ${sessionName}`)
-						})
-						.catch((error) => {
-							showError(`Failed to launch edit session: ${error}`)
-						})
-				} else {
-					showError("No task selected")
-				}
-				break
-			}
-			case "a": {
-				// Toggle VC auto-pilot mode
-				toggleVCAutoPilot()
-					.then((status) => {
-						// Refresh VC status to update StatusBar
-						refreshVCStatus()
-						const message =
-							status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
-						showSuccess(message)
-					})
-					.catch((error) => {
-						showError(`Failed to toggle VC auto-pilot: ${error}`)
-					})
-				break
-			}
-		}
+		},
+		[
+			moveUp,
+			moveDown,
+			moveLeft,
+			moveRight,
+			enterGoto,
+			enterSelect,
+			enterAction,
+			showHelp,
+			showDetail,
+			showCreate,
+			showClaudeCreate,
+			createBeadViaEditor,
+			refreshTasks,
+			selectedTask,
+			toggleVCAutoPilot,
+			refreshVCStatus,
+			showSuccess,
+			showError,
+			enterSearch,
+			enterCommand,
+			halfPageDown,
+			halfPageUp,
+		],
+	)
 
-		// "/" to enter search mode
-		if (event.sequence === "/") {
-			dispatch({ type: "ENTER_SEARCH" })
-			return
-		}
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Computed Values
+	// ═══════════════════════════════════════════════════════════════════════════
 
-		// ":" to enter command mode
-		if (event.sequence === ":") {
-			dispatch({ type: "ENTER_COMMAND" })
-			return
-		}
-
-		// Ctrl-d: half page down
-		if (event.ctrl && event.name === "d") {
-			const column = tasksByColumn[columnIndex]
-			if (column) {
-				const halfPage = Math.floor(column.length / 2)
-				const newIndex = Math.min(taskIndex + halfPage, column.length - 1)
-				navRef.current = { columnIndex, taskIndex: newIndex }
-				setNav({ columnIndex, taskIndex: newIndex })
-			}
-		}
-
-		// Ctrl-u: half page up
-		if (event.ctrl && event.name === "u") {
-			const column = tasksByColumn[columnIndex]
-			if (column) {
-				const halfPage = Math.floor(column.length / 2)
-				const newIndex = Math.max(taskIndex - halfPage, 0)
-				navRef.current = { columnIndex, taskIndex: newIndex }
-				setNav({ columnIndex, taskIndex: newIndex })
-			}
-		}
-
-		// Ctrl-c: quit (explicit handler since terminal may be in raw mode)
-		if (event.ctrl && event.name === "c") {
-			killActivePopup()
-			process.exit(0)
-		}
-	})
-
-	// Computed values (only when we have success)
 	const totalTasks = Result.isSuccess(tasksResult) ? tasksResult.value.length : 0
 
 	const activeSessions = useMemo(() => {
@@ -984,27 +901,29 @@ export const App = () => {
 
 	// Mode display text
 	const modeDisplay = useMemo(() => {
-		const { mode, gotoSubMode, pendingJumpKey, selectedIds, searchQuery } = editorState
-		switch (mode) {
+		switch (mode._tag) {
 			case "action":
 				return "action"
 			case "command":
 				return "command"
 			case "goto":
-				if (gotoSubMode === "pending") return "g..."
-				if (gotoSubMode === "jump") return pendingJumpKey ? `g w ${pendingJumpKey}_` : "g w ..."
+				if (mode.gotoSubMode === "pending") return "g..."
+				if (mode.gotoSubMode === "jump")
+					return mode.pendingJumpKey ? `g w ${mode.pendingJumpKey}_` : "g w ..."
 				return "goto"
 			case "normal":
-				// Show active filter in normal mode
 				return searchQuery ? `filter: ${searchQuery}` : "normal"
 			case "search":
 				return "search"
 			case "select":
-				return `select (${selectedIds.size})`
+				return `select (${selectedIds.length})`
 		}
-	}, [editorState])
+	}, [mode, searchQuery, selectedIds])
 
-	// Render based on Result state
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Render
+	// ═══════════════════════════════════════════════════════════════════════════
+
 	const renderContent = () => {
 		if (Result.isInitial(tasksResult)) {
 			return (
@@ -1028,15 +947,11 @@ export const App = () => {
 				<Board
 					tasks={tasksResult.value}
 					selectedTaskId={selectedTask?.id}
-					activeColumnIndex={nav.columnIndex}
-					activeTaskIndex={nav.taskIndex}
-					selectedIds={editorState.selectedIds}
-					jumpLabels={
-						editorState.mode === "goto" && editorState.gotoSubMode === "jump"
-							? editorState.jumpLabels
-							: null
-					}
-					pendingJumpKey={editorState.pendingJumpKey}
+					activeColumnIndex={columnIndex}
+					activeTaskIndex={taskIndex}
+					selectedIds={new Set(selectedIds)}
+					jumpLabels={isJump ? jumpLabels ?? null : null}
+					pendingJumpKey={pendingJumpKey ?? null}
 					terminalHeight={maxVisibleTasks}
 				/>
 			</box>
@@ -1051,62 +966,62 @@ export const App = () => {
 			<StatusBar
 				totalTasks={totalTasks}
 				activeSessions={activeSessions}
-				mode={editorState.mode}
+				mode={mode._tag}
 				modeDisplay={modeDisplay}
-				selectedCount={editorState.selectedIds.size}
+				selectedCount={selectedIds.length}
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 			/>
 
 			{/* Help overlay */}
-			{showHelp && <HelpOverlay />}
+			{showingHelp && <HelpOverlay />}
 
 			{/* Action palette */}
-			{editorState.mode === "action" && <ActionPalette task={selectedTask} />}
+			{isAction && <ActionPalette task={selectedTask} />}
 
 			{/* Search input */}
-			{editorState.mode === "search" && <SearchInput query={editorState.searchQuery} />}
+			{isSearch && <SearchInput query={searchQuery} />}
 
 			{/* Command input */}
-			{editorState.mode === "command" && <CommandInput input={editorState.commandInput} />}
+			{isCommand && <CommandInput input={commandInput} />}
 
 			{/* Detail panel */}
-			{showDetail && selectedTask && <DetailPanel task={selectedTask} />}
+			{showingDetail && selectedTask && <DetailPanel task={selectedTask} />}
 
-			{/* Create task prompt (manual) */}
-			{showCreatePrompt && (
+			{/* Create task prompt */}
+			{showingCreate && (
 				<CreateTaskPrompt
 					onSubmit={(params) => {
 						createTask(params)
 							.then((issue: any) => {
-								setShowCreatePrompt(false)
+								dismissOverlay()
 								refreshTasks()
 								showSuccess(`Created task: ${issue.id}`)
 							})
 							.catch((error) => {
-								setShowCreatePrompt(false)
+								dismissOverlay()
 								showError(`Failed to create task: ${error}`)
 							})
 					}}
-					onCancel={() => setShowCreatePrompt(false)}
+					onCancel={() => dismissOverlay()}
 				/>
 			)}
 
-			{/* Create task via Claude prompt */}
-			{showClaudeCreatePrompt && (
+			{/* Claude create prompt */}
+			{showingClaudeCreate && (
 				<ClaudeCreatePrompt
 					onSubmit={(description) => {
-						setShowClaudeCreatePrompt(false)
-						showInfo("Launching Claude session...")
 						claudeCreateSession(description)
-							.then((sessionName) => {
-								showSuccess(`Session started: ${sessionName}`)
+							.then((sessionName: string) => {
+								dismissOverlay()
+								showSuccess(`Claude session started: ${sessionName}`)
 								showInfo(`Attach with: tmux attach -t ${sessionName}`)
 							})
 							.catch((error) => {
-								showError(`Failed to launch session: ${error}`)
+								dismissOverlay()
+								showError(`Failed to start Claude session: ${error}`)
 							})
 					}}
-					onCancel={() => setShowClaudeCreatePrompt(false)}
+					onCancel={() => dismissOverlay()}
 				/>
 			)}
 

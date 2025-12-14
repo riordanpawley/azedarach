@@ -108,7 +108,7 @@ export interface AppState {
 	mode: EditorMode
 	gotoSubMode: GotoSubMode | null
 	selectedIds: Set<string>
-	jumpLabels: Map<string, JumpTarget> | null
+	jumpLabels: ReadonlyMap<string, JumpTarget> | null
 	pendingJumpKey: string | null
 }
 
