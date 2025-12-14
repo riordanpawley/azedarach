@@ -21,44 +21,59 @@ import { BeadsClient } from "./BeadsClient"
 let activeEditorState: { channel: string; tempFile: string } | null = null
 
 /**
- * Kill any active tmux popup by terminating the editor process.
+ * Kill any active tmux popup by terminating processes related to the editor.
  * Called on SIGINT to prevent orphaned popups.
  *
  * The popup is created with `-E` flag, so it closes when its command exits.
- * By killing the editor (which has the temp file open), we cause the popup to close.
+ * By killing processes that have the temp file in their command line, we close the popup.
+ *
+ * Note: lsof doesn't work because editors (vim, etc.) don't keep files open -
+ * they read into a buffer and close the fd. We use pkill -f instead.
  */
 export const killActivePopup = (): void => {
 	if (activeEditorState) {
 		const { tempFile } = activeEditorState
+		const myPid = process.pid
+
 		try {
-			// Use lsof to find PIDs of processes with the temp file open, then kill them
-			// This works on both macOS and Linux
-			// lsof -t returns just PIDs, one per line
-			const result = Bun.spawnSync(["lsof", "-t", tempFile], {
+			// Use pkill to kill any process with the temp file in its command line
+			// This catches: the shell in the popup, the editor, etc.
+			// The -f flag matches against the full command line
+			Bun.spawnSync(["pkill", "-f", tempFile], {
 				stdin: "ignore",
-				stdout: "pipe",
+				stdout: "ignore",
 				stderr: "ignore",
 			})
+		} catch {
+			// pkill may not be available, try pgrep + manual kill
+			try {
+				const result = Bun.spawnSync(["pgrep", "-f", tempFile], {
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "ignore",
+				})
 
-			if (result.stdout) {
-				const output = Buffer.isBuffer(result.stdout)
-					? result.stdout.toString()
-					: String(result.stdout)
-				const pids = output.trim().split("\n").filter(Boolean)
+				if (result.stdout) {
+					const output = Buffer.isBuffer(result.stdout)
+						? result.stdout.toString()
+						: String(result.stdout)
+					const pids = output.trim().split("\n").filter(Boolean)
 
-				for (const pidStr of pids) {
-					const pid = parseInt(pidStr, 10)
-					if (!isNaN(pid) && pid > 0) {
-						try {
-							process.kill(pid, "SIGTERM")
-						} catch {
-							// Process may have already exited
+					for (const pidStr of pids) {
+						const pid = parseInt(pidStr, 10)
+						// Don't kill ourselves!
+						if (!isNaN(pid) && pid > 0 && pid !== myPid) {
+							try {
+								process.kill(pid, "SIGTERM")
+							} catch {
+								// Process may have already exited
+							}
 						}
 					}
 				}
+			} catch {
+				// Ignore errors during cleanup
 			}
-		} catch {
-			// lsof may not be available or other error - ignore during cleanup
 		}
 		activeEditorState = null
 	}
