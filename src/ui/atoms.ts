@@ -217,7 +217,7 @@ export const moveTaskAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const client = yield* BeadsClient
 			yield* client.update(taskId, { status: newStatus })
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -231,7 +231,7 @@ export const moveTasksAtom = appRuntime.fn(
 				taskIds.map((id) => client.update(id, { status: newStatus })),
 				{ concurrency: "unbounded" },
 			)
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -244,7 +244,7 @@ export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
 		const service = yield* AttachmentService
 		yield* service.attachExternal(sessionId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -254,7 +254,7 @@ export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
 		const service = yield* AttachmentService
 		yield* service.attachInline(sessionId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -270,7 +270,7 @@ export const startSessionAtom = appRuntime.fn((beadId: string) =>
 			beadId,
 			projectPath: process.cwd(),
 		})
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -280,7 +280,7 @@ export const pauseSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		yield* manager.pause(beadId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -290,7 +290,7 @@ export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		yield* manager.resume(beadId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -300,7 +300,7 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		yield* manager.stop(beadId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -314,7 +314,7 @@ export const createTaskAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const client = yield* BeadsClient
 			return yield* client.create(params)
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -330,7 +330,7 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
 	Effect.gen(function* () {
 		const editor = yield* EditorService
 		yield* editor.editBead(bead)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -345,7 +345,7 @@ export const createBeadViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* EditorService
 		return yield* editor.createBead()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -403,7 +403,7 @@ Please create the bead now.`
 		yield* tmux.sendKeys(sessionName, "Enter")
 
 		return sessionName
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 // ============================================================================
@@ -423,7 +423,7 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
 			beadId,
 			projectPath: process.cwd(),
 		})
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -439,7 +439,7 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 			beadId,
 			projectPath: process.cwd(),
 		})
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -452,7 +452,7 @@ export const deleteBeadAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const client = yield* BeadsClient
 		yield* client.delete(beadId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -491,7 +491,7 @@ export const toggleVCAutoPilotAtom = appRuntime.fn((_: void, get) =>
 		yield* SubscriptionRef.set(ref, newStatus)
 
 		return newStatus
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -504,7 +504,7 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 	Effect.gen(function* () {
 		const vcService = yield* VCService
 		yield* vcService.sendCommand(command)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 // ============================================================================
@@ -604,6 +604,34 @@ export const overlaysAtom = appRuntime.subscriptionRef(
 )
 
 /**
+ * Board tasks atom - subscribes to BoardService tasks changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
+ *
+ * Usage: const tasks = useAtomValue(boardTasksAtom)
+ */
+export const boardTasksAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.tasks
+	}),
+)
+
+/**
+ * Board tasks by column atom - subscribes to BoardService tasksByColumn changes
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
+ *
+ * Usage: const tasksByColumn = useAtomValue(boardTasksByColumnAtom)
+ */
+export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.tasksByColumn
+	}),
+)
+
+/**
  * Current overlay atom - the top of the overlay stack
  *
  * Derived from overlaysAtom for automatic reactivity.
@@ -633,7 +661,7 @@ export const enterSelectAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.enterSelect()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -646,7 +674,7 @@ export const exitSelectAtom = appRuntime.fn((clearSelections: boolean | undefine
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.exitSelect(clearSelections ?? false)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -659,7 +687,7 @@ export const toggleSelectionAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.toggleSelection(taskId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -672,7 +700,7 @@ export const enterGotoAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.enterGoto()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -686,7 +714,7 @@ export const enterJumpAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const editor = yield* ModeService
 			yield* editor.enterJump(labels)
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -699,7 +727,7 @@ export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.setPendingJumpKey(key)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -712,7 +740,7 @@ export const enterActionAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.enterAction()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -725,7 +753,7 @@ export const enterSearchAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.enterSearch()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -738,7 +766,7 @@ export const updateSearchAtom = appRuntime.fn((query: string) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.updateSearch(query)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -751,7 +779,7 @@ export const clearSearchAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.clearSearch()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -764,7 +792,7 @@ export const enterCommandAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.enterCommand()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -777,7 +805,7 @@ export const updateCommandAtom = appRuntime.fn((input: string) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.updateCommand(input)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -790,7 +818,7 @@ export const clearCommandAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.clearCommand()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -803,7 +831,7 @@ export const exitToNormalAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.exitToNormal()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 // --- NavigationService Actions ---
@@ -818,7 +846,7 @@ export const navigateAtom = appRuntime.fn((direction: "up" | "down" | "left" | "
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		yield* nav.move(direction)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -831,7 +859,7 @@ export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; tas
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		yield* nav.jumpTo(column, task)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -845,7 +873,7 @@ export const showToastAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const toast = yield* ToastService
 			yield* toast.show(type, message)
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -858,7 +886,7 @@ export const dismissToastAtom = appRuntime.fn((toastId: string) =>
 	Effect.gen(function* () {
 		const toast = yield* ToastService
 		yield* toast.dismiss(toastId)
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -884,7 +912,7 @@ export const pushOverlayAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
 			yield* overlayService.push(overlay)
-		}),
+		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -897,5 +925,5 @@ export const popOverlayAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const overlay = yield* OverlayService
 		yield* overlay.pop()
-	}),
+	}).pipe(Effect.catchAll(Effect.logError)),
 )

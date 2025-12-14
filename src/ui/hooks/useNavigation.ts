@@ -52,7 +52,7 @@ export function useNavigation(tasksByColumn: TaskWithSession[][]) {
 		for (let colIdx = 0; colIdx < tasksByColumn.length; colIdx++) {
 			const taskIdx = tasksByColumn[colIdx].findIndex((t) => t.id === followTaskId)
 			if (taskIdx >= 0) {
-				jump({ column: colIdx, task: taskIdx }).catch(console.error)
+				jump({ column: colIdx, task: taskIdx })
 				setFollowTaskId(null)
 				return
 			}
@@ -61,27 +61,27 @@ export function useNavigation(tasksByColumn: TaskWithSession[][]) {
 		setFollowTaskId(null)
 	}, [followTaskId, tasksByColumn, jump])
 
-	// Navigation actions (memoized)
+	// Navigation actions (memoized) - errors are logged in Effect layer
 	const actions = useMemo(
 		() => ({
 			moveUp: () => {
-				navigate("up").catch(console.error)
+				navigate("up")
 			},
 
 			moveDown: () => {
-				navigate("down").catch(console.error)
+				navigate("down")
 			},
 
 			moveLeft: () => {
-				navigate("left").catch(console.error)
+				navigate("left")
 			},
 
 			moveRight: () => {
-				navigate("right").catch(console.error)
+				navigate("right")
 			},
 
 			jumpTo: (column: number, task: number) => {
-				jump({ column, task }).catch(console.error)
+				jump({ column, task })
 			},
 		}),
 		[navigate, jump],
