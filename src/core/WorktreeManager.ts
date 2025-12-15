@@ -405,8 +405,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// git worktree add -b <branch-name> <path> <start-point>
 					yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
 
-				// Copy Claude's local settings to preserve permission grants
-				yield* copyClaudeLocalSettings(projectPath, worktreePath)
+					// Copy Claude's local settings to preserve permission grants
+					yield* copyClaudeLocalSettings(projectPath, worktreePath)
 
 					// Refresh cache to get the new worktree info
 					yield* refreshWorktrees(projectPath)
