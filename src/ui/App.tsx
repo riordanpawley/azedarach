@@ -217,8 +217,13 @@ export const App = () => {
 			return
 		}
 
-		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d)
-		const keySeq = event.ctrl ? `C-${event.name}` : event.name
+		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
+		let keySeq = event.name
+		if (event.ctrl) {
+			keySeq = `C-${event.name}`
+		} else if (event.shift) {
+			keySeq = `S-${event.name}`
+		}
 
 		// Delegate all keyboard handling to KeyboardService
 		// KeyboardService handles: navigation, mode transitions, actions, overlays, escape, view toggle

@@ -4,9 +4,10 @@
  * Uses effect-atom for reactive state management with Effect integration.
  */
 
+import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
+import { Effect, Layer, Logger, pipe, Schedule, Stream, SubscriptionRef } from "effect"
 import { ModeService } from "../atoms/runtime"
 import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
@@ -31,6 +32,7 @@ import type { TaskWithSession } from "./types"
 
 const platformLayer = BunContext.layer
 
+const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 const appLayer = Layer.mergeAll(
 	SessionService.Default,
 	AttachmentService.Default,
@@ -50,7 +52,7 @@ const appLayer = Layer.mergeAll(
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,
-).pipe(Layer.provideMerge(platformLayer))
+).pipe(Layer.provideMerge(Logger.replace(fileLogger)), Layer.provideMerge(platformLayer))
 
 /**
  * Runtime atom that provides all services and platform dependencies

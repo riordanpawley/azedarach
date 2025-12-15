@@ -729,7 +729,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: Effect.suspend(() => actionCreateBead()),
 			},
 			{
-				key: "C",
+				key: "S-c",
 				mode: "normal",
 				description: "Create bead via Claude",
 				action: overlay.push({ _tag: "claudeCreate" }),
@@ -811,7 +811,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				),
 			},
 			{
-				key: "A",
+				key: "S-a",
 				mode: "action",
 				description: "Attach inline",
 				action: Effect.suspend(() =>
@@ -851,7 +851,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				),
 			},
 			{
-				key: "E",
+				key: "S-e",
 				mode: "action",
 				description: "Edit bead (Claude)",
 				action: Effect.suspend(() =>
@@ -861,7 +861,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				),
 			},
 			{
-				key: "P",
+				key: "S-p",
 				mode: "action",
 				description: "Create PR",
 				action: Effect.suspend(() =>
@@ -875,7 +875,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
 			},
 			{
-				key: "D",
+				key: "S-d",
 				mode: "action",
 				description: "Delete bead",
 				action: Effect.suspend(() =>
