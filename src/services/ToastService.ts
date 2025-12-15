@@ -7,7 +7,8 @@
  * - Methods for showing, dismissing, and clearing toasts
  */
 
-import { Effect, Ref, SubscriptionRef } from "effect"
+import { Data, Effect, Ref, SubscriptionRef } from "effect"
+import { emptyArray } from "../lib/empty"
 
 // ============================================================================
 // Types
@@ -27,7 +28,7 @@ export interface Toast {
 export class ToastService extends Effect.Service<ToastService>()("ToastService", {
 	scoped: Effect.gen(function* () {
 		// SubscriptionRef for reactive toasts array
-		const toasts = yield* SubscriptionRef.make<ReadonlyArray<Toast>>([])
+		const toasts = yield* SubscriptionRef.make<ReadonlyArray<Toast>>(emptyArray())
 		// Config refs (don't need reactivity)
 		const duration = yield* Ref.make(5000)
 		const maxVisible = yield* Ref.make(3)
@@ -55,12 +56,12 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 			// Methods
 			show: (type: Toast["type"], message: string) =>
 				Effect.gen(function* () {
-					const toast: Toast = {
+					const toast: Toast = Data.struct({
 						id: crypto.randomUUID(),
 						type,
 						message,
 						createdAt: Date.now(),
-					}
+					})
 					const max = yield* Ref.get(maxVisible)
 					yield* SubscriptionRef.update(toasts, (ts) => [...ts.slice(-(max - 1)), toast])
 					return toast
@@ -69,7 +70,7 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 			dismiss: (id: string) =>
 				SubscriptionRef.update(toasts, (ts) => ts.filter((t) => t.id !== id)),
 
-			clear: () => SubscriptionRef.set(toasts, []),
+			clear: () => SubscriptionRef.set(toasts, emptyArray()),
 		}
 	}),
 }) {}
