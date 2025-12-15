@@ -14,7 +14,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Ref, type Scope } from "effect"
-import { getWorktreePath } from "./paths.js"
+import { getWorktreePath, normalizePath } from "./paths.js"
 
 // ============================================================================
 // Types
@@ -241,6 +241,9 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
 	const entries = output.split("\n\n").filter((entry) => entry.trim())
 	const worktrees: Worktree[] = []
 
+	// Normalize projectPath for comparison (resolve symlinks, trailing slashes)
+	const normalizedProjectPath = normalizePath(projectPath)
+
 	for (const entry of entries) {
 		const lines = entry.split("\n")
 		let path = ""
@@ -261,15 +264,25 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
 			}
 		}
 
-		// Extract beadId from path
-		// Path format: /parent/dir/ProjectName-beadId
-		const pathParts = path.split("/")
-		const lastPart = pathParts[pathParts.length - 1]
-		const match = lastPart?.match(/-(az-[a-z0-9]+)$/)
-		const beadId = match?.[1] || ""
+		// Use branch name directly as beadId - this is more reliable than parsing the path
+		// since we create branches with the beadId as the name (see line ~406)
+		// Fallback to path parsing if branch is missing (detached HEAD)
+		let beadId = branch
+		if (!beadId) {
+			// Fallback: Extract beadId from path
+			// Path format: /parent/dir/ProjectName-beadId
+			const pathParts = path.split("/")
+			const lastPart = pathParts[pathParts.length - 1]
+			// Match any prefix pattern (e.g., az-xxx, proj-xxx, etc.)
+			const match = lastPart?.match(/-([a-z]+-[a-z0-9]+)$/i)
+			beadId = match?.[1] || ""
+		}
 
-		// Only include worktrees that match our naming convention and aren't the main worktree
-		if (beadId && path !== projectPath) {
+		// Normalize path for comparison
+		const normalizedPath = normalizePath(path)
+
+		// Only include worktrees that have a valid beadId and aren't the main/current worktree
+		if (beadId && normalizedPath !== normalizedProjectPath) {
 			worktrees.push({
 				path,
 				beadId,
@@ -414,10 +427,18 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const newWorktree = updated.get(beadId)
 
 					if (!newWorktree) {
-						// This shouldn't happen, but handle it gracefully
+						// Log diagnostic info to help debug this issue
+						const foundBeadIds = Array.from(updated.keys())
+						yield* Effect.logError("Worktree created but not found in cache", {
+							beadId,
+							worktreePath,
+							projectPath,
+							foundBeadIds,
+							cacheSize: updated.size,
+						})
 						return yield* Effect.fail(
 							new GitError({
-								message: "Worktree created but not found in list",
+								message: `Worktree created but not found in list. Looking for: ${beadId}, found: [${foundBeadIds.join(", ")}]`,
 								command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
 							}),
 						)
