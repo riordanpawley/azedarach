@@ -18,6 +18,7 @@ import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
+import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
 import { NavigationService } from "../services/NavigationService"
@@ -526,6 +527,18 @@ export const commandInputAtom = Atom.readable((get) => {
 })
 
 /**
+ * Sort configuration atom - subscribes to ModeService sortConfig changes
+ *
+ * Usage: const sortConfig = useAtomValue(sortConfigAtom)
+ */
+export const sortConfigAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return editor.sortConfig
+	}),
+)
+
+/**
  * Navigation cursor atom - subscribes to NavigationService cursor changes
  *
  * Uses appRuntime.subscriptionRef() for automatic reactive updates.
@@ -795,6 +808,32 @@ export const exitToNormalAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.exitToNormal()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Enter sort mode
+ *
+ * Usage: const [, enterSort] = useAtom(enterSortAtom, { mode: "promise" })
+ *        await enterSort()
+ */
+export const enterSortAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterSort()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Cycle sort configuration for a field
+ *
+ * Usage: const [, cycleSort] = useAtom(cycleSortAtom, { mode: "promise" })
+ *        await cycleSort("priority")
+ */
+export const cycleSortAtom = appRuntime.fn((field: SortField) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.cycleSort(field)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
