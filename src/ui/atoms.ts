@@ -26,7 +26,8 @@ import { OverlayService } from "../services/OverlayService"
 import { SessionService } from "../services/SessionService"
 // New atomic Effect services
 import { ToastService } from "../services/ToastService"
-import type { TaskWithSession, ViewMode } from "./types"
+import { ViewService } from "../services/ViewService"
+import type { TaskWithSession } from "./types"
 
 const platformLayer = BunContext.layer
 
@@ -43,13 +44,12 @@ const appLayer = Layer.mergeAll(
 	KeyboardService.Default,
 	OverlayService.Default,
 	ToastService.Default,
-	KeyboardService.Default,
 	NavigationService.Default,
-	SessionService.Default,
 	SessionManager.Default,
 	BeadsClient.Default,
 	AppConfig.Default,
 	VCService.Default,
+	ViewService.Default,
 ).pipe(Layer.provideMerge(platformLayer))
 
 /**
@@ -173,9 +173,16 @@ export const errorAtom = Atom.make<string | undefined>(undefined)
  * - kanban: Traditional column-based view with task cards
  * - compact: Linear list view with minimal row height
  *
- * Usage: const [viewMode, setViewMode] = useAtom(viewModeAtom)
+ * Uses ViewService for reactive state via SubscriptionRef.
+ *
+ * Usage: const viewMode = useAtomValue(viewModeAtom)
  */
-export const viewModeAtom = Atom.make<ViewMode>("kanban")
+export const viewModeAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const viewService = yield* ViewService
+		return viewService.viewMode
+	}),
+)
 
 // ============================================================================
 // Action Atoms (using runtime.fn for proper effect-atom integration)
@@ -479,6 +486,26 @@ export const sendVCCommandAtom = appRuntime.fn((command: string) =>
 	Effect.gen(function* () {
 		const vcService = yield* VCService
 		yield* vcService.sendCommand(command)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+// ============================================================================
+// Keyboard Handling Atom
+// ============================================================================
+
+/**
+ * Handle keyboard input via KeyboardService
+ *
+ * This is the main entry point for keyboard handling. It delegates to
+ * KeyboardService which has all keybindings defined as data.
+ *
+ * Usage: const [, handleKey] = useAtom(handleKeyAtom, { mode: "promise" })
+ *        handleKey(event.name)
+ */
+export const handleKeyAtom = appRuntime.fn((key: string) =>
+	Effect.gen(function* () {
+		const keyboard = yield* KeyboardService
+		yield* keyboard.handleKey(key)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

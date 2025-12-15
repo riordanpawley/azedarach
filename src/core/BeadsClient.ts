@@ -519,19 +519,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(args)
 
-					// bd create returns an array with the created issue
-					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-
-					if (parsed.length === 0) {
-						return yield* Effect.fail(
-							new BeadsError({
-								message: "bd create returned no issue",
-								command: `bd ${args.join(" ")}`,
-							}),
-						)
-					}
-
-					return parsed[0]!
+					// bd create returns a single issue object (not an array)
+					return yield* parseJson(IssueSchema, output)
 				}),
 
 			delete: (id: string) =>
