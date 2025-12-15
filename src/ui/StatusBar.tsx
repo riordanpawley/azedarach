@@ -3,7 +3,7 @@
  */
 
 import type { VCStatus } from "../core/VCService"
-import type { EditorMode } from "../services/EditorService"
+import type { EditorMode, ViewMode } from "../services/EditorService"
 import { theme } from "./theme"
 
 export interface StatusBarProps {
@@ -14,6 +14,7 @@ export interface StatusBarProps {
 	selectedCount: number
 	connected?: boolean
 	vcStatus?: VCStatus
+	viewMode?: ViewMode
 }
 
 /**
@@ -37,6 +38,7 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "hjkl", action: "Nav" },
 		{ key: "Enter", action: "Details" },
 		{ key: "c", action: "Create" },
+		{ key: "Tab", action: "View" },
 		{ key: "a", action: "VC" },
 		{ key: ":", action: "Cmd" },
 		{ key: "C-d/u", action: "Page" },
@@ -236,6 +238,11 @@ export const StatusBar = (props: StatusBarProps) => {
 					<text fg={theme.base} attributes={ATTR_BOLD}>
 						{modeLabel}
 					</text>
+				</box>
+
+				{/* View mode indicator */}
+				<box backgroundColor={theme.surface1} paddingLeft={1} paddingRight={1}>
+					<text fg={theme.text}>{props.viewMode === "compact" ? "LST" : "KAN"}</text>
 				</box>
 
 				{/* Mode detail (shows pending keys, selection count, etc) */}

@@ -26,7 +26,7 @@ import { OverlayService } from "../services/OverlayService"
 import { SessionService } from "../services/SessionService"
 // New atomic Effect services
 import { ToastService } from "../services/ToastService"
-import type { TaskWithSession } from "./types"
+import type { TaskWithSession, ViewMode } from "./types"
 
 const platformLayer = BunContext.layer
 
@@ -166,6 +166,16 @@ export const selectedTaskIdAtom = Atom.make<string | undefined>(undefined)
  * Atom for UI error state
  */
 export const errorAtom = Atom.make<string | undefined>(undefined)
+
+/**
+ * Atom for board view mode (kanban vs compact)
+ *
+ * - kanban: Traditional column-based view with task cards
+ * - compact: Linear list view with minimal row height
+ *
+ * Usage: const [viewMode, setViewMode] = useAtom(viewModeAtom)
+ */
+export const viewModeAtom = Atom.make<ViewMode>("kanban")
 
 // ============================================================================
 // Action Atoms (using runtime.fn for proper effect-atom integration)
