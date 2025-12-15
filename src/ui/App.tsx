@@ -31,6 +31,7 @@ import {
 	tasksAtom,
 	toggleVCAutoPilotAtom,
 	vcStatusAtom,
+	viewModeAtom,
 } from "./atoms"
 import { Board } from "./Board"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
@@ -45,7 +46,13 @@ import { StatusBar } from "./StatusBar"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import { ToastContainer } from "./Toast"
 import { theme } from "./theme"
-import { COLUMNS, generateJumpLabels, type JumpTarget, type TaskWithSession } from "./types"
+import {
+	COLUMNS,
+	generateJumpLabels,
+	type JumpTarget,
+	type TaskWithSession,
+	type ViewMode,
+} from "./types"
 
 // ============================================================================
 // Constants
@@ -155,6 +162,9 @@ export const App = () => {
 	const [, deleteBead] = useAtom(deleteBeadAtom, { mode: "promise" })
 	const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
 	const [, sendVCCommand] = useAtom(sendVCCommandAtom, { mode: "promise" })
+
+	// View mode state
+	const [viewMode, setViewMode] = useAtom(viewModeAtom)
 
 	// Terminal size
 	const maxVisibleTasks = useMemo(() => {
@@ -954,6 +964,10 @@ export const App = () => {
 							showError(`Failed to toggle VC auto-pilot: ${error}`)
 						})
 					break
+				case "tab":
+					// Toggle view mode between kanban and compact
+					setViewMode((current: ViewMode) => (current === "kanban" ? "compact" : "kanban"))
+					break
 			}
 
 			// "/" to enter search mode
@@ -1007,6 +1021,7 @@ export const App = () => {
 			enterSort,
 			halfPageDown,
 			halfPageUp,
+			setViewMode,
 		],
 	)
 
@@ -1079,6 +1094,7 @@ export const App = () => {
 					jumpLabels={isJump ? (jumpLabels ?? null) : null}
 					pendingJumpKey={pendingJumpKey ?? null}
 					terminalHeight={maxVisibleTasks}
+					viewMode={viewMode}
 				/>
 			</box>
 		)
@@ -1096,6 +1112,7 @@ export const App = () => {
 				modeDisplay={modeDisplay}
 				selectedCount={selectedIds.length}
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
+				viewMode={viewMode}
 			/>
 
 			{/* Help overlay */}

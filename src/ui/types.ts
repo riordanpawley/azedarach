@@ -91,6 +91,14 @@ export interface NavigationState {
 export type EditorMode = "action" | "command" | "goto" | "normal" | "search" | "select" | "sort"
 
 /**
+ * View modes for the board display
+ *
+ * - kanban: Traditional column-based view with task cards
+ * - compact: Linear list view with minimal row height
+ */
+export type ViewMode = "kanban" | "compact"
+
+/**
  * Goto mode sub-state
  * When 'g' is pressed, we wait for the next key:
  * - 'w' enters word/item jump mode (shows labels)
