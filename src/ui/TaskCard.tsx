@@ -46,11 +46,11 @@ export const TaskCard = (props: TaskCardProps) => {
 	const getHeaderLine = () => {
 		let line = ""
 		if (props.jumpLabel) {
-			line += props.jumpLabel + " "
+			line += `${props.jumpLabel} `
 		}
-		line += props.task.id + " [" + props.task.issue_type + "]"
+		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
-			line += " " + indicator
+			line += ` ${indicator}`
 		}
 		if (props.isMultiSelected) {
 			line += " *"

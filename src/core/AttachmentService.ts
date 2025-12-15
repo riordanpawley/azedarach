@@ -4,8 +4,8 @@
  * Uses tmux to attach to running Claude Code sessions for manual intervention.
  */
 
-import { Context, Data, Effect, Layer } from "effect"
-import { NotInsideTmuxError, TerminalService, TmuxCommandError } from "./TerminalService"
+import { Data, Effect } from "effect"
+import { TerminalService } from "./TerminalService"
 import { TmuxService } from "./TmuxService"
 
 // ============================================================================
@@ -131,7 +131,7 @@ export class AttachmentService extends Effect.Service<AttachmentService>()("Atta
 	dependencies: [TmuxService.Default, TerminalService.Default],
 	effect: Effect.gen(function* () {
 		const tmux = yield* TmuxService
-		const terminal = yield* TerminalService
+		const _terminal = yield* TerminalService
 
 		// Track attachment history
 		const attachmentHistory: AttachmentEvent[] = []

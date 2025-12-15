@@ -28,7 +28,6 @@ function getToastStyle(type: ToastMessage["type"]) {
 			return { bg: theme.red, fg: theme.crust, icon: "!" }
 		case "success":
 			return { bg: theme.green, fg: theme.crust, icon: "+" }
-		case "info":
 		default:
 			return { bg: theme.blue, fg: theme.crust, icon: "i" }
 	}

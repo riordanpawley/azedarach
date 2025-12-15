@@ -7,17 +7,18 @@
 import { BunContext } from "@effect/platform-bun"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Layer, pipe, Schedule, Stream, SubscriptionRef } from "effect"
-import { AppConfig, AppConfigLiveWithPlatform } from "../config/index"
+import { ModeService } from "../atoms/runtime"
+import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
-import { EditorService } from "../core/EditorService"
+import { BeadEditorService } from "../core/EditorService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
-import { EditorService as ModeService } from "../services/EditorService"
+import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
 import { NavigationService } from "../services/NavigationService"
 import { OverlayService } from "../services/OverlayService"
@@ -26,78 +27,36 @@ import { SessionService } from "../services/SessionService"
 import { ToastService } from "../services/ToastService"
 import type { TaskWithSession } from "./types"
 
-/**
- * Combined runtime layer with all services
- *
- * Merges BeadsClient, TmuxService, TerminalService, AttachmentService, SessionManager, and AppConfig.
- * AppConfig is provided so SessionManager can use custom init commands and session settings.
- */
-const configLayer = AppConfigLiveWithPlatform(process.cwd())
-
-// Platform layer provides CommandExecutor which services need
 const platformLayer = BunContext.layer
 
-const baseLayer = Layer.mergeAll(
-	BeadsClient.Default,
+const appLayer = Layer.mergeAll(
+	SessionService.Default,
+	AttachmentService.Default,
+	BoardService.Default,
 	TmuxService.Default,
-	TerminalService.Default,
-	configLayer,
-	platformLayer,
-)
-
-// Core services layer (existing)
-const coreServicesLayer = baseLayer.pipe(
-	Layer.merge(AttachmentService.Default),
-	Layer.merge(SessionManager.Default),
-	Layer.merge(EditorService.Default),
-	Layer.merge(PRWorkflow.Default),
-	Layer.merge(VCService.Default),
-)
-
-// Atomic services layer (new Effect.Service pattern)
-// Tier 1: Truly independent services (no deps beyond platform)
-const independentServicesLayer = Layer.mergeAll(
-	ToastService.Default,
-	OverlayService.Default,
+	BeadEditorService.Default,
 	ModeService.Default,
-)
-
-// Tier 2: BoardService needs BeadsClient & SessionManager from coreServicesLayer
-const boardServiceLayer = BoardService.Default
-
-// Tier 3: NavigationService needs BoardService
-const navigationServiceLayer = NavigationService.Default
-
-// Tier 4: Services that need NavigationService, BoardService, etc.
-// SessionService needs ToastService, NavigationService, BoardService
-// KeyboardService needs ToastService, OverlayService, NavigationService, ModeService, BoardService
-const highLevelServicesLayer = Layer.mergeAll(SessionService.Default, KeyboardService.Default)
-
-// Build layers in dependency order:
-// 1. core + independent (no cross-deps)
-const baseWithIndependent = coreServicesLayer.pipe(Layer.merge(independentServicesLayer))
-
-// 2. Add BoardService (needs core)
-const withBoardService = baseWithIndependent.pipe(
-	Layer.merge(boardServiceLayer.pipe(Layer.provide(baseWithIndependent))),
-)
-
-// 3. Add NavigationService (needs BoardService)
-const withNavigation = withBoardService.pipe(
-	Layer.merge(navigationServiceLayer.pipe(Layer.provide(withBoardService))),
-)
-
-// 4. Add high-level services (need everything above)
-const appLayer = withNavigation.pipe(
-	Layer.merge(highLevelServicesLayer.pipe(Layer.provide(withNavigation))),
-)
+	PRWorkflow.Default,
+	TerminalService.Default,
+	EditorService.Default,
+	KeyboardService.Default,
+	OverlayService.Default,
+	ToastService.Default,
+	KeyboardService.Default,
+	NavigationService.Default,
+	SessionService.Default,
+	SessionManager.Default,
+	BeadsClient.Default,
+	AppConfig.Default,
+	VCService.Default,
+).pipe(Layer.provideMerge(platformLayer))
 
 /**
  * Runtime atom that provides all services and platform dependencies
  *
  * This creates a runtime that all other async atoms can use.
  */
-export const appRuntime = Atom.runtime(() => appLayer)
+export const appRuntime = Atom.runtime(appLayer)
 
 /**
  * Async atom that fetches all tasks from BeadsClient
@@ -319,7 +278,7 @@ export const createTaskAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const client = yield* BeadsClient
 			return yield* client.create(params)
-		}).pipe(Effect.catchAll(Effect.logError)),
+		}).pipe(Effect.tapError(Effect.logError)),
 )
 
 /**
@@ -333,7 +292,7 @@ export const createTaskAtom = appRuntime.fn(
  */
 export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
 	Effect.gen(function* () {
-		const editor = yield* EditorService
+		const editor = yield* BeadEditorService
 		yield* editor.editBead(bead)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -348,7 +307,7 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
  */
 export const createBeadViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* EditorService
+		const editor = yield* BeadEditorService
 		return yield* editor.createBead()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -408,7 +367,7 @@ Please create the bead now.`
 		yield* tmux.sendKeys(sessionName, "Enter")
 
 		return sessionName
-	}).pipe(Effect.catchAll(Effect.logError)),
+	}).pipe(Effect.tapError(Effect.logError)),
 )
 
 // ============================================================================
@@ -428,7 +387,7 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
 			beadId,
 			projectPath: process.cwd(),
 		})
-	}).pipe(Effect.catchAll(Effect.logError)),
+	}).pipe(Effect.tapError(Effect.logError)),
 )
 
 /**
@@ -486,7 +445,7 @@ export const ghCLIAvailableAtom = appRuntime.atom(
  * Usage: const [, toggleVCAutoPilot] = useAtom(toggleVCAutoPilotAtom, { mode: "promise" })
  *        await toggleVCAutoPilot()
  */
-export const toggleVCAutoPilotAtom = appRuntime.fn((_: void, get) =>
+export const toggleVCAutoPilotAtom = appRuntime.fn((_: undefined, get) =>
 	Effect.gen(function* () {
 		const vc = yield* VCService
 		const newStatus = yield* vc.toggleAutoPilot()

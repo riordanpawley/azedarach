@@ -105,7 +105,7 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 			bottom={0}
 			alignItems="center"
 			justifyContent="center"
-			backgroundColor={theme.crust + "CC"}
+			backgroundColor={`${theme.crust}CC`}
 		>
 			<box
 				borderStyle="rounded"

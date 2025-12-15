@@ -7,7 +7,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
-import { useCallback, useMemo } from "react"
+import { useMemo } from "react"
 import {
 	clearCommandAtom,
 	clearSearchAtom,

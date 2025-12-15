@@ -33,7 +33,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 	const formatDate = (dateStr: string) => {
 		try {
 			const date = new Date(dateStr)
-			return date.toLocaleDateString() + " " + date.toLocaleTimeString()
+			return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`
 		} catch {
 			return dateStr
 		}
@@ -128,7 +128,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 	}, [props.task.status])
 
 	// Build header line
-	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? " " + indicator : ""}`
+	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}`
 
 	return (
 		<box
@@ -139,7 +139,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 			bottom={0}
 			alignItems="center"
 			justifyContent="center"
-			backgroundColor={theme.crust + "CC"}
+			backgroundColor={`${theme.crust}CC`}
 		>
 			<box
 				borderStyle="rounded"
@@ -174,9 +174,9 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 				{/* Metadata row */}
 				<box flexDirection="row" gap={2}>
-					<text fg={getPriorityColor(props.task.priority)}>{"Priority: " + priorityLabel}</text>
-					<text fg={getStatusColor()}>{"Status: " + props.task.status}</text>
-					<text fg={theme.subtext0}>{"Session: " + props.task.sessionState}</text>
+					<text fg={getPriorityColor(props.task.priority)}>{`Priority: ${priorityLabel}`}</text>
+					<text fg={getStatusColor()}>{`Status: ${props.task.status}`}</text>
+					<text fg={theme.subtext0}>{`Session: ${props.task.sessionState}`}</text>
 				</box>
 				<text> </text>
 
@@ -214,10 +214,10 @@ export const DetailPanel = (props: DetailPanelProps) => {
 				)}
 
 				{/* Timestamps */}
-				<text fg={theme.subtext0}>{"Created: " + formatDate(props.task.created_at)}</text>
-				<text fg={theme.subtext0}>{"Updated: " + formatDate(props.task.updated_at)}</text>
+				<text fg={theme.subtext0}>{`Created: ${formatDate(props.task.created_at)}`}</text>
+				<text fg={theme.subtext0}>{`Updated: ${formatDate(props.task.updated_at)}`}</text>
 				{props.task.closed_at && (
-					<text fg={theme.subtext0}>{"Closed: " + formatDate(props.task.closed_at)}</text>
+					<text fg={theme.subtext0}>{`Closed: ${formatDate(props.task.closed_at)}`}</text>
 				)}
 				<text> </text>
 
@@ -233,14 +233,16 @@ export const DetailPanel = (props: DetailPanelProps) => {
 									{"Context: " +
 										props.task.contextPercent +
 										"%" +
-										(props.task.contextPercent >= 90 ? " ⚠️" : "")}
+										(props.task.contextPercent >= 90 ? " !" : "")}
 								</text>
 							)}
 							{props.task.sessionStartedAt !== undefined && (
-								<text fg={theme.text}>{"Duration: " + formatDuration(props.task.sessionStartedAt)}</text>
+								<text
+									fg={theme.text}
+								>{`Duration: ${formatDuration(props.task.sessionStartedAt)}`}</text>
 							)}
 							{props.task.estimatedTokens !== undefined && (
-								<text fg={theme.text}>{"Tokens: " + formatTokens(props.task.estimatedTokens)}</text>
+								<text fg={theme.text}>{`Tokens: ${formatTokens(props.task.estimatedTokens)}`}</text>
 							)}
 						</box>
 						<text> </text>
@@ -251,9 +253,9 @@ export const DetailPanel = (props: DetailPanelProps) => {
 				<text fg={theme.blue} attributes={ATTR_BOLD}>
 					{"Available Actions:"}
 				</text>
-				{availableActions.map((action, i) => (
-					<text key={i} fg={theme.text}>
-						{"  " + action}
+				{availableActions.map((action) => (
+					<text key={`availableActions:${action}`} fg={theme.text}>
+						{`  ${action}`}
 					</text>
 				))}
 				<text> </text>

@@ -11,8 +11,7 @@
  * Pattern matching uses priority ordering - first match wins.
  */
 
-import { Context, Data, Effect, Layer } from "effect"
-import * as Schema from "effect/Schema"
+import { Data, Effect } from "effect"
 
 // ============================================================================
 // Type Definitions

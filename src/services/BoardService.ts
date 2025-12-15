@@ -37,9 +37,7 @@ export interface ColumnInfo {
 // ============================================================================
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
-	// Note: BeadsClient and SessionManager use old Context.Tag pattern,
-	// so we can't declare them in dependencies array. They must be
-	// provided via Layer composition when using BoardService.Default
+	dependencies: [SessionManager.Default, BeadsClient.Default],
 	effect: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
@@ -47,9 +45,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
-		const tasksByColumn = yield* SubscriptionRef.make<ReadonlyMap<string, ReadonlyArray<TaskWithSession>>>(
-			new Map(),
-		)
+		const tasksByColumn = yield* SubscriptionRef.make<
+			ReadonlyMap<string, ReadonlyArray<TaskWithSession>>
+		>(new Map())
 
 		/**
 		 * Load tasks from BeadsClient and merge with session state

@@ -6,6 +6,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomRefresh, useAtomValue } from "@effect-atom/atom-react"
+import type { KeyEvent } from "@opentui/core"
 import { useKeyboard } from "@opentui/react"
 import { useCallback, useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/EditorService"
@@ -65,10 +66,8 @@ export const App = () => {
 
 	const { toasts, showError, showSuccess, showInfo, dismissToast } = useToasts()
 	const {
-		currentOverlay,
 		showHelp,
 		showDetail,
-		showCreate,
 		showClaudeCreate,
 		dismiss: dismissOverlay,
 		showingHelp,
@@ -84,7 +83,6 @@ export const App = () => {
 		commandInput,
 		pendingJumpKey,
 		jumpLabels,
-		isNormal,
 		isSelect,
 		isGoto,
 		isGotoPending,
@@ -167,7 +165,6 @@ export const App = () => {
 
 	// Navigation hook (needs tasksByColumn)
 	const {
-		cursor,
 		columnIndex,
 		taskIndex,
 		selectedTask,
@@ -343,7 +340,7 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const handleActionMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			switch (event.name) {
 				case "left":
 				case "h": {
@@ -425,7 +422,7 @@ export const App = () => {
 							.then(() => {
 								showInfo(`Switched! Ctrl-a ) to return`)
 							})
-							.catch((error: any) => {
+							.catch((error) => {
 								const msg =
 									error && typeof error === "object" && error._tag === "SessionNotFoundError"
 										? `No session for ${selectedTask.id} - press Space+s to start`
@@ -439,7 +436,7 @@ export const App = () => {
 				case "A": {
 					// Attach to session inline (replace TUI)
 					if (selectedTask) {
-						attachInline(selectedTask.id).catch((error: any) => {
+						attachInline(selectedTask.id).catch((error) => {
 							const msg =
 								error && typeof error === "object" && error._tag === "SessionNotFoundError"
 									? `No session for ${selectedTask.id} - press Space+s to start`
@@ -515,7 +512,7 @@ export const App = () => {
 								refreshTasks()
 								showSuccess(`Updated ${selectedTask.id}`)
 							})
-							.catch((error: any) => {
+							.catch((error) => {
 								const msg =
 									error && typeof error === "object" && error._tag === "ParseMarkdownError"
 										? `Invalid format: ${error.message}`
@@ -545,10 +542,10 @@ export const App = () => {
 						} else {
 							showInfo(`Creating PR for ${selectedTask.id}...`)
 							createPR(selectedTask.id)
-								.then((pr: any) => {
+								.then((pr) => {
 									showSuccess(`PR created: ${pr.url}`)
 								})
-								.catch((error: any) => {
+								.catch((error) => {
 									const msg =
 										error && typeof error === "object" && error._tag === "GHCLIError"
 											? error.message
@@ -623,7 +620,7 @@ export const App = () => {
 	)
 
 	const handleGotoMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			if (isGotoPending) {
 				// Waiting for second key after 'g'
 				switch (event.name) {
@@ -670,7 +667,7 @@ export const App = () => {
 	)
 
 	const handleSearchMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			if (event.name === "return") {
 				exitToNormal()
 				return
@@ -692,7 +689,7 @@ export const App = () => {
 	)
 
 	const handleCommandMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			const vcStatus = Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined
 
 			if (event.name === "return") {
@@ -712,7 +709,7 @@ export const App = () => {
 						showSuccess(`Sent to VC: ${commandInput}`)
 						clearCommand()
 					})
-					.catch((error: any) => {
+					.catch((error) => {
 						const msg =
 							error && typeof error === "object" && error._tag === "VCNotRunningError"
 								? "VC is not running"
@@ -747,7 +744,7 @@ export const App = () => {
 	)
 
 	const handleSelectMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			switch (event.name) {
 				case "up":
 				case "k":
@@ -779,7 +776,7 @@ export const App = () => {
 	)
 
 	const handleNormalMode = useCallback(
-		(event: any) => {
+		(event: KeyEvent) => {
 			switch (event.name) {
 				case "up":
 				case "k":
@@ -806,9 +803,9 @@ export const App = () => {
 				case "space":
 					enterAction()
 					break
+				// biome-ignore lint/suspicious/noFallthroughSwitchClause: <its not though>
 				case "q":
 					process.exit(0)
-					break
 				case "?":
 					showHelp()
 					break
@@ -822,9 +819,11 @@ export const App = () => {
 					createBeadViaEditor()
 						.then((result) => {
 							refreshTasks()
-							showSuccess(`Created ${result.id}`)
+							if (result) {
+								showSuccess(`Created ${result.id}`)
+							}
 						})
-						.catch((error: any) => {
+						.catch((error) => {
 							const msg =
 								error && typeof error === "object" && error._tag === "ParseMarkdownError"
 									? `Invalid format: ${error.message}`
@@ -840,12 +839,14 @@ export const App = () => {
 					showClaudeCreate()
 					break
 				case "a":
-					toggleVCAutoPilot()
+					toggleVCAutoPilot(undefined)
 						.then((status) => {
 							refreshVCStatus()
-							const message =
-								status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
-							showSuccess(message)
+							if (status) {
+								const message =
+									status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
+								showSuccess(message)
+							}
 						})
 						.catch((error) => {
 							showError(`Failed to toggle VC auto-pilot: ${error}`)
@@ -885,7 +886,6 @@ export const App = () => {
 			enterAction,
 			showHelp,
 			showDetail,
-			showCreate,
 			showClaudeCreate,
 			createBeadViaEditor,
 			refreshTasks,
@@ -1007,7 +1007,7 @@ export const App = () => {
 				<CreateTaskPrompt
 					onSubmit={(params) => {
 						createTask(params)
-							.then((issue: any) => {
+							.then((issue) => {
 								dismissOverlay()
 								refreshTasks()
 								showSuccess(`Created task: ${issue.id}`)

@@ -8,21 +8,10 @@
 export {
 	// Service
 	AppConfig,
-	// Layers
-	AppConfigLive,
-	AppConfigLiveWithPlatform,
 	type AppConfigService,
 	// Errors
 	ConfigError,
 	ConfigParseError,
-	getNotificationsConfig,
-	getPatternsConfig,
-	getPRConfig,
-	getSessionConfig,
-	// Convenience functions
-	getWorktreeConfig,
-	// Loader
-	loadConfig,
 } from "./AppConfig.js"
 
 // Defaults and resolved types

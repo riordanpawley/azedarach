@@ -17,7 +17,6 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
 import { Data, Effect, Ref, Schedule } from "effect"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 
@@ -241,8 +240,8 @@ export interface VCServiceImpl {
  * ```
  */
 export class VCService extends Effect.Service<VCService>()("VCService", {
-	dependencies: [TmuxService.Default, BunContext.layer],
-	effect: Effect.gen(function* () {
+	dependencies: [TmuxService.Default],
+	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
 
 		// Track executor state
