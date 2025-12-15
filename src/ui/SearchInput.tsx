@@ -32,7 +32,7 @@ export const SearchInput = ({ query }: SearchInputProps) => {
 			<text fg={theme.text}>{query}</text>
 			<text fg={theme.yellow}>_</text>
 			<box flexGrow={1} />
-			<text fg={theme.overlay0}>Enter: search Esc: cancel</text>
+			<text fg={theme.overlay0}>Enter: confirm Esc: cancel</text>
 		</box>
 	)
 }
