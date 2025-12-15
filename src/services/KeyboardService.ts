@@ -24,6 +24,7 @@ import { EditorService, type JumpTarget } from "./EditorService"
 import { NavigationService } from "./NavigationService"
 import { OverlayService } from "./OverlayService"
 import { ToastService } from "./ToastService"
+import { ViewService } from "./ViewService"
 
 // ============================================================================
 // Types
@@ -92,6 +93,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		VCService.Default,
 		BeadsClient.Default,
 		BeadEditorService.Default,
+		ViewService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -107,6 +109,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const vc = yield* VCService
 		const beadsClient = yield* BeadsClient
 		const beadEditor = yield* BeadEditorService
+		const viewService = yield* ViewService
 
 		// ========================================================================
 		// Helper Functions
@@ -272,6 +275,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					yield* Effect.all(
 						taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
 					)
+					// Refresh board to reflect the move
+					yield* board.refresh()
 					// Follow the first task
 					if (firstTaskId) {
 						yield* nav.setFollow(firstTaskId)
@@ -404,6 +409,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 				yield* beadEditor.editBead(task).pipe(
 					Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
+					Effect.tap(() => board.refresh()),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
@@ -425,6 +431,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			Effect.gen(function* () {
 				yield* beadEditor.createBead().pipe(
 					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
+					Effect.tap(() => board.refresh()),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
@@ -497,6 +504,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 				yield* beadsClient.delete(task.id).pipe(
 					Effect.tap(() => toast.show("success", `Deleted ${task.id}`)),
+					Effect.tap(() => board.refresh()),
 					Effect.catchAll(showErrorToast("Failed to delete")),
 				)
 			})
@@ -617,25 +625,25 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: nav.move("right"),
 			},
 			{
-				key: "Down",
+				key: "down",
 				mode: "normal",
 				description: "Move down",
 				action: nav.move("down"),
 			},
 			{
-				key: "Up",
+				key: "up",
 				mode: "normal",
 				description: "Move up",
 				action: nav.move("up"),
 			},
 			{
-				key: "Left",
+				key: "left",
 				mode: "normal",
 				description: "Move left",
 				action: nav.move("left"),
 			},
 			{
-				key: "Right",
+				key: "right",
 				mode: "normal",
 				description: "Move right",
 				action: nav.move("right"),
@@ -732,6 +740,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Toggle VC auto-pilot",
 				action: Effect.suspend(() => actionToggleVC()),
 			},
+			{
+				key: "tab",
+				mode: "normal",
+				description: "Toggle view mode (kanban/compact)",
+				action: viewService.toggleViewMode(),
+			},
 
 			// ======================================================================
 			// Action Mode (Space menu)
@@ -741,7 +755,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(Effect.tap(() => editor.exitToNormal())),
+					moveTasksToColumn("left").pipe(
+						Effect.tap(() => editor.exitToNormal()),
+						Effect.catchAll(Effect.logError),
+					),
 				),
 			},
 			{
@@ -749,23 +766,32 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(Effect.tap(() => editor.exitToNormal())),
+					moveTasksToColumn("right").pipe(
+						Effect.tap(() => editor.exitToNormal()),
+						Effect.catchAll(Effect.logError),
+					),
 				),
 			},
 			{
-				key: "Left",
+				key: "left",
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(Effect.tap(() => editor.exitToNormal())),
+					moveTasksToColumn("left").pipe(
+						Effect.tap(() => editor.exitToNormal()),
+						Effect.catchAll(Effect.logError),
+					),
 				),
 			},
 			{
-				key: "Right",
+				key: "right",
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(Effect.tap(() => editor.exitToNormal())),
+					moveTasksToColumn("right").pipe(
+						Effect.tap(() => editor.exitToNormal()),
+						Effect.catchAll(Effect.logError),
+					),
 				),
 			},
 			{
@@ -922,25 +948,25 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: nav.move("right"),
 			},
 			{
-				key: "Down",
+				key: "down",
 				mode: "select",
 				description: "Move down",
 				action: nav.move("down"),
 			},
 			{
-				key: "Up",
+				key: "up",
 				mode: "select",
 				description: "Move up",
 				action: nav.move("up"),
 			},
 			{
-				key: "Left",
+				key: "left",
 				mode: "select",
 				description: "Move left",
 				action: nav.move("left"),
 			},
 			{
-				key: "Right",
+				key: "right",
 				mode: "select",
 				description: "Move right",
 				action: nav.move("right"),
@@ -965,26 +991,35 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				key: "s",
 				mode: "sort",
 				description: "Sort by session status",
-				action: editor.cycleSort("session").pipe(Effect.tap(() => editor.exitToNormal())),
+				action: editor.cycleSort("session").pipe(
+					Effect.tap(() => editor.exitToNormal()),
+					Effect.catchAll(Effect.logError),
+				),
 			},
 			{
 				key: "p",
 				mode: "sort",
 				description: "Sort by priority",
-				action: editor.cycleSort("priority").pipe(Effect.tap(() => editor.exitToNormal())),
+				action: editor.cycleSort("priority").pipe(
+					Effect.tap(() => editor.exitToNormal()),
+					Effect.catchAll(Effect.logError),
+				),
 			},
 			{
 				key: "u",
 				mode: "sort",
 				description: "Sort by updated at",
-				action: editor.cycleSort("updated").pipe(Effect.tap(() => editor.exitToNormal())),
+				action: editor.cycleSort("updated").pipe(
+					Effect.tap(() => editor.exitToNormal()),
+					Effect.catchAll(Effect.logError),
+				),
 			},
 
 			// ======================================================================
 			// Universal (*)
 			// ======================================================================
 			{
-				key: "Escape",
+				key: "escape",
 				mode: "*",
 				description: "Exit/cancel",
 				action: Effect.suspend(() => handleEscape()),
@@ -994,7 +1029,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			// Overlay Mode
 			// ======================================================================
 			{
-				key: "Escape",
+				key: "escape",
 				mode: "overlay",
 				description: "Close overlay",
 				action: overlay.pop().pipe(Effect.asVoid),
