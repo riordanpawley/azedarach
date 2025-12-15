@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 1.0.1
-Updated: 2025-12-14
+Version: 2.0.0
+Updated: 2025-12-15
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -121,6 +121,284 @@ src/
 - **Other worktrees**: Run `bd sync` manually at session end
 
 **Full reference:** `.claude/skills/workflow/beads-tracking.skill.md`
+
+## State Management Architecture
+
+This project uses a **three-layer reactive architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         React Components                         │
+│   useAtomValue(modeAtom)  │  useAtom(startSessionAtom)          │
+└─────────────────────────────────────────────────────────────────┘
+                                    ▲
+                                    │ effect-atom bridge
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          Atoms (atoms.ts)                        │
+│   appRuntime.atom()  │  appRuntime.fn()  │  Atom.readable()     │
+└─────────────────────────────────────────────────────────────────┘
+                                    ▲
+                                    │ Effect services
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        Effect Services                           │
+│   EditorService  │  NavigationService  │  BeadsClient           │
+│   (SubscriptionRef state + methods)                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Layer 1: Effect Services (State + Logic)
+
+Services hold state in `SubscriptionRef` and expose methods:
+
+```typescript
+// src/services/EditorService.ts
+export class EditorService extends Effect.Service<EditorService>()("EditorService", {
+  effect: Effect.gen(function* () {
+    // State lives in SubscriptionRef (reactive)
+    const mode = yield* SubscriptionRef.make<EditorMode>({ _tag: "normal" })
+
+    return {
+      mode,  // Exposed for atom subscription
+
+      // Methods mutate via SubscriptionRef
+      enterAction: () => SubscriptionRef.set(mode, { _tag: "action" }),
+      exitToNormal: () => SubscriptionRef.set(mode, { _tag: "normal" }),
+    }
+  }),
+}) {}
+```
+
+**Key patterns:**
+- State in `SubscriptionRef` → enables reactive subscriptions
+- Methods return `Effect.Effect<T>` → composable, testable
+- Use `Effect.Service` pattern with `dependencies` array for DI
+
+### Layer 2: Atoms (React Bridge)
+
+Atoms connect Effect services to React via `effect-atom`:
+
+```typescript
+// src/ui/atoms.ts
+
+// 1. Create runtime with all service layers
+const appLayer = Layer.mergeAll(
+  EditorService.Default,
+  NavigationService.Default,
+  // ... all services
+).pipe(Layer.provideMerge(BunContext.layer))
+
+export const appRuntime = Atom.runtime(appLayer)
+
+// 2. Subscribe to service state (reads SubscriptionRef)
+export const modeAtom = appRuntime.subscriptionRef(
+  Effect.gen(function* () {
+    const editor = yield* EditorService
+    return editor.mode  // Returns the SubscriptionRef itself
+  }),
+)
+
+// 3. Derive computed state from atoms
+export const isActionModeAtom = Atom.readable((get) => {
+  const result = get(modeAtom)
+  return Result.isSuccess(result) && result.value._tag === "action"
+})
+
+// 4. Create action atoms for mutations
+export const enterActionAtom = appRuntime.fn(() =>
+  Effect.gen(function* () {
+    const editor = yield* EditorService
+    yield* editor.enterAction()
+  }).pipe(Effect.catchAll(Effect.logError)),
+)
+```
+
+**Atom types:**
+| Pattern | Use Case | Example |
+|---------|----------|---------|
+| `appRuntime.subscriptionRef()` | Subscribe to service state | `modeAtom`, `cursorAtom` |
+| `appRuntime.atom()` | One-time async fetch | `tasksAtom`, `ghCLIAvailableAtom` |
+| `appRuntime.fn()` | Actions/mutations | `startSessionAtom`, `moveTaskAtom` |
+| `Atom.readable()` | Derived sync state | `selectedIdsAtom`, `searchQueryAtom` |
+| `Atom.make()` | Simple local state | `viewModeAtom` |
+
+### Layer 3: React Hooks (Consumption)
+
+Hooks wrap atoms for clean component APIs:
+
+```typescript
+// src/ui/hooks/useEditorMode.ts
+export function useEditorMode() {
+  // Read state
+  const modeResult = useAtomValue(modeAtom)
+  const mode = Result.isSuccess(modeResult) ? modeResult.value : DEFAULT_MODE
+
+  // Get action functions
+  const [, enterAction] = useAtom(enterActionAtom, { mode: "promise" })
+
+  return {
+    mode,
+    isAction: mode._tag === "action",
+    enterAction: () => enterAction(),
+  }
+}
+```
+
+**In components:**
+```tsx
+const { mode, isAction, enterAction } = useEditorMode()
+
+// Reading state triggers re-render on change
+if (isAction) { /* render action UI */ }
+
+// Mutations are async (return promises)
+const handleSpace = () => enterAction()
+```
+
+### Mutation Flow
+
+```
+User presses Space
+       │
+       ▼
+useKeyboard callback → enterAction()
+       │
+       ▼
+enterActionAtom (appRuntime.fn)
+       │
+       ▼
+EditorService.enterAction() → SubscriptionRef.set(mode, { _tag: "action" })
+       │
+       ▼
+modeAtom (subscriptionRef) detects change
+       │
+       ▼
+React re-renders with new mode
+```
+
+## TUI & Keyboard Architecture
+
+### Modal Editing (Helix-style)
+
+The UI uses modal editing like Helix/Vim:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                        Mode States                            │
+├──────────────────────────────────────────────────────────────┤
+│  normal  ─────v────→  select    (multi-select tasks)         │
+│     │                    │                                    │
+│     g ──────────────→  goto     (jump navigation)            │
+│     │                    │                                    │
+│  space ─────────────→  action   (task actions menu)          │
+│     │                    │                                    │
+│     / ──────────────→  search   (filter tasks)               │
+│     │                    │                                    │
+│     : ──────────────→  command  (VC REPL commands)           │
+│     │                    │                                    │
+│     , ──────────────→  sort     (sort menu)                  │
+│                                                               │
+│  All modes: Escape returns to normal                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Keyboard Handling
+
+App.tsx handles keyboard events with mode-specific handlers:
+
+```typescript
+// App.tsx
+useKeyboard((event) => {
+  // Route to mode-specific handler
+  if (isAction) return handleActionMode(event)
+  if (isSearch) return handleSearchMode(event)
+  if (isNormal) return handleNormalMode(event)
+  // ...
+})
+
+const handleNormalMode = useCallback((event: KeyEvent) => {
+  switch (event.name) {
+    case "j": moveDown(); break
+    case "k": moveUp(); break
+    case "space": enterAction(); break
+    case "g": enterGoto(); break
+    // ...
+  }
+}, [moveDown, moveUp, enterAction, enterGoto])
+```
+
+### Navigation State
+
+NavigationService manages cursor position:
+
+```typescript
+// Cursor position
+interface Cursor {
+  columnIndex: number  // Which kanban column (0-3)
+  taskIndex: number    // Which task in column
+}
+
+// Movement updates cursor
+const move = (direction: Direction) =>
+  SubscriptionRef.update(cursor, (c) => {
+    switch (direction) {
+      case "up": return { ...c, taskIndex: c.taskIndex - 1 }
+      case "down": return { ...c, taskIndex: c.taskIndex + 1 }
+      case "left": return { columnIndex: c.columnIndex - 1, taskIndex: 0 }
+      case "right": return { columnIndex: c.columnIndex + 1, taskIndex: 0 }
+    }
+  })
+```
+
+## Adding New Features
+
+### Adding a New Service
+
+1. Create service with `Effect.Service`:
+```typescript
+// src/services/MyService.ts
+export class MyService extends Effect.Service<MyService>()("MyService", {
+  dependencies: [OtherService.Default],  // Optional
+  effect: Effect.gen(function* () {
+    const state = yield* SubscriptionRef.make(initialState)
+    return {
+      state,
+      doThing: () => SubscriptionRef.update(state, ...),
+    }
+  }),
+}) {}
+```
+
+2. Add to layer in `atoms.ts`:
+```typescript
+const appLayer = Layer.mergeAll(
+  // ...existing services
+  MyService.Default,
+)
+```
+
+3. Create atoms:
+```typescript
+export const myStateAtom = appRuntime.subscriptionRef(
+  Effect.gen(function* () {
+    const svc = yield* MyService
+    return svc.state
+  }),
+)
+```
+
+### Adding a New Keybinding
+
+1. Add handler in appropriate mode function in `App.tsx`
+2. Update `docs/keybindings.md`
+3. If new mode needed, add to EditorService
+
+### Adding a New Overlay
+
+1. Add variant to OverlayService stack type
+2. Create overlay component in `src/ui/`
+3. Add rendering logic in App.tsx
 
 ## Key Design Decisions
 
