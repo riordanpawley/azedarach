@@ -6,7 +6,6 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
 import { Data, Effect } from "effect"
 import * as Schema from "effect/Schema"
 
@@ -345,7 +344,7 @@ const parseJson = <A, I, R>(
  * ```
  */
 export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
-	dependencies: [BunContext.layer],
+	dependencies: [],
 	effect: Effect.gen(function* () {
 		return {
 			list: (filters?: { status?: string; priority?: number; type?: string }) =>

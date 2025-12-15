@@ -68,15 +68,13 @@ export const Column = (props: ColumnProps) => {
 				<text fg={headerColor} attributes={props.isActiveColumn ? ATTR_BOLD : 0}>
 					{headerText}
 				</text>
-				{props.isActiveColumn && (
-					<text fg={headerColor}>{"─".repeat(headerText.length)}</text>
-				)}
+				{props.isActiveColumn && <text fg={headerColor}>{"─".repeat(headerText.length)}</text>}
 			</box>
 
 			{/* Scroll indicator - top */}
 			{visibleTasks.hasPrev && (
 				<box paddingLeft={1}>
-					<text fg={theme.overlay0}>{"  ↑ " + visibleTasks.startIndex + " more"}</text>
+					<text fg={theme.overlay0}>{`  ↑ ${visibleTasks.startIndex} more`}</text>
 				</box>
 			)}
 
@@ -98,7 +96,7 @@ export const Column = (props: ColumnProps) => {
 			{visibleTasks.hasMore && (
 				<box paddingLeft={1}>
 					<text fg={theme.overlay0}>
-						{"  ↓ " + (taskCount - visibleTasks.startIndex - maxVisible) + " more"}
+						{`  ↓ ${taskCount - visibleTasks.startIndex - maxVisible} more`}
 					</text>
 				</box>
 			)}

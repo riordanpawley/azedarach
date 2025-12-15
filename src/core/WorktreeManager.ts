@@ -13,7 +13,6 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
 import { Data, Effect, Ref, type Scope } from "effect"
 import { getWorktreePath } from "./paths.js"
 
@@ -307,7 +306,7 @@ const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
  * ```
  */
 export class WorktreeManager extends Effect.Service<WorktreeManager>()("WorktreeManager", {
-	dependencies: [BunContext.layer],
+	dependencies: [],
 	effect: Effect.gen(function* () {
 		// Track active worktrees in memory for fast lookups
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())

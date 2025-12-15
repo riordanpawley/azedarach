@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer } from "effect"
+import { Data, Effect } from "effect"
 
 export class NotInsideTmuxError extends Data.TaggedError("NotInsideTmuxError")<{
 	message: string

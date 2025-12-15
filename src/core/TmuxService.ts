@@ -1,8 +1,8 @@
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Context, Data, Effect, Layer } from "effect"
+import { Data, Effect } from "effect"
 
 // Errors
+// biome-ignore lint/complexity/noBannedTypes: <eh>
 export class TmuxNotFoundError extends Data.TaggedError("TmuxNotFoundError")<{}> {}
 export class SessionNotFoundError extends Data.TaggedError("SessionNotFoundError")<{
 	session: string
@@ -17,34 +17,6 @@ export interface TmuxSession {
 	attached: boolean
 }
 
-// Service interface
-export interface TmuxServiceI {
-	readonly newSession: (
-		name: string,
-		opts?: {
-			cwd?: string
-			command?: string
-			/** Custom prefix key (default: C-a to avoid Claude capturing C-b) */
-			prefix?: string
-		},
-	) => Effect.Effect<void, TmuxError>
-
-	readonly killSession: (name: string) => Effect.Effect<void, TmuxError | SessionNotFoundError>
-
-	readonly listSessions: () => Effect.Effect<TmuxSession[], TmuxError>
-
-	readonly hasSession: (name: string) => Effect.Effect<boolean, TmuxError>
-
-	readonly sendKeys: (
-		session: string,
-		keys: string,
-	) => Effect.Effect<void, TmuxError | SessionNotFoundError>
-
-	readonly attachCommand: (session: string) => string // Returns the command string to attach
-
-	readonly switchClient: (session: string) => Effect.Effect<void, TmuxError | SessionNotFoundError>
-}
-
 // Helper to run tmux commands
 const runTmux = (
 	args: string[],
@@ -56,7 +28,7 @@ const runTmux = (
 
 // Service implementation
 export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
-	dependencies: [BunContext.layer],
+	dependencies: [],
 	effect: Effect.gen(function* () {
 		return {
 			newSession: (name: string, opts?: { cwd?: string; command?: string; prefix?: string }) =>

@@ -17,7 +17,7 @@
  */
 
 import * as crypto from "node:crypto"
-import { Context, Data, Deferred, Duration, Effect, HashMap, Layer, Ref } from "effect"
+import { Data, Deferred, Duration, Effect, HashMap, Ref } from "effect"
 import { normalizePath } from "./paths.js"
 
 // ============================================================================

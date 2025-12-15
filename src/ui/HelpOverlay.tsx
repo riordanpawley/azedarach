@@ -10,7 +10,7 @@ const ATTR_BOLD = 1
  */
 const KeyLine = ({ keys, description }: { keys: string; description: string }) => (
 	<box flexDirection="row">
-		<text fg={theme.lavender}>{"  " + keys}</text>
+		<text fg={theme.lavender}>{`  ${keys}`}</text>
 		<text fg={theme.text}>{" ".repeat(Math.max(1, 12 - keys.length)) + description}</text>
 	</box>
 )
@@ -40,7 +40,7 @@ export const HelpOverlay = () => {
 			bottom={0}
 			alignItems="center"
 			justifyContent="center"
-			backgroundColor={theme.crust + "CC"}
+			backgroundColor={`${theme.crust}CC`}
 		>
 			<box
 				borderStyle="rounded"

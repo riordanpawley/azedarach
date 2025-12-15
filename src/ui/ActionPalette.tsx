@@ -8,7 +8,7 @@ export interface ActionPaletteProps {
 	task?: TaskWithSession
 }
 
-const ATTR_BOLD = 1
+const _ATTR_BOLD = 1
 const ATTR_DIM = 2
 
 /**
@@ -60,7 +60,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 					{keyName}
 				</text>
 				<text fg={fgColor} attributes={attrs}>
-					{" " + description}
+					{` ${description}`}
 				</text>
 			</box>
 		)

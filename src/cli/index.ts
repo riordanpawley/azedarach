@@ -8,11 +8,10 @@
 import { Args, Command, Options } from "@effect/cli"
 import * as FileSystem from "@effect/platform/FileSystem"
 import * as Path from "@effect/platform/Path"
-import { BunContext, BunRuntime } from "@effect/platform-bun"
+import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option } from "effect"
-import { AppConfigLiveWithPlatform } from "../config/index.js"
-import { BeadsClientLiveWithPlatform } from "../core/BeadsClient.js"
-import { SessionManager, SessionManagerLive } from "../core/SessionManager.js"
+import { AppConfigConfig } from "../config/AppConfig.js"
+import { SessionManager } from "../core/SessionManager.js"
 
 // ============================================================================
 // Shared Options
@@ -128,9 +127,9 @@ const startHandler = (args: {
 		yield* validateBeadsDatabase(cwd)
 
 		// Create the combined layer with config and platform dependencies
-		const appConfigLayer = AppConfigLiveWithPlatform(cwd, configPath)
+		const appConfigLayer = AppConfigConfig.Default(cwd, configPath)
 		const fullLayer = Layer.provideMerge(
-			SessionManagerLive,
+			SessionManager.Default,
 			Layer.merge(appConfigLayer, BunContext.layer),
 		)
 
@@ -397,7 +396,4 @@ export { cli }
  * Run the CLI with the provided arguments (full process.argv)
  */
 export const run = (argv: ReadonlyArray<string>) =>
-	cliRunner(argv).pipe(
-		Effect.provide(BeadsClientLiveWithPlatform),
-		Effect.provide(BunContext.layer),
-	)
+	cliRunner(argv).pipe(Effect.provide(BunContext.layer))

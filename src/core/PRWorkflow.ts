@@ -10,8 +10,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Context, Data, Effect, Layer, Option } from "effect"
+import { Data, Effect, Option } from "effect"
 import {
 	BeadsClient,
 	type BeadsError,

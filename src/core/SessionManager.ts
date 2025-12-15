@@ -18,14 +18,8 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Context, Data, Effect, HashMap, Layer, PubSub, Ref } from "effect"
-import {
-	AppConfig,
-	AppConfigLiveWithPlatform,
-	ConfigParseError,
-	type ResolvedConfig,
-} from "../config/index.js"
+import { Data, Effect, HashMap, Layer, PubSub, Ref } from "effect"
+import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getSessionName } from "./paths.js"
@@ -35,12 +29,7 @@ import {
 	TmuxService,
 	type SessionNotFoundError as TmuxSessionNotFoundError,
 } from "./TmuxService.js"
-import {
-	GitError,
-	type NotAGitRepoError,
-	type Worktree,
-	WorktreeManager,
-} from "./WorktreeManager.js"
+import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 
 // ============================================================================
 // Type Definitions
@@ -267,6 +256,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		WorktreeManager.Default,
 		TmuxService.Default,
 		BeadsClient.Default,
+		AppConfig.Default,
 		StateDetector.Default,
 	],
 	effect: Effect.gen(function* () {
@@ -274,7 +264,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const worktreeManager = yield* WorktreeManager
 		const tmuxService = yield* TmuxService
 		const beadsClient = yield* BeadsClient
-		const stateDetector = yield* StateDetector
+		const _stateDetector = yield* StateDetector
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
@@ -314,23 +304,23 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					}
 
 					// Get bead info to verify it exists
-					const bead = yield* beadsClient.show(beadId)
+					const _bead = yield* beadsClient.show(beadId)
 
-				// Create worktree (idempotent - returns existing if present)
-				const worktree = yield* worktreeManager.create({
-					beadId,
-					projectPath,
-					baseBranch,
-				})
+					// Create worktree (idempotent - returns existing if present)
+					const worktree = yield* worktreeManager.create({
+						beadId,
+						projectPath,
+						baseBranch,
+					})
 
-				// Copy .claude/ directory to worktree for permission inheritance
-				// This prevents Claude from asking for permissions again in each worktree
-				const claudeConfigPath = `${projectPath}/.claude`
-				const worktreeClaudePath = `${worktree.path}/.claude`
-				const copyClaudeConfigCmd = Command.make("cp", "-r", claudeConfigPath, worktreeClaudePath)
-				yield* Command.exitCode(copyClaudeConfigCmd).pipe(
-					Effect.catchAll(() => Effect.void), // Non-critical if .claude doesn't exist
-				)
+					// Copy .claude/ directory to worktree for permission inheritance
+					// This prevents Claude from asking for permissions again in each worktree
+					const claudeConfigPath = `${projectPath}/.claude`
+					const worktreeClaudePath = `${worktree.path}/.claude`
+					const copyClaudeConfigCmd = Command.make("cp", "-r", claudeConfigPath, worktreeClaudePath)
+					yield* Command.exitCode(copyClaudeConfigCmd).pipe(
+						Effect.catchAll(() => Effect.void), // Non-critical if .claude doesn't exist
+					)
 
 					// Get configuration for init commands and session settings
 					const worktreeConfig = resolvedConfig.worktree
