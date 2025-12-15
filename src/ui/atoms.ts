@@ -7,7 +7,7 @@
 import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect, Layer, Logger, pipe, Schedule, Stream, SubscriptionRef } from "effect"
+import { Effect, Layer, Logger, pipe, type Record, Schedule, SubscriptionRef } from "effect"
 import { ModeService } from "../atoms/runtime"
 import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
@@ -152,15 +152,7 @@ export const vcStatusPollerAtom = appRuntime.atom(
  *
  * Usage: const vcStatus = useAtomValue(vcStatusAtom)
  */
-export const vcStatusAtom = appRuntime.atom(
-	(get) =>
-		pipe(
-			get.result(vcStatusRefAtom),
-			Effect.map((_) => _.changes),
-			Stream.unwrap,
-		),
-	{ initialValue: VC_STATUS_INITIAL },
-)
+export const vcStatusAtom = appRuntime.subscriptionRef((get) => pipe(get.result(vcStatusRefAtom)))
 
 /**
  * Atom for currently selected task ID
@@ -581,21 +573,10 @@ export const sortConfigAtom = appRuntime.subscriptionRef(
 )
 
 /**
- * Navigation cursor atom - subscribes to NavigationService cursor changes
- *
- * Uses appRuntime.subscriptionRef() for automatic reactive updates.
- *
- * Usage: const cursor = useAtomValue(cursorAtom)
- */
-export const cursorAtom = appRuntime.subscriptionRef(
-	Effect.gen(function* () {
-		const nav = yield* NavigationService
-		return nav.cursor
-	}),
-)
-
-/**
  * Focused task ID atom - subscribes to NavigationService focusedTaskId
+ *
+ * This is the source of truth for which task is selected.
+ * Position (columnIndex, taskIndex) is derived in useNavigation.
  *
  * Usage: const focusedTaskId = useAtomValue(focusedTaskIdAtom)
  */
@@ -607,18 +588,34 @@ export const focusedTaskIdAtom = appRuntime.subscriptionRef(
 )
 
 /**
- * Set focused task ID - syncs selected task from UI to service
+ * Initialize navigation - ensures a task is focused
  *
- * This is called by useNavigation when the selected task changes,
- * allowing KeyboardService to access the currently selected task.
+ * Called when the app starts or when no task is focused.
+ * Sets focusedTaskId to the first available task.
  *
- * Usage: const setFocusedTask = useAtomSet(setFocusedTaskAtom, { mode: "promise" })
- *        setFocusedTask("az-123")
+ * Usage: const initNav = useAtomSet(initializeNavigationAtom, { mode: "promise" })
+ *        initNav()
  */
-export const setFocusedTaskAtom = appRuntime.fn((taskId: string | null) =>
+export const initializeNavigationAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
-		yield* nav.setFocusedTask(taskId)
+		yield* nav.initialize()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Refresh board data from BeadsClient
+ *
+ * Must be called before navigation can work, as NavigationService
+ * depends on BoardService for filtered task data.
+ *
+ * Usage: const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
+ *        refreshBoard()
+ */
+export const refreshBoardAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		yield* board.refresh()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -754,10 +751,15 @@ export const enterGotoAtom = appRuntime.fn(() =>
  * Enter jump mode with labels
  *
  * Usage: const [, enterJump] = useAtom(enterJumpAtom, { mode: "promise" })
- *        await enterJump(labelsMap)
+ *        await enterJump(labelsRecord)
  */
 export const enterJumpAtom = appRuntime.fn(
-	(labels: Map<string, { taskId: string; columnIndex: number; taskIndex: number }>) =>
+	(
+		labels: Record.ReadonlyRecord<
+			string,
+			{ taskId: string; columnIndex: number; taskIndex: number }
+		>,
+	) =>
 		Effect.gen(function* () {
 			const editor = yield* ModeService
 			yield* editor.enterJump(labels)

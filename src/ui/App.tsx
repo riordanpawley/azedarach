@@ -5,16 +5,17 @@
  */
 
 import { Result } from "@effect-atom/atom"
-import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect-atom/atom-react"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { useCallback, useMemo } from "react"
+import { useCallback, useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
 import {
+	boardTasksAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	handleKeyAtom,
-	tasksAtom,
+	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
 } from "./atoms"
@@ -98,9 +99,17 @@ export const App = () => {
 	// Data Atoms
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const tasksResult = useAtomValue(tasksAtom)
-	const refreshTasks = useAtomRefresh(tasksAtom)
+	// Use BoardService as single source of truth for task data
+	// This ensures UI updates when KeyboardService calls board.refresh()
+	const tasksResult = useAtomValue(boardTasksAtom)
 	const vcStatusResult = useAtomValue(vcStatusAtom)
+	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
+
+	// Initialize BoardService data on mount
+	// This is required for NavigationService to work (ID-based cursor needs task data)
+	useEffect(() => {
+		refreshBoard()
+	}, [refreshBoard])
 
 	// Actions for prompts (these bypass keyboard handling)
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
@@ -296,7 +305,7 @@ export const App = () => {
 					activeColumnIndex={columnIndex}
 					activeTaskIndex={taskIndex}
 					selectedIds={new Set(selectedIds)}
-					jumpLabels={isJump ? (jumpLabels ?? null) : null}
+					jumpLabels={isJump ? jumpLabels : null}
 					pendingJumpKey={pendingJumpKey ?? null}
 					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
@@ -345,7 +354,7 @@ export const App = () => {
 						createTask(params)
 							.then((issue) => {
 								dismissOverlay()
-								refreshTasks()
+								refreshBoard()
 								showSuccess(`Created task: ${issue.id}`)
 							})
 							.catch((error) => {

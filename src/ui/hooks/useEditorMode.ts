@@ -7,6 +7,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
+import type { Record as R } from "effect"
 import { useMemo } from "react"
 import type { SortConfig, SortField } from "../../services/EditorService"
 import {
@@ -130,7 +131,7 @@ export function useEditorMode() {
 				enterGoto()
 			},
 
-			enterJump: (labels: Map<string, JumpTarget>) => {
+			enterJump: (labels: R.ReadonlyRecord<string, JumpTarget>) => {
 				enterJump(labels)
 			},
 

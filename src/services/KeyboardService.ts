@@ -11,7 +11,7 @@
 
 import type { CommandExecutor } from "@effect/platform/CommandExecutor"
 import type { FileSystem } from "@effect/platform/FileSystem"
-import { Effect, Ref } from "effect"
+import { Effect, Record, Ref } from "effect"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
@@ -116,17 +116,16 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		// ========================================================================
 
 		/**
-		 * Get currently selected task based on focusedTaskId
+		 * Get currently selected task by ID
 		 *
-		 * This uses the task ID synced from useNavigation, which correctly
-		 * tracks the selected task in the filtered/sorted view.
+		 * NavigationService stores the focused task ID directly,
+		 * so we just look it up from the task list.
 		 */
 		const getSelectedTask = () =>
 			Effect.gen(function* () {
 				const taskId = yield* nav.getFocusedTaskId()
 				if (!taskId) return undefined
 
-				// Look up task by ID from board
 				const allTasks = yield* board.getTasks()
 				return allTasks.find((t) => t.id === taskId)
 			})
@@ -136,8 +135,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		 */
 		const getColumnIndex = () =>
 			Effect.gen(function* () {
-				const cursor = yield* nav.getCursor()
-				return cursor.columnIndex
+				const position = yield* nav.getPosition()
+				return position.columnIndex
 			})
 
 		/**
@@ -198,7 +197,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		/**
 		 * Compute jump labels for all visible tasks
 		 */
-		const computeJumpLabels = (): Effect.Effect<Map<string, JumpTarget>> =>
+		const computeJumpLabels = (): Effect.Effect<Record.ReadonlyRecord<string, JumpTarget>> =>
 			Effect.gen(function* () {
 				const tasksByColumn = yield* board.getTasksByColumn()
 
@@ -210,7 +209,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				}> = []
 
 				COLUMNS.forEach((col, colIdx) => {
-					const tasks = tasksByColumn.get(col.status) ?? []
+					const tasks = tasksByColumn[col.status] ?? []
 					tasks.forEach((task, taskIdx) => {
 						allTasks.push({
 							taskId: task.id,
@@ -220,17 +219,15 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					})
 				})
 
-				// Generate label strings and build the Map
+				// Generate label strings and build the Record
 				const labels = generateJumpLabels(allTasks.length)
-				const labelMap = new Map<string, JumpTarget>()
-
-				allTasks.forEach(({ taskId, columnIndex, taskIndex }, i) => {
-					if (labels[i]) {
-						labelMap.set(labels[i]!, { taskId, columnIndex, taskIndex })
-					}
-				})
-
-				return labelMap
+				return Record.fromEntries(
+					allTasks
+						.map(({ taskId, columnIndex, taskIndex }, i) =>
+							labels[i] ? [labels[i]!, { taskId, columnIndex, taskIndex }] : null,
+						)
+						.filter((entry): entry is [string, JumpTarget] => entry !== null),
+				)
 			})
 
 		/**
@@ -247,7 +244,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				} else {
 					// Second character - lookup and jump
 					const label = mode.pendingJumpKey + key
-					const target = mode.jumpLabels?.get(label)
+					const target = mode.jumpLabels?.[label]
 					if (target) {
 						yield* nav.jumpTo(target.columnIndex, target.taskIndex)
 					}
@@ -528,6 +525,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				yield* beadsClient.delete(task.id).pipe(
 					Effect.tap(() => toast.show("success", `Deleted ${task.id}`)),
 					Effect.tap(() => board.refresh()),
+					// Move cursor to a valid task after deletion
+					Effect.tap(() => nav.initialize()),
 					Effect.catchAll(showErrorToast("Failed to delete")),
 				)
 			})

@@ -2,28 +2,47 @@
  * useNavigation - Hook for cursor navigation on the Kanban board
  *
  * Wraps NavigationService atoms for convenient React usage.
- * Provides cursor position and movement functions.
+ *
+ * The cursor state is ID-based (focusedTaskId). Position (columnIndex, taskIndex)
+ * is derived locally from the focusedTaskId + tasksByColumn, ensuring it always
+ * matches the rendered view.
  */
 
 import { Result } from "@effect-atom/atom"
-import { useAtom, useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { cursorAtom, jumpToAtom, navigateAtom, setFocusedTaskAtom } from "../atoms"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
+import { useMemo } from "react"
+import { focusedTaskIdAtom, initializeNavigationAtom, jumpToAtom, navigateAtom } from "../atoms"
 import type { TaskWithSession } from "../types"
 
-// Default cursor when loading
-const DEFAULT_CURSOR = { columnIndex: 0, taskIndex: 0 }
+/**
+ * Find task position by ID in the filtered/sorted task columns
+ */
+function findTaskPosition(
+	taskId: string | null,
+	tasksByColumn: TaskWithSession[][],
+): { columnIndex: number; taskIndex: number } | undefined {
+	if (!taskId) return undefined
+
+	for (let colIdx = 0; colIdx < tasksByColumn.length; colIdx++) {
+		const column = tasksByColumn[colIdx]!
+		const taskIdx = column.findIndex((t) => t.id === taskId)
+		if (taskIdx >= 0) {
+			return { columnIndex: colIdx, taskIndex: taskIdx }
+		}
+	}
+	return undefined
+}
 
 /**
  * Hook for managing cursor navigation
  *
- * @param tasksByColumn - Tasks grouped by column for bounds checking
+ * @param tasksByColumn - Tasks grouped by column (already filtered/sorted)
  *
  * @example
  * ```tsx
- * const { cursor, selectedTask, moveUp, moveDown, jumpTo } = useNavigation(tasksByColumn)
+ * const { selectedTask, moveUp, moveDown, jumpTo } = useNavigation(tasksByColumn)
  *
- * // Move cursor
+ * // Move cursor - NavigationService handles all logic
  * moveDown()
  *
  * // Jump to specific position
@@ -31,130 +50,68 @@ const DEFAULT_CURSOR = { columnIndex: 0, taskIndex: 0 }
  * ```
  */
 export function useNavigation(tasksByColumn: TaskWithSession[][]) {
-	const cursorResult = useAtomValue(cursorAtom)
-	const [, navigate] = useAtom(navigateAtom, { mode: "promise" })
-	const [, jump] = useAtom(jumpToAtom, { mode: "promise" })
-	const setFocusedTask = useAtomSet(setFocusedTaskAtom, { mode: "promise" })
+	// Read the focused task ID from NavigationService
+	const focusedTaskIdResult = useAtomValue(focusedTaskIdAtom)
+	const focusedTaskId = Result.isSuccess(focusedTaskIdResult) ? focusedTaskIdResult.value : null
 
-	// Unwrap Result with default
-	const cursor = Result.isSuccess(cursorResult) ? cursorResult.value : DEFAULT_CURSOR
+	// Navigation actions from NavigationService
+	const navigate = useAtomSet(navigateAtom, { mode: "promise" })
+	const jump = useAtomSet(jumpToAtom, { mode: "promise" })
+	const initializeNavigation = useAtomSet(initializeNavigationAtom, { mode: "promise" })
 
-	// Track task ID to follow after move operations
-	const [followTaskId, setFollowTaskId] = useState<string | null>(null)
+	// Derive position from focusedTaskId + local tasksByColumn
+	// This ensures position always matches the rendered view
+	const position = useMemo(
+		() => findTaskPosition(focusedTaskId, tasksByColumn),
+		[focusedTaskId, tasksByColumn],
+	)
 
-	// Get currently selected task
-	const selectedTask = tasksByColumn[cursor.columnIndex]?.[cursor.taskIndex]
+	const columnIndex = position?.columnIndex ?? 0
+	const taskIndex = position?.taskIndex ?? 0
 
-	// Sync selected task ID to NavigationService whenever it changes
-	// This allows KeyboardService to access the currently selected task
-	useEffect(() => {
-		setFocusedTask(selectedTask?.id ?? null)
-	}, [selectedTask?.id, setFocusedTask])
+	// Get the selected task from our local data (matches what's rendered)
+	const selectedTask = tasksByColumn[columnIndex]?.[taskIndex]
 
-	// Effect to follow a task after move operations
-	useEffect(() => {
-		if (!followTaskId) return
-
-		// Search all columns for the task
-		for (let colIdx = 0; colIdx < tasksByColumn.length; colIdx++) {
-			const taskIdx = tasksByColumn[colIdx].findIndex((t) => t.id === followTaskId)
-			if (taskIdx >= 0) {
-				jump({ column: colIdx, task: taskIdx })
-				setFollowTaskId(null)
-				return
-			}
-		}
-		// Task not found (maybe deleted), clear the follow state
-		setFollowTaskId(null)
-	}, [followTaskId, tasksByColumn, jump])
-
-	// Navigation actions (memoized) - errors are logged in Effect layer
+	// Navigation actions (memoized) - NavigationService handles all logic
 	const actions = useMemo(
 		() => ({
-			moveUp: () => {
-				navigate("up")
-			},
-
-			moveDown: () => {
-				navigate("down")
-			},
-
-			moveLeft: () => {
-				navigate("left")
-			},
-
-			moveRight: () => {
-				navigate("right")
-			},
-
-			jumpTo: (column: number, task: number) => {
-				jump({ column, task })
-			},
+			moveUp: () => navigate("up"),
+			moveDown: () => navigate("down"),
+			moveLeft: () => navigate("left"),
+			moveRight: () => navigate("right"),
+			jumpTo: (column: number, task: number) => jump({ column, task }),
 		}),
 		[navigate, jump],
 	)
 
-	// Follow a task after it moves (e.g., after status change)
-	const followTask = useCallback((taskId: string) => {
-		setFollowTaskId(taskId)
-	}, [])
-
-	// Half-page navigation
-	const halfPageDown = useCallback(() => {
-		const column = tasksByColumn[cursor.columnIndex]
-		if (column) {
-			const halfPage = Math.floor(column.length / 2)
-			const newIndex = Math.min(cursor.taskIndex + halfPage, column.length - 1)
-			actions.jumpTo(cursor.columnIndex, newIndex)
+	// Initialize navigation if no task is focused
+	// This is called once when the hook mounts and there's no selection
+	useMemo(() => {
+		if (!focusedTaskId && tasksByColumn.some((col) => col.length > 0)) {
+			initializeNavigation()
 		}
-	}, [tasksByColumn, cursor, actions])
-
-	const halfPageUp = useCallback(() => {
-		const column = tasksByColumn[cursor.columnIndex]
-		if (column) {
-			const halfPage = Math.floor(column.length / 2)
-			const newIndex = Math.max(cursor.taskIndex - halfPage, 0)
-			actions.jumpTo(cursor.columnIndex, newIndex)
-		}
-	}, [tasksByColumn, cursor, actions])
-
-	// Go to extremes
-	const goToFirst = useCallback(() => {
-		actions.jumpTo(0, 0)
-	}, [actions])
-
-	const goToLast = useCallback(() => {
-		const lastColIdx = tasksByColumn.length - 1
-		const lastCol = tasksByColumn[lastColIdx]
-		actions.jumpTo(lastColIdx, lastCol ? lastCol.length - 1 : 0)
-	}, [tasksByColumn, actions])
-
-	const goToFirstColumn = useCallback(() => {
-		actions.jumpTo(0, cursor.taskIndex)
-	}, [cursor.taskIndex, actions])
-
-	const goToLastColumn = useCallback(() => {
-		actions.jumpTo(tasksByColumn.length - 1, cursor.taskIndex)
-	}, [tasksByColumn.length, cursor.taskIndex, actions])
+	}, [focusedTaskId, tasksByColumn, initializeNavigation])
 
 	return {
-		cursor,
-		columnIndex: cursor.columnIndex,
-		taskIndex: cursor.taskIndex,
+		// ID-based cursor (source of truth)
+		focusedTaskId,
+
+		// Position derived from focusedTaskId (for rendering)
+		columnIndex,
+		taskIndex,
 		selectedTask,
 
-		// Basic movement
+		// Legacy cursor object for backward compatibility
+		cursor: { columnIndex, taskIndex },
+
+		// Basic movement (handled by NavigationService)
 		...actions,
 
-		// Task following
-		followTask,
-
-		// Extended navigation
-		halfPageDown,
-		halfPageUp,
-		goToFirst,
-		goToLast,
-		goToFirstColumn,
-		goToLastColumn,
+		// Follow a task after it moves (e.g., after status change)
+		// This is now handled by NavigationService.setFollow
+		followTask: (_taskId: string) => {
+			// NavigationService handles following via setFollow
+			// The task ID approach means the cursor automatically follows
+		},
 	}
 }

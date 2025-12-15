@@ -5,6 +5,7 @@
  * in a single scrollable list, with one row per task.
  */
 
+import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
 import { columnColors, getPriorityColor, theme } from "./theme"
 import type { JumpTarget, TaskWithSession } from "./types"
@@ -14,12 +15,12 @@ import { COLUMNS, SESSION_INDICATORS } from "./types"
 export const COMPACT_ROW_HEIGHT = 1
 
 export interface CompactViewProps {
-	tasks: TaskWithSession[]
+	tasks: readonly TaskWithSession[]
 	selectedTaskId?: string
 	activeColumnIndex?: number
 	activeTaskIndex?: number
 	selectedIds?: Set<string>
-	jumpLabels?: ReadonlyMap<string, JumpTarget> | null
+	jumpLabels?: ReadonlyRecord<string, JumpTarget> | null
 	pendingJumpKey?: string | null
 	terminalHeight?: number
 }
@@ -187,9 +188,9 @@ export const CompactView = (props: CompactViewProps) => {
 		if (!labels) return null
 
 		const taskToLabel = new Map<string, string>()
-		labels.forEach((target, label) => {
+		for (const [label, target] of Object.entries(labels)) {
 			taskToLabel.set(target.taskId, label)
-		})
+		}
 		return taskToLabel
 	}, [props.jumpLabels])
 
