@@ -1,6 +1,7 @@
 // src/services/OverlayService.ts
 
-import { Effect, SubscriptionRef } from "effect"
+import { Data, Effect, SubscriptionRef } from "effect"
+import { emptyArray } from "../lib/empty"
 
 export type Overlay =
 	| { readonly _tag: "help" }
@@ -13,13 +14,14 @@ export type Overlay =
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	effect: Effect.gen(function* () {
 		// SubscriptionRef for reactive overlay stack
-		const stack = yield* SubscriptionRef.make<ReadonlyArray<Overlay>>([])
+		const stack = yield* SubscriptionRef.make<ReadonlyArray<Overlay>>(emptyArray())
 
 		return {
 			// Expose SubscriptionRef for atom subscription
 			stack,
 
-			push: (overlay: Overlay) => SubscriptionRef.update(stack, (s) => [...s, overlay]),
+			push: (overlay: Overlay) =>
+				SubscriptionRef.update(stack, (s) => [...s, Data.struct(overlay)]),
 
 			pop: () =>
 				SubscriptionRef.modify(stack, (s) => {
@@ -27,7 +29,7 @@ export class OverlayService extends Effect.Service<OverlayService>()("OverlaySer
 					return [s[s.length - 1], s.slice(0, -1)]
 				}),
 
-			clear: () => SubscriptionRef.set(stack, []),
+			clear: () => SubscriptionRef.set(stack, emptyArray()),
 
 			current: () =>
 				SubscriptionRef.get(stack).pipe(

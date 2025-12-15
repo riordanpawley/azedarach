@@ -64,40 +64,6 @@ const appLayer = Layer.mergeAll(
  */
 export const appRuntime = Atom.runtime(appLayer)
 
-/**
- * Async atom that fetches all tasks from BeadsClient
- *
- * Uses the appRuntime to access BeadsClient service.
- * Returns Result.Result<TaskWithSession[], Error> for proper loading/error states.
- *
- * Note: Fetches ALL issues (not just ready) so we can display the full kanban board.
- * Merges session state from SessionManager for tasks with active sessions.
- */
-export const tasksAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const client = yield* BeadsClient
-		const sessionManager = yield* SessionManager
-
-		// Fetch all issues (no status filter) to populate the full board
-		const issues = yield* client.list()
-
-		// Get active sessions to merge their state
-		const activeSessions = yield* sessionManager.listActive()
-		const sessionStateMap = new Map(
-			activeSessions.map((session) => [session.beadId, session.state]),
-		)
-
-		// Map issues to TaskWithSession, using real session state if available
-		const tasks: TaskWithSession[] = issues.map((issue) => ({
-			...issue,
-			sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
-		}))
-
-		return tasks
-	}),
-	{ initialValue: [] },
-)
-
 // ============================================================================
 // VC Status Atoms (scoped polling with SubscriptionRef)
 // ============================================================================
