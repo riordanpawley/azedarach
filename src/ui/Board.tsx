@@ -5,19 +5,20 @@
  * - kanban: Traditional column-based view with task cards
  * - compact: Linear list view with minimal row height
  */
+import type { Record as R } from "effect"
 import { useMemo } from "react"
 import { Column } from "./Column"
 import { CompactView } from "./CompactView"
-import type { ColumnStatus, JumpTarget, TaskWithSession, ViewMode } from "./types"
+import type { JumpTarget, TaskWithSession, ViewMode } from "./types"
 import { COLUMNS } from "./types"
 
 export interface BoardProps {
-	tasks: TaskWithSession[]
+	tasks: readonly TaskWithSession[]
 	selectedTaskId?: string
 	activeColumnIndex?: number
 	activeTaskIndex?: number
 	selectedIds?: Set<string>
-	jumpLabels?: ReadonlyMap<string, JumpTarget> | null
+	jumpLabels?: R.ReadonlyRecord<string, JumpTarget> | null
 	pendingJumpKey?: string | null
 	terminalHeight?: number
 	viewMode?: ViewMode
@@ -57,9 +58,9 @@ export const Board = (props: BoardProps) => {
 		if (!labels) return null
 
 		const taskToLabel = new Map<string, string>()
-		labels.forEach((target, label) => {
+		for (const [label, target] of Object.entries(labels)) {
 			taskToLabel.set(target.taskId, label)
-		})
+		}
 		return taskToLabel
 	}, [props.jumpLabels])
 
@@ -79,24 +80,29 @@ export const Board = (props: BoardProps) => {
 		)
 	}
 
-	// Render Kanban view (default)
+	// Render kanban view
 	return (
-		<box flexDirection="row" width="100%" height="100%" padding={1}>
-			{COLUMNS.map((column, index) => (
-				<Column
-					key={column.status}
-					title={column.title}
-					status={column.status as ColumnStatus}
-					tasks={tasksByStatus.get(column.status) || []}
-					selectedTaskId={props.selectedTaskId}
-					selectedTaskIndex={props.activeColumnIndex === index ? props.activeTaskIndex : undefined}
-					isActiveColumn={props.activeColumnIndex === index}
-					selectedIds={props.selectedIds}
-					taskJumpLabels={taskJumpLabels}
-					pendingJumpKey={props.pendingJumpKey}
-					maxVisible={props.terminalHeight}
-				/>
-			))}
+		<box flexDirection="row" width="100%" height="100%">
+			{COLUMNS.map((col, colIndex) => {
+				const columnTasks = tasksByStatus.get(col.status) || []
+				const isActiveColumn = colIndex === props.activeColumnIndex
+
+				return (
+					<Column
+						key={col.id}
+						title={col.title}
+						status={col.status}
+						tasks={columnTasks}
+						selectedTaskId={props.selectedTaskId}
+						isActiveColumn={isActiveColumn}
+						selectedTaskIndex={isActiveColumn ? (props.activeTaskIndex ?? 0) : undefined}
+						selectedIds={props.selectedIds}
+						taskJumpLabels={taskJumpLabels}
+						pendingJumpKey={props.pendingJumpKey}
+						maxVisible={props.terminalHeight}
+					/>
+				)
+			})}
 		</box>
 	)
 }

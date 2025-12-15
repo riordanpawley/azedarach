@@ -1,6 +1,6 @@
 // src/services/EditorService.ts
 
-import { Effect, SubscriptionRef } from "effect"
+import { Effect, type Record, SubscriptionRef } from "effect"
 
 /**
  * Jump target for goto mode
@@ -58,7 +58,7 @@ export type EditorMode =
 	| {
 			readonly _tag: "goto"
 			readonly gotoSubMode: GotoSubMode
-			readonly jumpLabels: ReadonlyMap<string, JumpTarget> | null
+			readonly jumpLabels: Record.ReadonlyRecord<string, JumpTarget> | null
 			readonly pendingJumpKey: string | null
 	  }
 	| { readonly _tag: "action" }
@@ -169,7 +169,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					pendingJumpKey: null,
 				}),
 
-			enterJump: (labels: Map<string, JumpTarget>) =>
+			enterJump: (labels: Record.ReadonlyRecord<string, JumpTarget>) =>
 				SubscriptionRef.set(mode, {
 					_tag: "goto",
 					gotoSubMode: "jump",

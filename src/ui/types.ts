@@ -1,6 +1,7 @@
 /**
  * Shared types for UI components
  */
+import type { Record } from "effect"
 import type { Issue } from "../core/BeadsClient"
 
 /**
@@ -116,7 +117,7 @@ export interface AppState {
 	mode: EditorMode
 	gotoSubMode: GotoSubMode | null
 	selectedIds: Set<string>
-	jumpLabels: ReadonlyMap<string, JumpTarget> | null
+	jumpLabels: Record.ReadonlyRecord<string, JumpTarget> | null
 	pendingJumpKey: string | null
 }
 
