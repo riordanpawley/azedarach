@@ -677,7 +677,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: editor.enterSelect(),
 			},
 			{
-				key: "Space",
+				key: "space",
 				mode: "normal",
 				description: "Enter action mode",
 				action: editor.enterAction(),
@@ -717,7 +717,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: overlay.push({ _tag: "help" }),
 			},
 			{
-				key: "Enter",
+				key: "return",
 				mode: "normal",
 				description: "View detail",
 				action: Effect.suspend(() => openCurrentDetail()),
@@ -972,7 +972,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: nav.move("right"),
 			},
 			{
-				key: "Space",
+				key: "space",
 				mode: "select",
 				description: "Toggle selection",
 				action: Effect.suspend(() => toggleCurrentSelection()),
