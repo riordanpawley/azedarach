@@ -3,8 +3,9 @@
  */
 
 import type { VCStatus } from "../core/VCService"
-import type { EditorMode, ViewMode } from "../services/EditorService"
+import type { EditorMode } from "../services/EditorService"
 import { theme } from "./theme"
+import type { ViewMode } from "./types"
 
 export interface StatusBarProps {
 	totalTasks: number
