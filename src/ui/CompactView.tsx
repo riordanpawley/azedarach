@@ -7,7 +7,7 @@
 
 import { useMemo } from "react"
 import { columnColors, getPriorityColor, theme } from "./theme"
-import type { ColumnStatus, JumpTarget, TaskWithSession } from "./types"
+import type { JumpTarget, TaskWithSession } from "./types"
 import { COLUMNS, SESSION_INDICATORS } from "./types"
 
 /** Height of each row in compact view (terminal rows) */
@@ -117,7 +117,7 @@ const CompactRow = (props: CompactRowProps) => {
 	const maxTitleLength = 45
 	const truncatedTitle =
 		props.task.title.length > maxTitleLength
-			? props.task.title.slice(0, maxTitleLength - 1) + "…"
+			? `${props.task.title.slice(0, maxTitleLength - 1)}…`
 			: props.task.title
 
 	return (
