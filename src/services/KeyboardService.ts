@@ -141,6 +141,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 		/**
 		 * Show error toast for any failure
+		 * Also logs the error via Effect.logError for debugging
 		 */
 		const showErrorToast =
 			(prefix: string) =>
@@ -149,7 +150,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					error && typeof error === "object" && "message" in error
 						? String((error as { message: string }).message)
 						: String(error)
-				return toast.show("error", `${prefix}: ${message}`)
+				return Effect.gen(function* () {
+					yield* Effect.logError(`${prefix}: ${message}`, { error })
+					yield* toast.show("error", `${prefix}: ${message}`)
+				})
 			}
 
 		/**
@@ -331,7 +335,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 									? `No session for ${task.id} - press Space+s to start`
 									: String((error as { message?: string }).message || error)
 								: String(error)
-						return toast.show("error", msg)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Attach external: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
 					}),
 				)
 			})
@@ -426,7 +433,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 										? `Editor error: ${(error as { message: string }).message}`
 										: `Failed to edit: ${error}`
 								: `Failed to edit: ${error}`
-						return toast.show("error", msg)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Edit bead: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
 					}),
 				)
 			})
@@ -448,7 +458,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 										? `Editor error: ${(error as { message: string }).message}`
 										: `Failed to create: ${error}`
 								: `Failed to create: ${error}`
-						return toast.show("error", msg)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Create bead: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
 					}),
 				)
 			})
@@ -475,7 +488,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 							error && typeof error === "object" && "_tag" in error && error._tag === "GHCLIError"
 								? String((error as { message: string }).message)
 								: `Failed to create PR: ${error}`
-						return toast.show("error", msg)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Create PR: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
 					}),
 				)
 			})
@@ -578,7 +594,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 											? "VC is not running - start it with 'a' key"
 											: String((error as { message?: string }).message || error)
 										: String(error)
-								return toast.show("error", msg)
+								return Effect.gen(function* () {
+									yield* Effect.logError(`VC command: ${msg}`, { error })
+									yield* toast.show("error", msg)
+								})
 							}),
 						)
 						yield* editor.clearCommand()
