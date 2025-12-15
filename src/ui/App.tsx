@@ -300,7 +300,7 @@ export const App = () => {
 		return (
 			<box flexGrow={1}>
 				<Board
-					tasks={tasksResult.value}
+					tasks={tasksByColumn.flat()}
 					selectedTaskId={selectedTask?.id}
 					activeColumnIndex={columnIndex}
 					activeTaskIndex={taskIndex}
