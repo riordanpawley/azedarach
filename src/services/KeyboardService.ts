@@ -256,21 +256,34 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				const columnIndex = yield* getColumnIndex()
 				const targetColIdx = direction === "left" ? columnIndex - 1 : columnIndex + 1
 
+				yield* Effect.logInfo(
+					`[MOVE] direction=${direction} col=${columnIndex} target=${targetColIdx}`,
+				)
+
 				// Bounds check
-				if (targetColIdx < 0 || targetColIdx >= COLUMNS.length) return
+				if (targetColIdx < 0 || targetColIdx >= COLUMNS.length) {
+					yield* Effect.logInfo(`[MOVE] out of bounds, aborting`)
+					return
+				}
 
 				const targetStatus = COLUMNS[targetColIdx]?.status
-				if (!targetStatus) return
+				if (!targetStatus) {
+					yield* Effect.logInfo(`[MOVE] no target status found`)
+					return
+				}
 
 				// Get selected IDs or current task
 				const mode = yield* editor.getMode()
 				const selectedIds = mode._tag === "select" ? mode.selectedIds : []
 				const task = yield* getSelectedTask()
 
+				yield* Effect.logInfo(`[MOVE] selectedIds=${selectedIds.length} task=${task?.id ?? "none"}`)
+
 				const taskIdsToMove = selectedIds.length > 0 ? [...selectedIds] : task ? [task.id] : []
 				const firstTaskId = taskIdsToMove[0]
 
 				if (taskIdsToMove.length > 0) {
+					yield* Effect.logInfo(`[MOVE] moving ${taskIdsToMove.length} tasks to ${targetStatus}`)
 					// Use injected beadsClient (no yield* needed)
 					yield* Effect.all(
 						taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
@@ -281,6 +294,9 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					if (firstTaskId) {
 						yield* nav.setFollow(firstTaskId)
 					}
+					yield* Effect.logInfo(`[MOVE] done`)
+				} else {
+					yield* Effect.logInfo(`[MOVE] no tasks to move`)
 				}
 			})
 
