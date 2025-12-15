@@ -116,12 +116,19 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		// ========================================================================
 
 		/**
-		 * Get currently selected task based on cursor position
+		 * Get currently selected task based on focusedTaskId
+		 *
+		 * This uses the task ID synced from useNavigation, which correctly
+		 * tracks the selected task in the filtered/sorted view.
 		 */
 		const getSelectedTask = () =>
 			Effect.gen(function* () {
-				const cursor = yield* nav.getCursor()
-				return yield* board.getTaskAt(cursor.columnIndex, cursor.taskIndex)
+				const taskId = yield* nav.getFocusedTaskId()
+				if (!taskId) return undefined
+
+				// Look up task by ID from board
+				const allTasks = yield* board.getTasks()
+				return allTasks.find((t) => t.id === taskId)
 			})
 
 		/**
