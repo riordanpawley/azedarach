@@ -3,13 +3,13 @@
  */
 
 import type { VCStatus } from "../core/VCService"
+import type { EditorMode } from "../services/EditorService"
 import { theme } from "./theme"
-import type { EditorMode } from "./types"
 
 export interface StatusBarProps {
 	totalTasks: number
 	activeSessions: number
-	mode: EditorMode
+	mode: EditorMode["_tag"]
 	modeDisplay: string
 	selectedCount: number
 	connected?: boolean
@@ -27,9 +27,10 @@ interface KeyBinding {
 /**
  * All keybindings per mode, ordered by priority (most important first)
  */
-const MODE_KEYBINDINGS: Record<EditorMode, KeyBinding[]> = {
+const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 	normal: [
 		{ key: "Space", action: "Menu" },
+		{ key: ",", action: "Sort" },
 		{ key: "/", action: "Search" },
 		{ key: "v", action: "Select" },
 		{ key: "g", action: "Goto" },
@@ -76,6 +77,12 @@ const MODE_KEYBINDINGS: Record<EditorMode, KeyBinding[]> = {
 		{ key: "Enter", action: "Send" },
 		{ key: "Esc", action: "Cancel" },
 	],
+	sort: [
+		{ key: "s", action: "Session" },
+		{ key: "p", action: "Priority" },
+		{ key: "u", action: "Updated" },
+		{ key: "Esc", action: "Cancel" },
+	],
 }
 
 /**
@@ -118,6 +125,10 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.peach
 			case "select":
 				return theme.mauve
+			case "sort":
+				return theme.teal
+			case "command":
+				return theme.pink
 			default:
 				return theme.text
 		}
@@ -136,6 +147,10 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SRC"
 			case "select":
 				return "SEL"
+			case "sort":
+				return "SRT"
+			case "command":
+				return "CMD"
 			default:
 				return "???"
 		}

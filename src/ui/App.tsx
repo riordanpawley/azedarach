@@ -40,6 +40,7 @@ import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
 import { SearchInput } from "./SearchInput"
+import { SortMenu } from "./SortMenu"
 import { StatusBar } from "./StatusBar"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import { ToastContainer } from "./Toast"
@@ -54,6 +55,25 @@ import { COLUMNS, generateJumpLabels, type JumpTarget, type TaskWithSession } fr
 // Add 1 more row when running inside tmux to account for tmux status bar
 const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
 const CHROME_HEIGHT = 6 + TMUX_STATUS_BAR_HEIGHT
+
+// Helper function for session state sorting (defined outside component for stable reference)
+const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
+	// Active sessions (busy, waiting) first, then paused, then done/error, then idle
+	switch (state) {
+		case "busy":
+			return 0
+		case "waiting":
+			return 1
+		case "paused":
+			return 2
+		case "done":
+			return 3
+		case "error":
+			return 4
+		case "idle":
+			return 5
+	}
+}
 
 // ============================================================================
 // App Component
@@ -83,6 +103,7 @@ export const App = () => {
 		commandInput,
 		pendingJumpKey,
 		jumpLabels,
+		sortConfig,
 		isSelect,
 		isGoto,
 		isGotoPending,
@@ -90,6 +111,7 @@ export const App = () => {
 		isAction,
 		isSearch,
 		isCommand,
+		isSort,
 		enterSelect,
 		exitSelect,
 		toggleSelection,
@@ -104,6 +126,8 @@ export const App = () => {
 		updateCommand,
 		clearCommand,
 		exitToNormal,
+		enterSort,
+		cycleSort,
 	} = useEditorMode()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -142,14 +166,61 @@ export const App = () => {
 	// Task Grouping and Filtering
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	// Group tasks by column for navigation, filtering by search query
+	const sortTasks = useCallback(
+		(tasks: TaskWithSession[]): TaskWithSession[] => {
+			return [...tasks].sort((a, b) => {
+				const direction = sortConfig.direction === "desc" ? -1 : 1
+
+				switch (sortConfig.field) {
+					case "session": {
+						// Sort by session status (active first when desc)
+						const sessionDiff =
+							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+						if (sessionDiff !== 0) return sessionDiff * direction
+						// Then by priority (lower number = higher priority)
+						const priorityDiff = a.priority - b.priority
+						if (priorityDiff !== 0) return priorityDiff
+						// Then by updated_at (more recent first)
+						return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+					}
+					case "priority": {
+						// Sort by priority (lower number = higher priority, so desc shows P1 first)
+						const priorityDiff = a.priority - b.priority
+						if (priorityDiff !== 0) return priorityDiff * direction
+						// Then by session status
+						const sessionDiff =
+							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+						if (sessionDiff !== 0) return sessionDiff
+						// Then by updated_at
+						return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+					}
+					case "updated": {
+						// Sort by updated_at (desc = most recent first)
+						const dateDiff = new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+						if (dateDiff !== 0) return dateDiff * direction
+						// Then by session status
+						const sessionDiff =
+							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
+						if (sessionDiff !== 0) return sessionDiff
+						// Then by priority
+						return a.priority - b.priority
+					}
+					default:
+						return 0
+				}
+			})
+		},
+		[sortConfig],
+	)
+
+	// Group tasks by column for navigation, filtering by search query, then sorting
 	const tasksByColumn = useMemo(() => {
 		if (!Result.isSuccess(tasksResult)) return []
 
 		const query = searchQuery.toLowerCase().trim()
 
-		return COLUMNS.map((col) =>
-			tasksResult.value.filter((task) => {
+		return COLUMNS.map((col) => {
+			const filtered = tasksResult.value.filter((task) => {
 				// First filter by status
 				if (task.status !== col.status) return false
 				// Then filter by search query if present
@@ -159,9 +230,11 @@ export const App = () => {
 					return titleMatch || idMatch
 				}
 				return true
-			}),
-		)
-	}, [tasksResult, searchQuery])
+			})
+			// Apply sorting
+			return sortTasks(filtered)
+		})
+	}, [tasksResult, searchQuery, sortTasks])
 
 	// Navigation hook (needs tasksByColumn)
 	const {
@@ -322,6 +395,12 @@ export const App = () => {
 		// Handle command mode
 		if (isCommand) {
 			handleCommandMode(event)
+			return
+		}
+
+		// Handle sort mode
+		if (isSort) {
+			handleSortMode(event)
 			return
 		}
 
@@ -743,6 +822,29 @@ export const App = () => {
 		],
 	)
 
+	const handleSortMode = useCallback(
+		(event: KeyEvent) => {
+			switch (event.name) {
+				case "s":
+					// Sort by session status (active sessions first)
+					cycleSort("session")
+					break
+				case "p":
+					// Sort by priority
+					cycleSort("priority")
+					break
+				case "u":
+					// Sort by updated at
+					cycleSort("updated")
+					break
+				default:
+					// Any other key exits sort mode
+					exitToNormal()
+			}
+		},
+		[cycleSort, exitToNormal],
+	)
+
 	const handleSelectMode = useCallback(
 		(event: KeyEvent) => {
 			switch (event.name) {
@@ -866,6 +968,12 @@ export const App = () => {
 				return
 			}
 
+			// "," to enter sort mode
+			if (event.sequence === ",") {
+				enterSort()
+				return
+			}
+
 			// Ctrl-d: half page down
 			if (event.ctrl && event.name === "d") {
 				halfPageDown()
@@ -896,6 +1004,7 @@ export const App = () => {
 			showError,
 			enterSearch,
 			enterCommand,
+			enterSort,
 			halfPageDown,
 			halfPageUp,
 		],
@@ -932,6 +1041,8 @@ export const App = () => {
 				return "search"
 			case "select":
 				return `select (${selectedIds.length})`
+			case "sort":
+				return "sort"
 		}
 	}, [mode, searchQuery, selectedIds])
 
@@ -992,6 +1103,9 @@ export const App = () => {
 
 			{/* Action palette */}
 			{isAction && <ActionPalette task={selectedTask} />}
+
+			{/* Sort menu */}
+			{isSort && <SortMenu currentSort={sortConfig} />}
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}
