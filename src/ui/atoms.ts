@@ -595,6 +595,34 @@ export const cursorAtom = appRuntime.subscriptionRef(
 )
 
 /**
+ * Focused task ID atom - subscribes to NavigationService focusedTaskId
+ *
+ * Usage: const focusedTaskId = useAtomValue(focusedTaskIdAtom)
+ */
+export const focusedTaskIdAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.focusedTaskId
+	}),
+)
+
+/**
+ * Set focused task ID - syncs selected task from UI to service
+ *
+ * This is called by useNavigation when the selected task changes,
+ * allowing KeyboardService to access the currently selected task.
+ *
+ * Usage: const setFocusedTask = useAtomSet(setFocusedTaskAtom, { mode: "promise" })
+ *        setFocusedTask("az-123")
+ */
+export const setFocusedTaskAtom = appRuntime.fn((taskId: string | null) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.setFocusedTask(taskId)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
  * Toast notifications atom - subscribes to ToastService toasts changes
  *
  * Uses appRuntime.subscriptionRef() for automatic reactive updates.

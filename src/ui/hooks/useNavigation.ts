@@ -6,9 +6,9 @@
  */
 
 import { Result } from "@effect-atom/atom"
-import { useAtom, useAtomValue } from "@effect-atom/atom-react"
+import { useAtom, useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { cursorAtom, jumpToAtom, navigateAtom } from "../atoms"
+import { cursorAtom, jumpToAtom, navigateAtom, setFocusedTaskAtom } from "../atoms"
 import type { TaskWithSession } from "../types"
 
 // Default cursor when loading
@@ -34,6 +34,7 @@ export function useNavigation(tasksByColumn: TaskWithSession[][]) {
 	const cursorResult = useAtomValue(cursorAtom)
 	const [, navigate] = useAtom(navigateAtom, { mode: "promise" })
 	const [, jump] = useAtom(jumpToAtom, { mode: "promise" })
+	const setFocusedTask = useAtomSet(setFocusedTaskAtom, { mode: "promise" })
 
 	// Unwrap Result with default
 	const cursor = Result.isSuccess(cursorResult) ? cursorResult.value : DEFAULT_CURSOR
@@ -43,6 +44,12 @@ export function useNavigation(tasksByColumn: TaskWithSession[][]) {
 
 	// Get currently selected task
 	const selectedTask = tasksByColumn[cursor.columnIndex]?.[cursor.taskIndex]
+
+	// Sync selected task ID to NavigationService whenever it changes
+	// This allows KeyboardService to access the currently selected task
+	useEffect(() => {
+		setFocusedTask(selectedTask?.id ?? null)
+	}, [selectedTask?.id, setFocusedTask])
 
 	// Effect to follow a task after move operations
 	useEffect(() => {

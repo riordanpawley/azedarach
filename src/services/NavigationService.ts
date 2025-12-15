@@ -88,6 +88,19 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				SubscriptionRef.set(focusedTaskId, taskId),
 
 			/**
+			 * Set the focused task ID (for syncing UI selection to service)
+			 *
+			 * Called by useNavigation when the selected task changes.
+			 */
+			setFocusedTask: (taskId: string | null): Effect.Effect<void> =>
+				SubscriptionRef.set(focusedTaskId, taskId),
+
+			/**
+			 * Get the focused task ID
+			 */
+			getFocusedTaskId: (): Effect.Effect<string | null> => SubscriptionRef.get(focusedTaskId),
+
+			/**
 			 * Jump to the end of the board (last task in last column)
 			 */
 			jumpToEnd: (): Effect.Effect<void> =>
