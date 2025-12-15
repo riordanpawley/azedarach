@@ -52,7 +52,10 @@ const appLayer = Layer.mergeAll(
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,
-).pipe(Layer.provideMerge(Logger.replace(fileLogger)), Layer.provideMerge(platformLayer))
+).pipe(
+	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+	Layer.provideMerge(platformLayer),
+)
 
 /**
  * Runtime atom that provides all services and platform dependencies

@@ -1098,6 +1098,9 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				Effect.gen(function* () {
 					const effectiveMode = yield* getEffectiveMode()
 
+					// DEBUG
+					yield* Effect.logInfo(`[KB] key="${key}" mode="${effectiveMode}"`)
+
 					// Special handling for goto-jump mode (any key is label input)
 					if (effectiveMode === "goto-jump") {
 						yield* handleJumpInput(key)
@@ -1111,9 +1114,11 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					// Find and execute keybinding
 					const binding = yield* findBinding(key, effectiveMode)
 					if (binding) {
+						yield* Effect.logInfo(`[KB] found binding: ${binding.description}`)
 						yield* binding.action
+					} else {
+						yield* Effect.logInfo(`[KB] no binding found`)
 					}
-					// Unknown key - ignore
 				}),
 
 			/**
