@@ -218,7 +218,7 @@ export const enterActionAtom = appRuntime.fn(() =>
 | Pattern | Use Case | Example |
 |---------|----------|---------|
 | `appRuntime.subscriptionRef()` | Subscribe to service state | `modeAtom`, `cursorAtom` |
-| `appRuntime.atom()` | One-time async fetch | `tasksAtom`, `ghCLIAvailableAtom` |
+| `appRuntime.atom()` | One-time async fetch | `vcStatusRefAtom`, `ghCLIAvailableAtom` |
 | `appRuntime.fn()` | Actions/mutations | `startSessionAtom`, `moveTaskAtom` |
 | `Atom.readable()` | Derived sync state | `selectedIdsAtom`, `searchQueryAtom` |
 | `Atom.make()` | Simple local state | `viewModeAtom` |
