@@ -18,7 +18,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, HashMap, Layer, PubSub, Ref } from "effect"
+import { Data, Effect, HashMap, PubSub, Ref } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
@@ -264,7 +264,6 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const worktreeManager = yield* WorktreeManager
 		const tmuxService = yield* TmuxService
 		const beadsClient = yield* BeadsClient
-		const _stateDetector = yield* StateDetector
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
@@ -304,7 +303,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					}
 
 					// Get bead info to verify it exists
-					const _bead = yield* beadsClient.show(beadId)
+					yield* beadsClient.show(beadId)
 
 					// Create worktree (idempotent - returns existing if present)
 					const worktree = yield* worktreeManager.create({
@@ -634,25 +633,3 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		}
 	}),
 }) {}
-
-/**
- * Legacy layer export
- *
- * @deprecated Use SessionManager.Default instead
- */
-export const SessionManagerLive = SessionManager.Default
-
-/**
- * SessionManager layer with AppConfig included (legacy)
- *
- * @deprecated Use SessionManager.Default with AppConfig layer instead
- */
-export const SessionManagerLiveWithConfig = (projectPath: string, configPath?: string) =>
-	Layer.provideMerge(SessionManager.Default, AppConfigLiveWithPlatform(projectPath, configPath))
-
-/**
- * Alias for backwards compatibility
- *
- * @deprecated Use SessionManager.Default instead
- */
-export const SessionManagerLiveWithPlatform = SessionManager.Default

@@ -52,6 +52,7 @@ export type KeyMode =
 	| "search"
 	| "command"
 	| "overlay"
+	| "sort"
 	| "*"
 
 /**
@@ -685,6 +686,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Enter command mode",
 				action: editor.enterCommand(),
 			},
+			{
+				key: ",",
+				mode: "normal",
+				description: "Enter sort mode",
+				action: editor.enterSort(),
+			},
 
 			// ======================================================================
 			// Normal Mode - Actions
@@ -952,6 +959,28 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			},
 
 			// ======================================================================
+			// Sort Mode
+			// ======================================================================
+			{
+				key: "s",
+				mode: "sort",
+				description: "Sort by session status",
+				action: editor.cycleSort("session").pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "p",
+				mode: "sort",
+				description: "Sort by priority",
+				action: editor.cycleSort("priority").pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+			{
+				key: "u",
+				mode: "sort",
+				description: "Sort by updated at",
+				action: editor.cycleSort("updated").pipe(Effect.tap(() => editor.exitToNormal())),
+			},
+
+			// ======================================================================
 			// Universal (*)
 			// ======================================================================
 			{
@@ -996,6 +1025,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						return "search"
 					case "command":
 						return "command"
+					case "sort":
+						return "sort"
+					default:
+						return mode satisfies never
 				}
 			})
 
