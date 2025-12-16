@@ -356,7 +356,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				if (!task) return
 
 				yield* attachment.attachExternal(task.id).pipe(
-					Effect.tap(() => toast.show("info", "Switched! Ctrl-a ) to return")),
+					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
