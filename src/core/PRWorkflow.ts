@@ -19,7 +19,7 @@ import {
 	type ParseError,
 } from "./BeadsClient.js"
 import { type SessionError, SessionManager } from "./SessionManager.js"
-import type { TmuxError } from "./TmuxService.js"
+import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 
 // ============================================================================
@@ -410,11 +410,17 @@ const parsePRJson = (json: string): PR => {
  * ```
  */
 export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
-	dependencies: [WorktreeManager.Default, BeadsClient.Default, SessionManager.Default],
+	dependencies: [
+		WorktreeManager.Default,
+		BeadsClient.Default,
+		SessionManager.Default,
+		TmuxService.Default,
+	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
+		const tmuxService = yield* TmuxService
 
 		return {
 			createPR: (options: CreatePROptions) =>
@@ -512,7 +518,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
 
 					// 1. Stop any running session (ignore errors)
+					// First try SessionManager.stop (handles beads sync from worktree)
 					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+					// Also directly kill tmux session in case it wasn't tracked in memory
+					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
 
 					// 2. Delete worktree
 					yield* worktreeManager.remove({ beadId, projectPath })
@@ -565,7 +574,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 1. Stop any running session (ignore errors)
+					// First try SessionManager.stop (handles beads sync from worktree)
 					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+					// Also directly kill tmux session in case it wasn't tracked in memory
+					// (e.g., Azedarach was restarted, or session was orphaned)
+					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
 
 					// 2. Sync beads in worktree (bd sync --from-main)
 					yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
