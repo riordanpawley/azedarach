@@ -1,8 +1,8 @@
 /**
  * ClaudeCreatePrompt - Modal prompt for creating tasks via Claude
  *
- * Allows users to describe a task in natural language, then spawns a Claude
- * session that creates the bead and stays open for immediate work.
+ * Allows users to describe a task in natural language. Claude CLI runs
+ * in non-interactive mode to create the bead, then exits.
  */
 
 import { useKeyboard } from "@opentui/react"
@@ -122,7 +122,7 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				<box marginTop={1}>
 					<text fg={theme.subtext0}>
 						Describe what you want to do in natural language.{"\n"}
-						Claude will create the bead and be ready to work on it.
+						Claude will create a bead with appropriate title/type/priority.
 					</text>
 				</box>
 
