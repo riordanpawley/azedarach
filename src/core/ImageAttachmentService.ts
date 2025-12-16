@@ -218,9 +218,75 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				readonly attachments: readonly ImageAttachment[]
 			} | null>(null)
 
+			/**
+			 * State for the image attach overlay.
+			 */
+			const overlayState = yield* SubscriptionRef.make<{
+				readonly mode: "menu" | "path"
+				readonly pathInput: string
+				readonly isAttaching: boolean
+				readonly taskId: string | null
+			}>({
+				mode: "menu",
+				pathInput: "",
+				isAttaching: false,
+				taskId: null,
+			})
+
 			return {
-				// Expose SubscriptionRef for atom subscription
+				// Expose SubscriptionRefs for atom subscription
 				currentAttachments,
+				overlayState,
+
+				/**
+				 * Open the image attach overlay for a task
+				 */
+				openOverlay: (taskId: string) =>
+					SubscriptionRef.set(overlayState, {
+						mode: "menu",
+						pathInput: "",
+						isAttaching: false,
+						taskId,
+					}),
+
+				/**
+				 * Close the image attach overlay
+				 */
+				closeOverlay: () =>
+					SubscriptionRef.set(overlayState, {
+						mode: "menu",
+						pathInput: "",
+						isAttaching: false,
+						taskId: null,
+					}),
+
+				/**
+				 * Switch overlay to path input mode
+				 */
+				enterPathMode: () =>
+					SubscriptionRef.update(overlayState, (s) => ({ ...s, mode: "path" as const })),
+
+				/**
+				 * Switch overlay back to menu mode
+				 */
+				exitPathMode: () =>
+					SubscriptionRef.update(overlayState, (s) => ({
+						...s,
+						mode: "menu" as const,
+						pathInput: "",
+					})),
+
+				/**
+				 * Update the path input value
+				 */
+				setPathInput: (value: string) =>
+					SubscriptionRef.update(overlayState, (s) => ({ ...s, pathInput: value })),
+
+				/**
+				 * Set attaching state
+				 */
+				setAttaching: (isAttaching: boolean) =>
+					SubscriptionRef.update(overlayState, (s) => ({ ...s, isAttaching })),
 
 				/**
 				 * Load attachments for a task and update reactive state.

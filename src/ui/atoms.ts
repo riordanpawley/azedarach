@@ -962,6 +962,12 @@ export const pushOverlayAtom = appRuntime.fn(
 				const imageService = yield* ImageAttachmentService
 				yield* imageService.loadForTask(overlay.taskId)
 			}
+
+			// Initialize overlay state when opening imageAttach overlay
+			if (overlay._tag === "imageAttach") {
+				const imageService = yield* ImageAttachmentService
+				yield* imageService.openOverlay(overlay.taskId)
+			}
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -980,6 +986,12 @@ export const popOverlayAtom = appRuntime.fn(() =>
 		if (popped?._tag === "detail") {
 			const imageService = yield* ImageAttachmentService
 			yield* imageService.clearCurrent()
+		}
+
+		// Close overlay state when closing imageAttach overlay
+		if (popped?._tag === "imageAttach") {
+			const imageService = yield* ImageAttachmentService
+			yield* imageService.closeOverlay()
 		}
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -1018,6 +1030,67 @@ export const clearCurrentAttachmentsAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const service = yield* ImageAttachmentService
 		yield* service.clearCurrent()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Image attach overlay state.
+ * Subscribe to this in ImageAttachOverlay for reactive updates.
+ */
+export const imageAttachOverlayStateAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return service.overlayState
+	}),
+)
+
+/**
+ * Open the image attach overlay for a task
+ */
+export const openImageAttachOverlayAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.openOverlay(taskId)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Close the image attach overlay
+ */
+export const closeImageAttachOverlayAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.closeOverlay()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Enter path input mode in image attach overlay
+ */
+export const enterImagePathModeAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.enterPathMode()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Exit path input mode in image attach overlay
+ */
+export const exitImagePathModeAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.exitPathMode()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Update path input value in image attach overlay
+ */
+export const setImagePathInputAtom = appRuntime.fn((value: string) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.setPathInput(value)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
