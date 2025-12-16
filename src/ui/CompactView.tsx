@@ -23,6 +23,8 @@ export interface CompactViewProps {
 	jumpLabels?: ReadonlyRecord<string, JumpTarget> | null
 	pendingJumpKey?: string | null
 	terminalHeight?: number
+	/** Whether action mode is active (selected row gets prominent indicator) */
+	isActionMode?: boolean
 }
 
 /**
@@ -95,6 +97,8 @@ interface CompactRowProps {
 	task: TaskWithSession
 	isSelected?: boolean
 	isMultiSelected?: boolean
+	/** Whether action mode is active (selected row gets prominent indicator) */
+	isActionMode?: boolean
 	jumpLabel?: string
 	pendingJumpKey?: string | null
 }
@@ -107,11 +111,22 @@ const CompactRow = (props: CompactRowProps) => {
 	const typeLabel = getTypeLabel(props.task.issue_type)
 	const typeColor = getTypeColor(props.task.issue_type)
 
+	// Action mode selected gets mauve background
+	const isActionSelected = props.isSelected && props.isActionMode
+
 	// Background color based on selection state
 	const getBackgroundColor = () => {
+		if (isActionSelected) return theme.surface1 // More prominent when action menu open
 		if (props.isMultiSelected) return theme.surface1
 		if (props.isSelected) return theme.surface0
 		return undefined
+	}
+
+	// Selection indicator: » when action mode, > when selected, space otherwise
+	const getSelectionIndicator = () => {
+		if (isActionSelected) return "»"
+		if (props.isSelected) return "›"
+		return " "
 	}
 
 	// Truncate title to fit in available space
@@ -129,6 +144,9 @@ const CompactRow = (props: CompactRowProps) => {
 			paddingLeft={1}
 			paddingRight={1}
 		>
+			{/* Selection indicator (shows » when action menu open, › when selected) */}
+			<text fg={isActionSelected ? theme.mauve : theme.lavender}>{getSelectionIndicator()}</text>
+
 			{/* Jump label (if in jump mode) */}
 			{props.jumpLabel && <text fg={theme.mauve}>{props.jumpLabel}</text>}
 
@@ -227,6 +245,8 @@ export const CompactView = (props: CompactViewProps) => {
 		<box flexDirection="column" width="100%" height="100%" padding={1}>
 			{/* Header row */}
 			<box flexDirection="row" gap={1} paddingLeft={1} paddingRight={1}>
+				{/* Space for selection indicator column */}
+				<text fg={theme.overlay0}> </text>
 				{props.jumpLabels && <text fg={theme.overlay0}>{"  "}</text>}
 				<text fg={theme.overlay0}>Pri</text>
 				<text fg={theme.overlay0}>Stat</text>
@@ -251,6 +271,7 @@ export const CompactView = (props: CompactViewProps) => {
 					task={task}
 					isSelected={task.id === props.selectedTaskId}
 					isMultiSelected={props.selectedIds?.has(task.id)}
+					isActionMode={props.isActionMode}
 					jumpLabel={taskJumpLabels?.get(task.id)}
 					pendingJumpKey={props.pendingJumpKey}
 				/>

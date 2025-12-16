@@ -38,6 +38,8 @@ export interface TaskCardProps {
 	task: TaskWithSession
 	isSelected?: boolean
 	isMultiSelected?: boolean
+	/** Whether the action menu is currently open (selected card gets prominent border) */
+	isActionMode?: boolean
 	jumpLabel?: string
 	pendingJumpKey?: string | null
 	/** Number of image attachments for this task */
@@ -67,13 +69,21 @@ export const TaskCard = (props: TaskCardProps) => {
 		return theme.lavender
 	}
 
-	// Border color: selection takes priority, then context health
+	// Border color: action mode > multi-select > selection > context health > default
 	const getBorderColor = () => {
+		// Action mode selected card gets mauve (matches action palette)
+		if (props.isSelected && props.isActionMode) return theme.mauve
 		if (props.isMultiSelected) return theme.mauve
 		if (props.isSelected) return theme.lavender
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
+	}
+
+	// Border style: double border when action mode is active on selected card
+	const getBorderStyle = (): "single" | "double" => {
+		if (props.isSelected && props.isActionMode) return "double"
+		return "single"
 	}
 
 	// Background color based on selection state
@@ -108,7 +118,7 @@ export const TaskCard = (props: TaskCardProps) => {
 
 	return (
 		<box
-			borderStyle="single"
+			borderStyle={getBorderStyle()}
 			border={true}
 			borderColor={getBorderColor()}
 			backgroundColor={getBackgroundColor()}
