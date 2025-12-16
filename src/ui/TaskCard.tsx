@@ -15,6 +15,8 @@ export interface TaskCardProps {
 	isMultiSelected?: boolean
 	jumpLabel?: string
 	pendingJumpKey?: string | null
+	/** Number of image attachments for this task */
+	attachmentCount?: number
 }
 
 /**
@@ -51,6 +53,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		// Show attachment indicator if there are attachments
+		if (props.attachmentCount && props.attachmentCount > 0) {
+			line += ` 📎${props.attachmentCount > 1 ? props.attachmentCount : ""}`
 		}
 		if (props.isMultiSelected) {
 			line += " *"
