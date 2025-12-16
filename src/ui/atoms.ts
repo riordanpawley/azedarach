@@ -956,6 +956,12 @@ export const pushOverlayAtom = appRuntime.fn(
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
 			yield* overlayService.push(overlay)
+
+			// Load attachments when opening detail overlay
+			if (overlay._tag === "detail") {
+				const imageService = yield* ImageAttachmentService
+				yield* imageService.loadForTask(overlay.taskId)
+			}
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -967,14 +973,53 @@ export const pushOverlayAtom = appRuntime.fn(
  */
 export const popOverlayAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const overlay = yield* OverlayService
-		yield* overlay.pop()
+		const overlayService = yield* OverlayService
+		const popped = yield* overlayService.pop()
+
+		// Clear attachments when closing detail overlay
+		if (popped?._tag === "detail") {
+			const imageService = yield* ImageAttachmentService
+			yield* imageService.clearCurrent()
+		}
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 // ============================================================================
 // Image Attachment Atoms
 // ============================================================================
+
+/**
+ * Reactive state for the currently viewed task's attachments.
+ * Subscribe to this in DetailPanel for automatic updates.
+ */
+export const currentAttachmentsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return service.currentAttachments
+	}),
+)
+
+/**
+ * Load attachments for a task and update reactive state.
+ * Called when detail panel opens.
+ */
+export const loadAttachmentsForTaskAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.loadForTask(taskId)
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
+ * Clear current attachments state.
+ * Called when detail panel closes.
+ */
+export const clearCurrentAttachmentsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.clearCurrent()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
 
 /**
  * List image attachments for a task

@@ -2,13 +2,9 @@
  * DetailPanel component - expandable detail view for selected task
  */
 import { Result } from "@effect-atom/atom"
-import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import { useEffect, useMemo, useState } from "react"
-import {
-	type ImageAttachment,
-	listImageAttachmentsAtom,
-	openImageAttachmentAtom,
-} from "./atoms"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { useMemo } from "react"
+import { currentAttachmentsAtom } from "./atoms"
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
 import { SESSION_INDICATORS } from "./types"
@@ -33,21 +29,18 @@ const ATTR_BOLD = 1
 export const DetailPanel = (props: DetailPanelProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
 
-	// State for attachments
-	const [attachments, setAttachments] = useState<ImageAttachment[]>([])
-	const listAttachments = useAtomSet(listImageAttachmentsAtom, { mode: "promise" })
-	const openAttachment = useAtomSet(openImageAttachmentAtom, { mode: "promise" })
-
-	// Load attachments when component mounts
-	useEffect(() => {
-		listAttachments(props.task.id)
-			.then((result) => {
-				if (result) setAttachments(result)
-			})
-			.catch(() => {
-				// Ignore errors - just show no attachments
-			})
-	}, [props.task.id, listAttachments])
+	// Subscribe to current attachments from Effect layer
+	const attachmentsResult = useAtomValue(currentAttachmentsAtom)
+	const attachments = useMemo(() => {
+		if (Result.isSuccess(attachmentsResult)) {
+			const data = attachmentsResult.value
+			// Only show attachments if they're for the current task
+			if (data?.taskId === props.task.id) {
+				return data.attachments
+			}
+		}
+		return []
+	}, [attachmentsResult, props.task.id])
 
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
