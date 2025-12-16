@@ -4,25 +4,14 @@
  * Provides two methods for attaching images:
  * 1. Paste from clipboard (if xclip/wl-paste available)
  * 2. Enter file path manually
+ *
+ * Note: Keyboard handling is in KeyboardService, this component just renders.
  */
 
 import { Result } from "@effect-atom/atom"
-import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import { useKeyboard, useTextInput } from "@opentui/react"
-import { useCallback, useEffect, useState } from "react"
-import {
-	attachImageClipboardAtom,
-	attachImageFileAtom,
-	hasClipboardSupportAtom,
-	showToastAtom,
-} from "./atoms"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { hasClipboardSupportAtom, imageAttachOverlayStateAtom } from "./atoms"
 import { theme } from "./theme"
-
-export interface ImageAttachOverlayProps {
-	taskId: string
-	onSuccess: () => void
-	onCancel: () => void
-}
 
 const ATTR_BOLD = 1
 
@@ -31,115 +20,20 @@ const ATTR_BOLD = 1
  *
  * Modal overlay for attaching images to a task.
  * Supports clipboard paste and file path entry.
+ * All state and keyboard handling is in the Effect layer.
  */
-export const ImageAttachOverlay = (props: ImageAttachOverlayProps) => {
-	const [mode, setMode] = useState<"menu" | "path">("menu")
-	const [pathInput, setPathInput] = useState("")
-	const [isAttaching, setIsAttaching] = useState(false)
+export const ImageAttachOverlay = () => {
+	// Subscribe to overlay state from Effect layer
+	const stateResult = useAtomValue(imageAttachOverlayStateAtom)
+	const state = Result.isSuccess(stateResult)
+		? stateResult.value
+		: { mode: "menu" as const, pathInput: "", isAttaching: false, taskId: null }
 
-	// Atoms
+	// Subscribe to clipboard support
 	const hasClipboardResult = useAtomValue(hasClipboardSupportAtom)
 	const hasClipboard = Result.isSuccess(hasClipboardResult) ? hasClipboardResult.value : false
 
-	const attachFromClipboard = useAtomSet(attachImageClipboardAtom, { mode: "promise" })
-	const attachFromFile = useAtomSet(attachImageFileAtom, { mode: "promise" })
-	const showToast = useAtomSet(showToastAtom, { mode: "promise" })
-
-	// Text input for file path mode
-	const { ref: inputRef, value, focus } = useTextInput({
-		initialValue: "",
-		onChange: setPathInput,
-	})
-
-	// Focus input when entering path mode
-	useEffect(() => {
-		if (mode === "path") {
-			focus()
-		}
-	}, [mode, focus])
-
-	// Handle clipboard paste
-	const handleClipboardPaste = useCallback(async () => {
-		if (isAttaching) return
-
-		setIsAttaching(true)
-		try {
-			const attachment = await attachFromClipboard(props.taskId)
-			if (attachment) {
-				await showToast({ type: "success", message: `Image attached: ${attachment.filename}` })
-				props.onSuccess()
-			}
-		} catch (error) {
-			await showToast({
-				type: "error",
-				message: `Failed to attach from clipboard: ${error instanceof Error ? error.message : String(error)}`,
-			})
-		} finally {
-			setIsAttaching(false)
-		}
-	}, [attachFromClipboard, props, showToast, isAttaching])
-
-	// Handle file path submission
-	const handleFileSubmit = useCallback(async () => {
-		if (isAttaching || !pathInput.trim()) return
-
-		setIsAttaching(true)
-		try {
-			const attachment = await attachFromFile({ taskId: props.taskId, filePath: pathInput.trim() })
-			if (attachment) {
-				await showToast({ type: "success", message: `Image attached: ${attachment.filename}` })
-				props.onSuccess()
-			}
-		} catch (error) {
-			await showToast({
-				type: "error",
-				message: `Failed to attach file: ${error instanceof Error ? error.message : String(error)}`,
-			})
-		} finally {
-			setIsAttaching(false)
-		}
-	}, [attachFromFile, props, pathInput, showToast, isAttaching])
-
-	// Keyboard handling
-	useKeyboard((event) => {
-		// Escape always cancels
-		if (event.name === "escape") {
-			if (mode === "path") {
-				setMode("menu")
-				setPathInput("")
-			} else {
-				props.onCancel()
-			}
-			return
-		}
-
-		if (mode === "menu") {
-			// Menu mode: select action
-			switch (event.name) {
-				case "p":
-				case "v": // 'v' for paste as alternative
-					if (hasClipboard && !isAttaching) {
-						handleClipboardPaste()
-					}
-					break
-				case "f":
-					setMode("path")
-					break
-				case "return":
-				case "enter":
-					// If clipboard is available, default to paste
-					if (hasClipboard && !isAttaching) {
-						handleClipboardPaste()
-					}
-					break
-			}
-		} else if (mode === "path") {
-			// Path input mode
-			if (event.name === "return" || event.name === "enter") {
-				handleFileSubmit()
-			}
-		}
-	})
+	const { mode, pathInput, isAttaching, taskId } = state
 
 	return (
 		<box
@@ -167,7 +61,7 @@ export const ImageAttachOverlay = (props: ImageAttachOverlayProps) => {
 			>
 				{/* Header */}
 				<text fg={theme.mauve} attributes={ATTR_BOLD}>
-					{"Attach Image to " + props.taskId}
+					{`Attach Image to ${taskId ?? "task"}`}
 				</text>
 				<text fg={theme.surface1}>{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}</text>
 				<text> </text>
@@ -213,7 +107,6 @@ export const ImageAttachOverlay = (props: ImageAttachOverlayProps) => {
 							paddingRight={1}
 						>
 							<text fg={theme.text}>{pathInput || " "}</text>
-							<textInput ref={inputRef} />
 						</box>
 
 						<text> </text>

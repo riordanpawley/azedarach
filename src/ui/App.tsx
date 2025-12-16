@@ -229,10 +229,7 @@ export const App = () => {
 			return
 		}
 
-		// Image attach overlay handles its own keyboard input
-		if (showingImageAttach) {
-			return
-		}
+		// Note: imageAttach overlay keyboard is handled by KeyboardService
 
 		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
 		let keySeq = event.name
@@ -394,16 +391,7 @@ export const App = () => {
 			)}
 
 			{/* Image attach overlay */}
-			{showingImageAttach && currentOverlay?._tag === "imageAttach" && (
-				<ImageAttachOverlay
-					taskId={currentOverlay.taskId}
-					onSuccess={() => {
-						dismissOverlay()
-						refreshBoard()
-					}}
-					onCancel={() => dismissOverlay()}
-				/>
-			)}
+			{showingImageAttach && <ImageAttachOverlay />}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />
