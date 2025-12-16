@@ -448,11 +448,11 @@ Azedarach registers a global tmux keybinding for session navigation:
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Ctrl-a A` | Return to az | Works from any Claude session |
+| `Ctrl-a Ctrl-a` | Return to az | Double-tap prefix from any Claude session |
 
 **Navigation flow:**
 1. From az: `Space` `a` → attach to Claude session
-2. From Claude: `Ctrl-a A` → return to az TUI
+2. From Claude: `Ctrl-a Ctrl-a` → return to az TUI (double-tap prefix)
 
 This makes az the central hub for all session navigation.
 
