@@ -381,6 +381,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `u` | Push to origin | Worktree exists (commits + pushes branch) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 

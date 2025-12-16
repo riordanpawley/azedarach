@@ -579,6 +579,30 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
+		 * Push worktree branch to origin action (Space+u)
+		 *
+		 * Commits any uncommitted changes and pushes the branch to origin.
+		 * Does not create a PR - just pushes the branch.
+		 */
+		const actionPush = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				yield* toast.show("info", `Pushing ${task.id} to origin...`)
+
+				yield* prWorkflow.push({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap(() => toast.show("success", `Pushed ${task.id} to origin`)),
+					Effect.catchAll(showErrorToast("Push failed")),
+				)
+			})
+
+		/**
 		 * Delete bead action (Space+D)
 		 */
 		const actionDeleteBead = () =>
@@ -978,6 +1002,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: Effect.suspend(() =>
 					actionMergeToMain().pipe(Effect.tap(() => editor.exitToNormal())),
 				),
+			},
+			{
+				key: "u",
+				mode: "action",
+				description: "Push to origin",
+				action: Effect.suspend(() => actionPush().pipe(Effect.tap(() => editor.exitToNormal()))),
 			},
 			{
 				key: "S-d",

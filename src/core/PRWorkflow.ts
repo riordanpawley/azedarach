@@ -78,6 +78,16 @@ export interface MergeToMainOptions {
 	readonly closeBead?: boolean
 }
 
+/**
+ * Options for pushing a worktree branch
+ */
+export interface PushOptions {
+	readonly beadId: string
+	readonly projectPath: string
+	/** Set upstream tracking (default: true) */
+	readonly setUpstream?: boolean
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -241,6 +251,29 @@ export interface PRWorkflowService {
 		| NotFoundError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Push worktree branch to origin
+	 *
+	 * Commits any uncommitted changes and pushes to origin.
+	 * Does not create a PR or merge - just pushes the branch.
+	 *
+	 * Workflow:
+	 * 1. Stage all changes in worktree
+	 * 2. Commit with WIP message if needed
+	 * 3. Push branch to origin
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.push({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly push: (
+		options: PushOptions,
+	) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -603,6 +636,45 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							.update(beadId, { status: "closed" })
 							.pipe(Effect.catchAll(() => Effect.void))
 					}
+				}),
+
+			push: (options: PushOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, setUpstream = true } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// Stage all changes
+					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+
+					// Commit if there are staged changes (ignore if nothing to commit)
+					yield* runGit(["commit", "-m", `WIP: ${beadId}`], worktree.path).pipe(
+						Effect.catchAll(() => Effect.void),
+					)
+
+					// Push to origin
+					const pushArgs = setUpstream
+						? ["push", "-u", "origin", beadId]
+						: ["push", "origin", beadId]
+
+					yield* runGit(pushArgs, worktree.path).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to push branch: ${e.message}`,
+									command: `git push${setUpstream ? " -u" : ""} origin ${beadId}`,
+								}),
+						),
+					)
 				}),
 		}
 	}),
