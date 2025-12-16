@@ -695,10 +695,15 @@ AutoMaker is a polished GUI tool with strong UX patterns. Key takeaways:
 
 ## Related Beads
 
-<!-- Add bead IDs here when features are tracked -->
-- AI Profiles: TBD
-- Detail Levels: TBD
-- Elapsed Timer: TBD
-- Concurrency Limits: TBD
-- Git Diff View: TBD
-- Context Browser: TBD
+| Bead | Title | Priority |
+|------|-------|----------|
+| `az-ph1` | Add agent phase detection and display | P1 |
+| `az-et1` | Add elapsed timer to TaskCard | P2 |
+| `az-dl1` | Add detail level toggle for cards | P2 |
+| `az-cl1` | Add concurrency limit config | P2 |
+| `az-nk1` | Add number keys 1-9 for quick attach | P3 |
+
+**Not yet tracked:**
+- AI Profiles system (epic)
+- Git diff overlay
+- Context file browser
