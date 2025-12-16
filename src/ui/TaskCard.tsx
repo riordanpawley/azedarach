@@ -22,8 +22,17 @@ export interface TaskCardProps {
  *
  * Simple two-line card: ID line + title line
  */
+// Max title length for truncation (25% column minus borders/padding)
+const MAX_TITLE_LENGTH = 22
+
 export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+
+	// Truncate title to prevent overflow
+	const truncatedTitle =
+		props.task.title.length > MAX_TITLE_LENGTH
+			? `${props.task.title.slice(0, MAX_TITLE_LENGTH - 1)}…`
+			: props.task.title
 
 	// Border color based on selection state
 	const getBorderColor = () => {
@@ -73,7 +82,7 @@ export const TaskCard = (props: TaskCardProps) => {
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
 			</box>
-			<text fg={theme.text}>{props.task.title}</text>
+			<text fg={theme.text}>{truncatedTitle}</text>
 		</box>
 	)
 }

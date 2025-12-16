@@ -46,9 +46,11 @@ const sortTasks = (tasks: TaskWithSession[], sortConfig: SortConfig): TaskWithSe
 
 		switch (sortConfig.field) {
 			case "session": {
+				// Sort by session status (active sessions ALWAYS first, ignoring direction)
+				// Lower values = more active (busy=0, idle=5), so don't multiply by direction
 				const sessionDiff =
 					getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-				if (sessionDiff !== 0) return sessionDiff * direction
+				if (sessionDiff !== 0) return sessionDiff
 				const priorityDiff = a.priority - b.priority
 				if (priorityDiff !== 0) return priorityDiff
 				return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()

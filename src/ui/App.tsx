@@ -15,6 +15,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	handleKeyAtom,
+	jumpToTaskAtom,
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
@@ -40,17 +41,12 @@ import { COLUMNS, type TaskWithSession } from "./types"
 
 // UI chrome heights - these sum to CHROME_HEIGHT for maxVisibleTasks calculation
 const STATUS_BAR_HEIGHT = 3 // border-top + content + border-bottom
-const COLUMN_HEADER_HEIGHT = 1
-const COLUMN_UNDERLINE_HEIGHT = 1 // active column underline
+const COLUMN_HEADER_HEIGHT = 1 // header with underline attribute (no separate line needed)
 const SCROLL_INDICATORS_HEIGHT = 2 // top "↑ N more" + bottom "↓ M more"
 const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
 
 const CHROME_HEIGHT =
-	STATUS_BAR_HEIGHT +
-	COLUMN_HEADER_HEIGHT +
-	COLUMN_UNDERLINE_HEIGHT +
-	SCROLL_INDICATORS_HEIGHT +
-	TMUX_STATUS_BAR_HEIGHT
+	STATUS_BAR_HEIGHT + COLUMN_HEADER_HEIGHT + SCROLL_INDICATORS_HEIGHT + TMUX_STATUS_BAR_HEIGHT
 
 // Helper function for session state sorting (defined outside component for stable reference)
 const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
@@ -123,6 +119,7 @@ export const App = () => {
 	// Actions for prompts (these bypass keyboard handling)
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
+	const jumpToTask = useAtomSet(jumpToTaskAtom, { mode: "promise" })
 
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
@@ -148,10 +145,11 @@ export const App = () => {
 
 				switch (sortConfig.field) {
 					case "session": {
-						// Sort by session status (active first when desc)
+						// Sort by session status (active sessions ALWAYS first, ignoring direction)
+						// Lower values = more active (busy=0, idle=5), so don't multiply by direction
 						const sessionDiff =
 							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-						if (sessionDiff !== 0) return sessionDiff * direction
+						if (sessionDiff !== 0) return sessionDiff
 						// Then by priority (lower number = higher priority)
 						const priorityDiff = a.priority - b.priority
 						if (priorityDiff !== 0) return priorityDiff
@@ -361,9 +359,11 @@ export const App = () => {
 				<CreateTaskPrompt
 					onSubmit={(params) => {
 						createTask(params)
-							.then((issue) => {
+							.then(async (issue) => {
 								dismissOverlay()
-								refreshBoard()
+								await refreshBoard()
+								// Navigate to the newly created task
+								await jumpToTask(issue.id)
 								showSuccess(`Created task: ${issue.id}`)
 							})
 							.catch((error) => {

@@ -449,6 +449,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				yield* beadEditor.createBead().pipe(
 					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
 					Effect.tap(() => board.refresh()),
+					// Navigate to the newly created task
+					Effect.tap((result) => nav.jumpToTask(result.id)),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error

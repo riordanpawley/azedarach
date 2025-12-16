@@ -923,6 +923,19 @@ export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; tas
 )
 
 /**
+ * Jump to task by ID - move cursor to a specific task
+ *
+ * Usage: const [, jumpToTask] = useAtom(jumpToTaskAtom, { mode: "promise" })
+ *        await jumpToTask("az-123")
+ */
+export const jumpToTaskAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.jumpToTask(taskId)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
  * Show toast atom - display a toast notification
  *
  * Usage: const [, showToast] = useAtom(showToastAtom, { mode: "promise" })

@@ -64,11 +64,10 @@ export const Column = (props: ColumnProps) => {
 	return (
 		<box flexDirection="column" width="25%" marginRight={1}>
 			{/* Column header */}
-			<box paddingLeft={1} flexDirection="column">
-				<text fg={headerColor} attributes={props.isActiveColumn ? ATTR_BOLD : 0}>
+			<box paddingLeft={1}>
+				<text fg={headerColor} attributes={props.isActiveColumn ? ATTR_BOLD | ATTR_UNDERLINE : 0}>
 					{headerText}
 				</text>
-				{props.isActiveColumn && <text fg={headerColor}>{"─".repeat(headerText.length)}</text>}
 			</box>
 
 			{/* Scroll indicator - top */}
@@ -105,6 +104,7 @@ export const Column = (props: ColumnProps) => {
 }
 
 /**
- * Text attribute for bold
+ * Text attributes (bitflags from OpenTUI)
  */
 const ATTR_BOLD = 1
+const ATTR_UNDERLINE = 8
