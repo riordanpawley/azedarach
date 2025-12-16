@@ -1,7 +1,11 @@
 // src/services/OverlayService.ts
 
+import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
 import { emptyArray } from "../lib/empty"
+
+// onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
+type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 
 export type Overlay =
 	| { readonly _tag: "help" }
@@ -10,7 +14,7 @@ export type Overlay =
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
-	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: Effect.Effect<void> }
+	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	effect: Effect.gen(function* () {

@@ -5,10 +5,14 @@
  * Manages help, detail, create, and confirm overlays.
  */
 
+import type { CommandExecutor } from "@effect/platform"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Effect } from "effect"
 import { useMemo } from "react"
 import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms"
+
+// onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
+type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 
 export type OverlayType =
 	| { readonly _tag: "help" }
@@ -20,7 +24,7 @@ export type OverlayType =
 	| {
 			readonly _tag: "confirm"
 			readonly message: string
-			readonly onConfirm: Effect.Effect<void>
+			readonly onConfirm: AnyEffect
 	  }
 
 /**
@@ -69,7 +73,7 @@ export function useOverlays() {
 				push({ _tag: "settings" })
 			},
 
-			showConfirm: (message: string, onConfirm: Effect.Effect<void>) => {
+			showConfirm: (message: string, onConfirm: AnyEffect) => {
 				push({ _tag: "confirm", message, onConfirm })
 			},
 

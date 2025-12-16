@@ -5,8 +5,8 @@
  * .beads/images/index.json since the beads CLI doesn't natively support attachments.
  */
 
-import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Schema, SubscriptionRef } from "effect"
+import { Command, FileSystem, Path } from "@effect/platform"
+import { Data, Effect, Record, Schema, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Schema Definitions
@@ -361,12 +361,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							createdAt: new Date().toISOString(),
 						}
 
-						// Update index
+						// Update index using Effect's Record.set for immutability
 						const index = yield* readIndex
 						const issueAttachments = index[issueId] ?? []
 						const newAttachments = [...issueAttachments, attachment]
-						index[issueId] = newAttachments
-						yield* writeIndex(index)
+						yield* writeIndex(Record.set(index, issueId, newAttachments))
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -405,49 +404,23 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const destFilename = `${id}.png`
 						const destPath = path.join(issueDir, destFilename)
 
-						// Get image from clipboard based on tool
-						if (tool === "wl-paste") {
-							// wl-paste --type image/png > file
-							const result = yield* Command.make("wl-paste", "--type", "image/png").pipe(
-								Command.stdout("inherit"),
-								Command.stderr("inherit"),
-								Effect.flatMap((process) => Effect.promise(() => process.stdout)),
-								Effect.catchAll((error) =>
-									Effect.fail(
-										new ClipboardError({
-											message: `Failed to get image from clipboard: ${error}`,
-											tool: "wl-paste",
-										}),
-									),
-								),
-							)
+						// Get image from clipboard using shell redirection (binary output)
+						const shellCmd =
+							tool === "wl-paste"
+								? `wl-paste --type image/png > "${destPath}"`
+								: `xclip -selection clipboard -t image/png -o > "${destPath}"`
 
-							yield* fs.writeFile(destPath, new Uint8Array(result as ArrayBuffer))
-						} else {
-							// xclip -selection clipboard -t image/png -o > file
-							const result = yield* Command.make(
-								"xclip",
-								"-selection",
-								"clipboard",
-								"-t",
-								"image/png",
-								"-o",
-							).pipe(
-								Command.stdout("inherit"),
-								Command.stderr("inherit"),
-								Effect.flatMap((process) => Effect.promise(() => process.stdout)),
-								Effect.catchAll((error) =>
-									Effect.fail(
-										new ClipboardError({
-											message: `Failed to get image from clipboard: ${error}`,
-											tool: "xclip",
-										}),
-									),
+						yield* Command.make("sh", "-c", shellCmd).pipe(
+							Command.exitCode,
+							Effect.catchAll((error) =>
+								Effect.fail(
+									new ClipboardError({
+										message: `Failed to get image from clipboard: ${error}`,
+										tool,
+									}),
 								),
-							)
-
-							yield* fs.writeFile(destPath, new Uint8Array(result as ArrayBuffer))
-						}
+							),
+						)
 
 						// Verify the file was created and has content
 						const exists = yield* fs.exists(destPath)
@@ -481,12 +454,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							createdAt: new Date().toISOString(),
 						}
 
-						// Update index
+						// Update index using Effect's Record.set for immutability
 						const index = yield* readIndex
 						const issueAttachments = index[issueId] ?? []
 						const newAttachments = [...issueAttachments, attachment]
-						index[issueId] = newAttachments
-						yield* writeIndex(index)
+						yield* writeIndex(Record.set(index, issueId, newAttachments))
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -521,15 +493,17 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const filePath = path.join(getIssueDir(issueId), attachment.filename)
 						yield* fs.remove(filePath).pipe(Effect.ignore)
 
-						// Update index
+						// Update index using Effect's Record for immutability
 						const newAttachments = issueAttachments.filter((a) => a.id !== attachmentId)
-						index[issueId] = newAttachments
+						const updatedIndex =
+							newAttachments.length === 0
+								? Record.remove(index, issueId)
+								: Record.set(index, issueId, newAttachments)
 						if (newAttachments.length === 0) {
-							delete index[issueId]
 							// Also try to remove the empty directory
 							yield* fs.remove(getIssueDir(issueId)).pipe(Effect.ignore)
 						}
-						yield* writeIndex(index)
+						yield* writeIndex(updatedIndex)
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
