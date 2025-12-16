@@ -960,13 +960,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			{
 				key: "g",
 				mode: "goto-pending",
-				description: "Go to first",
+				description: "Go to top of column",
 				action: nav.goToFirst().pipe(Effect.tap(() => editor.exitToNormal())),
 			},
 			{
 				key: "e",
 				mode: "goto-pending",
-				description: "Go to last",
+				description: "Go to bottom of column",
 				action: nav.goToLast().pipe(Effect.tap(() => editor.exitToNormal())),
 			},
 			{

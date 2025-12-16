@@ -230,10 +230,10 @@ Press `g` to enter goto mode. The next key determines the jump target.
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `g` `g` | First task | Jump to top of board |
-| `g` `e` | Last task | Jump to bottom of board |
-| `g` `h` | Column start | First task in current column |
-| `g` `l` | Column end | Last task in current column |
+| `g` `g` | Column top | Jump to first task in current column |
+| `g` `e` | Column bottom | Jump to last task in current column |
+| `g` `h` | First column | Jump to first column |
+| `g` `l` | Last column | Jump to last column |
 | `g` `w` | Jump labels | Shows 2-char labels on each task |
 
 ### Jump Labels (gw)
@@ -463,6 +463,6 @@ This makes az the central hub for all session navigation.
 
 3. **Batch moves with Select mode**: Select multiple related tasks, then move them together.
 
-4. **Quick column jumps**: `gh` and `gl` jump to column boundaries quickly.
+4. **Quick column jumps**: `gh` and `gl` jump between first and last columns; `gg` and `ge` jump to top/bottom of current column.
 
 5. **Half-page scrolling**: `Ctrl-d` and `Ctrl-u` are great for tall columns.
