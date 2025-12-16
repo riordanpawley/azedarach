@@ -9,6 +9,7 @@ export type Overlay =
 	| { readonly _tag: "create" }
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
+	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: Effect.Effect<void> }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
