@@ -249,7 +249,10 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
 )
 
 /**
- * Create a new task
+ * Create a new task with full orchestration
+ *
+ * Handles the complete create flow: dismiss overlay, create bead, refresh board,
+ * navigate to new task, show toast. All logic in Effects, not React callbacks.
  *
  * Usage: const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
  *        await createTask({ title: "New task", type: "task", priority: 2 })
@@ -258,7 +261,20 @@ export const createTaskAtom = appRuntime.fn(
 	(params: { title: string; type?: string; priority?: number; description?: string }) =>
 		Effect.gen(function* () {
 			const client = yield* BeadsClient
-			return yield* client.create(params)
+			const board = yield* BoardService
+			const navigation = yield* NavigationService
+			const toast = yield* ToastService
+			const overlay = yield* OverlayService
+
+			yield* overlay.pop()
+
+			const issue = yield* client.create(params)
+
+			yield* board.refresh()
+			yield* navigation.jumpToTask(issue.id)
+			yield* toast.show("success", `Created task: ${issue.id}`)
+
+			return issue
 		}).pipe(Effect.tapError(Effect.logError)),
 )
 
@@ -299,7 +315,8 @@ export const createBeadViaEditorAtom = appRuntime.fn(() =>
  * Runs claude in non-interactive mode (-p) to create a bead based on
  * the user's description. Much lighter than a full interactive session.
  *
- * Returns the created bead ID so the UI can refresh and show it.
+ * Handles full orchestration: dismiss overlay, show progress toast, create via Claude,
+ * refresh board, navigate to new task, show success toast.
  *
  * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
  *        const beadId = await claudeCreate("Add dark mode toggle to settings")
@@ -308,6 +325,13 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
 		const { config } = yield* AppConfig
 		const board = yield* BoardService
+		const navigation = yield* NavigationService
+		const toast = yield* ToastService
+		const overlay = yield* OverlayService
+
+		// Dismiss overlay first
+		yield* overlay.pop()
+		yield* toast.show("info", "Creating task with Claude...")
 
 		const projectPath = process.cwd()
 		const { dangerouslySkipPermissions } = config.session
@@ -362,15 +386,18 @@ Create the bead now and output just the ID.`
 			}
 		}
 
+		// Refresh the board to show the new task
+		yield* board.refresh()
+
 		if (!beadId) {
 			yield* Effect.logWarning(`Could not parse bead ID from Claude output: ${result}`)
-			// Refresh board anyway - the bead was likely created
-			yield* board.refresh()
+			yield* toast.show("success", "Task created (check board for new task)")
 			return "unknown"
 		}
 
-		// Refresh the board to show the new task
-		yield* board.refresh()
+		// Navigate to the new task and show success
+		yield* navigation.jumpToTask(beadId)
+		yield* toast.show("success", `Created task: ${beadId}`)
 
 		return beadId
 	}).pipe(Effect.tapError(Effect.logError)),
@@ -944,6 +971,21 @@ export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; tas
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		yield* nav.jumpTo(column, task)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Jump to task by ID - move cursor directly to a specific task
+ *
+ * Useful after creating a bead when you know the ID but not the position.
+ *
+ * Usage: const [, jumpToTask] = useAtom(jumpToTaskAtom, { mode: "promise" })
+ *        await jumpToTask("az-123")
+ */
+export const jumpToTaskAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.jumpToTask(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
