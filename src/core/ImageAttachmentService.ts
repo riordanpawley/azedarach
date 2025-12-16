@@ -6,7 +6,7 @@
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Schema } from "effect"
+import { Data, Effect, Schema, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Schema Definitions
@@ -205,7 +205,40 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				return null
 			})
 
+			// ========================================================================
+			// Reactive State
+			// ========================================================================
+
+			/**
+			 * State for the currently viewed task's attachments.
+			 * Updated when detail panel opens for a task.
+			 */
+			const currentAttachments = yield* SubscriptionRef.make<{
+				readonly taskId: string
+				readonly attachments: readonly ImageAttachment[]
+			} | null>(null)
+
 			return {
+				// Expose SubscriptionRef for atom subscription
+				currentAttachments,
+
+				/**
+				 * Load attachments for a task and update reactive state.
+				 * Call this when opening detail panel.
+				 */
+				loadForTask: (taskId: string) =>
+					Effect.gen(function* () {
+						const index = yield* readIndex
+						const attachments = index[taskId] ?? []
+						yield* SubscriptionRef.set(currentAttachments, { taskId, attachments })
+						return attachments
+					}),
+
+				/**
+				 * Clear current attachments state (when closing detail panel)
+				 */
+				clearCurrent: () => SubscriptionRef.set(currentAttachments, null),
+
 				/**
 				 * List all attachments for an issue
 				 */
@@ -265,8 +298,18 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						// Update index
 						const index = yield* readIndex
 						const issueAttachments = index[issueId] ?? []
-						index[issueId] = [...issueAttachments, attachment]
+						const newAttachments = [...issueAttachments, attachment]
+						index[issueId] = newAttachments
 						yield* writeIndex(index)
+
+						// Update reactive state if viewing this task
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (current?.taskId === issueId) {
+							yield* SubscriptionRef.set(currentAttachments, {
+								taskId: issueId,
+								attachments: newAttachments,
+							})
+						}
 
 						return attachment
 					}),
@@ -375,8 +418,18 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						// Update index
 						const index = yield* readIndex
 						const issueAttachments = index[issueId] ?? []
-						index[issueId] = [...issueAttachments, attachment]
+						const newAttachments = [...issueAttachments, attachment]
+						index[issueId] = newAttachments
 						yield* writeIndex(index)
+
+						// Update reactive state if viewing this task
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (current?.taskId === issueId) {
+							yield* SubscriptionRef.set(currentAttachments, {
+								taskId: issueId,
+								attachments: newAttachments,
+							})
+						}
 
 						return attachment
 					}),
@@ -403,13 +456,23 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						yield* fs.remove(filePath).pipe(Effect.ignore)
 
 						// Update index
-						index[issueId] = issueAttachments.filter((a) => a.id !== attachmentId)
-						if (index[issueId].length === 0) {
+						const newAttachments = issueAttachments.filter((a) => a.id !== attachmentId)
+						index[issueId] = newAttachments
+						if (newAttachments.length === 0) {
 							delete index[issueId]
 							// Also try to remove the empty directory
 							yield* fs.remove(getIssueDir(issueId)).pipe(Effect.ignore)
 						}
 						yield* writeIndex(index)
+
+						// Update reactive state if viewing this task
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (current?.taskId === issueId) {
+							yield* SubscriptionRef.set(currentAttachments, {
+								taskId: issueId,
+								attachments: newAttachments,
+							})
+						}
 					}),
 
 				/**
