@@ -121,7 +121,7 @@ I'll write this as: `Ctrl-a d`
 │ PREFIX = Ctrl-a (press first, then command key)        │
 ├────────────────────────────────────────────────────────┤
 │ Session Commands:                                       │
-│   Ctrl-a A     Return to az TUI (from Claude session)  │
+│   Ctrl-a Ctrl-a Return to az TUI (double-tap prefix)   │
 │   Ctrl-a d     Detach from session                     │
 │   Ctrl-a $     Rename session                          │
 │   Ctrl-a s     List sessions (interactive)             │
@@ -164,7 +164,7 @@ When you start az, it runs inside a tmux session (default name: `az`). When you 
 2. Claude Code runs inside that tmux session
 3. You can attach to see/interact with Claude
 4. Detaching lets Claude continue working
-5. **Press `Ctrl-a A` from any Claude session to return to az**
+5. **Press `Ctrl-a Ctrl-a` (double-tap prefix) from any Claude session to return to az**
 
 ### Session Naming Convention
 
@@ -232,12 +232,12 @@ Great for quick `git status`, `bd ready`, or any one-off command!
 **The quick workflow:**
 ```bash
 # From az TUI: Space+a on a task to attach to its Claude session
-# From Claude session: Ctrl-a A to return to az TUI
+# From Claude session: Ctrl-a Ctrl-a to return to az TUI (double-tap prefix)
 ```
 
 This two-keystroke pattern makes az the hub for all session navigation:
 - `Space` `a` → go TO a Claude session (from az)
-- `Ctrl-a A` → go BACK to az (from anywhere)
+- `Ctrl-a Ctrl-a` → go BACK to az (double-tap prefix, from anywhere)
 
 ### Workflow 1: Monitor a Running Session
 
