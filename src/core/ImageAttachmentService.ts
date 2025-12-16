@@ -112,6 +112,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				}
 			})
 
+			// Decoder for reading index from JSON string
+			const decodeIndex = Schema.decodeUnknown(Schema.parseJson(AttachmentIndexSchema))
+
 			/**
 			 * Read the attachment index
 			 */
@@ -119,12 +122,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				yield* ensureStorage
 				const indexPath = getIndexPath()
 				const content = yield* fs.readFileString(indexPath)
-				try {
-					const parsed = JSON.parse(content)
-					return Schema.decodeUnknownSync(AttachmentIndexSchema)(parsed)
-				} catch {
-					return {} as AttachmentIndex
-				}
+				return yield* decodeIndex(content).pipe(
+					Effect.catchAll(() => Effect.succeed({} as AttachmentIndex)),
+				)
 			})
 
 			/**
@@ -183,18 +183,20 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			 */
 			const detectClipboardTool = Effect.gen(function* () {
 				// Try wl-paste first (Wayland)
-				const wlPasteCheck = yield* Command.make("which", "wl-paste")
-					.pipe(Command.exitCode)
-					.pipe(Effect.catchAll(() => Effect.succeed(1)))
+				const wlPasteCheck = yield* Command.make("which", "wl-paste").pipe(
+					Command.exitCode,
+					Effect.catchAll(() => Effect.succeed(1)),
+				)
 
 				if (wlPasteCheck === 0) {
 					return "wl-paste" as const
 				}
 
 				// Try xclip (X11)
-				const xclipCheck = yield* Command.make("which", "xclip")
-					.pipe(Command.exitCode)
-					.pipe(Effect.catchAll(() => Effect.succeed(1)))
+				const xclipCheck = yield* Command.make("which", "xclip").pipe(
+					Command.exitCode,
+					Effect.catchAll(() => Effect.succeed(1)),
+				)
 
 				if (xclipCheck === 0) {
 					return "xclip" as const
@@ -297,19 +299,19 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						// Get image from clipboard based on tool
 						if (tool === "wl-paste") {
 							// wl-paste --type image/png > file
-							const result = yield* Command.make("wl-paste", "--type", "image/png")
-								.pipe(Command.stdout("inherit"), Command.stderr("inherit"))
-								.pipe(
-									Effect.flatMap((process) => Effect.promise(() => process.stdout)),
-									Effect.catchAll((error) =>
-										Effect.fail(
-											new ClipboardError({
-												message: `Failed to get image from clipboard: ${error}`,
-												tool: "wl-paste",
-											}),
-										),
+							const result = yield* Command.make("wl-paste", "--type", "image/png").pipe(
+								Command.stdout("inherit"),
+								Command.stderr("inherit"),
+								Effect.flatMap((process) => Effect.promise(() => process.stdout)),
+								Effect.catchAll((error) =>
+									Effect.fail(
+										new ClipboardError({
+											message: `Failed to get image from clipboard: ${error}`,
+											tool: "wl-paste",
+										}),
 									),
-								)
+								),
+							)
 
 							yield* fs.writeFile(destPath, new Uint8Array(result as ArrayBuffer))
 						} else {
@@ -321,19 +323,19 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 								"-t",
 								"image/png",
 								"-o",
-							)
-								.pipe(Command.stdout("inherit"), Command.stderr("inherit"))
-								.pipe(
-									Effect.flatMap((process) => Effect.promise(() => process.stdout)),
-									Effect.catchAll((error) =>
-										Effect.fail(
-											new ClipboardError({
-												message: `Failed to get image from clipboard: ${error}`,
-												tool: "xclip",
-											}),
-										),
+							).pipe(
+								Command.stdout("inherit"),
+								Command.stderr("inherit"),
+								Effect.flatMap((process) => Effect.promise(() => process.stdout)),
+								Effect.catchAll((error) =>
+									Effect.fail(
+										new ClipboardError({
+											message: `Failed to get image from clipboard: ${error}`,
+											tool: "xclip",
+										}),
 									),
-								)
+								),
+							)
 
 							yield* fs.writeFile(destPath, new Uint8Array(result as ArrayBuffer))
 						}
@@ -450,17 +452,16 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const filePath = path.join(getIssueDir(issueId), attachment.filename)
 
 						// Use xdg-open on Linux
-						yield* Command.make("xdg-open", filePath)
-							.pipe(Command.exitCode)
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.fail(
-										new ImageAttachmentError({
-											message: `Failed to open image: ${error}`,
-										}),
-									),
+						yield* Command.make("xdg-open", filePath).pipe(
+							Command.exitCode,
+							Effect.catchAll((error) =>
+								Effect.fail(
+									new ImageAttachmentError({
+										message: `Failed to open image: ${error}`,
+									}),
 								),
-							)
+							),
+						)
 					}),
 
 				/**
