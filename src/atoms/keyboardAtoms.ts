@@ -19,7 +19,7 @@ import { appRuntime } from "../ui/atoms"
  * Usage:
  * ```tsx
  * const [, handleKey] = useAtom(handleKeyAtom, { mode: "promise" })
- * handleKey("Escape")
+ * handleKey("escape")
  * ```
  */
 export const handleKeyAtom = appRuntime.fn((key: string) =>
