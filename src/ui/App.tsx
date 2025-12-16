@@ -41,7 +41,7 @@ import { COLUMNS, type TaskWithSession } from "./types"
 // UI chrome heights - these sum to CHROME_HEIGHT for maxVisibleTasks calculation
 const STATUS_BAR_HEIGHT = 3 // border-top + content + border-bottom
 const COLUMN_HEADER_HEIGHT = 1
-const COLUMN_UNDERLINE_HEIGHT = 1 // active column underline
+const COLUMN_UNDERLINE_HEIGHT = 0 // underline now rendered as text attribute
 const SCROLL_INDICATORS_HEIGHT = 2 // top "↑ N more" + bottom "↓ M more"
 const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
 
