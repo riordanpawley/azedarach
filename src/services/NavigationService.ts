@@ -293,12 +293,23 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				}),
 
 			/**
-			 * Go to first task (top-left: first task in first column)
+			 * Go to first task in current column
 			 */
 			goToFirst: (): Effect.Effect<void> =>
 				Effect.gen(function* () {
-					const firstTask = yield* getFirstTask()
-					if (firstTask) {
+					const currentId = yield* SubscriptionRef.get(focusedTaskId)
+					const currentPos = yield* findTaskPosition(currentId)
+
+					if (!currentPos) {
+						yield* ensureValidFocus()
+						return
+					}
+
+					const tasksByColumn = yield* getFilteredTasksByColumn()
+					const column = tasksByColumn[currentPos.columnIndex]!
+
+					if (column.length > 0) {
+						const firstTask = column[0]!
 						yield* SubscriptionRef.set(focusedTaskId, firstTask.id)
 					}
 				}),
