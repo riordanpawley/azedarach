@@ -38,10 +38,19 @@ import { COLUMNS, type TaskWithSession } from "./types"
 // Constants
 // ============================================================================
 
-// UI chrome height: board padding (2) + status bar (3) + column header (1) = 6
-// Add 1 more row when running inside tmux to account for tmux status bar
+// UI chrome heights - these sum to CHROME_HEIGHT for maxVisibleTasks calculation
+const STATUS_BAR_HEIGHT = 3 // border-top + content + border-bottom
+const COLUMN_HEADER_HEIGHT = 1
+const COLUMN_UNDERLINE_HEIGHT = 0 // underline now rendered as text attribute
+const SCROLL_INDICATORS_HEIGHT = 2 // top "↑ N more" + bottom "↓ M more"
 const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
-const CHROME_HEIGHT = 6 + TMUX_STATUS_BAR_HEIGHT
+
+const CHROME_HEIGHT =
+	STATUS_BAR_HEIGHT +
+	COLUMN_HEADER_HEIGHT +
+	COLUMN_UNDERLINE_HEIGHT +
+	SCROLL_INDICATORS_HEIGHT +
+	TMUX_STATUS_BAR_HEIGHT
 
 // Helper function for session state sorting (defined outside component for stable reference)
 const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
@@ -71,7 +80,7 @@ export const App = () => {
 	// Hooks - Atomic State Management
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const { toasts, showError, showSuccess, showInfo, dismissToast } = useToasts()
+	const { toasts, dismissToast } = useToasts()
 	const {
 		dismiss: dismissOverlay,
 		showingHelp,
@@ -112,6 +121,7 @@ export const App = () => {
 	}, [refreshBoard])
 
 	// Actions for prompts (these bypass keyboard handling)
+	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
 
@@ -352,15 +362,6 @@ export const App = () => {
 				<CreateTaskPrompt
 					onSubmit={(params) => {
 						createTask(params)
-							.then((issue) => {
-								dismissOverlay()
-								refreshBoard()
-								showSuccess(`Created task: ${issue.id}`)
-							})
-							.catch((error) => {
-								dismissOverlay()
-								showError(`Failed to create task: ${error}`)
-							})
 					}}
 					onCancel={() => dismissOverlay()}
 				/>
@@ -371,15 +372,6 @@ export const App = () => {
 				<ClaudeCreatePrompt
 					onSubmit={(description) => {
 						claudeCreateSession(description)
-							.then((sessionName: string) => {
-								dismissOverlay()
-								showSuccess(`Claude session started: ${sessionName}`)
-								showInfo(`Attach with: tmux attach -t ${sessionName}`)
-							})
-							.catch((error) => {
-								dismissOverlay()
-								showError(`Failed to start Claude session: ${error}`)
-							})
 					}}
 					onCancel={() => dismissOverlay()}
 				/>

@@ -66,6 +66,18 @@ export interface CleanupOptions {
 	readonly closeBead?: boolean
 }
 
+/**
+ * Options for merging to main
+ */
+export interface MergeToMainOptions {
+	readonly beadId: string
+	readonly projectPath: string
+	/** Push to origin after merge (default: true) */
+	readonly pushToOrigin?: boolean
+	/** Close the bead issue after successful merge (default: true) */
+	readonly closeBead?: boolean
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -92,6 +104,15 @@ export class GHCLIError extends Data.TaggedError("GHCLIError")<{
 export class PRNotFoundError extends Data.TaggedError("PRNotFoundError")<{
 	readonly beadId: string
 	readonly branch: string
+}> {}
+
+/**
+ * Error when merge has conflicts
+ */
+export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
+	readonly beadId: string
+	readonly branch: string
+	readonly message: string
 }> {}
 
 // ============================================================================
@@ -180,6 +201,46 @@ export interface PRWorkflowService {
 	 * Check if gh CLI is installed and authenticated
 	 */
 	readonly checkGHCLI: () => Effect.Effect<boolean, never, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Merge worktree branch to main and clean up
+	 *
+	 * This is for local merges without creating a PR. Use when work is complete
+	 * and you want to merge directly to main without GitHub PR workflow.
+	 *
+	 * Workflow:
+	 * 1. Stop any running session
+	 * 2. Sync beads in worktree (bd sync --from-main)
+	 * 3. Commit any uncommitted changes in worktree
+	 * 4. Switch to main branch in main repo
+	 * 5. Merge branch with --no-ff
+	 * 6. Remove worktree directory
+	 * 7. Delete local branch
+	 * 8. Push to origin (optional)
+	 * 9. Close bead issue (optional)
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.mergeToMain({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly mergeToMain: (
+		options: MergeToMainOptions,
+	) => Effect.Effect<
+		void,
+		| PRError
+		| MergeConflictError
+		| GitError
+		| NotAGitRepoError
+		| SessionError
+		| TmuxError
+		| BeadsError
+		| NotFoundError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -445,6 +506,103 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.succeed(1)),
 					)
 					return exitCode === 0
+				}),
+
+			mergeToMain: (options: MergeToMainOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, pushToOrigin = true, closeBead = true } = options
+
+					// Get bead info for merge commit message
+					const bead = yield* beadsClient.show(beadId)
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// 1. Stop any running session (ignore errors)
+					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+
+					// 2. Sync beads in worktree (bd sync --from-main)
+					yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
+
+					// 3. Stage and commit any uncommitted changes in worktree
+					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
+						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
+					)
+
+					// 4. Switch to main branch in main repo
+					yield* runGit(["checkout", "main"], projectPath).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to checkout main: ${e.message}`,
+									command: "git checkout main",
+								}),
+						),
+					)
+
+					// 5. Merge branch with --no-ff
+					const mergeMessage = `Merge ${beadId}: ${bead.title}`
+					yield* runGit(["merge", beadId, "--no-ff", "-m", mergeMessage], projectPath).pipe(
+						Effect.mapError((e) => {
+							// Check if it's a merge conflict
+							if (
+								e.stderr?.includes("CONFLICT") ||
+								e.stderr?.includes("Automatic merge failed") ||
+								e.message.includes("CONFLICT") ||
+								e.message.includes("Automatic merge failed")
+							) {
+								return new MergeConflictError({
+									beadId,
+									branch: beadId,
+									message:
+										"Merge conflicts detected. Resolve manually and run: git merge --continue",
+								})
+							}
+							return new GitError({
+								message: `Merge failed: ${e.message}`,
+								command: `git merge ${beadId} --no-ff`,
+								stderr: e.stderr,
+							})
+						}),
+					)
+
+					// 6. Remove worktree directory
+					yield* worktreeManager.remove({ beadId, projectPath })
+
+					// 7. Delete local branch
+					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
+						Effect.catchAll(() => Effect.void), // Ignore if already deleted
+					)
+
+					// 8. Push to origin (optional)
+					if (pushToOrigin) {
+						yield* runGit(["push", "origin", "main"], projectPath).pipe(
+							Effect.mapError(
+								(e) =>
+									new GitError({
+										message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
+										command: "git push origin main",
+										stderr: e.stderr,
+									}),
+							),
+						)
+					}
+
+					// 9. Close bead issue (optional)
+					if (closeBead) {
+						yield* beadsClient
+							.update(beadId, { status: "closed" })
+							.pipe(Effect.catchAll(() => Effect.void))
+					}
 				}),
 		}
 	}),

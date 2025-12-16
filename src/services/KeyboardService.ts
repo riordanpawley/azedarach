@@ -15,7 +15,7 @@ import { Effect, Record, Ref } from "effect"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
-import { PRWorkflow } from "../core/PRWorkflow"
+import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { VCService } from "../core/VCService"
 import { COLUMNS, generateJumpLabels } from "../ui/types"
@@ -319,6 +319,32 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
+		 * Start session with initial prompt (Space+S)
+		 * Starts Claude and tells it to "work on bead {beadId}"
+		 */
+		const actionStartSessionWithPrompt = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "idle") {
+					yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager
+					.start({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						initialPrompt: `work on ${task.id}`,
+					})
+					.pipe(
+						Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
+						Effect.catchAll(showErrorToast("Failed to start")),
+					)
+			})
+
+		/**
 		 * Attach external action (Space+a)
 		 */
 		const actionAttachExternal = () =>
@@ -447,8 +473,9 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const actionCreateBead = () =>
 			Effect.gen(function* () {
 				yield* beadEditor.createBead().pipe(
-					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
 					Effect.tap(() => board.refresh()),
+					Effect.tap((result) => nav.jumpToTask(result.id)),
+					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
@@ -514,6 +541,40 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				yield* prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
 					Effect.tap(() => toast.show("success", `Cleaned up ${task.id}`)),
 					Effect.catchAll(showErrorToast("Failed to cleanup")),
+				)
+			})
+
+		/**
+		 * Merge worktree to main action (Space+m)
+		 *
+		 * Merges the worktree branch to main locally without creating a PR.
+		 * Handles merge conflicts gracefully by showing error and preserving worktree.
+		 */
+		const actionMergeToMain = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				yield* toast.show("info", `Merging ${task.id} to main...`)
+
+				yield* prWorkflow.mergeToMain({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap(() => board.refresh()),
+					Effect.tap(() => toast.show("success", `Merged ${task.id} to main`)),
+					Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
+						if (error._tag === "MergeConflictError") {
+							return toast.show("error", `Merge conflict: ${error.message}`)
+						}
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return toast.show("error", `Merge failed: ${msg}`)
+					}),
 				)
 			})
 
@@ -831,6 +892,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				),
 			},
 			{
+				key: "S-s",
+				mode: "action",
+				description: "Start+work (prompt Claude)",
+				action: Effect.suspend(() =>
+					actionStartSessionWithPrompt().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
 				key: "a",
 				mode: "action",
 				description: "Attach to session",
@@ -903,6 +972,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
 			},
 			{
+				key: "m",
+				mode: "action",
+				description: "Merge to main",
+				action: Effect.suspend(() =>
+					actionMergeToMain().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
 				key: "S-d",
 				mode: "action",
 				description: "Delete bead",
@@ -917,13 +994,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			{
 				key: "g",
 				mode: "goto-pending",
-				description: "Go to first",
+				description: "Go to top of column",
 				action: nav.goToFirst().pipe(Effect.tap(() => editor.exitToNormal())),
 			},
 			{
 				key: "e",
 				mode: "goto-pending",
-				description: "Go to last",
+				description: "Go to bottom of column",
 				action: nav.goToLast().pipe(Effect.tap(() => editor.exitToNormal())),
 			},
 			{

@@ -24,6 +24,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const isAvailable = (action: string): boolean => {
 		switch (action) {
 			case "s": // Start - only if idle
+			case "S": // Start+work - only if idle
 				return sessionState === "idle"
 			case "a": // Attach - only if not idle
 				return sessionState !== "idle"
@@ -34,6 +35,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "x": // Stop - only if not idle
 				return sessionState !== "idle"
 			case "P": // Create PR - only if session has worktree (not idle)
+				return sessionState !== "idle"
+			case "m": // Merge to main - only if session has worktree (not idle)
 				return sessionState !== "idle"
 			case "d": // Cleanup/Delete worktree - only if session exists
 				return sessionState !== "idle"
@@ -84,6 +87,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Session actions */}
 				<ActionLine keyName="s" description="start" />
+				<ActionLine keyName="S" description="start+work" />
 				<ActionLine keyName="a" description="attach" />
 				<ActionLine keyName="p" description="pause" />
 				<ActionLine keyName="r" description="resume" />
@@ -92,6 +96,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Git/PR */}
 				<ActionLine keyName="P" description="PR" />
+				<ActionLine keyName="m" description="merge" />
 				<ActionLine keyName="d" description="cleanup" />
 				<ActionLine keyName="D" description="delete" />
 			</box>

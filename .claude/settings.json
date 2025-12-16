@@ -15,14 +15,14 @@
 			"Bash(git push:*)",
 			"Bash(pnpm:*)",
 			"Bash(npm:*)",
-			"Bash(gh:*)"
+			"Bash(gh:*)",
+			"Bash(bun run type-check:*)"
 		],
 		"deny": []
 	},
 	"hooks": {
 		"UserPromptSubmit": [
 			{
-				"matcher": {},
 				"hooks": [
 					{
 						"type": "command",
