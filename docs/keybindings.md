@@ -441,6 +441,20 @@ The UI uses the Catppuccin Mocha color palette:
   - ❌ Error
   - ⏸️ Paused
 
+## tmux Navigation
+
+Azedarach registers a global tmux keybinding for session navigation:
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Ctrl-a A` | Return to az | Works from any Claude session |
+
+**Navigation flow:**
+1. From az: `Space` `a` → attach to Claude session
+2. From Claude: `Ctrl-a A` → return to az TUI
+
+This makes az the central hub for all session navigation.
+
 ## Tips
 
 1. **Stay on home row**: All primary keys (hjkl, g, v, Space) are accessible without moving your hands.
