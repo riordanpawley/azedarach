@@ -78,6 +78,20 @@ export interface MergeToMainOptions {
 	readonly closeBead?: boolean
 }
 
+/**
+ * Result of merge conflict check
+ */
+export interface MergeConflictCheck {
+	/** Whether conflicts are likely (files modified in both branches) */
+	readonly hasConflictRisk: boolean
+	/** Files modified in both main and branch since divergence */
+	readonly conflictingFiles: readonly string[]
+	/** Total files changed in the branch */
+	readonly branchChangedFiles: number
+	/** Total files changed in main since divergence */
+	readonly mainChangedFiles: number
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -241,6 +255,30 @@ export interface PRWorkflowService {
 		| NotFoundError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Check for potential merge conflicts without actually merging
+	 *
+	 * This performs a safe, read-only check by:
+	 * 1. Finding the merge base between main and the branch
+	 * 2. Comparing which files changed on each side since divergence
+	 * 3. Reporting files that changed on both sides (conflict risk)
+	 *
+	 * @example
+	 * ```ts
+	 * const check = yield* prWorkflow.checkMergeConflicts({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * if (check.hasConflictRisk) {
+	 *   console.log("Potential conflicts in:", check.conflictingFiles)
+	 * }
+	 * ```
+	 */
+	readonly checkMergeConflicts: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -603,6 +641,70 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							.update(beadId, { status: "closed" })
 							.pipe(Effect.catchAll(() => Effect.void))
 					}
+				}),
+
+			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Find the merge base between main and the branch
+					const mergeBase = yield* runGit(["merge-base", "main", beadId], projectPath).pipe(
+						Effect.map((output) => output.trim()),
+						Effect.catchAll(() =>
+							// If merge-base fails, branches have no common ancestor
+							// This means main has likely been rebased/reset - high conflict risk
+							Effect.succeed(""),
+						),
+					)
+
+					// If no merge base found, we can't determine conflict risk
+					if (!mergeBase) {
+						return {
+							hasConflictRisk: true,
+							conflictingFiles: [] as readonly string[],
+							branchChangedFiles: 0,
+							mainChangedFiles: 0,
+						} satisfies MergeConflictCheck
+					}
+
+					// Get files changed in the branch since merge base
+					const branchFiles = yield* runGit(
+						["diff", "--name-only", `${mergeBase}..${beadId}`],
+						projectPath,
+					).pipe(
+						Effect.map((output) =>
+							output
+								.trim()
+								.split("\n")
+								.filter((f) => f.length > 0),
+						),
+						Effect.catchAll(() => Effect.succeed([] as string[])),
+					)
+
+					// Get files changed in main since merge base
+					const mainFiles = yield* runGit(
+						["diff", "--name-only", `${mergeBase}..main`],
+						projectPath,
+					).pipe(
+						Effect.map((output) =>
+							output
+								.trim()
+								.split("\n")
+								.filter((f) => f.length > 0),
+						),
+						Effect.catchAll(() => Effect.succeed([] as string[])),
+					)
+
+					// Find files that changed on both sides (potential conflicts)
+					const branchFileSet = new Set(branchFiles)
+					const conflictingFiles = mainFiles.filter((f) => branchFileSet.has(f))
+
+					return {
+						hasConflictRisk: conflictingFiles.length > 0,
+						conflictingFiles,
+						branchChangedFiles: branchFiles.length,
+						mainChangedFiles: mainFiles.length,
+					} satisfies MergeConflictCheck
 				}),
 		}
 	}),
