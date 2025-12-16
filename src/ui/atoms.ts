@@ -353,7 +353,16 @@ ${description}
 Create the bead now and output just the ID.`
 
 		// Build command arguments for non-interactive print mode
-		const args = ["-p", prompt, "--output-format", "text"]
+		// Pre-approve bd CLI commands and beads MCP tools to avoid permission hang in non-interactive mode
+		const args = [
+			"-p",
+			prompt,
+			"--output-format",
+			"text",
+			"--allowedTools",
+			"Bash(bd:*)",
+			"mcp__plugin_beads_beads__create",
+		]
 		if (dangerouslySkipPermissions) {
 			args.push("--dangerously-skip-permissions")
 		}
