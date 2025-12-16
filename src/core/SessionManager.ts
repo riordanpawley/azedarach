@@ -410,10 +410,15 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					const session = sessionOpt.value
 
+					yield* Effect.log(`Stopping session for ${beadId}`)
+
 					// Sync beads changes from worktree before killing session
 					// This ensures any bd update/close commands run in the worktree get synced back to main
 					yield* beadsClient.sync(session.worktreePath).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
+						Effect.tap(() => Effect.log(`Synced beads from worktree for ${beadId}`)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Sync failed for ${beadId}: ${error}`).pipe(Effect.asVoid),
+						),
 					)
 
 					// Kill tmux session (ignore error if already dead)
@@ -429,6 +434,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Publish state change event
 					yield* publishStateChange(beadId, oldState, "idle")
+
+					yield* Effect.log(`Session stopped for ${beadId} (was: ${oldState})`)
 				}),
 
 			pause: (beadId: string) =>
