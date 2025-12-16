@@ -379,15 +379,18 @@ export const App = () => {
 			{showingClaudeCreate && (
 				<ClaudeCreatePrompt
 					onSubmit={(description) => {
+						dismissOverlay()
+						showInfo("Creating task with Claude...")
 						claudeCreateSession(description)
-							.then((sessionName: string) => {
-								dismissOverlay()
-								showSuccess(`Claude session started: ${sessionName}`)
-								showInfo(`Attach with: tmux attach -t ${sessionName}`)
+							.then((beadId: string) => {
+								if (beadId === "unknown") {
+									showSuccess("Task created (check board for new task)")
+								} else {
+									showSuccess(`Created task: ${beadId}`)
+								}
 							})
 							.catch((error) => {
-								dismissOverlay()
-								showError(`Failed to start Claude session: ${error}`)
+								showError(`Failed to create task: ${error}`)
 							})
 					}}
 					onCancel={() => dismissOverlay()}
