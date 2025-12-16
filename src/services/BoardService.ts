@@ -5,7 +5,7 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
-import { Effect, Record, Schedule, SubscriptionRef } from "effect"
+import { Cause, Effect, Record, Schedule, SubscriptionRef } from "effect"
 import { BeadsClient } from "../core/BeadsClient"
 import { SessionManager } from "../core/SessionManager"
 import { emptyRecord } from "../lib/empty"
@@ -146,6 +146,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
 				}))
 
+				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
+				const withSessions = tasksWithSession.filter((t) => t.sessionState !== "idle").length
+				if (issues.length === 0 || withSessions !== activeSessions.length) {
+					yield* Effect.logWarning(
+						`Task load: ${issues.length} beads, ${activeSessions.length} active sessions, ${withSessions} beads with sessions`,
+					)
+				}
+
 				return tasksWithSession
 			})
 
@@ -181,9 +189,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(
-			Effect.gen(function* () {
-				yield* refresh()
-			}),
+			refresh().pipe(
+				Effect.catchAllCause((cause) =>
+					Effect.logError("BoardService refresh failed", Cause.pretty(cause)).pipe(Effect.asVoid),
+				),
+			),
 		)
 		return {
 			// State refs (fine-grained for external subscription)
