@@ -25,11 +25,13 @@ const getTitleMaxWidth = (): number => {
 }
 
 /**
- * Truncate text to fit within a specified width, adding ellipsis if needed.
+ * Truncate text to fit within two lines, adding ellipsis if needed.
+ * Title is allowed to span 2 lines before truncation kicks in.
  */
-const truncateText = (text: string, maxWidth: number): string => {
-	if (text.length <= maxWidth) return text
-	return `${text.slice(0, maxWidth - 1)}…`
+const truncateText = (text: string, maxWidthPerLine: number): string => {
+	const maxChars = maxWidthPerLine * 2 // Allow 2 lines of text
+	if (text.length <= maxChars) return text
+	return `${text.slice(0, maxChars - 1)}…`
 }
 
 export interface TaskCardProps {
