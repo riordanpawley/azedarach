@@ -23,7 +23,7 @@ import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
 import { NavigationService } from "../services/NavigationService"
-import { OverlayService } from "../services/OverlayService"
+import { type Overlay, OverlayService } from "../services/OverlayService"
 import { SessionService } from "../services/SessionService"
 // New atomic Effect services
 import { ToastService } from "../services/ToastService"
@@ -1022,24 +1022,11 @@ export const dismissToastAtom = appRuntime.fn((toastId: string) =>
  * Usage: const [, pushOverlay] = useAtom(pushOverlayAtom, { mode: "promise" })
  *        await pushOverlay({ _tag: "help" })
  */
-export const pushOverlayAtom = appRuntime.fn(
-	(
-		overlay:
-			| { readonly _tag: "help" }
-			| { readonly _tag: "detail"; readonly taskId: string }
-			| { readonly _tag: "create" }
-			| { readonly _tag: "claudeCreate" }
-			| { readonly _tag: "settings" }
-			| {
-					readonly _tag: "confirm"
-					readonly message: string
-					readonly onConfirm: Effect.Effect<void>
-			  },
-	) =>
-		Effect.gen(function* () {
-			const overlayService = yield* OverlayService
-			yield* overlayService.push(overlay)
-		}).pipe(Effect.catchAll(Effect.logError)),
+export const pushOverlayAtom = appRuntime.fn((overlay: Overlay) =>
+	Effect.gen(function* () {
+		const overlayService = yield* OverlayService
+		yield* overlayService.push(overlay)
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -1052,5 +1039,25 @@ export const popOverlayAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const overlay = yield* OverlayService
 		yield* overlay.pop()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Execute confirm action and dismiss overlay
+ *
+ * Gets the current overlay, checks if it's a confirm type,
+ * executes the onConfirm Effect, and pops the overlay.
+ *
+ * Usage: const [, runConfirm] = useAtom(runConfirmAtom, { mode: "promise" })
+ *        await runConfirm()
+ */
+export const runConfirmAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const overlayService = yield* OverlayService
+		const current = yield* overlayService.current()
+		if (current && current._tag === "confirm") {
+			yield* current.onConfirm
+		}
+		yield* overlayService.pop()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

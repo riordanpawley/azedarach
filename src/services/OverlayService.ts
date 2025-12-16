@@ -3,13 +3,16 @@
 import { Data, Effect, SubscriptionRef } from "effect"
 import { emptyArray } from "../lib/empty"
 
+// biome-ignore lint/suspicious/noExplicitAny: onConfirm effects may have any requirements, satisfied by runtime
+type AnyEffect = Effect.Effect<void, any, any>
+
 export type Overlay =
 	| { readonly _tag: "help" }
 	| { readonly _tag: "detail"; readonly taskId: string }
 	| { readonly _tag: "create" }
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
-	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: Effect.Effect<void> }
+	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	effect: Effect.gen(function* () {

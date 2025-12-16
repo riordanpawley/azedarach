@@ -10,6 +10,9 @@ import type { Effect } from "effect"
 import { useMemo } from "react"
 import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms"
 
+// biome-ignore lint/suspicious/noExplicitAny: onConfirm effects may have any requirements, satisfied by runtime
+type AnyEffect = Effect.Effect<void, any, any>
+
 export type OverlayType =
 	| { readonly _tag: "help" }
 	| { readonly _tag: "detail"; readonly taskId: string }
@@ -19,7 +22,7 @@ export type OverlayType =
 	| {
 			readonly _tag: "confirm"
 			readonly message: string
-			readonly onConfirm: Effect.Effect<void>
+			readonly onConfirm: AnyEffect
 	  }
 
 /**
@@ -68,7 +71,7 @@ export function useOverlays() {
 				push({ _tag: "settings" })
 			},
 
-			showConfirm: (message: string, onConfirm: Effect.Effect<void>) => {
+			showConfirm: (message: string, onConfirm: AnyEffect) => {
 				push({ _tag: "confirm", message, onConfirm })
 			},
 

@@ -519,26 +519,15 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
-		 * Merge worktree to main action (Space+m)
-		 *
-		 * Merges the worktree branch to main locally without creating a PR.
-		 * Handles merge conflicts gracefully by showing error and preserving worktree.
+		 * Execute the actual merge operation (called directly or via confirm)
 		 */
-		const actionMergeToMain = () =>
+		const doMergeToMain = (beadId: string) =>
 			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
+				yield* toast.show("info", `Merging ${beadId} to main...`)
 
-				if (task.sessionState === "idle") {
-					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
-					return
-				}
-
-				yield* toast.show("info", `Merging ${task.id} to main...`)
-
-				yield* prWorkflow.mergeToMain({ beadId: task.id, projectPath: process.cwd() }).pipe(
+				yield* prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
 					Effect.tap(() => board.refresh()),
-					Effect.tap(() => toast.show("success", `Merged ${task.id} to main`)),
+					Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
 					Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
 						if (error._tag === "MergeConflictError") {
 							return toast.show("error", `Merge conflict: ${error.message}`)
@@ -550,6 +539,65 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						return toast.show("error", `Merge failed: ${msg}`)
 					}),
 				)
+			})
+
+		/**
+		 * Merge worktree to main action (Space+m)
+		 *
+		 * Checks for potential merge conflicts before merging. If conflicts are
+		 * likely (files modified in both branches), shows a confirmation dialog.
+		 * Otherwise proceeds directly with the merge.
+		 */
+		const actionMergeToMain = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				// Check for potential merge conflicts before proceeding
+				const conflictCheck = yield* prWorkflow
+					.checkMergeConflicts({
+						beadId: task.id,
+						projectPath: process.cwd(),
+					})
+					.pipe(
+						Effect.catchAll(() =>
+							// If check fails, assume no conflicts and proceed
+							Effect.succeed({
+								hasConflictRisk: false,
+								conflictingFiles: [] as readonly string[],
+								branchChangedFiles: 0,
+								mainChangedFiles: 0,
+							}),
+						),
+					)
+
+				if (conflictCheck.hasConflictRisk) {
+					// Show confirmation dialog with conflict warning
+					const fileList =
+						conflictCheck.conflictingFiles.length > 0
+							? `\n\nConflicting files:\n${conflictCheck.conflictingFiles.slice(0, 5).join("\n")}${
+									conflictCheck.conflictingFiles.length > 5
+										? `\n... and ${conflictCheck.conflictingFiles.length - 5} more`
+										: ""
+								}`
+							: ""
+
+					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nProceed with merge?`
+
+					yield* overlay.push({
+						_tag: "confirm",
+						message,
+						onConfirm: doMergeToMain(task.id),
+					})
+				} else {
+					// No conflicts detected, proceed directly
+					yield* doMergeToMain(task.id)
+				}
 			})
 
 		/**

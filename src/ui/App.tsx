@@ -22,6 +22,7 @@ import {
 import { Board } from "./Board"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
+import { ConfirmOverlay } from "./ConfirmOverlay"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
@@ -87,6 +88,7 @@ export const App = () => {
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
+		showingConfirm,
 	} = useOverlays()
 
 	const {
@@ -376,6 +378,9 @@ export const App = () => {
 					onCancel={() => dismissOverlay()}
 				/>
 			)}
+
+			{/* Confirm overlay */}
+			{showingConfirm && <ConfirmOverlay />}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />
