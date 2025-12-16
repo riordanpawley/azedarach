@@ -320,9 +320,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Copy .claude/ directory to worktree for permission inheritance
 					// This prevents Claude from asking for permissions again in each worktree
+					// Note: cp -r src/.claude dst/ copies INTO dst, avoiding nested .claude/.claude
 					const claudeConfigPath = `${projectPath}/.claude`
-					const worktreeClaudePath = `${worktree.path}/.claude`
-					const copyClaudeConfigCmd = Command.make("cp", "-r", claudeConfigPath, worktreeClaudePath)
+					const copyClaudeConfigCmd = Command.make("cp", "-r", claudeConfigPath, worktree.path)
 					yield* Command.exitCode(copyClaudeConfigCmd).pipe(
 						Effect.catchAll(() => Effect.void), // Non-critical if .claude doesn't exist
 					)
