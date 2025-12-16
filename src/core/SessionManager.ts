@@ -307,7 +307,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					}
 
 					// Get bead info to verify it exists
-					yield* beadsClient.show(beadId)
+					const issue = yield* beadsClient.show(beadId)
+
+					// Auto-update bead status to in_progress if not already
+					// This ensures consistency: an active session implies active work
+					if (issue.status !== "in_progress") {
+						yield* beadsClient.update(beadId, { status: "in_progress" })
+					}
 
 					// Create worktree (idempotent - returns existing if present)
 					const worktree = yield* worktreeManager.create({
