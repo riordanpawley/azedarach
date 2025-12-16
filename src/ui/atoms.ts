@@ -4,7 +4,7 @@
  * Uses effect-atom for reactive state management with Effect integration.
  */
 
-import { Command, PlatformLogger } from "@effect/platform"
+import { Command, type CommandExecutor, PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Layer, Logger, pipe, type Record, Schedule, SubscriptionRef } from "effect"
@@ -12,8 +12,8 @@ import { ModeService } from "../atoms/runtime"
 import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
-import { ImageAttachmentService, type ImageAttachment } from "../core/ImageAttachmentService"
 import { BeadEditorService } from "../core/EditorService"
+import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
@@ -1036,7 +1036,8 @@ export const pushOverlayAtom = appRuntime.fn(
 			| {
 					readonly _tag: "confirm"
 					readonly message: string
-					readonly onConfirm: Effect.Effect<void>
+					// Exception: CommandExecutor is the only allowed leaked requirement
+					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 			  },
 	) =>
 		Effect.gen(function* () {

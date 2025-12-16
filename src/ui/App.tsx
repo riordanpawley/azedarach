@@ -22,11 +22,12 @@ import {
 import { Board } from "./Board"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
+import { ConfirmOverlay } from "./ConfirmOverlay"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
-import { ImageAttachOverlay } from "./ImageAttachOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
+import { ImageAttachOverlay } from "./ImageAttachOverlay"
 import { SearchInput } from "./SearchInput"
 import { SortMenu } from "./SortMenu"
 import { StatusBar } from "./StatusBar"
@@ -83,13 +84,13 @@ export const App = () => {
 
 	const { toasts, dismissToast } = useToasts()
 	const {
-		currentOverlay,
 		dismiss: dismissOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
 		showingImageAttach,
+		showingConfirm,
 	} = useOverlays()
 
 	const {
@@ -384,6 +385,8 @@ export const App = () => {
 
 			{/* Image attach overlay */}
 			{showingImageAttach && <ImageAttachOverlay />}
+			{/* Confirm overlay */}
+			{showingConfirm && <ConfirmOverlay />}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />
