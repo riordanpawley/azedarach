@@ -9,6 +9,29 @@ import { SESSION_INDICATORS } from "./types"
 /** Height of each task card in terminal rows */
 export const TASK_CARD_HEIGHT = 6
 
+/**
+ * Calculate available width for title text inside a task card.
+ *
+ * Layout breakdown:
+ * - Column width: 25% of terminal width, minus marginRight(1)
+ * - Borders: 2 chars (left + right)
+ * - Padding: 2 chars (paddingLeft + paddingRight)
+ */
+const getTitleMaxWidth = (): number => {
+	const terminalWidth = process.stdout.columns || 80
+	const columnWidth = Math.floor(terminalWidth * 0.25) - 1 // 25% minus marginRight
+	const borderAndPadding = 4 // border(2) + padding(2)
+	return Math.max(10, columnWidth - borderAndPadding)
+}
+
+/**
+ * Truncate text to fit within a specified width, adding ellipsis if needed.
+ */
+const truncateText = (text: string, maxWidth: number): string => {
+	if (text.length <= maxWidth) return text
+	return `${text.slice(0, maxWidth - 1)}…`
+}
+
 export interface TaskCardProps {
 	task: TaskWithSession
 	isSelected?: boolean
@@ -24,6 +47,7 @@ export interface TaskCardProps {
  */
 export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	const maxTitleWidth = getTitleMaxWidth()
 
 	// Border color based on selection state
 	const getBorderColor = () => {
@@ -73,7 +97,7 @@ export const TaskCard = (props: TaskCardProps) => {
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
 			</box>
-			<text fg={theme.text}>{props.task.title}</text>
+			<text fg={theme.text}>{truncateText(props.task.title, maxTitleWidth)}</text>
 		</box>
 	)
 }
