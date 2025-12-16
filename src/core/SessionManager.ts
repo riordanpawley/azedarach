@@ -54,6 +54,8 @@ export interface StartSessionOptions {
 	readonly beadId: string
 	readonly projectPath: string
 	readonly baseBranch?: string
+	/** Optional initial prompt to send to Claude on startup (e.g., "work on bead az-123") */
+	readonly initialPrompt?: string
 }
 
 /**
@@ -296,7 +298,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		return {
 			start: (options: StartSessionOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, baseBranch } = options
+					const { beadId, projectPath, baseBranch, initialPrompt } = options
 
 					// Check if session already exists (idempotent)
 					const sessions = yield* Ref.get(sessionsRef)
@@ -388,7 +390,16 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							.pipe(Effect.catchAll(() => Effect.succeed(false)))
 
 						// Wrap with direnv exec if .envrc exists
-						const effectiveCommand = hasEnvrc ? `direnv exec . ${claudeCommand}` : claudeCommand
+						// If initialPrompt provided, append it to the claude command (properly escaped)
+						const escapeForShell = (s: string) =>
+							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+
+						const claudeWithPrompt = initialPrompt
+							? `${claudeCommand} "${escapeForShell(initialPrompt)}"`
+							: claudeCommand
+						const effectiveCommand = hasEnvrc
+							? `direnv exec . ${claudeWithPrompt}`
+							: claudeWithPrompt
 
 						yield* tmuxService.newSession(tmuxSessionName, {
 							cwd: worktree.path,

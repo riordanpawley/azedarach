@@ -24,6 +24,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const isAvailable = (action: string): boolean => {
 		switch (action) {
 			case "s": // Start - only if idle
+			case "S": // Start+work - only if idle
 				return sessionState === "idle"
 			case "a": // Attach - only if not idle
 				return sessionState !== "idle"
@@ -86,6 +87,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Session actions */}
 				<ActionLine keyName="s" description="start" />
+				<ActionLine keyName="S" description="start+work" />
 				<ActionLine keyName="a" description="attach" />
 				<ActionLine keyName="p" description="pause" />
 				<ActionLine keyName="r" description="resume" />
