@@ -12,6 +12,7 @@ import { ModeService } from "../atoms/runtime"
 import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
+import { ImageAttachmentService, type ImageAttachment } from "../core/ImageAttachmentService"
 import { BeadEditorService } from "../core/EditorService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
@@ -36,6 +37,7 @@ const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { fl
 const appLayer = Layer.mergeAll(
 	SessionService.Default,
 	AttachmentService.Default,
+	ImageAttachmentService.Default,
 	BoardService.Default,
 	TmuxService.Default,
 	BeadEditorService.Default,
@@ -944,6 +946,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			| { readonly _tag: "create" }
 			| { readonly _tag: "claudeCreate" }
 			| { readonly _tag: "settings" }
+			| { readonly _tag: "imageAttach"; readonly taskId: string }
 			| {
 					readonly _tag: "confirm"
 					readonly message: string
@@ -968,3 +971,98 @@ export const popOverlayAtom = appRuntime.fn(() =>
 		yield* overlay.pop()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
+
+// ============================================================================
+// Image Attachment Atoms
+// ============================================================================
+
+/**
+ * List image attachments for a task
+ *
+ * Usage: const attachments = await listAttachments(taskId)
+ */
+export const listImageAttachmentsAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.list(taskId)
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
+ * Attach image from file path
+ *
+ * Usage: await attachImageFile({ taskId: "az-123", filePath: "/path/to/image.png" })
+ */
+export const attachImageFileAtom = appRuntime.fn(
+	({ taskId, filePath }: { taskId: string; filePath: string }) =>
+		Effect.gen(function* () {
+			const service = yield* ImageAttachmentService
+			return yield* service.attachFile(taskId, filePath)
+		}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
+ * Attach image from clipboard
+ *
+ * Usage: await attachImageClipboard(taskId)
+ */
+export const attachImageClipboardAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.attachFromClipboard(taskId)
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
+ * Remove an image attachment
+ *
+ * Usage: await removeImageAttachment({ taskId: "az-123", attachmentId: "abc123" })
+ */
+export const removeImageAttachmentAtom = appRuntime.fn(
+	({ taskId, attachmentId }: { taskId: string; attachmentId: string }) =>
+		Effect.gen(function* () {
+			const service = yield* ImageAttachmentService
+			yield* service.remove(taskId, attachmentId)
+		}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Open image attachment in default viewer
+ *
+ * Usage: await openImageAttachment({ taskId: "az-123", attachmentId: "abc123" })
+ */
+export const openImageAttachmentAtom = appRuntime.fn(
+	({ taskId, attachmentId }: { taskId: string; attachmentId: string }) =>
+		Effect.gen(function* () {
+			const service = yield* ImageAttachmentService
+			yield* service.open(taskId, attachmentId)
+		}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Check if clipboard tools are available
+ *
+ * Usage: const hasClipboard = await checkClipboardSupport()
+ */
+export const hasClipboardSupportAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.hasClipboardSupport()
+	}),
+	{ initialValue: false },
+)
+
+/**
+ * Get attachment counts for all tasks (batch)
+ *
+ * Usage: const counts = await getAttachmentCounts(taskIds)
+ */
+export const getAttachmentCountsAtom = appRuntime.fn((taskIds: readonly string[]) =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.countBatch(taskIds)
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+// Re-export ImageAttachment type for components
+export type { ImageAttachment }

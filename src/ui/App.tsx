@@ -25,6 +25,7 @@ import { CommandInput } from "./CommandInput"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
+import { ImageAttachOverlay } from "./ImageAttachOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
 import { SearchInput } from "./SearchInput"
 import { SortMenu } from "./SortMenu"
@@ -73,11 +74,13 @@ export const App = () => {
 
 	const { toasts, showError, showSuccess, showInfo, dismissToast } = useToasts()
 	const {
+		currentOverlay,
 		dismiss: dismissOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
+		showingImageAttach,
 	} = useOverlays()
 
 	const {
@@ -223,6 +226,11 @@ export const App = () => {
 
 		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
 		if (showingClaudeCreate) {
+			return
+		}
+
+		// Image attach overlay handles its own keyboard input
+		if (showingImageAttach) {
 			return
 		}
 
@@ -380,6 +388,18 @@ export const App = () => {
 								dismissOverlay()
 								showError(`Failed to start Claude session: ${error}`)
 							})
+					}}
+					onCancel={() => dismissOverlay()}
+				/>
+			)}
+
+			{/* Image attach overlay */}
+			{showingImageAttach && currentOverlay?._tag === "imageAttach" && (
+				<ImageAttachOverlay
+					taskId={currentOverlay.taskId}
+					onSuccess={() => {
+						dismissOverlay()
+						refreshBoard()
 					}}
 					onCancel={() => dismissOverlay()}
 				/>

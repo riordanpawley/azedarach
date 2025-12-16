@@ -1,7 +1,14 @@
 /**
  * DetailPanel component - expandable detail view for selected task
  */
-import { useMemo } from "react"
+import { Result } from "@effect-atom/atom"
+import { useAtom, useAtomValue } from "@effect-atom/atom-react"
+import { useEffect, useMemo, useState } from "react"
+import {
+	type ImageAttachment,
+	listImageAttachmentsAtom,
+	openImageAttachmentAtom,
+} from "./atoms"
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
 import { SESSION_INDICATORS } from "./types"
@@ -25,6 +32,22 @@ const ATTR_BOLD = 1
  */
 export const DetailPanel = (props: DetailPanelProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+
+	// State for attachments
+	const [attachments, setAttachments] = useState<ImageAttachment[]>([])
+	const [, listAttachments] = useAtom(listImageAttachmentsAtom, { mode: "promise" })
+	const [, openAttachment] = useAtom(openImageAttachmentAtom, { mode: "promise" })
+
+	// Load attachments when component mounts
+	useEffect(() => {
+		listAttachments(props.task.id)
+			.then((result) => {
+				if (result) setAttachments(result)
+			})
+			.catch(() => {
+				// Ignore errors - just show no attachments
+			})
+	}, [props.task.id, listAttachments])
 
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
@@ -209,6 +232,22 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							{"Notes:"}
 						</text>
 						<text fg={theme.text}>{props.task.notes}</text>
+						<text> </text>
+					</box>
+				)}
+
+				{/* Image Attachments */}
+				{attachments.length > 0 && (
+					<box flexDirection="column">
+						<text fg={theme.blue} attributes={ATTR_BOLD}>
+							{`Attachments (${attachments.length}):`}
+						</text>
+						{attachments.map((attachment, index) => (
+							<text key={attachment.id} fg={theme.text}>
+								{`  ${index + 1}. ${attachment.originalPath === "clipboard" ? "📋 " : "📁 "}${attachment.filename}`}
+							</text>
+						))}
+						<text fg={theme.subtext0}>{"  (Space+i to add more images)"}</text>
 						<text> </text>
 					</box>
 				)}

@@ -39,6 +39,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "D": // Delete bead - always available
 				return true
+			case "i": // Image attach - always available
+				return true
 			case "h": // Move left - always available
 			case "l": // Move right - always available
 				return true
@@ -88,6 +90,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<ActionLine keyName="p" description="pause" />
 				<ActionLine keyName="r" description="resume" />
 				<ActionLine keyName="x" description="stop" />
+				<text fg={theme.surface1}>{"─────────"}</text>
+
+				{/* Task actions */}
+				<ActionLine keyName="i" description="image" />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Git/PR */}

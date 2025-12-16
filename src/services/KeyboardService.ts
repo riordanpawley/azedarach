@@ -910,6 +910,18 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					actionDeleteBead().pipe(Effect.tap(() => editor.exitToNormal())),
 				),
 			},
+			{
+				key: "i",
+				mode: "action",
+				description: "Attach image",
+				action: Effect.gen(function* () {
+					const task = yield* getSelectedTask()
+					if (task) {
+						yield* overlay.push({ _tag: "imageAttach", taskId: task.id })
+					}
+					yield* editor.exitToNormal()
+				}),
+			},
 
 			// ======================================================================
 			// Goto-Pending Mode (after pressing 'g')
