@@ -15,7 +15,8 @@
 			"Bash(git push:*)",
 			"Bash(pnpm:*)",
 			"Bash(npm:*)",
-			"Bash(gh:*)"
+			"Bash(gh:*)",
+			"Bash(bun run type-check:*)"
 		],
 		"deny": []
 	},
