@@ -319,6 +319,32 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
+		 * Start session with initial prompt (Space+S)
+		 * Starts Claude and tells it to "work on bead {beadId}"
+		 */
+		const actionStartSessionWithPrompt = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "idle") {
+					yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager
+					.start({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						initialPrompt: `work on ${task.id}`,
+					})
+					.pipe(
+						Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
+						Effect.catchAll(showErrorToast("Failed to start")),
+					)
+			})
+
+		/**
 		 * Attach external action (Space+a)
 		 */
 		const actionAttachExternal = () =>
@@ -863,6 +889,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Start session",
 				action: Effect.suspend(() =>
 					actionStartSession().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
+			},
+			{
+				key: "S-s",
+				mode: "action",
+				description: "Start+work (prompt Claude)",
+				action: Effect.suspend(() =>
+					actionStartSessionWithPrompt().pipe(Effect.tap(() => editor.exitToNormal())),
 				),
 			},
 			{
