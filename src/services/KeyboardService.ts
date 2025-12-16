@@ -11,9 +11,10 @@
 
 import type { CommandExecutor } from "@effect/platform/CommandExecutor"
 import type { FileSystem } from "@effect/platform/FileSystem"
-import { Effect, Record, Ref } from "effect"
+import { Effect, Record, Ref, SubscriptionRef } from "effect"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
+import { ImageAttachmentService } from "../core/ImageAttachmentService"
 import { BeadEditorService } from "../core/EditorService"
 import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
@@ -94,6 +95,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		BeadsClient.Default,
 		BeadEditorService.Default,
 		ViewService.Default,
+		ImageAttachmentService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -110,6 +112,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const beadsClient = yield* BeadsClient
 		const beadEditor = yield* BeadEditorService
 		const viewService = yield* ViewService
+		const imageAttachment = yield* ImageAttachmentService
 
 		// ========================================================================
 		// Helper Functions
@@ -681,6 +684,115 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				return false
 			})
 
+		/**
+		 * Handle imageAttach overlay keyboard input
+		 *
+		 * Returns true if the key was handled
+		 */
+		const handleImageAttachInput = (key: string) =>
+			Effect.gen(function* () {
+				const currentOverlay = yield* overlay.current()
+				if (currentOverlay?._tag !== "imageAttach") {
+					return false
+				}
+
+				const state = yield* SubscriptionRef.get(imageAttachment.overlayState)
+				if (!state.taskId) return false
+
+				const overlayTaskId = currentOverlay.taskId
+
+				// Escape handling
+				if (key === "escape") {
+					if (state.mode === "path") {
+						yield* imageAttachment.exitPathMode()
+					} else {
+						yield* imageAttachment.closeOverlay()
+						yield* overlay.pop()
+					}
+					return true
+				}
+
+				// Path input mode
+				if (state.mode === "path") {
+					if (key === "return") {
+						if (state.pathInput.trim() && !state.isAttaching) {
+							yield* imageAttachment.setAttaching(true)
+							yield* imageAttachment
+								.attachFile(overlayTaskId, state.pathInput.trim())
+								.pipe(
+									Effect.tap((attachment) =>
+										toast.show("success", `Image attached: ${attachment.filename}`),
+									),
+									Effect.tap(() => imageAttachment.closeOverlay()),
+									Effect.tap(() => overlay.pop()),
+									Effect.catchAll((error) => {
+										const msg =
+											error && typeof error === "object" && "message" in error
+												? String(error.message)
+												: String(error)
+										return Effect.gen(function* () {
+											yield* toast.show("error", `Failed to attach: ${msg}`)
+											yield* imageAttachment.setAttaching(false)
+										})
+									}),
+								)
+						}
+						return true
+					}
+					if (key === "backspace") {
+						if (state.pathInput.length > 0) {
+							yield* imageAttachment.setPathInput(state.pathInput.slice(0, -1))
+						}
+						return true
+					}
+					// Single printable character
+					if (key.length === 1 && !key.startsWith("C-")) {
+						yield* imageAttachment.setPathInput(state.pathInput + key)
+						return true
+					}
+					return true // Consume all keys in path mode
+				}
+
+				// Menu mode
+				if (key === "p" || key === "v") {
+					// Paste from clipboard
+					if (!state.isAttaching) {
+						const hasClipboard = yield* imageAttachment.hasClipboardSupport()
+						if (hasClipboard) {
+							yield* imageAttachment.setAttaching(true)
+							yield* imageAttachment
+								.attachFromClipboard(overlayTaskId)
+								.pipe(
+									Effect.tap((attachment) =>
+										toast.show("success", `Image attached: ${attachment.filename}`),
+									),
+									Effect.tap(() => imageAttachment.closeOverlay()),
+									Effect.tap(() => overlay.pop()),
+									Effect.catchAll((error) => {
+										const msg =
+											error && typeof error === "object" && "message" in error
+												? String(error.message)
+												: String(error)
+										return Effect.gen(function* () {
+											yield* toast.show("error", `Clipboard: ${msg}`)
+											yield* imageAttachment.setAttaching(false)
+										})
+									}),
+								)
+						}
+					}
+					return true
+				}
+
+				if (key === "f") {
+					// Enter file path mode
+					yield* imageAttachment.enterPathMode()
+					return true
+				}
+
+				return true // Consume all keys in overlay
+			})
+
 		// ========================================================================
 		// Default Keybindings
 		// ========================================================================
@@ -987,6 +1099,18 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					actionDeleteBead().pipe(Effect.tap(() => editor.exitToNormal())),
 				),
 			},
+			{
+				key: "i",
+				mode: "action",
+				description: "Attach image",
+				action: Effect.gen(function* () {
+					const task = yield* getSelectedTask()
+					if (task) {
+						yield* overlay.push({ _tag: "imageAttach", taskId: task.id })
+					}
+					yield* editor.exitToNormal()
+				}),
+			},
 
 			// ======================================================================
 			// Goto-Pending Mode (after pressing 'g')
@@ -1201,6 +1325,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			 */
 			handleKey: (key: string) =>
 				Effect.gen(function* () {
+					// Check for imageAttach overlay first (handles its own keys)
+					const handledAsImageAttach = yield* handleImageAttachInput(key)
+					if (handledAsImageAttach) return
+
 					const effectiveMode = yield* getEffectiveMode()
 
 					// Special handling for goto-jump mode (any key is label input)

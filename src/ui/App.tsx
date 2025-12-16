@@ -25,6 +25,7 @@ import { CommandInput } from "./CommandInput"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
+import { ImageAttachOverlay } from "./ImageAttachOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
 import { SearchInput } from "./SearchInput"
 import { SortMenu } from "./SortMenu"
@@ -82,11 +83,13 @@ export const App = () => {
 
 	const { toasts, dismissToast } = useToasts()
 	const {
+		currentOverlay,
 		dismiss: dismissOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
+		showingImageAttach,
 	} = useOverlays()
 
 	const {
@@ -236,6 +239,8 @@ export const App = () => {
 			return
 		}
 
+		// Note: imageAttach overlay keyboard is handled by KeyboardService
+
 		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
 		let keySeq = event.name
 		if (event.ctrl) {
@@ -376,6 +381,9 @@ export const App = () => {
 					onCancel={() => dismissOverlay()}
 				/>
 			)}
+
+			{/* Image attach overlay */}
+			{showingImageAttach && <ImageAttachOverlay />}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />

@@ -1,7 +1,10 @@
 /**
  * DetailPanel component - expandable detail view for selected task
  */
+import { Result } from "@effect-atom/atom"
+import { useAtomValue } from "@effect-atom/atom-react"
 import { useMemo } from "react"
+import { currentAttachmentsAtom } from "./atoms"
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
 import { SESSION_INDICATORS } from "./types"
@@ -25,6 +28,19 @@ const ATTR_BOLD = 1
  */
 export const DetailPanel = (props: DetailPanelProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+
+	// Subscribe to current attachments from Effect layer
+	const attachmentsResult = useAtomValue(currentAttachmentsAtom)
+	const attachments = useMemo(() => {
+		if (Result.isSuccess(attachmentsResult)) {
+			const data = attachmentsResult.value
+			// Only show attachments if they're for the current task
+			if (data?.taskId === props.task.id) {
+				return data.attachments
+			}
+		}
+		return []
+	}, [attachmentsResult, props.task.id])
 
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
@@ -209,6 +225,22 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							{"Notes:"}
 						</text>
 						<text fg={theme.text}>{props.task.notes}</text>
+						<text> </text>
+					</box>
+				)}
+
+				{/* Image Attachments */}
+				{attachments.length > 0 && (
+					<box flexDirection="column">
+						<text fg={theme.blue} attributes={ATTR_BOLD}>
+							{`Attachments (${attachments.length}):`}
+						</text>
+						{attachments.map((attachment, index) => (
+							<text key={attachment.id} fg={theme.text}>
+								{`  ${index + 1}. ${attachment.originalPath === "clipboard" ? "📋 " : "📁 "}${attachment.filename}`}
+							</text>
+						))}
+						<text fg={theme.subtext0}>{"  (Space+i to add more images)"}</text>
 						<text> </text>
 					</box>
 				)}
