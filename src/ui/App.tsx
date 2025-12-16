@@ -325,6 +325,7 @@ export const App = () => {
 					pendingJumpKey={pendingJumpKey ?? null}
 					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
+					isActionMode={isAction}
 				/>
 			</box>
 		)
