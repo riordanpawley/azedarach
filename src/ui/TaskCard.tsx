@@ -51,10 +51,26 @@ export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
 	const maxTitleWidth = getTitleMaxWidth()
 
-	// Border color based on selection state
+	// Get context health border color based on contextPercent
+	// Only applies when session is active (not idle) and has context data
+	const getContextHealthColor = (): string | undefined => {
+		const { sessionState, contextPercent } = props.task
+		if (sessionState === "idle" || contextPercent === undefined) {
+			return undefined
+		}
+
+		// Thresholds: 0-70% healthy, 70-90% warning, 90%+ critical
+		if (contextPercent >= 90) return theme.red
+		if (contextPercent >= 70) return theme.yellow
+		return theme.lavender
+	}
+
+	// Border color: selection takes priority, then context health
 	const getBorderColor = () => {
 		if (props.isMultiSelected) return theme.mauve
 		if (props.isSelected) return theme.lavender
+		const healthColor = getContextHealthColor()
+		if (healthColor) return healthColor
 		return theme.surface1
 	}
 
