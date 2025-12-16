@@ -80,7 +80,7 @@ export const App = () => {
 	// Hooks - Atomic State Management
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const { toasts, showError, showSuccess, showInfo, dismissToast } = useToasts()
+	const { toasts, dismissToast } = useToasts()
 	const {
 		dismiss: dismissOverlay,
 		showingHelp,
@@ -121,6 +121,7 @@ export const App = () => {
 	}, [refreshBoard])
 
 	// Actions for prompts (these bypass keyboard handling)
+	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
 
@@ -361,15 +362,6 @@ export const App = () => {
 				<CreateTaskPrompt
 					onSubmit={(params) => {
 						createTask(params)
-							.then((issue) => {
-								dismissOverlay()
-								refreshBoard()
-								showSuccess(`Created task: ${issue.id}`)
-							})
-							.catch((error) => {
-								dismissOverlay()
-								showError(`Failed to create task: ${error}`)
-							})
 					}}
 					onCancel={() => dismissOverlay()}
 				/>
@@ -379,19 +371,7 @@ export const App = () => {
 			{showingClaudeCreate && (
 				<ClaudeCreatePrompt
 					onSubmit={(description) => {
-						dismissOverlay()
-						showInfo("Creating task with Claude...")
 						claudeCreateSession(description)
-							.then((beadId: string) => {
-								if (beadId === "unknown") {
-									showSuccess("Task created (check board for new task)")
-								} else {
-									showSuccess(`Created task: ${beadId}`)
-								}
-							})
-							.catch((error) => {
-								showError(`Failed to create task: ${error}`)
-							})
 					}}
 					onCancel={() => dismissOverlay()}
 				/>
