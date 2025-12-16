@@ -558,11 +558,11 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 				// Search mode text input
 				if (mode._tag === "search") {
-					if (key === "Enter") {
+					if (key === "return") {
 						yield* editor.exitToNormal()
 						return true
 					}
-					if (key === "Backspace") {
+					if (key === "backspace") {
 						if (mode.query.length > 0) {
 							yield* editor.updateSearch(mode.query.slice(0, -1))
 						}
@@ -578,7 +578,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 				// Command mode text input
 				if (mode._tag === "command") {
-					if (key === "Enter") {
+					if (key === "return") {
 						if (!mode.input.trim()) {
 							yield* editor.clearCommand()
 							return true
@@ -603,7 +603,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						yield* editor.clearCommand()
 						return true
 					}
-					if (key === "Backspace") {
+					if (key === "backspace") {
 						if (mode.input.length > 0) {
 							yield* editor.updateCommand(mode.input.slice(0, -1))
 						}
