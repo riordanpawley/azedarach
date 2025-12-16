@@ -388,6 +388,25 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 )
 
 /**
+ * Merge worktree branch to main and clean up
+ *
+ * Merges the worktree branch to main locally without creating a PR.
+ * Ideal for completed work that doesn't need review.
+ *
+ * Usage: const mergeToMain = useAtomSet(mergeToMainAtom, { mode: "promise" })
+ *        await mergeToMain(beadId)
+ */
+export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
+	Effect.gen(function* () {
+		const prWorkflow = yield* PRWorkflow
+		yield* prWorkflow.mergeToMain({
+			beadId,
+			projectPath: process.cwd(),
+		})
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
  * Delete a bead entirely
  *
  * Usage: const deleteBead = useAtom(deleteBeadAtom, { mode: "promise" })
