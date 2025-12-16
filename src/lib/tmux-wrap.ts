@@ -5,7 +5,14 @@
  * Must be called BEFORE any Effect runtime initialization.
  */
 
-const SESSION_NAME = process.env.AZ_TMUX_SESSION ?? "azedarach"
+/**
+ * The tmux session name for the main az TUI.
+ * Configurable via AZ_TMUX_SESSION env var, defaults to "az".
+ */
+export const AZ_SESSION_NAME = process.env.AZ_TMUX_SESSION ?? "az"
+
+// Keep internal alias for backwards compatibility within this file
+const SESSION_NAME = AZ_SESSION_NAME
 
 /**
  * Check if we should wrap the current process in tmux
