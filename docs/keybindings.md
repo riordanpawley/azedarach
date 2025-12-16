@@ -230,10 +230,10 @@ Press `g` to enter goto mode. The next key determines the jump target.
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `g` `g` | First task | Jump to top of board |
-| `g` `e` | Last task | Jump to bottom of board |
-| `g` `h` | Column start | First task in current column |
-| `g` `l` | Column end | Last task in current column |
+| `g` `g` | Column top | Jump to first task in current column |
+| `g` `e` | Column bottom | Jump to last task in current column |
+| `g` `h` | First column | Jump to first column |
+| `g` `l` | Last column | Jump to last column |
 | `g` `w` | Jump labels | Shows 2-char labels on each task |
 
 ### Jump Labels (gw)
@@ -371,6 +371,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
+| `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
@@ -441,6 +442,20 @@ The UI uses the Catppuccin Mocha color palette:
   - ❌ Error
   - ⏸️ Paused
 
+## tmux Navigation
+
+Azedarach registers a global tmux keybinding for session navigation:
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Ctrl-a A` | Return to az | Works from any Claude session |
+
+**Navigation flow:**
+1. From az: `Space` `a` → attach to Claude session
+2. From Claude: `Ctrl-a A` → return to az TUI
+
+This makes az the central hub for all session navigation.
+
 ## Tips
 
 1. **Stay on home row**: All primary keys (hjkl, g, v, Space) are accessible without moving your hands.
@@ -449,6 +464,6 @@ The UI uses the Catppuccin Mocha color palette:
 
 3. **Batch moves with Select mode**: Select multiple related tasks, then move them together.
 
-4. **Quick column jumps**: `gh` and `gl` jump to column boundaries quickly.
+4. **Quick column jumps**: `gh` and `gl` jump between first and last columns; `gg` and `ge` jump to top/bottom of current column.
 
 5. **Half-page scrolling**: `Ctrl-d` and `Ctrl-u` are great for tall columns.

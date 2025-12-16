@@ -4,7 +4,7 @@
  * Uses effect-atom for reactive state management with Effect integration.
  */
 
-import { PlatformLogger } from "@effect/platform"
+import { Command, PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Layer, Logger, pipe, type Record, Schedule, SubscriptionRef } from "effect"
@@ -249,7 +249,10 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
 )
 
 /**
- * Create a new task
+ * Create a new task with full orchestration
+ *
+ * Handles the complete create flow: dismiss overlay, create bead, refresh board,
+ * navigate to new task, show toast. All logic in Effects, not React callbacks.
  *
  * Usage: const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
  *        await createTask({ title: "New task", type: "task", priority: 2 })
@@ -258,7 +261,20 @@ export const createTaskAtom = appRuntime.fn(
 	(params: { title: string; type?: string; priority?: number; description?: string }) =>
 		Effect.gen(function* () {
 			const client = yield* BeadsClient
-			return yield* client.create(params)
+			const board = yield* BoardService
+			const navigation = yield* NavigationService
+			const toast = yield* ToastService
+			const overlay = yield* OverlayService
+
+			yield* overlay.pop()
+
+			const issue = yield* client.create(params)
+
+			yield* board.refresh()
+			yield* navigation.jumpToTask(issue.id)
+			yield* toast.show("success", `Created task: ${issue.id}`)
+
+			return issue
 		}).pipe(Effect.tapError(Effect.logError)),
 )
 
@@ -294,40 +310,31 @@ export const createBeadViaEditorAtom = appRuntime.fn(() =>
 )
 
 /**
- * Create a Claude session to generate a bead from natural language
+ * Create a bead from natural language using Claude CLI
  *
- * Spawns a tmux session with Claude in the main project directory,
- * sends a prompt asking Claude to create a bead from the description,
- * and leaves the session open for the user to continue working.
+ * Runs claude in non-interactive mode (-p) to create a bead based on
+ * the user's description. Much lighter than a full interactive session.
  *
- * Returns the session name so the UI can inform the user.
+ * Handles full orchestration: dismiss overlay, show progress toast, create via Claude,
+ * refresh board, navigate to new task, show success toast.
  *
  * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
- *        const sessionName = await claudeCreate("Add dark mode toggle to settings")
+ *        const beadId = await claudeCreate("Add dark mode toggle to settings")
  */
 export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
-		const tmux = yield* TmuxService
 		const { config } = yield* AppConfig
+		const board = yield* BoardService
+		const navigation = yield* NavigationService
+		const toast = yield* ToastService
+		const overlay = yield* OverlayService
 
-		// Generate unique session name with timestamp
-		const timestamp = Date.now().toString(36)
-		const sessionName = `claude-create-${timestamp}`
+		// Dismiss overlay first
+		yield* overlay.pop()
+		yield* toast.show("info", "Creating task with Claude...")
+
 		const projectPath = process.cwd()
-
-		// Build the Claude command with session settings
-		const { command: claudeCommand, shell, tmuxPrefix, dangerouslySkipPermissions } = config.session
-		const claudeArgs = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
-
-		// Create the tmux session
-		yield* tmux.newSession(sessionName, {
-			cwd: projectPath,
-			command: `${shell} -c '${claudeCommand}${claudeArgs}; exec ${shell}'`,
-			prefix: tmuxPrefix,
-		})
-
-		// Wait briefly for Claude to start up
-		yield* Effect.sleep("1500 millis")
+		const { dangerouslySkipPermissions } = config.session
 
 		// Build the prompt for Claude with explicit bd create instructions
 		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
@@ -336,18 +343,63 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 ${description}
 
 **Instructions:**
-1. Use \`bd create --title="..." --type=task|bug|feature --priority=1|2|3\`
-2. Add a description if the task needs more detail
-3. The issue ID will be returned - note it for the user
-4. After creating, you may start working on it or wait for further instructions
+1. Use \`bd create --title="..." --type=task|bug|feature --priority=0|1|2|3|4\` (0=critical, 2=medium, 4=backlog)
+2. Choose appropriate type: task for general work, feature for new functionality, bug for fixes
+3. Add a description with --description="..." if the task needs more detail
+4. Output ONLY the created issue ID on the final line (e.g., "az-123")
 
-Please create the bead now.`
+Create the bead now and output just the ID.`
 
-		// Send the prompt to Claude via tmux
-		yield* tmux.sendKeys(sessionName, prompt)
-		yield* tmux.sendKeys(sessionName, "Enter")
+		// Build command arguments for non-interactive print mode
+		const args = ["-p", prompt, "--output-format", "text"]
+		if (dangerouslySkipPermissions) {
+			args.push("--dangerously-skip-permissions")
+		}
 
-		return sessionName
+		// Run claude CLI in non-interactive print mode
+		const claudeCmd = Command.make("claude", ...args).pipe(Command.workingDirectory(projectPath))
+
+		const result = yield* Command.string(claudeCmd).pipe(
+			Effect.timeout("120 seconds"),
+			Effect.mapError((e) => new Error(`Claude CLI failed: ${e}`)),
+		)
+
+		// Parse output to find created bead ID (pattern: az-xxx, beads-xxx, etc.)
+		const beadIdPattern = /^([a-z]+-[a-z0-9]+)\s*$/im
+		const lines = result.trim().split("\n")
+
+		// Look for bead ID in the output, preferring the last line
+		let beadId: string | null = null
+		for (let i = lines.length - 1; i >= 0; i--) {
+			const match = lines[i].trim().match(beadIdPattern)
+			if (match) {
+				beadId = match[1]
+				break
+			}
+		}
+
+		// If no ID found in strict format, try to find any bead-like ID in the output
+		if (!beadId) {
+			const broadMatch = result.match(/\b([a-z]+-[a-z0-9]{2,})\b/i)
+			if (broadMatch) {
+				beadId = broadMatch[1]
+			}
+		}
+
+		// Refresh the board to show the new task
+		yield* board.refresh()
+
+		if (!beadId) {
+			yield* Effect.logWarning(`Could not parse bead ID from Claude output: ${result}`)
+			yield* toast.show("success", "Task created (check board for new task)")
+			return "unknown"
+		}
+
+		// Navigate to the new task and show success
+		yield* navigation.jumpToTask(beadId)
+		yield* toast.show("success", `Created task: ${beadId}`)
+
+		return beadId
 	}).pipe(Effect.tapError(Effect.logError)),
 )
 
@@ -385,6 +437,25 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 			projectPath: process.cwd(),
 		})
 	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Merge worktree branch to main and clean up
+ *
+ * Merges the worktree branch to main locally without creating a PR.
+ * Ideal for completed work that doesn't need review.
+ *
+ * Usage: const mergeToMain = useAtomSet(mergeToMainAtom, { mode: "promise" })
+ *        await mergeToMain(beadId)
+ */
+export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
+	Effect.gen(function* () {
+		const prWorkflow = yield* PRWorkflow
+		yield* prWorkflow.mergeToMain({
+			beadId,
+			projectPath: process.cwd(),
+		})
+	}).pipe(Effect.tapError(Effect.logError)),
 )
 
 /**
@@ -900,6 +971,21 @@ export const jumpToAtom = appRuntime.fn(({ column, task }: { column: number; tas
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
 		yield* nav.jumpTo(column, task)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Jump to task by ID - move cursor directly to a specific task
+ *
+ * Useful after creating a bead when you know the ID but not the position.
+ *
+ * Usage: const [, jumpToTask] = useAtom(jumpToTaskAtom, { mode: "promise" })
+ *        await jumpToTask("az-123")
+ */
+export const jumpToTaskAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.jumpToTask(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

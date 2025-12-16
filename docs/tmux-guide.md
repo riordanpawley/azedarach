@@ -121,6 +121,7 @@ I'll write this as: `Ctrl-a d`
 │ PREFIX = Ctrl-a (press first, then command key)        │
 ├────────────────────────────────────────────────────────┤
 │ Session Commands:                                       │
+│   Ctrl-a A     Return to az TUI (from Claude session)  │
 │   Ctrl-a d     Detach from session                     │
 │   Ctrl-a $     Rename session                          │
 │   Ctrl-a s     List sessions (interactive)             │
@@ -157,23 +158,24 @@ I'll write this as: `Ctrl-a d`
 
 ### How Azedarach Uses tmux
 
-When you start a Claude session through Azedarach:
+When you start az, it runs inside a tmux session (default name: `az`). When you start Claude sessions:
 
-1. **SessionManager** creates a tmux session named `claude-{bead-id}`
+1. **SessionManager** creates a tmux session named after the bead ID
 2. Claude Code runs inside that tmux session
 3. You can attach to see/interact with Claude
 4. Detaching lets Claude continue working
+5. **Press `Ctrl-a A` from any Claude session to return to az**
 
 ### Session Naming Convention
 
 Azedarach creates tmux sessions with this pattern:
-```
-claude-{bead-id}
-```
+- Main TUI: `az` (configurable via `AZ_TMUX_SESSION` env var)
+- Claude sessions: `{bead-id}` (e.g., `az-05y`, `az-xyz`)
 
 Examples:
-- `claude-az-05y` for bead `az-05y`
-- `claude-az-xyz` for bead `az-xyz`
+- `az` - the main Azedarach TUI
+- `az-05y` - Claude session for bead `az-05y`
+- `az-xyz` - Claude session for bead `az-xyz`
 
 ### Attaching to Sessions
 
@@ -224,6 +226,18 @@ Press `` Ctrl-a ` `` (backtick) to open a floating popup terminal. It:
 Great for quick `git status`, `bd ready`, or any one-off command!
 
 ## Common Workflows
+
+### Workflow 0: Navigate Between az and Claude Sessions
+
+**The quick workflow:**
+```bash
+# From az TUI: Space+a on a task to attach to its Claude session
+# From Claude session: Ctrl-a A to return to az TUI
+```
+
+This two-keystroke pattern makes az the hub for all session navigation:
+- `Space` `a` → go TO a Claude session (from az)
+- `Ctrl-a A` → go BACK to az (from anywhere)
 
 ### Workflow 1: Monitor a Running Session
 
