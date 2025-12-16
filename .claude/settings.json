@@ -3,6 +3,8 @@
 	"permissions": {
 		"allow": [
 			"Bash(bd:*)",
+			"mcp__plugin_beads_beads__*",
+			"mcp__effect-docs__*",
 			"Bash(rg:*)",
 			"Bash(fd:*)",
 			"Bash(git status)",

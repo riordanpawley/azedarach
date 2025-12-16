@@ -316,14 +316,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						baseBranch,
 					})
 
-					// Copy .claude/ directory to worktree for permission inheritance
-					// This prevents Claude from asking for permissions again in each worktree
-					const claudeConfigPath = `${projectPath}/.claude`
-					const worktreeClaudePath = `${worktree.path}/.claude`
-					const copyClaudeConfigCmd = Command.make("cp", "-r", claudeConfigPath, worktreeClaudePath)
-					yield* Command.exitCode(copyClaudeConfigCmd).pipe(
-						Effect.catchAll(() => Effect.void), // Non-critical if .claude doesn't exist
-					)
+					// NOTE: .claude/ directory is git-tracked so it's already in the worktree.
+					// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
+					// No additional copying needed here.
 
 					// Get configuration for init commands and session settings
 					const worktreeConfig = resolvedConfig.worktree
@@ -431,10 +426,15 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					const session = sessionOpt.value
 
+					yield* Effect.log(`Stopping session for ${beadId}`)
+
 					// Sync beads changes from worktree before killing session
 					// This ensures any bd update/close commands run in the worktree get synced back to main
 					yield* beadsClient.sync(session.worktreePath).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
+						Effect.tap(() => Effect.log(`Synced beads from worktree for ${beadId}`)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Sync failed for ${beadId}: ${error}`).pipe(Effect.asVoid),
+						),
 					)
 
 					// Kill tmux session (ignore error if already dead)
@@ -450,6 +450,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Publish state change event
 					yield* publishStateChange(beadId, oldState, "idle")
+
+					yield* Effect.log(`Session stopped for ${beadId} (was: ${oldState})`)
 				}),
 
 			pause: (beadId: string) =>
