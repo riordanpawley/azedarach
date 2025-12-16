@@ -15,7 +15,7 @@ import { Effect, Record, Ref } from "effect"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
-import { PRWorkflow } from "../core/PRWorkflow"
+import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { VCService } from "../core/VCService"
 import { COLUMNS, generateJumpLabels } from "../ui/types"
@@ -502,6 +502,40 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
+		 * Merge worktree to main action (Space+m)
+		 *
+		 * Merges the worktree branch to main locally without creating a PR.
+		 * Handles merge conflicts gracefully by showing error and preserving worktree.
+		 */
+		const actionMergeToMain = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				yield* toast.show("info", `Merging ${task.id} to main...`)
+
+				yield* prWorkflow.mergeToMain({ beadId: task.id, projectPath: process.cwd() }).pipe(
+					Effect.tap(() => board.refresh()),
+					Effect.tap(() => toast.show("success", `Merged ${task.id} to main`)),
+					Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
+						if (error._tag === "MergeConflictError") {
+							return toast.show("error", `Merge conflict: ${error.message}`)
+						}
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return toast.show("error", `Merge failed: ${msg}`)
+					}),
+				)
+			})
+
+		/**
 		 * Delete bead action (Space+D)
 		 */
 		const actionDeleteBead = () =>
@@ -882,6 +916,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Cleanup worktree",
 				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
+			},
+			{
+				key: "m",
+				mode: "action",
+				description: "Merge to main",
+				action: Effect.suspend(() =>
+					actionMergeToMain().pipe(Effect.tap(() => editor.exitToNormal())),
+				),
 			},
 			{
 				key: "S-d",
