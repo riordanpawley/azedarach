@@ -2,7 +2,7 @@
  * DetailPanel component - expandable detail view for selected task
  */
 import { Result } from "@effect-atom/atom"
-import { useAtom, useAtomValue } from "@effect-atom/atom-react"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useEffect, useMemo, useState } from "react"
 import {
 	type ImageAttachment,
@@ -35,8 +35,8 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 	// State for attachments
 	const [attachments, setAttachments] = useState<ImageAttachment[]>([])
-	const [, listAttachments] = useAtom(listImageAttachmentsAtom, { mode: "promise" })
-	const [, openAttachment] = useAtom(openImageAttachmentAtom, { mode: "promise" })
+	const listAttachments = useAtomSet(listImageAttachmentsAtom, { mode: "promise" })
+	const openAttachment = useAtomSet(openImageAttachmentAtom, { mode: "promise" })
 
 	// Load attachments when component mounts
 	useEffect(() => {

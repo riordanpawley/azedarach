@@ -85,6 +85,7 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 export class ImageAttachmentService extends Effect.Service<ImageAttachmentService>()(
 	"ImageAttachmentService",
 	{
+		dependencies: [],
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
