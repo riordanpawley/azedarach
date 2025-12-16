@@ -35,6 +35,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "P": // Create PR - only if session has worktree (not idle)
 				return sessionState !== "idle"
+			case "m": // Merge to main - only if session has worktree (not idle)
+				return sessionState !== "idle"
 			case "d": // Cleanup/Delete worktree - only if session exists
 				return sessionState !== "idle"
 			case "D": // Delete bead - always available
@@ -92,6 +94,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Git/PR */}
 				<ActionLine keyName="P" description="PR" />
+				<ActionLine keyName="m" description="merge" />
 				<ActionLine keyName="d" description="cleanup" />
 				<ActionLine keyName="D" description="delete" />
 			</box>
