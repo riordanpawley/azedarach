@@ -288,6 +288,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 			})
 
+		// Initial data load - run immediately since Schedule.spaced waits before first execution
+		yield* refresh().pipe(
+			Effect.catchAllCause((cause) =>
+				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
+					Effect.asVoid,
+				),
+			),
+		)
+
 		// Background task refresh (every 2 seconds)
 		yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(
 			refresh().pipe(

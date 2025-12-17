@@ -124,48 +124,65 @@ src/
 
 ## State Management Architecture
 
-This project uses a **three-layer reactive architecture**:
+This project uses a **three-layer reactive architecture** with strict separation of concerns:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         React Components                         │
-│   useAtomValue(modeAtom)  │  useAtom(startSessionAtom)          │
+│                    React Components (PURE RENDER)                │
+│   Only: useAtomValue() + JSX. NO business logic.                │
 └─────────────────────────────────────────────────────────────────┘
                                     ▲
                                     │ effect-atom bridge
                                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                          Atoms (atoms.ts)                        │
-│   appRuntime.atom()  │  appRuntime.fn()  │  Atom.readable()     │
+│                     Atoms (DERIVED STATE)                        │
+│   Transform/format data. All computation before React.          │
 └─────────────────────────────────────────────────────────────────┘
                                     ▲
                                     │ Effect services
                                     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Effect Services                           │
-│   EditorService  │  NavigationService  │  BeadsClient           │
-│   (SubscriptionRef state + methods)                              │
+│                  Effect Services (STATE + LOGIC)                 │
+│   SubscriptionRef state, methods, pure utility functions        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Layer 1: Effect Services (State + Logic)
+### Critical Rule: React = Pure Render Only
 
-Services hold state in `SubscriptionRef` and expose methods:
+**React components should ONLY contain:**
+- `useAtomValue()` calls to get ready-to-render data
+- JSX rendering
+- Style/layout decisions
+
+**React components should NEVER contain:**
+- Data transformation or formatting
+- Business logic or calculations
+- Direct calls to utility functions with data
+- Conditional logic beyond simple render branching
+
+### Layer 1: Effect Services (State + Logic + Utilities)
+
+Services hold state in `SubscriptionRef`, expose methods, AND provide pure utility functions:
 
 ```typescript
-// src/services/EditorService.ts
-export class EditorService extends Effect.Service<EditorService>()("EditorService", {
-  effect: Effect.gen(function* () {
-    // State lives in SubscriptionRef (reactive)
-    const mode = yield* SubscriptionRef.make<EditorMode>({ _tag: "normal" })
+// src/services/ClockService.ts
 
-    return {
-      mode,  // Exposed for atom subscription
+// Pure utility functions - exported for atoms to use
+export const computeElapsedFormatted = (startedAt: string, now: DateTime.Utc): string => {
+  const start = DateTime.unsafeMake(startedAt)
+  return formatElapsedMs(DateTime.distance(start, now))
+}
 
-      // Methods mutate via SubscriptionRef
-      enterAction: () => SubscriptionRef.set(mode, { _tag: "action" }),
-      exitToNormal: () => SubscriptionRef.set(mode, { _tag: "normal" }),
-    }
+export class ClockService extends Effect.Service<ClockService>()("ClockService", {
+  scoped: Effect.gen(function* () {
+    const now = yield* SubscriptionRef.make<DateTime.Utc>(yield* DateTime.now)
+
+    // Schedule updates - NOTE: Schedule.spaced waits before first execution!
+    yield* Effect.scheduleForked(Schedule.spaced("1 second"))(
+      Effect.flatMap(DateTime.now, (dt) => SubscriptionRef.set(now, dt)),
+    )
+
+    return { now }
   }),
 }) {}
 ```
@@ -173,87 +190,87 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 **Key patterns:**
 - State in `SubscriptionRef` → enables reactive subscriptions
 - Methods return `Effect.Effect<T>` → composable, testable
-- Use `Effect.Service` pattern with `dependencies` array for DI
+- Pure utility functions exported for atoms to use
+- Use `DateTime` from Effect, not native `Date`
+- `Schedule.spaced` waits before first run - add initial call if needed
 
-### Layer 2: Atoms (React Bridge)
+### Layer 2: Atoms (Computation Layer)
 
-Atoms connect Effect services to React via `effect-atom`:
+Atoms compute/transform data so React receives ready-to-render values:
 
 ```typescript
 // src/ui/atoms.ts
 
-// 1. Create runtime with all service layers
-const appLayer = Layer.mergeAll(
-  EditorService.Default,
-  NavigationService.Default,
-  // ... all services
-).pipe(Layer.provideMerge(BunContext.layer))
-
-export const appRuntime = Atom.runtime(appLayer)
-
-// 2. Subscribe to service state (reads SubscriptionRef)
-export const modeAtom = appRuntime.subscriptionRef(
+// Subscribe to service state
+export const clockTickAtom = appRuntime.subscriptionRef(
   Effect.gen(function* () {
-    const editor = yield* EditorService
-    return editor.mode  // Returns the SubscriptionRef itself
+    const clock = yield* ClockService
+    return clock.now
   }),
 )
 
-// 3. Derive computed state from atoms
-export const isActionModeAtom = Atom.readable((get) => {
-  const result = get(modeAtom)
-  return Result.isSuccess(result) && result.value._tag === "action"
-})
-
-// 4. Create action atoms for mutations
-export const enterActionAtom = appRuntime.fn(() =>
-  Effect.gen(function* () {
-    const editor = yield* EditorService
-    yield* editor.enterAction()
-  }).pipe(Effect.catchAll(Effect.logError)),
-)
+// Parameterized atom - returns formatted string ready for render
+// ALL computation happens here, not in React
+export const elapsedFormattedAtom = (startedAt: string) =>
+  Atom.readable((get) => {
+    const nowResult = get(clockTickAtom)
+    if (!Result.isSuccess(nowResult)) return "00:00"
+    return computeElapsedFormatted(startedAt, nowResult.value)  // Service utility
+  })
 ```
 
 **Atom types:**
 | Pattern | Use Case | Example |
 |---------|----------|---------|
-| `appRuntime.subscriptionRef()` | Subscribe to service state | `modeAtom`, `cursorAtom` |
-| `appRuntime.atom()` | One-time async fetch | `vcStatusRefAtom`, `ghCLIAvailableAtom` |
+| `appRuntime.subscriptionRef()` | Subscribe to service state | `modeAtom`, `clockTickAtom` |
 | `appRuntime.fn()` | Actions/mutations | `startSessionAtom`, `moveTaskAtom` |
-| `Atom.readable()` | Derived sync state | `selectedIdsAtom`, `searchQueryAtom` |
+| `Atom.readable()` | Derived/computed state | `selectedIdsAtom`, `searchQueryAtom` |
+| `Atom.readable((get) => ...)` with param | Per-instance computation | `elapsedFormattedAtom(startedAt)` |
 | `Atom.make()` | Simple local state | `viewModeAtom` |
 
-### Layer 3: React Hooks (Consumption)
+### Layer 3: React Components (Pure Render)
 
-Hooks wrap atoms for clean component APIs:
+Components are pure render - single `useAtomValue`, no function calls:
 
-```typescript
-// src/ui/hooks/useEditorMode.ts
-export function useEditorMode() {
-  // Read state
-  const modeResult = useAtomValue(modeAtom)
-  const mode = Result.isSuccess(modeResult) ? modeResult.value : DEFAULT_MODE
+```tsx
+// CORRECT: Pure render component
+export const ElapsedTimer = ({ startedAt, color }: Props) => {
+  const elapsed = useAtomValue(elapsedFormattedAtom(startedAt))
+  return <text fg={color}>{elapsed}</text>
+}
 
-  // Get action functions
-  const [, enterAction] = useAtom(enterActionAtom, { mode: "promise" })
-
-  return {
-    mode,
-    isAction: mode._tag === "action",
-    enterAction: () => enterAction(),
-  }
+// WRONG: Logic in React
+export const ElapsedTimer = ({ startedAt, color }: Props) => {
+  const now = useAtomValue(clockTickAtom)
+  const start = DateTime.unsafeMake(startedAt)  // ❌ Logic in React!
+  const elapsed = formatElapsed(DateTime.distance(start, now))  // ❌ Computation in React!
+  return <text fg={color}>{elapsed}</text>
 }
 ```
 
-**In components:**
-```tsx
-const { mode, isAction, enterAction } = useEditorMode()
+### Effect Scheduling Gotchas
 
-// Reading state triggers re-render on change
-if (isAction) { /* render action UI */ }
+**`Schedule.spaced` waits before first execution:**
+```typescript
+// BAD: Board is empty for 2 seconds on startup
+yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(refresh())
 
-// Mutations are async (return promises)
-const handleSpace = () => enterAction()
+// GOOD: Initial load + polling
+yield* refresh()  // Immediate first load
+yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(refresh())
+```
+
+**Lazy evaluation in scheduled effects:**
+```typescript
+// BAD: Date.now() captured once at service creation
+yield* Effect.scheduleForked(Schedule.spaced("1 second"))(
+  SubscriptionRef.set(now, Date.now())  // ❌ Evaluated once!
+)
+
+// GOOD: Fresh value each tick using Effect.flatMap
+yield* Effect.scheduleForked(Schedule.spaced("1 second"))(
+  Effect.flatMap(DateTime.now, (dt) => SubscriptionRef.set(now, dt))
+)
 ```
 
 ### Mutation Flow
