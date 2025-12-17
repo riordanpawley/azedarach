@@ -740,8 +740,23 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// 10. Close bead issue (optional)
 					if (closeBead) {
 						yield* beadsClient
-							.update(beadId, { status: "closed" })
+							.close(beadId, `Merged to main`)
 							.pipe(Effect.catchAll(() => Effect.void))
+
+						// 11. Commit and push the bead close to git
+						// The bead close updates .beads/issues.jsonl which is tracked in git
+						yield* runGit(["add", ".beads/issues.jsonl"], projectPath).pipe(
+							Effect.catchAll(() => Effect.void),
+						)
+						yield* runGit(["commit", "-m", `Close ${beadId}: ${bead.title}`], projectPath).pipe(
+							Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
+						)
+
+						if (pushToOrigin) {
+							yield* runGit(["push", "origin", "main"], projectPath).pipe(
+								Effect.catchAll(() => Effect.void), // Best effort - code is already pushed
+							)
+						}
 					}
 				}),
 
