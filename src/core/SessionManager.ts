@@ -17,7 +17,7 @@
  * - listActive(): List all running sessions
  */
 
-import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect, HashMap, PubSub, Ref } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
@@ -276,10 +276,6 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
-		// Get platform services at construction time (for use in closures)
-		const fs = yield* FileSystem.FileSystem
-		const pathService = yield* Path.Path
-
 		// Track active sessions in memory
 		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
 
@@ -388,15 +384,6 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						// 2. If claude exits, you're left in a shell (session doesn't die)
 						const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
 
-						// Check if .envrc exists - if so, wrap command with direnv exec
-						// This ensures the environment is properly loaded before Claude starts
-						// (direnv shell hooks don't fire with `bash -c`)
-						const envrcPath = pathService.join(worktree.path, ".envrc")
-						const hasEnvrc = yield* fs
-							.exists(envrcPath)
-							.pipe(Effect.catchAll(() => Effect.succeed(false)))
-
-						// Wrap with direnv exec if .envrc exists
 						// If initialPrompt provided, append it to the claude command (properly escaped)
 						// If model is specified, add --model flag (e.g., for haiku chat sessions)
 						const escapeForShell = (s: string) =>
@@ -407,13 +394,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						const claudeWithOptions = initialPrompt
 							? `${claudeCommand}${modelFlag} "${escapeForShell(initialPrompt)}"`
 							: `${claudeCommand}${modelFlag}`
-						const effectiveCommand = hasEnvrc
-							? `direnv exec . ${claudeWithOptions}`
-							: claudeWithOptions
 
+						// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+						// This ensures the project's .envrc environment is loaded automatically
+						// (Previously used `direnv exec .` but that bypassed user's shell PATH)
 						yield* tmuxService.newSession(tmuxSessionName, {
 							cwd: worktree.path,
-							command: `${shell} -c '${effectiveCommand}; exec ${shell}'`,
+							command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
 							prefix: tmuxPrefix,
 						})
 					}
