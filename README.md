@@ -104,7 +104,7 @@ Azedarach uses **modal keybindings** inspired by the [Helix editor](https://heli
 | Key | Action |
 |-----|--------|
 | `h/j/k/l` or `←↓↑→` | Navigate (column/down/up/column) |
-| `Ctrl-d` / `Ctrl-u` | Half-page down/up |
+| `Ctrl-Shift-d` / `Ctrl-Shift-u` | Half-page down/up |
 | `Space` | Open action menu |
 | `v` | Enter select mode (multi-select) |
 | `g` | Enter goto mode (see below) |

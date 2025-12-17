@@ -262,6 +262,53 @@ const syncHandler = (args: {
 		}
 	})
 
+/**
+ * Valid hook event types from Claude Code
+ */
+const VALID_HOOK_EVENTS = ["idle_prompt", "stop", "session_end"] as const
+type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
+
+/**
+ * Handle hook notifications from Claude Code sessions
+ *
+ * This command is called by Claude Code hooks configured in worktree's
+ * .claude/settings.local.json. It writes a notification file that the
+ * HookReceiver service in the main Azedarach process watches.
+ */
+const notifyHandler = (args: {
+	readonly event: string
+	readonly beadId: string
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+
+		// Validate event type
+		if (!VALID_HOOK_EVENTS.includes(args.event as HookEvent)) {
+			yield* Console.error(`Invalid event type: ${args.event}`)
+			yield* Console.error(`Valid events: ${VALID_HOOK_EVENTS.join(", ")}`)
+			return yield* Effect.fail(new Error(`Invalid event: ${args.event}`))
+		}
+
+		if (args.verbose) {
+			yield* Console.log(`Received hook event: ${args.event} for ${args.beadId}`)
+		}
+
+		// Write notification file for HookReceiver to pick up
+		const notifyPath = `/tmp/azedarach-notify-${args.beadId}.json`
+		const payload = JSON.stringify({
+			event: args.event,
+			beadId: args.beadId,
+			timestamp: Date.now(),
+		})
+
+		yield* fs.writeFileString(notifyPath, payload)
+
+		if (args.verbose) {
+			yield* Console.log(`Wrote notification to: ${notifyPath}`)
+		}
+	})
+
 // ============================================================================
 // Command Definitions
 // ============================================================================
@@ -341,6 +388,36 @@ const syncCommand = Command.make(
 ).pipe(Command.withDescription("Sync beads database in worktrees"))
 
 /**
+ * Event argument for notify command
+ */
+const eventArg = Args.text({ name: "event" }).pipe(
+	Args.withDescription("Hook event type: idle_prompt, stop, session_end"),
+)
+
+/**
+ * Bead ID argument for notify command
+ */
+const beadIdArg = Args.text({ name: "bead-id" }).pipe(
+	Args.withDescription("Bead ID for the session (e.g., az-123)"),
+)
+
+/**
+ * az notify <event> <bead-id> - Handle Claude Code hook notifications
+ *
+ * Called by Claude Code hooks to notify Azedarach of session state changes.
+ * Writes a notification file that HookReceiver watches.
+ */
+const notifyCommand = Command.make(
+	"notify",
+	{
+		event: eventArg,
+		beadId: beadIdArg,
+		verbose: verboseOption,
+	},
+	notifyHandler,
+).pipe(Command.withDescription("Handle Claude Code hook notifications (internal use)"))
+
+/**
  * Main CLI - combines all commands
  *
  * The parent command has its own handler that runs when `az` is called
@@ -364,7 +441,14 @@ const az = Command.make(
  * Full CLI with subcommands attached
  */
 const cli = az.pipe(
-	Command.withSubcommands([startCommand, attachCommand, pauseCommand, statusCommand, syncCommand]),
+	Command.withSubcommands([
+		startCommand,
+		attachCommand,
+		pauseCommand,
+		statusCommand,
+		syncCommand,
+		notifyCommand,
+	]),
 )
 
 // ============================================================================

@@ -48,9 +48,6 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 					// Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
-
-					// Note: Ctrl-u binding removed - conflicts with az TUI's C-u keybinding
-					// Users can enter copy mode with Prefix+u or Prefix+[ per global tmux config
 				}),
 
 			killSession: (name: string) =>

@@ -14,6 +14,7 @@
 		"lint": "biome lint src bin",
 		"format": "biome format --write src bin",
 		"check": "biome check --write src bin",
+		"fix": "biome check --write .",
 		"prepare": "git config core.hooksPath .githooks"
 	},
 	"keywords": [

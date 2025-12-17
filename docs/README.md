@@ -54,8 +54,8 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 | `l` / `→` | Move to next column |
 | `j` / `↓` | Move to next task in column |
 | `k` / `↑` | Move to previous task in column |
-| `Ctrl-d` | Half-page down |
-| `Ctrl-u` | Half-page up |
+| `Ctrl-Shift-d` | Half-page down |
+| `Ctrl-Shift-u` | Half-page up |
 
 ### Task Actions
 
