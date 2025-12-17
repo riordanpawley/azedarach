@@ -19,6 +19,7 @@
  */
 
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
 import { SessionManager } from "./SessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
@@ -147,11 +148,20 @@ const extractRecentOutput = (output: string): string | undefined => {
  * ```
  */
 export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
-	dependencies: [TmuxService.Default, SessionManager.Default, StateDetector.Default],
+	dependencies: [
+		TmuxService.Default,
+		SessionManager.Default,
+		StateDetector.Default,
+		DiagnosticsService.Default,
+	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
 		const sessionManager = yield* SessionManager
 		const stateDetector = yield* StateDetector
+		const diagnostics = yield* DiagnosticsService
+
+		// Register with diagnostics - will mark unhealthy when scope closes
+		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 2s")
 
 		// Per-session monitoring state
 		const monitors = yield* Ref.make<HashMap.HashMap<string, SessionMonitor>>(HashMap.empty())

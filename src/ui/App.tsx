@@ -26,6 +26,7 @@ import { CommandInput } from "./CommandInput"
 import { ConfirmOverlay } from "./ConfirmOverlay"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
 import { DetailPanel } from "./DetailPanel"
+import { DiagnosticsOverlay } from "./DiagnosticsOverlay"
 import { HelpOverlay } from "./HelpOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
 import { ImageAttachOverlay } from "./ImageAttachOverlay"
@@ -72,6 +73,7 @@ export const App = () => {
 		showingClaudeCreate,
 		showingImageAttach,
 		showingConfirm,
+		showingDiagnostics,
 	} = useOverlays()
 
 	const {
@@ -262,6 +264,9 @@ export const App = () => {
 
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
+
+			{/* Diagnostics overlay */}
+			{showingDiagnostics && <DiagnosticsOverlay />}
 
 			{/* Action palette */}
 			{isAction && <ActionPalette task={selectedTask} />}
