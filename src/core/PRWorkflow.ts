@@ -715,6 +715,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
+					// 6b. Re-import beads from merged JSONL to recover any beads incorrectly
+					// removed by the bd merge driver. The merge driver uses 3-way merge semantics
+					// which can delete beads that exist in main but not in the branch.
+					yield* beadsClient.syncImportOnly(projectPath).pipe(Effect.catchAll(() => Effect.void))
+
 					// 7. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 
