@@ -15,6 +15,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	handleKeyAtom,
+	hookReceiverStarterAtom,
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
@@ -117,6 +118,10 @@ export const App = () => {
 	const tasksResult = useAtomValue(boardTasksAtom)
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
+
+	// Start the hook receiver for Claude Code native hook integration
+	// This watches for notification files and updates session state
+	useAtomValue(hookReceiverStarterAtom)
 
 	// Initialize BoardService data on mount
 	// This is required for NavigationService to work (ID-based cursor needs task data)

@@ -7,7 +7,7 @@ import { useMemo } from "react"
 import { currentAttachmentsAtom } from "./atoms"
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
-import { SESSION_INDICATORS } from "./types"
+import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS } from "./types"
 
 export interface DetailPanelProps {
 	task: TaskWithSession
@@ -113,7 +113,8 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		isSessionActive &&
 		(props.task.contextPercent !== undefined ||
 			props.task.sessionStartedAt !== undefined ||
-			props.task.estimatedTokens !== undefined)
+			props.task.estimatedTokens !== undefined ||
+			props.task.agentPhase !== undefined)
 
 	// Available actions based on task state
 	const availableActions = useMemo(() => {
@@ -259,6 +260,12 @@ export const DetailPanel = (props: DetailPanelProps) => {
 						<text fg={theme.blue} attributes={ATTR_BOLD}>
 							{"Session Metrics:"}
 						</text>
+						{/* Agent Phase row - displayed prominently when available */}
+						{props.task.agentPhase && props.task.agentPhase !== "idle" && (
+							<text fg={theme.mauve}>
+								{`Phase: ${PHASE_INDICATORS[props.task.agentPhase]} ${PHASE_LABELS[props.task.agentPhase]}`}
+							</text>
+						)}
 						<box flexDirection="row" gap={2}>
 							{props.task.contextPercent !== undefined && (
 								<text fg={getContextColor(props.task.contextPercent)}>

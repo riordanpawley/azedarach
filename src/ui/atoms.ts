@@ -14,6 +14,7 @@ import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
 import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
+import { HookReceiver, mapEventToState } from "../core/HookReceiver"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
@@ -54,6 +55,7 @@ const appLayer = Layer.mergeAll(
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,
+	HookReceiver.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
@@ -121,6 +123,46 @@ export const vcStatusPollerAtom = appRuntime.atom(
  * Usage: const vcStatus = useAtomValue(vcStatusAtom)
  */
 export const vcStatusAtom = appRuntime.subscriptionRef((get) => pipe(get.result(vcStatusRefAtom)))
+
+// ============================================================================
+// Hook Receiver (Claude Code native hooks integration)
+// ============================================================================
+
+/**
+ * Hook receiver starter atom - starts the hook receiver on mount
+ *
+ * Watches for notification files from Claude Code hooks and updates
+ * session state in SessionManager. The receiver is automatically stopped
+ * when the atom unmounts.
+ *
+ * Usage: Simply subscribe to this atom in the app root to start the receiver.
+ *        useAtomValue(hookReceiverStarterAtom)
+ */
+export const hookReceiverStarterAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const receiver = yield* HookReceiver
+		const manager = yield* SessionManager
+
+		// Handler that maps hook events to session state changes
+		const handler = (event: { event: string; beadId: string }) =>
+			Effect.gen(function* () {
+				const newState = mapEventToState(event.event as "idle_prompt" | "stop" | "session_end")
+				if (newState) {
+					yield* manager
+						.updateState(event.beadId, newState)
+						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
+				}
+			})
+
+		// Start the receiver - it will be interrupted when this atom unmounts
+		const fiber = yield* receiver.start(handler)
+
+		yield* Effect.log("HookReceiver started - watching for Claude Code hook notifications")
+
+		return fiber
+	}),
+	{ initialValue: undefined },
+)
 
 /**
  * Atom for currently selected task ID
