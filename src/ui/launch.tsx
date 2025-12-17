@@ -9,7 +9,7 @@ import { App } from "./App"
 
 /**
  * Register a global tmux keybinding to return to the az session.
- * Binds Ctrl-a A (capital A) to switch back to the main az TUI session.
+ * Binds Ctrl-a Ctrl-a (double-tap prefix) to switch back to the main az TUI session.
  * This works from any Claude session spawned by az.
  */
 async function registerReturnBinding(): Promise<void> {
@@ -17,7 +17,9 @@ async function registerReturnBinding(): Promise<void> {
 	if (!process.env.TMUX) return
 
 	try {
-		const proc = Bun.spawn(["tmux", "bind-key", "A", "switch-client", "-t", AZ_SESSION_NAME], {
+		// Bind C-a (Ctrl-a after prefix) to return to az session
+		// This creates a "double-tap prefix to go home" pattern
+		const proc = Bun.spawn(["tmux", "bind-key", "C-a", "switch-client", "-t", AZ_SESSION_NAME], {
 			stdout: "ignore",
 			stderr: "ignore",
 		})

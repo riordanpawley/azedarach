@@ -17,6 +17,8 @@ export interface ColumnProps {
 	taskJumpLabels?: Map<string, string> | null
 	pendingJumpKey?: string | null
 	maxVisible?: number
+	/** Whether action mode is active (selected card gets prominent border) */
+	isActionMode?: boolean
 }
 
 /**
@@ -85,6 +87,7 @@ export const Column = (props: ColumnProps) => {
 						task={task}
 						isSelected={props.selectedTaskId === task.id}
 						isMultiSelected={props.selectedIds?.has(task.id)}
+						isActionMode={props.isActionMode}
 						jumpLabel={props.taskJumpLabels?.get(task.id)}
 						pendingJumpKey={props.pendingJumpKey}
 					/>

@@ -4,7 +4,7 @@
 
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
-import { SESSION_INDICATORS } from "./types"
+import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
 
 /** Height of each task card in terminal rows */
 export const TASK_CARD_HEIGHT = 6
@@ -38,6 +38,8 @@ export interface TaskCardProps {
 	task: TaskWithSession
 	isSelected?: boolean
 	isMultiSelected?: boolean
+	/** Whether the action menu is currently open (selected card gets prominent border) */
+	isActionMode?: boolean
 	jumpLabel?: string
 	pendingJumpKey?: string | null
 	/** Number of image attachments for this task */
@@ -67,13 +69,21 @@ export const TaskCard = (props: TaskCardProps) => {
 		return theme.lavender
 	}
 
-	// Border color: selection takes priority, then context health
+	// Border color: action mode > multi-select > selection > context health > default
 	const getBorderColor = () => {
+		// Action mode selected card gets mauve (matches action palette)
+		if (props.isSelected && props.isActionMode) return theme.mauve
 		if (props.isMultiSelected) return theme.mauve
 		if (props.isSelected) return theme.lavender
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
+	}
+
+	// Border style: double border when action mode is active on selected card
+	const getBorderStyle = (): "single" | "double" => {
+		if (props.isSelected && props.isActionMode) return "double"
+		return "single"
 	}
 
 	// Background color based on selection state
@@ -86,6 +96,12 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
 
+	// Get phase indicator (only show when session is active and phase is detected)
+	const phaseIndicator =
+		props.task.sessionState !== "idle" && props.task.agentPhase
+			? PHASE_INDICATORS[props.task.agentPhase]
+			: ""
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -95,6 +111,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
+		if (phaseIndicator) {
+			line += ` ${phaseIndicator}`
 		}
 		// Show attachment indicator if there are attachments
 		if (props.attachmentCount && props.attachmentCount > 0) {
@@ -108,7 +128,7 @@ export const TaskCard = (props: TaskCardProps) => {
 
 	return (
 		<box
-			borderStyle="single"
+			borderStyle={getBorderStyle()}
 			border={true}
 			borderColor={getBorderColor()}
 			backgroundColor={getBackgroundColor()}

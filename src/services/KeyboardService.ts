@@ -356,7 +356,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				if (!task) return
 
 				yield* attachment.attachExternal(task.id).pipe(
-					Effect.tap(() => toast.show("info", "Switched! Ctrl-a ) to return")),
+					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
@@ -616,7 +616,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 								}`
 							: ""
 
-					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nProceed with merge?`
+					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nMerge will be attempted in the worktree first - main won't be affected if conflicts occur.\n\nProceed?`
 
 					yield* overlay.push({
 						_tag: "confirm",
