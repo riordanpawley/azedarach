@@ -402,108 +402,106 @@ export const createBeadViaEditorAtom = appRuntime.fn(() =>
 /**
  * Create a bead from natural language using Claude CLI
  *
- * Runs claude in non-interactive mode (-p) to create a bead based on
- * the user's description. Much lighter than a full interactive session.
+ * Two-phase approach for reliability:
+ * 1. Claude extracts structured data (title, type, priority) from natural language
+ * 2. We call bd create directly via BeadsClient
  *
- * Handles full orchestration: dismiss overlay, show progress toast, create via Claude,
- * refresh board, navigate to new task, show success toast.
+ * This avoids the unreliability of Claude executing CLI commands and parsing free-form output.
  *
  * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
  *        const beadId = await claudeCreate("Add dark mode toggle to settings")
  */
 export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
-		const { config } = yield* AppConfig
 		const board = yield* BoardService
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
+		const beadsClient = yield* BeadsClient
 
 		// Dismiss overlay first
 		yield* overlay.pop()
 		yield* toast.show("info", "Creating task with Claude...")
 
 		const projectPath = process.cwd()
-		const { dangerouslySkipPermissions } = config.session
 
-		// Build the prompt for Claude with explicit bd create instructions
-		const prompt = `Create a new bead issue for the following task using the \`bd\` CLI tool.
+		// Phase 1: Ask Claude to extract structured task data
+		// Using JSON output format for deterministic parsing
+		const prompt = `Extract task information from this description and return ONLY a JSON object.
 
-**Task description:**
-${description}
+Description: "${description}"
 
-**Instructions:**
-1. Use \`bd create --title="..." --type=task|bug|feature --priority=0|1|2|3|4\` (0=critical, 2=medium, 4=backlog)
-2. Choose appropriate type: task for general work, feature for new functionality, bug for fixes
-3. Add a description with --description="..." if the task needs more detail
-4. Output ONLY the created issue ID on the final line (e.g., "az-123")
+Return a JSON object with these fields:
+- "title": A concise task title (imperative form, e.g. "Add dark mode toggle")
+- "type": One of "task", "bug", "feature", "chore" (task=general work, feature=new functionality, bug=fix, chore=maintenance)
+- "priority": Number 1-4 (1=high, 2=medium, 3=low, 4=backlog)
+- "description": Optional longer description if the input has details worth preserving (omit if redundant with title)
 
-Create the bead now and output just the ID.`
+Example output:
+{"title": "Add dark mode toggle to settings", "type": "feature", "priority": 2}
 
-		// Build command arguments for non-interactive print mode
-		// Use Haiku model for fast task creation (avoids timeout issues with slower models)
-		// Pre-approve bd CLI commands and beads MCP tools to avoid permission hang in non-interactive mode
-		// MCP tools need set_context before create, so allow all beads MCP tools
-		const args = [
-			"-p",
-			prompt,
-			"--model",
-			"haiku",
-			"--output-format",
-			"text",
-			"--allowedTools",
-			"Bash(bd:*)",
-			"mcp__plugin_beads_beads__*",
-		]
-		if (dangerouslySkipPermissions) {
-			args.push("--dangerously-skip-permissions")
-		}
+Return ONLY the JSON object, no explanation or markdown.`
 
-		// Run claude CLI in non-interactive print mode
-		// 20 second timeout - Haiku should be fast; on failure show toast instead of crashing
+		const args = ["-p", prompt, "--model", "haiku", "--output-format", "text"]
+
 		const claudeCmd = Command.make("claude", ...args).pipe(Command.workingDirectory(projectPath))
 
-		const result = yield* Command.string(claudeCmd).pipe(
-			Effect.timeout("20 seconds"),
+		const rawOutput = yield* Command.string(claudeCmd).pipe(
+			Effect.timeout("15 seconds"),
 			Effect.mapError((e) => new Error(`Claude CLI failed: ${e}`)),
 		)
 
-		// Parse output to find created bead ID (pattern: az-xxx, beads-xxx, etc.)
-		const beadIdPattern = /^([a-z]+-[a-z0-9]+)\s*$/im
-		const lines = result.trim().split("\n")
+		// Parse the JSON output from Claude
+		// Handle potential markdown code blocks or extra whitespace
+		const cleanOutput = rawOutput
+			.trim()
+			.replace(/^```json?\s*/i, "")
+			.replace(/\s*```$/i, "")
+			.trim()
 
-		// Look for bead ID in the output, preferring the last line
-		let beadId: string | null = null
-		for (let i = lines.length - 1; i >= 0; i--) {
-			const match = lines[i].trim().match(beadIdPattern)
-			if (match) {
-				beadId = match[1]
-				break
-			}
+		const parsed = yield* Effect.try({
+			try: () =>
+				JSON.parse(cleanOutput) as {
+					title: string
+					type?: string
+					priority?: number
+					description?: string
+				},
+			catch: (e) =>
+				new Error(`Failed to parse Claude output as JSON: ${e}\nRaw output: ${rawOutput}`),
+		})
+
+		// Validate required fields
+		if (!parsed.title || typeof parsed.title !== "string") {
+			yield* Effect.fail(
+				new Error(`Claude returned invalid data: missing title. Output: ${rawOutput}`),
+			)
 		}
 
-		// If no ID found in strict format, try to find any bead-like ID in the output
-		if (!beadId) {
-			const broadMatch = result.match(/\b([a-z]+-[a-z0-9]{2,})\b/i)
-			if (broadMatch) {
-				beadId = broadMatch[1]
-			}
-		}
+		// Normalize type and priority
+		const validTypes = ["task", "bug", "feature", "chore", "epic"]
+		const taskType = validTypes.includes(parsed.type ?? "") ? parsed.type : "task"
+		const priority =
+			typeof parsed.priority === "number" && parsed.priority >= 1 && parsed.priority <= 4
+				? parsed.priority
+				: 2
+
+		// Phase 2: Create the bead directly via BeadsClient
+		const createdIssue = yield* beadsClient.create({
+			title: parsed.title,
+			type: taskType,
+			priority,
+			description: parsed.description,
+		})
 
 		// Refresh the board to show the new task
 		yield* board.refresh()
 
-		if (!beadId) {
-			yield* Effect.logWarning(`Could not parse bead ID from Claude output: ${result}`)
-			yield* toast.show("success", "Task created (check board for new task)")
-			return "unknown"
-		}
-
 		// Navigate to the new task and show success
-		yield* navigation.jumpToTask(beadId)
-		yield* toast.show("success", `Created task: ${beadId}`)
+		yield* navigation.jumpToTask(createdIssue.id)
+		yield* toast.show("success", `Created ${taskType}: ${createdIssue.id}`)
 
-		return beadId
+		return createdIssue.id
 	}).pipe(
 		Effect.catchAll((error) =>
 			Effect.gen(function* () {
