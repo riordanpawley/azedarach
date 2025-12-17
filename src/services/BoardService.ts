@@ -199,17 +199,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Fetch all issues from beads
 				const issues = yield* beadsClient.list()
 
-				// Get active sessions to merge their state
+				// Get active sessions to merge their state and metrics
 				const activeSessions = yield* sessionManager.listActive()
-				const sessionStateMap = new Map(
-					activeSessions.map((session) => [session.beadId, session.state]),
-				)
+				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 
-				// Map issues to TaskWithSession, using real session state if available
-				const tasksWithSession: TaskWithSession[] = issues.map((issue) => ({
-					...issue,
-					sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
-				}))
+				// Map issues to TaskWithSession, merging session state and available metrics
+				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
+					const session = sessionMap.get(issue.id)
+					return {
+						...issue,
+						sessionState: session?.state ?? ("idle" as const),
+						// Map available session metrics
+						sessionStartedAt: session?.startedAt?.toISOString(),
+					}
+				})
 
 				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
 				const withSessions = tasksWithSession.filter((t) => t.sessionState !== "idle").length
