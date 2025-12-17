@@ -14,6 +14,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	filteredTasksByColumnAtom,
+	focusedTaskRunningOperationAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
 	refreshBoardAtom,
@@ -131,6 +132,10 @@ export const App = () => {
 
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
+
+	// Running operation for focused task (for ActionPalette busy state)
+	// Derives from NavigationService + CommandQueueService - no props needed
+	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Keyboard Handler - Delegates to KeyboardService
@@ -264,7 +269,7 @@ export const App = () => {
 			{showingHelp && <HelpOverlay />}
 
 			{/* Action palette */}
-			{isAction && <ActionPalette task={selectedTask} />}
+			{isAction && <ActionPalette task={selectedTask} runningOperation={runningOperation} />}
 
 			{/* Sort menu */}
 			{isSort && <SortMenu currentSort={sortConfig} />}
