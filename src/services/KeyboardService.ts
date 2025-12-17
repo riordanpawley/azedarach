@@ -207,6 +207,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)
 					if (handledAsImageAttach) return
 
+					// Check for detail overlay (handles attachment navigation)
+					const handledAsDetail = yield* inputHandlers.handleDetailOverlayInput(key)
+					if (handledAsDetail) return
+
 					const effectiveMode = yield* inputHandlers.getEffectiveMode()
 
 					// Special handling for goto-jump mode (any key is label input)
