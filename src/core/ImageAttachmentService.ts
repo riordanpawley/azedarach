@@ -224,10 +224,12 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			/**
 			 * State for the currently viewed task's attachments.
 			 * Updated when detail panel opens for a task.
+			 * selectedIndex: -1 means no attachment is selected (focus on task details)
 			 */
 			const currentAttachments = yield* SubscriptionRef.make<{
 				readonly taskId: string
 				readonly attachments: readonly ImageAttachment[]
+				readonly selectedIndex: number
 			} | null>(null)
 
 			/**
@@ -308,7 +310,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					Effect.gen(function* () {
 						const index = yield* readIndex
 						const attachments = index[taskId] ?? []
-						yield* SubscriptionRef.set(currentAttachments, { taskId, attachments })
+						yield* SubscriptionRef.set(currentAttachments, {
+							taskId,
+							attachments,
+							selectedIndex: -1, // -1 = no attachment selected
+						})
 						return attachments
 					}),
 
@@ -316,6 +322,121 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 * Clear current attachments state (when closing detail panel)
 				 */
 				clearCurrent: () => SubscriptionRef.set(currentAttachments, null),
+
+				/**
+				 * Move attachment selection up (toward index 0, or -1 to exit selection)
+				 */
+				selectPreviousAttachment: () =>
+					SubscriptionRef.update(currentAttachments, (current) => {
+						if (!current || current.attachments.length === 0) return current
+						const newIndex = Math.max(-1, current.selectedIndex - 1)
+						return { ...current, selectedIndex: newIndex }
+					}),
+
+				/**
+				 * Move attachment selection down (toward last attachment)
+				 */
+				selectNextAttachment: () =>
+					SubscriptionRef.update(currentAttachments, (current) => {
+						if (!current || current.attachments.length === 0) return current
+						const maxIndex = current.attachments.length - 1
+						const newIndex = Math.min(maxIndex, current.selectedIndex + 1)
+						return { ...current, selectedIndex: newIndex }
+					}),
+
+				/**
+				 * Get currently selected attachment (if any)
+				 */
+				getSelectedAttachment: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.selectedIndex < 0) return null
+						return current.attachments[current.selectedIndex] ?? null
+					}),
+
+				/**
+				 * Open currently selected attachment in default viewer
+				 */
+				openSelectedAttachment: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.selectedIndex < 0) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "No attachment selected" }),
+							)
+						}
+						const attachment = current.attachments[current.selectedIndex]
+						if (!attachment) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "Attachment not found" }),
+							)
+						}
+
+						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+
+						// Use platform-specific open command
+						const openCmd = process.platform === "darwin" ? "open" : "xdg-open"
+						yield* Command.make(openCmd, filePath).pipe(
+							Command.exitCode,
+							Effect.catchAll((error) =>
+								Effect.fail(
+									new ImageAttachmentError({
+										message: `Failed to open image: ${error}`,
+									}),
+								),
+							),
+						)
+					}),
+
+				/**
+				 * Remove currently selected attachment
+				 * Returns the removed attachment or fails if none selected
+				 */
+				removeSelectedAttachment: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.selectedIndex < 0) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "No attachment selected" }),
+							)
+						}
+						const attachment = current.attachments[current.selectedIndex]
+						if (!attachment) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "Attachment not found" }),
+							)
+						}
+
+						// Remove file
+						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+						yield* fs.remove(filePath).pipe(Effect.ignore)
+
+						// Update index
+						const index = yield* readIndex
+						const issueAttachments = index[current.taskId] ?? []
+						const newAttachments = issueAttachments.filter((a) => a.id !== attachment.id)
+						const updatedIndex =
+							newAttachments.length === 0
+								? Record.remove(index, current.taskId)
+								: Record.set(index, current.taskId, newAttachments)
+						if (newAttachments.length === 0) {
+							yield* fs.remove(getIssueDir(current.taskId)).pipe(Effect.ignore)
+						}
+						yield* writeIndex(updatedIndex)
+
+						// Update reactive state - adjust selected index if needed
+						const newSelectedIndex =
+							newAttachments.length === 0
+								? -1
+								: Math.min(current.selectedIndex, newAttachments.length - 1)
+						yield* SubscriptionRef.set(currentAttachments, {
+							taskId: current.taskId,
+							attachments: newAttachments,
+							selectedIndex: newSelectedIndex,
+						})
+
+						return attachment
+					}),
 
 				/**
 				 * List all attachments for an issue
@@ -385,6 +506,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							yield* SubscriptionRef.set(currentAttachments, {
 								taskId: issueId,
 								attachments: newAttachments,
+								selectedIndex: current.selectedIndex,
 							})
 						}
 
@@ -487,6 +609,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							yield* SubscriptionRef.set(currentAttachments, {
 								taskId: issueId,
 								attachments: newAttachments,
+								selectedIndex: current.selectedIndex,
 							})
 						}
 
@@ -529,9 +652,15 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
 						if (current?.taskId === issueId) {
+							// Adjust selected index if needed
+							const newSelectedIndex =
+								newAttachments.length === 0
+									? -1
+									: Math.min(current.selectedIndex, newAttachments.length - 1)
 							yield* SubscriptionRef.set(currentAttachments, {
 								taskId: issueId,
 								attachments: newAttachments,
+								selectedIndex: newSelectedIndex,
 							})
 						}
 					}),
