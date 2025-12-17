@@ -5,79 +5,45 @@
  * Keybindings are stored as data structures with associated Effect actions,
  * allowing for dynamic registration, mode-based filtering, and overlay precedence.
  *
- * This service handles ALL keyboard input for the application, replacing the
- * inline useKeyboard handlers that were previously in App.tsx.
+ * This service handles ALL keyboard input for the application, delegating
+ * to domain-specific handler modules for complex actions.
  */
 
-import type { CommandExecutor } from "@effect/platform"
-import { Effect, Record, Ref, SubscriptionRef } from "effect"
+import { Effect, Ref } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
-import { BeadsClient, type BeadsError } from "../core/BeadsClient"
+import { BeadsClient } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
 import { ImageAttachmentService } from "../core/ImageAttachmentService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TmuxService } from "../core/TmuxService"
 import { VCService } from "../core/VCService"
-import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
 import { CommandQueueService } from "./CommandQueueService"
-import { EditorService, type JumpTarget } from "./EditorService"
-import { formatForToast } from "./ErrorFormatter"
+import { EditorService } from "./EditorService"
+// Import handler modules
+import { createDefaultBindings } from "./keyboard/bindings"
+import {
+	createGetColumnIndex,
+	createGetSelectedTask,
+	createOpenCurrentDetail,
+	createShowErrorToast,
+	createToggleCurrentSelection,
+	createWithQueue,
+} from "./keyboard/helpers"
+import { createInputHandlers } from "./keyboard/inputHandlers"
+import { createPRHandlers } from "./keyboard/prHandlers"
+import { createSessionHandlers } from "./keyboard/sessionHandlers"
+import { createTaskHandlers } from "./keyboard/taskHandlers"
+import type { HandlerContext, Keybinding, KeyMode } from "./keyboard/types"
 import { NavigationService } from "./NavigationService"
 import { OverlayService } from "./OverlayService"
 import { ToastService } from "./ToastService"
 import { ViewService } from "./ViewService"
 
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Keyboard mode for keybinding matching
- *
- * Modes map to EditorService modes:
- * - normal: Default navigation
- * - select: Multi-selection
- * - action: Action palette (Space menu)
- * - goto-pending: Waiting for second key after 'g'
- * - goto-jump: Jump label mode (2-char input)
- * - search: Search/filter with text input
- * - command: VC command with text input
- * - overlay: Any overlay is open
- * - *: Universal (matches any mode)
- */
-export type KeyMode =
-	| "normal"
-	| "select"
-	| "action"
-	| "goto-pending"
-	| "goto-jump"
-	| "search"
-	| "command"
-	| "overlay"
-	| "sort"
-	| "*"
-
-/**
- * Platform dependencies that keybinding actions may require.
- * CommandExecutor is the one platform dependency allowed to leak through method return types.
- */
-export type KeybindingDeps = CommandExecutor.CommandExecutor
-
-/**
- * Keybinding definition with mode-specific action
- *
- * Actions may have platform requirements (CommandExecutor, FileSystem, BeadsClient)
- * which are satisfied by the runtime layer when KeyboardService is used.
- */
-export interface Keybinding {
-	readonly key: string
-	readonly mode: KeyMode
-	readonly description: string
-	readonly action: Effect.Effect<void, BeadsError, KeybindingDeps>
-}
+// Re-export types for backwards compatibility
+export type { Keybinding, KeybindingDeps, KeyMode } from "./keyboard/types"
 
 // ============================================================================
 // Service Definition
@@ -105,7 +71,9 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 	],
 
 	effect: Effect.gen(function* () {
+		// ====================================================================
 		// Inject ALL services at construction time
+		// ====================================================================
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
 		const nav = yield* NavigationService
@@ -124,1375 +92,76 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
-		// ========================================================================
-		// Helper Functions
-		// ========================================================================
-
-		/**
-		 * Get currently selected task by ID
-		 *
-		 * NavigationService stores the focused task ID directly,
-		 * so we just look it up from the task list.
-		 */
-		const getSelectedTask = () =>
-			Effect.gen(function* () {
-				const taskId = yield* nav.getFocusedTaskId()
-				if (!taskId) return undefined
-
-				const allTasks = yield* board.getTasks()
-				return allTasks.find((t) => t.id === taskId)
-			})
-
-		/**
-		 * Get current cursor column index
-		 */
-		const getColumnIndex = () =>
-			Effect.gen(function* () {
-				const position = yield* nav.getPosition()
-				return position.columnIndex
-			})
-
-		/**
-		 * Show error toast for any failure with actionable guidance
-		 * Uses ErrorFormatter for user-friendly messages and suggestions
-		 * Also logs the full error via Effect.logError for debugging
-		 */
-		const showErrorToast =
-			(prefix: string) =>
-			(error: unknown): Effect.Effect<void> =>
-				Effect.gen(function* () {
-					const formatted = formatForToast(error)
-					yield* Effect.logError(`${prefix}: ${formatted}`, { error })
-					yield* toast.show("error", `${prefix}: ${formatted}`)
-				})
-
-		/**
-		 * Open detail overlay for current cursor position
-		 */
-		const openCurrentDetail = (): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (task) {
-					yield* overlay.push({ _tag: "detail", taskId: task.id })
-				}
-			})
-
-		/**
-		 * Toggle selection for task at current cursor position
-		 */
-		const toggleCurrentSelection = (): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (task) {
-					yield* editor.toggleSelection(task.id)
-				}
-			})
-
-		/**
-		 * Handle escape key based on current context
-		 *
-		 * Priority:
-		 * 1. Close overlay if one is open
-		 * 2. Exit to normal mode if in another mode
-		 */
-		const handleEscape = (): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				const hasOverlay = yield* overlay.isOpen()
-				if (hasOverlay) {
-					yield* overlay.pop()
-					return
-				}
-				const mode = yield* editor.getMode()
-				if (mode._tag !== "normal") {
-					yield* editor.exitToNormal()
-				}
-			})
-
-		/**
-		 * Compute jump labels for all visible tasks
-		 */
-		const computeJumpLabels = (): Effect.Effect<Record.ReadonlyRecord<string, JumpTarget>> =>
-			Effect.gen(function* () {
-				const tasksByColumn = yield* board.getTasksByColumn()
-
-				// Flatten tasks with position info
-				const allTasks: Array<{
-					taskId: string
-					columnIndex: number
-					taskIndex: number
-				}> = []
-
-				COLUMNS.forEach((col, colIdx) => {
-					const tasks = tasksByColumn[col.status] ?? []
-					tasks.forEach((task, taskIdx) => {
-						allTasks.push({
-							taskId: task.id,
-							columnIndex: colIdx,
-							taskIndex: taskIdx,
-						})
-					})
-				})
-
-				// Generate label strings and build the Record
-				const labels = generateJumpLabels(allTasks.length)
-				return Record.fromEntries(
-					allTasks
-						.map(({ taskId, columnIndex, taskIndex }, i) =>
-							labels[i] ? [labels[i]!, { taskId, columnIndex, taskIndex }] : null,
-						)
-						.filter((entry): entry is [string, JumpTarget] => entry !== null),
-				)
-			})
-
-		/**
-		 * Handle jump label input (2-char sequence)
-		 */
-		const handleJumpInput = (key: string): Effect.Effect<void> =>
-			Effect.gen(function* () {
-				const mode = yield* editor.getMode()
-				if (mode._tag !== "goto" || mode.gotoSubMode !== "jump") return
-
-				if (!mode.pendingJumpKey) {
-					// First character
-					yield* editor.setPendingJumpKey(key)
-				} else {
-					// Second character - lookup and jump
-					const label = mode.pendingJumpKey + key
-					const target = mode.jumpLabels?.[label]
-					if (target) {
-						yield* nav.jumpTo(target.columnIndex, target.taskIndex)
-					}
-					yield* editor.exitToNormal()
-				}
-			})
-
-		/**
-		 * Move task(s) to adjacent column
-		 */
-		const moveTasksToColumn = (direction: "left" | "right") =>
-			Effect.gen(function* () {
-				const columnIndex = yield* getColumnIndex()
-				const targetColIdx = direction === "left" ? columnIndex - 1 : columnIndex + 1
-
-				// Bounds check
-				if (targetColIdx < 0 || targetColIdx >= COLUMNS.length) {
-					return
-				}
-
-				const targetStatus = COLUMNS[targetColIdx]?.status
-				if (!targetStatus) {
-					return
-				}
-
-				// Get selected IDs or current task
-				const mode = yield* editor.getMode()
-				const selectedIds = mode._tag === "select" ? mode.selectedIds : []
-				const task = yield* getSelectedTask()
-
-				const taskIdsToMove = selectedIds.length > 0 ? [...selectedIds] : task ? [task.id] : []
-				const firstTaskId = taskIdsToMove[0]
-
-				if (taskIdsToMove.length > 0) {
-					yield* Effect.all(
-						taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
-					)
-					// Refresh board to reflect the move
-					yield* board.refresh()
-					// Follow the first task
-					if (firstTaskId) {
-						yield* nav.setFollow(firstTaskId)
-					}
-				}
-			})
-
-		// ========================================================================
-		// Command Queue Helper - Serializes conflicting per-task operations
-		// ========================================================================
-
-		/**
-		 * Execute a queued operation for a task
-		 *
-		 * Operations like merge, cleanup, start session, etc. can conflict if run
-		 * simultaneously on the same task. This helper ensures they run one at a time.
-		 *
-		 * CommandExecutor is allowed to propagate - it will be satisfied by the runtime.
-		 *
-		 * @param taskId - The task to operate on
-		 * @param label - Human-readable label for the operation (e.g., "merge", "cleanup")
-		 * @param operation - The Effect to execute (return value is ignored)
-		 */
-		const withQueue = <A, E>(
-			taskId: string,
-			label: string,
-			operation: Effect.Effect<A, E, CommandExecutor.CommandExecutor>,
-		) =>
-			commandQueue
-				.enqueue({
-					taskId,
-					label,
-					// CommandExecutor propagates to runtime - no provide needed
-					effect: Effect.asVoid(operation),
-				})
-				.pipe(
-					// Queue errors (timeout, cancelled) are handled separately
-					Effect.catchAll((error) =>
-						toast.show("error", `${label} timed out or was cancelled: ${error._tag}`),
-					),
-				)
-
-		// ========================================================================
-		// Action Mode Handlers - Use injected services directly
-		// ========================================================================
-
-		/**
-		 * Start session action (Space+s)
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const actionStartSession = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState !== "idle") {
-					yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
-					return
-				}
-
-				yield* withQueue(
-					task.id,
-					"start",
-					sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
-						Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
-						Effect.catchAll(showErrorToast("Failed to start")),
-					),
-				)
-			})
-
-		/**
-		 * Start session with initial prompt (Space+S)
-		 * Starts Claude and tells it to "work on bead {beadId}"
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const actionStartSessionWithPrompt = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState !== "idle") {
-					yield* toast.show("error", `Cannot start: task is ${task.sessionState}`)
-					return
-				}
-
-				yield* withQueue(
-					task.id,
-					"start",
-					sessionManager
-						.start({
-							beadId: task.id,
-							projectPath: process.cwd(),
-							initialPrompt: `work on ${task.id}`,
-						})
-						.pipe(
-							Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
-							Effect.catchAll(showErrorToast("Failed to start")),
-						),
-				)
-			})
-
-		/**
-		 * Chat about task (Space+c)
-		 * Opens a Haiku chat in a tmux popup to discuss/understand the task
-		 *
-		 * This is an ephemeral session that runs in the current directory (not a worktree).
-		 * The popup closes automatically when Claude exits.
-		 * Uses Haiku model for faster, cheaper responses.
-		 */
-		const actionChatAboutTask = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				// Build the Claude command with Haiku model and initial prompt
-				const { command: claudeCommand } = resolvedConfig.session
-				const escapeForShell = (s: string) =>
-					s.replace(/\\/g, "\\\\").replace(/'/g, "'\\''").replace(/"/g, '\\"')
-
-				const prompt = `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`
-				const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
-
-				yield* tmux
-					.displayPopup({
-						command: fullCommand,
-						width: "90%",
-						height: "90%",
-						title: ` Chat: ${task.id} (Haiku) - Ctrl-C to exit `,
-					})
-					.pipe(Effect.catchAll(showErrorToast("Failed to start chat")))
-			})
-
-		/**
-		 * Attach external action (Space+a)
-		 */
-		const actionAttachExternal = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				yield* attachment.attachExternal(task.id).pipe(
-					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
-					Effect.catchAll((error) => {
-						const msg =
-							error && typeof error === "object" && "_tag" in error
-								? error._tag === "SessionNotFoundError"
-									? `No session for ${task.id} - press Space+s to start`
-									: String((error as { message?: string }).message || error)
-								: String(error)
-						return Effect.gen(function* () {
-							yield* Effect.logError(`Attach external: ${msg}`, { error })
-							yield* toast.show("error", msg)
-						})
-					}),
-				)
-			})
-
-		/**
-		 * Attach inline action (Space+A)
-		 */
-		const actionAttachInline = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				yield* attachment
-					.attachInline(task.id)
-					.pipe(Effect.catchAll(showErrorToast("Failed to attach")))
-			})
-
-		/**
-		 * Pause session action (Space+p)
-		 */
-		const actionPauseSession = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState !== "busy") {
-					yield* toast.show("error", `Cannot pause: task is ${task.sessionState}`)
-					return
-				}
-
-				yield* sessionManager.pause(task.id).pipe(
-					Effect.tap(() => toast.show("success", `Paused session for ${task.id}`)),
-					Effect.catchAll(showErrorToast("Failed to pause")),
-				)
-			})
-
-		/**
-		 * Resume session action (Space+r)
-		 */
-		const actionResumeSession = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState !== "paused") {
-					yield* toast.show("error", `Cannot resume: task is ${task.sessionState}`)
-					return
-				}
-
-				yield* sessionManager.resume(task.id).pipe(
-					Effect.tap(() => toast.show("success", `Resumed session for ${task.id}`)),
-					Effect.catchAll(showErrorToast("Failed to resume")),
-				)
-			})
-
-		/**
-		 * Stop session action (Space+x)
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const actionStopSession = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState === "idle") {
-					yield* toast.show("error", "No session to stop")
-					return
-				}
-
-				yield* withQueue(
-					task.id,
-					"stop",
-					sessionManager.stop(task.id).pipe(
-						Effect.tap(() => toast.show("success", `Stopped session for ${task.id}`)),
-						Effect.catchAll(showErrorToast("Failed to stop")),
-					),
-				)
-			})
-
-		/**
-		 * Edit bead action (Space+e)
-		 */
-		const actionEditBead = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				yield* beadEditor.editBead(task).pipe(
-					Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
-					Effect.tap(() => board.refresh()),
-					Effect.catchAll((error) => {
-						const msg =
-							error && typeof error === "object" && "_tag" in error
-								? error._tag === "ParseMarkdownError"
-									? `Invalid format: ${(error as { message: string }).message}`
-									: error._tag === "EditorError"
-										? `Editor error: ${(error as { message: string }).message}`
-										: `Failed to edit: ${error}`
-								: `Failed to edit: ${error}`
-						return Effect.gen(function* () {
-							yield* Effect.logError(`Edit bead: ${msg}`, { error })
-							yield* toast.show("error", msg)
-						})
-					}),
-				)
-			})
-
-		/**
-		 * Create bead via $EDITOR action (c key)
-		 */
-		const actionCreateBead = () =>
-			Effect.gen(function* () {
-				yield* beadEditor.createBead().pipe(
-					Effect.tap(() => board.refresh()),
-					Effect.tap((result) => nav.jumpToTask(result.id)),
-					Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
-					Effect.catchAll((error) => {
-						const msg =
-							error && typeof error === "object" && "_tag" in error
-								? error._tag === "ParseMarkdownError"
-									? `Invalid format: ${(error as { message: string }).message}`
-									: error._tag === "EditorError"
-										? `Editor error: ${(error as { message: string }).message}`
-										: `Failed to create: ${error}`
-								: `Failed to create: ${error}`
-						return Effect.gen(function* () {
-							yield* Effect.logError(`Create bead: ${msg}`, { error })
-							yield* toast.show("error", msg)
-						})
-					}),
-				)
-			})
-
-		/**
-		 * Create PR action (Space+P)
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const actionCreatePR = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState === "idle") {
-					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
-					return
-				}
-
-				yield* withQueue(
-					task.id,
-					"create-pr",
-					Effect.gen(function* () {
-						yield* toast.show("info", `Creating PR for ${task.id}...`)
-
-						yield* prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
-							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
-							Effect.catchAll((error) => {
-								const msg =
-									error &&
-									typeof error === "object" &&
-									"_tag" in error &&
-									error._tag === "GHCLIError"
-										? String((error as { message: string }).message)
-										: `Failed to create PR: ${error}`
-								return Effect.gen(function* () {
-									yield* Effect.logError(`Create PR: ${msg}`, { error })
-									yield* toast.show("error", msg)
-								})
-							}),
-						)
-					}),
-				)
-			})
-
-		/**
-		 * Cleanup worktree action (Space+d)
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const actionCleanup = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState === "idle") {
-					yield* toast.show("error", `No worktree to delete for ${task.id}`)
-					return
-				}
-
-				yield* withQueue(
-					task.id,
-					"cleanup",
-					Effect.gen(function* () {
-						yield* toast.show("info", `Cleaning up ${task.id}...`)
-
-						yield* prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
-							Effect.tap(() => toast.show("success", `Cleaned up ${task.id}`)),
-							Effect.catchAll(showErrorToast("Failed to cleanup")),
-						)
-					}),
-				)
-			})
-
-		/**
-		 * Execute the actual merge operation (called directly or via confirm)
-		 *
-		 * Queued to prevent race conditions with other operations on the same task.
-		 */
-		const doMergeToMain = (beadId: string) =>
-			withQueue(
-				beadId,
-				"merge",
-				Effect.gen(function* () {
-					yield* toast.show("info", `Merging ${beadId} to main...`)
-
-					yield* prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
-						Effect.tap(() => board.refresh()),
-						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
-						Effect.catchAll((error: unknown) => {
-							const formatted = formatForToast(error)
-							return toast.show("error", `Merge failed: ${formatted}`)
-						}),
-					)
-				}),
-			)
-
-		/**
-		 * Merge worktree to main action (Space+m)
-		 *
-		 * Checks for potential merge conflicts before merging. If conflicts are
-		 * likely (files modified in both branches), shows a confirmation dialog.
-		 * Otherwise proceeds directly with the merge.
-		 */
-		const actionMergeToMain = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				if (task.sessionState === "idle") {
-					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
-					return
-				}
-
-				// Check for potential merge conflicts before proceeding
-				const conflictCheck = yield* prWorkflow
-					.checkMergeConflicts({
-						beadId: task.id,
-						projectPath: process.cwd(),
-					})
-					.pipe(
-						Effect.catchAll(() =>
-							// If check fails, assume no conflicts and proceed
-							Effect.succeed({
-								hasConflictRisk: false,
-								conflictingFiles: [] as readonly string[],
-								branchChangedFiles: 0,
-								mainChangedFiles: 0,
-							}),
-						),
-					)
-
-				if (conflictCheck.hasConflictRisk) {
-					// Show confirmation dialog with conflict warning
-					const fileList =
-						conflictCheck.conflictingFiles.length > 0
-							? `\n\nConflicting files:\n${conflictCheck.conflictingFiles.slice(0, 5).join("\n")}${
-									conflictCheck.conflictingFiles.length > 5
-										? `\n... and ${conflictCheck.conflictingFiles.length - 5} more`
-										: ""
-								}`
-							: ""
-
-					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nMerge will be attempted in the worktree first - main won't be affected if conflicts occur.\n\nProceed?`
-
-					yield* overlay.push({
-						_tag: "confirm",
-						message,
-						onConfirm: doMergeToMain(task.id),
-					})
-				} else {
-					// No conflicts detected, proceed directly
-					yield* doMergeToMain(task.id)
-				}
-			})
-
-		/**
-		 * Delete bead action (Space+D)
-		 */
-		const actionDeleteBead = () =>
-			Effect.gen(function* () {
-				const task = yield* getSelectedTask()
-				if (!task) return
-
-				yield* beadsClient.delete(task.id).pipe(
-					Effect.tap(() => toast.show("success", `Deleted ${task.id}`)),
-					Effect.tap(() => board.refresh()),
-					// Move cursor to a valid task after deletion
-					Effect.tap(() => nav.initialize()),
-					Effect.catchAll(showErrorToast("Failed to delete")),
-				)
-			})
-
-		/**
-		 * Toggle VC auto-pilot action (a key)
-		 */
-		const actionToggleVC = () =>
-			vc.toggleAutoPilot().pipe(
-				Effect.tap((status) => {
-					const message =
-						status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
-					return toast.show("success", message)
-				}),
-				Effect.catchAll(showErrorToast("Failed to toggle VC")),
-			)
-
-		/**
-		 * Handle text input for search/command modes
-		 *
-		 * Returns true if the key was handled as text input
-		 */
-		const handleTextInput = (key: string) =>
-			Effect.gen(function* () {
-				const mode = yield* editor.getMode()
-
-				// Search mode text input
-				if (mode._tag === "search") {
-					if (key === "return") {
-						yield* editor.exitToNormal()
-						return true
-					}
-					if (key === "backspace") {
-						if (mode.query.length > 0) {
-							yield* editor.updateSearch(mode.query.slice(0, -1))
-						}
-						return true
-					}
-					// Single printable character
-					if (key.length === 1 && !key.startsWith("C-")) {
-						yield* editor.updateSearch(mode.query + key)
-						return true
-					}
-					return false
-				}
-
-				// Command mode text input
-				if (mode._tag === "command") {
-					if (key === "return") {
-						if (!mode.input.trim()) {
-							yield* editor.clearCommand()
-							return true
-						}
-
-						// Send command to VC using injected service
-						yield* vc.sendCommand(mode.input).pipe(
-							Effect.tap(() => toast.show("success", `Sent to VC: ${mode.input}`)),
-							Effect.catchAll((error) => {
-								const msg =
-									error && typeof error === "object" && "_tag" in error
-										? error._tag === "VCNotRunningError"
-											? "VC is not running - start it with 'a' key"
-											: String((error as { message?: string }).message || error)
-										: String(error)
-								return Effect.gen(function* () {
-									yield* Effect.logError(`VC command: ${msg}`, { error })
-									yield* toast.show("error", msg)
-								})
-							}),
-						)
-						yield* editor.clearCommand()
-						return true
-					}
-					if (key === "backspace") {
-						if (mode.input.length > 0) {
-							yield* editor.updateCommand(mode.input.slice(0, -1))
-						}
-						return true
-					}
-					// Single printable character
-					if (key.length === 1 && !key.startsWith("C-")) {
-						yield* editor.updateCommand(mode.input + key)
-						return true
-					}
-					return false
-				}
-
-				return false
-			})
-
-		/**
-		 * Handle confirm overlay keyboard input
-		 *
-		 * Returns true if the key was handled.
-		 * y/Enter → execute onConfirm effect, pop overlay
-		 * n/Escape → just pop overlay
-		 */
-		const handleConfirmInput = (key: string) =>
-			Effect.gen(function* () {
-				const currentOverlay = yield* overlay.current()
-				if (currentOverlay?._tag !== "confirm") {
-					return false
-				}
-
-				// y or Enter to confirm
-				if (key === "y" || key === "return") {
-					yield* currentOverlay.onConfirm
-					yield* overlay.pop()
-					return true
-				}
-
-				// n or Escape to cancel
-				if (key === "n" || key === "escape") {
-					yield* overlay.pop()
-					return true
-				}
-
-				// Consume all other keys while overlay is open
-				return true
-			})
-
-		/**
-		 * Handle imageAttach overlay keyboard input
-		 *
-		 * Returns true if the key was handled
-		 */
-		const handleImageAttachInput = (key: string) =>
-			Effect.gen(function* () {
-				const currentOverlay = yield* overlay.current()
-				if (currentOverlay?._tag !== "imageAttach") {
-					return false
-				}
-
-				const state = yield* SubscriptionRef.get(imageAttachment.overlayState)
-				if (!state.taskId) return false
-
-				const overlayTaskId = currentOverlay.taskId
-
-				// Escape handling
-				if (key === "escape") {
-					if (state.mode === "path") {
-						yield* imageAttachment.exitPathMode()
-					} else {
-						yield* imageAttachment.closeOverlay()
-						yield* overlay.pop()
-					}
-					return true
-				}
-
-				// Path input mode
-				if (state.mode === "path") {
-					if (key === "return") {
-						if (state.pathInput.trim() && !state.isAttaching) {
-							yield* imageAttachment.setAttaching(true)
-							yield* imageAttachment.attachFile(overlayTaskId, state.pathInput.trim()).pipe(
-								Effect.tap((attachment) =>
-									toast.show("success", `Image attached: ${attachment.filename}`),
-								),
-								Effect.tap(() => imageAttachment.closeOverlay()),
-								Effect.tap(() => overlay.pop()),
-								Effect.catchAll((error) => {
-									const msg =
-										error && typeof error === "object" && "message" in error
-											? String(error.message)
-											: String(error)
-									return Effect.gen(function* () {
-										yield* toast.show("error", `Failed to attach: ${msg}`)
-										yield* imageAttachment.setAttaching(false)
-									})
-								}),
-							)
-						}
-						return true
-					}
-					if (key === "backspace") {
-						if (state.pathInput.length > 0) {
-							yield* imageAttachment.setPathInput(state.pathInput.slice(0, -1))
-						}
-						return true
-					}
-					// Single printable character
-					if (key.length === 1 && !key.startsWith("C-")) {
-						yield* imageAttachment.setPathInput(state.pathInput + key)
-						return true
-					}
-					return true // Consume all keys in path mode
-				}
-
-				// Menu mode
-				if (key === "p" || key === "v") {
-					// Paste from clipboard
-					if (!state.isAttaching) {
-						const hasClipboard = yield* imageAttachment.hasClipboardSupport()
-						if (hasClipboard) {
-							yield* imageAttachment.setAttaching(true)
-							yield* imageAttachment.attachFromClipboard(overlayTaskId).pipe(
-								Effect.tap((attachment) =>
-									toast.show("success", `Image attached: ${attachment.filename}`),
-								),
-								Effect.tap(() => imageAttachment.closeOverlay()),
-								Effect.tap(() => overlay.pop()),
-								Effect.catchAll((error) => {
-									const msg =
-										error && typeof error === "object" && "message" in error
-											? String(error.message)
-											: String(error)
-									return Effect.gen(function* () {
-										yield* toast.show("error", `Clipboard: ${msg}`)
-										yield* imageAttachment.setAttaching(false)
-									})
-								}),
-							)
-						}
-					}
-					return true
-				}
-
-				if (key === "f") {
-					// Enter file path mode
-					yield* imageAttachment.enterPathMode()
-					return true
-				}
-
-				return true // Consume all keys in overlay
-			})
-
-		// ========================================================================
-		// Default Keybindings
-		// ========================================================================
-
-		const defaultBindings: ReadonlyArray<Keybinding> = [
-			// ======================================================================
-			// Normal Mode - Navigation
-			// ======================================================================
-			{
-				key: "j",
-				mode: "normal",
-				description: "Move down",
-				action: nav.move("down"),
-			},
-			{
-				key: "k",
-				mode: "normal",
-				description: "Move up",
-				action: nav.move("up"),
-			},
-			{
-				key: "h",
-				mode: "normal",
-				description: "Move left",
-				action: nav.move("left"),
-			},
-			{
-				key: "l",
-				mode: "normal",
-				description: "Move right",
-				action: nav.move("right"),
-			},
-			{
-				key: "down",
-				mode: "normal",
-				description: "Move down",
-				action: nav.move("down"),
-			},
-			{
-				key: "up",
-				mode: "normal",
-				description: "Move up",
-				action: nav.move("up"),
-			},
-			{
-				key: "left",
-				mode: "normal",
-				description: "Move left",
-				action: nav.move("left"),
-			},
-			{
-				key: "right",
-				mode: "normal",
-				description: "Move right",
-				action: nav.move("right"),
-			},
-			{
-				key: "CS-d",
-				mode: "normal",
-				description: "Half page down",
-				action: nav.halfPageDown(),
-			},
-			{
-				key: "CS-u",
-				mode: "normal",
-				description: "Half page up",
-				action: nav.halfPageUp(),
-			},
-
-			// ======================================================================
-			// Normal Mode - Mode Transitions
-			// ======================================================================
-			{
-				key: "g",
-				mode: "normal",
-				description: "Enter goto mode",
-				action: editor.enterGoto(),
-			},
-			{
-				key: "v",
-				mode: "normal",
-				description: "Enter select mode",
-				action: editor.enterSelect(),
-			},
-			{
-				key: "space",
-				mode: "normal",
-				description: "Enter action mode",
-				action: editor.enterAction(),
-			},
-			{
-				key: "/",
-				mode: "normal",
-				description: "Enter search mode",
-				action: editor.enterSearch(),
-			},
-			{
-				key: ":",
-				mode: "normal",
-				description: "Enter command mode",
-				action: editor.enterCommand(),
-			},
-			{
-				key: ",",
-				mode: "normal",
-				description: "Enter sort mode",
-				action: editor.enterSort(),
-			},
-
-			// ======================================================================
-			// Normal Mode - Actions
-			// ======================================================================
-			{
-				key: "q",
-				mode: "normal",
-				description: "Quit",
-				action: Effect.sync(() => process.exit(0)),
-			},
-			{
-				key: "?",
-				mode: "normal",
-				description: "Show help",
-				action: overlay.push({ _tag: "help" }),
-			},
-			{
-				key: "return",
-				mode: "normal",
-				description: "View detail",
-				action: Effect.suspend(() => openCurrentDetail()),
-			},
-			{
-				key: "c",
-				mode: "normal",
-				description: "Create bead via $EDITOR",
-				action: Effect.suspend(() => actionCreateBead()),
-			},
-			{
-				key: "S-c",
-				mode: "normal",
-				description: "Create bead via Claude",
-				action: overlay.push({ _tag: "claudeCreate" }),
-			},
-			{
-				key: "a",
-				mode: "normal",
-				description: "Toggle VC auto-pilot",
-				action: Effect.suspend(() => actionToggleVC()),
-			},
-			{
-				key: "tab",
-				mode: "normal",
-				description: "Toggle view mode (kanban/compact)",
-				action: viewService.toggleViewMode(),
-			},
-			{
-				key: "S-l",
-				mode: "normal",
-				description: "View logs in tmux popup",
-				action: tmux
-					.displayPopup({
-						command: `less +F ${process.cwd()}/az.log`,
-						width: "90%",
-						height: "90%",
-						title: " az.log (Ctrl-C to scroll, q to quit) ",
-					})
-					.pipe(Effect.catchAll(Effect.logError)),
-			},
-
-			// ======================================================================
-			// Action Mode (Space menu)
-			// ======================================================================
-			{
-				key: "h",
-				mode: "action",
-				description: "Move task left",
-				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
-				),
-			},
-			{
-				key: "l",
-				mode: "action",
-				description: "Move task right",
-				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
-				),
-			},
-			{
-				key: "left",
-				mode: "action",
-				description: "Move task left",
-				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
-				),
-			},
-			{
-				key: "right",
-				mode: "action",
-				description: "Move task right",
-				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
-				),
-			},
-			{
-				key: "s",
-				mode: "action",
-				description: "Start session",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionStartSession())),
-				),
-			},
-			{
-				key: "S-s",
-				mode: "action",
-				description: "Start+work (prompt Claude)",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionStartSessionWithPrompt())),
-				),
-			},
-			{
-				key: "c",
-				mode: "action",
-				description: "Chat (Haiku)",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionChatAboutTask())),
-				),
-			},
-			{
-				key: "a",
-				mode: "action",
-				description: "Attach to session",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionAttachExternal())),
-				),
-			},
-			{
-				key: "S-a",
-				mode: "action",
-				description: "Attach inline",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionAttachInline())),
-				),
-			},
-			{
-				key: "p",
-				mode: "action",
-				description: "Pause session",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionPauseSession())),
-				),
-			},
-			{
-				key: "r",
-				mode: "action",
-				description: "Resume session",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionResumeSession())),
-				),
-			},
-			{
-				key: "x",
-				mode: "action",
-				description: "Stop session",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionStopSession())),
-				),
-			},
-			{
-				key: "e",
-				mode: "action",
-				description: "Edit bead ($EDITOR)",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionEditBead())),
-				),
-			},
-			{
-				key: "S-e",
-				mode: "action",
-				description: "Edit bead (Claude)",
-				action: Effect.suspend(() =>
-					editor
-						.exitToNormal()
-						.pipe(
-							Effect.tap(() =>
-								toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
-							),
-						),
-				),
-			},
-			{
-				key: "S-p",
-				mode: "action",
-				description: "Create PR",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionCreatePR())),
-				),
-			},
-			{
-				key: "d",
-				mode: "action",
-				description: "Cleanup worktree",
-				action: Effect.suspend(() => editor.exitToNormal().pipe(Effect.tap(() => actionCleanup()))),
-			},
-			{
-				key: "m",
-				mode: "action",
-				description: "Merge to main",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionMergeToMain())),
-				),
-			},
-			{
-				key: "S-d",
-				mode: "action",
-				description: "Delete bead",
-				action: Effect.suspend(() =>
-					editor.exitToNormal().pipe(Effect.tap(() => actionDeleteBead())),
-				),
-			},
-			{
-				key: "i",
-				mode: "action",
-				description: "Attach image",
-				action: Effect.gen(function* () {
-					const task = yield* getSelectedTask()
-					yield* editor.exitToNormal()
-					if (task) {
-						yield* overlay.push({ _tag: "imageAttach", taskId: task.id })
-					}
-				}),
-			},
-
-			// ======================================================================
-			// Goto-Pending Mode (after pressing 'g')
-			// ======================================================================
-			{
-				key: "g",
-				mode: "goto-pending",
-				description: "Go to top of column",
-				action: nav.goToFirst().pipe(Effect.tap(() => editor.exitToNormal())),
-			},
-			{
-				key: "e",
-				mode: "goto-pending",
-				description: "Go to bottom of column",
-				action: nav.goToLast().pipe(Effect.tap(() => editor.exitToNormal())),
-			},
-			{
-				key: "h",
-				mode: "goto-pending",
-				description: "Go to first column",
-				action: nav.goToFirstColumn().pipe(Effect.tap(() => editor.exitToNormal())),
-			},
-			{
-				key: "l",
-				mode: "goto-pending",
-				description: "Go to last column",
-				action: nav.goToLastColumn().pipe(Effect.tap(() => editor.exitToNormal())),
-			},
-			{
-				key: "w",
-				mode: "goto-pending",
-				description: "Enter jump mode",
-				action: Effect.gen(function* () {
-					const labels = yield* computeJumpLabels()
-					yield* editor.enterJump(labels)
-				}),
-			},
-
-			// ======================================================================
-			// Select Mode
-			// ======================================================================
-			{
-				key: "j",
-				mode: "select",
-				description: "Move down",
-				action: nav.move("down"),
-			},
-			{
-				key: "k",
-				mode: "select",
-				description: "Move up",
-				action: nav.move("up"),
-			},
-			{
-				key: "h",
-				mode: "select",
-				description: "Move left",
-				action: nav.move("left"),
-			},
-			{
-				key: "l",
-				mode: "select",
-				description: "Move right",
-				action: nav.move("right"),
-			},
-			{
-				key: "down",
-				mode: "select",
-				description: "Move down",
-				action: nav.move("down"),
-			},
-			{
-				key: "up",
-				mode: "select",
-				description: "Move up",
-				action: nav.move("up"),
-			},
-			{
-				key: "left",
-				mode: "select",
-				description: "Move left",
-				action: nav.move("left"),
-			},
-			{
-				key: "right",
-				mode: "select",
-				description: "Move right",
-				action: nav.move("right"),
-			},
-			{
-				key: "space",
-				mode: "select",
-				description: "Toggle selection",
-				action: Effect.suspend(() => toggleCurrentSelection()),
-			},
-			{
-				key: "v",
-				mode: "select",
-				description: "Exit select mode",
-				action: editor.exitSelect(),
-			},
-
-			// ======================================================================
-			// Sort Mode
-			// ======================================================================
-			{
-				key: "s",
-				mode: "sort",
-				description: "Sort by session status",
-				action: editor.cycleSort("session").pipe(
-					Effect.tap(() => editor.exitToNormal()),
-					Effect.catchAll(Effect.logError),
-				),
-			},
-			{
-				key: "p",
-				mode: "sort",
-				description: "Sort by priority",
-				action: editor.cycleSort("priority").pipe(
-					Effect.tap(() => editor.exitToNormal()),
-					Effect.catchAll(Effect.logError),
-				),
-			},
-			{
-				key: "u",
-				mode: "sort",
-				description: "Sort by updated at",
-				action: editor.cycleSort("updated").pipe(
-					Effect.tap(() => editor.exitToNormal()),
-					Effect.catchAll(Effect.logError),
-				),
-			},
-
-			// ======================================================================
-			// Universal (*)
-			// ======================================================================
-			{
-				key: "escape",
-				mode: "*",
-				description: "Exit/cancel",
-				action: Effect.suspend(() => handleEscape()),
-			},
-
-			// ======================================================================
-			// Overlay Mode
-			// ======================================================================
-			{
-				key: "escape",
-				mode: "overlay",
-				description: "Close overlay",
-				action: overlay.pop().pipe(Effect.asVoid),
-			},
-		]
+		// ====================================================================
+		// Create shared helper functions (pre-bound to services)
+		// ====================================================================
+		const getSelectedTask = createGetSelectedTask(nav, board)
+		const getColumnIndex = createGetColumnIndex(nav)
+		const showErrorToast = createShowErrorToast(toast)
+		const openCurrentDetail = createOpenCurrentDetail(overlay, getSelectedTask)
+		const toggleCurrentSelection = createToggleCurrentSelection(editor, getSelectedTask)
+		const withQueue = createWithQueue(commandQueue, toast)
+
+		// ====================================================================
+		// Build handler context
+		// ====================================================================
+		const ctx: HandlerContext = {
+			// Services
+			toast,
+			overlay,
+			nav,
+			editor,
+			board,
+			sessionManager,
+			attachment,
+			prWorkflow,
+			beadsClient,
+			beadEditor,
+			viewService,
+			imageAttachment,
+			tmux,
+			vc,
+			commandQueue,
+
+			// Config
+			resolvedConfig,
+
+			// Pre-bound helpers
+			getSelectedTask,
+			getColumnIndex,
+			showErrorToast,
+			openCurrentDetail,
+			toggleCurrentSelection,
+			withQueue,
+
+			// ImageAttachment state for inputHandlers
+			imageAttachmentOverlayState: imageAttachment.overlayState,
+		}
+
+		// ====================================================================
+		// Create domain-specific handlers
+		// ====================================================================
+		const sessionHandlers = createSessionHandlers(ctx)
+		const taskHandlers = createTaskHandlers(ctx)
+		const prHandlers = createPRHandlers(ctx)
+		const inputHandlers = createInputHandlers(ctx)
+
+		// ====================================================================
+		// Create default keybindings
+		// ====================================================================
+		const defaultBindings = createDefaultBindings({
+			sessionHandlers,
+			taskHandlers,
+			prHandlers,
+			inputHandlers,
+			ctx,
+		})
 
 		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)
 
-		/**
-		 * Get effective mode for keybinding matching
-		 */
-		const getEffectiveMode = (): Effect.Effect<KeyMode> =>
-			Effect.gen(function* () {
-				const hasOverlay = yield* overlay.isOpen()
-				if (hasOverlay) return "overlay"
-
-				const mode = yield* editor.getMode()
-				switch (mode._tag) {
-					case "normal":
-						return "normal"
-					case "select":
-						return "select"
-					case "action":
-						return "action"
-					case "goto":
-						return mode.gotoSubMode === "pending" ? "goto-pending" : "goto-jump"
-					case "search":
-						return "search"
-					case "command":
-						return "command"
-					case "sort":
-						return "sort"
-					default:
-						return mode satisfies never
-				}
-			})
+		// ====================================================================
+		// Keybinding lookup
+		// ====================================================================
 
 		/**
 		 * Find matching keybinding for key and mode
@@ -1511,6 +180,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				)
 			})
 
+		// ====================================================================
+		// Public API
+		// ====================================================================
+
 		return {
 			// State refs
 			keybindings,
@@ -1524,23 +197,23 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			handleKey: (key: string) =>
 				Effect.gen(function* () {
 					// Check for confirm overlay first (handles its own keys)
-					const handledAsConfirm = yield* handleConfirmInput(key)
+					const handledAsConfirm = yield* inputHandlers.handleConfirmInput(key)
 					if (handledAsConfirm) return
 
 					// Check for imageAttach overlay (handles its own keys)
-					const handledAsImageAttach = yield* handleImageAttachInput(key)
+					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)
 					if (handledAsImageAttach) return
 
-					const effectiveMode = yield* getEffectiveMode()
+					const effectiveMode = yield* inputHandlers.getEffectiveMode()
 
 					// Special handling for goto-jump mode (any key is label input)
 					if (effectiveMode === "goto-jump") {
-						yield* handleJumpInput(key)
+						yield* inputHandlers.handleJumpInput(key)
 						return
 					}
 
 					// Check for text input handling (search/command modes)
-					const handledAsText = yield* handleTextInput(key)
+					const handledAsText = yield* inputHandlers.handleTextInput(key)
 					if (handledAsText) return
 
 					// Find and execute keybinding
