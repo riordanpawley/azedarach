@@ -38,8 +38,8 @@ The default mode for navigation and basic actions.
 | `↓` | Same as `j` | Arrow key alternative |
 | `↑` | Same as `k` | Arrow key alternative |
 | `→` | Same as `l` | Arrow key alternative |
-| `Ctrl-d` | Half-page down | Fast scrolling |
-| `Ctrl-u` | Half-page up | Fast scrolling |
+| `Ctrl-Shift-d` | Half-page down | Fast scrolling |
+| `Ctrl-Shift-u` | Half-page up | Fast scrolling |
 
 ### Actions
 
@@ -57,6 +57,7 @@ The default mode for navigation and basic actions.
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
+| `L` | View logs | Opens az.log in tmux popup |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
 
@@ -372,6 +373,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
+| `Space` `c` | Chat (Haiku) | Task is idle (starts Haiku session to discuss/understand task) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
@@ -528,4 +530,4 @@ This makes az the central hub for all session navigation.
 
 4. **Quick column jumps**: `gh` and `gl` jump between first and last columns; `gg` and `ge` jump to top/bottom of current column.
 
-5. **Half-page scrolling**: `Ctrl-d` and `Ctrl-u` are great for tall columns.
+5. **Half-page scrolling**: `Ctrl-Shift-d` and `Ctrl-Shift-u` are great for tall columns.

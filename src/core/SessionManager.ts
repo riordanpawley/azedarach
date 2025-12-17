@@ -48,6 +48,11 @@ export interface Session {
 }
 
 /**
+ * Claude model to use for session
+ */
+export type ClaudeModel = "haiku" | "sonnet" | "opus"
+
+/**
  * Options for starting a session
  */
 export interface StartSessionOptions {
@@ -56,6 +61,8 @@ export interface StartSessionOptions {
 	readonly baseBranch?: string
 	/** Optional initial prompt to send to Claude on startup (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
+	/** Optional model to use (haiku, sonnet, opus). Uses Claude default if not specified. */
+	readonly model?: ClaudeModel
 }
 
 /**
@@ -298,7 +305,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		return {
 			start: (options: StartSessionOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, baseBranch, initialPrompt } = options
+					const { beadId, projectPath, baseBranch, initialPrompt, model } = options
 
 					// Check if session already exists (idempotent)
 					const sessions = yield* Ref.get(sessionsRef)
@@ -391,15 +398,18 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 						// Wrap with direnv exec if .envrc exists
 						// If initialPrompt provided, append it to the claude command (properly escaped)
+						// If model is specified, add --model flag (e.g., for haiku chat sessions)
 						const escapeForShell = (s: string) =>
 							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
-						const claudeWithPrompt = initialPrompt
-							? `${claudeCommand} "${escapeForShell(initialPrompt)}"`
-							: claudeCommand
+						// Build Claude command with optional model and prompt
+						const modelFlag = model ? ` --model ${model}` : ""
+						const claudeWithOptions = initialPrompt
+							? `${claudeCommand}${modelFlag} "${escapeForShell(initialPrompt)}"`
+							: `${claudeCommand}${modelFlag}`
 						const effectiveCommand = hasEnvrc
-							? `direnv exec . ${claudeWithPrompt}`
-							: claudeWithPrompt
+							? `direnv exec . ${claudeWithOptions}`
+							: claudeWithOptions
 
 						yield* tmuxService.newSession(tmuxSessionName, {
 							cwd: worktree.path,

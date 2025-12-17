@@ -13,14 +13,15 @@ import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
-import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { HookReceiver, mapEventToState } from "../core/HookReceiver"
+import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
+import { ClockService, computeElapsedFormatted } from "../services/ClockService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
@@ -40,6 +41,7 @@ const appLayer = Layer.mergeAll(
 	AttachmentService.Default,
 	ImageAttachmentService.Default,
 	BoardService.Default,
+	ClockService.Default,
 	TmuxService.Default,
 	BeadEditorService.Default,
 	ModeService.Default,
@@ -395,25 +397,30 @@ ${description}
 Create the bead now and output just the ID.`
 
 		// Build command arguments for non-interactive print mode
+		// Use Haiku model for fast task creation (avoids timeout issues with slower models)
 		// Pre-approve bd CLI commands and beads MCP tools to avoid permission hang in non-interactive mode
+		// MCP tools need set_context before create, so allow all beads MCP tools
 		const args = [
 			"-p",
 			prompt,
+			"--model",
+			"haiku",
 			"--output-format",
 			"text",
 			"--allowedTools",
 			"Bash(bd:*)",
-			"mcp__plugin_beads_beads__create",
+			"mcp__plugin_beads_beads__*",
 		]
 		if (dangerouslySkipPermissions) {
 			args.push("--dangerously-skip-permissions")
 		}
 
 		// Run claude CLI in non-interactive print mode
+		// 20 second timeout - Haiku should be fast; on failure show toast instead of crashing
 		const claudeCmd = Command.make("claude", ...args).pipe(Command.workingDirectory(projectPath))
 
 		const result = yield* Command.string(claudeCmd).pipe(
-			Effect.timeout("120 seconds"),
+			Effect.timeout("20 seconds"),
 			Effect.mapError((e) => new Error(`Claude CLI failed: ${e}`)),
 		)
 
@@ -453,7 +460,16 @@ Create the bead now and output just the ID.`
 		yield* toast.show("success", `Created task: ${beadId}`)
 
 		return beadId
-	}).pipe(Effect.tapError(Effect.logError)),
+	}).pipe(
+		Effect.catchAll((error) =>
+			Effect.gen(function* () {
+				yield* Effect.logError(error)
+				const toast = yield* ToastService
+				yield* toast.show("error", "Failed to create task - try again or use 'c' for manual create")
+				return "error" as const
+			}),
+		),
+	),
 )
 
 // ============================================================================
@@ -599,6 +615,34 @@ export const handleKeyAtom = appRuntime.fn((key: string) =>
 // ============================================================================
 // Atomic Service State Atoms (ModeService, NavigationService, etc.)
 // ============================================================================
+
+/**
+ * Clock tick atom - current DateTime.Utc updated every second
+ *
+ * Internal atom used by elapsedFormattedAtom. Components should use
+ * elapsedFormattedAtom(startedAt) instead of this directly.
+ */
+export const clockTickAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const clock = yield* ClockService
+		return clock.now
+	}),
+)
+
+/**
+ * Elapsed time atom factory - returns formatted MM:SS string
+ *
+ * Parameterized atom that derives elapsed time from clockTickAtom.
+ * All computation happens in Effect - the atom returns a ready-to-render string.
+ *
+ * Usage: const elapsed = useAtomValue(elapsedFormattedAtom(startedAt))
+ */
+export const elapsedFormattedAtom = (startedAt: string) =>
+	Atom.readable((get) => {
+		const nowResult = get(clockTickAtom)
+		if (!Result.isSuccess(nowResult)) return "00:00"
+		return computeElapsedFormatted(startedAt, nowResult.value)
+	})
 
 /**
  * Editor mode atom - subscribes to ModeService mode changes
@@ -762,6 +806,23 @@ export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const board = yield* BoardService
 		return board.tasksByColumn
+	}),
+)
+
+/**
+ * Filtered and sorted tasks by column - single source of truth for UI rendering
+ *
+ * This atom subscribes to BoardService's filteredTasksByColumn which:
+ * - Automatically updates when tasks change (every 2 seconds)
+ * - Automatically updates when sortConfig changes
+ * - Automatically updates when search query changes
+ *
+ * Usage: const tasksByColumn = useAtomValue(filteredTasksByColumnAtom)
+ */
+export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.filteredTasksByColumn
 	}),
 )
 

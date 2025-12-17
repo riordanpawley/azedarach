@@ -18,6 +18,7 @@ import { BeadEditorService } from "../core/EditorService"
 import { ImageAttachmentService } from "../core/ImageAttachmentService"
 import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
+import { TmuxService } from "../core/TmuxService"
 import { VCService } from "../core/VCService"
 import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
@@ -96,6 +97,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		BeadEditorService.Default,
 		ViewService.Default,
 		ImageAttachmentService.Default,
+		TmuxService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -113,6 +115,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const beadEditor = yield* BeadEditorService
 		const viewService = yield* ViewService
 		const imageAttachment = yield* ImageAttachmentService
+		const tmux = yield* TmuxService
 
 		// ========================================================================
 		// Helper Functions
@@ -344,6 +347,33 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					.pipe(
 						Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
 						Effect.catchAll(showErrorToast("Failed to start")),
+					)
+			})
+
+		/**
+		 * Chat about task (Space+c)
+		 * Opens a Haiku session to discuss/understand the task without working on it
+		 */
+		const actionChatAboutTask = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "idle") {
+					yield* toast.show("error", `Cannot start chat: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager
+					.start({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						model: "haiku",
+						initialPrompt: `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`,
+					})
+					.pipe(
+						Effect.tap(() => toast.show("success", `Chat session started for ${task.id} (Haiku)`)),
+						Effect.catchAll(showErrorToast("Failed to start chat")),
 					)
 			})
 
@@ -925,13 +955,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: nav.move("right"),
 			},
 			{
-				key: "C-d",
+				key: "CS-d",
 				mode: "normal",
 				description: "Half page down",
 				action: nav.halfPageDown(),
 			},
 			{
-				key: "C-u",
+				key: "CS-u",
 				mode: "normal",
 				description: "Half page up",
 				action: nav.halfPageUp(),
@@ -1022,6 +1052,19 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Toggle view mode (kanban/compact)",
 				action: viewService.toggleViewMode(),
 			},
+			{
+				key: "S-l",
+				mode: "normal",
+				description: "View logs in tmux popup",
+				action: tmux
+					.displayPopup({
+						command: `less +F ${process.cwd()}/az.log`,
+						width: "90%",
+						height: "90%",
+						title: " az.log (Ctrl-C to scroll, q to quit) ",
+					})
+					.pipe(Effect.catchAll(Effect.logError)),
+			},
 
 			// ======================================================================
 			// Action Mode (Space menu)
@@ -1031,10 +1074,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1042,10 +1082,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1053,10 +1090,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1064,10 +1098,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1075,7 +1106,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Start session",
 				action: Effect.suspend(() =>
-					actionStartSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStartSession())),
 				),
 			},
 			{
@@ -1083,7 +1114,15 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Start+work (prompt Claude)",
 				action: Effect.suspend(() =>
-					actionStartSessionWithPrompt().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStartSessionWithPrompt())),
+				),
+			},
+			{
+				key: "c",
+				mode: "action",
+				description: "Chat (Haiku)",
+				action: Effect.suspend(() =>
+					editor.exitToNormal().pipe(Effect.tap(() => actionChatAboutTask())),
 				),
 			},
 			{
@@ -1091,7 +1130,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Attach to session",
 				action: Effect.suspend(() =>
-					actionAttachExternal().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionAttachExternal())),
 				),
 			},
 			{
@@ -1099,7 +1138,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Attach inline",
 				action: Effect.suspend(() =>
-					actionAttachInline().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionAttachInline())),
 				),
 			},
 			{
@@ -1107,7 +1146,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Pause session",
 				action: Effect.suspend(() =>
-					actionPauseSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionPauseSession())),
 				),
 			},
 			{
@@ -1115,7 +1154,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Resume session",
 				action: Effect.suspend(() =>
-					actionResumeSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionResumeSession())),
 				),
 			},
 			{
@@ -1123,7 +1162,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Stop session",
 				action: Effect.suspend(() =>
-					actionStopSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStopSession())),
 				),
 			},
 			{
@@ -1131,7 +1170,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Edit bead ($EDITOR)",
 				action: Effect.suspend(() =>
-					actionEditBead().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionEditBead())),
 				),
 			},
 			{
@@ -1139,9 +1178,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Edit bead (Claude)",
 				action: Effect.suspend(() =>
-					toast
-						.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR")
-						.pipe(Effect.tap(() => editor.exitToNormal())),
+					editor
+						.exitToNormal()
+						.pipe(
+							Effect.tap(() =>
+								toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
+							),
+						),
 				),
 			},
 			{
@@ -1149,21 +1192,21 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Create PR",
 				action: Effect.suspend(() =>
-					actionCreatePR().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionCreatePR())),
 				),
 			},
 			{
 				key: "d",
 				mode: "action",
 				description: "Cleanup worktree",
-				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
+				action: Effect.suspend(() => editor.exitToNormal().pipe(Effect.tap(() => actionCleanup()))),
 			},
 			{
 				key: "m",
 				mode: "action",
 				description: "Merge to main",
 				action: Effect.suspend(() =>
-					actionMergeToMain().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionMergeToMain())),
 				),
 			},
 			{
@@ -1171,7 +1214,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Delete bead",
 				action: Effect.suspend(() =>
-					actionDeleteBead().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionDeleteBead())),
 				),
 			},
 			{
@@ -1180,10 +1223,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Attach image",
 				action: Effect.gen(function* () {
 					const task = yield* getSelectedTask()
+					yield* editor.exitToNormal()
 					if (task) {
 						yield* overlay.push({ _tag: "imageAttach", taskId: task.id })
 					}
-					yield* editor.exitToNormal()
 				}),
 			},
 
