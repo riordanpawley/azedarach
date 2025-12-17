@@ -746,63 +746,86 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 
-					// Find the merge base between main and the branch
-					const mergeBase = yield* runGit(["merge-base", "main", beadId], projectPath).pipe(
-						Effect.map((output) => output.trim()),
-						Effect.catchAll(() =>
-							// If merge-base fails, branches have no common ancestor
-							// This means main has likely been rebased/reset - high conflict risk
-							Effect.succeed(""),
-						),
+					// Use git merge-tree to perform an actual 3-way merge in memory
+					// This detects real line-level conflicts, not just file overlap
+					// Exit code 0 = clean merge, 1 = conflicts, other = error
+					const mergeTreeCommand = Command.make(
+						"git",
+						"merge-tree",
+						"--write-tree",
+						"main",
+						beadId,
+					).pipe(Command.workingDirectory(projectPath))
+
+					const exitCode = yield* Command.exitCode(mergeTreeCommand).pipe(
+						Effect.catchAll(() => Effect.succeed(2)), // Treat errors as unknown
 					)
 
-					// If no merge base found, we can't determine conflict risk
-					if (!mergeBase) {
-						return {
-							hasConflictRisk: true,
-							conflictingFiles: [] as readonly string[],
-							branchChangedFiles: 0,
-							mainChangedFiles: 0,
-						} satisfies MergeConflictCheck
+					// Exit code 1 means conflicts detected
+					const hasConflictRisk = exitCode === 1
+
+					// If conflicts exist, get the conflicting files from merge-tree output
+					let conflictingFiles: readonly string[] = []
+					if (hasConflictRisk) {
+						// Run merge-tree again to get the conflicted file list
+						// Use --no-messages to suppress "Auto-merging" messages and get clean file list
+						const output = yield* runGit(
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							projectPath,
+						).pipe(Effect.catchAll(() => Effect.succeed("")))
+
+						// Parse output - conflicting files appear after the tree hash line
+						const lines = output.trim().split("\n")
+						// Skip first line (tree hash) and filter non-empty lines
+						conflictingFiles = lines.slice(1).filter((f) => f.length > 0)
 					}
 
-					// Get files changed in the branch since merge base
-					const branchFiles = yield* runGit(
-						["diff", "--name-only", `${mergeBase}..${beadId}`],
-						projectPath,
-					).pipe(
-						Effect.map((output) =>
-							output
-								.trim()
-								.split("\n")
-								.filter((f) => f.length > 0),
-						),
-						Effect.catchAll(() => Effect.succeed([] as string[])),
+					// Get file change counts for informational purposes
+					const mergeBase = yield* runGit(["merge-base", "main", beadId], projectPath).pipe(
+						Effect.map((output) => output.trim()),
+						Effect.catchAll(() => Effect.succeed("")),
 					)
 
-					// Get files changed in main since merge base
-					const mainFiles = yield* runGit(
-						["diff", "--name-only", `${mergeBase}..main`],
-						projectPath,
-					).pipe(
-						Effect.map((output) =>
-							output
-								.trim()
-								.split("\n")
-								.filter((f) => f.length > 0),
-						),
-						Effect.catchAll(() => Effect.succeed([] as string[])),
-					)
+					let branchChangedFiles = 0
+					let mainChangedFiles = 0
 
-					// Find files that changed on both sides (potential conflicts)
-					const branchFileSet = new Set(branchFiles)
-					const conflictingFiles = mainFiles.filter((f) => branchFileSet.has(f))
+					if (mergeBase) {
+						const branchOutput = yield* runGit(
+							["diff", "--name-only", `${mergeBase}..${beadId}`],
+							projectPath,
+						).pipe(
+							Effect.map(
+								(output) =>
+									output
+										.trim()
+										.split("\n")
+										.filter((f) => f.length > 0).length,
+							),
+							Effect.catchAll(() => Effect.succeed(0)),
+						)
+						branchChangedFiles = branchOutput
+
+						const mainOutput = yield* runGit(
+							["diff", "--name-only", `${mergeBase}..main`],
+							projectPath,
+						).pipe(
+							Effect.map(
+								(output) =>
+									output
+										.trim()
+										.split("\n")
+										.filter((f) => f.length > 0).length,
+							),
+							Effect.catchAll(() => Effect.succeed(0)),
+						)
+						mainChangedFiles = mainOutput
+					}
 
 					return {
-						hasConflictRisk: conflictingFiles.length > 0,
+						hasConflictRisk,
 						conflictingFiles,
-						branchChangedFiles: branchFiles.length,
-						mainChangedFiles: mainFiles.length,
+						branchChangedFiles,
+						mainChangedFiles,
 					} satisfies MergeConflictCheck
 				}),
 		}
