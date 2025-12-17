@@ -372,6 +372,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
+| `Space` `c` | Chat (Haiku) | Task is idle (starts Haiku session to discuss/understand task) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
