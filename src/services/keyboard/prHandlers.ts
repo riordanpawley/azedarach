@@ -93,9 +93,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		/**
 		 * Merge worktree to main action (Space+m)
 		 *
-		 * Checks for potential merge conflicts before merging. If conflicts are
-		 * likely (files modified in both branches), shows a confirmation dialog.
-		 * Otherwise proceeds directly with the merge.
+		 * Performs a safe merge check using git merge-tree (in-memory 3-way merge).
+		 * If real conflicts are detected, blocks the merge and shows an error.
+		 * The user must resolve conflicts in the worktree before retrying.
+		 * Clean merges proceed directly without confirmation.
 		 */
 		mergeToMain: () =>
 			Effect.gen(function* () {
@@ -126,23 +127,19 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					)
 
 				if (conflictCheck.hasConflictRisk) {
-					// Show confirmation dialog with conflict warning
+					// Block the merge - conflicts must be resolved in worktree first
 					const fileList =
 						conflictCheck.conflictingFiles.length > 0
-							? `\n\nConflicting files:\n${conflictCheck.conflictingFiles.slice(0, 5).join("\n")}${
-									conflictCheck.conflictingFiles.length > 5
-										? `\n... and ${conflictCheck.conflictingFiles.length - 5} more`
-										: ""
-								}`
-							: ""
+							? conflictCheck.conflictingFiles.slice(0, 5).join(", ") +
+								(conflictCheck.conflictingFiles.length > 5
+									? ` (+${conflictCheck.conflictingFiles.length - 5} more)`
+									: "")
+							: "unknown files"
 
-					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nMerge will be attempted in the worktree first - main won't be affected if conflicts occur.\n\nProceed?`
-
-					yield* ctx.overlay.push({
-						_tag: "confirm",
-						message,
-						onConfirm: doMergeToMain(task.id),
-					})
+					yield* ctx.toast.show(
+						"error",
+						`Cannot merge ${task.id}: conflicts in ${fileList}. Resolve in worktree first.`,
+					)
 				} else {
 					// No conflicts detected, proceed directly
 					yield* doMergeToMain(task.id)
