@@ -131,6 +131,28 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					args.push(opts.command)
 					yield* runTmux(args)
 				}),
+
+			/**
+			 * Capture pane content for state detection
+			 *
+			 * Captures the visible content of a tmux pane. Used by PTYMonitor
+			 * to detect session state from output patterns.
+			 *
+			 * @param session - tmux session name
+			 * @param lines - number of lines to capture from history (negative = from end)
+			 * @returns captured pane content as string
+			 */
+			capturePane: (session: string, lines?: number) =>
+				Effect.gen(function* () {
+					const args = ["capture-pane", "-t", session, "-p"]
+					if (lines !== undefined) {
+						// -S sets the start line (negative = from history end)
+						args.push("-S", String(-Math.abs(lines)))
+					}
+					return yield* runTmux(args)
+				}).pipe(
+					Effect.catchAll(() => Effect.succeed("")), // Return empty on error (session may be dead)
+				),
 		}
 	}),
 }) {}

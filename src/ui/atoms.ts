@@ -16,6 +16,7 @@ import { BeadEditorService } from "../core/EditorService"
 import { HookReceiver, mapEventToState } from "../core/HookReceiver"
 import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { PRWorkflow } from "../core/PRWorkflow"
+import { PTYMonitor } from "../core/PTYMonitor"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
@@ -61,6 +62,7 @@ const appLayer = Layer.mergeAll(
 	ViewService.Default,
 	HookReceiver.Default,
 	CommandQueueService.Default,
+	PTYMonitor.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
@@ -137,8 +139,10 @@ export const vcStatusAtom = appRuntime.subscriptionRef((get) => pipe(get.result(
  * Hook receiver starter atom - starts the hook receiver on mount
  *
  * Watches for notification files from Claude Code hooks and updates
- * session state in SessionManager. The receiver is automatically stopped
- * when the atom unmounts.
+ * session state in SessionManager. Also notifies PTYMonitor of hook
+ * signals so it can respect the hook priority window.
+ *
+ * The receiver is automatically stopped when the atom unmounts.
  *
  * Usage: Simply subscribe to this atom in the app root to start the receiver.
  *        useAtomValue(hookReceiverStarterAtom)
@@ -147,12 +151,16 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 	Effect.gen(function* () {
 		const receiver = yield* HookReceiver
 		const manager = yield* SessionManager
+		const ptyMonitor = yield* PTYMonitor
 
 		// Handler that maps hook events to session state changes
 		const handler = (event: { event: string; beadId: string }) =>
 			Effect.gen(function* () {
 				const newState = mapEventToState(event.event as "idle_prompt" | "stop" | "session_end")
 				if (newState) {
+					// Notify PTYMonitor of hook signal (for priority handling)
+					yield* ptyMonitor.recordHookSignal(event.beadId, newState)
+
 					yield* manager
 						.updateState(event.beadId, newState)
 						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
@@ -167,6 +175,25 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 		return fiber
 	}),
 	{ initialValue: undefined },
+)
+
+// ============================================================================
+// PTY Monitor (session metrics via PTY output pattern matching)
+// ============================================================================
+
+/**
+ * Session metrics atom - subscribes to PTYMonitor metrics changes
+ *
+ * Provides reactive access to session metrics extracted from PTY output.
+ * Metrics include: estimatedTokens, agentPhase, recentOutput
+ *
+ * Usage: const metrics = useAtomValue(sessionMetricsAtom)
+ */
+export const sessionMetricsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const ptyMonitor = yield* PTYMonitor
+		return ptyMonitor.metrics
+	}),
 )
 
 /**
@@ -254,16 +281,23 @@ export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
 /**
  * Start a Claude session (creates worktree + tmux + launches Claude)
  *
+ * Also registers the session with PTYMonitor for state detection.
+ *
  * Usage: const startSession = useAtomSet(startSessionAtom, { mode: "promise" })
  *        await startSession(beadId)
  */
 export const startSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
-		yield* manager.start({
+		const ptyMonitor = yield* PTYMonitor
+
+		const session = yield* manager.start({
 			beadId,
 			projectPath: process.cwd(),
 		})
+
+		// Register with PTYMonitor for state detection
+		yield* ptyMonitor.registerSession(beadId, session.tmuxSessionName)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -289,10 +323,17 @@ export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
 
 /**
  * Stop a running session (kills tmux, marks as idle)
+ *
+ * Also unregisters the session from PTYMonitor.
  */
 export const stopSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
+		const ptyMonitor = yield* PTYMonitor
+
+		// Unregister from PTYMonitor first (before session is stopped)
+		yield* ptyMonitor.unregisterSession(beadId)
+
 		yield* manager.stop(beadId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
