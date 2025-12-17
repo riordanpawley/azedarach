@@ -41,3 +41,4 @@ yarn-error.log*
 # Test coverage
 coverage/
 .nyc_output/
+.beads/bd.sock.startlock

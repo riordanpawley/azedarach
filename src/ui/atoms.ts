@@ -21,7 +21,7 @@ import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
-import { ClockService } from "../services/ClockService"
+import { ClockService, computeElapsedFormatted } from "../services/ClockService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
@@ -617,14 +617,10 @@ export const handleKeyAtom = appRuntime.fn((key: string) =>
 // ============================================================================
 
 /**
- * Clock tick atom - current timestamp updated every second
+ * Clock tick atom - current DateTime.Utc updated every second
  *
- * Used for elapsed timer displays on TaskCards. Subscribing to this atom
- * triggers re-renders every second, allowing components to derive elapsed
- * time from session start timestamps.
- *
- * Usage: const now = useAtomValue(clockTickAtom)
- *        const elapsed = now - sessionStartedAt
+ * Internal atom used by elapsedFormattedAtom. Components should use
+ * elapsedFormattedAtom(startedAt) instead of this directly.
  */
 export const clockTickAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
@@ -632,6 +628,21 @@ export const clockTickAtom = appRuntime.subscriptionRef(
 		return clock.now
 	}),
 )
+
+/**
+ * Elapsed time atom factory - returns formatted MM:SS string
+ *
+ * Parameterized atom that derives elapsed time from clockTickAtom.
+ * All computation happens in Effect - the atom returns a ready-to-render string.
+ *
+ * Usage: const elapsed = useAtomValue(elapsedFormattedAtom(startedAt))
+ */
+export const elapsedFormattedAtom = (startedAt: string) =>
+	Atom.readable((get) => {
+		const nowResult = get(clockTickAtom)
+		if (!Result.isSuccess(nowResult)) return "00:00"
+		return computeElapsedFormatted(startedAt, nowResult.value)
+	})
 
 /**
  * Editor mode atom - subscribes to ModeService mode changes
