@@ -179,10 +179,22 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 
 			/**
 			 * Detect clipboard tool availability
-			 * Returns: "xclip" | "wl-paste" | null
+			 * Returns: "pbpaste" (macOS) | "wl-paste" (Wayland) | "xclip" (X11) | null
 			 */
 			const detectClipboardTool = Effect.gen(function* () {
-				// Try wl-paste first (Wayland)
+				// macOS: pbpaste is always available
+				if (process.platform === "darwin") {
+					const pbpasteCheck = yield* Command.make("which", "pbpaste").pipe(
+						Command.exitCode,
+						Effect.catchAll(() => Effect.succeed(1)),
+					)
+
+					if (pbpasteCheck === 0) {
+						return "pbpaste" as const
+					}
+				}
+
+				// Try wl-paste (Wayland)
 				const wlPasteCheck = yield* Command.make("which", "wl-paste").pipe(
 					Command.exitCode,
 					Effect.catchAll(() => Effect.succeed(1)),
@@ -390,7 +402,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							return yield* Effect.fail(
 								new ClipboardError({
 									message:
-										"No clipboard tool available. Install xclip (X11) or wl-clipboard (Wayland).",
+										process.platform === "darwin"
+											? "Clipboard tool not available on macOS."
+											: "No clipboard tool available. Install xclip (X11) or wl-clipboard (Wayland).",
 								}),
 							)
 						}
@@ -404,11 +418,18 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const destFilename = `${id}.png`
 						const destPath = path.join(issueDir, destFilename)
 
-						// Get image from clipboard using shell redirection (binary output)
-						const shellCmd =
-							tool === "wl-paste"
-								? `wl-paste --type image/png > "${destPath}"`
-								: `xclip -selection clipboard -t image/png -o > "${destPath}"`
+						// Get image from clipboard using platform-specific command
+						// macOS: Use osascript to write clipboard image data as PNG
+						// Linux: Use wl-paste or xclip depending on display server
+						let shellCmd: string
+						if (tool === "pbpaste") {
+							// macOS: osascript writes PNG data of clipboard image to file
+							shellCmd = `osascript -e 'set png_data to (the clipboard as «class PNGf»)' -e 'set fp to open for access POSIX file "${destPath}" with write permission' -e 'write png_data to fp' -e 'close access fp'`
+						} else if (tool === "wl-paste") {
+							shellCmd = `wl-paste --type image/png > "${destPath}"`
+						} else {
+							shellCmd = `xclip -selection clipboard -t image/png -o > "${destPath}"`
+						}
 
 						yield* Command.make("sh", "-c", shellCmd).pipe(
 							Command.exitCode,
