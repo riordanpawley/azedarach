@@ -382,7 +382,22 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
+| `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
+
+#### Merge to Main (Space+m)
+
+The merge action includes **conflict detection**:
+
+1. Before merging, az checks if files were modified in both your branch and main
+2. If potential conflicts are detected, a **confirmation dialog** appears:
+   - Shows which files might conflict
+   - Explains that the merge is tested in the worktree first (main isn't affected if it fails)
+   - Press `y` to proceed, `n` to cancel
+3. If no conflicts detected, the merge proceeds directly
+4. On success, the branch changes are merged into main locally
+
+**Note:** This is a local merge operation, not a GitHub PR merge. Use `Space+P` to create a PR for code review workflows.
 
 ### Movement Actions
 
@@ -398,6 +413,12 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
 | `Space` `E` | Edit bead (Claude) | AI-assisted editing |
 
+### Attachment Actions
+
+| Sequence | Action | Description |
+|----------|--------|-------------|
+| `Space` `i` | Attach image | Open image attachment overlay (paste or file path) |
+
 ### Other Actions
 
 | Sequence | Action | Description |
@@ -412,6 +433,47 @@ If you have tasks selected (from Select mode), Action mode commands apply to all
 2. Navigate and press `Space` to select multiple tasks
 3. Press `Esc` to return to Normal (selections persist)
 4. Press `Space` `l` to move all selected tasks right
+
+## Image Attachment Overlay
+
+Press `Space` `i` to open the image attachment overlay for the selected task.
+
+### Overlay Keys
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `p` or `v` | Paste from clipboard | Attach image from system clipboard (macOS) |
+| `f` | Enter file path mode | Type a file path to attach |
+| `Esc` | Close/back | Close overlay or exit path input mode |
+
+### Path Input Mode
+
+When in path input mode (after pressing `f`):
+
+| Key | Action |
+|-----|--------|
+| Type | Add characters to path |
+| `Backspace` | Delete last character |
+| `Enter` | Attach file at path |
+| `Esc` | Return to menu mode |
+
+### How Image Attachment Works
+
+1. Images are stored in `.beads/attachments/{bead-id}/`
+2. A metadata entry is added to the bead's data
+3. Supported formats: PNG, JPG, GIF, WebP
+4. Claude sessions can reference attached images for visual context
+
+### Example Workflow
+
+```
+1. Navigate to a task
+2. Press Space+i to open attachment overlay
+3. Either:
+   a. Copy an image to clipboard, then press 'p' to paste
+   b. Press 'f', type "/path/to/screenshot.png", press Enter
+4. Success toast confirms attachment
+```
 
 ## Status Bar Indicators
 
