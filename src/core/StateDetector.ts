@@ -84,6 +84,13 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/waiting for input/i,
 			/Continue\?/i,
 			/Proceed\?/i,
+			// AskUserQuestion tool - numbered choices and "Other" option
+			/^\s*\d+\.\s+Other\b/im, // "1. Other" or "  2. Other" etc.
+			/\bOther\s*\(describe\)/i, // "Other (describe)"
+			/select.*option/i, // "Select an option"
+			/choose.*option/i, // "Choose an option"
+			/enter.*number/i, // "Enter a number"
+			/type.*number.*select/i, // "Type a number to select"
 		],
 	},
 	{
