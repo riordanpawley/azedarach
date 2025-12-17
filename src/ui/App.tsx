@@ -247,9 +247,11 @@ export const App = () => {
 
 		// Note: imageAttach overlay keyboard is handled by KeyboardService
 
-		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
+		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c, "CS-u" for Ctrl+Shift+u)
 		let keySeq = event.name
-		if (event.ctrl) {
+		if (event.ctrl && event.shift) {
+			keySeq = `CS-${event.name}`
+		} else if (event.ctrl) {
 			keySeq = `C-${event.name}`
 		} else if (event.shift) {
 			keySeq = `S-${event.name}`

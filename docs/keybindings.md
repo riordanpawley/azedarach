@@ -38,8 +38,8 @@ The default mode for navigation and basic actions.
 | `↓` | Same as `j` | Arrow key alternative |
 | `↑` | Same as `k` | Arrow key alternative |
 | `→` | Same as `l` | Arrow key alternative |
-| `Ctrl-d` | Half-page down | Fast scrolling |
-| `Ctrl-u` | Half-page up | Fast scrolling |
+| `Ctrl-Shift-d` | Half-page down | Fast scrolling |
+| `Ctrl-Shift-u` | Half-page up | Fast scrolling |
 
 ### Actions
 
@@ -466,4 +466,4 @@ This makes az the central hub for all session navigation.
 
 4. **Quick column jumps**: `gh` and `gl` jump between first and last columns; `gg` and `ge` jump to top/bottom of current column.
 
-5. **Half-page scrolling**: `Ctrl-d` and `Ctrl-u` are great for tall columns.
+5. **Half-page scrolling**: `Ctrl-Shift-d` and `Ctrl-Shift-u` are great for tall columns.

@@ -925,13 +925,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: nav.move("right"),
 			},
 			{
-				key: "C-d",
+				key: "CS-d",
 				mode: "normal",
 				description: "Half page down",
 				action: nav.halfPageDown(),
 			},
 			{
-				key: "C-u",
+				key: "CS-u",
 				mode: "normal",
 				description: "Half page up",
 				action: nav.halfPageUp(),
