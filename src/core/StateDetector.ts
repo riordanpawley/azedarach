@@ -23,10 +23,29 @@ import { Data, Effect } from "effect"
 export type SessionState = "idle" | "busy" | "waiting" | "done" | "error"
 
 /**
+ * Agent workflow phase types
+ *
+ * Tracks where Claude is in its typical workflow:
+ * - planning: Analyzing, reading code, formulating approach
+ * - action: Writing code, making edits, running commands
+ * - verification: Running tests, type checks, validating results
+ */
+export type AgentPhase = "idle" | "planning" | "action" | "verification"
+
+/**
  * State detection patterns with priority levels
  */
 export interface StatePattern {
 	readonly state: SessionState
+	readonly patterns: readonly RegExp[]
+	readonly priority: number
+}
+
+/**
+ * Phase detection patterns with priority levels
+ */
+export interface PhasePattern {
+	readonly phase: AgentPhase
 	readonly patterns: readonly RegExp[]
 	readonly priority: number
 }
@@ -89,15 +108,126 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 	// "idle" is the default/initial state with no output
 ]
 
+/**
+ * Phase detection patterns ordered by priority (highest to lowest)
+ *
+ * Verification takes highest priority (tests/checks are explicit signals)
+ * Action is next (tool usage, code writes)
+ * Planning is lowest (intent statements are common)
+ */
+const PHASE_PATTERNS: readonly PhasePattern[] = [
+	{
+		phase: "verification",
+		priority: 100,
+		patterns: [
+			// Test execution
+			/running tests?/i,
+			/bun test/i,
+			/npm test/i,
+			/pnpm test/i,
+			/jest/i,
+			/vitest/i,
+			/pytest/i,
+			/cargo test/i,
+			/go test/i,
+			// Type checking
+			/type[- ]?check/i,
+			/tsc/i,
+			/typecheck/i,
+			// Build verification
+			/bun run build/i,
+			/npm run build/i,
+			/pnpm build/i,
+			/cargo build/i,
+			// Linting
+			/eslint/i,
+			/biome/i,
+			/prettier/i,
+			// Validation signals
+			/verifying/i,
+			/validating/i,
+			/checking/i,
+			/tests? pass/i,
+			/all tests/i,
+		],
+	},
+	{
+		phase: "action",
+		priority: 80,
+		patterns: [
+			// Tool usage indicators (Claude Code output patterns)
+			/\bEdit\b.*tool/i,
+			/\bWrite\b.*tool/i,
+			/\bBash\b.*tool/i,
+			/\bRead\b.*tool/i,
+			// File operations
+			/writing to/i,
+			/creating file/i,
+			/editing file/i,
+			/modifying/i,
+			// Code output signals
+			/```[\w]*\n/i, // Code block start
+			/implementing/i,
+			/adding/i,
+			/updating/i,
+			/fixing/i,
+			/refactoring/i,
+			// Command execution
+			/running command/i,
+			/executing/i,
+			/\$ /i, // Shell prompt
+		],
+	},
+	{
+		phase: "planning",
+		priority: 60,
+		patterns: [
+			// Intent statements
+			/I'll /i,
+			/Let me /i,
+			/I will /i,
+			/I need to /i,
+			/I should /i,
+			/First,? I/i,
+			/Now I/i,
+			/Next,? I/i,
+			// Analysis signals
+			/looking at/i,
+			/analyzing/i,
+			/understanding/i,
+			/exploring/i,
+			/searching/i,
+			/reading/i,
+			/checking/i,
+			/investigating/i,
+			// Planning language
+			/my plan/i,
+			/the approach/i,
+			/strategy/i,
+			/to understand/i,
+			/to figure out/i,
+		],
+	},
+	// "idle" is the default when no phase patterns match
+]
+
 // ============================================================================
 // Service Definition
 // ============================================================================
 
 /**
+ * Combined state and phase detection result
+ */
+export interface DetectionResult {
+	readonly state: SessionState | null
+	readonly phase: AgentPhase | null
+}
+
+/**
  * StateDetector service interface
  *
  * Provides pattern-matching capabilities for detecting Claude session state
- * from PTY output chunks.
+ * and workflow phase from PTY output chunks.
  */
 export interface StateDetectorService {
 	/**
@@ -114,6 +244,21 @@ export interface StateDetectorService {
 	 * ```
 	 */
 	readonly detectFromChunk: (chunk: string) => Effect.Effect<SessionState | null, never>
+
+	/**
+	 * Detect agent phase from a single output chunk
+	 *
+	 * Returns null if no phase is detected.
+	 * Returns AgentPhase if a pattern matches.
+	 *
+	 * @example
+	 * ```ts
+	 * const detector = yield* StateDetector
+	 * const phase = yield* detector.detectPhaseFromChunk("I'll start by reading the file")
+	 * // phase === "planning"
+	 * ```
+	 */
+	readonly detectPhaseFromChunk: (chunk: string) => Effect.Effect<AgentPhase | null, never>
 
 	/**
 	 * Create a stateful detector function
@@ -133,6 +278,23 @@ export interface StateDetectorService {
 	 * ```
 	 */
 	readonly createDetector: () => Effect.Effect<(chunk: string) => SessionState | null, never>
+
+	/**
+	 * Create a combined stateful detector for both state and phase
+	 *
+	 * Returns a function that detects both session state and agent phase.
+	 * Phase detection uses a longer debounce window to avoid rapid transitions.
+	 *
+	 * @example
+	 * ```ts
+	 * const detector = yield* StateDetector
+	 * const detect = yield* detector.createCombinedDetector()
+	 *
+	 * const result = detect("I'll read the file first")
+	 * // result === { state: "busy", phase: "planning" }
+	 * ```
+	 */
+	readonly createCombinedDetector: () => Effect.Effect<(chunk: string) => DetectionResult, never>
 }
 
 // ============================================================================
@@ -167,6 +329,29 @@ const detectState = (chunk: string): SessionState | null => {
 
 	// If we have non-empty output that doesn't match any pattern, it's "busy"
 	return "busy"
+}
+
+/**
+ * Detect agent phase from a chunk by checking phase patterns in priority order
+ *
+ * Returns the first matching phase, or null if no patterns match.
+ * Unlike state detection, no fallback phase is assumed.
+ */
+const detectPhase = (chunk: string): AgentPhase | null => {
+	// Ignore empty or whitespace-only chunks
+	if (!chunk || chunk.trim().length === 0) {
+		return null
+	}
+
+	// Check patterns in priority order
+	for (const { phase, patterns } of PHASE_PATTERNS) {
+		if (matchesPattern(chunk, patterns)) {
+			return phase
+		}
+	}
+
+	// No phase detected from this chunk
+	return null
 }
 
 /**
@@ -226,6 +411,71 @@ const createStatefulDetector = (): ((chunk: string) => SessionState | null) => {
 	}
 }
 
+/**
+ * Create a combined stateful detector for both state and phase
+ *
+ * Phase detection uses a longer debounce window (500ms) than state detection
+ * because phases tend to persist longer and we want to avoid rapid flickering.
+ */
+const createCombinedStatefulDetector = (): ((chunk: string) => DetectionResult) => {
+	let lastState: SessionState | null = null
+	let lastPhase: AgentPhase | null = null
+	let lastStateTime = Date.now()
+	let lastPhaseTime = Date.now()
+	const STATE_DEBOUNCE_MS = 100
+	const PHASE_DEBOUNCE_MS = 500 // Phases persist longer
+
+	return (chunk: string): DetectionResult => {
+		const now = Date.now()
+		const detectedState = detectState(chunk)
+		const detectedPhase = detectPhase(chunk)
+
+		// State detection logic (same as createStatefulDetector)
+		let newState: SessionState | null = null
+		if (detectedState !== null) {
+			// Terminal states are sticky
+			if (lastState === "done" || lastState === "error") {
+				newState = lastState
+			}
+			// High-priority states report immediately
+			else if (
+				detectedState === "waiting" ||
+				detectedState === "error" ||
+				detectedState === "done"
+			) {
+				lastState = detectedState
+				lastStateTime = now
+				newState = detectedState
+			}
+			// Busy state with debouncing
+			else if (detectedState === "busy") {
+				if (lastState !== "busy" || now - lastStateTime >= STATE_DEBOUNCE_MS) {
+					lastState = "busy"
+					lastStateTime = now
+					newState = "busy"
+				}
+			} else {
+				lastState = detectedState
+				lastStateTime = now
+				newState = detectedState
+			}
+		}
+
+		// Phase detection with longer debounce
+		let newPhase: AgentPhase | null = null
+		if (detectedPhase !== null) {
+			// Only update phase if different and past debounce window
+			if (detectedPhase !== lastPhase || now - lastPhaseTime >= PHASE_DEBOUNCE_MS) {
+				lastPhase = detectedPhase
+				lastPhaseTime = now
+				newPhase = detectedPhase
+			}
+		}
+
+		return { state: newState, phase: newPhase }
+	}
+}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -248,7 +498,11 @@ export class StateDetector extends Effect.Service<StateDetector>()("StateDetecto
 	effect: Effect.succeed({
 		detectFromChunk: (chunk: string) => Effect.sync(() => detectState(chunk)),
 
+		detectPhaseFromChunk: (chunk: string) => Effect.sync(() => detectPhase(chunk)),
+
 		createDetector: () => Effect.sync(() => createStatefulDetector()),
+
+		createCombinedDetector: () => Effect.sync(() => createCombinedStatefulDetector()),
 	}),
 }) {}
 
@@ -285,3 +539,33 @@ export const createDetector = (): Effect.Effect<
 	never,
 	StateDetector
 > => Effect.flatMap(StateDetector, (detector) => detector.createDetector())
+
+/**
+ * Detect phase from a chunk (convenience function)
+ *
+ * @example
+ * ```ts
+ * const phase = yield* detectPhaseFromChunk("I'll start by reading the config")
+ * // phase === "planning"
+ * ```
+ */
+export const detectPhaseFromChunk = (
+	chunk: string,
+): Effect.Effect<AgentPhase | null, never, StateDetector> =>
+	Effect.flatMap(StateDetector, (detector) => detector.detectPhaseFromChunk(chunk))
+
+/**
+ * Create a combined stateful detector (convenience function)
+ *
+ * @example
+ * ```ts
+ * const detect = yield* createCombinedDetector()
+ * const result = detect("I'll implement the feature now")
+ * // result === { state: "busy", phase: "planning" }
+ * ```
+ */
+export const createCombinedDetector = (): Effect.Effect<
+	(chunk: string) => DetectionResult,
+	never,
+	StateDetector
+> => Effect.flatMap(StateDetector, (detector) => detector.createCombinedDetector())
