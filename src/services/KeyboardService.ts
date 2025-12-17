@@ -18,6 +18,7 @@ import { BeadEditorService } from "../core/EditorService"
 import { ImageAttachmentService } from "../core/ImageAttachmentService"
 import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
+import { TmuxService } from "../core/TmuxService"
 import { VCService } from "../core/VCService"
 import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
@@ -96,6 +97,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		BeadEditorService.Default,
 		ViewService.Default,
 		ImageAttachmentService.Default,
+		TmuxService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -113,6 +115,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const beadEditor = yield* BeadEditorService
 		const viewService = yield* ViewService
 		const imageAttachment = yield* ImageAttachmentService
+		const tmux = yield* TmuxService
 
 		// ========================================================================
 		// Helper Functions
@@ -1048,6 +1051,19 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "normal",
 				description: "Toggle view mode (kanban/compact)",
 				action: viewService.toggleViewMode(),
+			},
+			{
+				key: "S-l",
+				mode: "normal",
+				description: "View logs in tmux popup",
+				action: tmux
+					.displayPopup({
+						command: `less +F ${process.cwd()}/az.log`,
+						width: "90%",
+						height: "90%",
+						title: " az.log (Ctrl-C to scroll, q to quit) ",
+					})
+					.pipe(Effect.catchAll(Effect.logError)),
 			},
 
 			// ======================================================================

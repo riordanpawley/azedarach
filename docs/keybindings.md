@@ -57,6 +57,7 @@ The default mode for navigation and basic actions.
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
+| `L` | View logs | Opens az.log in tmux popup |
 | `q` | Quit | Exit application |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
 
