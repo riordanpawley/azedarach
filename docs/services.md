@@ -179,6 +179,59 @@ withLock(options, effect): Effect<A, E | LockError, R>
 - `exclusive`: Only one holder, blocks all other locks
 - `shared`: Multiple holders allowed, blocks exclusive locks
 
+### ImageAttachmentService
+
+**Location:** `src/core/ImageAttachmentService.ts`
+
+Manages image attachments for beads tasks. Since the beads CLI doesn't natively support file attachments, images are stored in a local directory structure with a JSON metadata index.
+
+```typescript
+interface ImageAttachmentServiceImpl {
+  attachFile(issueId, filePath): Effect<ImageAttachment, FileNotFoundError | ImageAttachmentError>
+  attachFromClipboard(issueId): Effect<ImageAttachment, ClipboardError | ImageAttachmentError>
+  list(issueId): Effect<ImageAttachment[], ImageAttachmentError>
+  remove(issueId, attachmentId): Effect<void, ImageAttachmentError>
+  open(issueId, attachmentId): Effect<void, ImageAttachmentError>
+  hasClipboardSupport(): Effect<boolean, never>
+}
+```
+
+**Storage structure:**
+```
+.beads/images/
+├── index.json              # Metadata for all attachments
+├── az-abc/                 # Issue-specific directory
+│   ├── screenshot-1.png
+│   └── diagram-2.webp
+└── az-xyz/
+    └── mockup-1.jpg
+```
+
+**Supported formats:** PNG, JPG, JPEG, GIF, WebP, BMP, SVG
+
+**Clipboard support:**
+- macOS: Uses `pngpaste` (install via `brew install pngpaste`)
+- Linux: Uses `xclip` or `wl-paste`
+
+**Usage:**
+```typescript
+const program = Effect.gen(function* () {
+  const images = yield* ImageAttachmentService
+
+  // Attach from file
+  yield* images.attachFile("az-abc", "/path/to/screenshot.png")
+
+  // Attach from clipboard (screenshot)
+  yield* images.attachFromClipboard("az-abc")
+
+  // List attachments
+  const attachments = yield* images.list("az-abc")
+
+  // Open in default viewer
+  yield* images.open("az-abc", attachments[0].id)
+})
+```
+
 ### VCService
 
 **Location:** `src/core/VCService.ts`

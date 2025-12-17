@@ -8,7 +8,11 @@
 2. [Keyboard Navigation](#keyboard-navigation)
 3. [Modes](#modes)
 4. [Features](#features)
+   - [Creating Tasks](#creating-tasks)
+   - [Detail Panel](#detail-panel)
+   - [Task Movement](#task-movement)
    - [VC Integration](#vc-integration-vibecoder)
+   - [Session Attachment](#session-attachment-requires-active-sessions)
 5. [Testing Features](#testing-features)
 6. [Troubleshooting](#troubleshooting)
 
@@ -162,12 +166,55 @@ Use Action mode (`Space` + `h`/`l`) to move tasks between columns:
 
 Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an AI-supervised orchestration engine that autonomously executes tasks from your beads backlog.
 
-**How it works:**
-- **Azedarach**: TUI Kanban visualization + parallel session management
-- **VC**: AI-supervised execution with quality gates (tests, lint, build)
-- **Shared**: Both read/write the same `.beads/beads.db` database
+#### What is VC?
 
-**Workflow:**
+**VC (VibeCoder)** is an AI orchestration layer that sits above Claude Code. While Claude Code executes individual coding tasks, VC provides:
+
+- **AI Supervisor (Claude Sonnet)**: Strategic planning, task decomposition, and quality assessment
+- **Quality Gates**: Automatic test, lint, and build verification after each task
+- **Blocker-Aware Scheduling**: Only works on tasks with satisfied dependencies
+- **Conversational Interface**: REPL for natural language commands
+
+#### Architecture: az + VC
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          You (Human)                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────┐         ┌─────────────┐         ┌───────────┐  │
+│  │ Azedarach   │◄───────►│  VC         │◄───────►│ Claude    │  │
+│  │ (TUI)       │         │ (Orchestrator)        │ Code      │  │
+│  │             │         │             │         │ (Executor)│  │
+│  │ - Visualize │         │ - Schedule  │         │ - Code    │  │
+│  │ - Navigate  │         │ - Gate      │         │ - Git     │  │
+│  │ - Attach    │         │ - Supervise │         │ - Shell   │  │
+│  └──────┬──────┘         └──────┬──────┘         └───────────┘  │
+│         │                       │                                │
+│         └───────────┬───────────┘                                │
+│                     ▼                                            │
+│            ┌─────────────────┐                                   │
+│            │  .beads/beads.db │  ◄── Shared SQLite database      │
+│            │  (Beads Issues)  │                                   │
+│            └─────────────────┘                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight:** Both az and VC read/write the same `.beads/beads.db` database. This means:
+- Changes you make in az (moving tasks, changing priority) are immediately visible to VC
+- Tasks VC completes or updates appear in az in real-time
+- No sync conflicts - SQLite handles concurrent access
+
+#### When to Use Each
+
+| Scenario | Use |
+|----------|-----|
+| Manual coding session | az: `Space+s` to start, `Space+a` to attach |
+| Autonomous batch work | VC: Press `a` to start auto-pilot |
+| Monitor both | az for visualization, VC for execution |
+| Quick question to VC | az: Press `:` then type your question |
+
+#### Basic Workflow
 
 1. **Start VC auto-pilot**: Press `a` to launch VC in a background tmux session
 2. **Monitor status**: StatusBar shows `VC: running` (green) or `VC: stopped` (yellow)
@@ -175,13 +222,33 @@ Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an
 4. **Watch progress**: VC claims issues, executes work, and updates status in real-time
 5. **Stop when done**: Press `a` again to toggle off
 
-**Example commands (`:` mode):**
-- `What's ready to work on?` - Query available tasks
-- `Let's continue working` - Resume autonomous work
-- `Add Docker support` - Request a new feature
-- `Run tests` - Execute quality gates
+#### Command Mode Examples
 
-**Note:** VC must be installed separately. See [VC installation](https://github.com/steveyegge/vc) for setup.
+Press `:` to enter command mode, then type:
+
+| Command | What it does |
+|---------|--------------|
+| `What's ready to work on?` | Query available tasks with no blockers |
+| `Let's continue working` | Resume autonomous execution |
+| `Add Docker support` | Create and work on a new feature |
+| `Run tests` | Execute quality gates |
+| `Pause` | Stop after current task completes |
+| `Status` | Show what VC is currently doing |
+
+#### Installation
+
+VC must be installed separately:
+
+```bash
+# macOS (Homebrew)
+brew tap steveyegge/vc
+brew install vc
+
+# Verify installation
+vc --version
+```
+
+See [VC documentation](https://github.com/steveyegge/vc) for full setup instructions.
 
 ### Session Attachment (Requires Active Sessions)
 
