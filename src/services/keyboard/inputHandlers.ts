@@ -194,10 +194,18 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 				return false
 			}
 
-			const state = yield* SubscriptionRef.get(ctx.imageAttachmentOverlayState)
-			if (!state.taskId) return false
-
 			const overlayTaskId = currentOverlay.taskId
+
+			// Auto-initialize ImageAttachmentService state from overlay if needed
+			// This ensures state is ready regardless of how the overlay was opened
+			let state = yield* SubscriptionRef.get(ctx.imageAttachmentOverlayState)
+			if (!state.taskId) {
+				yield* Effect.logDebug("ImageAttach: auto-initializing state from overlay", {
+					taskId: overlayTaskId,
+				})
+				yield* ctx.imageAttachment.openOverlay(overlayTaskId)
+				state = yield* SubscriptionRef.get(ctx.imageAttachmentOverlayState)
+			}
 
 			// Escape handling
 			if (key === "escape") {
@@ -255,6 +263,9 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 				if (!state.isAttaching) {
 					const hasClipboard = yield* ctx.imageAttachment.hasClipboardSupport()
 					if (hasClipboard) {
+						yield* Effect.logDebug("ImageAttach: initiating clipboard paste", {
+							taskId: overlayTaskId,
+						})
 						yield* ctx.imageAttachment.setAttaching(true)
 						yield* ctx.imageAttachment.attachFromClipboard(overlayTaskId).pipe(
 							Effect.tap((attachment) =>
@@ -272,6 +283,17 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 									yield* ctx.imageAttachment.setAttaching(false)
 								})
 							}),
+						)
+					} else {
+						// No clipboard tool available - show user feedback instead of silent failure
+						yield* Effect.logWarning("ImageAttach: clipboard support not available", {
+							platform: process.platform,
+						})
+						yield* ctx.toast.show(
+							"error",
+							process.platform === "darwin"
+								? "Clipboard access not available"
+								: "No clipboard tool found (install xclip or wl-clipboard)",
 						)
 					}
 				}
