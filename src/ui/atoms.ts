@@ -25,11 +25,12 @@ import { ClockService, computeElapsedFormatted } from "../services/ClockService"
 import { CommandQueueService } from "../services/CommandQueueService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
+// New atomic Effect services
+import { formatForToast } from "../services/ErrorFormatter"
 import { KeyboardService } from "../services/KeyboardService"
 import { NavigationService } from "../services/NavigationService"
 import { OverlayService } from "../services/OverlayService"
 import { SessionService } from "../services/SessionService"
-// New atomic Effect services
 import { ToastService } from "../services/ToastService"
 import { ViewService } from "../services/ViewService"
 import type { TaskWithSession } from "./types"
@@ -467,7 +468,8 @@ Create the bead now and output just the ID.`
 			Effect.gen(function* () {
 				yield* Effect.logError(error)
 				const toast = yield* ToastService
-				yield* toast.show("error", "Failed to create task - try again or use 'c' for manual create")
+				const formatted = formatForToast(error)
+				yield* toast.show("error", `Create task failed: ${formatted}`)
 				return "error" as const
 			}),
 		),

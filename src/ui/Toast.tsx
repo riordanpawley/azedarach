@@ -1,5 +1,8 @@
 /**
  * Toast component - dismissible error/info notifications
+ *
+ * Supports multi-line messages (for error suggestions) and longer
+ * duration for error toasts to give users time to read actionable guidance.
  */
 import { useEffect } from "react"
 import { theme } from "./theme"
@@ -16,7 +19,10 @@ export interface ToastProps {
 	onDismiss: (id: string) => void
 }
 
+/** Default duration for info/success toasts */
 const TOAST_DURATION_MS = 5000
+/** Longer duration for error toasts (to read suggestions) */
+const ERROR_TOAST_DURATION_MS = 8000
 const ATTR_BOLD = 1
 
 /**
@@ -37,15 +43,16 @@ function getToastStyle(type: ToastMessage["type"]) {
  * Toast container - shows stacked toasts at bottom-right
  */
 export const ToastContainer = (props: ToastProps) => {
-	// Auto-dismiss toasts after duration
+	// Auto-dismiss toasts after duration (errors get longer to read suggestions)
 	useEffect(() => {
 		if (props.toasts.length === 0) return
 
 		const timers: NodeJS.Timeout[] = []
 
 		for (const toast of props.toasts) {
+			const duration = toast.type === "error" ? ERROR_TOAST_DURATION_MS : TOAST_DURATION_MS
 			const elapsed = Date.now() - toast.timestamp
-			const remaining = TOAST_DURATION_MS - elapsed
+			const remaining = duration - elapsed
 
 			if (remaining > 0) {
 				const timer = setTimeout(() => {
@@ -69,6 +76,9 @@ export const ToastContainer = (props: ToastProps) => {
 		<box position="absolute" right={2} bottom={2} flexDirection="column" gap={1}>
 			{props.toasts.map((toast) => {
 				const style = getToastStyle(toast.type)
+				// Split message by newlines to support multi-line (error + suggestion)
+				const lines = toast.message.split("\n")
+
 				return (
 					<box
 						key={toast.id}
@@ -79,11 +89,18 @@ export const ToastContainer = (props: ToastProps) => {
 						border={true}
 						borderColor={style.bg}
 						minWidth={30}
-						maxWidth={60}
+						maxWidth={70}
+						flexDirection="column"
 					>
-						<text fg={style.fg} attributes={ATTR_BOLD}>
-							{` ${style.icon} ${toast.message} `}
-						</text>
+						{lines.map((line, idx) => (
+							<text
+								key={`${toast.id}-line-${idx}`}
+								fg={style.fg}
+								attributes={idx === 0 ? ATTR_BOLD : undefined}
+							>
+								{idx === 0 ? ` ${style.icon} ${line} ` : `   ${line} `}
+							</text>
+						))}
 					</box>
 				)
 			})}
