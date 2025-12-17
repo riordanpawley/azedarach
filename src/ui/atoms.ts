@@ -724,6 +724,23 @@ export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
 )
 
 /**
+ * Filtered and sorted tasks by column - single source of truth for UI rendering
+ *
+ * This atom subscribes to BoardService's filteredTasksByColumn which:
+ * - Automatically updates when tasks change (every 2 seconds)
+ * - Automatically updates when sortConfig changes
+ * - Automatically updates when search query changes
+ *
+ * Usage: const tasksByColumn = useAtomValue(filteredTasksByColumnAtom)
+ */
+export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.filteredTasksByColumn
+	}),
+)
+
+/**
  * Current overlay atom - the top of the overlay stack
  *
  * Derived from overlaysAtom for automatic reactivity.
