@@ -6,6 +6,7 @@
 	},
 	"session": {
 		"command": "claude",
+		"shell": "zsh",
 		"tmuxPrefix": "C-a"
 	}
 }
