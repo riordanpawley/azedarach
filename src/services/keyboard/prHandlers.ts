@@ -197,6 +197,39 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 
 		// Expose doMergeToMain for direct calls if needed
 		doMergeToMain,
+
+		/**
+		 * Show git diff action (Space+g)
+		 *
+		 * Opens a tmux popup showing the diff between the branch and main.
+		 * Uses `git diff main..{branch}` with color, piped to less for scrolling.
+		 * Requires an active session with a worktree.
+		 */
+		showDiff: () =>
+			Effect.gen(function* () {
+				const task = yield* ctx.getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* ctx.toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				// Get worktree path from PRWorkflow (via worktreeManager)
+				const projectPath = process.cwd()
+
+				// Show diff in tmux popup using less for scrolling
+				// git diff main..{branch} shows what the branch adds relative to main
+				// --color=always ensures ANSI colors, -R in less interprets them
+				yield* ctx.tmux
+					.displayPopup({
+						command: `cd "${projectPath}" && git diff --color=always main..${task.id} | less -R`,
+						width: "95%",
+						height: "95%",
+						title: ` Diff: main..${task.id} (q to quit, /search, n/N next/prev) `,
+					})
+					.pipe(Effect.catchAll(Effect.logError))
+			}),
 	}
 }
 

@@ -383,9 +383,20 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `g` | Show diff | Worktree exists (diff vs main in popup) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
+
+#### Show Diff (Space+g)
+
+Opens a tmux popup showing the git diff between your branch and main. This lets you code review changes before merging:
+
+- **Navigation**: `j`/`k` or arrow keys to scroll, `g`/`G` for top/bottom
+- **Search**: `/pattern` to search, `n`/`N` for next/previous match
+- **Exit**: `q` to close the popup
+
+The diff shows what your branch adds relative to main (`git diff main..{branch}`), with syntax highlighting for additions (green) and deletions (red).
 
 #### Merge to Main (Space+m)
 
