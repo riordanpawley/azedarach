@@ -616,7 +616,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 								}`
 							: ""
 
-					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nProceed with merge?`
+					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nMerge will be attempted in the worktree first - main won't be affected if conflicts occur.\n\nProceed?`
 
 					yield* overlay.push({
 						_tag: "confirm",
