@@ -22,6 +22,7 @@ import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
 import { ClockService } from "../services/ClockService"
+import { CommandQueueService } from "../services/CommandQueueService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
@@ -58,6 +59,7 @@ const appLayer = Layer.mergeAll(
 	VCService.Default,
 	ViewService.Default,
 	HookReceiver.Default,
+	CommandQueueService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
