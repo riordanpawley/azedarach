@@ -329,27 +329,105 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
 		/**
-		 * Copy Claude's local settings to a new worktree
+		 * Generate Claude Code hook configuration for session state detection
+		 *
+		 * Creates hooks that call `az notify` when Claude enters specific states.
+		 * This enables authoritative state detection from Claude's native hook system.
+		 */
+		const generateHookConfig = (beadId: string) => ({
+			hooks: {
+				Notification: [
+					{
+						matcher: "idle_prompt",
+						hooks: [
+							{
+								type: "command",
+								command: `az notify idle_prompt ${beadId}`,
+							},
+						],
+					},
+				],
+				Stop: [
+					{
+						hooks: [
+							{
+								type: "command",
+								command: `az notify stop ${beadId}`,
+							},
+						],
+					},
+				],
+				SessionEnd: [
+					{
+						hooks: [
+							{
+								type: "command",
+								command: `az notify session_end ${beadId}`,
+							},
+						],
+					},
+				],
+			},
+		})
+
+		/**
+		 * Deep merge two objects (for merging hook configs with existing settings)
+		 *
+		 * Arrays are concatenated rather than replaced to preserve both
+		 * existing hooks and new hooks.
+		 */
+		const deepMerge = (
+			target: Record<string, unknown>,
+			source: Record<string, unknown>,
+		): Record<string, unknown> => {
+			const result = { ...target }
+
+			for (const key of Object.keys(source)) {
+				const sourceValue = source[key]
+				const targetValue = target[key]
+
+				if (
+					sourceValue &&
+					typeof sourceValue === "object" &&
+					!Array.isArray(sourceValue) &&
+					targetValue &&
+					typeof targetValue === "object" &&
+					!Array.isArray(targetValue)
+				) {
+					// Both are objects - recursively merge
+					result[key] = deepMerge(
+						targetValue as Record<string, unknown>,
+						sourceValue as Record<string, unknown>,
+					)
+				} else if (Array.isArray(sourceValue) && Array.isArray(targetValue)) {
+					// Both are arrays - concatenate
+					result[key] = [...targetValue, ...sourceValue]
+				} else {
+					// Otherwise, source wins
+					result[key] = sourceValue
+				}
+			}
+
+			return result
+		}
+
+		/**
+		 * Copy Claude's local settings to a new worktree and inject hook configuration
 		 *
 		 * Claude Code stores personal permission grants in .claude/settings.local.json,
 		 * which is globally gitignored and thus not copied when git creates a worktree.
-		 * This function copies that file so users don't have to re-grant permissions.
+		 * This function copies that file and merges in hook configuration for session
+		 * state detection.
 		 */
 		const copyClaudeLocalSettings = (
 			sourceProjectPath: string,
 			targetWorktreePath: string,
+			beadId: string,
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
 				const sourceSettings = pathService.join(sourceProjectPath, ".claude", "settings.local.json")
 				const targetClaudeDir = pathService.join(targetWorktreePath, ".claude")
 				const targetSettings = pathService.join(targetClaudeDir, "settings.local.json")
-
-				// Check if source settings exist
-				const sourceExists = yield* fs.exists(sourceSettings)
-				if (!sourceExists) {
-					// No local settings to copy - this is fine
-					return
-				}
 
 				// Ensure target .claude directory exists (it should from git, but be safe)
 				const targetDirExists = yield* fs.exists(targetClaudeDir)
@@ -357,8 +435,27 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					yield* fs.makeDirectory(targetClaudeDir, { recursive: true })
 				}
 
-				// Copy the settings file
-				yield* fs.copyFile(sourceSettings, targetSettings)
+				// Read existing settings if they exist
+				let existingSettings: Record<string, unknown> = {}
+				const sourceExists = yield* fs.exists(sourceSettings)
+				if (sourceExists) {
+					const content = yield* fs
+						.readFileString(sourceSettings)
+						.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+					existingSettings = yield* Effect.try({
+						try: () => JSON.parse(content) as Record<string, unknown>,
+						catch: () => ({}) as Record<string, unknown>,
+					}).pipe(Effect.catchAll(() => Effect.succeed({} as Record<string, unknown>)))
+				}
+
+				// Generate hook configuration for this bead
+				const hookConfig = generateHookConfig(beadId)
+
+				// Merge existing settings with hook configuration
+				const mergedSettings = deepMerge(existingSettings, hookConfig)
+
+				// Write merged settings to target
+				yield* fs.writeFileString(targetSettings, JSON.stringify(mergedSettings, null, "\t"))
 			}).pipe(
 				// Don't fail worktree creation if settings copy fails - just log and continue
 				Effect.catchAll((error) =>
@@ -418,8 +515,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// git worktree add -b <branch-name> <path> <start-point>
 					yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
 
-					// Copy Claude's local settings to preserve permission grants
-					yield* copyClaudeLocalSettings(projectPath, worktreePath)
+					// Copy Claude's local settings and inject hook configuration
+					yield* copyClaudeLocalSettings(projectPath, worktreePath, beadId)
 
 					// Refresh cache to get the new worktree info
 					yield* refreshWorktrees(projectPath)

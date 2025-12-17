@@ -15,6 +15,7 @@ import {
 	createTaskAtom,
 	filteredTasksByColumnAtom,
 	handleKeyAtom,
+	hookReceiverStarterAtom,
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
@@ -100,6 +101,10 @@ export const App = () => {
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
 
+	// Start the hook receiver for Claude Code native hook integration
+	// This watches for notification files and updates session state
+	useAtomValue(hookReceiverStarterAtom)
+
 	// Initialize BoardService data on mount
 	// This is required for NavigationService to work (ID-based cursor needs task data)
 	useEffect(() => {
@@ -150,9 +155,11 @@ export const App = () => {
 
 		// Note: imageAttach overlay keyboard is handled by KeyboardService
 
-		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
+		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c, "CS-u" for Ctrl+Shift+u)
 		let keySeq = event.name
-		if (event.ctrl) {
+		if (event.ctrl && event.shift) {
+			keySeq = `CS-${event.name}`
+		} else if (event.ctrl) {
 			keySeq = `C-${event.name}`
 		} else if (event.shift) {
 			keySeq = `S-${event.name}`

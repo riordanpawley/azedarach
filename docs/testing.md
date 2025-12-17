@@ -29,7 +29,7 @@ pnpm dev
 |------|-------|-----------------|
 | Basic nav | Press `h`, `j`, `k`, `l` | Selection moves between tasks/columns |
 | Arrow keys | Press arrow keys | Same as hjkl |
-| Half-page | Press `Ctrl-d`, `Ctrl-u` | Fast scrolling in tall columns |
+| Half-page | Press `Ctrl-Shift-d`, `Ctrl-Shift-u` | Fast scrolling in tall columns |
 | Column jump | Press `g` then `h` or `l` | Jump to first/last task in column |
 | Global jump | Press `g` then `g` or `e` | Jump to first/last task on board |
 
