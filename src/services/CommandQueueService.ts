@@ -116,7 +116,11 @@ const createEmptyState = (): InternalTaskQueueState => ({
 export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 	"CommandQueueService",
 	{
-		effect: Effect.gen(function* () {
+		// Use scoped to get a layer-level Scope for forkScoped fibers
+		scoped: Effect.gen(function* () {
+			// Capture the service's scope for use in forkScoped
+			const serviceScope = yield* Effect.scope
+
 			// Main state: HashMap of taskId -> queue state
 			const stateRef = yield* SubscriptionRef.make<HashMap.HashMap<string, InternalTaskQueueState>>(
 				HashMap.empty(),
@@ -154,7 +158,10 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					)
 
 					// Execute the command in background (don't block processNext)
-					yield* Effect.fork(
+					// Use forkIn with the service's captured scope so the fiber:
+					// 1. Isn't interrupted when processNext returns (outlives parent)
+					// 2. Gets cleaned up when the app shuts down (not a daemon)
+					yield* Effect.forkIn(
 						Effect.gen(function* () {
 							// Run the actual effect
 							const result = yield* Effect.either(next.effect)
@@ -181,6 +188,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// Recursively process next
 							yield* processNext(taskId)
 						}),
+						serviceScope,
 					)
 				})
 
