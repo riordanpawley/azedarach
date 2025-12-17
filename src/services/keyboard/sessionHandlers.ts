@@ -28,11 +28,16 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	 *
 	 * Starts a Claude session for the currently selected task.
 	 * Queued to prevent race conditions with other operations on the same task.
+	 * Blocked if task already has an operation in progress.
 	 */
 	startSession: () =>
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
+
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
 
 			if (task.sessionState !== "idle") {
 				yield* ctx.toast.show("error", `Cannot start: task is ${task.sessionState}`)
@@ -54,11 +59,16 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	 *
 	 * Starts Claude and tells it to "work on bead {beadId}".
 	 * Queued to prevent race conditions with other operations on the same task.
+	 * Blocked if task already has an operation in progress.
 	 */
 	startSessionWithPrompt: () =>
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
+
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
 
 			if (task.sessionState !== "idle") {
 				yield* ctx.toast.show("error", `Cannot start: task is ${task.sessionState}`)
@@ -204,11 +214,16 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	 *
 	 * Stops a running Claude session and cleans up resources.
 	 * Queued to prevent race conditions with other operations on the same task.
+	 * Blocked if task already has an operation in progress.
 	 */
 	stopSession: () =>
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
+
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
 
 			if (task.sessionState === "idle") {
 				yield* ctx.toast.show("error", "No session to stop")

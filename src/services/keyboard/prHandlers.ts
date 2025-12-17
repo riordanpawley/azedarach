@@ -53,11 +53,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		 * Creates a GitHub PR for the current task's worktree branch.
 		 * Requires an active session with a worktree.
 		 * Queued to prevent race conditions with other operations on the same task.
+		 * Blocked if task already has an operation in progress.
 		 */
 		createPR: () =>
 			Effect.gen(function* () {
 				const task = yield* ctx.getSelectedTask()
 				if (!task) return
+
+				// Check if task has an operation in progress
+				const isBusy = yield* ctx.checkBusy(task.id)
+				if (isBusy) return
 
 				if (task.sessionState === "idle") {
 					yield* ctx.toast.show("error", `No worktree for ${task.id} - start a session first`)
@@ -96,11 +101,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		 * Checks for potential merge conflicts before merging. If conflicts are
 		 * likely (files modified in both branches), shows a confirmation dialog.
 		 * Otherwise proceeds directly with the merge.
+		 * Blocked if task already has an operation in progress.
 		 */
 		mergeToMain: () =>
 			Effect.gen(function* () {
 				const task = yield* ctx.getSelectedTask()
 				if (!task) return
+
+				// Check if task has an operation in progress
+				const isBusy = yield* ctx.checkBusy(task.id)
+				if (isBusy) return
 
 				if (task.sessionState === "idle") {
 					yield* ctx.toast.show("error", `No worktree for ${task.id} - start a session first`)
@@ -155,11 +165,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		 * Deletes the worktree and branch for the current task.
 		 * Requires an active session with a worktree.
 		 * Queued to prevent race conditions with other operations on the same task.
+		 * Blocked if task already has an operation in progress.
 		 */
 		cleanup: () =>
 			Effect.gen(function* () {
 				const task = yield* ctx.getSelectedTask()
 				if (!task) return
+
+				// Check if task has an operation in progress
+				const isBusy = yield* ctx.checkBusy(task.id)
+				if (isBusy) return
 
 				if (task.sessionState === "idle") {
 					yield* ctx.toast.show("error", `No worktree to delete for ${task.id}`)
