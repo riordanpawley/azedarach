@@ -885,6 +885,20 @@ export const currentOverlayAtom = Atom.readable((get) => {
 	return overlays.length > 0 ? overlays[overlays.length - 1] : undefined
 })
 
+/**
+ * Command queue state atom - subscribes to CommandQueueService state changes
+ *
+ * Used by DebugOverlay to show running/queued operations per task.
+ *
+ * Usage: const queueState = useAtomValue(commandQueueStateAtom)
+ */
+export const commandQueueStateAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const queue = yield* CommandQueueService
+		return queue.state
+	}),
+)
+
 // ============================================================================
 // Atomic Service Action Atoms
 // ============================================================================
@@ -1195,7 +1209,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					readonly message: string
 					// Exception: CommandExecutor is the only allowed leaked requirement
 					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
-			  },
+			  }
+			| { readonly _tag: "debug" },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService

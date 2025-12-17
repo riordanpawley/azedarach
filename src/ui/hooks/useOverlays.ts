@@ -26,6 +26,7 @@ export type OverlayType =
 			readonly message: string
 			readonly onConfirm: AnyEffect
 	  }
+	| { readonly _tag: "debug" }
 
 /**
  * Hook for managing overlay stack
@@ -81,6 +82,10 @@ export function useOverlays() {
 				push({ _tag: "imageAttach", taskId })
 			},
 
+			showDebug: () => {
+				push({ _tag: "debug" })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -98,6 +103,7 @@ export function useOverlays() {
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
+			showingDebug: currentOverlay?._tag === "debug",
 		}),
 		[currentOverlay],
 	)

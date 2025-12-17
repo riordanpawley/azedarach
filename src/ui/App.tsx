@@ -25,6 +25,7 @@ import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
 import { CommandInput } from "./CommandInput"
 import { ConfirmOverlay } from "./ConfirmOverlay"
 import { CreateTaskPrompt } from "./CreateTaskPrompt"
+import { DebugOverlay } from "./DebugOverlay"
 import { DetailPanel } from "./DetailPanel"
 import { HelpOverlay } from "./HelpOverlay"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
@@ -72,6 +73,7 @@ export const App = () => {
 		showingClaudeCreate,
 		showingImageAttach,
 		showingConfirm,
+		showingDebug,
 	} = useOverlays()
 
 	const {
@@ -262,6 +264,9 @@ export const App = () => {
 
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
+
+			{/* Debug overlay - semi-transparent, shows alongside board */}
+			{showingDebug && <DebugOverlay />}
 
 			{/* Action palette */}
 			{isAction && <ActionPalette task={selectedTask} />}

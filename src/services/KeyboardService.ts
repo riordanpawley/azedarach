@@ -1103,6 +1103,19 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				action: overlay.push({ _tag: "help" }),
 			},
 			{
+				key: "d",
+				mode: "normal",
+				description: "Toggle debug overlay",
+				action: Effect.gen(function* () {
+					const current = yield* overlay.current()
+					if (current?._tag === "debug") {
+						yield* overlay.pop()
+					} else {
+						yield* overlay.push({ _tag: "debug" })
+					}
+				}),
+			},
+			{
 				key: "return",
 				mode: "normal",
 				description: "View detail",

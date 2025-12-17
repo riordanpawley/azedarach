@@ -112,6 +112,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="Enter" description="Show task details" />
 				<KeyLine keys="q" description="Quit application" />
 				<KeyLine keys="?" description="Toggle this help screen" />
+				<KeyLine keys="d" description="Toggle debug overlay" />
 				<KeyLine keys="Esc" description="Back to normal mode / dismiss" />
 				<text> </text>
 
