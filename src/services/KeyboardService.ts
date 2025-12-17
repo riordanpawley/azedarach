@@ -25,6 +25,7 @@ import { CommandQueueService } from "./CommandQueueService"
 import { EditorService, type JumpTarget } from "./EditorService"
 import { NavigationService } from "./NavigationService"
 import { OverlayService } from "./OverlayService"
+import { SessionService } from "./SessionService"
 import { ToastService } from "./ToastService"
 import { ViewService } from "./ViewService"
 
@@ -99,6 +100,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		ImageAttachmentService.Default,
 		TmuxService.Default,
 		CommandQueueService.Default,
+		SessionService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -109,7 +111,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const editor = yield* EditorService
 		const board = yield* BoardService
 		const sessionManager = yield* SessionManager
-		const attachment = yield* AttachmentService
+		const _attachment = yield* AttachmentService
 		const prWorkflow = yield* PRWorkflow
 		const vc = yield* VCService
 		const beadsClient = yield* BeadsClient
@@ -118,6 +120,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const imageAttachment = yield* ImageAttachmentService
 		const tmux = yield* TmuxService
 		const commandQueue = yield* CommandQueueService
+		const sessionService = yield* SessionService
 
 		// ========================================================================
 		// Helper Functions
@@ -345,6 +348,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		/**
 		 * Start session action (Space+s)
 		 *
+		 * Delegates to SessionService.spawn() for the actual work.
 		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionStartSession = () =>
@@ -357,20 +361,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* withQueue(
-					task.id,
-					"start",
-					sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
-						Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
-						Effect.catchAll(showErrorToast("Failed to start")),
-					),
-				)
+				yield* withQueue(task.id, "start", sessionService.spawn({ taskId: task.id }))
 			})
 
 		/**
 		 * Start session with initial prompt (Space+S)
 		 * Starts Claude and tells it to "work on bead {beadId}"
 		 *
+		 * Delegates to SessionService.spawn() with initialPrompt for the actual work.
 		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionStartSessionWithPrompt = () =>
@@ -386,22 +384,15 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				yield* withQueue(
 					task.id,
 					"start",
-					sessionManager
-						.start({
-							beadId: task.id,
-							projectPath: process.cwd(),
-							initialPrompt: `work on ${task.id}`,
-						})
-						.pipe(
-							Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
-							Effect.catchAll(showErrorToast("Failed to start")),
-						),
+					sessionService.spawn({ taskId: task.id, initialPrompt: `work on ${task.id}` }),
 				)
 			})
 
 		/**
 		 * Chat about task (Space+c)
 		 * Opens a Haiku session to discuss/understand the task without working on it
+		 *
+		 * Delegates to SessionService.spawn() with model=haiku for the actual work.
 		 */
 		const actionChatAboutTask = () =>
 			Effect.gen(function* () {
@@ -413,55 +404,37 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* sessionManager
-					.start({
-						beadId: task.id,
-						projectPath: process.cwd(),
-						model: "haiku",
-						initialPrompt: `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`,
-					})
-					.pipe(
-						Effect.tap(() => toast.show("success", `Chat session started for ${task.id} (Haiku)`)),
-						Effect.catchAll(showErrorToast("Failed to start chat")),
-					)
+				yield* sessionService.spawn({
+					taskId: task.id,
+					model: "haiku",
+					initialPrompt: `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`,
+				})
 			})
 
 		/**
 		 * Attach external action (Space+a)
+		 *
+		 * Delegates to SessionService.attach() with mode=external for the actual work.
 		 */
 		const actionAttachExternal = () =>
 			Effect.gen(function* () {
 				const task = yield* getSelectedTask()
 				if (!task) return
 
-				yield* attachment.attachExternal(task.id).pipe(
-					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
-					Effect.catchAll((error) => {
-						const msg =
-							error && typeof error === "object" && "_tag" in error
-								? error._tag === "SessionNotFoundError"
-									? `No session for ${task.id} - press Space+s to start`
-									: String((error as { message?: string }).message || error)
-								: String(error)
-						return Effect.gen(function* () {
-							yield* Effect.logError(`Attach external: ${msg}`, { error })
-							yield* toast.show("error", msg)
-						})
-					}),
-				)
+				yield* sessionService.attach({ taskId: task.id, mode: "external" })
 			})
 
 		/**
 		 * Attach inline action (Space+A)
+		 *
+		 * Delegates to SessionService.attach() with mode=inline for the actual work.
 		 */
 		const actionAttachInline = () =>
 			Effect.gen(function* () {
 				const task = yield* getSelectedTask()
 				if (!task) return
 
-				yield* attachment
-					.attachInline(task.id)
-					.pipe(Effect.catchAll(showErrorToast("Failed to attach")))
+				yield* sessionService.attach({ taskId: task.id, mode: "inline" })
 			})
 
 		/**
