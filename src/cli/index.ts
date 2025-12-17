@@ -6,8 +6,7 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import * as FileSystem from "@effect/platform/FileSystem"
-import * as Path from "@effect/platform/Path"
+import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
