@@ -17,13 +17,13 @@ Purpose: Claude Code entry point for Azedarach development
 
 2. **Modern CLI Tools**: ALWAYS use `rg` (NOT grep), `fd` (NOT find), `sd` (NOT sed), `bat` (NOT cat). 10x faster, gitignore-aware.
 
-3. **Beads Tracker**: ALWAYS use `bd` CLI commands for beads operations. Use `bd search` for discovery, `bd ready` for unblocked work. NEVER use `bd list` (causes context bloat). **In worktrees: run `bd sync` manually.** See beads-tracking.skill.md for details.
+3. **Beads Tracker**: ALWAYS use `bd` CLI commands for beads operations. Use `bd search` for discovery, `bd ready` for unblocked work. NEVER use `bd list` (causes context bloat). See beads-tracking.skill.md for details.
 
-4. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
+4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams and use normal `bd sync`. If you're on a truly ephemeral branch (no upstream), DON'T run `bd sync --from-main` at session end - it overwrites local beads changes.
 
-5. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
+5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
-6. **Beads Tracking**: ALWAYS track ALL work in beads. Update notes during work. Close with summary when done.
+6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
 
 ## Quick Commands
 
