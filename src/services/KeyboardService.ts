@@ -1031,10 +1031,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1042,10 +1039,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1053,10 +1047,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task left",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("left").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("left").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1064,10 +1055,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Move task right",
 				action: Effect.suspend(() =>
-					moveTasksToColumn("right").pipe(
-						Effect.tap(() => editor.exitToNormal()),
-						Effect.catchAll(Effect.logError),
-					),
+					moveTasksToColumn("right").pipe(Effect.catchAll(Effect.logError)),
 				),
 			},
 			{
@@ -1075,7 +1063,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Start session",
 				action: Effect.suspend(() =>
-					actionStartSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStartSession())),
 				),
 			},
 			{
@@ -1083,7 +1071,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Start+work (prompt Claude)",
 				action: Effect.suspend(() =>
-					actionStartSessionWithPrompt().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStartSessionWithPrompt())),
 				),
 			},
 			{
@@ -1091,7 +1079,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Attach to session",
 				action: Effect.suspend(() =>
-					actionAttachExternal().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionAttachExternal())),
 				),
 			},
 			{
@@ -1099,7 +1087,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Attach inline",
 				action: Effect.suspend(() =>
-					actionAttachInline().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionAttachInline())),
 				),
 			},
 			{
@@ -1107,7 +1095,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Pause session",
 				action: Effect.suspend(() =>
-					actionPauseSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionPauseSession())),
 				),
 			},
 			{
@@ -1115,7 +1103,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Resume session",
 				action: Effect.suspend(() =>
-					actionResumeSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionResumeSession())),
 				),
 			},
 			{
@@ -1123,7 +1111,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Stop session",
 				action: Effect.suspend(() =>
-					actionStopSession().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionStopSession())),
 				),
 			},
 			{
@@ -1131,7 +1119,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Edit bead ($EDITOR)",
 				action: Effect.suspend(() =>
-					actionEditBead().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionEditBead())),
 				),
 			},
 			{
@@ -1139,9 +1127,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Edit bead (Claude)",
 				action: Effect.suspend(() =>
-					toast
-						.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR")
-						.pipe(Effect.tap(() => editor.exitToNormal())),
+					editor
+						.exitToNormal()
+						.pipe(
+							Effect.tap(() =>
+								toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
+							),
+						),
 				),
 			},
 			{
@@ -1149,21 +1141,21 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Create PR",
 				action: Effect.suspend(() =>
-					actionCreatePR().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionCreatePR())),
 				),
 			},
 			{
 				key: "d",
 				mode: "action",
 				description: "Cleanup worktree",
-				action: Effect.suspend(() => actionCleanup().pipe(Effect.tap(() => editor.exitToNormal()))),
+				action: Effect.suspend(() => editor.exitToNormal().pipe(Effect.tap(() => actionCleanup()))),
 			},
 			{
 				key: "m",
 				mode: "action",
 				description: "Merge to main",
 				action: Effect.suspend(() =>
-					actionMergeToMain().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionMergeToMain())),
 				),
 			},
 			{
@@ -1171,7 +1163,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				mode: "action",
 				description: "Delete bead",
 				action: Effect.suspend(() =>
-					actionDeleteBead().pipe(Effect.tap(() => editor.exitToNormal())),
+					editor.exitToNormal().pipe(Effect.tap(() => actionDeleteBead())),
 				),
 			},
 			{
@@ -1180,10 +1172,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Attach image",
 				action: Effect.gen(function* () {
 					const task = yield* getSelectedTask()
+					yield* editor.exitToNormal()
 					if (task) {
 						yield* overlay.push({ _tag: "imageAttach", taskId: task.id })
 					}
-					yield* editor.exitToNormal()
 				}),
 			},
 
