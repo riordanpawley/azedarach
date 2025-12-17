@@ -436,15 +436,35 @@ If you have tasks selected (from Select mode), Action mode commands apply to all
 3. Press `Esc` to return to Normal (selections persist)
 4. Press `Space` `l` to move all selected tasks right
 
-## Image Attachment Overlay
+## Image Attachments
 
-Press `Space` `i` to open the image attachment overlay for the selected task.
+Tasks can have images attached to provide visual context for Claude sessions.
 
-### Overlay Keys
+### Viewing & Managing Attachments (Detail Panel)
+
+When viewing a task's details (`Enter`), if it has attachments, you can navigate and manage them:
 
 | Key | Action | Description |
 |-----|--------|-------------|
-| `p` or `v` | Paste from clipboard | Attach image from system clipboard (macOS) |
+| `j` / `↓` | Select next | Move selection to next attachment |
+| `k` / `↑` | Select previous | Move selection to previous attachment (or deselect) |
+| `o` | Open | Open selected attachment in system image viewer |
+| `x` | Remove | Delete selected attachment |
+| `i` | Add | Open image attachment overlay to add more |
+| `Esc` | Close | Close detail panel |
+
+**Visual Feedback:**
+- Selected attachment is highlighted with `▶` prefix and mauve color
+- When no attachment is selected, `j` moves into attachment list
+- When first attachment is selected, `k` deselects (exits attachment navigation)
+
+### Adding Attachments (Image Attach Overlay)
+
+Press `Space` `i` to open the image attachment overlay for the selected task.
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `p` or `v` | Paste from clipboard | Attach image from system clipboard (macOS/Linux) |
 | `f` | Enter file path mode | Type a file path to attach |
 | `Esc` | Close/back | Close overlay or exit path input mode |
 
@@ -461,13 +481,14 @@ When in path input mode (after pressing `f`):
 
 ### How Image Attachment Works
 
-1. Images are stored in `.beads/attachments/{bead-id}/`
-2. A metadata entry is added to the bead's data
-3. Supported formats: PNG, JPG, GIF, WebP
+1. Images are stored in `.beads/images/{bead-id}/`
+2. Metadata is tracked in `.beads/images/index.json`
+3. Supported formats: PNG, JPG, GIF, WebP, BMP, SVG
 4. Claude sessions can reference attached images for visual context
 
-### Example Workflow
+### Example Workflows
 
+**Attaching an image:**
 ```
 1. Navigate to a task
 2. Press Space+i to open attachment overlay
@@ -475,6 +496,22 @@ When in path input mode (after pressing `f`):
    a. Copy an image to clipboard, then press 'p' to paste
    b. Press 'f', type "/path/to/screenshot.png", press Enter
 4. Success toast confirms attachment
+```
+
+**Viewing an attached image:**
+```
+1. Navigate to a task with attachments
+2. Press Enter to open detail panel
+3. Press j to select first attachment
+4. Press o to open in system viewer
+```
+
+**Removing an attachment:**
+```
+1. Navigate to a task with attachments
+2. Press Enter to open detail panel
+3. Press j/k to select the attachment to remove
+4. Press x to delete it
 ```
 
 ## Status Bar Indicators
