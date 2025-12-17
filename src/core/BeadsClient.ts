@@ -172,6 +172,14 @@ export interface BeadsClientService {
 	) => Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
+	 * Import-only sync - re-imports beads from JSONL into database without git operations.
+	 * Use after git merge to recover any beads incorrectly removed by the merge driver.
+	 */
+	readonly syncImportOnly: (
+		cwd?: string,
+	) => Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+
+	/**
 	 * Get ready (unblocked) issues
 	 *
 	 * @example
@@ -458,6 +466,17 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const output = yield* runBd(["sync"], cwd)
 
 					// Parse sync output - bd sync returns statistics
+					return yield* parseJson(SyncResultSchema, output)
+				}),
+
+			/**
+			 * Import-only sync - re-imports beads from JSONL into database without git operations.
+			 * Use after git merge to recover any beads that might have been incorrectly
+			 * removed by the bd merge driver.
+			 */
+			syncImportOnly: (cwd?: string) =>
+				Effect.gen(function* () {
+					const output = yield* runBd(["sync", "--import-only"], cwd)
 					return yield* parseJson(SyncResultSchema, output)
 				}),
 
