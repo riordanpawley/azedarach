@@ -103,6 +103,34 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					Effect.asVoid,
 					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
 				),
+
+			/**
+			 * Display a popup window with a command
+			 *
+			 * Opens a centered popup window that runs the specified command.
+			 * The -E flag closes the popup when the command exits.
+			 *
+			 * @param opts.command - Command to run in the popup
+			 * @param opts.width - Width as percentage (default "80%")
+			 * @param opts.height - Height as percentage (default "80%")
+			 * @param opts.title - Optional title for the popup border
+			 */
+			displayPopup: (opts: { command: string; width?: string; height?: string; title?: string }) =>
+				Effect.gen(function* () {
+					const args = [
+						"display-popup",
+						"-E", // Close popup when command exits
+						"-w",
+						opts.width ?? "80%",
+						"-h",
+						opts.height ?? "80%",
+					]
+					if (opts.title) {
+						args.push("-T", opts.title)
+					}
+					args.push(opts.command)
+					yield* runTmux(args)
+				}),
 		}
 	}),
 }) {}
