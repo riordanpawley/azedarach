@@ -13,14 +13,15 @@ import { AppConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
-import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { HookReceiver, mapEventToState } from "../core/HookReceiver"
+import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
 import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TerminalService } from "../core/TerminalService"
 import { TmuxService } from "../core/TmuxService"
 import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
+import { ClockService } from "../services/ClockService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 import { KeyboardService } from "../services/KeyboardService"
@@ -40,6 +41,7 @@ const appLayer = Layer.mergeAll(
 	AttachmentService.Default,
 	ImageAttachmentService.Default,
 	BoardService.Default,
+	ClockService.Default,
 	TmuxService.Default,
 	BeadEditorService.Default,
 	ModeService.Default,
@@ -613,6 +615,23 @@ export const handleKeyAtom = appRuntime.fn((key: string) =>
 // ============================================================================
 // Atomic Service State Atoms (ModeService, NavigationService, etc.)
 // ============================================================================
+
+/**
+ * Clock tick atom - current timestamp updated every second
+ *
+ * Used for elapsed timer displays on TaskCards. Subscribing to this atom
+ * triggers re-renders every second, allowing components to derive elapsed
+ * time from session start timestamps.
+ *
+ * Usage: const now = useAtomValue(clockTickAtom)
+ *        const elapsed = now - sessionStartedAt
+ */
+export const clockTickAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const clock = yield* ClockService
+		return clock.now
+	}),
+)
 
 /**
  * Editor mode atom - subscribes to ModeService mode changes
