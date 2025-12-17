@@ -175,7 +175,12 @@ export interface ColumnInfo {
 // ============================================================================
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
-	dependencies: [SessionManager.Default, BeadsClient.Default, EditorService.Default, PTYMonitor.Default],
+	dependencies: [
+		SessionManager.Default,
+		BeadsClient.Default,
+		EditorService.Default,
+		PTYMonitor.Default,
+	],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
