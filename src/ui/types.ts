@@ -16,6 +16,18 @@ export type SessionState =
 	| "paused" // Session paused
 
 /**
+ * Agent workflow phase
+ *
+ * Claude Code sessions typically follow a Planning → Action → Verification cycle.
+ * Phases are detected from output patterns and displayed on TaskCards.
+ */
+export type AgentPhase =
+	| "idle" // No active phase (session not running or just started)
+	| "planning" // Claude is analyzing/planning ("I'll...", "Let me...", "First...")
+	| "action" // Claude is executing (tool calls, writing code)
+	| "verification" // Claude is testing/validating (running tests, type-check)
+
+/**
  * Session metrics for monitoring context health
  *
  * These metrics are populated when a Claude session is active and
@@ -34,6 +46,8 @@ export interface SessionMetrics {
 	lastCompactedAt?: string
 	/** Recent output snippet for monitoring session progress */
 	recentOutput?: string
+	/** Current agent workflow phase (planning/action/verification) */
+	agentPhase?: AgentPhase
 }
 
 /**
@@ -69,6 +83,29 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 	done: "✅",
 	error: "❌",
 	paused: "⏸️",
+}
+
+/**
+ * Agent phase indicators
+ *
+ * Displayed alongside session indicator when phase is detected.
+ * Uses distinct shapes to differentiate from session state circles.
+ */
+export const PHASE_INDICATORS: Record<AgentPhase, string> = {
+	idle: "",
+	planning: "📋", // Clipboard = planning/thinking
+	action: "⚙️", // Gear = executing/working
+	verification: "🧪", // Test tube = testing/validating
+}
+
+/**
+ * Agent phase display labels
+ */
+export const PHASE_LABELS: Record<AgentPhase, string> = {
+	idle: "",
+	planning: "Planning",
+	action: "Action",
+	verification: "Verification",
 }
 
 /**

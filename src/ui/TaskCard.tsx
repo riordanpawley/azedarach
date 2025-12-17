@@ -4,7 +4,7 @@
 
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
-import { SESSION_INDICATORS } from "./types"
+import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
 
 /** Height of each task card in terminal rows */
 export const TASK_CARD_HEIGHT = 6
@@ -86,6 +86,12 @@ export const TaskCard = (props: TaskCardProps) => {
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
 
+	// Get phase indicator (only show when session is active and phase is detected)
+	const phaseIndicator =
+		props.task.sessionState !== "idle" && props.task.agentPhase
+			? PHASE_INDICATORS[props.task.agentPhase]
+			: ""
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -95,6 +101,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
+		if (phaseIndicator) {
+			line += ` ${phaseIndicator}`
 		}
 		// Show attachment indicator if there are attachments
 		if (props.attachmentCount && props.attachmentCount > 0) {
