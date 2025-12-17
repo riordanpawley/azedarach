@@ -79,16 +79,16 @@ export interface MergeToMainOptions {
 }
 
 /**
- * Result of merge conflict check
+ * Result of merge conflict check using git merge-tree
  */
 export interface MergeConflictCheck {
-	/** Whether conflicts are likely (files modified in both branches) */
+	/** Whether actual merge conflicts exist (line-level, not just file overlap) */
 	readonly hasConflictRisk: boolean
-	/** Files modified in both main and branch since divergence */
+	/** Files with actual merge conflicts */
 	readonly conflictingFiles: readonly string[]
-	/** Total files changed in the branch */
+	/** Total files changed in the branch (informational) */
 	readonly branchChangedFiles: number
-	/** Total files changed in main since divergence */
+	/** Total files changed in main since divergence (informational) */
 	readonly mainChangedFiles: number
 }
 
@@ -257,12 +257,14 @@ export interface PRWorkflowService {
 	>
 
 	/**
-	 * Check for potential merge conflicts without actually merging
+	 * Check for actual merge conflicts without touching index or worktree
 	 *
-	 * This performs a safe, read-only check by:
-	 * 1. Finding the merge base between main and the branch
-	 * 2. Comparing which files changed on each side since divergence
-	 * 3. Reporting files that changed on both sides (conflict risk)
+	 * Uses git merge-tree to perform a real 3-way merge in memory:
+	 * - Detects actual line-level conflicts, not just file overlap
+	 * - Handles rename detection and directory/file conflicts
+	 * - Returns exit code 0 for clean merge, 1 for conflicts
+	 *
+	 * This is safe to call at any time - it never modifies any files.
 	 *
 	 * @example
 	 * ```ts
@@ -271,7 +273,8 @@ export interface PRWorkflowService {
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * if (check.hasConflictRisk) {
-	 *   console.log("Potential conflicts in:", check.conflictingFiles)
+	 *   // Real conflicts exist - must resolve before merge
+	 *   console.log("Conflicts in:", check.conflictingFiles)
 	 * }
 	 * ```
 	 */

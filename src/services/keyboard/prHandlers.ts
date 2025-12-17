@@ -98,9 +98,11 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		/**
 		 * Merge worktree to main action (Space+m)
 		 *
-		 * Checks for potential merge conflicts before merging. If conflicts are
-		 * likely (files modified in both branches), shows a confirmation dialog.
-		 * Otherwise proceeds directly with the merge.
+		 * Performs a safe merge check using git merge-tree (in-memory 3-way merge).
+		 * - Clean merges proceed directly without confirmation
+		 * - If conflicts detected, offers to ask Claude to resolve them
+		 * - Claude resolution merges main into worktree, then prompts Claude
+		 * - User retries Space+m after Claude resolves
 		 * Blocked if task already has an operation in progress.
 		 */
 		mergeToMain: () =>
@@ -136,17 +138,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					)
 
 				if (conflictCheck.hasConflictRisk) {
-					// Show confirmation dialog with conflict warning
+					// Offer to ask Claude to resolve the conflicts
 					const fileList =
 						conflictCheck.conflictingFiles.length > 0
-							? `\n\nConflicting files:\n${conflictCheck.conflictingFiles.slice(0, 5).join("\n")}${
-									conflictCheck.conflictingFiles.length > 5
-										? `\n... and ${conflictCheck.conflictingFiles.length - 5} more`
-										: ""
-								}`
-							: ""
+							? conflictCheck.conflictingFiles.slice(0, 5).join(", ") +
+								(conflictCheck.conflictingFiles.length > 5
+									? ` (+${conflictCheck.conflictingFiles.length - 5} more)`
+									: "")
+							: "unknown files"
 
-					const message = `Merge ${task.id} may have conflicts.${fileList}\n\nMerge will be attempted in the worktree first - main won't be affected if conflicts occur.\n\nProceed?`
+					const message = `Conflicts detected in: ${fileList}\n\nAsk Claude to resolve them?`
 
 					yield* ctx.overlay.push({
 						_tag: "confirm",
