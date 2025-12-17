@@ -395,25 +395,30 @@ ${description}
 Create the bead now and output just the ID.`
 
 		// Build command arguments for non-interactive print mode
+		// Use Haiku model for fast task creation (avoids timeout issues with slower models)
 		// Pre-approve bd CLI commands and beads MCP tools to avoid permission hang in non-interactive mode
+		// MCP tools need set_context before create, so allow all beads MCP tools
 		const args = [
 			"-p",
 			prompt,
+			"--model",
+			"haiku",
 			"--output-format",
 			"text",
 			"--allowedTools",
 			"Bash(bd:*)",
-			"mcp__plugin_beads_beads__create",
+			"mcp__plugin_beads_beads__*",
 		]
 		if (dangerouslySkipPermissions) {
 			args.push("--dangerously-skip-permissions")
 		}
 
 		// Run claude CLI in non-interactive print mode
+		// 20 second timeout - Haiku should be fast; on failure show toast instead of crashing
 		const claudeCmd = Command.make("claude", ...args).pipe(Command.workingDirectory(projectPath))
 
 		const result = yield* Command.string(claudeCmd).pipe(
-			Effect.timeout("120 seconds"),
+			Effect.timeout("20 seconds"),
 			Effect.mapError((e) => new Error(`Claude CLI failed: ${e}`)),
 		)
 
@@ -453,7 +458,16 @@ Create the bead now and output just the ID.`
 		yield* toast.show("success", `Created task: ${beadId}`)
 
 		return beadId
-	}).pipe(Effect.tapError(Effect.logError)),
+	}).pipe(
+		Effect.catchAll((error) =>
+			Effect.gen(function* () {
+				yield* Effect.logError(error)
+				const toast = yield* ToastService
+				yield* toast.show("error", "Failed to create task - try again or use 'c' for manual create")
+				return "error" as const
+			}),
+		),
+	),
 )
 
 // ============================================================================
