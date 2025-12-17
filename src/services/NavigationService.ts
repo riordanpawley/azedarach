@@ -190,35 +190,25 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					let newTaskIdx = taskIndex
 
 					switch (direction) {
-						case "up":
+						case "up": {
+							const column = tasksByColumn[columnIndex]!
 							if (taskIndex > 0) {
 								// Move up within the same column
 								newTaskIdx = taskIndex - 1
 							} else {
-								// At the top of column, move to previous column's last task
-								for (let col = columnIndex - 1; col >= 0; col--) {
-									if (tasksByColumn[col]!.length > 0) {
-										newColIdx = col
-										newTaskIdx = tasksByColumn[col]!.length - 1
-										break
-									}
-								}
+								// At the top of column, wrap to bottom
+								newTaskIdx = column.length - 1
 							}
 							break
+						}
 						case "down": {
 							const column = tasksByColumn[columnIndex]!
 							if (taskIndex < column.length - 1) {
 								// Move down within the same column
 								newTaskIdx = taskIndex + 1
 							} else {
-								// At the bottom of column, move to next column's first task
-								for (let col = columnIndex + 1; col < tasksByColumn.length; col++) {
-									if (tasksByColumn[col]!.length > 0) {
-										newColIdx = col
-										newTaskIdx = 0
-										break
-									}
-								}
+								// At the bottom of column, wrap to top
+								newTaskIdx = 0
 							}
 							break
 						}
