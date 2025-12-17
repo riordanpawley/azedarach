@@ -348,6 +348,33 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
+		 * Chat about task (Space+c)
+		 * Opens a Haiku session to discuss/understand the task without working on it
+		 */
+		const actionChatAboutTask = () =>
+			Effect.gen(function* () {
+				const task = yield* getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState !== "idle") {
+					yield* toast.show("error", `Cannot start chat: task is ${task.sessionState}`)
+					return
+				}
+
+				yield* sessionManager
+					.start({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						model: "haiku",
+						initialPrompt: `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`,
+					})
+					.pipe(
+						Effect.tap(() => toast.show("success", `Chat session started for ${task.id} (Haiku)`)),
+						Effect.catchAll(showErrorToast("Failed to start chat")),
+					)
+			})
+
+		/**
 		 * Attach external action (Space+a)
 		 */
 		const actionAttachExternal = () =>
@@ -1072,6 +1099,14 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 				description: "Start+work (prompt Claude)",
 				action: Effect.suspend(() =>
 					editor.exitToNormal().pipe(Effect.tap(() => actionStartSessionWithPrompt())),
+				),
+			},
+			{
+				key: "c",
+				mode: "action",
+				description: "Chat (Haiku)",
+				action: Effect.suspend(() =>
+					editor.exitToNormal().pipe(Effect.tap(() => actionChatAboutTask())),
 				),
 			},
 			{
