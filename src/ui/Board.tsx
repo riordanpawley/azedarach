@@ -22,6 +22,8 @@ export interface BoardProps {
 	pendingJumpKey?: string | null
 	terminalHeight?: number
 	viewMode?: ViewMode
+	/** Whether action mode is active (selected card gets prominent border) */
+	isActionMode?: boolean
 }
 
 /**
@@ -76,6 +78,7 @@ export const Board = (props: BoardProps) => {
 				jumpLabels={props.jumpLabels}
 				pendingJumpKey={props.pendingJumpKey}
 				terminalHeight={props.terminalHeight}
+				isActionMode={props.isActionMode}
 			/>
 		)
 	}
@@ -100,6 +103,7 @@ export const Board = (props: BoardProps) => {
 						taskJumpLabels={taskJumpLabels}
 						pendingJumpKey={props.pendingJumpKey}
 						maxVisible={props.terminalHeight}
+						isActionMode={props.isActionMode}
 					/>
 				)
 			})}
