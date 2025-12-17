@@ -66,6 +66,28 @@ const PatternsConfigSchema = Schema.Struct({
 })
 
 /**
+ * Git configuration
+ *
+ * Controls git behavior for worktrees and branches.
+ */
+const GitConfigSchema = Schema.Struct({
+	/**
+	 * Push branches after worktree creation (default: true)
+	 *
+	 * When true, runs `git push -u <remote> <branch>` after creating worktrees.
+	 * This makes branches non-ephemeral, enabling normal `bd sync` behavior.
+	 * Set to false for local-only development without a remote.
+	 */
+	pushBranchOnCreate: Schema.optional(Schema.Boolean),
+
+	/** Remote to push to (default: "origin") */
+	remote: Schema.optional(Schema.String),
+
+	/** Prefix for branch names (default: "az-") */
+	branchPrefix: Schema.optional(Schema.String),
+})
+
+/**
  * PR workflow configuration
  *
  * Controls automatic PR creation behavior.
@@ -107,6 +129,9 @@ export const AzedarachConfigSchema = Schema.Struct({
 	/** Worktree lifecycle configuration */
 	worktree: Schema.optional(WorktreeConfigSchema),
 
+	/** Git behavior configuration */
+	git: Schema.optional(GitConfigSchema),
+
 	/** Claude session configuration */
 	session: Schema.optional(SessionConfigSchema),
 
@@ -132,6 +157,9 @@ export type AzedarachConfig = Schema.Schema.Type<typeof AzedarachConfigSchema>
 
 /** Worktree config section type */
 export type WorktreeConfig = Schema.Schema.Type<typeof WorktreeConfigSchema>
+
+/** Git config section type */
+export type GitConfig = Schema.Schema.Type<typeof GitConfigSchema>
 
 /** Session config section type */
 export type SessionConfig = Schema.Schema.Type<typeof SessionConfigSchema>

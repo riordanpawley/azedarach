@@ -4,6 +4,11 @@
 		"continueOnFailure": true,
 		"parallel": false
 	},
+	"git": {
+		"pushBranchOnCreate": true,
+		"remote": "origin",
+		"branchPrefix": "az-"
+	},
 	"session": {
 		"command": "claude",
 		"shell": "zsh",
