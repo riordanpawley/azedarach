@@ -51,15 +51,36 @@
 | `blocked` | Waiting on dependencies | `bd update <id> --status=blocked` |
 | `closed` | Work completed or abandoned | `bd close <id>` |
 
-## Git Worktree Support
+## Git Worktree & Branch Support
 
-**CRITICAL: Manual sync required in worktrees!**
+### Branches WITH Upstream (Pushed)
 
-**Main worktree**: Auto-sync works normally
+Normal workflow - `bd sync` works bidirectionally:
+```bash
+bd sync   # Commits beads, pushes to upstream, pulls from remote
+```
 
-**Other worktrees**:
-- `BEADS_NO_DAEMON=1` should be set via `.envrc`
-- **You MUST run `bd sync` manually** at session end
+### Branches WITHOUT Upstream (Ephemeral)
+
+**CRITICAL**: `bd sync --from-main` OVERWRITES local beads changes!
+
+**Best practice**: Push the branch to create an upstream:
+```bash
+git push -u origin branch-name   # Now bd sync works normally
+```
+
+**If you can't push**: Don't use `--from-main` at session end. Instead:
+```bash
+git add -A        # Includes .beads/ changes
+git commit
+# Merge to main later - beads changes propagate via git merge
+```
+
+### Worktrees
+
+- **BEADS_NO_DAEMON=1** should be set via `.envrc`
+- Push the worktree branch at creation time for best results
+- Run `bd sync` manually at session end
 
 ## Critical Patterns
 
