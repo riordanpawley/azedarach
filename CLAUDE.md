@@ -273,6 +273,43 @@ yield* Effect.scheduleForked(Schedule.spaced("1 second"))(
 )
 ```
 
+**Effect.fork vs Effect.forkScoped - CRITICAL:**
+
+`Effect.fork` creates a fiber that is interrupted when the parent effect completes. This is almost always the WRONG choice for background tasks that need to outlive the spawning effect.
+
+```typescript
+// ❌ BAD: Fiber is immediately interrupted after start() returns
+const start = (handler: Handler) =>
+  Effect.gen(function* () {
+    const fiber = yield* pollingEffect.pipe(
+      Effect.repeat(Schedule.spaced("500 millis")),
+      Effect.fork,  // ❌ Fiber dies when start() returns!
+    )
+    return fiber
+  })
+
+// ✅ GOOD: Use scoped service + forkScoped for long-running tasks
+export class MyService extends Effect.Service<MyService>()("MyService", {
+  scoped: Effect.gen(function* () {  // Note: scoped, not effect
+    // Fiber lives for service lifetime (tied to scope)
+    yield* pollingEffect.pipe(
+      Effect.repeat(Schedule.spaced("500 millis")),
+      Effect.forkScoped,  // ✅ Lives for scope duration
+    )
+    return { /* service methods */ }
+  }),
+}) {}
+
+// ✅ ALSO GOOD: Use Effect.scheduleForked which is scoped by default
+yield* Effect.scheduleForked(Schedule.spaced("500 millis"))(pollingEffect)
+```
+
+**When to use each:**
+- `Effect.fork` - Fire-and-forget within a long-running parent (rare)
+- `Effect.forkScoped` - Background task that should live for scope duration
+- `Effect.scheduleForked` - Scheduled polling with proper scoping (preferred)
+- `Effect.forkDaemon` - Background task that survives parent interruption
+
 ### Mutation Flow
 
 ```

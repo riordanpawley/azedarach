@@ -21,7 +21,7 @@
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
 import type { AgentPhase, SessionState } from "../ui/types.js"
 import { SessionManager } from "./SessionManager.js"
-import { StateDetector, type DetectionResult } from "./StateDetector.js"
+import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -252,9 +252,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 
 				if (detectedState && !hookHasPriority) {
 					// Get current state from SessionManager
-					const currentState = yield* sessionManager.getState(beadId).pipe(
-						Effect.catchAll(() => Effect.succeed("idle" as SessionState)),
-					)
+					const currentState = yield* sessionManager
+						.getState(beadId)
+						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))
 
 					// Determine if we should update state
 					// PTY can transition: idle → busy, busy → error, busy → done
