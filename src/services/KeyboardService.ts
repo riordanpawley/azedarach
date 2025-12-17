@@ -15,7 +15,7 @@ import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
 import { ImageAttachmentService } from "../core/ImageAttachmentService"
-import { type MergeConflictError, PRWorkflow } from "../core/PRWorkflow"
+import { PRWorkflow } from "../core/PRWorkflow"
 import { SessionManager } from "../core/SessionManager"
 import { TmuxService } from "../core/TmuxService"
 import { VCService } from "../core/VCService"
@@ -23,6 +23,7 @@ import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
 import { CommandQueueService } from "./CommandQueueService"
 import { EditorService, type JumpTarget } from "./EditorService"
+import { formatForToast } from "./ErrorFormatter"
 import { NavigationService } from "./NavigationService"
 import { OverlayService } from "./OverlayService"
 import { ToastService } from "./ToastService"
@@ -148,21 +149,18 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		/**
-		 * Show error toast for any failure
-		 * Also logs the error via Effect.logError for debugging
+		 * Show error toast for any failure with actionable guidance
+		 * Uses ErrorFormatter for user-friendly messages and suggestions
+		 * Also logs the full error via Effect.logError for debugging
 		 */
 		const showErrorToast =
 			(prefix: string) =>
-			(error: unknown): Effect.Effect<void> => {
-				const message =
-					error && typeof error === "object" && "message" in error
-						? String((error as { message: string }).message)
-						: String(error)
-				return Effect.gen(function* () {
-					yield* Effect.logError(`${prefix}: ${message}`, { error })
-					yield* toast.show("error", `${prefix}: ${message}`)
+			(error: unknown): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					const formatted = formatForToast(error)
+					yield* Effect.logError(`${prefix}: ${formatted}`, { error })
+					yield* toast.show("error", `${prefix}: ${formatted}`)
 				})
-			}
 
 		/**
 		 * Open detail overlay for current cursor position
@@ -666,15 +664,9 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					yield* prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
 						Effect.tap(() => board.refresh()),
 						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
-						Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
-							if (error._tag === "MergeConflictError") {
-								return toast.show("error", `Merge conflict: ${error.message}`)
-							}
-							const msg =
-								error && typeof error === "object" && "message" in error
-									? String(error.message)
-									: String(error)
-							return toast.show("error", `Merge failed: ${msg}`)
+						Effect.catchAll((error: unknown) => {
+							const formatted = formatForToast(error)
+							return toast.show("error", `Merge failed: ${formatted}`)
 						}),
 					)
 				}),
