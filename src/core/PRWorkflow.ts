@@ -295,13 +295,16 @@ const runGit = (
 	Effect.gen(function* () {
 		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 		return yield* Command.string(command).pipe(
-			Effect.mapError(
-				(error) =>
-					new GitError({
-						message: `git ${args.join(" ")} failed: ${error}`,
-						command: `git ${args.join(" ")}`,
-					}),
-			),
+			Effect.mapError((error) => {
+				// Extract stderr from platform error (like BeadsClient does)
+				// This is critical for conflict detection which checks stderr for "CONFLICT"
+				const stderr = "stderr" in error ? String(error.stderr) : String(error)
+				return new GitError({
+					message: `git ${args.join(" ")} failed: ${stderr}`,
+					command: `git ${args.join(" ")}`,
+					stderr,
+				})
+			}),
 		)
 	})
 
