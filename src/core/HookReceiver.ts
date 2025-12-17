@@ -13,8 +13,8 @@
  * }
  *
  * Event to SessionState mapping:
- * - idle_prompt → "waiting" (Claude waiting for user input 60s+)
- * - stop → (no change) (Claude finished responding, but task continues)
+ * - idle_prompt → "waiting" (Claude waiting for user input 60s+, fallback)
+ * - stop → "waiting" (Claude finished responding, waiting for user input)
  * - session_end → "idle" (Session terminated)
  */
 
@@ -91,9 +91,8 @@ export const mapEventToState = (event: HookEventType): SessionState | null => {
 			// Session terminated - return to idle
 			return "idle"
 		case "stop":
-			// Claude finished responding, but this doesn't change the session state
-			// The session continues - it could be busy, waiting, or done
-			return null
+			// Claude finished responding and is now waiting for user input
+			return "waiting"
 		default:
 			return null
 	}
