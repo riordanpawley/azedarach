@@ -137,9 +137,6 @@ set -g focus-events on
 # Enable mouse support
 set -g mouse on
 
-# Unbind Ctrl-u from root table (let it pass through to editors)
-unbind -T root C-u
-
 # -----------------------------------------------------------------------------
 # Prefix Key
 # -----------------------------------------------------------------------------

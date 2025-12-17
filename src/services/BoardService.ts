@@ -5,16 +5,25 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
-import { Cause, Effect, Record, Schedule, SubscriptionRef } from "effect"
+import {
+	Array as Arr,
+	Cause,
+	Effect,
+	Order,
+	Record,
+	Schedule,
+	Stream,
+	SubscriptionRef,
+} from "effect"
 import { BeadsClient } from "../core/BeadsClient"
 import { SessionManager } from "../core/SessionManager"
 import { emptyRecord } from "../lib/empty"
 import type { TaskWithSession } from "../ui/types"
 import { COLUMNS } from "../ui/types"
-import type { SortConfig } from "./EditorService"
+import { EditorService, type SortConfig } from "./EditorService"
 
 // ============================================================================
-// Helpers
+// Sort Orders using Effect's composable Order module
 // ============================================================================
 
 /**
@@ -38,41 +47,91 @@ const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => 
 }
 
 /**
- * Sort tasks by the given configuration
+ * Primary sort: tasks with active sessions (not idle) always come first.
+ * This ensures that after actions like "space m" (move task), active sessions
+ * remain visible at the top regardless of the selected sort mode.
+ */
+const byHasActiveSession: Order.Order<TaskWithSession> = Order.mapInput(
+	Order.boolean,
+	(task: TaskWithSession) => task.sessionState === "idle", // false (has session) < true (idle)
+)
+
+/**
+ * Sort by detailed session state (busy > waiting > paused > done > error > idle)
+ */
+const bySessionState: Order.Order<TaskWithSession> = Order.mapInput(
+	Order.number,
+	(task: TaskWithSession) => getSessionSortValue(task.sessionState),
+)
+
+/**
+ * Sort by priority (lower number = higher priority, P0 is most urgent)
+ */
+const byPriority: Order.Order<TaskWithSession> = Order.mapInput(
+	Order.number,
+	(task: TaskWithSession) => task.priority,
+)
+
+/**
+ * Sort by updated_at timestamp (most recent first when reversed)
+ */
+const byUpdatedAt: Order.Order<TaskWithSession> = Order.mapInput(
+	Order.number,
+	(task: TaskWithSession) => new Date(task.updated_at).getTime(),
+)
+
+/**
+ * Build a composite sort order based on user's configuration.
+ *
+ * All sort modes share the same structure:
+ * 1. Active sessions first (tasks with sessionState !== "idle")
+ * 2. User's primary sort field (with direction)
+ * 3. Secondary sort by updatedAt (most recent first)
+ * 4. Tie-breakers for remaining criteria
+ */
+const buildSortOrder = (sortConfig: SortConfig): Order.Order<TaskWithSession> => {
+	const applyDirection = (order: Order.Order<TaskWithSession>): Order.Order<TaskWithSession> =>
+		sortConfig.direction === "desc" ? Order.reverse(order) : order
+
+	switch (sortConfig.field) {
+		case "session":
+			// Session mode: active first → session state (with direction) → priority → updatedAt
+			return Order.combine(
+				byHasActiveSession,
+				Order.combine(
+					applyDirection(bySessionState),
+					Order.combine(byPriority, Order.reverse(byUpdatedAt)),
+				),
+			)
+
+		case "priority":
+			// Priority mode: active first → priority (with direction) → updatedAt → session state
+			return Order.combine(
+				byHasActiveSession,
+				Order.combine(
+					applyDirection(byPriority),
+					Order.combine(Order.reverse(byUpdatedAt), bySessionState),
+				),
+			)
+
+		case "updated":
+			// Updated mode: active first → updatedAt (with direction) → session state → priority
+			return Order.combine(
+				byHasActiveSession,
+				Order.combine(
+					applyDirection(Order.reverse(byUpdatedAt)), // reverse twice for desc = chronological
+					Order.combine(bySessionState, byPriority),
+				),
+			)
+	}
+}
+
+/**
+ * Sort tasks by the given configuration using Effect's composable Order module
  */
 const sortTasks = (tasks: TaskWithSession[], sortConfig: SortConfig): TaskWithSession[] => {
-	return [...tasks].sort((a, b) => {
-		const direction = sortConfig.direction === "desc" ? -1 : 1
-
-		switch (sortConfig.field) {
-			case "session": {
-				const sessionDiff =
-					getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-				if (sessionDiff !== 0) return sessionDiff * direction
-				const priorityDiff = a.priority - b.priority
-				if (priorityDiff !== 0) return priorityDiff
-				return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-			}
-			case "priority": {
-				const priorityDiff = a.priority - b.priority
-				if (priorityDiff !== 0) return priorityDiff * direction
-				const sessionDiff =
-					getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-				if (sessionDiff !== 0) return sessionDiff
-				return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-			}
-			case "updated": {
-				const dateDiff = new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-				if (dateDiff !== 0) return dateDiff * direction
-				const sessionDiff =
-					getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-				if (sessionDiff !== 0) return sessionDiff
-				return a.priority - b.priority
-			}
-			default:
-				return 0
-		}
-	})
+	const order = buildSortOrder(sortConfig)
+	return Arr.sort(tasks, order)
 }
 
 /**
@@ -114,17 +173,23 @@ export interface ColumnInfo {
 // ============================================================================
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
-	dependencies: [SessionManager.Default, BeadsClient.Default],
+	dependencies: [SessionManager.Default, BeadsClient.Default, EditorService.Default],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
+		const editorService = yield* EditorService
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
 		const tasksByColumn = yield* SubscriptionRef.make<
 			Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
 		>(emptyRecord())
+
+		// Filtered and sorted tasks by column - single source of truth for UI
+		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
+			COLUMNS.map(() => []),
+		)
 
 		/**
 		 * Load tasks from BeadsClient and merge with session state
@@ -134,17 +199,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Fetch all issues from beads
 				const issues = yield* beadsClient.list()
 
-				// Get active sessions to merge their state
+				// Get active sessions to merge their state and metrics
 				const activeSessions = yield* sessionManager.listActive()
-				const sessionStateMap = new Map(
-					activeSessions.map((session) => [session.beadId, session.state]),
-				)
+				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 
-				// Map issues to TaskWithSession, using real session state if available
-				const tasksWithSession: TaskWithSession[] = issues.map((issue) => ({
-					...issue,
-					sessionState: sessionStateMap.get(issue.id) ?? ("idle" as const),
-				}))
+				// Map issues to TaskWithSession, merging session state and available metrics
+				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
+					const session = sessionMap.get(issue.id)
+					return {
+						...issue,
+						sessionState: session?.state ?? ("idle" as const),
+						// Map available session metrics
+						sessionStartedAt: session?.startedAt?.toISOString(),
+					}
+				})
 
 				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
 				const withSessions = tasksWithSession.filter((t) => t.sessionState !== "idle").length
@@ -177,6 +245,35 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		}
 
 		/**
+		 * Compute filtered and sorted tasks by column
+		 */
+		const computeFilteredTasksByColumn = (
+			allTasks: ReadonlyArray<TaskWithSession>,
+			searchQuery: string,
+			sortConfig: SortConfig,
+		): TaskWithSession[][] => {
+			return COLUMNS.map((col) => {
+				const columnTasks = allTasks.filter((task) => task.status === col.status)
+				const filtered = filterTasks(columnTasks, searchQuery)
+				return sortTasks(filtered, sortConfig)
+			})
+		}
+
+		/**
+		 * Update filteredTasksByColumn based on current state
+		 */
+		const updateFilteredTasks = () =>
+			Effect.gen(function* () {
+				const allTasks = yield* SubscriptionRef.get(tasks)
+				const mode = yield* editorService.getMode()
+				const sortConfig = yield* editorService.getSortConfig()
+				const searchQuery = mode._tag === "search" ? mode.query : ""
+
+				const computed = computeFilteredTasksByColumn(allTasks, searchQuery, sortConfig)
+				yield* SubscriptionRef.set(filteredTasksByColumn, computed)
+			})
+
+		/**
 		 * Refresh board data from BeadsClient
 		 */
 		const refresh = () =>
@@ -186,8 +283,21 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const grouped = groupTasksByColumn(loadedTasks)
 				yield* SubscriptionRef.set(tasksByColumn, grouped)
+
+				// Also update filtered/sorted view
+				yield* updateFilteredTasks()
 			})
 
+		// Initial data load - run immediately since Schedule.spaced waits before first execution
+		yield* refresh().pipe(
+			Effect.catchAllCause((cause) =>
+				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
+					Effect.asVoid,
+				),
+			),
+		)
+
+		// Background task refresh (every 2 seconds)
 		yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(
 			refresh().pipe(
 				Effect.catchAllCause((cause) =>
@@ -195,10 +305,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			),
 		)
+
+		// Watch for EditorService changes (mode, sortConfig) and update filteredTasksByColumn
+		// Merge the change streams so any change triggers an update
+		const modeChanges = editorService.mode.changes
+		const sortConfigChanges = editorService.sortConfig.changes
+		const editorChanges = Stream.merge(modeChanges, sortConfigChanges)
+
+		yield* Effect.forkScoped(
+			Stream.runForEach(editorChanges, () =>
+				updateFilteredTasks().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logError("FilteredTasks update failed", Cause.pretty(cause)).pipe(Effect.asVoid),
+					),
+				),
+			),
+		)
 		return {
 			// State refs (fine-grained for external subscription)
 			tasks,
 			tasksByColumn,
+			filteredTasksByColumn,
 
 			/**
 			 * Get all tasks

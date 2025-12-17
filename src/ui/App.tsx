@@ -7,13 +7,13 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { useCallback, useEffect, useMemo } from "react"
+import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/EditorService"
 import { ActionPalette } from "./ActionPalette"
 import {
-	boardTasksAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
+	filteredTasksByColumnAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
 	refreshBoardAtom,
@@ -35,7 +35,6 @@ import { StatusBar } from "./StatusBar"
 import { TASK_CARD_HEIGHT } from "./TaskCard"
 import { ToastContainer } from "./Toast"
 import { theme } from "./theme"
-import { COLUMNS, type TaskWithSession } from "./types"
 
 // ============================================================================
 // Constants
@@ -54,25 +53,6 @@ const CHROME_HEIGHT =
 	COLUMN_UNDERLINE_HEIGHT +
 	SCROLL_INDICATORS_HEIGHT +
 	TMUX_STATUS_BAR_HEIGHT
-
-// Helper function for session state sorting (defined outside component for stable reference)
-const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
-	// Active sessions (busy, waiting) first, then paused, then done/error, then idle
-	switch (state) {
-		case "busy":
-			return 0
-		case "waiting":
-			return 1
-		case "paused":
-			return 2
-		case "done":
-			return 3
-		case "error":
-			return 4
-		case "idle":
-			return 5
-	}
-}
 
 // ============================================================================
 // App Component
@@ -114,8 +94,10 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	// Use BoardService as single source of truth for task data
-	// This ensures UI updates when KeyboardService calls board.refresh()
-	const tasksResult = useAtomValue(boardTasksAtom)
+	// BoardService handles all filtering and sorting - React just renders the result
+	const filteredTasksResult = useAtomValue(filteredTasksByColumnAtom)
+	const tasksByColumn = Result.isSuccess(filteredTasksResult) ? filteredTasksResult.value : []
+
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
 
@@ -147,80 +129,6 @@ export const App = () => {
 		return Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
 	}, [])
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// Task Grouping and Filtering
-	// ═══════════════════════════════════════════════════════════════════════════
-
-	const sortTasks = useCallback(
-		(tasks: TaskWithSession[]): TaskWithSession[] => {
-			return [...tasks].sort((a, b) => {
-				const direction = sortConfig.direction === "desc" ? -1 : 1
-
-				switch (sortConfig.field) {
-					case "session": {
-						// Sort by session status (active first when desc)
-						const sessionDiff =
-							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-						if (sessionDiff !== 0) return sessionDiff * direction
-						// Then by priority (lower number = higher priority)
-						const priorityDiff = a.priority - b.priority
-						if (priorityDiff !== 0) return priorityDiff
-						// Then by updated_at (more recent first)
-						return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-					}
-					case "priority": {
-						// Sort by priority (lower number = higher priority, so desc shows P1 first)
-						const priorityDiff = a.priority - b.priority
-						if (priorityDiff !== 0) return priorityDiff * direction
-						// Then by session status
-						const sessionDiff =
-							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-						if (sessionDiff !== 0) return sessionDiff
-						// Then by updated_at
-						return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-					}
-					case "updated": {
-						// Sort by updated_at (desc = most recent first)
-						const dateDiff = new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-						if (dateDiff !== 0) return dateDiff * direction
-						// Then by session status
-						const sessionDiff =
-							getSessionSortValue(a.sessionState) - getSessionSortValue(b.sessionState)
-						if (sessionDiff !== 0) return sessionDiff
-						// Then by priority
-						return a.priority - b.priority
-					}
-					default:
-						return 0
-				}
-			})
-		},
-		[sortConfig],
-	)
-
-	// Group tasks by column for navigation, filtering by search query, then sorting
-	const tasksByColumn = useMemo(() => {
-		if (!Result.isSuccess(tasksResult)) return []
-
-		const query = searchQuery.toLowerCase().trim()
-
-		return COLUMNS.map((col) => {
-			const filtered = tasksResult.value.filter((task) => {
-				// First filter by status
-				if (task.status !== col.status) return false
-				// Then filter by search query if present
-				if (query) {
-					const titleMatch = task.title.toLowerCase().includes(query)
-					const idMatch = task.id.toLowerCase().includes(query)
-					return titleMatch || idMatch
-				}
-				return true
-			})
-			// Apply sorting
-			return sortTasks(filtered)
-		})
-	}, [tasksResult, searchQuery, sortTasks])
-
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
@@ -247,9 +155,11 @@ export const App = () => {
 
 		// Note: imageAttach overlay keyboard is handled by KeyboardService
 
-		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c)
+		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c, "CS-u" for Ctrl+Shift+u)
 		let keySeq = event.name
-		if (event.ctrl) {
+		if (event.ctrl && event.shift) {
+			keySeq = `CS-${event.name}`
+		} else if (event.ctrl) {
 			keySeq = `C-${event.name}`
 		} else if (event.shift) {
 			keySeq = `S-${event.name}`
@@ -264,14 +174,13 @@ export const App = () => {
 	// Computed Values
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const totalTasks = Result.isSuccess(tasksResult) ? tasksResult.value.length : 0
+	// Flatten tasksByColumn to get all tasks for computing totals
+	const allTasks = useMemo(() => tasksByColumn.flat(), [tasksByColumn])
+	const totalTasks = allTasks.length
 
 	const activeSessions = useMemo(() => {
-		if (!Result.isSuccess(tasksResult)) return 0
-		return tasksResult.value.filter(
-			(t) => t.sessionState === "busy" || t.sessionState === "waiting",
-		).length
-	}, [tasksResult])
+		return allTasks.filter((t) => t.sessionState === "busy" || t.sessionState === "waiting").length
+	}, [allTasks])
 
 	// Mode display text
 	const modeDisplay = useMemo(() => {
@@ -301,7 +210,7 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const renderContent = () => {
-		if (Result.isInitial(tasksResult)) {
+		if (Result.isInitial(filteredTasksResult)) {
 			return (
 				<box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
 					<text fg={theme.sky}>Loading tasks...</text>
@@ -309,11 +218,11 @@ export const App = () => {
 			)
 		}
 
-		if (Result.isFailure(tasksResult)) {
+		if (Result.isFailure(filteredTasksResult)) {
 			return (
 				<box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
 					<text fg={theme.red}>Error loading tasks:</text>
-					<text fg={theme.red}>{String(tasksResult.cause)}</text>
+					<text fg={theme.red}>{String(filteredTasksResult.cause)}</text>
 				</box>
 			)
 		}
