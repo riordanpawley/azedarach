@@ -132,11 +132,7 @@ export interface BeadEditorServiceImpl {
 	 */
 	readonly editBead: (
 		bead: Issue,
-	) => Effect.Effect<
-		void,
-		ParseMarkdownError | EditorError,
-		CommandExecutor.CommandExecutor | BeadsClient | FileSystem.FileSystem
-	>
+	) => Effect.Effect<void, ParseMarkdownError | EditorError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Create a new bead via $EDITOR
@@ -150,7 +146,7 @@ export interface BeadEditorServiceImpl {
 	readonly createBead: () => Effect.Effect<
 		CreatedBead,
 		ParseMarkdownError | EditorError,
-		CommandExecutor.CommandExecutor | BeadsClient | FileSystem.FileSystem
+		CommandExecutor.CommandExecutor
 	>
 }
 
@@ -691,11 +687,12 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 	dependencies: [BeadsClient.Default],
 	effect: Effect.gen(function* () {
 		const client = yield* BeadsClient
+		// Inject FileSystem at service construction - never leak it through method return types
+		const fs = yield* FileSystem.FileSystem
+
 		return {
 			editBead: (bead: Issue) =>
 				Effect.gen(function* () {
-					const fs = yield* FileSystem.FileSystem
-
 					// 1. Serialize to markdown
 					const markdown = serializeBeadToMarkdown(bead)
 
@@ -820,8 +817,6 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 
 			createBead: () =>
 				Effect.gen(function* () {
-					const fs = yield* FileSystem.FileSystem
-
 					// 1. Create blank template
 					const markdown = createBlankBeadTemplate()
 
