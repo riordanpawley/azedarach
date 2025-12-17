@@ -31,6 +31,16 @@
 					}
 				]
 			}
+		],
+		"PreToolUse": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/pre-edit-type-safety.cjs"
+					}
+				]
+			}
 		]
 	}
 }

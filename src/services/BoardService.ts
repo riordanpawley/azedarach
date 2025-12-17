@@ -9,6 +9,7 @@ import {
 	Array as Arr,
 	Cause,
 	Effect,
+	HashMap,
 	Order,
 	Record,
 	Schedule,
@@ -16,6 +17,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { BeadsClient } from "../core/BeadsClient"
+import { PTYMonitor } from "../core/PTYMonitor"
 import { SessionManager } from "../core/SessionManager"
 import { emptyRecord } from "../lib/empty"
 import type { TaskWithSession } from "../ui/types"
@@ -173,12 +175,13 @@ export interface ColumnInfo {
 // ============================================================================
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
-	dependencies: [SessionManager.Default, BeadsClient.Default, EditorService.Default],
+	dependencies: [SessionManager.Default, BeadsClient.Default, EditorService.Default, PTYMonitor.Default],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
 		const editorService = yield* EditorService
+		const ptyMonitor = yield* PTYMonitor
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
@@ -192,7 +195,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 
 		/**
-		 * Load tasks from BeadsClient and merge with session state
+		 * Load tasks from BeadsClient and merge with session state + PTY metrics
 		 */
 		const loadTasks = () =>
 			Effect.gen(function* () {
@@ -203,14 +206,24 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const activeSessions = yield* sessionManager.listActive()
 				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 
-				// Map issues to TaskWithSession, merging session state and available metrics
+				// Get PTY metrics for all sessions
+				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
+
+				// Map issues to TaskWithSession, merging session state and PTY metrics
 				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
 					const session = sessionMap.get(issue.id)
+					const metricsOpt = HashMap.get(allMetrics, issue.id)
+					const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+
 					return {
 						...issue,
 						sessionState: session?.state ?? ("idle" as const),
-						// Map available session metrics
+						// Session metrics from SessionManager
 						sessionStartedAt: session?.startedAt?.toISOString(),
+						// PTY-extracted metrics from PTYMonitor
+						estimatedTokens: metrics.estimatedTokens,
+						recentOutput: metrics.recentOutput,
+						agentPhase: metrics.agentPhase,
 					}
 				})
 
