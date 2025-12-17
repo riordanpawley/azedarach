@@ -94,9 +94,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		 * Merge worktree to main action (Space+m)
 		 *
 		 * Performs a safe merge check using git merge-tree (in-memory 3-way merge).
-		 * If real conflicts are detected, blocks the merge and shows an error.
-		 * The user must resolve conflicts in the worktree before retrying.
-		 * Clean merges proceed directly without confirmation.
+		 * - Clean merges proceed directly without confirmation
+		 * - If conflicts detected, offers to ask Claude to resolve them
+		 * - Claude resolution merges main into worktree, then prompts Claude
+		 * - User retries Space+m after Claude resolves
 		 */
 		mergeToMain: () =>
 			Effect.gen(function* () {
@@ -127,7 +128,7 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					)
 
 				if (conflictCheck.hasConflictRisk) {
-					// Block the merge - conflicts must be resolved in worktree first
+					// Offer to ask Claude to resolve the conflicts
 					const fileList =
 						conflictCheck.conflictingFiles.length > 0
 							? conflictCheck.conflictingFiles.slice(0, 5).join(", ") +
@@ -136,10 +137,13 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 									: "")
 							: "unknown files"
 
-					yield* ctx.toast.show(
-						"error",
-						`Cannot merge ${task.id}: conflicts in ${fileList}. Resolve in worktree first.`,
-					)
+					const message = `Conflicts detected in: ${fileList}\n\nAsk Claude to resolve them?`
+
+					yield* ctx.overlay.push({
+						_tag: "confirm",
+						message,
+						onConfirm: doMergeToMain(task.id),
+					})
 				} else {
 					// No conflicts detected, proceed directly
 					yield* doMergeToMain(task.id)
