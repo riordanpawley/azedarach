@@ -16,7 +16,8 @@
 			"Bash(pnpm:*)",
 			"Bash(npm:*)",
 			"Bash(gh:*)",
-			"Bash(bun run type-check:*)"
+			"Bash(bun run type-check:*)",
+			"Bash(bun run fix:*)"
 		],
 		"deny": []
 	},
