@@ -5,7 +5,48 @@
  * These are merged with user-provided config to ensure all fields are defined.
  */
 
+import { execSync } from "node:child_process"
 import type { AzedarachConfig } from "./schema.js"
+
+// ============================================================================
+// Login Shell Detection
+// ============================================================================
+
+/**
+ * Get the user's login shell from the system
+ *
+ * We query the system directly rather than trusting $SHELL because:
+ * - Nix develop shells often override $SHELL to bash for reproducibility
+ * - direnv environments may inherit a non-login shell
+ * - The login shell is what the user actually configured and expects
+ *
+ * Falls back to $SHELL or "bash" if detection fails.
+ */
+function getLoginShell(): string {
+	try {
+		if (process.platform === "darwin") {
+			// macOS: Use Directory Services
+			const result = execSync("dscl . -read /Users/$(whoami) UserShell", {
+				encoding: "utf8",
+				stdio: ["pipe", "pipe", "pipe"],
+			})
+			const shell = result.split(":")[1]?.trim()
+			if (shell) return shell
+		} else {
+			// Linux/Unix: Use passwd database
+			const result = execSync("getent passwd $(whoami) | cut -d: -f7", {
+				encoding: "utf8",
+				shell: "/bin/sh",
+				stdio: ["pipe", "pipe", "pipe"],
+			})
+			const shell = result.trim()
+			if (shell) return shell
+		}
+	} catch {
+		// Detection failed, fall back to environment
+	}
+	return process.env.SHELL || "bash"
+}
 
 // ============================================================================
 // Default Config Object
@@ -25,7 +66,7 @@ export const DEFAULT_CONFIG = {
 	},
 	session: {
 		command: "claude",
-		shell: process.env.SHELL || "bash",
+		shell: getLoginShell(),
 		tmuxPrefix: "C-a",
 		dangerouslySkipPermissions: false,
 	},
