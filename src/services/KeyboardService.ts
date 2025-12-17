@@ -11,6 +11,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect, Record, Ref, SubscriptionRef } from "effect"
+import { AppConfig, type ResolvedConfig } from "../config/index"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
 import { BeadEditorService } from "../core/EditorService"
@@ -99,6 +100,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		ImageAttachmentService.Default,
 		TmuxService.Default,
 		CommandQueueService.Default,
+		AppConfig.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -118,6 +120,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const imageAttachment = yield* ImageAttachmentService
 		const tmux = yield* TmuxService
 		const commandQueue = yield* CommandQueueService
+		const appConfig = yield* AppConfig
+		const resolvedConfig: ResolvedConfig = appConfig.config
 
 		// ========================================================================
 		// Helper Functions
@@ -401,29 +405,33 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 		/**
 		 * Chat about task (Space+c)
-		 * Opens a Haiku session to discuss/understand the task without working on it
+		 * Opens a Haiku chat in a tmux popup to discuss/understand the task
+		 *
+		 * This is an ephemeral session that runs in the current directory (not a worktree).
+		 * The popup closes automatically when Claude exits.
+		 * Uses Haiku model for faster, cheaper responses.
 		 */
 		const actionChatAboutTask = () =>
 			Effect.gen(function* () {
 				const task = yield* getSelectedTask()
 				if (!task) return
 
-				if (task.sessionState !== "idle") {
-					yield* toast.show("error", `Cannot start chat: task is ${task.sessionState}`)
-					return
-				}
+				// Build the Claude command with Haiku model and initial prompt
+				const { command: claudeCommand } = resolvedConfig.session
+				const escapeForShell = (s: string) =>
+					s.replace(/\\/g, "\\\\").replace(/'/g, "'\\''").replace(/"/g, '\\"')
 
-				yield* sessionManager
-					.start({
-						beadId: task.id,
-						projectPath: process.cwd(),
-						model: "haiku",
-						initialPrompt: `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`,
+				const prompt = `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`
+				const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
+
+				yield* tmux
+					.displayPopup({
+						command: fullCommand,
+						width: "90%",
+						height: "90%",
+						title: ` Chat: ${task.id} (Haiku) - Ctrl-C to exit `,
 					})
-					.pipe(
-						Effect.tap(() => toast.show("success", `Chat session started for ${task.id} (Haiku)`)),
-						Effect.catchAll(showErrorToast("Failed to start chat")),
-					)
+					.pipe(Effect.catchAll(showErrorToast("Failed to start chat")))
 			})
 
 		/**
