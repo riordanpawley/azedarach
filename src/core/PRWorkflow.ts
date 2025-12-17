@@ -723,6 +723,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// which can delete beads that exist in main but not in the branch.
 					yield* beadsClient.syncImportOnly(projectPath).pipe(Effect.catchAll(() => Effect.void))
 
+					// 6c. Recover tombstoned issues as fallback - syncImportOnly doesn't fix
+					// issues that were incorrectly tombstoned (see az-zby for bug details)
+					yield* beadsClient.recoverTombstones(projectPath).pipe(Effect.catchAll(() => Effect.void))
+
 					// 7. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 

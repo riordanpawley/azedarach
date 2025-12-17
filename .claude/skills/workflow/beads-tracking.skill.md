@@ -29,7 +29,7 @@
 | Add dependency | `bd dep add <issue> <depends-on>` | |
 | Get stats | `bd stats` | |
 | Find blocked | `bd blocked` | |
-| Sync changes | `bd sync` | **REQUIRED in worktrees** |
+| Sync changes | `bd sync` | **Run at session end** |
 
 ## CRITICAL: Use `search`, NEVER `list`
 
@@ -52,6 +52,21 @@
 | `closed` | Work completed or abandoned | `bd close <id>` |
 
 ## Git Worktree & Branch Support
+
+### Daemon Behavior (v0.30.1+)
+
+The daemon runs **per-project** — each worktree has its own daemon at `.beads/bd.sock`.
+
+**What the daemon does:**
+- Connection pooling and caching (performance)
+- JSONL export (5-second debounce) — keeps `.beads/issues.jsonl` in sync with DB
+- Optionally: auto-commit/auto-push (OFF by default)
+
+**What the daemon does NOT do by default:**
+- Commit changes to git
+- Push to remote
+
+**Therefore: `bd sync` is still required** to commit and push beads changes to git.
 
 ### Branches WITH Upstream (Pushed)
 
@@ -78,7 +93,7 @@ git commit
 
 ### Worktrees
 
-- **BEADS_NO_DAEMON=1** should be set via `.envrc`
+- Daemon runs per-worktree (no need to disable)
 - Push the worktree branch at creation time for best results
 - Run `bd sync` manually at session end
 
@@ -109,7 +124,7 @@ KEY DECISIONS: [Important context/rationale]
 **At session end:**
 1. Recognize logical stopping point
 2. Update notes with current state + next steps
-3. **In worktrees:** Run `bd sync` manually
+3. Run `bd sync` to commit and push beads changes
 4. Commit code changes
 
 ### 3. Understanding Dependency Direction
@@ -192,7 +207,7 @@ Examples:
 - **Passing `--notes` to create** - `--notes` only works with `update`
 - **Using invalid status values** - Valid: `open`, `in_progress`, `blocked`, `closed`
 - **Reversing dependency direction** - `bd dep add A B` means "A depends on B"
-- **Not syncing manually in worktrees** - Auto-sync is disabled
+- **Forgetting `bd sync` at session end** - Daemon only exports to JSONL, not git
 - **Vague notes** - "Working on feature" vs "Completed auth token generation, next: add expiry logic"
 
 ## Summary
@@ -203,5 +218,5 @@ Key practices:
 - **ALWAYS use `search` for finding issues - NEVER use `list`**
 - Create issues proactively for all work
 - Update notes continuously (clean as you go)
-- **In worktrees: Run `bd sync` manually** at session end
+- **Run `bd sync` at session end** to commit and push beads changes
 - Write notes for resumability (future agent has zero context)
