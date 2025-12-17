@@ -311,14 +311,12 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						return existingSession.value
 					}
 
-					// Get bead info to verify it exists
+					// Verify bead exists (will throw NotFoundError if not)
 					const issue = yield* beadsClient.show(beadId)
 
-					// Auto-update bead status to in_progress if not already
-					// This ensures consistency: an active session implies active work
-					if (issue.status !== "in_progress") {
-						yield* beadsClient.update(beadId, { status: "in_progress" })
-					}
+					// Note: We update bead status to in_progress AFTER session creation succeeds
+					// to avoid the bug where status updates but session fails (az-g7p)
+					const needsStatusUpdate = issue.status !== "in_progress"
 
 					// Create worktree (idempotent - returns existing if present)
 					const worktree = yield* worktreeManager.create({
@@ -403,6 +401,13 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
 							prefix: tmuxPrefix,
 						})
+					}
+
+					// Now that session is successfully created, update bead status
+					// This is done AFTER session creation to ensure we don't leave beads
+					// in "in_progress" state with no actual session (az-g7p bug fix)
+					if (needsStatusUpdate) {
+						yield* beadsClient.update(beadId, { status: "in_progress" })
 					}
 
 					// Create session object
