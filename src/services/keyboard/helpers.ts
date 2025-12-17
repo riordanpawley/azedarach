@@ -121,3 +121,26 @@ export const createWithQueue =
 						.pipe(Effect.asVoid),
 				),
 			)
+
+/**
+ * Create a function that checks if a task has an operation in progress.
+ *
+ * Returns true if busy (caller should abort), false if idle (caller can proceed).
+ * When busy, shows a toast with the running operation label.
+ *
+ * @param commandQueue - CommandQueueService instance
+ * @param toast - ToastService instance for notifications
+ */
+export const createCheckBusy =
+	(commandQueue: CommandQueueService, toast: ToastService) =>
+	(taskId: string): Effect.Effect<boolean> =>
+		Effect.gen(function* () {
+			const queueInfo = yield* commandQueue.getQueueInfo(taskId)
+
+			if (queueInfo.runningLabel !== null) {
+				yield* toast.show("error", `${taskId} is busy (${queueInfo.runningLabel} in progress)`)
+				return true
+			}
+
+			return false
+		})

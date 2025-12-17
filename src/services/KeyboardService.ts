@@ -25,6 +25,7 @@ import { EditorService } from "./EditorService"
 // Import handler modules
 import { createDefaultBindings } from "./keyboard/bindings"
 import {
+	createCheckBusy,
 	createGetColumnIndex,
 	createGetSelectedTask,
 	createOpenCurrentDetail,
@@ -101,6 +102,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const openCurrentDetail = createOpenCurrentDetail(overlay, getSelectedTask)
 		const toggleCurrentSelection = createToggleCurrentSelection(editor, getSelectedTask)
 		const withQueue = createWithQueue(commandQueue, toast)
+		const checkBusy = createCheckBusy(commandQueue, toast)
 
 		// ====================================================================
 		// Build handler context
@@ -133,6 +135,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			openCurrentDetail,
 			toggleCurrentSelection,
 			withQueue,
+			checkBusy,
 
 			// ImageAttachment state for inputHandlers
 			imageAttachmentOverlayState: imageAttachment.overlayState,

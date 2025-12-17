@@ -198,6 +198,17 @@ export interface HandlerContext {
 		operation: Effect.Effect<A, E, CommandExecutor.CommandExecutor>,
 	) => Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 
+	/**
+	 * Check if a task has an operation in progress and show a toast if so.
+	 *
+	 * Returns true if busy (caller should abort), false if idle (caller can proceed).
+	 * When busy, shows a toast like "az-123 is busy (merge in progress)"
+	 *
+	 * @param taskId - The task to check
+	 * @returns Effect that resolves to true if busy, false if idle
+	 */
+	readonly checkBusy: (taskId: string) => Effect.Effect<boolean>
+
 	// ========================================================================
 	// Image Attachment State (needed by inputHandlers)
 	// ========================================================================
