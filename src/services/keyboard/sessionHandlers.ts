@@ -57,7 +57,8 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	/**
 	 * Start session with initial prompt (Space+S)
 	 *
-	 * Starts Claude and tells it to "work on bead {beadId}".
+	 * Starts Claude with a detailed prompt containing the bead ID and title.
+	 * This helps Claude understand that it should work on a specific beads issue.
 	 * Queued to prevent race conditions with other operations on the same task.
 	 * Blocked if task already has an operation in progress.
 	 */
@@ -75,6 +76,13 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				return
 			}
 
+			// Build a clear prompt that explicitly identifies this as a beads issue.
+			// Format: "work on bead az-xxx (type): title"
+			// - "bead" prefix tells Claude this is a tracked issue
+			// - issue_type helps set expectations (bug fix vs feature vs task)
+			// - title gives immediate context without needing to run `bd show`
+			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+
 			yield* ctx.withQueue(
 				task.id,
 				"start",
@@ -82,7 +90,7 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 					.start({
 						beadId: task.id,
 						projectPath: process.cwd(),
-						initialPrompt: `work on ${task.id}`,
+						initialPrompt,
 					})
 					.pipe(
 						Effect.tap(() =>
