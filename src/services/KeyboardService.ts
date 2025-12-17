@@ -9,8 +9,7 @@
  * inline useKeyboard handlers that were previously in App.tsx.
  */
 
-import type { CommandExecutor } from "@effect/platform/CommandExecutor"
-import type { FileSystem } from "@effect/platform/FileSystem"
+import type { CommandExecutor } from "@effect/platform"
 import { Effect, Record, Ref, SubscriptionRef } from "effect"
 import { AttachmentService } from "../core/AttachmentService"
 import { BeadsClient, type BeadsError } from "../core/BeadsClient"
@@ -22,6 +21,7 @@ import { TmuxService } from "../core/TmuxService"
 import { VCService } from "../core/VCService"
 import { COLUMNS, generateJumpLabels } from "../ui/types"
 import { BoardService } from "./BoardService"
+import { CommandQueueService } from "./CommandQueueService"
 import { EditorService, type JumpTarget } from "./EditorService"
 import { NavigationService } from "./NavigationService"
 import { OverlayService } from "./OverlayService"
@@ -60,9 +60,9 @@ export type KeyMode =
 
 /**
  * Platform dependencies that keybinding actions may require.
- * These are provided by BunContext.layer at runtime.
+ * CommandExecutor is the one platform dependency allowed to leak through method return types.
  */
-export type KeybindingDeps = CommandExecutor | FileSystem
+export type KeybindingDeps = CommandExecutor.CommandExecutor
 
 /**
  * Keybinding definition with mode-specific action
@@ -98,6 +98,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		ViewService.Default,
 		ImageAttachmentService.Default,
 		TmuxService.Default,
+		CommandQueueService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -116,6 +117,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const viewService = yield* ViewService
 		const imageAttachment = yield* ImageAttachmentService
 		const tmux = yield* TmuxService
+		const commandQueue = yield* CommandQueueService
 
 		// ========================================================================
 		// Helper Functions
@@ -302,11 +304,48 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			})
 
 		// ========================================================================
+		// Command Queue Helper - Serializes conflicting per-task operations
+		// ========================================================================
+
+		/**
+		 * Execute a queued operation for a task
+		 *
+		 * Operations like merge, cleanup, start session, etc. can conflict if run
+		 * simultaneously on the same task. This helper ensures they run one at a time.
+		 *
+		 * CommandExecutor is allowed to propagate - it will be satisfied by the runtime.
+		 *
+		 * @param taskId - The task to operate on
+		 * @param label - Human-readable label for the operation (e.g., "merge", "cleanup")
+		 * @param operation - The Effect to execute (return value is ignored)
+		 */
+		const withQueue = <A, E>(
+			taskId: string,
+			label: string,
+			operation: Effect.Effect<A, E, CommandExecutor.CommandExecutor>,
+		) =>
+			commandQueue
+				.enqueue({
+					taskId,
+					label,
+					// CommandExecutor propagates to runtime - no provide needed
+					effect: Effect.asVoid(operation),
+				})
+				.pipe(
+					// Queue errors (timeout, cancelled) are handled separately
+					Effect.catchAll((error) =>
+						toast.show("error", `${label} timed out or was cancelled: ${error._tag}`),
+					),
+				)
+
+		// ========================================================================
 		// Action Mode Handlers - Use injected services directly
 		// ========================================================================
 
 		/**
 		 * Start session action (Space+s)
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionStartSession = () =>
 			Effect.gen(function* () {
@@ -318,15 +357,21 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
-					Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
-					Effect.catchAll(showErrorToast("Failed to start")),
+				yield* withQueue(
+					task.id,
+					"start",
+					sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
+						Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
+						Effect.catchAll(showErrorToast("Failed to start")),
+					),
 				)
 			})
 
 		/**
 		 * Start session with initial prompt (Space+S)
 		 * Starts Claude and tells it to "work on bead {beadId}"
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionStartSessionWithPrompt = () =>
 			Effect.gen(function* () {
@@ -338,16 +383,20 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* sessionManager
-					.start({
-						beadId: task.id,
-						projectPath: process.cwd(),
-						initialPrompt: `work on ${task.id}`,
-					})
-					.pipe(
-						Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
-						Effect.catchAll(showErrorToast("Failed to start")),
-					)
+				yield* withQueue(
+					task.id,
+					"start",
+					sessionManager
+						.start({
+							beadId: task.id,
+							projectPath: process.cwd(),
+							initialPrompt: `work on ${task.id}`,
+						})
+						.pipe(
+							Effect.tap(() => toast.show("success", `Started session for ${task.id} with prompt`)),
+							Effect.catchAll(showErrorToast("Failed to start")),
+						),
+				)
 			})
 
 		/**
@@ -455,6 +504,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 		/**
 		 * Stop session action (Space+x)
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionStopSession = () =>
 			Effect.gen(function* () {
@@ -466,9 +517,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* sessionManager.stop(task.id).pipe(
-					Effect.tap(() => toast.show("success", `Stopped session for ${task.id}`)),
-					Effect.catchAll(showErrorToast("Failed to stop")),
+				yield* withQueue(
+					task.id,
+					"stop",
+					sessionManager.stop(task.id).pipe(
+						Effect.tap(() => toast.show("success", `Stopped session for ${task.id}`)),
+						Effect.catchAll(showErrorToast("Failed to stop")),
+					),
 				)
 			})
 
@@ -528,6 +583,8 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 		/**
 		 * Create PR action (Space+P)
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionCreatePR = () =>
 			Effect.gen(function* () {
@@ -539,25 +596,36 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* toast.show("info", `Creating PR for ${task.id}...`)
+				yield* withQueue(
+					task.id,
+					"create-pr",
+					Effect.gen(function* () {
+						yield* toast.show("info", `Creating PR for ${task.id}...`)
 
-				yield* prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
-					Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
-					Effect.catchAll((error) => {
-						const msg =
-							error && typeof error === "object" && "_tag" in error && error._tag === "GHCLIError"
-								? String((error as { message: string }).message)
-								: `Failed to create PR: ${error}`
-						return Effect.gen(function* () {
-							yield* Effect.logError(`Create PR: ${msg}`, { error })
-							yield* toast.show("error", msg)
-						})
+						yield* prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
+							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
+							Effect.catchAll((error) => {
+								const msg =
+									error &&
+									typeof error === "object" &&
+									"_tag" in error &&
+									error._tag === "GHCLIError"
+										? String((error as { message: string }).message)
+										: `Failed to create PR: ${error}`
+								return Effect.gen(function* () {
+									yield* Effect.logError(`Create PR: ${msg}`, { error })
+									yield* toast.show("error", msg)
+								})
+							}),
+						)
 					}),
 				)
 			})
 
 		/**
 		 * Cleanup worktree action (Space+d)
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const actionCleanup = () =>
 			Effect.gen(function* () {
@@ -569,36 +637,48 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					return
 				}
 
-				yield* toast.show("info", `Cleaning up ${task.id}...`)
+				yield* withQueue(
+					task.id,
+					"cleanup",
+					Effect.gen(function* () {
+						yield* toast.show("info", `Cleaning up ${task.id}...`)
 
-				yield* prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
-					Effect.tap(() => toast.show("success", `Cleaned up ${task.id}`)),
-					Effect.catchAll(showErrorToast("Failed to cleanup")),
+						yield* prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
+							Effect.tap(() => toast.show("success", `Cleaned up ${task.id}`)),
+							Effect.catchAll(showErrorToast("Failed to cleanup")),
+						)
+					}),
 				)
 			})
 
 		/**
 		 * Execute the actual merge operation (called directly or via confirm)
+		 *
+		 * Queued to prevent race conditions with other operations on the same task.
 		 */
 		const doMergeToMain = (beadId: string) =>
-			Effect.gen(function* () {
-				yield* toast.show("info", `Merging ${beadId} to main...`)
+			withQueue(
+				beadId,
+				"merge",
+				Effect.gen(function* () {
+					yield* toast.show("info", `Merging ${beadId} to main...`)
 
-				yield* prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
-					Effect.tap(() => board.refresh()),
-					Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
-					Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
-						if (error._tag === "MergeConflictError") {
-							return toast.show("error", `Merge conflict: ${error.message}`)
-						}
-						const msg =
-							error && typeof error === "object" && "message" in error
-								? String(error.message)
-								: String(error)
-						return toast.show("error", `Merge failed: ${msg}`)
-					}),
-				)
-			})
+					yield* prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
+						Effect.tap(() => board.refresh()),
+						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
+						Effect.catchAll((error: MergeConflictError | { _tag?: string; message?: string }) => {
+							if (error._tag === "MergeConflictError") {
+								return toast.show("error", `Merge conflict: ${error.message}`)
+							}
+							const msg =
+								error && typeof error === "object" && "message" in error
+									? String(error.message)
+									: String(error)
+							return toast.show("error", `Merge failed: ${msg}`)
+						}),
+					)
+				}),
+			)
 
 		/**
 		 * Merge worktree to main action (Space+m)
