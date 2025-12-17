@@ -173,6 +173,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.ctx.overlay.push({ _tag: "help" }),
 	},
 	{
+		key: "d",
+		mode: "normal",
+		description: "Show diagnostics",
+		action: bc.ctx.overlay.push({ _tag: "diagnostics" }),
+	},
+	{
 		key: "return",
 		mode: "normal",
 		description: "View detail",
