@@ -19,7 +19,7 @@
  */
 
 import { FileSystem } from "@effect/platform"
-import { Data, Effect, type Fiber, Ref, Schedule } from "effect"
+import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import type { SessionState } from "../ui/types.js"
 
 // ============================================================================
@@ -115,8 +115,13 @@ export interface HookReceiverService {
 	 *
 	 * Returns a Fiber that can be interrupted to stop watching.
 	 * Events are pushed to the provided handler.
+	 *
+	 * IMPORTANT: The returned fiber is scoped to the caller's scope.
+	 * Use Effect.forkScoped internally so the fiber survives after start() returns.
 	 */
-	readonly start: (handler: HookEventHandler) => Effect.Effect<Fiber.RuntimeFiber<number, never>>
+	readonly start: (
+		handler: HookEventHandler,
+	) => Effect.Effect<Fiber.RuntimeFiber<number, never>, never, Scope.Scope>
 
 	/**
 	 * Process a single notification file
@@ -230,23 +235,42 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 
 		const start = (handler: HookEventHandler) =>
 			Effect.gen(function* () {
-				// Start a single polling fiber that processes notifications directly
-				// This is simpler than queue-based approach and sufficient for our needs
-				const pollerFiber = yield* Effect.gen(function* () {
-					const files = yield* listPendingNotifications()
+				// Poll once immediately on startup to process any pending notifications
+				const files = yield* listPendingNotifications()
+				if (files.length > 0) {
+					yield* Effect.log(
+						`HookReceiver: Processing ${files.length} pending notifications on startup`,
+					)
+				}
+				for (const file of files) {
+					const event = yield* processNotification(file)
+					if (event) {
+						yield* Effect.log(`HookReceiver: Processing ${event.event} for ${event.beadId}`)
+						yield* handler(event)
+					}
+				}
 
-					for (const file of files) {
+				// Start a scoped polling fiber that processes notifications
+				// Uses forkScoped so the fiber survives after start() returns
+				// and is tied to the caller's scope lifetime
+				const pollerFiber = yield* Effect.gen(function* () {
+					const pendingFiles = yield* listPendingNotifications()
+
+					for (const file of pendingFiles) {
 						const event = yield* processNotification(file)
 						if (event) {
+							yield* Effect.log(`HookReceiver: Processing ${event.event} for ${event.beadId}`)
 							yield* handler(event)
 						}
 					}
 				}).pipe(
 					// Catch errors inside the loop to prevent stopping
-					Effect.catchAll(() => Effect.void),
+					Effect.catchAll((e) =>
+						Effect.logWarning(`HookReceiver poll error: ${e}`).pipe(Effect.asVoid),
+					),
 					// Repeat indefinitely with 500ms interval
 					Effect.repeat(Schedule.spaced(`${POLL_INTERVAL_MS} millis`)),
-					Effect.fork,
+					Effect.forkScoped,
 				)
 
 				return pollerFiber
@@ -269,7 +293,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
  */
 export const startHookReceiver = (
 	handler: HookEventHandler,
-): Effect.Effect<Fiber.RuntimeFiber<number, never>, never, HookReceiver> =>
+): Effect.Effect<Fiber.RuntimeFiber<number, never>, never, HookReceiver | Scope.Scope> =>
 	Effect.flatMap(HookReceiver, (receiver) => receiver.start(handler))
 
 /**

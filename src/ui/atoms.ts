@@ -33,6 +33,7 @@ import { type VCExecutorInfo, VCService } from "../core/VCService"
 import { BoardService } from "../services/BoardService"
 import { ClockService, computeElapsedFormatted } from "../services/ClockService"
 import { CommandQueueService } from "../services/CommandQueueService"
+import { DiagnosticsService } from "../services/DiagnosticsService"
 import type { SortField } from "../services/EditorService"
 import { EditorService } from "../services/EditorService"
 // New atomic Effect services
@@ -72,6 +73,7 @@ const appLayer = Layer.mergeAll(
 	HookReceiver.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
+	DiagnosticsService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
@@ -161,6 +163,7 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 		const receiver = yield* HookReceiver
 		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
+		const diagnostics = yield* DiagnosticsService
 
 		// Handler that maps hook events to session state changes
 		const handler = (event: { event: string; beadId: string }) =>
@@ -174,10 +177,27 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 						.updateState(event.beadId, newState)
 						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
 				}
+				// Record activity for diagnostics
+				yield* diagnostics.recordActivity("HookReceiver", `${event.event} for ${event.beadId}`)
 			})
+
+		// Register HookReceiver as a service
+		yield* diagnostics.updateServiceHealth({
+			name: "HookReceiver",
+			status: "healthy",
+			details: "Polling /tmp for notifications every 500ms",
+		})
 
 		// Start the receiver - it will be interrupted when this atom unmounts
 		const fiber = yield* receiver.start(handler)
+
+		// Register the fiber with diagnostics for monitoring
+		yield* diagnostics.registerFiber({
+			id: "hook-receiver-poller",
+			name: "HookReceiver Poller",
+			description: "Polls /tmp for azedarach-notify-*.json files",
+			fiber,
+		})
 
 		yield* Effect.log("HookReceiver started - watching for Claude Code hook notifications")
 
@@ -204,6 +224,31 @@ export const sessionMetricsAtom = appRuntime.subscriptionRef(
 		return ptyMonitor.metrics
 	}),
 )
+
+// ============================================================================
+// Diagnostics (system health and fiber monitoring)
+// ============================================================================
+
+/**
+ * Diagnostics state atom - subscribes to DiagnosticsService state
+ *
+ * Provides reactive access to system health info including:
+ * - Running fibers and their status
+ * - Service health (HookReceiver, PTYMonitor, etc.)
+ * - Last activity timestamps
+ *
+ * Usage: const diagnostics = useAtomValue(diagnosticsAtom)
+ */
+export const diagnosticsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const diagnostics = yield* DiagnosticsService
+		// Return the SubscriptionRef for reactive updates
+		return diagnostics.state
+	}),
+)
+
+// Re-export DiagnosticsState type for consumers
+export type { DiagnosticsState } from "../services/DiagnosticsService"
 
 /**
  * Atom for currently selected task ID
@@ -1202,7 +1247,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					readonly message: string
 					// Exception: CommandExecutor is the only allowed leaked requirement
 					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
-			  },
+			  }
+			| { readonly _tag: "diagnostics" },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
