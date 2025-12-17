@@ -2,6 +2,7 @@
  * TaskCard component - displays a single task in the Kanban board
  */
 
+import { ElapsedTimer } from "./ElapsedTimer"
 import { getPriorityColor, theme } from "./theme"
 import type { TaskWithSession } from "./types"
 import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
@@ -102,6 +103,11 @@ export const TaskCard = (props: TaskCardProps) => {
 			? PHASE_INDICATORS[props.task.agentPhase]
 			: ""
 
+	// Show elapsed timer when session is active (busy or waiting) and we have a start time
+	const showTimer =
+		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
+		props.task.sessionStartedAt !== undefined
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -140,6 +146,9 @@ export const TaskCard = (props: TaskCardProps) => {
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
+				{showTimer && props.task.sessionStartedAt && (
+					<ElapsedTimer startedAt={props.task.sessionStartedAt} />
+				)}
 			</box>
 			<text fg={theme.text}>{truncateText(props.task.title, maxTitleWidth)}</text>
 		</box>
