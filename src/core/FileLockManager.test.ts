@@ -4,7 +4,8 @@
  * Quick test to verify the implementation works correctly.
  */
 
-import { Console, Duration, Effect } from "effect"
+import { BunContext } from "@effect/platform-bun"
+import { Console, Duration, Effect, Layer } from "effect"
 import { FileLockManager, withLock } from "./FileLockManager.js"
 
 const test = Effect.gen(function* () {
@@ -84,6 +85,8 @@ const test = Effect.gen(function* () {
 	yield* Console.log("\n✓ All tests passed!")
 })
 
-const program = test.pipe(Effect.provide(FileLockManager.Default))
+const testLayer = Layer.provide(FileLockManager.Default, BunContext.layer)
+
+const program = test.pipe(Effect.provide(testLayer))
 
 Effect.runPromise(program).catch(console.error)

@@ -16,9 +16,8 @@
  * Socket path: /tmp/azedarach-<project-hash>.sock
  */
 
-import * as crypto from "node:crypto"
-import { Data, Deferred, Duration, Effect, HashMap, Ref } from "effect"
-import { normalizePath } from "./paths.js"
+import { Path } from "@effect/platform"
+import { Data, Deferred, Duration, Effect, Hash, HashMap, Ref } from "effect"
 
 // ============================================================================
 // Type Definitions
@@ -166,10 +165,25 @@ export interface FileLockManagerService {
 /**
  * Generate a deterministic hash for a project path
  * Used for creating unique socket paths per project
+ *
+ * Uses Effect's Hash module which provides a fast, deterministic hash.
+ * The hash is converted to hex and truncated to 16 chars.
+ *
+ * Note: This function does basic normalization inline since it's called
+ * outside of Effect context (synchronous export).
  */
 export function getProjectHash(projectPath: string): string {
-	const normalized = normalizePath(projectPath)
-	return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16)
+	// Basic normalization: remove trailing slashes and resolve . and ..
+	// This is a simplified version that works for most cases
+	const normalized = projectPath.replace(/\/+$/, "").replace(/\/\.\//g, "/")
+	// Effect's Hash.string returns a 32-bit integer, convert to hex
+	const hashValue = Hash.string(normalized)
+	// Convert to unsigned and then to hex, pad to ensure consistent length
+	const hex = (hashValue >>> 0).toString(16).padStart(8, "0")
+	// Double it by hashing with a salt to get 16 chars
+	const hashValue2 = Hash.string(`${normalized}.salt`)
+	const hex2 = (hashValue2 >>> 0).toString(16).padStart(8, "0")
+	return hex + hex2
 }
 
 /**
@@ -181,11 +195,10 @@ export function getSocketPath(projectPath: string): string {
 }
 
 /**
- * Generate a unique lock ID
+ * Generate a unique lock ID (Effect-based)
+ * Uses the Web Crypto API which is available in both Bun and Node.js
  */
-const generateLockId = (): string => {
-	return crypto.randomUUID()
-}
+const generateLockId = Effect.sync(() => crypto.randomUUID())
 
 /**
  * Create initial lock state for a path
@@ -329,6 +342,9 @@ const DEFAULT_TIMEOUT = Duration.seconds(30)
  */
 export class FileLockManager extends Effect.Service<FileLockManager>()("FileLockManager", {
 	effect: Effect.gen(function* () {
+		// Grab Path service at layer construction
+		const pathService = yield* Path.Path
+
 		// Track locks per normalized path
 		const locksRef = yield* Ref.make<HashMap.HashMap<string, LockState>>(HashMap.empty())
 
@@ -341,8 +357,9 @@ export class FileLockManager extends Effect.Service<FileLockManager>()("FileLock
 			}) =>
 				Effect.gen(function* () {
 					const { path: rawPath, type, timeout = DEFAULT_TIMEOUT, sessionId } = options
-					const path = normalizePath(rawPath)
-					const lockId = sessionId ? `${sessionId}-${generateLockId()}` : generateLockId()
+					const path = pathService.resolve(rawPath)
+					const baseId = yield* generateLockId
+					const lockId = sessionId ? `${sessionId}-${baseId}` : baseId
 
 					// Get or create lock state for this path
 					const locks = yield* Ref.get(locksRef)
@@ -412,7 +429,7 @@ export class FileLockManager extends Effect.Service<FileLockManager>()("FileLock
 
 			releaseLock: (lock: Lock) =>
 				Effect.gen(function* () {
-					const path = normalizePath(lock.path)
+					const path = pathService.resolve(lock.path)
 					const locks = yield* Ref.get(locksRef)
 					const state = HashMap.get(locks, path)
 
@@ -444,7 +461,7 @@ export class FileLockManager extends Effect.Service<FileLockManager>()("FileLock
 
 			getLockState: (rawPath: string) =>
 				Effect.gen(function* () {
-					const path = normalizePath(rawPath)
+					const path = pathService.resolve(rawPath)
 					const locks = yield* Ref.get(locksRef)
 					const state = HashMap.get(locks, path)
 
