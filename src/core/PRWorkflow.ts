@@ -282,6 +282,25 @@ export interface PRWorkflowService {
 		beadId: string
 		projectPath: string
 	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Abort an in-progress merge in the worktree
+	 *
+	 * Use this when a merge conflict resolution is stuck or you want to cancel
+	 * the merge operation. Runs `git merge --abort` in the worktree.
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.abortMerge({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly abortMerge: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -842,6 +861,34 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						branchChangedFiles,
 						mainChangedFiles,
 					} satisfies MergeConflictCheck
+				}),
+
+			abortMerge: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// Run git merge --abort in the worktree
+					yield* runGit(["merge", "--abort"], worktree.path).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to abort merge: ${e.message}`,
+									command: "git merge --abort",
+									stderr: e.stderr,
+								}),
+						),
+					)
 				}),
 		}
 	}),

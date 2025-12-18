@@ -370,6 +370,14 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		),
 	},
 	{
+		key: "S-m",
+		mode: "action",
+		description: "Abort merge",
+		action: Effect.suspend(() =>
+			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+		),
+	},
+	{
 		key: "S-d",
 		mode: "action",
 		description: "Delete bead",
