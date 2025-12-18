@@ -2,9 +2,9 @@
  * Column component - displays a vertical list of tasks for a single status
  */
 import { useMemo } from "react"
-import { TaskCard } from "./TaskCard"
-import { columnColors, theme } from "./theme"
-import type { ColumnStatus, TaskWithSession } from "./types"
+import { TaskCard } from "./TaskCard.js"
+import { columnColors, theme } from "./theme.js"
+import type { ColumnStatus, TaskWithSession } from "./types.js"
 
 export interface ColumnProps {
 	title: string

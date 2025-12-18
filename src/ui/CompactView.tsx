@@ -9,9 +9,9 @@ import { useAtomValue } from "@effect-atom/atom-react"
 import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
 import { taskRunningOperationAtom } from "./atoms"
-import { columnColors, getPriorityColor, theme } from "./theme"
-import type { JumpTarget, TaskWithSession } from "./types"
-import { COLUMNS, SESSION_INDICATORS } from "./types"
+import { columnColors, getPriorityColor, theme } from "./theme.js"
+import type { JumpTarget, TaskWithSession } from "./types.js"
+import { COLUMNS, SESSION_INDICATORS } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task

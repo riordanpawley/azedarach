@@ -13,9 +13,9 @@
  */
 
 import { Effect, Stream, SubscriptionRef } from "effect"
-import { BoardService } from "./BoardService"
+import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService"
-import { EditorService } from "./EditorService"
+import { EditorService } from "./EditorService.js"
 
 // ============================================================================
 // Types

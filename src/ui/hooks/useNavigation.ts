@@ -11,8 +11,8 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useMemo } from "react"
-import { focusedTaskIdAtom, initializeNavigationAtom, jumpToAtom, navigateAtom } from "../atoms"
-import type { TaskWithSession } from "../types"
+import { focusedTaskIdAtom, initializeNavigationAtom, jumpToAtom, navigateAtom } from "../atoms.js"
+import type { TaskWithSession } from "../types.js"
 
 /**
  * Find task position by ID in the filtered/sorted task columns

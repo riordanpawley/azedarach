@@ -7,14 +7,14 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import type { TaskWithSession } from "../../ui/types"
-import type { BoardService } from "../BoardService"
-import type { CommandQueueService } from "../CommandQueueService"
-import type { EditorService } from "../EditorService"
-import { formatForToast } from "../ErrorFormatter"
-import type { NavigationService } from "../NavigationService"
-import type { OverlayService } from "../OverlayService"
-import type { ToastService } from "../ToastService"
+import type { TaskWithSession } from "../../ui/types.js"
+import type { BoardService } from "../BoardService.js"
+import type { CommandQueueService } from "../CommandQueueService.js"
+import type { EditorService } from "../EditorService.js"
+import { formatForToast } from "../ErrorFormatter.js"
+import type { NavigationService } from "../NavigationService.js"
+import type { OverlayService } from "../OverlayService.js"
+import type { ToastService } from "../ToastService.js"
 
 // ============================================================================
 // Helper Factory Functions

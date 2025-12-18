@@ -17,34 +17,34 @@ import {
 	Schedule,
 	SubscriptionRef,
 } from "effect"
-import { ModeService } from "../atoms/runtime"
-import { AppConfig } from "../config/index"
-import { AttachmentService } from "../core/AttachmentService"
-import { BeadsClient } from "../core/BeadsClient"
-import { BeadEditorService } from "../core/EditorService"
-import { HookReceiver, mapEventToState } from "../core/HookReceiver"
-import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
-import { PRWorkflow } from "../core/PRWorkflow"
-import { PTYMonitor } from "../core/PTYMonitor"
-import { SessionManager } from "../core/SessionManager"
-import { TerminalService } from "../core/TerminalService"
-import { TmuxService } from "../core/TmuxService"
-import { type VCExecutorInfo, VCService } from "../core/VCService"
-import { BoardService } from "../services/BoardService"
-import { ClockService, computeElapsedFormatted } from "../services/ClockService"
-import { CommandQueueService } from "../services/CommandQueueService"
-import { DiagnosticsService } from "../services/DiagnosticsService"
-import type { SortField } from "../services/EditorService"
-import { EditorService } from "../services/EditorService"
+import { ModeService } from "../atoms/runtime.js"
+import { AppConfig } from "../config/index.js"
+import { AttachmentService } from "../core/AttachmentService.js"
+import { BeadsClient } from "../core/BeadsClient.js"
+import { BeadEditorService } from "../core/EditorService.js"
+import { HookReceiver, mapEventToState } from "../core/HookReceiver.js"
+import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService.js"
+import { PRWorkflow } from "../core/PRWorkflow.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
+import { SessionManager } from "../core/SessionManager.js"
+import { TerminalService } from "../core/TerminalService.js"
+import { TmuxService } from "../core/TmuxService.js"
+import { type VCExecutorInfo, VCService } from "../core/VCService.js"
+import { BoardService } from "../services/BoardService.js"
+import { ClockService, computeElapsedFormatted } from "../services/ClockService.js"
+import { CommandQueueService } from "../services/CommandQueueService.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import type { SortField } from "../services/EditorService.js"
+import { EditorService } from "../services/EditorService.js"
 // New atomic Effect services
-import { formatForToast } from "../services/ErrorFormatter"
-import { KeyboardService } from "../services/KeyboardService"
-import { NavigationService } from "../services/NavigationService"
-import { OverlayService } from "../services/OverlayService"
-import { SessionService } from "../services/SessionService"
-import { ToastService } from "../services/ToastService"
-import { ViewService } from "../services/ViewService"
-import type { TaskWithSession } from "./types"
+import { formatForToast } from "../services/ErrorFormatter.js"
+import { KeyboardService } from "../services/KeyboardService.js"
+import { NavigationService } from "../services/NavigationService.js"
+import { OverlayService } from "../services/OverlayService.js"
+import { SessionService } from "../services/SessionService.js"
+import { ToastService } from "../services/ToastService.js"
+import { ViewService } from "../services/ViewService.js"
+import type { TaskWithSession } from "./types.js"
 
 const platformLayer = BunContext.layer
 
@@ -248,7 +248,7 @@ export const diagnosticsAtom = appRuntime.subscriptionRef(
 )
 
 // Re-export DiagnosticsState type for consumers
-export type { DiagnosticsState } from "../services/DiagnosticsService"
+export type { DiagnosticsState } from "../services/DiagnosticsService.js"
 
 /**
  * Atom for currently selected task ID

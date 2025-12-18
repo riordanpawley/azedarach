@@ -8,8 +8,8 @@
  */
 
 import { Effect } from "effect"
-import { formatForToast } from "../ErrorFormatter"
-import type { HandlerContext } from "./types"
+import { formatForToast } from "../ErrorFormatter.js"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // PR Handler Factory
