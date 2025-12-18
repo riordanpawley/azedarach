@@ -4,10 +4,10 @@
 
 import { useAtomValue } from "@effect-atom/atom-react"
 import { taskRunningOperationAtom } from "./atoms"
-import { ElapsedTimer } from "./ElapsedTimer"
-import { getPriorityColor, theme } from "./theme"
-import type { TaskWithSession } from "./types"
-import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
+import { ElapsedTimer } from "./ElapsedTimer.js"
+import { getPriorityColor, theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
+import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task

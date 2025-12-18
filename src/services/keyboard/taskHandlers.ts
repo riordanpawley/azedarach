@@ -10,8 +10,8 @@
  */
 
 import { Effect } from "effect"
-import { COLUMNS } from "../../ui/types"
-import type { HandlerContext } from "./types"
+import { COLUMNS } from "../../ui/types.js"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // Task Handler Factory
