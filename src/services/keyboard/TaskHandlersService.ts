@@ -12,8 +12,8 @@
  */
 
 import { Effect } from "effect"
+import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
-import { BeadEditorService } from "../../core/EditorService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { VCService } from "../../core/VCService.js"
 import { COLUMNS } from "../../ui/types.js"

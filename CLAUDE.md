@@ -323,6 +323,72 @@ yield* Effect.scheduleForked(Schedule.spaced("500 millis"))(pollingEffect)
 - `Effect.scheduleForked` - Scheduled polling with proper scoping (preferred)
 - `Effect.forkDaemon` - Background task that survives parent interruption
 
+**Service definition: `scoped:` vs `effect:`**
+
+Use `scoped:` when the service spawns fibers that need to outlive the constructor:
+
+```typescript
+// ✅ GOOD: Service spawns long-running fibers
+export class PollingService extends Effect.Service<PollingService>()("PollingService", {
+  scoped: Effect.gen(function* () {  // scoped: provides scope for forkScoped
+    yield* pollEffect.pipe(Effect.forkScoped)  // Lives for service lifetime
+    return { /* methods */ }
+  }),
+}) {}
+
+// ✅ GOOD: Service only has state and methods, no background fibers
+export class StateService extends Effect.Service<StateService>()("StateService", {
+  effect: Effect.gen(function* () {  // effect: no scope needed
+    const state = yield* SubscriptionRef.make(initial)
+    return { state, update: (x) => SubscriptionRef.set(state, x) }
+  }),
+}) {}
+
+// ❌ BAD: Uses effect: but spawns fibers with forkScoped - no scope available!
+export class BrokenService extends Effect.Service<BrokenService>()("BrokenService", {
+  effect: Effect.gen(function* () {
+    yield* cleanup.pipe(Effect.forkScoped)  // ❌ No scope! Will fail or be immediately interrupted
+    return { /* methods */ }
+  }),
+}) {}
+```
+
+**Decision checklist:**
+- Service spawns `Effect.forkScoped` or `Effect.scheduleForked` → use `scoped:`
+- Service methods spawn fibers that must outlive the method call → use `scoped:`
+- Service only has state (SubscriptionRef/Ref) and synchronous methods → use `effect:`
+
+**Service dependencies - use `dependencies:` to avoid leaking requirements:**
+
+When a service depends on another service, declare it in `dependencies:` so `.Default` provides its own deps:
+
+```typescript
+// ✅ GOOD: HookReceiver declares its dependency on DiagnosticsService
+export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
+  dependencies: [DiagnosticsService.Default],  // ← Provides own dependency
+  scoped: Effect.gen(function* () {
+    const diagnostics = yield* DiagnosticsService  // Available because of dependencies
+    // ...
+  }),
+}) {}
+
+// Now HookReceiver.Default has NO unsatisfied requirements
+// Can be used in Layer.mergeAll without leaking DiagnosticsService requirement
+
+// ❌ BAD: Missing dependencies declaration - leaks requirement to app layer
+export class BrokenReceiver extends Effect.Service<BrokenReceiver>()("BrokenReceiver", {
+  scoped: Effect.gen(function* () {
+    const diagnostics = yield* DiagnosticsService  // ❌ Requirement leaks!
+    // ...
+  }),
+}) {}
+
+// BrokenReceiver.Default now REQUIRES DiagnosticsService from the layer composition
+// This forces awkward Layer.provideMerge ordering in the app layer
+```
+
+**Rule**: If your service uses `yield* SomeOtherService`, add `SomeOtherService.Default` to `dependencies:[]`.
+
 ### Mutation Flow
 
 ```
