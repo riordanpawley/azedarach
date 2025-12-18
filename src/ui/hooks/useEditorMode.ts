@@ -104,6 +104,7 @@ export function useEditorMode() {
 			isSearch: mode._tag === "search",
 			isCommand: mode._tag === "command",
 			isSort: mode._tag === "sort",
+			isOrchestrate: mode._tag === "orchestrate",
 		}),
 		[mode],
 	)

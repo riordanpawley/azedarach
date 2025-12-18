@@ -2,9 +2,10 @@
  * DetailPanel component - expandable detail view for selected task
  */
 import { Result } from "@effect-atom/atom"
-import { useAtomValue } from "@effect-atom/atom-react"
-import { useMemo } from "react"
-import { currentAttachmentsAtom } from "./atoms.js"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
+import { useEffect, useMemo, useState } from "react"
+import type { DependencyRef } from "../core/BeadsClient.js"
+import { currentAttachmentsAtom, epicChildrenAtom } from "./atoms.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS } from "./types.js"
@@ -16,12 +17,43 @@ export interface DetailPanelProps {
 const ATTR_BOLD = 1
 
 /**
+ * Get status indicator for a child task
+ * ○ = open
+ * ● = in_progress or blocked
+ * ✓ = closed
+ */
+const getChildStatusIndicator = (child: DependencyRef): string => {
+	if (child.status === "closed") return "✓"
+	if (child.status === "open") return "○"
+	return "●"
+}
+
+/**
+ * Get status color for a child task
+ */
+const getChildStatusColor = (status: DependencyRef["status"]): string => {
+	switch (status) {
+		case "open":
+			return theme.blue
+		case "in_progress":
+			return theme.mauve
+		case "blocked":
+			return theme.red
+		case "closed":
+			return theme.green
+		default:
+			return theme.text
+	}
+}
+
+/**
  * DetailPanel component
  *
  * Displays a centered modal overlay with full task details:
  * - Title, ID, type, priority, status
  * - Description (wrapped)
  * - Design notes (if present)
+ * - Epic children (if task is epic)
  * - Dependencies (future enhancement)
  * - Session status and recent output (future enhancement)
  * - Available actions based on state (future enhancement)
@@ -41,6 +73,22 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		}
 		return { attachments: [] as readonly never[], selectedIndex: -1 }
 	}, [attachmentsResult, props.task.id])
+
+	// Fetch epic children if this is an epic
+	const isEpic = props.task.issue_type === "epic"
+	const [epicChildren, setEpicChildren] = useState<readonly DependencyRef[]>([])
+	const fetchEpicChildren = useAtomSet(epicChildrenAtom(props.task.id), { mode: "promise" })
+
+	useEffect(() => {
+		if (isEpic) {
+			fetchEpicChildren().then((result) => {
+				// appRuntime.fn returns the actual value, not a Result wrapper
+				setEpicChildren(result as readonly DependencyRef[])
+			})
+		} else {
+			setEpicChildren([])
+		}
+	}, [isEpic, fetchEpicChildren])
 
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
@@ -226,6 +274,22 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							{"Notes:"}
 						</text>
 						<text fg={theme.text}>{props.task.notes}</text>
+						<text> </text>
+					</box>
+				)}
+
+				{/* Epic Children */}
+				{isEpic && epicChildren.length > 0 && (
+					<box flexDirection="column">
+						<text fg={theme.blue} attributes={ATTR_BOLD}>
+							{`Children (${epicChildren.length}):`}
+						</text>
+						{epicChildren.map((child) => (
+							<text key={child.id} fg={getChildStatusColor(child.status)}>
+								{`  ${child.id}  ${getChildStatusIndicator(child)}  ${child.title}`}
+							</text>
+						))}
+						<text fg={theme.subtext0}>{"  Press 'o' to orchestrate parallel workers"}</text>
 						<text> </text>
 					</box>
 				)}
