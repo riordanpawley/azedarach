@@ -198,6 +198,46 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 
 		// Expose doMergeToMain for direct calls if needed
 		doMergeToMain,
+
+		/**
+		 * Abort merge action (Space+M)
+		 *
+		 * Aborts an in-progress merge in the worktree. Use this when a merge
+		 * conflict resolution is stuck or you want to cancel the merge.
+		 * Queued to prevent race conditions with other operations on the same task.
+		 * Blocked if task already has an operation in progress.
+		 */
+		abortMerge: () =>
+			Effect.gen(function* () {
+				const task = yield* ctx.getSelectedTask()
+				if (!task) return
+
+				// Check if task has an operation in progress
+				const isBusy = yield* ctx.checkBusy(task.id)
+				if (isBusy) return
+
+				if (task.sessionState === "idle") {
+					yield* ctx.toast.show("error", `No worktree for ${task.id} - nothing to abort`)
+					return
+				}
+
+				yield* ctx.withQueue(
+					task.id,
+					"abort-merge",
+					Effect.gen(function* () {
+						yield* ctx.toast.show("info", `Aborting merge for ${task.id}...`)
+
+						yield* ctx.prWorkflow.abortMerge({ beadId: task.id, projectPath: process.cwd() }).pipe(
+							Effect.tap(() => ctx.board.refresh()),
+							Effect.tap(() => ctx.toast.show("success", `Merge aborted for ${task.id}`)),
+							Effect.catchAll((error: unknown) => {
+								const formatted = formatForToast(error)
+								return ctx.toast.show("error", `Abort failed: ${formatted}`)
+							}),
+						)
+					}),
+				)
+			}),
 	}
 }
 

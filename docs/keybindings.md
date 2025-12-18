@@ -397,6 +397,7 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 |----------|--------|----------------|
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
+| `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 
 #### Merge to Main (Space+m)
@@ -412,6 +413,24 @@ The merge action includes **conflict detection**:
 4. On success, the branch changes are merged into main locally
 
 **Note:** This is a local merge operation, not a GitHub PR merge. Use `Space+P` to create a PR for code review workflows.
+
+#### Abort Merge (Space+M)
+
+If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cancel), use `Space` `M` to abort:
+
+1. Runs `git merge --abort` in the worktree
+2. Returns the worktree to its pre-merge state
+3. You can then:
+   - Try the merge again later
+   - Manually resolve conflicts
+   - Use `Space` `a` to attach to the Claude session and guide resolution
+
+**When to use:**
+- Merge conflict resolution is taking too long
+- Claude is stuck or going in the wrong direction
+- You want to resolve conflicts manually instead
+
+**Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
 
 ### Movement Actions
 
