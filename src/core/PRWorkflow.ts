@@ -686,16 +686,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 					)
 
-					// 3. Fetch main and merge INTO worktree first to catch conflicts early
+					// 3. Merge local main INTO worktree first to catch conflicts early
 					// This ensures any conflicts are resolved in the worktree context,
 					// where Claude can fix them before we merge to main.
-					yield* runGit(["fetch", "origin", "main"], worktree.path).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if offline or no remote
-					)
-
-					// Try to merge main into the worktree
+					// We use local main (not origin/main) to keep the workflow local -
+					// the pre-check also uses local main, so they stay consistent.
 					const mainMergeResult = yield* runGit(
-						["merge", "origin/main", "-m", `Merge main into ${beadId}`],
+						["merge", "main", "-m", `Merge main into ${beadId}`],
 						worktree.path,
 					).pipe(
 						Effect.map(() => ({ hasConflicts: false, conflictOutput: "" })),
