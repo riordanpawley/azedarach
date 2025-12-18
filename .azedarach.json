@@ -13,5 +13,11 @@
 		"command": "claude",
 		"shell": "zsh",
 		"tmuxPrefix": "C-a"
+	},
+	"merge": {
+		"validateCommands": ["bun run type-check"],
+		"fixCommand": "bun run fix",
+		"maxFixAttempts": 2,
+		"startClaudeOnFailure": true
 	}
 }
