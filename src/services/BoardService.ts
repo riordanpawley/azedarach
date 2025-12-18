@@ -89,8 +89,13 @@ const byUpdatedAt: Order.Order<TaskWithSession> = Order.mapInput(
  * All sort modes share the same structure:
  * 1. Active sessions first (tasks with sessionState !== "idle")
  * 2. User's primary sort field (with direction)
- * 3. Secondary sort by updatedAt (most recent first)
- * 4. Tie-breakers for remaining criteria
+ * 3. Secondary sort: updatedAt (most recent first) - provides meaningful ordering within primary groups
+ * 4. Remaining criteria as tie-breakers
+ *
+ * The key insight is that `updated` serves as a natural secondary sort for all modes:
+ * - Session sort: within each session state, show most recently updated first
+ * - Priority sort: within each priority level, show most recently updated first
+ * - Updated sort: use session state and priority as tie-breakers
  */
 const buildSortOrder = (sortConfig: SortConfig): Order.Order<TaskWithSession> => {
 	const applyDirection = (order: Order.Order<TaskWithSession>): Order.Order<TaskWithSession> =>
@@ -98,17 +103,19 @@ const buildSortOrder = (sortConfig: SortConfig): Order.Order<TaskWithSession> =>
 
 	switch (sortConfig.field) {
 		case "session":
-			// Session mode: active first → session state (with direction) → priority → updatedAt
+			// Session mode: active first → session state (with direction) → updatedAt → priority
+			// Updated is secondary so within each session state, recently touched tasks rise to top
 			return Order.combine(
 				byHasActiveSession,
 				Order.combine(
 					applyDirection(bySessionState),
-					Order.combine(byPriority, Order.reverse(byUpdatedAt)),
+					Order.combine(Order.reverse(byUpdatedAt), byPriority),
 				),
 			)
 
 		case "priority":
 			// Priority mode: active first → priority (with direction) → updatedAt → session state
+			// Updated is secondary so within each priority level, recently touched tasks rise to top
 			return Order.combine(
 				byHasActiveSession,
 				Order.combine(
@@ -118,12 +125,13 @@ const buildSortOrder = (sortConfig: SortConfig): Order.Order<TaskWithSession> =>
 			)
 
 		case "updated":
-			// Updated mode: active first → updatedAt (with direction) → session state → priority
+			// Updated mode: active first → updatedAt (with direction) → priority → session state
+			// Priority is secondary for updated mode (more useful than session state as tiebreaker)
 			return Order.combine(
 				byHasActiveSession,
 				Order.combine(
 					applyDirection(Order.reverse(byUpdatedAt)), // reverse twice for desc = chronological
-					Order.combine(bySessionState, byPriority),
+					Order.combine(byPriority, bySessionState),
 				),
 			)
 	}
