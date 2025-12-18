@@ -231,6 +231,7 @@ Help me with one of:
 - Improving the description so any Claude session could pick it up
 - Breaking down into subtasks if too large
 - Adding acceptance criteria
+- Just chatting about the task or exploring ideas
 
 What would you like to discuss?`
 			const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
