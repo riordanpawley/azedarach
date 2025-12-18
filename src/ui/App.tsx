@@ -8,8 +8,8 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
-import type { Dependent, Issue } from "../core/BeadsClient.js"
 import { killActivePopup } from "../core/BeadEditorService.js"
+import type { Dependent, Issue } from "../core/BeadsClient.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
 	claudeCreateSessionAtom,
