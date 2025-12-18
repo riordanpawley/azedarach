@@ -5,8 +5,9 @@
  * .beads/images/index.json since the beads CLI doesn't natively support attachments.
  */
 
-import { Command, FileSystem, Path } from "@effect/platform"
+import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Record, Schema, SubscriptionRef } from "effect"
+import { BeadsClient } from "./BeadsClient.js"
 
 // ============================================================================
 // Schema Definitions
@@ -85,10 +86,11 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 export class ImageAttachmentService extends Effect.Service<ImageAttachmentService>()(
 	"ImageAttachmentService",
 	{
-		dependencies: [],
+		dependencies: [BeadsClient.Default],
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
+			const beadsClient = yield* BeadsClient
 
 			// Base directory for all image attachments
 			const getBaseDir = () => path.join(process.cwd(), BEADS_IMAGES_DIR)
@@ -216,6 +218,43 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 
 				return null
 			})
+
+			/**
+			 * Update bead notes to include link to attached image.
+			 * Appends a markdown-style link to the notes field.
+			 */
+			const linkAttachmentInNotes = (
+				issueId: string,
+				attachment: ImageAttachment,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					// Build relative path from project root
+					const relativePath = `.beads/images/${issueId}/${attachment.filename}`
+
+					// Create a formatted attachment entry
+					const timestamp = new Date(attachment.createdAt).toLocaleString()
+					const source = attachment.originalPath === "clipboard" ? "clipboard" : "file"
+					const attachmentLine = `📎 [${attachment.filename}](${relativePath}) (${source}, ${timestamp})`
+
+					// Get current issue to read existing notes
+					const issue = yield* beadsClient
+						.show(issueId)
+						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+
+					// Append to existing notes or create new
+					const existingNotes = issue?.notes ?? ""
+					const separator = existingNotes.trim() ? "\n" : ""
+					const newNotes = `${existingNotes}${separator}${attachmentLine}`
+
+					// Update the bead with new notes
+					yield* beadsClient
+						.update(issueId, { notes: newNotes })
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Failed to update bead notes: ${error}`),
+							),
+						)
+				})
 
 			// ========================================================================
 			// Reactive State
@@ -531,6 +570,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							})
 						}
 
+						// Link attachment in bead notes
+						yield* linkAttachmentInNotes(issueId, attachment)
+
 						return attachment
 					}),
 
@@ -633,6 +675,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 								selectedIndex: current.selectedIndex,
 							})
 						}
+
+						// Link attachment in bead notes
+						yield* linkAttachmentInNotes(issueId, attachment)
 
 						return attachment
 					}),
