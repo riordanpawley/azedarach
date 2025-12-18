@@ -57,7 +57,7 @@ The default mode for navigation and basic actions.
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
-| `L` | View logs | Opens az.log in tmux popup |
+| `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
 | `q` | Quit/Back | Exits drill-down; otherwise quits app |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
 
@@ -425,7 +425,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
 | `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
-| `Space` `c` | Chat (Haiku) | Always (opens Haiku in tmux session to discuss task) |
+| `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |

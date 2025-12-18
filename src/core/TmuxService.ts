@@ -114,8 +114,15 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			 * @param opts.width - Width as percentage (default "80%")
 			 * @param opts.height - Height as percentage (default "80%")
 			 * @param opts.title - Optional title for the popup border
+			 * @param opts.cwd - Working directory for the command (optional)
 			 */
-			displayPopup: (opts: { command: string; width?: string; height?: string; title?: string }) =>
+			displayPopup: (opts: {
+				command: string
+				width?: string
+				height?: string
+				title?: string
+				cwd?: string
+			}) =>
 				Effect.gen(function* () {
 					const args = [
 						"display-popup",
@@ -125,6 +132,9 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 						"-h",
 						opts.height ?? "80%",
 					]
+					if (opts.cwd) {
+						args.push("-d", opts.cwd)
+					}
 					if (opts.title) {
 						args.push("-T", opts.title)
 					}

@@ -7,6 +7,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Record, Schema, SubscriptionRef } from "effect"
+import { ProjectService } from "../services/ProjectService.js"
 import { BeadsClient } from "./BeadsClient.js"
 
 // ============================================================================
@@ -86,33 +87,54 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 export class ImageAttachmentService extends Effect.Service<ImageAttachmentService>()(
 	"ImageAttachmentService",
 	{
-		dependencies: [BeadsClient.Default],
+		dependencies: [BeadsClient.Default, ProjectService.Default],
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
 			const beadsClient = yield* BeadsClient
+			const projectService = yield* ProjectService
 
-			// Base directory for all image attachments
-			const getBaseDir = () => path.join(process.cwd(), BEADS_IMAGES_DIR)
-			const getIndexPath = () => path.join(getBaseDir(), INDEX_FILE)
-			const getIssueDir = (issueId: string) => path.join(getBaseDir(), issueId)
+			/**
+			 * Get the project path from ProjectService, falling back to process.cwd()
+			 */
+			const getProjectPath = (): Effect.Effect<string> =>
+				Effect.gen(function* () {
+					const projectPath = yield* projectService.getCurrentPath()
+					return projectPath ?? process.cwd()
+				})
+
+			// Base directory for all image attachments (relative to project path)
+			const getBaseDirSync = (projectPath: string) => path.join(projectPath, BEADS_IMAGES_DIR)
+			const getIndexPathSync = (projectPath: string) =>
+				path.join(getBaseDirSync(projectPath), INDEX_FILE)
+			const getIssueDirSync = (projectPath: string, issueId: string) =>
+				path.join(getBaseDirSync(projectPath), issueId)
+
+			// Effect-returning versions that get projectPath from ProjectService
+			const getBaseDir = () =>
+				Effect.map(getProjectPath(), (projectPath) => getBaseDirSync(projectPath))
+			const getIndexPath = () =>
+				Effect.map(getProjectPath(), (projectPath) => getIndexPathSync(projectPath))
+			const getIssueDir = (issueId: string) =>
+				Effect.map(getProjectPath(), (projectPath) => getIssueDirSync(projectPath, issueId))
 
 			/**
 			 * Ensure base directory and index file exist
 			 */
-			const ensureStorage = Effect.gen(function* () {
-				const baseDir = getBaseDir()
-				const indexPath = getIndexPath()
+			const ensureStorage = () =>
+				Effect.gen(function* () {
+					const baseDir = yield* getBaseDir()
+					const indexPath = yield* getIndexPath()
 
-				// Create base directory if not exists
-				yield* fs.makeDirectory(baseDir, { recursive: true }).pipe(Effect.ignore)
+					// Create base directory if not exists
+					yield* fs.makeDirectory(baseDir, { recursive: true }).pipe(Effect.ignore)
 
-				// Create index file if not exists
-				const exists = yield* fs.exists(indexPath)
-				if (!exists) {
-					yield* fs.writeFileString(indexPath, "{}")
-				}
-			})
+					// Create index file if not exists
+					const exists = yield* fs.exists(indexPath)
+					if (!exists) {
+						yield* fs.writeFileString(indexPath, "{}")
+					}
+				})
 
 			// Decoder for reading index from JSON string
 			const decodeIndex = Schema.decodeUnknown(Schema.parseJson(AttachmentIndexSchema))
@@ -120,21 +142,22 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			/**
 			 * Read the attachment index
 			 */
-			const readIndex = Effect.gen(function* () {
-				yield* ensureStorage
-				const indexPath = getIndexPath()
-				const content = yield* fs.readFileString(indexPath)
-				return yield* decodeIndex(content).pipe(
-					Effect.catchAll(() => Effect.succeed({} as AttachmentIndex)),
-				)
-			})
+			const readIndex = () =>
+				Effect.gen(function* () {
+					yield* ensureStorage()
+					const indexPath = yield* getIndexPath()
+					const content = yield* fs.readFileString(indexPath)
+					return yield* decodeIndex(content).pipe(
+						Effect.catchAll(() => Effect.succeed<AttachmentIndex>({})),
+					)
+				})
 
 			/**
 			 * Write the attachment index
 			 */
 			const writeIndex = (index: AttachmentIndex) =>
 				Effect.gen(function* () {
-					const indexPath = getIndexPath()
+					const indexPath = yield* getIndexPath()
 					yield* fs.writeFileString(indexPath, JSON.stringify(index, null, 2))
 				})
 
@@ -368,7 +391,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				loadForTask: (taskId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const attachments = index[taskId] ?? []
 						yield* SubscriptionRef.set(currentAttachments, {
 							taskId,
@@ -432,7 +455,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+						const issueDir = yield* getIssueDir(current.taskId)
+						const filePath = path.join(issueDir, attachment.filename)
 
 						// Use platform-specific open command
 						const openCmd = process.platform === "darwin" ? "open" : "xdg-open"
@@ -467,12 +491,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
+						const issueDir = yield* getIssueDir(current.taskId)
+
 						// Remove file
-						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+						const filePath = path.join(issueDir, attachment.filename)
 						yield* fs.remove(filePath).pipe(Effect.ignore)
 
 						// Update index
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[current.taskId] ?? []
 						const newAttachments = issueAttachments.filter((a) => a.id !== attachment.id)
 						const updatedIndex =
@@ -480,7 +506,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 								? Record.remove(index, current.taskId)
 								: Record.set(index, current.taskId, newAttachments)
 						if (newAttachments.length === 0) {
-							yield* fs.remove(getIssueDir(current.taskId)).pipe(Effect.ignore)
+							yield* fs.remove(issueDir).pipe(Effect.ignore)
 						}
 						yield* writeIndex(updatedIndex)
 
@@ -503,7 +529,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				list: (issueId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						return index[issueId] ?? []
 					}),
 
@@ -532,7 +558,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const stats = yield* fs.stat(filePath)
 
 						// Create issue directory
-						const issueDir = getIssueDir(issueId)
+						const issueDir = yield* getIssueDir(issueId)
 						yield* fs.makeDirectory(issueDir, { recursive: true }).pipe(Effect.ignore)
 
 						// Generate unique ID and destination path
@@ -555,7 +581,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						}
 
 						// Update index using Effect's Record.set for immutability
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[issueId] ?? []
 						const newAttachments = [...issueAttachments, attachment]
 						yield* writeIndex(Record.set(index, issueId, newAttachments))
@@ -595,7 +621,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						}
 
 						// Create issue directory
-						const issueDir = getIssueDir(issueId)
+						const issueDir = yield* getIssueDir(issueId)
 						yield* fs.makeDirectory(issueDir, { recursive: true }).pipe(Effect.ignore)
 
 						// Generate unique ID
@@ -661,7 +687,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						}
 
 						// Update index using Effect's Record.set for immutability
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[issueId] ?? []
 						const newAttachments = [...issueAttachments, attachment]
 						yield* writeIndex(Record.set(index, issueId, newAttachments))
@@ -687,7 +713,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				remove: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[issueId] ?? []
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
@@ -699,8 +725,10 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
+						const issueDir = yield* getIssueDir(issueId)
+
 						// Remove file
-						const filePath = path.join(getIssueDir(issueId), attachment.filename)
+						const filePath = path.join(issueDir, attachment.filename)
 						yield* fs.remove(filePath).pipe(Effect.ignore)
 
 						// Update index using Effect's Record for immutability
@@ -711,7 +739,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 								: Record.set(index, issueId, newAttachments)
 						if (newAttachments.length === 0) {
 							// Also try to remove the empty directory
-							yield* fs.remove(getIssueDir(issueId)).pipe(Effect.ignore)
+							yield* fs.remove(issueDir).pipe(Effect.ignore)
 						}
 						yield* writeIndex(updatedIndex)
 
@@ -736,7 +764,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				getPath: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[issueId] ?? []
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
@@ -748,7 +776,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						return path.join(getIssueDir(issueId), attachment.filename)
+						const issueDir = yield* getIssueDir(issueId)
+						return path.join(issueDir, attachment.filename)
 					}),
 
 				/**
@@ -756,7 +785,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				open: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const issueAttachments = index[issueId] ?? []
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
@@ -768,10 +797,12 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const filePath = path.join(getIssueDir(issueId), attachment.filename)
+						const issueDir = yield* getIssueDir(issueId)
+						const filePath = path.join(issueDir, attachment.filename)
 
-						// Use xdg-open on Linux
-						yield* Command.make("xdg-open", filePath).pipe(
+						// Use platform-specific open command
+						const openCmd = process.platform === "darwin" ? "open" : "xdg-open"
+						yield* Command.make(openCmd, filePath).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
 								Effect.fail(
@@ -797,7 +828,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				count: (issueId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						return (index[issueId] ?? []).length
 					}),
 
@@ -806,7 +837,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				countBatch: (issueIds: readonly string[]) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex
+						const index = yield* readIndex()
 						const result: Record<string, number> = {}
 						for (const id of issueIds) {
 							result[id] = (index[id] ?? []).length
@@ -848,7 +879,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						})
 
 						// Get full file path
-						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+						const issueDir = yield* getIssueDir(current.taskId)
+						const filePath = path.join(issueDir, attachment.filename)
 
 						// Import terminal-image dynamically and render
 						const { default: terminalImage } = yield* Effect.tryPromise({
