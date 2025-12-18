@@ -10,7 +10,9 @@ import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
+import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { SessionManager } from "../core/SessionManager.js"
+import { launchTUI } from "../ui/launch.js"
 
 // ============================================================================
 // Shared Options
@@ -95,7 +97,6 @@ const defaultHandler = (args: {
 		yield* validateBeadsDatabase(cwd)
 
 		// Launch TUI
-		const { launchTUI } = yield* Effect.promise(() => import("../ui/launch.js"))
 		yield* Effect.promise(() => launchTUI())
 	})
 
@@ -264,7 +265,7 @@ const syncHandler = (args: {
 /**
  * Valid hook event types from Claude Code
  */
-const VALID_HOOK_EVENTS = ["idle_prompt", "stop", "session_end"] as const
+const VALID_HOOK_EVENTS = ["idle_prompt", "permission_request", "stop", "session_end"] as const
 type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 
 /**
@@ -305,6 +306,70 @@ const notifyHandler = (args: {
 
 		if (args.verbose) {
 			yield* Console.log(`Wrote notification to: ${notifyPath}`)
+		}
+	})
+
+/**
+ * Install Azedarach hooks into the current project's .claude/settings.local.json
+ *
+ * This command is useful for:
+ * - Setting up hooks in a non-worktree project
+ * - Manually adding hooks to an existing settings.local.json
+ * - Debugging hook configuration
+ */
+const hooksInstallHandler = (args: {
+	readonly beadId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const claudeDir = pathService.join(cwd, ".claude")
+		const settingsPath = pathService.join(claudeDir, "settings.local.json")
+
+		// Ensure .claude directory exists
+		const claudeDirExists = yield* fs.exists(claudeDir)
+		if (!claudeDirExists) {
+			yield* fs.makeDirectory(claudeDir, { recursive: true })
+			if (args.verbose) {
+				yield* Console.log(`Created .claude directory: ${claudeDir}`)
+			}
+		}
+
+		// Read existing settings if they exist
+		let existingSettings: Record<string, unknown> = {}
+		const settingsExist = yield* fs.exists(settingsPath)
+		if (settingsExist) {
+			const content = yield* fs
+				.readFileString(settingsPath)
+				.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+			existingSettings = yield* Effect.try({
+				try: () => JSON.parse(content),
+				catch: () => ({}),
+			}).pipe(Effect.catchAll(() => Effect.succeed({})))
+
+			if (args.verbose) {
+				yield* Console.log(`Read existing settings from: ${settingsPath}`)
+			}
+		}
+
+		// Generate and merge hook configuration
+		const hookConfig = generateHookConfig(args.beadId)
+		const mergedSettings = deepMerge(existingSettings, hookConfig)
+
+		// Write merged settings
+		yield* fs.writeFileString(settingsPath, JSON.stringify(mergedSettings, null, "\t"))
+
+		yield* Console.log(`✓ Installed hooks for bead ${args.beadId}`)
+		yield* Console.log(`  File: ${settingsPath}`)
+		yield* Console.log(`  Events: idle_prompt, permission_request, stop, session_end`)
+
+		if (args.verbose) {
+			yield* Console.log("\nHook configuration:")
+			yield* Console.log(JSON.stringify(hookConfig.hooks, null, 2))
 		}
 	})
 
@@ -417,6 +482,32 @@ const notifyCommand = Command.make(
 ).pipe(Command.withDescription("Handle Claude Code hook notifications (internal use)"))
 
 /**
+ * az hooks install <bead-id> - Install session state hooks
+ *
+ * Installs Azedarach hooks into .claude/settings.local.json for session state detection.
+ * This is automatically done when creating worktrees, but can be run manually.
+ */
+const hooksInstallCommand = Command.make(
+	"install",
+	{
+		beadId: beadIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	hooksInstallHandler,
+).pipe(Command.withDescription("Install session state hooks into .claude/settings.local.json"))
+
+/**
+ * az hooks - Parent command for hook management
+ */
+const hooksCommand = Command.make("hooks", {}, () =>
+	Console.log("Usage: az hooks install <bead-id>"),
+).pipe(
+	Command.withDescription("Manage Claude Code hooks for session state detection"),
+	Command.withSubcommands([hooksInstallCommand]),
+)
+
+/**
  * Main CLI - combines all commands
  *
  * The parent command has its own handler that runs when `az` is called
@@ -447,6 +538,7 @@ const cli = az.pipe(
 		statusCommand,
 		syncCommand,
 		notifyCommand,
+		hooksCommand,
 	]),
 )
 

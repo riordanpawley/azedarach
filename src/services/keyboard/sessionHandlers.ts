@@ -10,7 +10,7 @@
  */
 
 import { Effect } from "effect"
-import type { HandlerContext } from "./types"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // Session Handler Factory

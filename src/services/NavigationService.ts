@@ -13,8 +13,8 @@
  */
 
 import { Effect, SubscriptionRef } from "effect"
-import { BoardService } from "./BoardService"
-import { EditorService } from "./EditorService"
+import { BoardService } from "./BoardService.js"
+import { EditorService } from "./EditorService.js"
 
 // ============================================================================
 // Types

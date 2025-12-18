@@ -1,8 +1,8 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
-import { theme } from "./theme"
-import type { TaskWithSession } from "./types"
+import { theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
 
 export interface ActionPaletteProps {
 	task?: TaskWithSession

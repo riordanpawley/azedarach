@@ -4,10 +4,10 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
 import { useMemo } from "react"
-import { currentAttachmentsAtom } from "./atoms"
-import { getPriorityColor, theme } from "./theme"
-import type { TaskWithSession } from "./types"
-import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS } from "./types"
+import { currentAttachmentsAtom } from "./atoms.js"
+import { getPriorityColor, theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
+import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS } from "./types.js"
 
 export interface DetailPanelProps {
 	task: TaskWithSession
