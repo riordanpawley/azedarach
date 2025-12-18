@@ -12,6 +12,16 @@ export interface JumpTarget {
 }
 
 /**
+ * Task representation for orchestration mode
+ */
+export interface OrchestrationTask {
+	readonly id: string
+	readonly title: string
+	readonly status: "open" | "in_progress" | "blocked" | "closed"
+	readonly hasSession: boolean
+}
+
+/**
  * Goto mode sub-state
  * When 'g' is pressed, we wait for the next key:
  * - 'w' enters word/item jump mode (shows labels)
@@ -51,6 +61,7 @@ export interface SortConfig {
  * - search: Search/filter mode triggered by '/'
  * - command: VC command input mode triggered by ':'
  * - sort: Sort menu mode triggered by ','
+ * - orchestrate: Epic orchestration mode for managing child tasks ('o' from epic detail)
  */
 export type EditorMode =
 	| { readonly _tag: "normal" }
@@ -65,6 +76,14 @@ export type EditorMode =
 	| { readonly _tag: "search"; readonly query: string }
 	| { readonly _tag: "command"; readonly input: string }
 	| { readonly _tag: "sort" }
+	| {
+			readonly _tag: "orchestrate"
+			readonly epicId: string
+			readonly epicTitle: string
+			readonly childTasks: ReadonlyArray<OrchestrationTask>
+			readonly selectedIds: ReadonlyArray<string>
+			readonly focusIndex: number
+	  }
 
 /**
  * Default sort configuration: session status > priority > updated_at
@@ -273,6 +292,106 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					yield* SubscriptionRef.set(sortConfig, Data.struct({ field, direction: newDirection }))
 					yield* SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const }))
 				}),
+
+			// ========================================================================
+			// Orchestrate Mode
+			// ========================================================================
+
+			/**
+			 * Enter orchestrate mode for an epic
+			 * Called when 'o' is pressed in the detail panel for an epic
+			 */
+			enterOrchestrate: (
+				epicId: string,
+				epicTitle: string,
+				children: ReadonlyArray<OrchestrationTask>,
+			) =>
+				SubscriptionRef.set(
+					mode,
+					Data.struct({
+						_tag: "orchestrate" as const,
+						epicId,
+						epicTitle,
+						childTasks: children,
+						selectedIds: [],
+						focusIndex: 0,
+					}),
+				),
+
+			/**
+			 * Move focus down in orchestrate mode
+			 */
+			orchestrateMoveDown: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "orchestrate") return m
+					const maxIndex = Math.max(0, m.childTasks.length - 1)
+					const newIndex = Math.min(m.focusIndex + 1, maxIndex)
+					return Data.struct({ ...m, focusIndex: newIndex })
+				}),
+
+			/**
+			 * Move focus up in orchestrate mode
+			 */
+			orchestrateMoveUp: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "orchestrate") return m
+					const newIndex = Math.max(m.focusIndex - 1, 0)
+					return Data.struct({ ...m, focusIndex: newIndex })
+				}),
+
+			/**
+			 * Toggle task selection in orchestrate mode
+			 * Only allows selecting spawnable tasks (status === "open" && !hasSession)
+			 */
+			orchestrateToggle: (taskId: string) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "orchestrate") return m
+
+					// Find the task
+					const task = m.childTasks.find((t) => t.id === taskId)
+					if (!task) return m
+
+					// Only allow toggling spawnable tasks
+					const isSpawnable = task.status === "open" && !task.hasSession
+					if (!isSpawnable) return m
+
+					// Toggle selection
+					const has = m.selectedIds.includes(taskId)
+					return Data.struct({
+						...m,
+						selectedIds: has
+							? m.selectedIds.filter((id) => id !== taskId)
+							: [...m.selectedIds, taskId],
+					})
+				}),
+
+			/**
+			 * Select all spawnable tasks in orchestrate mode
+			 */
+			orchestrateSelectAll: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "orchestrate") return m
+
+					const spawnableIds = m.childTasks
+						.filter((t) => t.status === "open" && !t.hasSession)
+						.map((t) => t.id)
+
+					return Data.struct({ ...m, selectedIds: spawnableIds })
+				}),
+
+			/**
+			 * Clear all selections in orchestrate mode
+			 */
+			orchestrateSelectNone: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "orchestrate") return m
+					return Data.struct({ ...m, selectedIds: [] })
+				}),
+
+			/**
+			 * Exit orchestrate mode and return to normal
+			 */
+			exitOrchestrate: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
 		}
 	}),
 }) {}

@@ -15,6 +15,7 @@ import { EditorService } from "./EditorService.js"
 import { createDefaultBindings } from "./keyboard/bindings.js"
 import { InputHandlersService } from "./keyboard/InputHandlersService.js"
 import { KeyboardHelpersService } from "./keyboard/KeyboardHelpersService.js"
+import { OrchestrateHandlersService } from "./keyboard/OrchestrateHandlersService.js"
 import { PRHandlersService } from "./keyboard/PRHandlersService.js"
 import { SessionHandlersService } from "./keyboard/SessionHandlersService.js"
 import { TaskHandlersService } from "./keyboard/TaskHandlersService.js"
@@ -40,6 +41,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		TaskHandlersService.Default,
 		PRHandlersService.Default,
 		InputHandlersService.Default,
+		OrchestrateHandlersService.Default,
 		// Core services for direct binding access
 		ToastService.Default,
 		OverlayService.Default,
@@ -58,6 +60,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const taskHandlers = yield* TaskHandlersService
 		const prHandlers = yield* PRHandlersService
 		const inputHandlers = yield* InputHandlersService
+		const orchestrateHandlers = yield* OrchestrateHandlersService
 
 		// ====================================================================
 		// Inject core services for direct binding access
@@ -78,6 +81,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			taskHandlers,
 			prHandlers,
 			inputHandlers,
+			orchestrateHandlers,
 			helpers,
 			// Core services for direct bindings
 			nav,

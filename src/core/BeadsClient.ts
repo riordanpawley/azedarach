@@ -15,6 +15,19 @@ import { ProjectService } from "../services/ProjectService.js"
 // ============================================================================
 
 /**
+ * Dependency reference schema for issue dependencies/dependents
+ */
+const DependencyRefSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
+	dependency_type: Schema.Literal("blocks", "related", "parent-child", "discovered-from"),
+	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore").pipe(Schema.optional),
+})
+
+export type DependencyRef = Schema.Schema.Type<typeof DependencyRefSchema>
+
+/**
  * Issue schema matching bd --json output
  */
 const IssueSchema = Schema.Struct({
@@ -33,6 +46,10 @@ const IssueSchema = Schema.Struct({
 	notes: Schema.String.pipe(Schema.optional),
 	acceptance: Schema.String.pipe(Schema.optional),
 	estimate: Schema.Number.pipe(Schema.optional),
+	dependent_count: Schema.Number.pipe(Schema.optional),
+	dependency_count: Schema.Number.pipe(Schema.optional),
+	dependents: Schema.Array(DependencyRefSchema).pipe(Schema.optional),
+	dependencies: Schema.Array(DependencyRefSchema).pipe(Schema.optional),
 })
 
 export type Issue = Schema.Schema.Type<typeof IssueSchema>
@@ -260,6 +277,25 @@ export interface BeadsClientService {
 		id: string,
 		cwd?: string,
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Get an epic with its child tasks
+	 *
+	 * Fetches an epic issue and filters its dependents to return only parent-child relationships.
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.getEpicWithChildren("az-05y")
+	 * ```
+	 */
+	readonly getEpicWithChildren: (
+		epicId: string,
+		cwd?: string,
+	) => Effect.Effect<
+		{ epic: Issue; children: ReadonlyArray<DependencyRef> },
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -622,6 +658,31 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					// 2. --force is required to actually delete (not just preview)
 					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
 				}),
+
+			getEpicWithChildren: (epicId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["show", epicId], effectiveCwd)
+
+					// bd returns an array with a single item for show command
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
+					}
+
+					const epic = parsed[0]!
+					// Tombstone issues are effectively deleted
+					if (epic.status === "tombstone") {
+						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
+					}
+
+					// Filter dependents to only include parent-child relationships
+					const children =
+						epic.dependents?.filter((dep) => dep.dependency_type === "parent-child") ?? []
+
+					return { epic, children }
+				}),
 		}
 	}),
 }) {}
@@ -746,3 +807,15 @@ export const deleteIssue = (
 	cwd?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.delete(id, cwd))
+
+/**
+ * Get an epic with its child tasks
+ */
+export const getEpicWithChildren = (
+	epicId: string,
+	cwd?: string,
+): Effect.Effect<
+	{ epic: Issue; children: ReadonlyArray<DependencyRef> },
+	BeadsError | NotFoundError | ParseError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.getEpicWithChildren(epicId, cwd))

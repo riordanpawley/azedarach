@@ -5,9 +5,6 @@
  * but the atoms are now organized into logical modules.
  */
 
-// Runtime (foundation for all other atoms)
-export { appRuntime } from "./runtime.js"
-
 // Board state atoms
 export {
 	boardTasksAtom,
@@ -18,10 +15,8 @@ export {
 	selectedTaskIdAtom,
 	viewModeAtom,
 } from "./board.js"
-
 // Clock atoms
 export { clockTickAtom, elapsedFormattedAtom } from "./clock.js"
-
 // Command queue atoms
 export {
 	checkTaskBusyAtom,
@@ -30,10 +25,11 @@ export {
 	getQueueInfoAtom,
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
+export type { DiagnosticsState } from "./diagnostics.js"
 
 // Diagnostics atoms
 export { diagnosticsAtom } from "./diagnostics.js"
-export type { DiagnosticsState } from "./diagnostics.js"
+export type { ImageAttachment } from "./image.js"
 
 // Image attachment atoms
 export {
@@ -58,11 +54,8 @@ export {
 	removeImageAttachmentAtom,
 	setImagePathInputAtom,
 } from "./image.js"
-export type { ImageAttachment } from "./image.js"
-
 // Keyboard handling atoms
 export { handleKeyAtom } from "./keyboard.js"
-
 // Mode service atoms
 export {
 	clearCommandAtom,
@@ -73,12 +66,24 @@ export {
 	enterCommandAtom,
 	enterGotoAtom,
 	enterJumpAtom,
+	enterOrchestrateAtom,
 	enterSearchAtom,
 	enterSelectAtom,
 	enterSortAtom,
+	exitOrchestrateAtom,
 	exitSelectAtom,
 	exitToNormalAtom,
+	isOrchestrateAtom,
 	modeAtom,
+	orchestrateFocusIndexAtom,
+	orchestrateMoveDownAtom,
+	orchestrateMoveUpAtom,
+	orchestrateSelectAllAtom,
+	orchestrateSelectedIdsAtom,
+	orchestrateSelectNoneAtom,
+	orchestrateSpawnableCountAtom,
+	orchestrateStateAtom,
+	orchestrateToggleAtom,
 	searchQueryAtom,
 	selectedIdsAtom,
 	setPendingJumpKeyAtom,
@@ -87,7 +92,6 @@ export {
 	updateCommandAtom,
 	updateSearchAtom,
 } from "./mode.js"
-
 // Navigation atoms
 export {
 	focusedTaskIdAtom,
@@ -96,7 +100,6 @@ export {
 	jumpToTaskAtom,
 	navigateAtom,
 } from "./navigation.js"
-
 // Overlay and toast atoms
 export {
 	currentOverlayAtom,
@@ -107,12 +110,12 @@ export {
 	showToastAtom,
 	toastsAtom,
 } from "./overlay.js"
-
 // PR workflow atoms
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
-
 // Project service atoms
 export { currentProjectAtom, projectsAtom, switchProjectAtom } from "./project.js"
+// Runtime (foundation for all other atoms)
+export { appRuntime } from "./runtime.js"
 
 // Session management atoms
 export {
@@ -133,6 +136,7 @@ export {
 	createTaskAtom,
 	deleteBeadAtom,
 	editBeadAtom,
+	epicChildrenAtom,
 	moveTaskAtom,
 	moveTasksAtom,
 } from "./task.js"

@@ -86,6 +86,14 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "u", action: "Updated" },
 		{ key: "Esc", action: "Cancel" },
 	],
+	orchestrate: [
+		{ key: "jk", action: "Nav" },
+		{ key: "Space", action: "Toggle" },
+		{ key: "a", action: "All" },
+		{ key: "n", action: "None" },
+		{ key: "Enter", action: "Spawn" },
+		{ key: "Esc", action: "Exit" },
+	],
 }
 
 /**

@@ -32,6 +32,7 @@ import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
 import { ImagePreviewOverlay } from "./ImagePreviewOverlay.js"
+import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
 import { SortMenu } from "./SortMenu.js"
@@ -94,6 +95,7 @@ export const App = () => {
 		isSearch,
 		isCommand,
 		isSort,
+		isOrchestrate,
 	} = useEditorMode()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -323,6 +325,17 @@ export const App = () => {
 
 			{/* Confirm overlay */}
 			{showingConfirm && <ConfirmOverlay />}
+
+			{/* Orchestration overlay - rendered when in orchestrate mode */}
+			{isOrchestrate && mode._tag === "orchestrate" && (
+				<OrchestrationOverlay
+					epicId={mode.epicId}
+					epicTitle={mode.epicTitle}
+					childTasks={mode.childTasks}
+					selectedIds={mode.selectedIds}
+					focusIndex={mode.focusIndex}
+				/>
+			)}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />
