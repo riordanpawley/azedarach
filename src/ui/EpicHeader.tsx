@@ -66,8 +66,8 @@ export const EpicHeader = ({ epic, epicChildren }: EpicHeaderProps) => {
 			<text fg={theme.subtext0}>
 				<text fg={completed === total && total > 0 ? theme.green : theme.yellow}>
 					{progressBar(completed, total)}
-				</text>{" "}
-				{completed}/{total}
+				</text>
+				{` ${completed}/${total}`}
 			</text>
 		</box>
 	)
