@@ -49,6 +49,26 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 			}),
 		)
 
+	/**
+	 * Execute the actual cleanup operation (called via confirm dialog)
+	 *
+	 * Queued to prevent race conditions with other operations on the same task.
+	 * Internal helper used by cleanup.
+	 */
+	const doCleanup = (beadId: string, projectPath: string) =>
+		ctx.withQueue(
+			beadId,
+			"cleanup",
+			Effect.gen(function* () {
+				yield* ctx.toast.show("info", `Cleaning up ${beadId}...`)
+
+				yield* ctx.prWorkflow.cleanup({ beadId, projectPath }).pipe(
+					Effect.tap(() => ctx.toast.show("success", `Cleaned up ${beadId}`)),
+					Effect.catchAll(ctx.showErrorToast("Failed to cleanup")),
+				)
+			}),
+		)
+
 	return {
 		/**
 		 * Create PR action (Space+P)
@@ -182,8 +202,8 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		/**
 		 * Cleanup worktree action (Space+d)
 		 *
-		 * Deletes the worktree and branch for the current task.
-		 * Requires an active session with a worktree.
+		 * Shows confirmation dialog, then deletes the worktree and branch for
+		 * the current task. Requires an active session with a worktree.
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
@@ -204,18 +224,12 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* ctx.getProjectPath()
 
-				yield* ctx.withQueue(
-					task.id,
-					"cleanup",
-					Effect.gen(function* () {
-						yield* ctx.toast.show("info", `Cleaning up ${task.id}...`)
-
-						yield* ctx.prWorkflow.cleanup({ beadId: task.id, projectPath }).pipe(
-							Effect.tap(() => ctx.toast.show("success", `Cleaned up ${task.id}`)),
-							Effect.catchAll(ctx.showErrorToast("Failed to cleanup")),
-						)
-					}),
-				)
+				// Show confirmation dialog before cleanup
+				yield* ctx.overlay.push({
+					_tag: "confirm",
+					message: `Delete worktree and branch for ${task.id}?\n\nThis will remove the session and all uncommitted changes.`,
+					onConfirm: doCleanup(task.id, projectPath),
+				})
 			}),
 
 		// Expose doMergeToMain for direct calls if needed
