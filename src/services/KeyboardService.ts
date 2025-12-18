@@ -27,6 +27,7 @@ import { createDefaultBindings } from "./keyboard/bindings.js"
 import {
 	createCheckBusy,
 	createGetColumnIndex,
+	createGetProjectPath,
 	createGetSelectedTask,
 	createOpenCurrentDetail,
 	createShowErrorToast,
@@ -40,6 +41,7 @@ import { createTaskHandlers } from "./keyboard/taskHandlers.js"
 import type { HandlerContext, Keybinding, KeyMode } from "./keyboard/types.js"
 import { NavigationService } from "./NavigationService.js"
 import { OverlayService } from "./OverlayService.js"
+import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 import { ViewService } from "./ViewService.js"
 
@@ -69,6 +71,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		TmuxService.Default,
 		CommandQueueService.Default,
 		AppConfig.Default,
+		ProjectService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -91,6 +94,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const tmux = yield* TmuxService
 		const commandQueue = yield* CommandQueueService
 		const appConfig = yield* AppConfig
+		const projectService = yield* ProjectService
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
 		// ====================================================================
@@ -103,6 +107,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const toggleCurrentSelection = createToggleCurrentSelection(editor, getSelectedTask)
 		const withQueue = createWithQueue(commandQueue, toast)
 		const checkBusy = createCheckBusy(commandQueue, toast)
+		const getProjectPath = createGetProjectPath(projectService)
 
 		// ====================================================================
 		// Build handler context
@@ -124,6 +129,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			tmux,
 			vc,
 			commandQueue,
+			projectService,
 
 			// Config
 			resolvedConfig,
@@ -131,6 +137,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			// Pre-bound helpers
 			getSelectedTask,
 			getColumnIndex,
+			getProjectPath,
 			showErrorToast,
 			openCurrentDetail,
 			toggleCurrentSelection,
@@ -210,6 +217,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					// Check for detail overlay (handles attachment navigation)
 					const handledAsDetail = yield* inputHandlers.handleDetailOverlayInput(key)
 					if (handledAsDetail) return
+
+					// Check for projectSelector overlay (handles number key selection)
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag === "projectSelector") {
+						const handledAsProjectSelector = yield* inputHandlers.handleProjectSelectorInput(key)
+						if (handledAsProjectSelector) return
+					}
 
 					const effectiveMode = yield* inputHandlers.getEffectiveMode()
 

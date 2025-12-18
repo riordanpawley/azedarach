@@ -5,13 +5,15 @@
  * Provides commands for managing Claude Code sessions via TUI and direct control.
  */
 
+import * as path from "node:path"
 import { Args, Command, Options } from "@effect/cli"
 import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Console, Effect, Layer, Option } from "effect"
+import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { SessionManager } from "../core/SessionManager.js"
+import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
 
 // ============================================================================
@@ -373,6 +375,144 @@ const hooksInstallHandler = (args: {
 		}
 	})
 
+/**
+ * Add a new project to the registry
+ */
+const projectAddHandler = (args: {
+	readonly path: string
+	readonly name: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+
+		// Resolve absolute path
+		const absolutePath = pathService.resolve(args.path)
+
+		// Validate path exists
+		const exists = yield* fs.exists(absolutePath)
+		if (!exists) {
+			return yield* Effect.fail(new Error(`Path does not exist: ${absolutePath}`))
+		}
+
+		// Validate .beads directory exists
+		const beadsPath = pathService.join(absolutePath, ".beads")
+		const beadsExists = yield* fs.exists(beadsPath)
+		if (!beadsExists) {
+			return yield* Effect.fail(
+				new Error(
+					`No .beads directory found in ${absolutePath}. Run 'bd init' to initialize beads tracking.`,
+				),
+			)
+		}
+
+		// Derive name from directory if not provided
+		const projectName = Option.getOrElse(args.name, () => path.basename(absolutePath))
+
+		if (args.verbose) {
+			yield* Console.log(`Adding project: ${projectName}`)
+			yield* Console.log(`  Path: ${absolutePath}`)
+			yield* Console.log(`  Beads: ${beadsPath}`)
+		}
+
+		// Create ProjectService layer and add project
+		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
+
+		yield* Effect.gen(function* () {
+			const projectService = yield* ProjectService
+			yield* projectService.addProject({
+				name: projectName,
+				path: absolutePath,
+				beadsPath,
+			})
+		}).pipe(Effect.provide(fullLayer))
+
+		yield* Console.log(`Project '${projectName}' added successfully.`)
+	})
+
+/**
+ * List all registered projects
+ */
+const projectListHandler = (args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
+
+		const result = yield* Effect.gen(function* () {
+			const projectService = yield* ProjectService
+			const projects = yield* projectService.getProjects()
+			const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+
+			return { projects, currentProject }
+		}).pipe(Effect.provide(fullLayer))
+
+		if (result.projects.length === 0) {
+			yield* Console.log("No projects registered.")
+			yield* Console.log("Use 'az project add <path>' to register a project.")
+			return
+		}
+
+		yield* Console.log("Registered projects:")
+		yield* Console.log("")
+
+		for (const project of result.projects) {
+			const isCurrent = result.currentProject?.name === project.name
+			const marker = isCurrent ? "* " : "  "
+			yield* Console.log(`${marker}${project.name}`)
+			yield* Console.log(`    Path: ${project.path}`)
+			if (project.beadsPath && args.verbose) {
+				yield* Console.log(`    Beads: ${project.beadsPath}`)
+			}
+			if (isCurrent) {
+				yield* Console.log(`    (current)`)
+			}
+			yield* Console.log("")
+		}
+
+		if (!result.currentProject) {
+			yield* Console.log("No current project selected.")
+		}
+	})
+
+/**
+ * Remove a project from the registry
+ */
+const projectRemoveHandler = (args: { readonly name: string; readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		if (args.verbose) {
+			yield* Console.log(`Removing project: ${args.name}`)
+		}
+
+		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
+
+		yield* Effect.gen(function* () {
+			const projectService = yield* ProjectService
+			yield* projectService.removeProject(args.name)
+		}).pipe(Effect.provide(fullLayer))
+
+		yield* Console.log(`Project '${args.name}' removed successfully.`)
+	})
+
+/**
+ * Switch to a different project and set it as the default
+ */
+const projectSwitchHandler = (args: { readonly name: string; readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		if (args.verbose) {
+			yield* Console.log(`Switching to project: ${args.name}`)
+		}
+
+		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
+
+		yield* Effect.gen(function* () {
+			const projectService = yield* ProjectService
+			yield* projectService.switchProject(args.name)
+			yield* projectService.setDefaultProject(args.name)
+		}).pipe(Effect.provide(fullLayer))
+
+		yield* Console.log(`Switched to project '${args.name}' and set as default.`)
+	})
+
 // ============================================================================
 // Command Definitions
 // ============================================================================
@@ -508,6 +648,90 @@ const hooksCommand = Command.make("hooks", {}, () =>
 )
 
 /**
+ * Project path argument for project add command
+ */
+const projectPathArg = Args.text({ name: "path" }).pipe(
+	Args.withDescription("Path to the project directory"),
+)
+
+/**
+ * Project name argument for project commands
+ */
+const projectNameArg = Args.text({ name: "name" }).pipe(Args.withDescription("Project name"))
+
+/**
+ * Optional project name option for project add
+ */
+const projectNameOption = Options.text("name").pipe(
+	Options.withAlias("n"),
+	Options.optional,
+	Options.withDescription("Project name (defaults to directory name)"),
+)
+
+/**
+ * az project add <path> [--name <name>] - Register a new project
+ */
+const projectAddCommand = Command.make(
+	"add",
+	{
+		path: projectPathArg,
+		name: projectNameOption,
+		verbose: verboseOption,
+	},
+	projectAddHandler,
+).pipe(Command.withDescription("Register a new project"))
+
+/**
+ * az project list - Show all registered projects
+ */
+const projectListCommand = Command.make(
+	"list",
+	{
+		verbose: verboseOption,
+	},
+	projectListHandler,
+).pipe(Command.withDescription("Show all registered projects"))
+
+/**
+ * az project remove <name> - Unregister a project
+ */
+const projectRemoveCommand = Command.make(
+	"remove",
+	{
+		name: projectNameArg,
+		verbose: verboseOption,
+	},
+	projectRemoveHandler,
+).pipe(Command.withDescription("Unregister a project"))
+
+/**
+ * az project switch <name> - Switch to a project and set as default
+ */
+const projectSwitchCommand = Command.make(
+	"switch",
+	{
+		name: projectNameArg,
+		verbose: verboseOption,
+	},
+	projectSwitchHandler,
+).pipe(Command.withDescription("Switch to a project and set as default"))
+
+/**
+ * az project - Parent command for project management
+ */
+const projectCommand = Command.make("project", {}, () =>
+	Console.log("Use 'az project --help' to see available subcommands"),
+).pipe(
+	Command.withSubcommands([
+		projectAddCommand,
+		projectListCommand,
+		projectRemoveCommand,
+		projectSwitchCommand,
+	]),
+	Command.withDescription("Manage multiple projects"),
+)
+
+/**
  * Main CLI - combines all commands
  *
  * The parent command has its own handler that runs when `az` is called
@@ -539,6 +763,7 @@ const cli = az.pipe(
 		syncCommand,
 		notifyCommand,
 		hooksCommand,
+		projectCommand,
 	]),
 )
 
