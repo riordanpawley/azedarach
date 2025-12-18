@@ -426,6 +426,14 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			yield* bc.ctx.editor.enterJump(labels)
 		}),
 	},
+	{
+		key: "p",
+		mode: "goto-pending",
+		description: "Open project selector",
+		action: bc.ctx.overlay
+			.push({ _tag: "projectSelector" })
+			.pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+	},
 
 	// ========================================================================
 	// Select Mode

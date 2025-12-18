@@ -35,7 +35,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 			Effect.gen(function* () {
 				yield* ctx.toast.show("info", `Merging ${beadId} to main...`)
 
-				yield* ctx.prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
+				yield* ctx.prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
 					Effect.tap(() => ctx.board.refresh()),
 					Effect.tap(() => ctx.toast.show("success", `Merged ${beadId} to main`)),
 					Effect.catchAll((error: unknown) => {
@@ -75,7 +78,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					Effect.gen(function* () {
 						yield* ctx.toast.show("info", `Creating PR for ${task.id}...`)
 
-						yield* ctx.prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
+						// Get current project path (from ProjectService or cwd fallback)
+						const projectPath = yield* ctx.getProjectPath()
+
+						yield* ctx.prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => ctx.toast.show("success", `PR created: ${pr.url}`)),
 							Effect.catchAll((error) => {
 								const msg =
@@ -119,11 +125,14 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
 				// Check for potential merge conflicts before proceeding
 				const conflictCheck = yield* ctx.prWorkflow
 					.checkMergeConflicts({
 						beadId: task.id,
-						projectPath: process.cwd(),
+						projectPath,
 					})
 					.pipe(
 						Effect.catchAll(() =>
@@ -182,13 +191,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
 				yield* ctx.withQueue(
 					task.id,
 					"cleanup",
 					Effect.gen(function* () {
 						yield* ctx.toast.show("info", `Cleaning up ${task.id}...`)
 
-						yield* ctx.prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
+						yield* ctx.prWorkflow.cleanup({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => ctx.toast.show("success", `Cleaned up ${task.id}`)),
 							Effect.catchAll(ctx.showErrorToast("Failed to cleanup")),
 						)
