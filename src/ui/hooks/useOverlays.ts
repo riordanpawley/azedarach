@@ -27,6 +27,7 @@ export type OverlayType =
 			readonly onConfirm: AnyEffect
 	  }
 	| { readonly _tag: "diagnostics" }
+	| { readonly _tag: "projectSelector" }
 
 /**
  * Hook for managing overlay stack
@@ -86,6 +87,10 @@ export function useOverlays() {
 				push({ _tag: "diagnostics" })
 			},
 
+			showProjectSelector: () => {
+				push({ _tag: "projectSelector" })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -104,6 +109,7 @@ export function useOverlays() {
 			showingConfirm: currentOverlay?._tag === "confirm",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
+			showingProjectSelector: currentOverlay?._tag === "projectSelector",
 		}),
 		[currentOverlay],
 	)

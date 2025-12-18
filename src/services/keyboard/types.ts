@@ -24,6 +24,7 @@ import type { CommandQueueService } from "../CommandQueueService"
 import type { EditorService } from "../EditorService"
 import type { NavigationService } from "../NavigationService"
 import type { OverlayService } from "../OverlayService"
+import type { ProjectService } from "../ProjectService"
 import type { ToastService } from "../ToastService"
 import type { ViewService } from "../ViewService"
 
@@ -142,6 +143,9 @@ export interface HandlerContext {
 	/** Queue long-running operations per task */
 	readonly commandQueue: CommandQueueService
 
+	/** Multi-project management */
+	readonly projectService: ProjectService
+
 	// ========================================================================
 	// Configuration
 	// ========================================================================
@@ -163,6 +167,11 @@ export interface HandlerContext {
 	 * Get current cursor column index (0-3)
 	 */
 	readonly getColumnIndex: () => Effect.Effect<number>
+
+	/**
+	 * Get current project path (from ProjectService or cwd fallback)
+	 */
+	readonly getProjectPath: () => Effect.Effect<string>
 
 	/**
 	 * Show error toast with consistent formatting

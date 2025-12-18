@@ -236,6 +236,7 @@ Press `g` to enter goto mode. The next key determines the jump target.
 | `g` `h` | First column | Jump to first column |
 | `g` `l` | Last column | Jump to last column |
 | `g` `w` | Jump labels | Shows 2-char labels on each task |
+| `g` `p` | Project selector | Switch between registered projects |
 
 ### Jump Labels (gw)
 
@@ -556,6 +557,66 @@ Azedarach registers a global tmux keybinding for session navigation:
 2. From Claude: `Ctrl-a Ctrl-a` → return to az TUI (double-tap prefix)
 
 This makes az the central hub for all session navigation.
+
+## Multi-Project Support
+
+Azedarach supports working with multiple beads-enabled projects. Each project has its own set of tasks (beads), and you can switch between them using the project selector.
+
+### Project Management (CLI)
+
+Use the CLI to manage registered projects:
+
+```bash
+# Register a project
+az project add /path/to/project
+
+# Register with a custom name
+az project add /path/to/project --name my-project
+
+# List registered projects
+az project list
+
+# Remove a project
+az project remove project-name
+
+# Set default project
+az project switch project-name
+```
+
+### Project Selector (TUI)
+
+Press `g` `p` to open the project selector overlay:
+
+| Key | Action |
+|-----|--------|
+| `1`-`9` | Select project by number |
+| `Esc` | Cancel and close |
+
+The current project is highlighted with "(current)". When you switch projects:
+1. The board refreshes to show tasks from the new project
+2. All session operations (start, attach, etc.) use the new project's path
+3. PR and merge operations target the new project's repository
+
+### Auto-Detection
+
+When launching Azedarach, it automatically selects a project based on:
+1. **Current directory**: If you're inside a registered project's directory
+2. **Default project**: Falls back to the configured default project
+3. **First project**: Falls back to the first registered project
+
+### Project Configuration
+
+Projects are stored globally in `~/.config/azedarach/projects.json`:
+
+```json
+{
+  "projects": [
+    { "name": "azedarach", "path": "/Users/name/prog/azedarach" },
+    { "name": "other-project", "path": "/Users/name/work/other" }
+  ],
+  "defaultProject": "azedarach"
+}
+```
 
 ## Tips
 
