@@ -212,14 +212,16 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "S-l",
 		mode: "normal",
 		description: "View logs in tmux popup",
-		action: bc.ctx.tmux
-			.displayPopup({
-				command: `less +F ${process.cwd()}/az.log`,
+		action: Effect.gen(function* () {
+			const projectPath = yield* bc.ctx.getProjectPath()
+			yield* bc.ctx.tmux.displayPopup({
+				command: `less +F ${projectPath}/az.log`,
 				width: "90%",
 				height: "90%",
 				title: " az.log (Ctrl-C to scroll, q to quit) ",
+				cwd: projectPath,
 			})
-			.pipe(Effect.catchAll(Effect.logError)),
+		}).pipe(Effect.catchAll(Effect.logError)),
 	},
 
 	// ========================================================================

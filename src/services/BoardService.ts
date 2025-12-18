@@ -222,8 +222,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Fetch all issues from beads (pass project path for multi-project support)
 				const issues = yield* beadsClient.list(undefined, projectPath)
 
-				// Get active sessions to merge their state and metrics
-				const activeSessions = yield* sessionManager.listActive()
+				// Get active sessions to merge their state and metrics (pass project path)
+				const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined)
 				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 
 				// Get PTY metrics for all sessions
