@@ -17,7 +17,7 @@ const ATTR_DIM = 2
  * Actions that use the command queue and should be blocked when busy.
  * These are the actions that call ctx.withQueue() in their handlers.
  */
-const QUEUED_ACTIONS = new Set(["s", "S", "x", "P", "m", "d"])
+const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d"])
 
 /**
  * ActionPalette component
@@ -37,6 +37,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		switch (action) {
 			case "s": // Start - only if idle
 			case "S": // Start+work - only if idle
+			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
 			case "c": // Chat (Haiku) - always available (ephemeral popup)
 				return true
@@ -113,6 +114,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				{/* Session actions */}
 				<ActionLine keyName="s" description="start" />
 				<ActionLine keyName="S" description="start+work" />
+				<ActionLine keyName="!" description="start (yolo)" />
 				<ActionLine keyName="c" description="chat" />
 				<ActionLine keyName="a" description="attach" />
 				<ActionLine keyName="p" description="pause" />
