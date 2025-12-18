@@ -35,7 +35,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 			Effect.gen(function* () {
 				yield* ctx.toast.show("info", `Merging ${beadId} to main...`)
 
-				yield* ctx.prWorkflow.mergeToMain({ beadId, projectPath: process.cwd() }).pipe(
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
+				yield* ctx.prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
 					Effect.tap(() => ctx.board.refresh()),
 					Effect.tap(() => ctx.toast.show("success", `Merged ${beadId} to main`)),
 					Effect.catchAll((error: unknown) => {
@@ -75,7 +78,10 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					Effect.gen(function* () {
 						yield* ctx.toast.show("info", `Creating PR for ${task.id}...`)
 
-						yield* ctx.prWorkflow.createPR({ beadId: task.id, projectPath: process.cwd() }).pipe(
+						// Get current project path (from ProjectService or cwd fallback)
+						const projectPath = yield* ctx.getProjectPath()
+
+						yield* ctx.prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => ctx.toast.show("success", `PR created: ${pr.url}`)),
 							Effect.catchAll((error) => {
 								const msg =
@@ -119,23 +125,36 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
 				// Check for potential merge conflicts before proceeding
-				const conflictCheck = yield* ctx.prWorkflow
+				// If check fails, we must NOT proceed - failing to check doesn't mean it's safe
+				const conflictCheckResult = yield* ctx.prWorkflow
 					.checkMergeConflicts({
 						beadId: task.id,
-						projectPath: process.cwd(),
+						projectPath,
 					})
 					.pipe(
-						Effect.catchAll(() =>
-							// If check fails, assume no conflicts and proceed
+						Effect.map((check) => ({ _tag: "success" as const, check })),
+						Effect.catchAll((error) =>
 							Effect.succeed({
-								hasConflictRisk: false,
-								conflictingFiles: [] as readonly string[],
-								branchChangedFiles: 0,
-								mainChangedFiles: 0,
+								_tag: "error" as const,
+								message: formatForToast(error),
 							}),
 						),
 					)
+
+				// If conflict check failed, block the merge
+				if (conflictCheckResult._tag === "error") {
+					yield* ctx.toast.show(
+						"error",
+						`Cannot verify merge safety: ${conflictCheckResult.message}. Aborting.`,
+					)
+					return
+				}
+
+				const conflictCheck = conflictCheckResult.check
 
 				if (conflictCheck.hasConflictRisk) {
 					// Offer to ask Claude to resolve the conflicts
@@ -182,13 +201,16 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
 				yield* ctx.withQueue(
 					task.id,
 					"cleanup",
 					Effect.gen(function* () {
 						yield* ctx.toast.show("info", `Cleaning up ${task.id}...`)
 
-						yield* ctx.prWorkflow.cleanup({ beadId: task.id, projectPath: process.cwd() }).pipe(
+						yield* ctx.prWorkflow.cleanup({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => ctx.toast.show("success", `Cleaned up ${task.id}`)),
 							Effect.catchAll(ctx.showErrorToast("Failed to cleanup")),
 						)

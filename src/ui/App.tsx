@@ -31,6 +31,7 @@ import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
+import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
@@ -75,6 +76,7 @@ export const App = () => {
 		showingImageAttach,
 		showingConfirm,
 		showingDiagnostics,
+		showingProjectSelector,
 	} = useOverlays()
 
 	const {
@@ -269,6 +271,9 @@ export const App = () => {
 
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
+
+			{/* Project selector overlay */}
+			{showingProjectSelector && <ProjectSelector />}
 
 			{/* Diagnostics overlay */}
 			{showingDiagnostics && <DiagnosticsOverlay />}

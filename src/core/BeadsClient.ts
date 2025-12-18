@@ -94,11 +94,14 @@ export interface BeadsClientService {
 	 * BeadsClient.list({ status: "in_progress", type: "task" })
 	 * ```
 	 */
-	readonly list: (filters?: {
-		status?: string
-		priority?: number
-		type?: string
-	}) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	readonly list: (
+		filters?: {
+			status?: string
+			priority?: number
+			type?: string
+		},
+		cwd?: string,
+	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Show details for a single issue
@@ -110,6 +113,7 @@ export interface BeadsClientService {
 	 */
 	readonly show: (
 		id: string,
+		cwd?: string,
 	) => Effect.Effect<
 		Issue,
 		BeadsError | NotFoundError | ParseError,
@@ -142,6 +146,7 @@ export interface BeadsClientService {
 			estimate?: number
 			labels?: string[]
 		},
+		cwd?: string,
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -155,6 +160,7 @@ export interface BeadsClientService {
 	readonly close: (
 		id: string,
 		reason?: string,
+		cwd?: string,
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -198,11 +204,9 @@ export interface BeadsClientService {
 	 * BeadsClient.ready()
 	 * ```
 	 */
-	readonly ready: () => Effect.Effect<
-		Issue[],
-		BeadsError | ParseError,
-		CommandExecutor.CommandExecutor
-	>
+	readonly ready: (
+		cwd?: string,
+	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Search issues by query string
@@ -214,6 +218,7 @@ export interface BeadsClientService {
 	 */
 	readonly search: (
 		query: string,
+		cwd?: string,
 	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -239,6 +244,7 @@ export interface BeadsClientService {
 		assignee?: string
 		estimate?: number
 		labels?: string[]
+		cwd?: string
 	}) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -249,7 +255,10 @@ export interface BeadsClientService {
 	 * BeadsClient.delete("az-05y")
 	 * ```
 	 */
-	readonly delete: (id: string) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	readonly delete: (
+		id: string,
+		cwd?: string,
+	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -366,7 +375,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 	dependencies: [],
 	effect: Effect.gen(function* () {
 		return {
-			list: (filters?: { status?: string; priority?: number; type?: string }) =>
+			list: (filters?: { status?: string; priority?: number; type?: string }, cwd?: string) =>
 				Effect.gen(function* () {
 					const args: string[] = ["list"]
 
@@ -380,15 +389,15 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--type", filters.type)
 					}
 
-					const output = yield* runBd(args)
+					const output = yield* runBd(args, cwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
-			show: (id: string) =>
+			show: (id: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["show", id])
+					const output = yield* runBd(["show", id], cwd)
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -420,6 +429,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					estimate?: number
 					labels?: string[]
 				},
+				cwd?: string,
 			) =>
 				Effect.gen(function* () {
 					const args: string[] = ["update", id]
@@ -458,10 +468,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						}
 					}
 
-					yield* runBd(args)
+					yield* runBd(args, cwd)
 				}),
 
-			close: (id: string, reason?: string) =>
+			close: (id: string, reason?: string, cwd?: string) =>
 				Effect.gen(function* () {
 					const args: string[] = ["close", id]
 
@@ -469,7 +479,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--reason", reason)
 					}
 
-					yield* runBd(args)
+					yield* runBd(args, cwd)
 				}),
 
 			sync: (cwd?: string) =>
@@ -519,17 +529,17 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					return match ? Number.parseInt(match[1]!, 10) : 0
 				}),
 
-			ready: () =>
+			ready: (cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["ready"])
+					const output = yield* runBd(["ready"], cwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
-			search: (query: string) =>
+			search: (query: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["search", query])
+					const output = yield* runBd(["search", query], cwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
@@ -545,6 +555,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				assignee?: string
 				estimate?: number
 				labels?: string[]
+				cwd?: string
 			}) =>
 				Effect.gen(function* () {
 					const args: string[] = ["create", params.title]
@@ -575,18 +586,18 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--labels", params.labels.join(","))
 					}
 
-					const output = yield* runBd(args)
+					const output = yield* runBd(args, params.cwd)
 
 					// bd create returns a single issue object (not an array)
 					return yield* parseJson(IssueSchema, output)
 				}),
 
-			delete: (id: string) =>
+			delete: (id: string, cwd?: string) =>
 				Effect.gen(function* () {
 					// Use runBdDirect because:
 					// 1. The daemon doesn't support the delete operation
 					// 2. --force is required to actually delete (not just preview)
-					yield* runBdDirect(["delete", id, "--force"])
+					yield* runBdDirect(["delete", id, "--force"], cwd)
 				}),
 		}
 	}),
@@ -606,26 +617,27 @@ export const BeadsClientLiveWithPlatform = BeadsClient.Default
 /**
  * Get all issues matching filters
  */
-export const list = (filters?: {
-	status?: string
-	priority?: number
-	type?: string
-}): Effect.Effect<
-	Issue[],
-	BeadsError | ParseError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.list(filters))
+export const list = (
+	filters?: {
+		status?: string
+		priority?: number
+		type?: string
+	},
+	cwd?: string,
+): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd))
 
 /**
  * Get a single issue by ID
  */
 export const show = (
 	id: string,
+	cwd?: string,
 ): Effect.Effect<
 	Issue,
 	BeadsError | NotFoundError | ParseError,
 	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.show(id))
+> => Effect.flatMap(BeadsClient, (client) => client.show(id, cwd))
 
 /**
  * Update an issue
@@ -644,8 +656,9 @@ export const update = (
 		estimate?: number
 		labels?: string[]
 	},
+	cwd?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.update(id, fields))
+	Effect.flatMap(BeadsClient, (client) => client.update(id, fields, cwd))
 
 /**
  * Close an issue
@@ -653,8 +666,9 @@ export const update = (
 export const close = (
 	id: string,
 	reason?: string,
+	cwd?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.close(id, reason))
+	Effect.flatMap(BeadsClient, (client) => client.close(id, reason, cwd))
 
 /**
  * Sync beads database
@@ -670,19 +684,19 @@ export const sync = (
 /**
  * Get ready issues
  */
-export const ready = (): Effect.Effect<
-	Issue[],
-	BeadsError | ParseError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.ready())
+export const ready = (
+	cwd?: string,
+): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.ready(cwd))
 
 /**
  * Search issues
  */
 export const search = (
 	query: string,
+	cwd?: string,
 ): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.search(query))
+	Effect.flatMap(BeadsClient, (client) => client.search(query, cwd))
 
 /**
  * Create a new issue
@@ -697,6 +711,7 @@ export const create = (params: {
 	assignee?: string
 	estimate?: number
 	labels?: string[]
+	cwd?: string
 }): Effect.Effect<Issue, BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.create(params))
 
@@ -705,5 +720,6 @@ export const create = (params: {
  */
 export const deleteIssue = (
 	id: string,
+	cwd?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.delete(id))
+	Effect.flatMap(BeadsClient, (client) => client.delete(id, cwd))

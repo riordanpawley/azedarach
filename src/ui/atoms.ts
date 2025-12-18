@@ -41,6 +41,7 @@ import { formatForToast } from "../services/ErrorFormatter.js"
 import { KeyboardService } from "../services/KeyboardService.js"
 import { NavigationService } from "../services/NavigationService.js"
 import { OverlayService } from "../services/OverlayService.js"
+import { ProjectService } from "../services/ProjectService.js"
 import { SessionService } from "../services/SessionService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
@@ -74,6 +75,7 @@ const appLayer = Layer.mergeAll(
 	CommandQueueService.Default,
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
+	ProjectService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
@@ -344,10 +346,14 @@ export const startSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		const session = yield* manager.start({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 
 		// Register with PTYMonitor for state detection
@@ -472,12 +478,14 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
 		const beadsClient = yield* BeadsClient
+		const projectService = yield* ProjectService
 
 		// Dismiss overlay first
 		yield* overlay.pop()
 		yield* toast.show("info", "Creating task with Claude...")
 
-		const projectPath = process.cwd()
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		// Phase 1: Ask Claude to extract structured task data
 		// Using JSON output format for deterministic parsing
@@ -582,9 +590,14 @@ Return ONLY the JSON object, no explanation or markdown.`
 export const createPRAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		return yield* prWorkflow.createPR({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),
 )
@@ -598,9 +611,14 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
 export const cleanupAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		yield* prWorkflow.cleanup({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -617,9 +635,14 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		yield* prWorkflow.mergeToMain({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),
 )
@@ -921,6 +944,52 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 		const board = yield* BoardService
 		return board.filteredTasksByColumn
 	}),
+)
+
+// ============================================================================
+// Project Service Atoms
+// ============================================================================
+
+/**
+ * Current project atom - subscribes to ProjectService currentProject changes
+ *
+ * Usage: const currentProject = useAtomValue(currentProjectAtom)
+ */
+export const currentProjectAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return projectService.currentProject
+	}),
+)
+
+/**
+ * Projects list atom - subscribes to ProjectService projects changes
+ *
+ * Usage: const projects = useAtomValue(projectsAtom)
+ */
+export const projectsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return projectService.projects
+	}),
+)
+
+/**
+ * Switch project atom - change the active project
+ *
+ * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
+ *        await switchProject("project-name")
+ */
+export const switchProjectAtom = appRuntime.fn((projectName: string) =>
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		const board = yield* BoardService
+		const toast = yield* ToastService
+
+		yield* projectService.switchProject(projectName)
+		yield* board.refresh()
+		yield* toast.show("success", `Switched to project: ${projectName}`)
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -1248,7 +1317,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					// Exception: CommandExecutor is the only allowed leaked requirement
 					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 			  }
-			| { readonly _tag: "diagnostics" },
+			| { readonly _tag: "diagnostics" }
+			| { readonly _tag: "projectSelector" },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService

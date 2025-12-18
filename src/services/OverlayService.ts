@@ -16,6 +16,7 @@ export type Overlay =
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 	| { readonly _tag: "diagnostics" }
+	| { readonly _tag: "projectSelector" }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	effect: Effect.gen(function* () {

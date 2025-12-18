@@ -3,7 +3,7 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
-import { taskRunningOperationAtom } from "./atoms"
+import { taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
