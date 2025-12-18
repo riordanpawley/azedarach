@@ -12,9 +12,9 @@
  */
 
 import { Effect, Record, SubscriptionRef } from "effect"
-import { COLUMNS, generateJumpLabels } from "../../ui/types"
-import type { JumpTarget } from "../EditorService"
-import type { HandlerContext, KeyMode } from "./types"
+import { COLUMNS, generateJumpLabels } from "../../ui/types.js"
+import type { JumpTarget } from "../EditorService.js"
+import type { HandlerContext, KeyMode } from "./types.js"
 
 // ============================================================================
 // Input Handler Factory
@@ -388,6 +388,55 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 
 			return true // Consume all keys in overlay
 		}),
+
+	/**
+	 * Handle projectSelector overlay keyboard input
+	 *
+	 * Number keys 1-9 select a project by index.
+	 * All other keys are consumed to prevent falling through.
+	 *
+	 * @returns true if key was handled, false otherwise
+	 */
+	handleProjectSelectorInput: (key: string) =>
+		Effect.gen(function* () {
+			// Check if key is a number 1-9
+			const num = Number.parseInt(key, 10)
+			if (num >= 1 && num <= 9) {
+				// Get projects list from ProjectService
+				const projects = yield* ctx.projectService.getProjects()
+
+				if (num <= projects.length) {
+					const project = projects[num - 1]
+					if (project) {
+						yield* ctx.projectService.switchProject(project.name)
+						yield* ctx.overlay.pop()
+						yield* ctx.board.refresh()
+						yield* ctx.toast.show("success", `Switched to: ${project.name}`)
+					}
+				} else {
+					yield* ctx.toast.show("error", `No project at position ${num}`)
+				}
+				return true
+			}
+
+			// Escape is handled elsewhere
+			if (key === "escape") {
+				return false
+			}
+
+			return true // Consume other keys in overlay
+		}).pipe(
+			Effect.catchAll((error) =>
+				Effect.gen(function* () {
+					const msg =
+						error && typeof error === "object" && "message" in error
+							? String(error.message)
+							: String(error)
+					yield* ctx.toast.show("error", `Project switch failed: ${msg}`)
+					return true
+				}),
+			),
+		),
 
 	/**
 	 * Compute jump labels for all visible tasks

@@ -10,8 +10,8 @@
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
-import type { Issue } from "./BeadsClient"
-import { BeadsClient } from "./BeadsClient"
+import type { Issue } from "./BeadsClient.js"
+import { BeadsClient } from "./BeadsClient.js"
 
 // ============================================================================
 // Popup State Tracking (for cleanup on SIGINT)

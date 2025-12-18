@@ -6,11 +6,11 @@
  */
 
 import { Effect } from "effect"
-import type { InputHandlers } from "./inputHandlers"
-import type { PRHandlers } from "./prHandlers"
-import type { SessionHandlers } from "./sessionHandlers"
-import type { TaskHandlers } from "./taskHandlers"
-import type { HandlerContext, Keybinding } from "./types"
+import type { InputHandlers } from "./inputHandlers.js"
+import type { PRHandlers } from "./prHandlers.js"
+import type { SessionHandlers } from "./sessionHandlers.js"
+import type { TaskHandlers } from "./taskHandlers.js"
+import type { HandlerContext, Keybinding } from "./types.js"
 
 // ============================================================================
 // Binding Context
@@ -380,6 +380,14 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		),
 	},
 	{
+		key: "S-m",
+		mode: "action",
+		description: "Abort merge",
+		action: Effect.suspend(() =>
+			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+		),
+	},
+	{
 		key: "S-d",
 		mode: "action",
 		description: "Delete bead",
@@ -435,6 +443,14 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const labels = yield* bc.inputHandlers.computeJumpLabels()
 			yield* bc.ctx.editor.enterJump(labels)
 		}),
+	},
+	{
+		key: "p",
+		mode: "goto-pending",
+		description: "Open project selector",
+		action: bc.ctx.overlay
+			.push({ _tag: "projectSelector" })
+			.pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
 	},
 
 	// ========================================================================

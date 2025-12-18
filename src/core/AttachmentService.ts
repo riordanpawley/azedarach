@@ -5,8 +5,8 @@
  */
 
 import { Data, Effect } from "effect"
-import { TerminalService } from "./TerminalService"
-import { TmuxService } from "./TmuxService"
+import { TerminalService } from "./TerminalService.js"
+import { TmuxService } from "./TmuxService.js"
 
 // ============================================================================
 // Error Types
