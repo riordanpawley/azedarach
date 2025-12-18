@@ -21,6 +21,7 @@ import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platfor
 import { BunContext } from "@effect/platform-bun"
 import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getSessionName, getWorktreePath } from "./paths.js"
@@ -292,6 +293,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		BeadsClient.Default,
 		AppConfig.Default,
 		StateDetector.Default,
+		ProjectService.Default,
 	],
 	effect: Effect.gen(function* () {
 		// Get dependencies
@@ -300,6 +302,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const beadsClient = yield* BeadsClient
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
+		const projectService = yield* ProjectService
 
 		// Track active sessions in memory
 		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
@@ -325,11 +328,21 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		// Layer for filesystem operations - provides FileSystem and Path services
 		const fsLayer = BunContext.layer
 
+		/**
+		 * Get the current project path from ProjectService, falling back to process.cwd()
+		 */
+		const getEffectiveProjectPath = (): Effect.Effect<string> =>
+			Effect.gen(function* () {
+				const projectPath = yield* projectService.getCurrentPath()
+				return projectPath ?? process.cwd()
+			})
+
 		// Helper: Load persisted sessions from disk
 		const loadPersistedSessions = Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const pathSvc = yield* Path.Path
-			const filePath = pathSvc.join(process.cwd(), sessionFilePath)
+			const projectPath = yield* getEffectiveProjectPath()
+			const filePath = pathSvc.join(projectPath, sessionFilePath)
 
 			const exists = yield* fs.exists(filePath)
 			if (!exists) return HashMap.empty<string, Session>()
@@ -346,7 +359,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 			Effect.gen(function* () {
 				const fs = yield* FileSystem.FileSystem
 				const pathSvc = yield* Path.Path
-				const dirPath = pathSvc.join(process.cwd(), ".azedarach")
+				const projectPath = yield* getEffectiveProjectPath()
+				const dirPath = pathSvc.join(projectPath, ".azedarach")
 				const filePath = pathSvc.join(dirPath, "sessions.json")
 
 				yield* fs.makeDirectory(dirPath, { recursive: true }).pipe(Effect.ignore)
@@ -748,7 +762,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					return sessionOpt.value.state
 				}),
 
-			listActive: () =>
+			listActive: (projectPath?: string) =>
 				Effect.gen(function* () {
 					// Get in-memory sessions
 					const inMemorySessions = yield* Ref.get(sessionsRef)
@@ -762,9 +776,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					const persistedSessions = yield* loadPersistedSessions
 
 					// Query worktrees to get accurate paths
-					const projectPath = process.cwd()
+					// Falls back to process.cwd() for backwards compatibility
+					const effectiveProjectPath = projectPath ?? process.cwd()
 					const worktrees = yield* worktreeManager
-						.list(projectPath)
+						.list(effectiveProjectPath)
 						.pipe(Effect.catchAll(() => Effect.succeed([])))
 					const worktreeByBeadId = HashMap.fromIterable(
 						worktrees.map((wt) => [wt.beadId, wt] as const),
@@ -793,7 +808,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 									() =>
 										Option.getOrElse(
 											Option.map(persistedOpt, (p) => p.worktreePath),
-											() => getWorktreePath(projectPath, beadId),
+											() => getWorktreePath(effectiveProjectPath, beadId),
 										),
 								),
 								tmuxSessionName: beadId,
@@ -807,7 +822,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								),
 								projectPath: Option.getOrElse(
 									Option.map(persistedOpt, (p) => p.projectPath),
-									() => projectPath,
+									() => effectiveProjectPath,
 								),
 							}
 							yield* Ref.update(sessionsRef, (sessions) =>

@@ -196,6 +196,9 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
 			// Build the Claude command with Haiku model and initial prompt
 			const { command: claudeCommand, shell, tmuxPrefix } = ctx.resolvedConfig.session
 			const escapeForShell = (s: string) =>
@@ -206,7 +209,6 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 
 			// Use chat-<beadId> naming to distinguish from work sessions
 			const chatSessionName = `chat-${task.id}`
-			const projectPath = yield* ctx.getProjectPath()
 
 			// Check if chat session already exists
 			const hasSession = yield* ctx.tmux.hasSession(chatSessionName)
