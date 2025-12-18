@@ -252,7 +252,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 						})}
 						<text fg={theme.subtext0}>
 							{selectedIndex >= 0
-								? "  j/k:nav  o:open  x:remove  i:add  Esc:close"
+								? "  j/k:nav  v:preview  o:open  x:remove  i:add  Esc:close"
 								: "  j/k:select  i:add  Esc:close"}
 						</text>
 						<text> </text>

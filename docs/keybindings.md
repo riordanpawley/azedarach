@@ -482,6 +482,7 @@ When viewing a task's details (`Enter`), if it has attachments, you can navigate
 |-----|--------|-------------|
 | `j` / `↓` | Select next | Move selection to next attachment |
 | `k` / `↑` | Select previous | Move selection to previous attachment (or deselect) |
+| `v` | Preview | Open image preview overlay (in-terminal rendering) |
 | `o` | Open | Open selected attachment in system image viewer |
 | `x` | Remove | Delete selected attachment |
 | `i` | Add | Open image attachment overlay to add more |
@@ -513,6 +514,27 @@ When in path input mode (after pressing `f`):
 | `Enter` | Attach file at path |
 | `Esc` | Return to menu mode |
 
+### Image Preview Overlay
+
+Press `v` on a selected attachment to preview the image directly in the terminal:
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `j` / `↓` | Next image | Navigate to next attachment |
+| `k` / `↑` | Previous image | Navigate to previous attachment |
+| `o` | Open | Open in system image viewer |
+| `q` or `Esc` | Close | Close preview overlay |
+
+**How Preview Works:**
+
+The preview uses the `terminal-image` library which automatically selects the best rendering method for your terminal:
+
+1. **Kitty/WezTerm**: Full-resolution graphics via Kitty protocol
+2. **iTerm2**: Full-resolution inline images via iTerm2 protocol
+3. **Other terminals**: Unicode half-blocks with 24-bit color (works everywhere)
+
+Images are scaled to fit the terminal window while preserving aspect ratio.
+
 ### How Image Attachment Works
 
 1. Images are stored in `.beads/images/{bead-id}/`
@@ -532,7 +554,17 @@ When in path input mode (after pressing `f`):
 4. Success toast confirms attachment
 ```
 
-**Viewing an attached image:**
+**Previewing an image in-terminal:**
+```
+1. Navigate to a task with attachments
+2. Press Enter to open detail panel
+3. Press j to select first attachment
+4. Press v to preview (renders in terminal)
+5. Press j/k to navigate through attachments
+6. Press Esc to close preview
+```
+
+**Opening an attached image externally:**
 ```
 1. Navigate to a task with attachments
 2. Press Enter to open detail panel

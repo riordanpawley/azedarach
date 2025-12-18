@@ -5,7 +5,8 @@
  * These are merged with user-provided config to ensure all fields are defined.
  */
 
-import { execSync } from "node:child_process"
+import { Command, type CommandExecutor } from "@effect/platform"
+import { Effect } from "effect"
 import type { AzedarachConfig } from "./schema.js"
 
 // ============================================================================
@@ -13,7 +14,7 @@ import type { AzedarachConfig } from "./schema.js"
 // ============================================================================
 
 /**
- * Get the user's login shell from the system
+ * Get the user's login shell from the system (Effect-based)
  *
  * We query the system directly rather than trusting $SHELL because:
  * - Nix develop shells often override $SHELL to bash for reproducibility
@@ -22,31 +23,43 @@ import type { AzedarachConfig } from "./schema.js"
  *
  * Falls back to $SHELL or "bash" if detection fails.
  */
-function getLoginShell(): string {
-	try {
+export const getLoginShell = (): Effect.Effect<string, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const fallback = process.env.SHELL || "bash"
+
 		if (process.platform === "darwin") {
 			// macOS: Use Directory Services
-			const result = execSync("dscl . -read /Users/$(whoami) UserShell", {
-				encoding: "utf8",
-				stdio: ["pipe", "pipe", "pipe"],
-			})
+			const result = yield* Command.make(
+				"dscl",
+				".",
+				"-read",
+				`/Users/${process.env.USER}`,
+				"UserShell",
+			).pipe(
+				Command.string,
+				Effect.catchAll(() => Effect.succeed("")),
+			)
 			const shell = result.split(":")[1]?.trim()
 			if (shell) return shell
 		} else {
-			// Linux/Unix: Use passwd database
-			const result = execSync("getent passwd $(whoami) | cut -d: -f7", {
-				encoding: "utf8",
-				shell: "/bin/sh",
-				stdio: ["pipe", "pipe", "pipe"],
-			})
+			// Linux/Unix: Use passwd database via getent
+			const result = yield* Command.make("sh", "-c", "getent passwd $(whoami) | cut -d: -f7").pipe(
+				Command.string,
+				Effect.catchAll(() => Effect.succeed("")),
+			)
 			const shell = result.trim()
 			if (shell) return shell
 		}
-	} catch {
-		// Detection failed, fall back to environment
-	}
-	return process.env.SHELL || "bash"
-}
+
+		return fallback
+	})
+
+/**
+ * Get the user's login shell synchronously (simple fallback)
+ *
+ * This returns $SHELL or "bash" - use getLoginShell() for accurate detection.
+ */
+const getLoginShellSync = (): string => process.env.SHELL || "bash"
 
 // ============================================================================
 // Default Config Object
@@ -56,24 +69,27 @@ function getLoginShell(): string {
  * Complete default configuration
  *
  * Every field has a default value, ensuring the resolved config is fully typed.
+ *
+ * Note: session.shell uses a synchronous fallback. For accurate shell detection,
+ * use getLoginShell() Effect and override the default when creating AppConfig.
  */
 export const DEFAULT_CONFIG = {
 	worktree: {
-		initCommands: [] as string[],
-		env: {} as Record<string, string>,
+		initCommands: [] satisfies string[],
+		env: {} satisfies Record<string, string>,
 		continueOnFailure: true,
 		parallel: false,
 	},
 	session: {
 		command: "claude",
-		shell: getLoginShell(),
+		shell: getLoginShellSync(),
 		tmuxPrefix: "C-a",
 		dangerouslySkipPermissions: false,
 	},
 	patterns: {
-		waiting: [] as string[],
-		done: [] as string[],
-		error: [] as string[],
+		waiting: [] satisfies string[],
+		done: [] satisfies string[],
+		error: [] satisfies string[],
 	},
 	pr: {
 		autoDraft: true,
