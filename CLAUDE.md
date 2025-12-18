@@ -38,6 +38,13 @@ Purpose: Claude Code entry point for Azedarach development
    - `node:child_process` → Use `@effect/platform` `Command`
    - `node:os` → Use `process.env.HOME` for homedir
 
+9. **effect-atom is a React Bridge, NOT State Management**:
+   - State belongs in Effect Services (via `SubscriptionRef`)
+   - Atoms bridge that state to React via `appRuntime.subscriptionRef()`
+   - Use atoms for: parameterized derivations, cross-service composition
+   - Use services for: core state, business logic, background tasks
+   - See `internal-docs/effect-atom-architecture.md` for full decision matrix
+
 ## Quick Commands
 
 ```bash
@@ -159,6 +166,19 @@ This project uses a **three-layer reactive architecture** with strict separation
 │   SubscriptionRef state, methods, pure utility functions        │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Services vs Atoms Decision Matrix
+
+| What | Where | Why |
+|------|-------|-----|
+| Core domain state | Effect Services | Testable, lifecycle-managed |
+| Polling/background tasks | Effect Services | Scoped fibers, cleanup |
+| Parameterized derivations | Atoms (`Atom.readable`) | Per-instance computation |
+| Cross-service composition | Atoms | Combine without coupling |
+| Bridge to React | `appRuntime.subscriptionRef()` | SubscriptionRef → useAtomValue |
+| Actions/mutations | `appRuntime.fn()` | Service access + error handling |
+
+**Full documentation:** `internal-docs/effect-atom-architecture.md`
 
 ### Critical Rule: React = Pure Render Only
 
