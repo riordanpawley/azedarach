@@ -2,7 +2,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
-import { ImageAttachmentService } from "../core/ImageAttachmentService"
+import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { emptyArray } from "../lib/empty.js"
 
 // onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
@@ -15,6 +15,7 @@ export type Overlay =
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
+	| { readonly _tag: "imagePreview"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
