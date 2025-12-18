@@ -395,15 +395,20 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						: `${claudeCommand}${modelFlag}${dangerousFlag}`
 
 					// Use acquireUseRelease to ensure atomicity:
-					// - acquire: Create tmux session (if needed)
-					// - use: Update bead status + register session
-					// - release: Kill tmux session on failure, no-op on success
+					// - acquire: Create tmux session + update bead status (both are "resources")
+					// - use: Register session in memory + publish event
+					// - release: Rollback tmux + bead status on failure
 					//
-					// This fixes az-losz: if bead update or registry update fails after
-					// tmux creation, we roll back by killing the orphaned tmux session.
+					// This fixes az-losz: if any step fails after tmux creation or bead update,
+					// we roll back ALL changes to avoid inconsistent state.
 					const session = yield* Effect.acquireUseRelease(
-						// ACQUIRE: Create tmux session (returns whether we created a new one)
+						// ACQUIRE: Create tmux session and update bead status
+						// Both are "resources" that need rollback on failure
 						Effect.gen(function* () {
+							let createdNewSession = false
+							let updatedBeadStatus = false
+
+							// Step 1: Create tmux session if needed
 							if (!hasSession) {
 								// Create tmux session in the worktree directory
 								// Use user's shell that runs claude so:
@@ -417,21 +422,23 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 									command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
 									prefix: tmuxPrefix,
 								})
-								return { createdNewSession: true as const }
+								createdNewSession = true
 							}
-							return { createdNewSession: false as const }
+
+							// Step 2: Update bead status to in_progress
+							// Done AFTER session creation to ensure we don't leave beads
+							// in "in_progress" state with no actual session (az-g7p bug fix)
+							if (needsStatusUpdate) {
+								yield* beadsClient.update(beadId, { status: "in_progress" })
+								updatedBeadStatus = true
+							}
+
+							return { createdNewSession, updatedBeadStatus }
 						}),
 
-						// USE: Update bead status and register session
+						// USE: Register session in memory and publish event
 						() =>
 							Effect.gen(function* () {
-								// Now that session is successfully created, update bead status
-								// This is done AFTER session creation to ensure we don't leave beads
-								// in "in_progress" state with no actual session (az-g7p bug fix)
-								if (needsStatusUpdate) {
-									yield* beadsClient.update(beadId, { status: "in_progress" })
-								}
-
 								// Create session object
 								const sessionObj: Session = {
 									beadId,
@@ -453,17 +460,30 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								return sessionObj
 							}),
 
-						// RELEASE: Only kill tmux on failure if we created it
+						// RELEASE: Rollback on failure - kill tmux and revert bead status
 						(acquired, exit) =>
-							Exit.isFailure(exit) && acquired.createdNewSession
-								? tmuxService.killSession(tmuxSessionName).pipe(
-										Effect.tap(() =>
-											Effect.logWarning(
-												`Rolled back tmux session ${tmuxSessionName} due to failure`,
-											),
-										),
-										Effect.catchAll(() => Effect.void), // Ignore kill errors during rollback
-									)
+							Exit.isFailure(exit)
+								? Effect.gen(function* () {
+										// Rollback tmux session if we created it
+										if (acquired.createdNewSession) {
+											yield* tmuxService.killSession(tmuxSessionName).pipe(
+												Effect.tap(() =>
+													Effect.logWarning(`Rolled back tmux session ${tmuxSessionName}`),
+												),
+												Effect.catchAll(() => Effect.void),
+											)
+										}
+
+										// Rollback bead status if we changed it
+										if (acquired.updatedBeadStatus) {
+											yield* beadsClient.update(beadId, { status: "open" }).pipe(
+												Effect.tap(() =>
+													Effect.logWarning(`Rolled back bead ${beadId} status to open`),
+												),
+												Effect.catchAll(() => Effect.void),
+											)
+										}
+									})
 								: Effect.void,
 					)
 
