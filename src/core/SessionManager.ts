@@ -63,6 +63,8 @@ export interface StartSessionOptions {
 	readonly initialPrompt?: string
 	/** Optional model to use (haiku, sonnet, opus). Uses Claude default if not specified. */
 	readonly model?: ClaudeModel
+	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
+	readonly dangerouslySkipPermissions?: boolean
 }
 
 /**
@@ -301,7 +303,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		return {
 			start: (options: StartSessionOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, baseBranch, initialPrompt, model } = options
+					const {
+						beadId,
+						projectPath,
+						baseBranch,
+						initialPrompt,
+						model,
+						dangerouslySkipPermissions,
+					} = options
 
 					// Check if session already exists (idempotent)
 					const sessions = yield* Ref.get(sessionsRef)
@@ -387,11 +396,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						const escapeForShell = (s: string) =>
 							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
-						// Build Claude command with optional model and prompt
+						// Build Claude command with optional model, dangerous flag, and prompt
 						const modelFlag = model ? ` --model ${model}` : ""
+						const dangerousFlag = dangerouslySkipPermissions
+							? " --dangerously-skip-permissions"
+							: ""
 						const claudeWithOptions = initialPrompt
-							? `${claudeCommand}${modelFlag} "${escapeForShell(initialPrompt)}"`
-							: `${claudeCommand}${modelFlag}`
+							? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
+							: `${claudeCommand}${modelFlag}${dangerousFlag}`
 
 						// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
 						// This ensures the project's .envrc environment is loaded automatically
