@@ -684,11 +684,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// beads separately using bd sync which handles JSONL semantically.
 
 					// 1. Stop any running session first (before we modify git state)
-					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
-					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
+					yield* sessionManager.stop(beadId).pipe(
+						Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)),
+					)
+					yield* tmuxService.killSession(beadId).pipe(
+						Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)),
+					)
 
 					// 2. Stage and commit any uncommitted changes in worktree
-					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+					yield* runGit(["add", "-A"], worktree.path).pipe(
+						Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
+					)
 					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
 						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 					)
@@ -706,7 +712,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						).pipe(Command.workingDirectory(projectPath))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
-							Effect.catchAll(() => Effect.succeed(2)),
+							Effect.catchAll((e) =>
+								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(
+									Effect.map(() => 2),
+								),
+							),
 						)
 
 						if (exitCode === 0) {
@@ -717,7 +727,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const output = yield* runGit(
 							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
 							projectPath,
-						).pipe(Effect.catchAll(() => Effect.succeed("")))
+						).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+									Effect.map(() => ""),
+								),
+							),
+						)
 
 						const lines = output.trim().split("\n")
 						const conflictingFiles = lines
@@ -744,19 +760,30 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-						yield* sessionManager
+						const sessionStarted = yield* sessionManager
 							.start({
 								beadId,
 								projectPath,
 								initialPrompt: resolvePrompt,
 							})
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.map(() => true),
+								Effect.catchAll((e) =>
+									Effect.logError(`Failed to start Claude session for conflict resolution: ${e}`).pipe(
+										Effect.map(() => false),
+									),
+								),
+							)
+
+						const message = sessionStarted
+							? `Code conflicts detected in: ${fileList}. Started Claude session to resolve. Retry merge after resolution.`
+							: `Code conflicts detected in: ${fileList}. Failed to start Claude - resolve manually in worktree, then retry merge.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({
 								beadId,
 								branch: beadId,
-								message: `Code conflicts detected in: ${fileList}. Started Claude session to resolve. Retry merge after resolution.`,
+								message,
 							}),
 						)
 					}
@@ -811,15 +838,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							// Import beads from the merged JSONL
 							yield* beadsClient
 								.syncImportOnly(projectPath)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to import beads after merge: ${e}`),
+									),
+								)
 
 							// Recover any tombstoned issues
 							yield* beadsClient
 								.recoverTombstones(projectPath)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
+									),
+								)
 
 							// Full sync to commit any bead changes
-							yield* beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* beadsClient.sync(projectPath).pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)),
+							)
 						}),
 					)
 
@@ -835,10 +872,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${beadId}: ${e}`)),
+							)
 
 						yield* withSyncLock(
-							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+							beadsClient.sync(projectPath).pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
+							),
 						)
 					}
 
