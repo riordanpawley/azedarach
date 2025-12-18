@@ -318,6 +318,33 @@ export interface PRWorkflowService {
 		beadId: string
 		projectPath: string
 	}) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Check for uncommitted changes in the worktree
+	 *
+	 * Detects modified, added, deleted, or untracked files using `git status --porcelain`.
+	 * Used to warn users before merge operations when autostash is enabled,
+	 * since autostash conflicts can be hard to recover from.
+	 *
+	 * @example
+	 * ```ts
+	 * const result = yield* prWorkflow.checkUncommittedChanges({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * if (result.hasUncommittedChanges) {
+	 *   // Show warning or block operation
+	 * }
+	 * ```
+	 */
+	readonly checkUncommittedChanges: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<
+		{ hasUncommittedChanges: boolean; changedFiles: readonly string[] },
+		PRError | GitError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -956,6 +983,41 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								}),
 						),
 					)
+				}),
+
+			checkUncommittedChanges: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// Run git status --porcelain to get changed files
+					// This is faster than git status and easier to parse
+					// Format: XY filename (where X=index status, Y=worktree status)
+					const output = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+
+					// Parse output - each non-empty line is a changed file
+					const changedFiles = output
+						.trim()
+						.split("\n")
+						.filter((line) => line.length > 0)
+						.map((line) => line.slice(3)) // Remove "XY " prefix to get filename
+
+					return {
+						hasUncommittedChanges: changedFiles.length > 0,
+						changedFiles,
+					}
 				}),
 		}
 	}),
