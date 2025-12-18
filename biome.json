@@ -18,7 +18,13 @@
 			"recommended": true,
 			"correctness": {
 				"noUnusedImports": "warn",
-				"noUnusedVariables": "warn"
+				"noUnusedVariables": "warn",
+				"useImportExtensions": {
+					"level": "error",
+					"options": {
+						"forceJsExtensions": true
+					}
+				}
 			},
 			"style": {
 				"noNonNullAssertion": "off"

@@ -8,8 +8,8 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
-import { currentOverlayAtom } from "./atoms"
-import { theme } from "./theme"
+import { currentOverlayAtom } from "./atoms.js"
+import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
 

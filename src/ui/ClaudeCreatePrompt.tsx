@@ -7,7 +7,7 @@
 
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
-import { theme } from "./theme"
+import { theme } from "./theme.js"
 
 export interface ClaudeCreatePromptProps {
 	onSubmit: (description: string) => void

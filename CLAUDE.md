@@ -497,7 +497,7 @@ Skills auto-load when you edit files or mention keywords:
 
 - **Type errors:** Always run `bun run type-check` for validation
 - **Files:** Check references before deleting (`rg "filename"`)
-- **Testing:** Run `bun run dev` for interactive testing, `bun run type-check` for types
+- **Testing:** Run `bun run build` to verify changes compile and bundle correctly (not `bun run dev` which requires interactive testing)
 
 ## Documentation
 

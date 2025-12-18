@@ -84,6 +84,8 @@ export const DEFAULT_CONFIG = {
 		bell: true,
 		system: false,
 	},
+	projects: [],
+	defaultProject: undefined,
 } as const
 
 // ============================================================================
@@ -123,6 +125,12 @@ export interface ResolvedConfig {
 		bell: boolean
 		system: boolean
 	}
+	projects: ReadonlyArray<{
+		name: string
+		path: string
+		beadsPath?: string
+	}>
+	defaultProject: string | undefined
 }
 
 // ============================================================================
@@ -168,5 +176,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,
 			system: config.notifications?.system ?? DEFAULT_CONFIG.notifications.system,
 		},
+		projects: config.projects ?? DEFAULT_CONFIG.projects,
+		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
 	}
 }

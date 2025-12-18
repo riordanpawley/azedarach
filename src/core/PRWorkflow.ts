@@ -10,7 +10,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, Option } from "effect"
+import { Data, Duration, Effect, Option } from "effect"
 import {
 	BeadsClient,
 	type BeadsError,
@@ -18,9 +18,26 @@ import {
 	type NotFoundError,
 	type ParseError,
 } from "./BeadsClient.js"
+import { FileLockManager } from "./FileLockManager.js"
 import { type SessionError, SessionManager } from "./SessionManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
+
+// ============================================================================
+// Beads Sync Locking
+// ============================================================================
+
+/**
+ * Lock path for beads sync operations.
+ * Using a fixed path ensures all processes use the same lock.
+ */
+const BEADS_SYNC_LOCK_PATH = "/tmp/azedarach-beads-sync.lock"
+
+/**
+ * Timeout for acquiring the beads sync lock.
+ * Should be long enough to allow slow syncs to complete.
+ */
+const BEADS_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
 
 // ============================================================================
 // Type Definitions
@@ -282,6 +299,25 @@ export interface PRWorkflowService {
 		beadId: string
 		projectPath: string
 	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Abort an in-progress merge in the worktree
+	 *
+	 * Use this when a merge conflict resolution is stuck or you want to cancel
+	 * the merge operation. Runs `git merge --abort` in the worktree.
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.abortMerge({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly abortMerge: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -421,12 +457,36 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		BeadsClient.Default,
 		SessionManager.Default,
 		TmuxService.Default,
+		FileLockManager.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
+		const fileLockManager = yield* FileLockManager
+
+		/**
+		 * Execute an effect with exclusive beads sync lock.
+		 * Uses Effect.acquireUseRelease for guaranteed cleanup.
+		 * Fails gracefully if lock cannot be acquired.
+		 */
+		const withSyncLock = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+			Effect.acquireUseRelease(
+				// Acquire: get the lock (null if failed)
+				fileLockManager
+					.acquireLock({
+						path: BEADS_SYNC_LOCK_PATH,
+						type: "exclusive",
+						timeout: BEADS_SYNC_LOCK_TIMEOUT,
+					})
+					.pipe(Effect.option),
+				// Use: run the effect
+				() => effect,
+				// Release: release the lock if acquired
+				(lockOption) =>
+					Option.isSome(lockOption) ? fileLockManager.releaseLock(lockOption.value) : Effect.void,
+			)
 
 		return {
 			createPR: (options: CreatePROptions) =>
@@ -447,8 +507,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// Sync beads changes
-					yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
+					// Sync beads changes (with lock to prevent races)
+					yield* withSyncLock(
+						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+					)
 
 					// Stage and commit any changes
 					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
@@ -544,11 +606,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
 
-					// 5. Close bead issue (optional)
+					// 5. Close bead issue (optional) and sync to persist the change
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
 							.pipe(Effect.catchAll(() => Effect.void))
+
+						// Sync the closed status to JSONL and commit it
+						// This fixes az-o5m9: merged tasks being left in in_progress status
+						yield* withSyncLock(
+							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						)
 					}
 				}),
 
@@ -580,7 +648,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 1. Sync beads in worktree (bd sync --from-main) BEFORE stopping session
-					yield* beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void))
+					// Use lock to prevent races with daemon or other sessions
+					yield* withSyncLock(
+						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+					)
 
 					// 2. Stage and commit any uncommitted changes in worktree
 					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
@@ -721,11 +792,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// 6b. Re-import beads from merged JSONL to recover any beads incorrectly
 					// removed by the bd merge driver. The merge driver uses 3-way merge semantics
 					// which can delete beads that exist in main but not in the branch.
-					yield* beadsClient.syncImportOnly(projectPath).pipe(Effect.catchAll(() => Effect.void))
+					// Use lock for import+recovery to prevent races
+					yield* withSyncLock(
+						Effect.gen(function* () {
+							yield* beadsClient
+								.syncImportOnly(projectPath)
+								.pipe(Effect.catchAll(() => Effect.void))
 
-					// 6c. Recover tombstoned issues as fallback - syncImportOnly doesn't fix
-					// issues that were incorrectly tombstoned (see az-zby for bug details)
-					yield* beadsClient.recoverTombstones(projectPath).pipe(Effect.catchAll(() => Effect.void))
+							// 6c. Recover tombstoned issues as fallback - syncImportOnly doesn't fix
+							// issues that were incorrectly tombstoned (see az-zby for bug details)
+							yield* beadsClient
+								.recoverTombstones(projectPath)
+								.pipe(Effect.catchAll(() => Effect.void))
+						}),
+					)
 
 					// 7. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
@@ -735,7 +815,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
 
-					// 9. Push to origin (optional)
+					// 9. Close bead issue BEFORE pushing (so status is included in push)
+					// This fixes az-o5m9: merged tasks being left in in_progress status
+					if (closeBead) {
+						yield* beadsClient
+							.update(beadId, { status: "closed" })
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						// Sync the closed status to JSONL and commit it
+						yield* withSyncLock(
+							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						)
+					}
+
+					// 10. Push to origin (optional) - now includes the closed status
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(
@@ -747,13 +840,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									}),
 							),
 						)
-					}
-
-					// 10. Close bead issue (optional)
-					if (closeBead) {
-						yield* beadsClient
-							.update(beadId, { status: "closed" })
-							.pipe(Effect.catchAll(() => Effect.void))
 					}
 				}),
 
@@ -842,6 +928,34 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						branchChangedFiles,
 						mainChangedFiles,
 					} satisfies MergeConflictCheck
+				}),
+
+			abortMerge: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// Run git merge --abort in the worktree
+					yield* runGit(["merge", "--abort"], worktree.path).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to abort merge: ${e.message}`,
+									command: "git merge --abort",
+									stderr: e.stderr,
+								}),
+						),
+					)
 				}),
 		}
 	}),

@@ -10,8 +10,8 @@
  */
 
 import { Effect } from "effect"
-import { COLUMNS } from "../../ui/types"
-import type { HandlerContext } from "./types"
+import { COLUMNS } from "../../ui/types.js"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // Task Handler Factory
@@ -88,12 +88,31 @@ export const createTaskHandlers = (ctx: HandlerContext) => ({
 	 * Delete bead action (Space+D)
 	 *
 	 * Permanently deletes the selected bead.
+	 * If the task has an active session/worktree, cleans it up first.
 	 * Reinitializes cursor position after deletion.
 	 */
 	deleteBead: () =>
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
+
+			// If there's an active session, clean up the worktree first
+			// (like space+d does, but without closing the bead since we're deleting it)
+			if (task.sessionState !== "idle") {
+				yield* ctx.toast.show("info", `Cleaning up worktree for ${task.id}...`)
+				yield* ctx.prWorkflow
+					.cleanup({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						closeBead: false, // Don't close - we're deleting it entirely
+					})
+					.pipe(
+						Effect.catchAll((error) => {
+							// Log but continue with deletion - worktree cleanup is best-effort
+							return Effect.logWarning(`Worktree cleanup failed for ${task.id}: ${error}`)
+						}),
+					)
+			}
 
 			yield* ctx.beadsClient.delete(task.id).pipe(
 				Effect.tap(() => ctx.toast.show("success", `Deleted ${task.id}`)),

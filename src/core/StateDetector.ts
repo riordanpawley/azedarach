@@ -29,8 +29,9 @@ export type SessionState = "idle" | "busy" | "waiting" | "done" | "error"
  * - planning: Analyzing, reading code, formulating approach
  * - action: Writing code, making edits, running commands
  * - verification: Running tests, type checks, validating results
+ * - planMode: Claude Code's formal plan mode (read-only permission state)
  */
-export type AgentPhase = "idle" | "planning" | "action" | "verification"
+export type AgentPhase = "idle" | "planning" | "action" | "verification" | "planMode"
 
 /**
  * State detection patterns with priority levels
@@ -84,6 +85,13 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/waiting for input/i,
 			/Continue\?/i,
 			/Proceed\?/i,
+			// AskUserQuestion tool - numbered choices and "Other" option
+			/^\s*\d+\.\s+Other\b/im, // "1. Other" or "  2. Other" etc.
+			/\bOther\s*\(describe\)/i, // "Other (describe)"
+			/select.*option/i, // "Select an option"
+			/choose.*option/i, // "Choose an option"
+			/enter.*number/i, // "Enter a number"
+			/type.*number.*select/i, // "Type a number to select"
 		],
 	},
 	{
@@ -116,6 +124,26 @@ const STATE_PATTERNS: readonly StatePattern[] = [
  * Planning is lowest (intent statements are common)
  */
 const PHASE_PATTERNS: readonly PhasePattern[] = [
+	{
+		phase: "planMode",
+		priority: 110, // Highest priority - plan mode is a distinct operational state
+		patterns: [
+			// Plan mode entry/active indicators
+			/plan mode/i,
+			/entering plan mode/i,
+			/in plan mode/i,
+			/ExitPlanMode/i, // Tool name indicates plan mode is active
+			/exit plan mode/i,
+			/read-only mode/i,
+			// Plan mode prompts
+			/would you like (?:me )?to enter plan mode/i,
+			/enter plan mode\?/i,
+			// Plan mode status indicators (Claude Code terminal output)
+			/\[plan\]/i, // Status bar indicator
+			/mode:\s*plan/i,
+			/permission.?mode.*plan/i,
+		],
+	},
 	{
 		phase: "verification",
 		priority: 100,

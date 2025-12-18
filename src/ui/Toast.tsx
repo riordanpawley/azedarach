@@ -5,7 +5,7 @@
  * duration for error toasts to give users time to read actionable guidance.
  */
 import { useEffect } from "react"
-import { theme } from "./theme"
+import { theme } from "./theme.js"
 
 export interface ToastMessage {
 	readonly id: string

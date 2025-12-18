@@ -5,11 +5,24 @@
  * in a single scrollable list, with one row per task.
  */
 
+import { useAtomValue } from "@effect-atom/atom-react"
 import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
-import { columnColors, getPriorityColor, theme } from "./theme"
-import type { JumpTarget, TaskWithSession } from "./types"
-import { COLUMNS, SESSION_INDICATORS } from "./types"
+import { taskRunningOperationAtom } from "./atoms.js"
+import { columnColors, getPriorityColor, theme } from "./theme.js"
+import type { JumpTarget, TaskWithSession } from "./types.js"
+import { COLUMNS, SESSION_INDICATORS } from "./types.js"
+
+/**
+ * Operation indicators shown when an async operation is running on the task
+ */
+const OPERATION_INDICATORS: Record<string, string> = {
+	merge: "⏳",
+	"create-pr": "⏳",
+	cleanup: "🧹",
+	start: "⚡",
+	stop: "⏹️",
+}
 
 /** Height of each row in compact view (terminal rows) */
 export const COMPACT_ROW_HEIGHT = 1
@@ -111,6 +124,12 @@ const CompactRow = (props: CompactRowProps) => {
 	const typeLabel = getTypeLabel(props.task.issue_type)
 	const typeColor = getTypeColor(props.task.issue_type)
 
+	// Subscribe to running operation state for this task
+	const runningOperation = useAtomValue(taskRunningOperationAtom(props.task.id))
+	const operationIndicator = runningOperation
+		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
+		: ""
+
 	// Action mode selected gets mauve background
 	const isActionSelected = props.isSelected && props.isActionMode
 
@@ -161,6 +180,9 @@ const CompactRow = (props: CompactRowProps) => {
 
 			{/* Session indicator */}
 			<text>{indicator || " "}</text>
+
+			{/* Operation indicator (when async operation is running) */}
+			<text>{operationIndicator || " "}</text>
 
 			{/* Task ID */}
 			<text fg={theme.overlay0}>{props.task.id}</text>
@@ -251,6 +273,7 @@ export const CompactView = (props: CompactViewProps) => {
 				<text fg={theme.overlay0}>Pri</text>
 				<text fg={theme.overlay0}>Stat</text>
 				<text fg={theme.overlay0}>Type</text>
+				<text fg={theme.overlay0}> </text>
 				<text fg={theme.overlay0}> </text>
 				<text fg={theme.overlay0}>ID</text>
 				<text fg={theme.overlay0}>{"       "}</text>

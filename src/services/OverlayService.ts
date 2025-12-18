@@ -3,7 +3,7 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
 import { ImageAttachmentService } from "../core/ImageAttachmentService"
-import { emptyArray } from "../lib/empty"
+import { emptyArray } from "../lib/empty.js"
 
 // onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
@@ -17,6 +17,7 @@ export type Overlay =
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 	| { readonly _tag: "diagnostics" }
+	| { readonly _tag: "projectSelector" }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	dependencies: [ImageAttachmentService.Default],

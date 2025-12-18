@@ -10,7 +10,7 @@
  */
 
 import { Effect } from "effect"
-import type { HandlerContext } from "./types"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // Session Handler Factory
@@ -44,10 +44,13 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				return
 			}
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
 			yield* ctx.withQueue(
 				task.id,
 				"start",
-				ctx.sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
+				ctx.sessionManager.start({ beadId: task.id, projectPath }).pipe(
 					Effect.tap(() => ctx.toast.show("success", `Started session for ${task.id}`)),
 					Effect.catchAll(ctx.showErrorToast("Failed to start")),
 				),
@@ -83,6 +86,53 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			// - title gives immediate context without needing to run `bd show`
 			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
+			yield* ctx.withQueue(
+				task.id,
+				"start",
+				ctx.sessionManager
+					.start({
+						beadId: task.id,
+						projectPath,
+						initialPrompt,
+					})
+					.pipe(
+						Effect.tap(() =>
+							ctx.toast.show("success", `Started session for ${task.id} with prompt`),
+						),
+						Effect.catchAll(ctx.showErrorToast("Failed to start")),
+					),
+			)
+		}),
+
+	/**
+	 * Start session with prompt and --dangerously-skip-permissions (Space+!)
+	 *
+	 * Starts Claude with a detailed prompt AND the --dangerously-skip-permissions flag.
+	 * This allows Claude to run without permission prompts - useful for trusted tasks
+	 * but should be used with caution.
+	 * Queued to prevent race conditions with other operations on the same task.
+	 * Blocked if task already has an operation in progress.
+	 */
+	startSessionDangerous: () =>
+		Effect.gen(function* () {
+			const task = yield* ctx.getSelectedTask()
+			if (!task) return
+
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
+
+			if (task.sessionState !== "idle") {
+				yield* ctx.toast.show("error", `Cannot start: task is ${task.sessionState}`)
+				return
+			}
+
+			// Build prompt (same as startSessionWithPrompt)
+			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+
 			yield* ctx.withQueue(
 				task.id,
 				"start",
@@ -91,10 +141,11 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 						beadId: task.id,
 						projectPath: process.cwd(),
 						initialPrompt,
+						dangerouslySkipPermissions: true,
 					})
 					.pipe(
 						Effect.tap(() =>
-							ctx.toast.show("success", `Started session for ${task.id} with prompt`),
+							ctx.toast.show("success", `Started session for ${task.id} (skip-permissions)`),
 						),
 						Effect.catchAll(ctx.showErrorToast("Failed to start")),
 					),
