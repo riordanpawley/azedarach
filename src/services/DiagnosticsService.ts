@@ -76,7 +76,7 @@ export interface DiagnosticsState {
  * ```
  */
 export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("DiagnosticsService", {
-	effect: Effect.gen(function* () {
+	scoped: Effect.gen(function* () {
 		const stateRef = yield* SubscriptionRef.make<DiagnosticsState>({
 			fibers: [],
 			services: [],
@@ -116,7 +116,8 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 				}))
 
 				// Set up finalizer to update status when fiber completes
-				yield* Effect.fork(
+				// Use forkScoped so the watcher survives the trackFiber call
+				yield* Effect.forkScoped(
 					Fiber.await(fiber).pipe(
 						Effect.flatMap((exit) =>
 							SubscriptionRef.update(stateRef, (s) => {
