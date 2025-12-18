@@ -199,8 +199,10 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					// y or Enter to confirm
 					if (key === "y" || key === "return") {
-						yield* currentOverlay.onConfirm
+						// Pop overlay FIRST for immediate UI feedback, then run the async operation
+						// The onConfirm effect (e.g., merge) shows its own toast progress
 						yield* overlay.pop()
+						yield* currentOverlay.onConfirm
 						return true
 					}
 
