@@ -236,6 +236,7 @@ Press `g` to enter goto mode. The next key determines the jump target.
 | `g` `h` | First column | Jump to first column |
 | `g` `l` | Last column | Jump to last column |
 | `g` `w` | Jump labels | Shows 2-char labels on each task |
+| `g` `p` | Project selector | Switch between registered projects |
 
 ### Jump Labels (gw)
 
@@ -373,11 +374,23 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
+| `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
 | `Space` `c` | Chat (Haiku) | Always (opens Haiku in tmux popup to discuss task) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
+
+#### Start (yolo) Mode (Space+!)
+
+The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip-permissions` flag. This allows Claude to run commands and edit files without asking for permission on each operation.
+
+**Use cases:**
+- Trusted, well-defined tasks where you want Claude to work autonomously
+- Tasks with clear scope that don't require manual review of each step
+- When you're ready to accept all changes Claude makes
+
+**Caution:** Since Claude won't ask for permission, it can make changes faster but with less oversight. Use this for tasks where you trust Claude's judgment.
 
 ### Git/PR Actions
 
@@ -385,6 +398,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 |----------|--------|----------------|
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
+| `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 
 #### Merge to Main (Space+m)
@@ -400,6 +414,24 @@ The merge action includes **conflict detection**:
 4. On success, the branch changes are merged into main locally
 
 **Note:** This is a local merge operation, not a GitHub PR merge. Use `Space+P` to create a PR for code review workflows.
+
+#### Abort Merge (Space+M)
+
+If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cancel), use `Space` `M` to abort:
+
+1. Runs `git merge --abort` in the worktree
+2. Returns the worktree to its pre-merge state
+3. You can then:
+   - Try the merge again later
+   - Manually resolve conflicts
+   - Use `Space` `a` to attach to the Claude session and guide resolution
+
+**When to use:**
+- Merge conflict resolution is taking too long
+- Claude is stuck or going in the wrong direction
+- You want to resolve conflicts manually instead
+
+**Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
 
 ### Movement Actions
 
@@ -556,6 +588,66 @@ Azedarach registers a global tmux keybinding for session navigation:
 2. From Claude: `Ctrl-a Ctrl-a` → return to az TUI (double-tap prefix)
 
 This makes az the central hub for all session navigation.
+
+## Multi-Project Support
+
+Azedarach supports working with multiple beads-enabled projects. Each project has its own set of tasks (beads), and you can switch between them using the project selector.
+
+### Project Management (CLI)
+
+Use the CLI to manage registered projects:
+
+```bash
+# Register a project
+az project add /path/to/project
+
+# Register with a custom name
+az project add /path/to/project --name my-project
+
+# List registered projects
+az project list
+
+# Remove a project
+az project remove project-name
+
+# Set default project
+az project switch project-name
+```
+
+### Project Selector (TUI)
+
+Press `g` `p` to open the project selector overlay:
+
+| Key | Action |
+|-----|--------|
+| `1`-`9` | Select project by number |
+| `Esc` | Cancel and close |
+
+The current project is highlighted with "(current)". When you switch projects:
+1. The board refreshes to show tasks from the new project
+2. All session operations (start, attach, etc.) use the new project's path
+3. PR and merge operations target the new project's repository
+
+### Auto-Detection
+
+When launching Azedarach, it automatically selects a project based on:
+1. **Current directory**: If you're inside a registered project's directory
+2. **Default project**: Falls back to the configured default project
+3. **First project**: Falls back to the first registered project
+
+### Project Configuration
+
+Projects are stored globally in `~/.config/azedarach/projects.json`:
+
+```json
+{
+  "projects": [
+    { "name": "azedarach", "path": "/Users/name/prog/azedarach" },
+    { "name": "other-project", "path": "/Users/name/work/other" }
+  ],
+  "defaultProject": "azedarach"
+}
+```
 
 ## Tips
 

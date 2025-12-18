@@ -17,34 +17,35 @@ import {
 	Schedule,
 	SubscriptionRef,
 } from "effect"
-import { ModeService } from "../atoms/runtime"
-import { AppConfig } from "../config/index"
-import { AttachmentService } from "../core/AttachmentService"
-import { BeadsClient } from "../core/BeadsClient"
-import { BeadEditorService } from "../core/EditorService"
-import { HookReceiver, mapEventToState } from "../core/HookReceiver"
-import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService"
-import { PRWorkflow } from "../core/PRWorkflow"
-import { PTYMonitor } from "../core/PTYMonitor"
-import { SessionManager } from "../core/SessionManager"
-import { TerminalService } from "../core/TerminalService"
-import { TmuxService } from "../core/TmuxService"
-import { type VCExecutorInfo, VCService } from "../core/VCService"
-import { BoardService } from "../services/BoardService"
-import { ClockService, computeElapsedFormatted } from "../services/ClockService"
-import { CommandQueueService } from "../services/CommandQueueService"
-import { DiagnosticsService } from "../services/DiagnosticsService"
-import type { SortField } from "../services/EditorService"
-import { EditorService } from "../services/EditorService"
+import { ModeService } from "../atoms/runtime.js"
+import { AppConfig } from "../config/index.js"
+import { AttachmentService } from "../core/AttachmentService.js"
+import { BeadsClient } from "../core/BeadsClient.js"
+import { BeadEditorService } from "../core/EditorService.js"
+import { HookReceiver, mapEventToState } from "../core/HookReceiver.js"
+import { type ImageAttachment, ImageAttachmentService } from "../core/ImageAttachmentService.js"
+import { PRWorkflow } from "../core/PRWorkflow.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
+import { SessionManager } from "../core/SessionManager.js"
+import { TerminalService } from "../core/TerminalService.js"
+import { TmuxService } from "../core/TmuxService.js"
+import { type VCExecutorInfo, VCService } from "../core/VCService.js"
+import { BoardService } from "../services/BoardService.js"
+import { ClockService, computeElapsedFormatted } from "../services/ClockService.js"
+import { CommandQueueService } from "../services/CommandQueueService.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import type { SortField } from "../services/EditorService.js"
+import { EditorService } from "../services/EditorService.js"
 // New atomic Effect services
-import { formatForToast } from "../services/ErrorFormatter"
-import { KeyboardService } from "../services/KeyboardService"
-import { NavigationService } from "../services/NavigationService"
-import { OverlayService } from "../services/OverlayService"
-import { SessionService } from "../services/SessionService"
-import { ToastService } from "../services/ToastService"
-import { ViewService } from "../services/ViewService"
-import type { TaskWithSession } from "./types"
+import { formatForToast } from "../services/ErrorFormatter.js"
+import { KeyboardService } from "../services/KeyboardService.js"
+import { NavigationService } from "../services/NavigationService.js"
+import { OverlayService } from "../services/OverlayService.js"
+import { ProjectService } from "../services/ProjectService.js"
+import { SessionService } from "../services/SessionService.js"
+import { ToastService } from "../services/ToastService.js"
+import { ViewService } from "../services/ViewService.js"
+import type { TaskWithSession } from "./types.js"
 
 const platformLayer = BunContext.layer
 
@@ -74,6 +75,7 @@ const appLayer = Layer.mergeAll(
 	CommandQueueService.Default,
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
+	ProjectService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
@@ -248,7 +250,7 @@ export const diagnosticsAtom = appRuntime.subscriptionRef(
 )
 
 // Re-export DiagnosticsState type for consumers
-export type { DiagnosticsState } from "../services/DiagnosticsService"
+export type { DiagnosticsState } from "../services/DiagnosticsService.js"
 
 /**
  * Atom for currently selected task ID
@@ -344,10 +346,14 @@ export const startSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		const session = yield* manager.start({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 
 		// Register with PTYMonitor for state detection
@@ -472,12 +478,14 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
 		const beadsClient = yield* BeadsClient
+		const projectService = yield* ProjectService
 
 		// Dismiss overlay first
 		yield* overlay.pop()
 		yield* toast.show("info", "Creating task with Claude...")
 
-		const projectPath = process.cwd()
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		// Phase 1: Ask Claude to extract structured task data
 		// Using JSON output format for deterministic parsing
@@ -582,9 +590,14 @@ Return ONLY the JSON object, no explanation or markdown.`
 export const createPRAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		return yield* prWorkflow.createPR({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),
 )
@@ -598,9 +611,14 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
 export const cleanupAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		yield* prWorkflow.cleanup({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -617,9 +635,14 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
+		const projectService = yield* ProjectService
+
+		// Get current project path (or cwd if no project selected)
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+
 		yield* prWorkflow.mergeToMain({
 			beadId,
-			projectPath: process.cwd(),
+			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),
 )
@@ -921,6 +944,52 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 		const board = yield* BoardService
 		return board.filteredTasksByColumn
 	}),
+)
+
+// ============================================================================
+// Project Service Atoms
+// ============================================================================
+
+/**
+ * Current project atom - subscribes to ProjectService currentProject changes
+ *
+ * Usage: const currentProject = useAtomValue(currentProjectAtom)
+ */
+export const currentProjectAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return projectService.currentProject
+	}),
+)
+
+/**
+ * Projects list atom - subscribes to ProjectService projects changes
+ *
+ * Usage: const projects = useAtomValue(projectsAtom)
+ */
+export const projectsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		return projectService.projects
+	}),
+)
+
+/**
+ * Switch project atom - change the active project
+ *
+ * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
+ *        await switchProject("project-name")
+ */
+export const switchProjectAtom = appRuntime.fn((projectName: string) =>
+	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		const board = yield* BoardService
+		const toast = yield* ToastService
+
+		yield* projectService.switchProject(projectName)
+		yield* board.refresh()
+		yield* toast.show("success", `Switched to project: ${projectName}`)
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
@@ -1248,7 +1317,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					// Exception: CommandExecutor is the only allowed leaked requirement
 					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 			  }
-			| { readonly _tag: "diagnostics" },
+			| { readonly _tag: "diagnostics" }
+			| { readonly _tag: "projectSelector" },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
@@ -1501,6 +1571,29 @@ export const focusedTaskRunningOperationAtom = Atom.readable((get) => {
 
 	return taskState.value.running?.label ?? null
 })
+
+/**
+ * Running operation for a specific task - parameterized atom factory
+ *
+ * Returns the running operation label (e.g., "merge", "cleanup") for the given task,
+ * or null if no operation is running.
+ *
+ * Used by TaskCard to show operation indicators on individual cards.
+ *
+ * Usage: const runningOp = useAtomValue(taskRunningOperationAtom(taskId))
+ */
+export const taskRunningOperationAtom = (taskId: string) =>
+	Atom.readable((get) => {
+		// Get the queue state
+		const stateResult = get(commandQueueStateAtom)
+		if (!Result.isSuccess(stateResult)) return null
+
+		// Look up the running operation for this task
+		const taskState = HashMap.get(stateResult.value, taskId)
+		if (taskState._tag === "None") return null
+
+		return taskState.value.running?.label ?? null
+	})
 
 /**
  * Get queue info for a specific task

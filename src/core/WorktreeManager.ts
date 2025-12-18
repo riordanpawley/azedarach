@@ -14,6 +14,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Ref, type Scope } from "effect"
+import { deepMerge, generateHookConfig } from "./hooks.js"
 import { getWorktreePath, normalizePath } from "./paths.js"
 
 // ============================================================================
@@ -327,89 +328,6 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 		// Track active worktrees in memory for fast lookups
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
-
-		/**
-		 * Generate Claude Code hook configuration for session state detection
-		 *
-		 * Creates hooks that call `az notify` when Claude enters specific states.
-		 * This enables authoritative state detection from Claude's native hook system.
-		 */
-		const generateHookConfig = (beadId: string) => ({
-			hooks: {
-				Notification: [
-					{
-						matcher: "idle_prompt",
-						hooks: [
-							{
-								type: "command",
-								command: `az notify idle_prompt ${beadId}`,
-							},
-						],
-					},
-				],
-				Stop: [
-					{
-						hooks: [
-							{
-								type: "command",
-								command: `az notify stop ${beadId}`,
-							},
-						],
-					},
-				],
-				SessionEnd: [
-					{
-						hooks: [
-							{
-								type: "command",
-								command: `az notify session_end ${beadId}`,
-							},
-						],
-					},
-				],
-			},
-		})
-
-		/**
-		 * Deep merge two objects (for merging hook configs with existing settings)
-		 *
-		 * Arrays are concatenated rather than replaced to preserve both
-		 * existing hooks and new hooks.
-		 */
-		const deepMerge = (
-			target: Record<string, unknown>,
-			source: Record<string, unknown>,
-		): Record<string, unknown> => {
-			const result = { ...target }
-
-			for (const key of Object.keys(source)) {
-				const sourceValue = source[key]
-				const targetValue = target[key]
-
-				if (
-					sourceValue &&
-					typeof sourceValue === "object" &&
-					!Array.isArray(sourceValue) &&
-					targetValue &&
-					typeof targetValue === "object" &&
-					!Array.isArray(targetValue)
-				) {
-					// Both are objects - recursively merge
-					result[key] = deepMerge(
-						targetValue as Record<string, unknown>,
-						sourceValue as Record<string, unknown>,
-					)
-				} else if (Array.isArray(sourceValue) && Array.isArray(targetValue)) {
-					// Both are arrays - concatenate
-					result[key] = [...targetValue, ...sourceValue]
-				} else {
-					// Otherwise, source wins
-					result[key] = sourceValue
-				}
-			}
-
-			return result
-		}
 
 		/**
 		 * Copy Claude's local settings to a new worktree and inject hook configuration

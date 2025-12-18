@@ -116,6 +116,22 @@ const NotificationsConfigSchema = Schema.Struct({
 	system: Schema.optional(Schema.Boolean),
 })
 
+/**
+ * Project configuration
+ *
+ * Defines a project that can be managed by Azedarach.
+ */
+const ProjectConfigSchema = Schema.Struct({
+	/** Name of the project */
+	name: Schema.String,
+
+	/** Absolute path to the project root */
+	path: Schema.String,
+
+	/** Optional path to the beads database for this project */
+	beadsPath: Schema.optional(Schema.String),
+})
+
 // ============================================================================
 // Root Schema
 // ============================================================================
@@ -143,6 +159,12 @@ export const AzedarachConfigSchema = Schema.Struct({
 
 	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
+
+	/** Project configurations */
+	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
+
+	/** Default project name to use */
+	defaultProject: Schema.optional(Schema.String),
 })
 
 // ============================================================================
@@ -172,3 +194,6 @@ export type PRConfig = Schema.Schema.Type<typeof PRConfigSchema>
 
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>
+
+/** Project config section type */
+export type ProjectConfig = Schema.Schema.Type<typeof ProjectConfigSchema>

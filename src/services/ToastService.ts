@@ -8,7 +8,7 @@
  */
 
 import { Data, Effect, Ref, SubscriptionRef } from "effect"
-import { emptyArray } from "../lib/empty"
+import { emptyArray } from "../lib/empty.js"
 
 // ============================================================================
 // Types

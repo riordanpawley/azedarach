@@ -8,8 +8,8 @@
 import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import { useMemo } from "react"
-import { dismissToastAtom, showToastAtom, toastsAtom } from "../atoms"
-import type { ToastMessage } from "../Toast"
+import { dismissToastAtom, showToastAtom, toastsAtom } from "../atoms.js"
+import type { ToastMessage } from "../Toast.js"
 
 /**
  * Hook for managing toast notifications

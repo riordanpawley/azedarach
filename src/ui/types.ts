@@ -2,7 +2,7 @@
  * Shared types for UI components
  */
 import type { Record } from "effect"
-import type { Issue } from "../core/BeadsClient"
+import type { Issue } from "../core/BeadsClient.js"
 
 /**
  * Session state for a task
@@ -20,12 +20,16 @@ export type SessionState =
  *
  * Claude Code sessions typically follow a Planning → Action → Verification cycle.
  * Phases are detected from output patterns and displayed on TaskCards.
+ *
+ * planMode is a special phase representing Claude Code's formal plan mode
+ * (read-only permission state) - distinct from regular planning work.
  */
 export type AgentPhase =
 	| "idle" // No active phase (session not running or just started)
 	| "planning" // Claude is analyzing/planning ("I'll...", "Let me...", "First...")
 	| "action" // Claude is executing (tool calls, writing code)
 	| "verification" // Claude is testing/validating (running tests, type-check)
+	| "planMode" // Claude Code plan mode active (read-only permission state)
 
 /**
  * Session metrics for monitoring context health
@@ -96,6 +100,7 @@ export const PHASE_INDICATORS: Record<AgentPhase, string> = {
 	planning: "📋", // Clipboard = planning/thinking
 	action: "⚙️", // Gear = executing/working
 	verification: "🧪", // Test tube = testing/validating
+	planMode: "📝", // Memo/notepad = plan mode (read-only planning)
 }
 
 /**
@@ -106,6 +111,7 @@ export const PHASE_LABELS: Record<AgentPhase, string> = {
 	planning: "Planning",
 	action: "Action",
 	verification: "Verification",
+	planMode: "Plan Mode",
 }
 
 /**

@@ -13,8 +13,8 @@
  * }
  *
  * Event to SessionState mapping:
- * - idle_prompt → "waiting" (Claude waiting for user input 60s+)
- * - stop → (no change) (Claude finished responding, but task continues)
+ * - idle_prompt → "waiting" (Claude waiting for user input 60s+, fallback)
+ * - stop → "waiting" (Claude finished responding, waiting for user input)
  * - session_end → "idle" (Session terminated)
  */
 
@@ -28,8 +28,20 @@ import type { SessionState } from "../ui/types.js"
 
 /**
  * Hook event types from Claude Code
+ *
+ * Event timing and state mapping:
+ * - pretooluse: Fires BEFORE permission check when Claude attempts any tool → "busy"
+ * - permission_request: Fires when Claude needs user approval → "waiting"
+ * - idle_prompt: Fires after 60s+ of no input (fallback) → "waiting"
+ * - stop: Fires when Claude finishes responding → "waiting"
+ * - session_end: Fires when session terminates → "idle"
  */
-export type HookEventType = "idle_prompt" | "stop" | "session_end"
+export type HookEventType =
+	| "idle_prompt"
+	| "permission_request"
+	| "pretooluse"
+	| "stop"
+	| "session_end"
 
 /**
  * Hook event payload (matches what `az notify` writes)
@@ -80,20 +92,31 @@ const POLL_INTERVAL_MS = 500
 /**
  * Map hook event type to SessionState
  *
+ * State transitions follow Claude Code's hook execution order:
+ * 1. PreToolUse fires → "busy" (Claude attempting tool)
+ * 2. PermissionRequest fires → "waiting" (needs user approval)
+ * 3. User approves → tool executes → stays "busy"
+ * 4. Stop fires → "waiting" (Claude done, awaiting next prompt)
+ *
  * Returns null if the event should not trigger a state change.
  */
 export const mapEventToState = (event: HookEventType): SessionState | null => {
 	switch (event) {
+		case "pretooluse":
+			// Claude is attempting to use a tool - actively working
+			return "busy"
+		case "permission_request":
+			// Claude needs user approval to proceed
+			return "waiting"
 		case "idle_prompt":
-			// Claude has been waiting for input for 60+ seconds
+			// Claude has been waiting for input for 60+ seconds (fallback)
+			return "waiting"
+		case "stop":
+			// Claude finished responding and is now waiting for user input
 			return "waiting"
 		case "session_end":
 			// Session terminated - return to idle
 			return "idle"
-		case "stop":
-			// Claude finished responding, but this doesn't change the session state
-			// The session continues - it could be busy, waiting, or done
-			return null
 		default:
 			return null
 	}
