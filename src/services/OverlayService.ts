@@ -15,6 +15,7 @@ export type Overlay =
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
+	| { readonly _tag: "imagePreview"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }

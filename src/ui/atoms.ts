@@ -1311,6 +1311,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			| { readonly _tag: "claudeCreate" }
 			| { readonly _tag: "settings" }
 			| { readonly _tag: "imageAttach"; readonly taskId: string }
+			| { readonly _tag: "imagePreview"; readonly taskId: string }
 			| {
 					readonly _tag: "confirm"
 					readonly message: string
@@ -1386,6 +1387,17 @@ export const imageAttachOverlayStateAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const service = yield* ImageAttachmentService
 		return service.overlayState
+	}),
+)
+
+/**
+ * Image preview overlay state.
+ * Subscribe to this in ImagePreviewOverlay for reactive updates.
+ */
+export const imagePreviewStateAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return service.previewState
 	}),
 )
 
@@ -1525,6 +1537,51 @@ export const getAttachmentCountsAtom = appRuntime.fn((taskIds: readonly string[]
 		const service = yield* ImageAttachmentService
 		return yield* service.countBatch(taskIds)
 	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+// ============================================================================
+// Image Preview Atoms
+// ============================================================================
+
+/**
+ * Open image preview for the currently selected attachment.
+ * Renders the image to terminal-compatible text.
+ */
+export const openImagePreviewAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		return yield* service.openPreview()
+	}).pipe(Effect.tapError(Effect.logError)),
+)
+
+/**
+ * Close image preview and clear state
+ */
+export const closeImagePreviewAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.closePreview()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Navigate to next attachment in preview
+ */
+export const previewNextAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.previewNext()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Navigate to previous attachment in preview
+ */
+export const previewPreviousAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const service = yield* ImageAttachmentService
+		yield* service.previewPrevious()
+	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 // ============================================================================

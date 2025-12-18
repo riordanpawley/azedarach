@@ -225,6 +225,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						if (handledAsProjectSelector) return
 					}
 
+					// Check for imagePreview overlay (handles image navigation)
+					if (currentOverlay?._tag === "imagePreview") {
+						const handledAsImagePreview = yield* inputHandlers.handleImagePreviewInput(key)
+						if (handledAsImagePreview) return
+					}
+
 					const effectiveMode = yield* inputHandlers.getEffectiveMode()
 
 					// Special handling for goto-jump mode (any key is label input)
