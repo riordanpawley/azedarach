@@ -3,9 +3,9 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import type { FiberStatus } from "../services/DiagnosticsService"
-import { diagnosticsAtom } from "./atoms"
-import { theme } from "./theme"
+import type { FiberStatus } from "../services/DiagnosticsService.js"
+import { diagnosticsAtom } from "./atoms.js"
+import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
 

@@ -8,8 +8,8 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useEffect, useMemo } from "react"
-import { killActivePopup } from "../core/EditorService"
-import { ActionPalette } from "./ActionPalette"
+import { killActivePopup } from "../core/EditorService.js"
+import { ActionPalette } from "./ActionPalette.js"
 import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
@@ -20,23 +20,23 @@ import {
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
-} from "./atoms"
-import { Board } from "./Board"
-import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt"
-import { CommandInput } from "./CommandInput"
-import { ConfirmOverlay } from "./ConfirmOverlay"
-import { CreateTaskPrompt } from "./CreateTaskPrompt"
-import { DetailPanel } from "./DetailPanel"
-import { DiagnosticsOverlay } from "./DiagnosticsOverlay"
-import { HelpOverlay } from "./HelpOverlay"
-import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks"
-import { ImageAttachOverlay } from "./ImageAttachOverlay"
-import { SearchInput } from "./SearchInput"
-import { SortMenu } from "./SortMenu"
-import { StatusBar } from "./StatusBar"
-import { TASK_CARD_HEIGHT } from "./TaskCard"
-import { ToastContainer } from "./Toast"
-import { theme } from "./theme"
+} from "./atoms.js"
+import { Board } from "./Board.js"
+import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
+import { CommandInput } from "./CommandInput.js"
+import { ConfirmOverlay } from "./ConfirmOverlay.js"
+import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
+import { DetailPanel } from "./DetailPanel.js"
+import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
+import { HelpOverlay } from "./HelpOverlay.js"
+import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
+import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
+import { SearchInput } from "./SearchInput.js"
+import { SortMenu } from "./SortMenu.js"
+import { StatusBar } from "./StatusBar.js"
+import { TASK_CARD_HEIGHT } from "./TaskCard.js"
+import { ToastContainer } from "./Toast.js"
+import { theme } from "./theme.js"
 
 // ============================================================================
 // Constants

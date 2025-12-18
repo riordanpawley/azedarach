@@ -12,9 +12,9 @@
  */
 
 import { Effect, Record, SubscriptionRef } from "effect"
-import { COLUMNS, generateJumpLabels } from "../../ui/types"
-import type { JumpTarget } from "../EditorService"
-import type { HandlerContext, KeyMode } from "./types"
+import { COLUMNS, generateJumpLabels } from "../../ui/types.js"
+import type { JumpTarget } from "../EditorService.js"
+import type { HandlerContext, KeyMode } from "./types.js"
 
 // ============================================================================
 // Input Handler Factory

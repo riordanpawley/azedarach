@@ -9,7 +9,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Effect } from "effect"
 import { useMemo } from "react"
-import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms"
+import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms.js"
 
 // onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>

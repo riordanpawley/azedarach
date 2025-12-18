@@ -7,9 +7,9 @@
 
 import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
-import { columnColors, getPriorityColor, theme } from "./theme"
-import type { JumpTarget, TaskWithSession } from "./types"
-import { COLUMNS, SESSION_INDICATORS } from "./types"
+import { columnColors, getPriorityColor, theme } from "./theme.js"
+import type { JumpTarget, TaskWithSession } from "./types.js"
+import { COLUMNS, SESSION_INDICATORS } from "./types.js"
 
 /** Height of each row in compact view (terminal rows) */
 export const COMPACT_ROW_HEIGHT = 1

@@ -2,10 +2,10 @@
  * StatusBar component - bottom status bar with mode indicator and contextual keybinds
  */
 
-import type { VCStatus } from "../core/VCService"
-import type { EditorMode } from "../services/EditorService"
-import { theme } from "./theme"
-import type { ViewMode } from "./types"
+import type { VCStatus } from "../core/VCService.js"
+import type { EditorMode } from "../services/EditorService.js"
+import { theme } from "./theme.js"
+import type { ViewMode } from "./types.js"
 
 export interface StatusBarProps {
 	totalTasks: number

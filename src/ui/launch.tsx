@@ -3,9 +3,9 @@
  */
 import { createCliRenderer } from "@opentui/core"
 import { createRoot } from "@opentui/react"
-import { killActivePopup } from "../core/EditorService"
-import { AZ_SESSION_NAME } from "../lib/tmux-wrap"
-import { App } from "./App"
+import { killActivePopup } from "../core/EditorService.js"
+import { AZ_SESSION_NAME } from "../lib/tmux-wrap.js"
+import { App } from "./App.js"
 
 /**
  * Register a global tmux keybinding to return to the az session.

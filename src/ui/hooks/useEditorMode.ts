@@ -9,7 +9,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
-import type { SortConfig, SortField } from "../../services/EditorService"
+import type { SortConfig, SortField } from "../../services/EditorService.js"
 import {
 	clearCommandAtom,
 	clearSearchAtom,
@@ -32,8 +32,8 @@ import {
 	toggleSelectionAtom,
 	updateCommandAtom,
 	updateSearchAtom,
-} from "../atoms"
-import type { JumpTarget } from "../types"
+} from "../atoms.js"
+import type { JumpTarget } from "../types.js"
 
 // Default mode when loading
 const DEFAULT_MODE = { _tag: "normal" } as const

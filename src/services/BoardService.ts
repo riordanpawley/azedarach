@@ -16,13 +16,13 @@ import {
 	Stream,
 	SubscriptionRef,
 } from "effect"
-import { BeadsClient } from "../core/BeadsClient"
-import { PTYMonitor } from "../core/PTYMonitor"
-import { SessionManager } from "../core/SessionManager"
-import { emptyRecord } from "../lib/empty"
-import type { TaskWithSession } from "../ui/types"
-import { COLUMNS } from "../ui/types"
-import { EditorService, type SortConfig } from "./EditorService"
+import { BeadsClient } from "../core/BeadsClient.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
+import { SessionManager } from "../core/SessionManager.js"
+import { emptyRecord } from "../lib/empty.js"
+import type { TaskWithSession } from "../ui/types.js"
+import { COLUMNS } from "../ui/types.js"
+import { EditorService, type SortConfig } from "./EditorService.js"
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module

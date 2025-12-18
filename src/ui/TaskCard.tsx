@@ -2,10 +2,10 @@
  * TaskCard component - displays a single task in the Kanban board
  */
 
-import { ElapsedTimer } from "./ElapsedTimer"
-import { getPriorityColor, theme } from "./theme"
-import type { TaskWithSession } from "./types"
-import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
+import { ElapsedTimer } from "./ElapsedTimer.js"
+import { getPriorityColor, theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
+import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
 
 /** Height of each task card in terminal rows */
 export const TASK_CARD_HEIGHT = 6

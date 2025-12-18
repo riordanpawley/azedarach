@@ -2,7 +2,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
-import { emptyArray } from "../lib/empty"
+import { emptyArray } from "../lib/empty.js"
 
 // onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>

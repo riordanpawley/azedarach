@@ -21,6 +21,7 @@
 | Guide | Description |
 |-------|-------------|
 | [Keybindings Reference](keybindings.md) | Complete keyboard shortcut reference |
+| [Hooks Installation](hooks-installation.md) | How az installs session state hooks |
 | [tmux Guide](tmux-guide.md) | **New to tmux?** Start here! |
 | [tmux Config](tmux-config.md) | Recommended tmux configuration + cheatsheet |
 | [Services Architecture](services.md) | Effect services and architecture |
