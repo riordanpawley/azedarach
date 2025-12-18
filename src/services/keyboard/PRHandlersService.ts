@@ -350,8 +350,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Show diff action (Space+f)
 		 *
 		 * Opens a tmux popup showing the git diff between the bead's branch and main.
-		 * Useful for code review before merging. Uses delta or git diff with color
-		 * piped to less for navigation.
+		 * Useful for code review before merging. Respects user's git diff configuration
+		 * (difftastic, delta, etc.) with DFT_COLOR=always for difftastic support.
 		 * Requires an active session with a worktree.
 		 */
 		const showDiff = () =>
@@ -372,9 +372,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Build git diff command that works in the worktree
 				// - diff main...HEAD shows changes since branching from main
-				// - --color=always ensures ANSI colors in the popup
+				// - DFT_COLOR=always ensures difftastic colors in tmux popup
+				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				const diffCommand = `cd "${worktreePath}" && git diff main...HEAD --stat --color=always && echo "" && git diff main...HEAD --color=always | less -RS +Gg`
+				const diffCommand = `cd "${worktreePath}" && git diff main...HEAD --stat --color=always && echo "" && DFT_COLOR=always git diff main...HEAD --color=always | less -RS +Gg`
 
 				yield* tmux
 					.displayPopup({
