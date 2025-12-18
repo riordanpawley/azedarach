@@ -125,7 +125,11 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 		/**
 		 * Merge worktree to main action (Space+m)
 		 *
-		 * Performs a safe merge check using git merge-tree (in-memory 3-way merge).
+		 * Performs safety checks before merge:
+		 * 1. Check for uncommitted changes (autostash can cause hard-to-recover conflicts)
+		 * 2. Check for merge conflicts using git merge-tree (in-memory 3-way merge)
+		 *
+		 * - Uncommitted changes: shows confirmation dialog warning about autostash risks
 		 * - Clean merges proceed directly without confirmation
 		 * - If conflicts detected, offers to ask Claude to resolve them
 		 * - Claude resolution merges main into worktree, then prompts Claude
@@ -148,6 +152,48 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* ctx.getProjectPath()
+
+				// Check for uncommitted changes in worktree BEFORE merge
+				// With merge.autostash=true, uncommitted changes get stashed before merge
+				// and auto-popped after. If stash pop conflicts with merged content,
+				// you get a stash conflict that's hard to recover from.
+				const uncommittedResult = yield* ctx.prWorkflow
+					.checkUncommittedChanges({
+						beadId: task.id,
+						projectPath,
+					})
+					.pipe(
+						Effect.map((result) => ({ _tag: "success" as const, result })),
+						Effect.catchAll((error) =>
+							Effect.succeed({
+								_tag: "error" as const,
+								message: formatForToast(error),
+							}),
+						),
+					)
+
+				// If uncommitted check failed, we can still proceed (warn but don't block)
+				if (uncommittedResult._tag === "error") {
+					yield* ctx.toast.show(
+						"info",
+						`Could not check for uncommitted changes: ${uncommittedResult.message}`,
+					)
+				} else if (uncommittedResult.result.hasUncommittedChanges) {
+					// Show confirmation dialog - uncommitted changes detected
+					const fileCount = uncommittedResult.result.changedFiles.length
+					const fileList =
+						uncommittedResult.result.changedFiles.slice(0, 3).join(", ") +
+						(fileCount > 3 ? ` (+${fileCount - 3} more)` : "")
+
+					const message = `Uncommitted changes in worktree: ${fileList}\n\nWith autostash, these may conflict after merge. Commit first?`
+
+					yield* ctx.overlay.push({
+						_tag: "confirm",
+						message,
+						onConfirm: doMergeToMain(task.id),
+					})
+					return
+				}
 
 				// Check for potential merge conflicts before proceeding
 				// If check fails, we must NOT proceed - failing to check doesn't mean it's safe
