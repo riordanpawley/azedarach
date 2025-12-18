@@ -18,7 +18,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, HashMap, PubSub, Ref } from "effect"
+import { Data, Effect, Exit, HashMap, PubSub, Ref } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
@@ -384,59 +384,88 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// Check if tmux session already exists
 					const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
-					if (!hasSession) {
-						// Create tmux session in the worktree directory
-						// Use user's shell that runs claude so:
-						// 1. tmux prefix keys work (shell handles them, not claude)
-						// 2. If claude exits, you're left in a shell (session doesn't die)
-						const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+					// Build Claude command configuration (shared between acquire and use phases)
+					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+					const escapeForShell = (s: string) =>
+						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+					const modelFlag = model ? ` --model ${model}` : ""
+					const dangerousFlag = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+					const claudeWithOptions = initialPrompt
+						? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
+						: `${claudeCommand}${modelFlag}${dangerousFlag}`
 
-						// If initialPrompt provided, append it to the claude command (properly escaped)
-						// If model is specified, add --model flag (e.g., for haiku chat sessions)
-						const escapeForShell = (s: string) =>
-							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+					// Use acquireUseRelease to ensure atomicity:
+					// - acquire: Create tmux session (if needed)
+					// - use: Update bead status + register session
+					// - release: Kill tmux session on failure, no-op on success
+					//
+					// This fixes az-losz: if bead update or registry update fails after
+					// tmux creation, we roll back by killing the orphaned tmux session.
+					const session = yield* Effect.acquireUseRelease(
+						// ACQUIRE: Create tmux session (returns whether we created a new one)
+						Effect.gen(function* () {
+							if (!hasSession) {
+								// Create tmux session in the worktree directory
+								// Use user's shell that runs claude so:
+								// 1. tmux prefix keys work (shell handles them, not claude)
+								// 2. If claude exits, you're left in a shell (session doesn't die)
+								//
+								// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+								// This ensures the project's .envrc environment is loaded automatically
+								yield* tmuxService.newSession(tmuxSessionName, {
+									cwd: worktree.path,
+									command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
+									prefix: tmuxPrefix,
+								})
+								return { createdNewSession: true as const }
+							}
+							return { createdNewSession: false as const }
+						}),
 
-						// Build Claude command with optional model, dangerous flag, and prompt
-						const modelFlag = model ? ` --model ${model}` : ""
-						const dangerousFlag = dangerouslySkipPermissions
-							? " --dangerously-skip-permissions"
-							: ""
-						const claudeWithOptions = initialPrompt
-							? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
-							: `${claudeCommand}${modelFlag}${dangerousFlag}`
+						// USE: Update bead status and register session
+						() =>
+							Effect.gen(function* () {
+								// Now that session is successfully created, update bead status
+								// This is done AFTER session creation to ensure we don't leave beads
+								// in "in_progress" state with no actual session (az-g7p bug fix)
+								if (needsStatusUpdate) {
+									yield* beadsClient.update(beadId, { status: "in_progress" })
+								}
 
-						// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
-						// This ensures the project's .envrc environment is loaded automatically
-						// (Previously used `direnv exec .` but that bypassed user's shell PATH)
-						yield* tmuxService.newSession(tmuxSessionName, {
-							cwd: worktree.path,
-							command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
-							prefix: tmuxPrefix,
-						})
-					}
+								// Create session object
+								const sessionObj: Session = {
+									beadId,
+									worktreePath: worktree.path,
+									tmuxSessionName,
+									state: "busy",
+									startedAt: new Date(),
+									projectPath,
+								}
 
-					// Now that session is successfully created, update bead status
-					// This is done AFTER session creation to ensure we don't leave beads
-					// in "in_progress" state with no actual session (az-g7p bug fix)
-					if (needsStatusUpdate) {
-						yield* beadsClient.update(beadId, { status: "in_progress" })
-					}
+								// Store session in registry
+								yield* Ref.update(sessionsRef, (sessions) =>
+									HashMap.set(sessions, beadId, sessionObj),
+								)
 
-					// Create session object
-					const session: Session = {
-						beadId,
-						worktreePath: worktree.path,
-						tmuxSessionName,
-						state: "busy",
-						startedAt: new Date(),
-						projectPath,
-					}
+								// Publish state change event (from idle to busy)
+								yield* publishStateChange(beadId, "idle", "busy")
 
-					// Store session in registry
-					yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, session))
+								return sessionObj
+							}),
 
-					// Publish state change event (from idle to busy)
-					yield* publishStateChange(beadId, "idle", "busy")
+						// RELEASE: Only kill tmux on failure if we created it
+						(acquired, exit) =>
+							Exit.isFailure(exit) && acquired.createdNewSession
+								? tmuxService.killSession(tmuxSessionName).pipe(
+										Effect.tap(() =>
+											Effect.logWarning(
+												`Rolled back tmux session ${tmuxSessionName} due to failure`,
+											),
+										),
+										Effect.catchAll(() => Effect.void), // Ignore kill errors during rollback
+									)
+								: Effect.void,
+					)
 
 					return session
 				}),
