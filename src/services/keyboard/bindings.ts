@@ -6,6 +6,7 @@
  */
 
 import { Effect } from "effect"
+import type { BeadsClient } from "../../core/BeadsClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { EditorService } from "../EditorService.js"
 import type { NavigationService } from "../NavigationService.js"
@@ -44,6 +45,7 @@ export interface BindingContext {
 	toast: ToastService
 	viewService: ViewService
 	tmux: TmuxService
+	beadsClient: BeadsClient
 }
 
 // ============================================================================
@@ -178,9 +180,9 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "Quit (or exit drill-down)",
 		action: Effect.gen(function* () {
 			// If in drill-down mode, exit it instead of quitting
-			const inDrillDown = yield* bc.ctx.nav.isInDrillDown()
+			const inDrillDown = yield* bc.nav.isInDrillDown()
 			if (inDrillDown) {
-				yield* bc.ctx.nav.exitDrillDown()
+				yield* bc.nav.exitDrillDown()
 			} else {
 				process.exit(0)
 			}
@@ -204,15 +206,15 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "View detail (or enter epic)",
 		action: Effect.gen(function* () {
 			// Get selected task to check if it's an epic
-			const task = yield* bc.ctx.getSelectedTask()
+			const task = yield* bc.helpers.getSelectedTask()
 			if (task && task.issue_type === "epic") {
 				// Fetch epic children
-				const children = yield* bc.ctx.beadsClient
+				const children = yield* bc.beadsClient
 					.getEpicChildren(task.id)
 					.pipe(Effect.catchAll(() => Effect.succeed([])))
-				const childIds = new Set(children.map((c) => c.id))
+				const childIds = new Set(children.map((c: { id: string }) => c.id))
 				// Enter drill-down mode for the epic with children
-				yield* bc.ctx.nav.enterDrillDown(task.id, childIds)
+				yield* bc.nav.enterDrillDown(task.id, childIds)
 			} else {
 				// Normal detail view for non-epics
 				yield* bc.helpers.openCurrentDetail()

@@ -135,6 +135,41 @@ src/
 
 **Full reference:** `.claude/skills/workflow/beads-tracking.skill.md`
 
+### Epic Orchestration (Swarm Pattern)
+
+**Use epics to orchestrate parallel agent work.** When a feature requires multiple independent tasks that can run concurrently, create an epic with child tasks:
+
+```bash
+# 1. Create the epic
+bd create --title="Implement user settings page" --type=epic --priority=1
+
+# 2. Create child tasks (can be worked in parallel)
+bd create --title="Settings UI components" --type=task
+bd create --title="Settings API endpoints" --type=task
+bd create --title="Settings persistence layer" --type=task
+
+# 3. Link children to epic (child depends on parent)
+bd dep add az-ui az-epic --type=parent-child
+bd dep add az-api az-epic --type=parent-child
+bd dep add az-persist az-epic --type=parent-child
+```
+
+**Azedarach swarm workflow:**
+1. Create epic with decomposed child tasks
+2. Use `Space+s` on each child to spawn parallel Claude sessions
+3. Each session runs in its own git worktree (isolation)
+4. Monitor progress via epic drill-down (`Enter` on epic)
+5. Sessions auto-create PRs on completion
+6. Merge completed work back to main
+
+**When to use epics:**
+- Feature spans 3+ independent tasks
+- Tasks can be worked in parallel (no blocking deps between them)
+- You want focused drill-down view of related work
+- Orchestrating multiple Claude Code sessions
+
+**Epic drill-down:** Press `Enter` on an epic card to see only its children, with a progress bar showing completion status.
+
 ## State Management Architecture
 
 This project uses a **three-layer reactive architecture** with strict separation of concerns:
