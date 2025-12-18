@@ -693,12 +693,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 					)
 
-					// 3. Fetch latest main
-					yield* runGit(["fetch", "origin", "main"], projectPath).pipe(
-						Effect.catchAll(() => Effect.void),
-					)
-
-					// 4. Check for non-beads conflicts using merge-tree (safe, in-memory)
+					// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
 					// We only care about conflicts in actual code files, not .beads/
 					const mergeTreeResult = yield* Effect.gen(function* () {
 						const command = Command.make(
@@ -706,7 +701,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							"origin/main",
+							"main",
 							beadId,
 						).pipe(Command.workingDirectory(projectPath))
 
@@ -720,7 +715,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "origin/main", beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
 							projectPath,
 						).pipe(Effect.catchAll(() => Effect.succeed("")))
 
@@ -737,17 +732,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 					})
 
-					// 5. If there are real code conflicts (not .beads/), ask Claude to resolve
+					// 4. If there are real code conflicts (not .beads/), ask Claude to resolve
 					if (mergeTreeResult.hasConflicts) {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
 						// Start merge in worktree so Claude can resolve
-						yield* runGit(["fetch", "origin", "main"], worktree.path).pipe(
-							Effect.catchAll(() => Effect.void),
-						)
-
 						yield* runGit(
-							["merge", "origin/main", "-m", `Merge main into ${beadId}`],
+							["merge", "main", "-m", `Merge main into ${beadId}`],
 							worktree.path,
 						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
 
@@ -770,7 +761,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 6. No code conflicts - safe to merge
+					// 5. No code conflicts - safe to merge
 					// Switch to main branch in main repo
 					yield* runGit(["checkout", "main"], projectPath).pipe(
 						Effect.mapError(
@@ -782,12 +773,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						),
 					)
 
-					// Pull latest main to ensure we're up to date
-					yield* runGit(["pull", "origin", "main", "--ff-only"], projectPath).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if offline or already up to date
-					)
-
-					// 7. Merge branch with strategy to favor 'ours' for .beads/ conflicts
+					// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
 					// This ensures .beads/issues.jsonl from main is preserved during merge
 					const mergeMessage = `Merge ${beadId}: ${bead.title}`
 					yield* runGit(
@@ -818,7 +804,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
-					// 8. Sync beads AFTER merge to reconcile any bead changes from branch
+					// 7. Sync beads AFTER merge to reconcile any bead changes from branch
 					// This imports beads from the branch that might have been excluded by -X ours
 					yield* withSyncLock(
 						Effect.gen(function* () {
@@ -837,15 +823,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
-					// 9. Remove worktree directory
+					// 8. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 10. Delete local branch
+					// 9. Delete local branch
 					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
 						Effect.catchAll(() => Effect.void),
 					)
 
-					// 11. Close bead issue
+					// 10. Close bead issue
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
@@ -856,7 +842,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 12. Push to origin
+					// 11. Push to origin
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(
