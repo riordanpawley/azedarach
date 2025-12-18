@@ -11,6 +11,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import {
 	BeadsClient,
 	type BeadsError,
@@ -363,31 +364,23 @@ export interface PRWorkflowService {
 // ============================================================================
 
 /**
- * Run type-check command and return success/failure with output
+ * Run a shell command and return success/failure with output
+ *
+ * Used for post-merge validation and fix commands.
  */
-const runTypeCheck = (
+const runShellCommand = (
+	commandStr: string,
 	cwd: string,
 ): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
-		const command = Command.make("bun", "run", "type-check").pipe(Command.workingDirectory(cwd))
-		const result = yield* Effect.all({
-			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
-			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
-		})
-		return {
-			success: result.exitCode === 0,
-			output: result.output,
+		// Split command into program and args
+		const parts = commandStr.split(" ")
+		const [program, ...args] = parts
+		if (!program) {
+			return { success: false, output: "Empty command" }
 		}
-	})
 
-/**
- * Run fix command (biome check --write)
- */
-const runFix = (
-	cwd: string,
-): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		const command = Command.make("bun", "run", "fix").pipe(Command.workingDirectory(cwd))
+		const command = Command.make(program, ...args).pipe(Command.workingDirectory(cwd))
 		const result = yield* Effect.all({
 			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
 			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
@@ -532,6 +525,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		SessionManager.Default,
 		TmuxService.Default,
 		FileLockManager.Default,
+		AppConfig.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -539,6 +533,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const fileLockManager = yield* FileLockManager
+		const appConfig = yield* AppConfig
+		const mergeConfig = appConfig.getMergeConfig()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -897,90 +893,102 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
-					// 7.5. Run type-check and fix to ensure merged code is valid
-					// This catches type errors introduced by the merge before pushing
-					yield* Effect.gen(function* () {
-						yield* Effect.log("Running type-check after merge...")
+					// 7.5. Run post-merge validation (configurable via .azedarach.json)
+					// Only runs if merge.validateCommands is configured
+					if (mergeConfig.validateCommands.length > 0) {
+						yield* Effect.gen(function* () {
+							const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
+								mergeConfig
 
-						// First type-check
-						const firstCheck = yield* runTypeCheck(projectPath)
-						if (firstCheck.success) {
-							yield* Effect.log("Type-check passed")
-							return
-						}
+							/**
+							 * Run all validation commands and return first failure
+							 */
+							const runValidation = (): Effect.Effect<
+								{ success: boolean; output: string; failedCommand?: string },
+								never,
+								CommandExecutor.CommandExecutor
+							> =>
+								Effect.gen(function* () {
+									for (const cmd of validateCommands) {
+										yield* Effect.log(`Running: ${cmd}`)
+										const result = yield* runShellCommand(cmd, projectPath)
+										if (!result.success) {
+											return { success: false, output: result.output, failedCommand: cmd }
+										}
+									}
+									return { success: true, output: "" }
+								})
 
-						yield* Effect.log("Type-check failed, running fix...")
+							// Initial validation
+							let lastResult = yield* runValidation()
+							if (lastResult.success) {
+								yield* Effect.log("Post-merge validation passed")
+								return
+							}
 
-						// Run fix to auto-fix biome/formatting issues
-						yield* runFix(projectPath)
+							// Try fix attempts if fixCommand is configured
+							if (fixCommand) {
+								for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
+									yield* Effect.log(
+										`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
+									)
+									yield* runShellCommand(fixCommand, projectPath)
 
-						// Re-run type-check
-						const secondCheck = yield* runTypeCheck(projectPath)
-						if (secondCheck.success) {
-							yield* Effect.log("Type-check passed after fix")
+									lastResult = yield* runValidation()
+									if (lastResult.success) {
+										yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
 
-							// Commit the fixes
+										// Commit the fixes
+										yield* runGit(["add", "-A"], projectPath).pipe(
+											Effect.catchAll(() => Effect.void),
+										)
+										yield* runGit(
+											["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+											projectPath,
+										).pipe(Effect.catchAll(() => Effect.void))
+
+										return
+									}
+								}
+							}
+
+							// Still failing after all fix attempts
+							yield* Effect.log("Validation still failing after auto-fix attempts")
+
+							// Commit any partial fixes
 							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
 							yield* runGit(
-								["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+								["commit", "-m", `wip: partial fix after merging ${beadId}`],
 								projectPath,
 							).pipe(Effect.catchAll(() => Effect.void))
 
-							return
-						}
+							// Start Claude session if configured
+							if (startClaudeOnFailure) {
+								const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
+								const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
 
-						// Still failing - try fix one more time (some fixes cascade)
-						yield* Effect.log("Type-check still failing, running fix again...")
-						yield* runFix(projectPath)
+								yield* sessionManager
+									.start({
+										beadId,
+										projectPath,
+										initialPrompt: fixPrompt,
+									})
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
+										),
+									)
+							}
 
-						const thirdCheck = yield* runTypeCheck(projectPath)
-						if (thirdCheck.success) {
-							yield* Effect.log("Type-check passed after second fix")
-
-							// Commit the fixes
-							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
-							yield* runGit(
-								["commit", "-m", `fix: auto-fix after merging ${beadId}`],
-								projectPath,
-							).pipe(Effect.catchAll(() => Effect.void))
-
-							return
-						}
-
-						// Type-check still failing - start a Claude session to fix
-						yield* Effect.log("Type-check still failing after auto-fix, starting Claude session...")
-
-						// Commit any partial fixes so far
-						yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
-						yield* runGit(
-							["commit", "-m", `wip: partial fix after merging ${beadId}`],
-							projectPath,
-						).pipe(Effect.catchAll(() => Effect.void))
-
-						// Start Claude session to fix type errors
-						// We start it in the projectPath (main branch) since the worktree is still around
-						const fixPrompt = `Type-check is failing after merge. Please fix the type errors:\n\n${thirdCheck.output}\n\nRun \`bun run type-check\` after fixing to verify.`
-
-						yield* sessionManager
-							.start({
-								beadId,
-								projectPath,
-								initialPrompt: fixPrompt,
-							})
-							.pipe(
-								Effect.catchAll((e) =>
-									Effect.logWarning(`Failed to start Claude session for type fixes: ${e}`),
-								),
+							return yield* Effect.fail(
+								new TypeCheckError({
+									beadId,
+									message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
+									output: lastResult.output,
+								}),
 							)
-
-						return yield* Effect.fail(
-							new TypeCheckError({
-								beadId,
-								message: `Type-check failed after merge. Claude session started to fix. Retry merge after fixing.`,
-								output: thirdCheck.output,
-							}),
-						)
-					})
+						})
+					}
 
 					// 8. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
