@@ -8,6 +8,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
 import * as Schema from "effect/Schema"
+import { ProjectService } from "../services/ProjectService.js"
 
 // ============================================================================
 // Schema Definitions
@@ -372,11 +373,23 @@ const parseJson = <A, I, R>(
  * ```
  */
 export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
-	dependencies: [],
+	dependencies: [ProjectService.Default],
 	effect: Effect.gen(function* () {
+		const projectService = yield* ProjectService
+
+		/**
+		 * Get effective cwd for bd commands:
+		 * - If explicit cwd provided, use it
+		 * - Otherwise, use current project path from ProjectService
+		 * - Falls back to undefined (process.cwd()) if no project selected
+		 */
+		const getEffectiveCwd = (explicitCwd?: string): Effect.Effect<string | undefined> =>
+			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
+
 		return {
 			list: (filters?: { status?: string; priority?: number; type?: string }, cwd?: string) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const args: string[] = ["list"]
 
 					if (filters?.status) {
@@ -389,7 +402,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--type", filters.type)
 					}
 
-					const output = yield* runBd(args, cwd)
+					const output = yield* runBd(args, effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
@@ -397,7 +410,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			show: (id: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["show", id], cwd)
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["show", id], effectiveCwd)
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -432,6 +446,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				cwd?: string,
 			) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const args: string[] = ["update", id]
 
 					if (fields.status) {
@@ -468,23 +483,25 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						}
 					}
 
-					yield* runBd(args, cwd)
+					yield* runBd(args, effectiveCwd)
 				}),
 
 			close: (id: string, reason?: string, cwd?: string) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const args: string[] = ["close", id]
 
 					if (reason) {
 						args.push("--reason", reason)
 					}
 
-					yield* runBd(args, cwd)
+					yield* runBd(args, effectiveCwd)
 				}),
 
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["sync"], cwd)
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["sync"], effectiveCwd)
 
 					// Parse sync output - bd sync returns statistics
 					return yield* parseJson(SyncResultSchema, output)
@@ -497,20 +514,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			 */
 			syncImportOnly: (cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["sync", "--import-only"], cwd)
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
 					return yield* parseJson(SyncResultSchema, output)
 				}),
 
 			recoverTombstones: (cwd?: string) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					// Run recovery script that fixes tombstoned issues from JSONL
 					// This is a workaround for bd sync bug (see az-zby)
-					const scriptPath = cwd
-						? `${cwd}/.beads/recover-tombstones.sh`
+					const scriptPath = effectiveCwd
+						? `${effectiveCwd}/.beads/recover-tombstones.sh`
 						: ".beads/recover-tombstones.sh"
 
 					const command = Command.make("bash", scriptPath).pipe(
-						cwd ? Command.workingDirectory(cwd) : (x) => x,
+						effectiveCwd ? Command.workingDirectory(effectiveCwd) : (x) => x,
 					)
 
 					const result = yield* Command.string(command).pipe(
@@ -531,7 +550,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			ready: (cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["ready"], cwd)
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["ready"], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
@@ -539,7 +559,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			search: (query: string, cwd?: string) =>
 				Effect.gen(function* () {
-					const output = yield* runBd(["search", query], cwd)
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["search", query], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					// Filter out tombstone (deleted) issues
 					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
@@ -558,6 +579,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				cwd?: string
 			}) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(params.cwd)
 					const args: string[] = ["create", params.title]
 
 					if (params.type) {
@@ -586,7 +608,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--labels", params.labels.join(","))
 					}
 
-					const output = yield* runBd(args, params.cwd)
+					const output = yield* runBd(args, effectiveCwd)
 
 					// bd create returns a single issue object (not an array)
 					return yield* parseJson(IssueSchema, output)
@@ -594,10 +616,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			delete: (id: string, cwd?: string) =>
 				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					// Use runBdDirect because:
 					// 1. The daemon doesn't support the delete operation
 					// 2. --force is required to actually delete (not just preview)
-					yield* runBdDirect(["delete", id, "--force"], cwd)
+					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
 				}),
 		}
 	}),
