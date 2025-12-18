@@ -310,14 +310,18 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 					Effect.gen(function* () {
 						yield* ctx.toast.show("info", `Aborting merge for ${task.id}...`)
 
-						yield* ctx.prWorkflow.abortMerge({ beadId: task.id, projectPath: process.cwd() }).pipe(
-							Effect.tap(() => ctx.board.refresh()),
-							Effect.tap(() => ctx.toast.show("success", `Merge aborted for ${task.id}`)),
-							Effect.catchAll((error: unknown) => {
-								const formatted = formatForToast(error)
-								return ctx.toast.show("error", `Abort failed: ${formatted}`)
-							}),
-						)
+						// Get project path from context
+						const abortProjectPath = yield* ctx.getProjectPath()
+						yield* ctx.prWorkflow
+							.abortMerge({ beadId: task.id, projectPath: abortProjectPath })
+							.pipe(
+								Effect.tap(() => ctx.board.refresh()),
+								Effect.tap(() => ctx.toast.show("success", `Merge aborted for ${task.id}`)),
+								Effect.catchAll((error: unknown) => {
+									const formatted = formatForToast(error)
+									return ctx.toast.show("error", `Abort failed: ${formatted}`)
+								}),
+							)
 					}),
 				)
 			}),
@@ -358,6 +362,7 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 						width: "95%",
 						height: "95%",
 						title: ` Diff: ${task.id} vs main (q to quit) `,
+						cwd: worktreePath,
 					})
 					.pipe(Effect.catchAll(ctx.showErrorToast("Failed to show diff")))
 			}),
