@@ -606,11 +606,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
 
-					// 5. Close bead issue (optional)
+					// 5. Close bead issue (optional) and sync to persist the change
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
 							.pipe(Effect.catchAll(() => Effect.void))
+
+						// Sync the closed status to JSONL and commit it
+						// This fixes az-o5m9: merged tasks being left in in_progress status
+						yield* withSyncLock(
+							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						)
 					}
 				}),
 
@@ -809,7 +815,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
 
-					// 9. Push to origin (optional)
+					// 9. Close bead issue BEFORE pushing (so status is included in push)
+					// This fixes az-o5m9: merged tasks being left in in_progress status
+					if (closeBead) {
+						yield* beadsClient
+							.update(beadId, { status: "closed" })
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						// Sync the closed status to JSONL and commit it
+						yield* withSyncLock(
+							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						)
+					}
+
+					// 10. Push to origin (optional) - now includes the closed status
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(
@@ -821,13 +840,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									}),
 							),
 						)
-					}
-
-					// 10. Close bead issue (optional)
-					if (closeBead) {
-						yield* beadsClient
-							.update(beadId, { status: "closed" })
-							.pipe(Effect.catchAll(() => Effect.void))
 					}
 				}),
 

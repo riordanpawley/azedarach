@@ -349,20 +349,22 @@ Press `,` to enter sort mode for changing how tasks are ordered within each colu
 
 ### Sort Criteria Details
 
+All sort modes prioritize active sessions first, then apply multi-level sorting within each group. The key insight is that `updated` serves as the natural secondary sort—within any primary grouping, you want to see recently-touched tasks rise to the top.
+
 **Session Status Sort (s)**:
 1. Primary: Session state (busy → waiting → paused → done → error → idle)
-2. Secondary: Priority (P1 first)
-3. Tertiary: Updated at (most recent first)
+2. Secondary: Updated at (most recent first)
+3. Tertiary: Priority (P1 first)
 
 **Priority Sort (p)**:
 1. Primary: Priority number (lower = higher priority)
-2. Secondary: Session state
-3. Tertiary: Updated at
+2. Secondary: Updated at (most recent first)
+3. Tertiary: Session state
 
 **Updated Sort (u)**:
 1. Primary: Updated timestamp (most recent first)
-2. Secondary: Session state
-3. Tertiary: Priority
+2. Secondary: Priority (P1 first)
+3. Tertiary: Session state
 
 ## Action Mode
 

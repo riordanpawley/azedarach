@@ -18,7 +18,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, HashMap, PubSub, Ref } from "effect"
+import { Data, Effect, Exit, HashMap, PubSub, Ref } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
@@ -384,59 +384,108 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// Check if tmux session already exists
 					const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
-					if (!hasSession) {
-						// Create tmux session in the worktree directory
-						// Use user's shell that runs claude so:
-						// 1. tmux prefix keys work (shell handles them, not claude)
-						// 2. If claude exits, you're left in a shell (session doesn't die)
-						const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+					// Build Claude command configuration (shared between acquire and use phases)
+					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+					const escapeForShell = (s: string) =>
+						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+					const modelFlag = model ? ` --model ${model}` : ""
+					const dangerousFlag = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+					const claudeWithOptions = initialPrompt
+						? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
+						: `${claudeCommand}${modelFlag}${dangerousFlag}`
 
-						// If initialPrompt provided, append it to the claude command (properly escaped)
-						// If model is specified, add --model flag (e.g., for haiku chat sessions)
-						const escapeForShell = (s: string) =>
-							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+					// Use acquireUseRelease to ensure atomicity:
+					// - acquire: Create tmux session + update bead status (both are "resources")
+					// - use: Register session in memory + publish event
+					// - release: Rollback tmux + bead status on failure
+					//
+					// This fixes az-losz: if any step fails after tmux creation or bead update,
+					// we roll back ALL changes to avoid inconsistent state.
+					const session = yield* Effect.acquireUseRelease(
+						// ACQUIRE: Create tmux session and update bead status
+						// Both are "resources" that need rollback on failure
+						Effect.gen(function* () {
+							let createdNewSession = false
+							let updatedBeadStatus = false
 
-						// Build Claude command with optional model, dangerous flag, and prompt
-						const modelFlag = model ? ` --model ${model}` : ""
-						const dangerousFlag = dangerouslySkipPermissions
-							? " --dangerously-skip-permissions"
-							: ""
-						const claudeWithOptions = initialPrompt
-							? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
-							: `${claudeCommand}${modelFlag}${dangerousFlag}`
+							// Step 1: Create tmux session if needed
+							if (!hasSession) {
+								// Create tmux session in the worktree directory
+								// Use user's shell that runs claude so:
+								// 1. tmux prefix keys work (shell handles them, not claude)
+								// 2. If claude exits, you're left in a shell (session doesn't die)
+								//
+								// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+								// This ensures the project's .envrc environment is loaded automatically
+								yield* tmuxService.newSession(tmuxSessionName, {
+									cwd: worktree.path,
+									command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
+									prefix: tmuxPrefix,
+								})
+								createdNewSession = true
+							}
 
-						// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
-						// This ensures the project's .envrc environment is loaded automatically
-						// (Previously used `direnv exec .` but that bypassed user's shell PATH)
-						yield* tmuxService.newSession(tmuxSessionName, {
-							cwd: worktree.path,
-							command: `${shell} -i -c '${claudeWithOptions}; exec ${shell}'`,
-							prefix: tmuxPrefix,
-						})
-					}
+							// Step 2: Update bead status to in_progress
+							// Done AFTER session creation to ensure we don't leave beads
+							// in "in_progress" state with no actual session (az-g7p bug fix)
+							if (needsStatusUpdate) {
+								yield* beadsClient.update(beadId, { status: "in_progress" })
+								updatedBeadStatus = true
+							}
 
-					// Now that session is successfully created, update bead status
-					// This is done AFTER session creation to ensure we don't leave beads
-					// in "in_progress" state with no actual session (az-g7p bug fix)
-					if (needsStatusUpdate) {
-						yield* beadsClient.update(beadId, { status: "in_progress" })
-					}
+							return { createdNewSession, updatedBeadStatus }
+						}),
 
-					// Create session object
-					const session: Session = {
-						beadId,
-						worktreePath: worktree.path,
-						tmuxSessionName,
-						state: "busy",
-						startedAt: new Date(),
-						projectPath,
-					}
+						// USE: Register session in memory and publish event
+						() =>
+							Effect.gen(function* () {
+								// Create session object
+								const sessionObj: Session = {
+									beadId,
+									worktreePath: worktree.path,
+									tmuxSessionName,
+									state: "busy",
+									startedAt: new Date(),
+									projectPath,
+								}
 
-					// Store session in registry
-					yield* Ref.update(sessionsRef, (sessions) => HashMap.set(sessions, beadId, session))
+								// Store session in registry
+								yield* Ref.update(sessionsRef, (sessions) =>
+									HashMap.set(sessions, beadId, sessionObj),
+								)
 
-					// Publish state change event (from idle to busy)
-					yield* publishStateChange(beadId, "idle", "busy")
+								// Publish state change event (from idle to busy)
+								yield* publishStateChange(beadId, "idle", "busy")
+
+								return sessionObj
+							}),
+
+						// RELEASE: Rollback on failure - kill tmux and revert bead status
+						(acquired, exit) =>
+							Exit.isFailure(exit)
+								? Effect.gen(function* () {
+										// Rollback tmux session if we created it
+										if (acquired.createdNewSession) {
+											yield* tmuxService.killSession(tmuxSessionName).pipe(
+												Effect.tap(() =>
+													Effect.logWarning(`Rolled back tmux session ${tmuxSessionName}`),
+												),
+												Effect.catchAll(() => Effect.void),
+											)
+										}
+
+										// Rollback bead status if we changed it
+										if (acquired.updatedBeadStatus) {
+											yield* beadsClient.update(beadId, { status: "open" }).pipe(
+												Effect.tap(() =>
+													Effect.logWarning(`Rolled back bead ${beadId} status to open`),
+												),
+												Effect.catchAll(() => Effect.void),
+											)
+										}
+									})
+								: Effect.void,
+					)
 
 					return session
 				}),

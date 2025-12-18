@@ -22,6 +22,17 @@
  */
 export const generateHookConfig = (beadId: string) => ({
 	hooks: {
+		PreToolUse: [
+			{
+				// Fires BEFORE permission check - immediate "busy" detection
+				hooks: [
+					{
+						type: "command",
+						command: `az notify pretooluse ${beadId}`,
+					},
+				],
+			},
+		],
 		Notification: [
 			{
 				matcher: "idle_prompt",

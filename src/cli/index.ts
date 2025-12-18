@@ -266,7 +266,13 @@ const syncHandler = (args: {
 /**
  * Valid hook event types from Claude Code
  */
-const VALID_HOOK_EVENTS = ["idle_prompt", "permission_request", "stop", "session_end"] as const
+const VALID_HOOK_EVENTS = [
+	"idle_prompt",
+	"permission_request",
+	"pretooluse",
+	"stop",
+	"session_end",
+] as const
 type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 
 /**
@@ -366,7 +372,7 @@ const hooksInstallHandler = (args: {
 
 		yield* Console.log(`✓ Installed hooks for bead ${args.beadId}`)
 		yield* Console.log(`  File: ${settingsPath}`)
-		yield* Console.log(`  Events: idle_prompt, permission_request, stop, session_end`)
+		yield* Console.log(`  Events: pretooluse, permission_request, idle_prompt, stop, session_end`)
 
 		if (args.verbose) {
 			yield* Console.log("\nHook configuration:")
@@ -730,6 +736,39 @@ const projectCommand = Command.make("project", {}, () =>
 	Command.withDescription("Manage multiple projects"),
 )
 
+// ============================================================================
+// Top-level Shortcut Commands
+// ============================================================================
+
+/**
+ * az add <path> - Top-level shortcut for az project add
+ *
+ * This allows users to run `az add /path/to/project` instead of
+ * `az project add /path/to/project` for convenience.
+ */
+const addCommand = Command.make(
+	"add",
+	{
+		path: projectPathArg,
+		name: projectNameOption,
+		verbose: verboseOption,
+	},
+	projectAddHandler,
+).pipe(Command.withDescription("Register a new project (shortcut for 'az project add')"))
+
+/**
+ * az list - Top-level shortcut for az project list
+ *
+ * This allows users to run `az list` instead of `az project list` for convenience.
+ */
+const listCommand = Command.make(
+	"list",
+	{
+		verbose: verboseOption,
+	},
+	projectListHandler,
+).pipe(Command.withDescription("Show all registered projects (shortcut for 'az project list')"))
+
 /**
  * Main CLI - combines all commands
  *
@@ -755,11 +794,16 @@ const az = Command.make(
  */
 const cli = az.pipe(
 	Command.withSubcommands([
+		// Top-level shortcuts (most commonly used)
+		addCommand,
+		listCommand,
+		// Session management
 		startCommand,
 		attachCommand,
 		pauseCommand,
 		statusCommand,
 		syncCommand,
+		// Internal/advanced commands
 		notifyCommand,
 		hooksCommand,
 		projectCommand,
