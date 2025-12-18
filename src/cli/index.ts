@@ -265,7 +265,13 @@ const syncHandler = (args: {
 /**
  * Valid hook event types from Claude Code
  */
-const VALID_HOOK_EVENTS = ["idle_prompt", "permission_request", "stop", "session_end"] as const
+const VALID_HOOK_EVENTS = [
+	"idle_prompt",
+	"permission_request",
+	"pretooluse",
+	"stop",
+	"session_end",
+] as const
 type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 
 /**
@@ -365,7 +371,7 @@ const hooksInstallHandler = (args: {
 
 		yield* Console.log(`✓ Installed hooks for bead ${args.beadId}`)
 		yield* Console.log(`  File: ${settingsPath}`)
-		yield* Console.log(`  Events: idle_prompt, permission_request, stop, session_end`)
+		yield* Console.log(`  Events: pretooluse, permission_request, idle_prompt, stop, session_end`)
 
 		if (args.verbose) {
 			yield* Console.log("\nHook configuration:")
