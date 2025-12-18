@@ -9,9 +9,10 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { SessionManager } from "../../core/SessionManager.js"
+import { TemplateService } from "../../core/TemplateService.js"
 import type { OrchestrationTask } from "../EditorService.js"
 import { EditorService } from "../EditorService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -32,6 +33,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			OverlayService.Default,
 			BeadsClient.Default,
 			SessionManager.Default,
+			TemplateService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -42,6 +44,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const overlay = yield* OverlayService
 			const beads = yield* BeadsClient
 			const sessionManager = yield* SessionManager
+			const templateService = yield* TemplateService
 
 			// ================================================================
 			// Orchestrate Handler Methods
@@ -128,6 +131,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			 * Confirm spawn selected tasks (enter key in orchestrate mode)
 			 *
 			 * Spawns Claude sessions for all selected tasks in orchestrate mode.
+			 * Each session is injected with epic context via the worker template.
 			 * Only spawns tasks that are in "open" status and don't already have sessions.
 			 * Exits orchestrate mode after spawning.
 			 */
@@ -149,32 +153,68 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					// Get project path for spawning sessions
 					const projectPath = yield* helpers.getProjectPath()
 
-					// Exit orchestrate mode first
+					// Load epic details for context injection
+					const epic = yield* beads
+						.show(mode.epicId)
+						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+
+					// Exit orchestrate mode first (so UI updates)
 					yield* editor.exitOrchestrate()
 
-					// Spawn sessions for each selected task
+					// Spawn sessions for each selected task with epic context
 					// Use Effect.all to spawn all sessions in parallel
 					const spawnResults = yield* Effect.all(
 						mode.selectedIds.map((taskId) =>
-							sessionManager
-								.start({
-									beadId: taskId,
-									projectPath,
-								})
-								.pipe(
-									Effect.tap(() => Effect.logInfo(`Spawned session for ${taskId}`)),
-									// Catch individual spawn failures so one failure doesn't block others
-									Effect.catchAll((error) => {
-										const msg =
-											error && typeof error === "object" && "message" in error
-												? String(error.message)
-												: String(error)
-										return Effect.gen(function* () {
-											yield* Effect.logError(`Failed to spawn ${taskId}: ${msg}`, { error })
-											return yield* Effect.succeed(undefined) // Continue with other spawns
-										})
-									}),
-								),
+							Effect.gen(function* () {
+								// Load task details for template
+								const task = yield* beads
+									.show(taskId)
+									.pipe(Effect.catchAll(() => Effect.succeed(null)))
+
+								// Try to render worker template with context
+								const initialPrompt = yield* templateService
+									.tryRenderWorkerTemplate(
+										{
+											TASK_ID: taskId,
+											TASK_TITLE: task?.title ?? taskId,
+											TASK_DESCRIPTION: task?.description,
+											TASK_DESIGN: task?.design,
+											EPIC_ID: mode.epicId,
+											EPIC_TITLE: mode.epicTitle,
+											EPIC_DESIGN: epic?.design,
+										},
+										projectPath,
+									)
+									.pipe(
+										Effect.map((opt) =>
+											Option.isSome(opt) ? opt.value : `Work on bead ${taskId}`,
+										),
+									)
+
+								// Start session with rendered template as initial prompt
+								return yield* sessionManager
+									.start({
+										beadId: taskId,
+										projectPath,
+										initialPrompt,
+									})
+									.pipe(
+										Effect.tap(() => Effect.logInfo(`Spawned session for ${taskId}`)),
+										// Catch individual spawn failures so one failure doesn't block others
+										Effect.catchAll((error) => {
+											const msg =
+												error && typeof error === "object" && "message" in error
+													? String(error.message)
+													: String(error)
+											return Effect.gen(function* () {
+												yield* Effect.logError(`Failed to spawn ${taskId}: ${msg}`, {
+													error,
+												})
+												return yield* Effect.succeed(undefined)
+											})
+										}),
+									)
+							}),
 						),
 					)
 
