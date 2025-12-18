@@ -11,7 +11,8 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import { Effect } from "effect"
+import { Command } from "@effect/platform"
+import { Effect, Option } from "effect"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
@@ -97,9 +98,21 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		// ================================================================
 
 		/**
-		 * Create PR action (Space+P)
+		 * Open URL in browser using macOS `open` command.
+		 * CommandExecutor requirement propagates from Command.exitCode()
+		 */
+		const openInBrowser = (url: string) =>
+			Effect.gen(function* () {
+				const command = Command.make("open", url)
+				yield* Command.exitCode(command).pipe(Effect.catchAll(() => Effect.void))
+			})
+
+		/**
+		 * PR action (Space+P)
 		 *
-		 * Creates a GitHub PR for the current task's worktree branch.
+		 * If PR already exists: opens PR in browser
+		 * If no PR exists: creates a new GitHub PR for the current task's worktree branch.
+		 *
 		 * Requires an active session with a worktree.
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
@@ -118,14 +131,33 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
+				// If PR already exists (from cached prInfo), open in browser
+				if (task.prInfo) {
+					yield* toast.show("info", `Opening PR #${task.prInfo.number}...`)
+					yield* openInBrowser(task.prInfo.url)
+					return
+				}
+
+				// Check if PR exists on GitHub (fresh check in case cache is stale)
+				const projectPath = yield* helpers.getProjectPath()
+				const existingPR = yield* prWorkflow
+					.getPR({ beadId: task.id, projectPath })
+					.pipe(Effect.catchAll(() => Effect.succeed(Option.none())))
+
+				if (Option.isSome(existingPR)) {
+					yield* toast.show("info", `Opening PR #${existingPR.value.number}...`)
+					yield* openInBrowser(existingPR.value.url)
+					// Refresh board to update cache (errors caught separately)
+					yield* board.refresh().pipe(Effect.catchAll(() => Effect.void))
+					return
+				}
+
+				// No PR exists - create a new one
 				yield* helpers.withQueue(
 					task.id,
 					"create-pr",
 					Effect.gen(function* () {
 						yield* toast.show("info", `Creating PR for ${task.id}...`)
-
-						// Get current project path (from ProjectService or cwd fallback)
-						const projectPath = yield* helpers.getProjectPath()
 
 						yield* prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
@@ -143,6 +175,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 								})
 							}),
 						)
+
+						// Refresh board to update PR cache (errors caught separately)
+						yield* board.refresh().pipe(Effect.catchAll(() => Effect.void))
 					}),
 				)
 			})

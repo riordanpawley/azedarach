@@ -55,6 +55,18 @@ export interface SessionMetrics {
 }
 
 /**
+ * PR info for tasks that have an open GitHub pull request
+ */
+export interface PRInfo {
+	/** GitHub PR number */
+	number: number
+	/** Full PR URL for opening in browser */
+	url: string
+	/** Whether the PR is a draft */
+	draft: boolean
+}
+
+/**
  * Task with session state and optional metrics
  *
  * Extends Issue with session tracking. Metrics are only populated
@@ -62,6 +74,8 @@ export interface SessionMetrics {
  */
 export interface TaskWithSession extends Issue, SessionMetrics {
 	sessionState: SessionState
+	/** PR info if task has an open GitHub pull request */
+	prInfo?: PRInfo
 }
 
 /**

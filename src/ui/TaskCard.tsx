@@ -130,6 +130,13 @@ export const TaskCard = (props: TaskCardProps) => {
 		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
 		props.task.sessionStartedAt !== undefined
 
+	// PR indicator: 🔗 for ready PRs, dimmed 🔗 for drafts
+	const prIndicator = props.task.prInfo
+		? props.task.prInfo.draft
+			? "🔗" // Draft PR - could style differently in future
+			: "🔗" // Ready PR
+		: ""
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -137,6 +144,10 @@ export const TaskCard = (props: TaskCardProps) => {
 			line += `${props.jumpLabel} `
 		}
 		line += `${props.task.id} [${props.task.issue_type}]`
+		// Show PR indicator after type (before session indicators)
+		if (prIndicator) {
+			line += ` ${prIndicator}`
+		}
 		if (indicator) {
 			line += ` ${indicator}`
 		}

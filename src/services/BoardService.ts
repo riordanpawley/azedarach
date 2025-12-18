@@ -5,12 +5,14 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
+import type { CommandExecutor } from "@effect/platform"
 import {
 	Array as Arr,
 	Cause,
 	DateTime,
 	Effect,
 	HashMap,
+	Option,
 	Order,
 	Record,
 	Schedule,
@@ -18,10 +20,11 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
+import { type PR, PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { SessionManager } from "../core/SessionManager.js"
 import { emptyRecord } from "../lib/empty.js"
-import type { TaskWithSession } from "../ui/types.js"
+import type { PRInfo, TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { EditorService, type SortConfig } from "./EditorService.js"
 import { ProjectService } from "./ProjectService.js"
@@ -191,6 +194,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
+		PRWorkflow.Default,
 	],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
@@ -199,6 +203,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
+		const prWorkflow = yield* PRWorkflow
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
@@ -210,6 +215,40 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
+
+		// Cache for PR info - persists across refreshes to avoid hammering GitHub API
+		// Key: beadId, Value: PR info (or undefined if no PR)
+		const prCache = new Map<string, PRInfo | undefined>()
+
+		/**
+		 * Fetch PR info for a task with an active session
+		 * Uses cache to avoid excessive GitHub API calls.
+		 * CommandExecutor requirement propagates from prWorkflow.getPR()
+		 */
+		const fetchPRInfo = (
+			beadId: string,
+			projectPath: string | undefined,
+		): Effect.Effect<PRInfo | undefined, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Check cache first
+				if (prCache.has(beadId)) {
+					return prCache.get(beadId)
+				}
+
+				// Fetch from GitHub
+				const prOption = yield* prWorkflow
+					.getPR({ beadId, projectPath: projectPath ?? process.cwd() })
+					.pipe(Effect.catchAll(() => Effect.succeed(Option.none<PR>())))
+
+				const prInfo: PRInfo | undefined = Option.isSome(prOption)
+					? { number: prOption.value.number, url: prOption.value.url, draft: prOption.value.draft }
+					: undefined
+
+				// Cache the result
+				prCache.set(beadId, prInfo)
+
+				return prInfo
+			})
 
 		/**
 		 * Load tasks from BeadsClient and merge with session state + PTY metrics
@@ -229,7 +268,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get PTY metrics for all sessions
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
-				// Map issues to TaskWithSession, merging session state and PTY metrics
+				// Fetch PR info for tasks with active sessions (in parallel, with concurrency limit)
+				const beadIdsWithSessions = [...sessionMap.keys()]
+				const prInfoResults = yield* Effect.all(
+					beadIdsWithSessions.map((beadId) => fetchPRInfo(beadId, projectPath)),
+					{ concurrency: 3 }, // Limit concurrent gh requests
+				)
+
+				// Build PR info map
+				const prInfoMap = new Map<string, PRInfo | undefined>()
+				beadIdsWithSessions.forEach((beadId, index) => {
+					prInfoMap.set(beadId, prInfoResults[index])
+				})
+
+				// Map issues to TaskWithSession, merging session state, PTY metrics, and PR info
 				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
 					const session = sessionMap.get(issue.id)
 					const metricsOpt = HashMap.get(allMetrics, issue.id)
@@ -246,6 +298,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						estimatedTokens: metrics.estimatedTokens,
 						recentOutput: metrics.recentOutput,
 						agentPhase: metrics.agentPhase,
+						// PR info (only for tasks with active sessions)
+						prInfo: prInfoMap.get(issue.id),
 					}
 				})
 

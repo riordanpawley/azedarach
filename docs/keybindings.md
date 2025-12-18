@@ -399,7 +399,7 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
-| `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
+| `Space` `P` | PR action | Opens existing PR in browser, or creates new one |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
@@ -632,6 +632,8 @@ The UI uses the Catppuccin Mocha color palette:
   - ✅ Done
   - ❌ Error
   - ⏸️ Paused
+- **Other indicators**:
+  - 🔗 Has open PR (shown on task header)
 
 ## tmux Navigation
 
