@@ -945,17 +945,3 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 		}
 	}),
 }) {}
-
-/**
- * Legacy alias for BeadEditorService
- *
- * @deprecated Use BeadEditorService instead
- */
-export const EditorService = BeadEditorService
-
-/**
- * Legacy layer export
- *
- * @deprecated Use BeadEditorService.Default instead
- */
-export const EditorServiceLive = BeadEditorService.Default

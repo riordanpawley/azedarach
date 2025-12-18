@@ -6,8 +6,9 @@
 
 import { Command } from "@effect/platform"
 import { Effect, Schema } from "effect"
+import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
-import { BeadEditorService } from "../../core/EditorService.js"
+import { BoardService } from "../../services/BoardService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"

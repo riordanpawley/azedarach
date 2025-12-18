@@ -60,16 +60,8 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 			details: "Polling /tmp for notifications every 500ms",
 		})
 
-		// Start the receiver - it will be interrupted when this atom unmounts
+		// Start the receiver (fiber tracking happens inside HookReceiver service)
 		const fiber = yield* receiver.start(handler)
-
-		// Register the fiber with diagnostics for monitoring
-		yield* diagnostics.registerFiber({
-			id: "hook-receiver-poller",
-			name: "HookReceiver Poller",
-			description: "Polls /tmp for azedarach-notify-*.json files",
-			fiber,
-		})
 
 		yield* Effect.log("HookReceiver started - watching for Claude Code hook notifications")
 
