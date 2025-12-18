@@ -1525,6 +1525,29 @@ export const focusedTaskRunningOperationAtom = Atom.readable((get) => {
 })
 
 /**
+ * Running operation for a specific task - parameterized atom factory
+ *
+ * Returns the running operation label (e.g., "merge", "cleanup") for the given task,
+ * or null if no operation is running.
+ *
+ * Used by TaskCard to show operation indicators on individual cards.
+ *
+ * Usage: const runningOp = useAtomValue(taskRunningOperationAtom(taskId))
+ */
+export const taskRunningOperationAtom = (taskId: string) =>
+	Atom.readable((get) => {
+		// Get the queue state
+		const stateResult = get(commandQueueStateAtom)
+		if (!Result.isSuccess(stateResult)) return null
+
+		// Look up the running operation for this task
+		const taskState = HashMap.get(stateResult.value, taskId)
+		if (taskState._tag === "None") return null
+
+		return taskState.value.running?.label ?? null
+	})
+
+/**
  * Get queue info for a specific task
  *
  * Returns the running operation label (if any) and queued operation count.
