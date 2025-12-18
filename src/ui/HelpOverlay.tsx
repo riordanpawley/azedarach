@@ -93,7 +93,8 @@ export const HelpOverlay = () => {
 				{/* Action mode section */}
 				<SectionHeader title="Action Mode:" />
 				<KeyLine keys="h / l" description="Move task(s) to prev / next column" />
-				<KeyLine keys="s" description="Start session" />
+				<KeyLine keys="s / S" description="Start session / Start+work" />
+				<KeyLine keys="!" description="Start+work (skip permissions)" />
 				<KeyLine keys="a" description="Attach to session" />
 				<KeyLine keys="p" description="Pause session" />
 				<KeyLine keys="D" description="Delete bead permanently" />

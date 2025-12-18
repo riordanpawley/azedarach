@@ -373,11 +373,23 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
+| `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
 | `Space` `c` | Chat (Haiku) | Always (opens Haiku in tmux popup to discuss task) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
+
+#### Start (yolo) Mode (Space+!)
+
+The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip-permissions` flag. This allows Claude to run commands and edit files without asking for permission on each operation.
+
+**Use cases:**
+- Trusted, well-defined tasks where you want Claude to work autonomously
+- Tasks with clear scope that don't require manual review of each step
+- When you're ready to accept all changes Claude makes
+
+**Caution:** Since Claude won't ask for permission, it can make changes faster but with less oversight. Use this for tasks where you trust Claude's judgment.
 
 ### Git/PR Actions
 
