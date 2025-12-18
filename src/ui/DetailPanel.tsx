@@ -31,15 +31,15 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 	// Subscribe to current attachments from Effect layer
 	const attachmentsResult = useAtomValue(currentAttachmentsAtom)
-	const attachments = useMemo(() => {
+	const { attachments, selectedIndex } = useMemo(() => {
 		if (Result.isSuccess(attachmentsResult)) {
 			const data = attachmentsResult.value
 			// Only show attachments if they're for the current task
 			if (data?.taskId === props.task.id) {
-				return data.attachments
+				return { attachments: data.attachments, selectedIndex: data.selectedIndex }
 			}
 		}
-		return []
+		return { attachments: [] as readonly never[], selectedIndex: -1 }
 	}, [attachmentsResult, props.task.id])
 
 	// Priority label like P1, P2, P3, P4
@@ -236,12 +236,25 @@ export const DetailPanel = (props: DetailPanelProps) => {
 						<text fg={theme.blue} attributes={ATTR_BOLD}>
 							{`Attachments (${attachments.length}):`}
 						</text>
-						{attachments.map((attachment, index) => (
-							<text key={attachment.id} fg={theme.text}>
-								{`  ${index + 1}. ${attachment.originalPath === "clipboard" ? "📋 " : "📁 "}${attachment.filename}`}
-							</text>
-						))}
-						<text fg={theme.subtext0}>{"  (Space+i to add more images)"}</text>
+						{attachments.map((attachment, index) => {
+							const isSelected = index === selectedIndex
+							const icon = attachment.originalPath === "clipboard" ? "📋" : "📁"
+							const prefix = isSelected ? "▶ " : "  "
+							return (
+								<text
+									key={attachment.id}
+									fg={isSelected ? theme.mauve : theme.text}
+									attributes={isSelected ? ATTR_BOLD : 0}
+								>
+									{`${prefix}${index + 1}. ${icon} ${attachment.filename}`}
+								</text>
+							)
+						})}
+						<text fg={theme.subtext0}>
+							{selectedIndex >= 0
+								? "  j/k:nav  o:open  x:remove  i:add  Esc:close"
+								: "  j/k:select  i:add  Esc:close"}
+						</text>
 						<text> </text>
 					</box>
 				)}

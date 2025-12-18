@@ -276,6 +276,16 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		),
 	},
 	{
+		key: "!",
+		mode: "action",
+		description: "Start+work (skip permissions)",
+		action: Effect.suspend(() =>
+			bc.ctx.editor
+				.exitToNormal()
+				.pipe(Effect.tap(() => bc.sessionHandlers.startSessionDangerous())),
+		),
+	},
+	{
 		key: "c",
 		mode: "action",
 		description: "Chat (Haiku)",
