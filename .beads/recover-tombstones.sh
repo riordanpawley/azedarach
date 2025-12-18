@@ -79,22 +79,39 @@ for id in $tombstoned; do
   fi
 
   # Strategy 2: Search git history
-  # Find the commit where this issue was removed (count changed)
-  removal_commit=$(git log --all --oneline -1 -S "\"$id\"" -- .beads/issues.jsonl 2>/dev/null | cut -d' ' -f1)
+  # Search multiple commits to find a non-tombstone version
+  # (the issue may have been tombstoned in history before being fully removed)
+  commits=$(git log --all --oneline -20 -S "\"$id\"" -- .beads/issues.jsonl 2>/dev/null | cut -d' ' -f1)
 
-  if [ -z "$removal_commit" ]; then
+  if [ -z "$commits" ]; then
     echo "  Not found in git history: $id"
     ((skipped++)) || true
     continue
   fi
 
-  # Get from parent commit (before removal)
-  jsonl_line=$(git show "${removal_commit}^:.beads/issues.jsonl" 2>/dev/null | jq -c "select(.id == \"$id\")" | head -1)
+  # Search each commit for a non-tombstone version
+  jsonl_line=""
+  for commit in $commits; do
+    # Try the commit itself first
+    candidate=$(git show "${commit}:.beads/issues.jsonl" 2>/dev/null | jq -c "select(.id == \"$id\")" | head -1)
+    if [ -n "$candidate" ]; then
+      candidate_status=$(echo "$candidate" | jq -r '.status')
+      if [ "$candidate_status" != "tombstone" ]; then
+        jsonl_line="$candidate"
+        break
+      fi
+    fi
 
-  if [ -z "$jsonl_line" ]; then
-    # Maybe it was added and removed in same commit, try the commit itself
-    jsonl_line=$(git show "${removal_commit}:.beads/issues.jsonl" 2>/dev/null | jq -c "select(.id == \"$id\")" | head -1)
-  fi
+    # Try parent commit
+    candidate=$(git show "${commit}^:.beads/issues.jsonl" 2>/dev/null | jq -c "select(.id == \"$id\")" | head -1)
+    if [ -n "$candidate" ]; then
+      candidate_status=$(echo "$candidate" | jq -r '.status')
+      if [ "$candidate_status" != "tombstone" ]; then
+        jsonl_line="$candidate"
+        break
+      fi
+    fi
+  done
 
   if [ -n "$jsonl_line" ]; then
     if recover_issue "$id" "$jsonl_line"; then
