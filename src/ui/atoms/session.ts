@@ -6,6 +6,7 @@
  */
 
 import { Effect } from "effect"
+import { AttachmentService } from "../../core/AttachmentService.js"
 import { HookReceiver, mapEventToState } from "../../core/HookReceiver.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { SessionManager } from "../../core/SessionManager.js"
@@ -172,7 +173,6 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
  */
 export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
-		const { AttachmentService } = yield* import("../../core/AttachmentService.js")
 		const service = yield* AttachmentService
 		yield* service.attachExternal(sessionId)
 	}).pipe(Effect.catchAll(Effect.logError)),
@@ -183,7 +183,6 @@ export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
  */
 export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
-		const { AttachmentService } = yield* import("../../core/AttachmentService.js")
 		const service = yield* AttachmentService
 		yield* service.attachInline(sessionId)
 	}).pipe(Effect.catchAll(Effect.logError)),
