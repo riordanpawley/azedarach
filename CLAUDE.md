@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 2.0.0
-Updated: 2025-12-15
+Version: 2.1.0
+Updated: 2025-12-19
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -44,6 +44,14 @@ Purpose: Claude Code entry point for Azedarach development
    - Use atoms for: parameterized derivations, cross-service composition
    - Use services for: core state, business logic, background tasks
    - See `internal-docs/effect-atom-architecture.md` for full decision matrix
+
+10. **OpenTUI Text Nesting**: NEVER nest `<text>` inside `<text>`. Use `<span>` for inline styled text:
+    - `<text>` → `TextRenderable` (container, accepts: string | TextNodeRenderable | StyledText)
+    - `<span>` → `SpanRenderable` → `TextNodeRenderable` (can be nested inside `<text>`)
+    - **Wrong:** `<text fg="gray"><text fg="blue">→</text> Back</text>` - inner `<text>` is a `TextRenderable`, not accepted
+    - **Right:** `<text fg="gray"><span fg="blue">→</span> Back</text>` - `<span>` is a `TextNodeRenderable`, works!
+    - **Also Right:** Use sibling `<text>` in `<box flexDirection="row">` for different colors
+    - Error message: "TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances"
 
 ## Quick Commands
 

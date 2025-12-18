@@ -47,9 +47,10 @@ export const EpicHeader = ({ epic, epicChildren }: EpicHeaderProps) => {
 			backgroundColor={theme.surface0}
 		>
 			{/* Back hint */}
-			<text fg={theme.subtext0}>
-				<text fg={theme.sky}>◀</text> {epic.id}
-			</text>
+			<box flexDirection="row">
+				<text fg={theme.sky}>◀</text>
+				<text fg={theme.subtext0}>{` ${epic.id}`}</text>
+			</box>
 
 			{/* Spacer */}
 			<box flexGrow={1} />
@@ -63,12 +64,12 @@ export const EpicHeader = ({ epic, epicChildren }: EpicHeaderProps) => {
 			<box flexGrow={1} />
 
 			{/* Progress */}
-			<text fg={theme.subtext0}>
+			<box flexDirection="row">
 				<text fg={completed === total && total > 0 ? theme.green : theme.yellow}>
 					{progressBar(completed, total)}
 				</text>
-				{` ${completed}/${total}`}
-			</text>
+				<text fg={theme.subtext0}>{` ${completed}/${total}`}</text>
+			</box>
 		</box>
 	)
 }
