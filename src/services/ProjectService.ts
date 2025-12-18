@@ -11,8 +11,6 @@
  * - Auto-select project based on cwd on startup
  */
 
-import * as os from "node:os"
-import * as path from "node:path"
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 
@@ -62,11 +60,20 @@ export class NoProjectsError extends Data.TaggedError("NoProjectsError")<{
 }> {}
 
 // ============================================================================
-// Constants
+// Path Helpers
 // ============================================================================
 
-const CONFIG_DIR = path.join(os.homedir(), ".config", "azedarach")
-const PROJECTS_FILE = path.join(CONFIG_DIR, "projects.json")
+/**
+ * Build config paths using the Path service
+ * Returns { configDir, projectsFile }
+ */
+const getConfigPaths = (pathService: Path.Path) => {
+	// Use process.env.HOME as homedir - this is standard and works across platforms
+	const homedir = process.env.HOME || process.env.USERPROFILE || "~"
+	const configDir = pathService.join(homedir, ".config", "azedarach")
+	const projectsFile = pathService.join(configDir, "projects.json")
+	return { configDir, projectsFile }
+}
 
 // ============================================================================
 // Service Implementation
@@ -76,6 +83,9 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 	scoped: Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
+
+		// Get config paths using the path service
+		const { configDir, projectsFile } = getConfigPaths(pathService)
 
 		// ========================================================================
 		// Config Loading/Saving
@@ -87,14 +97,14 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		const loadProjectsConfig = (): Effect.Effect<ProjectsConfig, ProjectError> =>
 			Effect.gen(function* () {
 				const exists = yield* fs
-					.exists(PROJECTS_FILE)
+					.exists(projectsFile)
 					.pipe(Effect.catchAll(() => Effect.succeed(false)))
 
 				if (!exists) {
 					return emptyProjectsConfig
 				}
 
-				const content = yield* fs.readFileString(PROJECTS_FILE).pipe(
+				const content = yield* fs.readFileString(projectsFile).pipe(
 					Effect.mapError(
 						(e) =>
 							new ProjectError({
@@ -128,11 +138,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 			Effect.gen(function* () {
 				// Ensure config directory exists
 				yield* fs
-					.makeDirectory(CONFIG_DIR, { recursive: true })
+					.makeDirectory(configDir, { recursive: true })
 					.pipe(Effect.catchAll(() => Effect.void))
 
 				const content = JSON.stringify(config, null, 2)
-				yield* fs.writeFileString(PROJECTS_FILE, content).pipe(
+				yield* fs.writeFileString(projectsFile, content).pipe(
 					Effect.mapError(
 						(e) =>
 							new ProjectError({
@@ -369,7 +379,7 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 			/**
 			 * Get the config file path (for display/debugging)
 			 */
-			getConfigPath: (): string => PROJECTS_FILE,
+			getConfigPath: (): string => projectsFile,
 		}
 	}),
 }) {}

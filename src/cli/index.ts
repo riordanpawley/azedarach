@@ -5,7 +5,6 @@
  * Provides commands for managing Claude Code sessions via TUI and direct control.
  */
 
-import * as path from "node:path"
 import { Args, Command, Options } from "@effect/cli"
 import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
@@ -414,7 +413,7 @@ const projectAddHandler = (args: {
 		}
 
 		// Derive name from directory if not provided
-		const projectName = Option.getOrElse(args.name, () => path.basename(absolutePath))
+		const projectName = Option.getOrElse(args.name, () => pathService.basename(absolutePath))
 
 		if (args.verbose) {
 			yield* Console.log(`Adding project: ${projectName}`)
