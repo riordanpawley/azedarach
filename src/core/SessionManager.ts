@@ -17,12 +17,13 @@
  * - listActive(): List all running sessions
  */
 
-import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, Exit, HashMap, PubSub, Ref } from "effect"
+import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { BunContext } from "@effect/platform-bun"
+import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
-import { getSessionName } from "./paths.js"
+import { getSessionName, getWorktreePath } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -43,9 +44,31 @@ export interface Session {
 	readonly worktreePath: string
 	readonly tmuxSessionName: string
 	readonly state: SessionState
-	readonly startedAt: Date
+	readonly startedAt: DateTime.Utc
 	readonly projectPath: string
 }
+
+// ============================================================================
+// Persistence Schema
+// ============================================================================
+
+/**
+ * Schema for session state - validates against SessionState literals
+ */
+const SessionStateSchema = Schema.Literal("idle", "busy", "waiting", "done", "error", "paused")
+
+/**
+ * Schema for persisted session - matches Session interface
+ * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
+ */
+const SessionSchema = Schema.Struct({
+	beadId: Schema.String,
+	worktreePath: Schema.String,
+	tmuxSessionName: Schema.String,
+	state: SessionStateSchema,
+	startedAt: Schema.DateTimeUtc,
+	projectPath: Schema.String,
+})
 
 /**
  * Claude model to use for session
@@ -284,6 +307,53 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		// PubSub for state change events
 		const stateChangeHub = yield* PubSub.unbounded<SessionStateChange>()
 
+		// ====================================================================
+		// Session Persistence
+		// ====================================================================
+
+		// Schema handles ALL conversions:
+		// - JSON string ↔ array of tuples (Schema.parseJson)
+		// - Array of tuples ↔ HashMap (Schema.HashMap)
+		// - ISO string ↔ DateTime (Schema.DateTimeUtc)
+		const sessionFilePath = ".azedarach/sessions.json"
+		const SessionsSchema = Schema.parseJson(
+			Schema.HashMap({ key: Schema.String, value: SessionSchema }),
+		)
+		const decodeSessions = Schema.decodeUnknown(SessionsSchema)
+		const encodeSessions = Schema.encode(SessionsSchema)
+
+		// Layer for filesystem operations - provides FileSystem and Path services
+		const fsLayer = BunContext.layer
+
+		// Helper: Load persisted sessions from disk
+		const loadPersistedSessions = Effect.gen(function* () {
+			const fs = yield* FileSystem.FileSystem
+			const pathSvc = yield* Path.Path
+			const filePath = pathSvc.join(process.cwd(), sessionFilePath)
+
+			const exists = yield* fs.exists(filePath)
+			if (!exists) return HashMap.empty<string, Session>()
+
+			const content = yield* fs.readFileString(filePath)
+			return yield* decodeSessions(content)
+		}).pipe(
+			Effect.provide(fsLayer),
+			Effect.catchAll(() => Effect.succeed(HashMap.empty<string, Session>())),
+		)
+
+		// Helper: Save sessions to disk
+		const persistSessions = (sessions: HashMap.HashMap<string, Session>) =>
+			Effect.gen(function* () {
+				const fs = yield* FileSystem.FileSystem
+				const pathSvc = yield* Path.Path
+				const dirPath = pathSvc.join(process.cwd(), ".azedarach")
+				const filePath = pathSvc.join(dirPath, "sessions.json")
+
+				yield* fs.makeDirectory(dirPath, { recursive: true }).pipe(Effect.ignore)
+				const json = yield* encodeSessions(sessions)
+				yield* fs.writeFileString(filePath, json).pipe(Effect.ignore)
+			}).pipe(Effect.provide(fsLayer))
+
 		// Helper: Publish state change event
 		const publishStateChange = (
 			beadId: string,
@@ -445,7 +515,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 									worktreePath: worktree.path,
 									tmuxSessionName,
 									state: "busy",
-									startedAt: new Date(),
+									startedAt: yield* DateTime.now,
 									projectPath,
 								}
 
@@ -453,6 +523,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								yield* Ref.update(sessionsRef, (sessions) =>
 									HashMap.set(sessions, beadId, sessionObj),
 								)
+
+								// Persist to disk
+								const sessions = yield* Ref.get(sessionsRef)
+								yield* persistSessions(sessions)
 
 								// Publish state change event (from idle to busy)
 								yield* publishStateChange(beadId, "idle", "busy")
@@ -527,6 +601,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Remove from registry
 					yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, beadId))
+
+					// Persist to disk
+					const updatedSessions = yield* Ref.get(sessionsRef)
+					yield* persistSessions(updatedSessions)
 
 					// Publish state change event
 					yield* publishStateChange(beadId, oldState, "idle")
@@ -604,6 +682,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						HashMap.set(sessions, beadId, updatedSession),
 					)
 
+					// Persist to disk
+					const allSessions = yield* Ref.get(sessionsRef)
+					yield* persistSessions(allSessions)
+
 					// Publish state change
 					yield* publishStateChange(beadId, oldState, "paused")
 				}),
@@ -646,6 +728,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						HashMap.set(sessions, beadId, updatedSession),
 					)
 
+					// Persist to disk
+					const allSessions = yield* Ref.get(sessionsRef)
+					yield* persistSessions(allSessions)
+
 					// Publish state change
 					yield* publishStateChange(beadId, "paused", "busy")
 				}),
@@ -672,6 +758,18 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						Effect.catchAll(() => Effect.succeed([])), // If tmux fails, just use in-memory
 					)
 
+					// Load persisted sessions for state recovery
+					const persistedSessions = yield* loadPersistedSessions
+
+					// Query worktrees to get accurate paths
+					const projectPath = process.cwd()
+					const worktrees = yield* worktreeManager
+						.list(projectPath)
+						.pipe(Effect.catchAll(() => Effect.succeed([])))
+					const worktreeByBeadId = HashMap.fromIterable(
+						worktrees.map((wt) => [wt.beadId, wt] as const),
+					)
+
 					// Find tmux sessions that look like bead IDs (az-xxx pattern) but aren't tracked in memory
 					// Our session names are just the bead ID (see getSessionName in paths.ts)
 					const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
@@ -682,17 +780,38 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							beadIdPattern.test(tmuxSession.name) &&
 							!HashMap.has(inMemorySessions, tmuxSession.name)
 						) {
-							// This is an orphaned session - add it to our tracking as "busy"
+							const beadId = tmuxSession.name
+							const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
+							const persistedOpt = HashMap.get(persistedSessions, beadId)
+
+							// Recover session: use persisted data if available
+							// Schema.Literal validates state, so persistedOpt.state is already typed correctly
 							const orphanedSession: Session = {
-								beadId: tmuxSession.name,
-								worktreePath: "", // Unknown - would need to query worktree
-								tmuxSessionName: tmuxSession.name,
-								state: "busy",
-								startedAt: tmuxSession.created,
-								projectPath: process.cwd(), // Assume current project
+								beadId,
+								worktreePath: Option.getOrElse(
+									Option.map(worktreeOpt, (wt) => wt.path),
+									() =>
+										Option.getOrElse(
+											Option.map(persistedOpt, (p) => p.worktreePath),
+											() => getWorktreePath(projectPath, beadId),
+										),
+								),
+								tmuxSessionName: beadId,
+								state: Option.getOrElse(
+									Option.map(persistedOpt, (p) => p.state),
+									() => "busy",
+								),
+								startedAt: Option.getOrElse(
+									Option.map(persistedOpt, (p) => p.startedAt),
+									() => DateTime.unsafeFromDate(tmuxSession.created),
+								),
+								projectPath: Option.getOrElse(
+									Option.map(persistedOpt, (p) => p.projectPath),
+									() => projectPath,
+								),
 							}
 							yield* Ref.update(sessionsRef, (sessions) =>
-								HashMap.set(sessions, tmuxSession.name, orphanedSession),
+								HashMap.set(sessions, beadId, orphanedSession),
 							)
 						}
 					}
@@ -722,6 +841,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					yield* Ref.update(sessionsRef, (sessions) =>
 						HashMap.set(sessions, beadId, updatedSession),
 					)
+
+					// Persist to disk
+					const allSessions = yield* Ref.get(sessionsRef)
+					yield* persistSessions(allSessions)
 
 					// Publish state change
 					yield* publishStateChange(beadId, oldState, newState)
