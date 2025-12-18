@@ -184,10 +184,12 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	/**
 	 * Chat about task (Space+c)
 	 *
-	 * Opens a Haiku chat in a tmux popup to discuss/understand the task.
-	 * This is an ephemeral session that runs in the current directory (not a worktree).
-	 * The popup closes automatically when Claude exits.
+	 * Spawns a Haiku chat in a dedicated tmux session to discuss/understand the task.
+	 * Unlike startSession, this runs in the current project directory (not a worktree).
+	 * Session persists in the background, allowing you to continue using Azedarach.
 	 * Uses Haiku model for faster, cheaper responses.
+	 *
+	 * The session name is `chat-<beadId>` to distinguish from work sessions.
 	 */
 	chatAboutTask: () =>
 		Effect.gen(function* () {
@@ -195,21 +197,42 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			if (!task) return
 
 			// Build the Claude command with Haiku model and initial prompt
-			const { command: claudeCommand } = ctx.resolvedConfig.session
+			const { command: claudeCommand, shell, tmuxPrefix } = ctx.resolvedConfig.session
 			const escapeForShell = (s: string) =>
-				s.replace(/\\/g, "\\\\").replace(/'/g, "'\\''").replace(/"/g, '\\"')
+				s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
 			const prompt = `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`
 			const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
 
-			yield* ctx.tmux
-				.displayPopup({
-					command: fullCommand,
-					width: "90%",
-					height: "90%",
-					title: ` Chat: ${task.id} (Haiku) - Ctrl-C to exit `,
-				})
-				.pipe(Effect.catchAll(ctx.showErrorToast("Failed to start chat")))
+			// Use chat-<beadId> naming to distinguish from work sessions
+			const chatSessionName = `chat-${task.id}`
+			const projectPath = yield* ctx.getProjectPath()
+
+			// Check if chat session already exists
+			const hasSession = yield* ctx.tmux.hasSession(chatSessionName)
+
+			if (hasSession) {
+				// Session exists - just switch to it
+				yield* ctx.tmux.switchClient(chatSessionName).pipe(
+					Effect.tap(() => ctx.toast.show("info", "Attached to existing chat session")),
+					Effect.catchAll(ctx.showErrorToast("Failed to attach to chat session")),
+				)
+			} else {
+				// Create new chat session
+				// Use interactive shell so we can resume if Claude exits
+				yield* ctx.tmux
+					.newSession(chatSessionName, {
+						cwd: projectPath,
+						command: `${shell} -i -c '${fullCommand}; exec ${shell}'`,
+						prefix: tmuxPrefix,
+					})
+					.pipe(
+						Effect.tap(() => ctx.toast.show("success", `Chat session started for ${task.id}`)),
+						// Switch to the new session immediately
+						Effect.tap(() => ctx.tmux.switchClient(chatSessionName)),
+						Effect.catchAll(ctx.showErrorToast("Failed to start chat session")),
+					)
+			}
 		}),
 
 	/**

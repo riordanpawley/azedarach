@@ -39,7 +39,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "S": // Start+work - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
-			case "c": // Chat (Haiku) - always available (ephemeral popup)
+			case "c": // Chat (Haiku) - always available (opens tmux session)
 				return true
 			case "a": // Attach - only if not idle
 				return sessionState !== "idle"
