@@ -61,6 +61,9 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	 * Start session with initial prompt (Space+S)
 	 *
 	 * Starts Claude with a detailed prompt containing the bead ID and title.
+	 * If the task has attached images, their paths are included so Claude
+	 * can use the Read tool to view them.
+	 *
 	 * This helps Claude understand that it should work on a specific beads issue.
 	 * Queued to prevent race conditions with other operations on the same task.
 	 * Blocked if task already has an operation in progress.
@@ -79,15 +82,27 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				return
 			}
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
 			// Build a clear prompt that explicitly identifies this as a beads issue.
 			// Format: "work on bead az-xxx (type): title"
 			// - "bead" prefix tells Claude this is a tracked issue
 			// - issue_type helps set expectations (bug fix vs feature vs task)
 			// - title gives immediate context without needing to run `bd show`
-			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
 
-			// Get current project path (from ProjectService or cwd fallback)
-			const projectPath = yield* ctx.getProjectPath()
+			// Check for attached images and include their paths
+			// This allows Claude to use the Read tool to view them
+			const attachments = yield* ctx.imageAttachment
+				.list(task.id)
+				.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+			if (attachments.length > 0) {
+				const imagePaths = attachments.map(
+					(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
+				)
+				initialPrompt += `\n\nAttached images (use Read tool to view):\n${imagePaths.join("\n")}`
+			}
 
 			yield* ctx.withQueue(
 				task.id,
@@ -130,8 +145,22 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				return
 			}
 
+			// Get current project path
+			const projectPath = yield* ctx.getProjectPath()
+
 			// Build prompt (same as startSessionWithPrompt)
-			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+
+			// Check for attached images and include their paths
+			const attachments = yield* ctx.imageAttachment
+				.list(task.id)
+				.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+			if (attachments.length > 0) {
+				const imagePaths = attachments.map(
+					(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
+				)
+				initialPrompt += `\n\nAttached images (use Read tool to view):\n${imagePaths.join("\n")}`
+			}
 
 			yield* ctx.withQueue(
 				task.id,
@@ -139,7 +168,7 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				ctx.sessionManager
 					.start({
 						beadId: task.id,
-						projectPath: process.cwd(),
+						projectPath,
 						initialPrompt,
 						dangerouslySkipPermissions: true,
 					})

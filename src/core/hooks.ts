@@ -6,21 +6,73 @@
  */
 
 /**
+ * Compute the absolute path to bin/az.ts at module load time.
+ *
+ * Uses standard URL APIs (not node:path/url) to parse import.meta.url
+ * and navigate up to the project root.
+ *
+ * Path structure: src/core/hooks.ts → src/core → src → projectRoot → bin/az.ts
+ */
+const computeAzBinaryPath = (): string => {
+	// import.meta.url gives us file:///path/to/src/core/hooks.ts
+	const url = new URL(import.meta.url)
+	// URL.pathname gives /path/to/src/core/hooks.ts (or /C:/... on Windows)
+	const pathParts = url.pathname.split("/")
+	// Remove: hooks.ts (or hooks.js if compiled)
+	pathParts.pop()
+	// Remove: core
+	pathParts.pop()
+	// Remove: src
+	pathParts.pop()
+	// Now at project root, add bin/az.ts
+	return `${pathParts.join("/")}/bin/az.ts`
+}
+
+/** Cached absolute path to the az CLI script */
+const AZ_BINARY_PATH = computeAzBinaryPath()
+
+/**
+ * Get the absolute path to the az CLI script
+ *
+ * Returns the pre-computed path to bin/az.ts.
+ * This ensures hooks work even when az isn't in PATH.
+ */
+export const getAzBinaryPath = (): string => AZ_BINARY_PATH
+
+/**
+ * Build the az notify command with proper path handling
+ *
+ * Uses bun with absolute path to ensure the command works in /bin/sh
+ * which doesn't have the user's PATH configured.
+ *
+ * @param event - Hook event type
+ * @param beadId - Bead ID for the session
+ * @param azBinaryPath - Optional absolute path to az binary (auto-detected if not provided)
+ */
+const buildNotifyCommand = (event: string, beadId: string, azBinaryPath?: string): string => {
+	const azPath = azBinaryPath ?? getAzBinaryPath()
+	// Use bun to run the TypeScript CLI directly
+	return `bun run "${azPath}" notify ${event} ${beadId}`
+}
+
+/**
  * Generate Claude Code hook configuration for session state detection
  *
  * Creates hooks that call `az notify` when Claude enters specific states.
  * This enables authoritative state detection from Claude's native hook system.
  *
  * Hook events:
+ * - PreToolUse - Claude is about to use a tool (busy detection)
  * - Notification (idle_prompt) - Claude is waiting for user input at the prompt
  * - PermissionRequest - Claude is waiting for permission approval
  * - Stop - Claude session stops (Ctrl+C, completion, etc.)
  * - SessionEnd - Claude session fully ends
  *
  * @param beadId - The bead ID to associate with this session
+ * @param azBinaryPath - Optional absolute path to az binary (auto-detected if not provided)
  * @returns Hook configuration object to merge into settings.local.json
  */
-export const generateHookConfig = (beadId: string) => ({
+export const generateHookConfig = (beadId: string, azBinaryPath?: string) => ({
 	hooks: {
 		PreToolUse: [
 			{
@@ -28,7 +80,7 @@ export const generateHookConfig = (beadId: string) => ({
 				hooks: [
 					{
 						type: "command",
-						command: `az notify pretooluse ${beadId}`,
+						command: buildNotifyCommand("pretooluse", beadId, azBinaryPath),
 					},
 				],
 			},
@@ -39,7 +91,7 @@ export const generateHookConfig = (beadId: string) => ({
 				hooks: [
 					{
 						type: "command",
-						command: `az notify idle_prompt ${beadId}`,
+						command: buildNotifyCommand("idle_prompt", beadId, azBinaryPath),
 					},
 				],
 			},
@@ -49,7 +101,7 @@ export const generateHookConfig = (beadId: string) => ({
 				hooks: [
 					{
 						type: "command",
-						command: `az notify permission_request ${beadId}`,
+						command: buildNotifyCommand("permission_request", beadId, azBinaryPath),
 					},
 				],
 			},
@@ -59,7 +111,7 @@ export const generateHookConfig = (beadId: string) => ({
 				hooks: [
 					{
 						type: "command",
-						command: `az notify stop ${beadId}`,
+						command: buildNotifyCommand("stop", beadId, azBinaryPath),
 					},
 				],
 			},
@@ -69,7 +121,7 @@ export const generateHookConfig = (beadId: string) => ({
 				hooks: [
 					{
 						type: "command",
-						command: `az notify session_end ${beadId}`,
+						command: buildNotifyCommand("session_end", beadId, azBinaryPath),
 					},
 				],
 			},
