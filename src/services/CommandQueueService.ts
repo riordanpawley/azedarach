@@ -12,7 +12,6 @@
  * - Observable state: UI can show "queued" indicators
  */
 
-import * as crypto from "node:crypto"
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Deferred, Duration, Effect, HashMap, SubscriptionRef } from "effect"
 
@@ -93,7 +92,7 @@ interface InternalTaskQueueState {
 
 const DEFAULT_TIMEOUT = Duration.minutes(5)
 
-const generateCommandId = (): string => crypto.randomUUID()
+const generateCommandId = Effect.sync(() => crypto.randomUUID())
 
 const createEmptyState = (): InternalTaskQueueState => ({
 	running: null,
@@ -219,7 +218,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				> =>
 					Effect.gen(function* () {
 						const { taskId, label, effect, timeout = DEFAULT_TIMEOUT } = options
-						const id = generateCommandId()
+						const id = yield* generateCommandId
 						const deferred = yield* Deferred.make<
 							void,
 							CommandTimeoutError | CommandCancelledError

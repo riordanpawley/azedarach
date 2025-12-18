@@ -15,7 +15,6 @@
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Ref, type Scope } from "effect"
 import { deepMerge, generateHookConfig } from "./hooks.js"
-import { getWorktreePath, normalizePath } from "./paths.js"
 
 // ============================================================================
 // Types
@@ -222,81 +221,6 @@ const getCurrentBranch = (
 		return output.trim()
 	})
 
-/**
- * Parse git worktree list --porcelain output
- *
- * Format:
- * worktree /path/to/worktree
- * HEAD <sha>
- * branch refs/heads/branch-name
- * [locked <reason>]
- * [prunable <reason>]
- *
- * Entries are separated by blank lines.
- */
-const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
-	if (!output.trim()) {
-		return []
-	}
-
-	const entries = output.split("\n\n").filter((entry) => entry.trim())
-	const worktrees: Worktree[] = []
-
-	// Normalize projectPath for comparison (resolve symlinks, trailing slashes)
-	const normalizedProjectPath = normalizePath(projectPath)
-
-	for (const entry of entries) {
-		const lines = entry.split("\n")
-		let path = ""
-		let head = ""
-		let branch = ""
-		let isLocked = false
-
-		for (const line of lines) {
-			if (line.startsWith("worktree ")) {
-				path = line.slice("worktree ".length)
-			} else if (line.startsWith("HEAD ")) {
-				head = line.slice("HEAD ".length)
-			} else if (line.startsWith("branch ")) {
-				const branchRef = line.slice("branch ".length)
-				branch = branchRef.replace("refs/heads/", "")
-			} else if (line.startsWith("locked")) {
-				isLocked = true
-			}
-		}
-
-		// Use branch name directly as beadId - this is more reliable than parsing the path
-		// since we create branches with the beadId as the name (see line ~406)
-		// Fallback to path parsing if branch is missing (detached HEAD)
-		let beadId = branch
-		if (!beadId) {
-			// Fallback: Extract beadId from path
-			// Path format: /parent/dir/ProjectName-beadId
-			const pathParts = path.split("/")
-			const lastPart = pathParts[pathParts.length - 1]
-			// Match any prefix pattern (e.g., az-xxx, proj-xxx, etc.)
-			const match = lastPart?.match(/-([a-z]+-[a-z0-9]+)$/i)
-			beadId = match?.[1] || ""
-		}
-
-		// Normalize path for comparison
-		const normalizedPath = normalizePath(path)
-
-		// Only include worktrees that have a valid beadId and aren't the main/current worktree
-		if (beadId && normalizedPath !== normalizedProjectPath) {
-			worktrees.push({
-				path,
-				beadId,
-				branch,
-				isLocked,
-				head,
-			})
-		}
-	}
-
-	return worktrees
-}
-
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -380,6 +304,56 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					Effect.logWarning(`Failed to copy Claude local settings: ${error}`),
 				),
 			)
+
+		// Pure helper to parse worktree list output (uses captured pathService)
+		const parseWorktreeList = (output: string, projectPath: string): Worktree[] => {
+			if (!output.trim()) return []
+
+			const entries = output.split("\n\n").filter((entry) => entry.trim())
+			const worktrees: Worktree[] = []
+			const normalizedProjectPath = pathService.resolve(projectPath)
+
+			for (const entry of entries) {
+				const lines = entry.split("\n")
+				let path = ""
+				let head = ""
+				let branch = ""
+				let isLocked = false
+
+				for (const line of lines) {
+					if (line.startsWith("worktree ")) {
+						path = line.slice("worktree ".length)
+					} else if (line.startsWith("HEAD ")) {
+						head = line.slice("HEAD ".length)
+					} else if (line.startsWith("branch ")) {
+						branch = line.slice("branch ".length).replace("refs/heads/", "")
+					} else if (line.startsWith("locked")) {
+						isLocked = true
+					}
+				}
+
+				let beadId = branch
+				if (!beadId) {
+					const pathParts = path.split("/")
+					const lastPart = pathParts[pathParts.length - 1]
+					const match = lastPart?.match(/-([a-z]+-[a-z0-9]+)$/i)
+					beadId = match?.[1] || ""
+				}
+
+				const normalizedPath = pathService.resolve(path)
+				if (beadId && normalizedPath !== normalizedProjectPath) {
+					worktrees.push({ path, beadId, branch, isLocked, head })
+				}
+			}
+			return worktrees
+		}
+
+		// Pure helper to get worktree path (uses captured pathService)
+		const getWorktreePath = (projectPath: string, beadId: string): string => {
+			const projectName = pathService.basename(projectPath)
+			const parentDir = pathService.dirname(projectPath)
+			return pathService.join(parentDir, `${projectName}-${beadId}`)
+		}
 
 		// Helper to refresh worktrees cache
 		const refreshWorktrees = (
