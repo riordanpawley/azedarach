@@ -15,6 +15,23 @@ import { ProjectService } from "../services/ProjectService.js"
 // ============================================================================
 
 /**
+ * Dependency info schema (for dependents array in show output)
+ */
+const DependentSchema = Schema.Struct({
+	id: Schema.String,
+	title: Schema.String,
+	description: Schema.String.pipe(Schema.optional),
+	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
+	priority: Schema.Number,
+	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore"),
+	created_at: Schema.String,
+	updated_at: Schema.String,
+	dependency_type: Schema.String.pipe(Schema.optional),
+})
+
+export type Dependent = Schema.Schema.Type<typeof DependentSchema>
+
+/**
  * Issue schema matching bd --json output
  */
 const IssueSchema = Schema.Struct({
@@ -33,6 +50,8 @@ const IssueSchema = Schema.Struct({
 	notes: Schema.String.pipe(Schema.optional),
 	acceptance: Schema.String.pipe(Schema.optional),
 	estimate: Schema.Number.pipe(Schema.optional),
+	// Dependents (children) - populated by bd show, not bd list
+	dependents: Schema.Array(DependentSchema).pipe(Schema.optional),
 })
 
 export type Issue = Schema.Schema.Type<typeof IssueSchema>
@@ -260,6 +279,24 @@ export interface BeadsClientService {
 		id: string,
 		cwd?: string,
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Get children of an epic (issues with parent-child dependency)
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.getEpicChildren("az-gds")
+	 * // Returns array of child issue IDs
+	 * ```
+	 */
+	readonly getEpicChildren: (
+		epicId: string,
+		cwd?: string,
+	) => Effect.Effect<
+		Dependent[],
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -621,6 +658,27 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					// 1. The daemon doesn't support the delete operation
 					// 2. --force is required to actually delete (not just preview)
 					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
+				}),
+
+			getEpicChildren: (epicId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["show", epicId], effectiveCwd)
+
+					// bd show returns an array with a single item
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
+					}
+
+					const epic = parsed[0]!
+
+					// Filter dependents to only parent-child relationships
+					const children =
+						epic.dependents?.filter((dep) => dep.dependency_type === "parent-child") ?? []
+
+					return children
 				}),
 		}
 	}),

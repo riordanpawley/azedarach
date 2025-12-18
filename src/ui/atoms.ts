@@ -857,6 +857,105 @@ export const initializeNavigationAtom = appRuntime.fn(() =>
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
+// ============================================================================
+// Epic Drill-Down Atoms
+// ============================================================================
+
+/**
+ * Drill-down epic atom - subscribes to NavigationService drillDownEpic
+ *
+ * When set, the board shows only children of this epic.
+ * When null, normal board view is shown.
+ *
+ * Usage: const drillDownEpic = useAtomValue(drillDownEpicAtom)
+ */
+export const drillDownEpicAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.drillDownEpic
+	}),
+)
+
+/**
+ * Drill-down child IDs atom - subscribes to NavigationService drillDownChildIds
+ *
+ * Contains the set of task IDs to show when in drill-down mode.
+ *
+ * Usage: const childIds = useAtomValue(drillDownChildIdsAtom)
+ */
+export const drillDownChildIdsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.drillDownChildIds
+	}),
+)
+
+/**
+ * Enter drill-down mode for an epic
+ *
+ * Takes an object with epicId and childIds since appRuntime.fn supports single arg.
+ * Note: The normal keybinding handles drill-down entry directly - this is for
+ * programmatic use if needed.
+ */
+export const enterDrillDownAtom = appRuntime.fn(
+	(params: { epicId: string; childIds: ReadonlySet<string> }) =>
+		Effect.gen(function* () {
+			const nav = yield* NavigationService
+			yield* nav.enterDrillDown(params.epicId, params.childIds)
+		}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Exit drill-down mode
+ *
+ * Usage: const exitDrillDown = useAtomSet(exitDrillDownAtom, { mode: "promise" })
+ *        await exitDrillDown()
+ */
+export const exitDrillDownAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.exitDrillDown()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Get epic children - fetches children for the current drill-down epic
+ *
+ * Usage: const epicChildren = useAtomValue(epicChildrenAtom(epicId))
+ */
+export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
+	Effect.gen(function* () {
+		const beads = yield* BeadsClient
+		return yield* beads.getEpicChildren(epicId)
+	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
+)
+
+/**
+ * Epic info atom - fetches epic details for the header
+ *
+ * Usage: const epic = useAtomValue(epicInfoAtom(epicId))
+ */
+export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
+	Effect.gen(function* () {
+		const beads = yield* BeadsClient
+		return yield* beads.show(epicId)
+	}).pipe(
+		Effect.catchAll((e) =>
+			Effect.logError(e).pipe(
+				Effect.as({
+					id: epicId,
+					title: "Unknown Epic",
+					status: "open" as const,
+					priority: 2,
+					issue_type: "epic" as const,
+					created_at: "",
+					updated_at: "",
+				}),
+			),
+		),
+	),
+)
+
 /**
  * Refresh board data from BeadsClient
  *
@@ -945,6 +1044,39 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 		return board.filteredTasksByColumn
 	}),
 )
+
+/**
+ * Drill-down filtered tasks by column - applies epic drill-down filtering
+ *
+ * Derives from filteredTasksByColumnAtom and drillDownChildIdsAtom:
+ * - When drillDownChildIds is empty, returns all tasks (normal mode)
+ * - When drillDownChildIds has values, filters to only those tasks
+ *
+ * This is the atom App.tsx should use for rendering the board.
+ *
+ * Usage: const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+ */
+export const drillDownFilteredTasksAtom = Atom.readable((get) => {
+	// Get the child IDs for filtering
+	const childIdsResult = get(drillDownChildIdsAtom)
+	if (!Result.isSuccess(childIdsResult)) return []
+
+	const childIds = childIdsResult.value
+
+	// Get the filtered tasks
+	const tasksResult = get(filteredTasksByColumnAtom)
+	if (!Result.isSuccess(tasksResult)) return []
+
+	const tasksByColumn = tasksResult.value
+
+	// If no drill-down active (empty childIds), return all tasks
+	if (childIds.size === 0) {
+		return tasksByColumn
+	}
+
+	// Filter each column to only include children
+	return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+})
 
 // ============================================================================
 // Project Service Atoms

@@ -45,7 +45,7 @@ The default mode for navigation and basic actions.
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Enter` | Show task details | Modal overlay |
+| `Enter` | View/Enter | Show task details; on epics, enters drill-down |
 | `Space` | Enter Action mode | Prefix for commands |
 | `,` | Enter Sort mode | Change task sort order |
 | `/` | Enter Search mode | Filter tasks by title/ID |
@@ -58,8 +58,56 @@ The default mode for navigation and basic actions.
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `L` | View logs | Opens az.log in tmux popup |
-| `q` | Quit | Exit application |
+| `q` | Quit/Back | Exits drill-down; otherwise quits app |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
+
+## Epic Drill-Down
+
+When the cursor is on an epic card, pressing `Enter` enters **drill-down mode** instead of showing the detail panel. This focuses the board to show only that epic's children.
+
+### Entering Drill-Down
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Enter` (on epic) | Enter drill-down | Shows only epic's children |
+
+### Drill-Down View
+
+When in drill-down mode:
+
+```
+┌─ Open ─────┬─ In Progress ─┬─ Done ──────┐
+│  ◀ az-gds  │   Epic View   │  ████░ 3/5  │  ← Header bar
+│  az-lqb    │  az-7sr ⚙    │  az-aiu ✓   │
+│  az-bjp    │               │  az-xxx ✓   │
+└────────────┴───────────────┴─────────────┘
+```
+
+**Header bar shows:**
+- Back arrow (`◀`) with epic ID
+- Epic title (centered)
+- Progress bar (`████░░`) with count (e.g., `3/5` children closed)
+
+### Navigation in Drill-Down
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `h/j/k/l` | Navigate | Works normally within children |
+| `Enter` | Open detail | On child tasks, opens detail panel |
+| `q` | Exit drill-down | Returns to main board |
+| `Esc` | Exit drill-down | Same as `q` |
+
+### Cursor Restoration
+
+When you exit drill-down mode:
+- The cursor returns to the epic you drilled into
+- Your previous position is remembered
+
+### Notes
+
+- **Epic children** are tasks with a parent-child dependency to the epic
+- All normal actions (Space menu, search, sort) work in drill-down
+- The progress bar fills based on closed/total children ratio
 
 ## View Modes
 

@@ -56,6 +56,16 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		// Follow mode: when set, cursor follows this task after operations
 		const followTaskId = yield* SubscriptionRef.make<string | null>(null)
 
+		// Drill-down mode: when set, board shows only children of this epic
+		// Stores the epic ID, or null for normal view
+		const drillDownEpic = yield* SubscriptionRef.make<string | null>(null)
+
+		// Children IDs for drill-down filtering (populated when entering drill-down)
+		const drillDownChildIds = yield* SubscriptionRef.make<ReadonlySet<string>>(new Set())
+
+		// Remember cursor position before entering drill-down (for restoration)
+		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
+
 		/**
 		 * Get the filtered/sorted tasks by column using current search/sort config
 		 */
@@ -158,6 +168,8 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			// Expose SubscriptionRefs for atom subscription
 			focusedTaskId,
 			followTaskId,
+			drillDownEpic,
+			drillDownChildIds,
 
 			/**
 			 * Get current position of focused task
@@ -453,6 +465,66 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					const position = yield* findTaskPosition(currentId)
 					return position ?? { columnIndex: 0, taskIndex: 0 }
 				}),
+
+			/**
+			 * Enter drill-down mode for an epic
+			 *
+			 * Shows only the epic's children in the board view.
+			 * Saves current cursor position for restoration when exiting.
+			 *
+			 * @param epicId - The epic ID to drill into
+			 * @param childIds - Set of child task IDs for filtering
+			 */
+			enterDrillDown: (epicId: string, childIds: ReadonlySet<string>): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					// Save current cursor position for restoration
+					const currentId = yield* SubscriptionRef.get(focusedTaskId)
+					yield* SubscriptionRef.set(savedFocusedTaskId, currentId)
+
+					// Store children IDs for filtering
+					yield* SubscriptionRef.set(drillDownChildIds, childIds)
+
+					// Enter drill-down mode
+					yield* SubscriptionRef.set(drillDownEpic, epicId)
+
+					// Clear focus - will be set to first child when board renders
+					yield* SubscriptionRef.set(focusedTaskId, null)
+				}),
+
+			/**
+			 * Exit drill-down mode
+			 *
+			 * Returns to normal board view and restores cursor position.
+			 */
+			exitDrillDown: (): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					// Restore saved cursor position
+					const savedId = yield* SubscriptionRef.get(savedFocusedTaskId)
+					if (savedId) {
+						yield* SubscriptionRef.set(focusedTaskId, savedId)
+					}
+					yield* SubscriptionRef.set(savedFocusedTaskId, null)
+
+					// Clear children IDs
+					yield* SubscriptionRef.set(drillDownChildIds, new Set())
+
+					// Exit drill-down mode
+					yield* SubscriptionRef.set(drillDownEpic, null)
+				}),
+
+			/**
+			 * Check if currently in drill-down mode
+			 */
+			isInDrillDown: (): Effect.Effect<boolean> =>
+				Effect.gen(function* () {
+					const epic = yield* SubscriptionRef.get(drillDownEpic)
+					return epic !== null
+				}),
+
+			/**
+			 * Get current drill-down epic ID (if any)
+			 */
+			getDrillDownEpic: (): Effect.Effect<string | null> => SubscriptionRef.get(drillDownEpic),
 		}
 	}),
 }) {}

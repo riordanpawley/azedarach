@@ -163,8 +163,16 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "q",
 		mode: "normal",
-		description: "Quit",
-		action: Effect.sync(() => process.exit(0)),
+		description: "Quit (or exit drill-down)",
+		action: Effect.gen(function* () {
+			// If in drill-down mode, exit it instead of quitting
+			const inDrillDown = yield* bc.ctx.nav.isInDrillDown()
+			if (inDrillDown) {
+				yield* bc.ctx.nav.exitDrillDown()
+			} else {
+				process.exit(0)
+			}
+		}),
 	},
 	{
 		key: "?",
@@ -181,8 +189,23 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "return",
 		mode: "normal",
-		description: "View detail",
-		action: Effect.suspend(() => bc.ctx.openCurrentDetail()),
+		description: "View detail (or enter epic)",
+		action: Effect.gen(function* () {
+			// Get selected task to check if it's an epic
+			const task = yield* bc.ctx.getSelectedTask()
+			if (task && task.issue_type === "epic") {
+				// Fetch epic children
+				const children = yield* bc.ctx.beadsClient
+					.getEpicChildren(task.id)
+					.pipe(Effect.catchAll(() => Effect.succeed([])))
+				const childIds = new Set(children.map((c) => c.id))
+				// Enter drill-down mode for the epic with children
+				yield* bc.ctx.nav.enterDrillDown(task.id, childIds)
+			} else {
+				// Normal detail view for non-epics
+				yield* bc.ctx.openCurrentDetail()
+			}
+		}),
 	},
 	{
 		key: "c",
