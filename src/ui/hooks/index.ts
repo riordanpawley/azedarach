@@ -4,7 +4,7 @@
  * These hooks wrap atomic services for convenient React usage.
  */
 
-export { useEditorMode } from "./useEditorMode"
-export { useNavigation } from "./useNavigation"
-export { useOverlays } from "./useOverlays"
-export { useToasts } from "./useToasts"
+export { useEditorMode } from "./useEditorMode.js"
+export { useNavigation } from "./useNavigation.js"
+export { useOverlays } from "./useOverlays.js"
+export { useToasts } from "./useToasts.js"

@@ -7,8 +7,8 @@
  */
 
 import { Effect } from "effect"
-import { KeyboardService } from "../services/KeyboardService"
-import { appRuntime } from "../ui/atoms"
+import { KeyboardService } from "../services/KeyboardService.js"
+import { appRuntime } from "../ui/atoms.js"
 
 /**
  * Action atom to handle a key press

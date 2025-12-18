@@ -10,41 +10,43 @@
  */
 
 import { Effect, Ref } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index"
-import { AttachmentService } from "../core/AttachmentService"
-import { BeadsClient } from "../core/BeadsClient"
-import { BeadEditorService } from "../core/EditorService"
-import { ImageAttachmentService } from "../core/ImageAttachmentService"
-import { PRWorkflow } from "../core/PRWorkflow"
-import { SessionManager } from "../core/SessionManager"
-import { TmuxService } from "../core/TmuxService"
-import { VCService } from "../core/VCService"
-import { BoardService } from "./BoardService"
-import { CommandQueueService } from "./CommandQueueService"
-import { EditorService } from "./EditorService"
+import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { AttachmentService } from "../core/AttachmentService.js"
+import { BeadsClient } from "../core/BeadsClient.js"
+import { BeadEditorService } from "../core/EditorService.js"
+import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
+import { PRWorkflow } from "../core/PRWorkflow.js"
+import { SessionManager } from "../core/SessionManager.js"
+import { TmuxService } from "../core/TmuxService.js"
+import { VCService } from "../core/VCService.js"
+import { BoardService } from "./BoardService.js"
+import { CommandQueueService } from "./CommandQueueService.js"
+import { EditorService } from "./EditorService.js"
 // Import handler modules
-import { createDefaultBindings } from "./keyboard/bindings"
+import { createDefaultBindings } from "./keyboard/bindings.js"
 import {
 	createCheckBusy,
 	createGetColumnIndex,
+	createGetProjectPath,
 	createGetSelectedTask,
 	createOpenCurrentDetail,
 	createShowErrorToast,
 	createToggleCurrentSelection,
 	createWithQueue,
-} from "./keyboard/helpers"
-import { createInputHandlers } from "./keyboard/inputHandlers"
-import { createPRHandlers } from "./keyboard/prHandlers"
-import { createSessionHandlers } from "./keyboard/sessionHandlers"
-import { createTaskHandlers } from "./keyboard/taskHandlers"
-import type { HandlerContext, Keybinding, KeyMode } from "./keyboard/types"
-import { NavigationService } from "./NavigationService"
-import { OverlayService } from "./OverlayService"
-import { ToastService } from "./ToastService"
-import { ViewService } from "./ViewService"
+} from "./keyboard/helpers.js"
+import { createInputHandlers } from "./keyboard/inputHandlers.js"
+import { createPRHandlers } from "./keyboard/prHandlers.js"
+import { createSessionHandlers } from "./keyboard/sessionHandlers.js"
+import { createTaskHandlers } from "./keyboard/taskHandlers.js"
+import type { HandlerContext, Keybinding, KeyMode } from "./keyboard/types.js"
+import { NavigationService } from "./NavigationService.js"
+import { OverlayService } from "./OverlayService.js"
+import { ProjectService } from "./ProjectService.js"
+import { ToastService } from "./ToastService.js"
+import { ViewService } from "./ViewService.js"
 
 // Re-export types for backwards compatibility
-export type { Keybinding, KeybindingDeps, KeyMode } from "./keyboard/types"
+export type { Keybinding, KeybindingDeps, KeyMode } from "./keyboard/types.js"
 
 // ============================================================================
 // Service Definition
@@ -69,6 +71,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		TmuxService.Default,
 		CommandQueueService.Default,
 		AppConfig.Default,
+		ProjectService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -91,6 +94,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const tmux = yield* TmuxService
 		const commandQueue = yield* CommandQueueService
 		const appConfig = yield* AppConfig
+		const projectService = yield* ProjectService
 		const resolvedConfig: ResolvedConfig = appConfig.config
 
 		// ====================================================================
@@ -103,6 +107,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const toggleCurrentSelection = createToggleCurrentSelection(editor, getSelectedTask)
 		const withQueue = createWithQueue(commandQueue, toast)
 		const checkBusy = createCheckBusy(commandQueue, toast)
+		const getProjectPath = createGetProjectPath(projectService)
 
 		// ====================================================================
 		// Build handler context
@@ -124,6 +129,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			tmux,
 			vc,
 			commandQueue,
+			projectService,
 
 			// Config
 			resolvedConfig,
@@ -131,6 +137,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			// Pre-bound helpers
 			getSelectedTask,
 			getColumnIndex,
+			getProjectPath,
 			showErrorToast,
 			openCurrentDetail,
 			toggleCurrentSelection,
@@ -210,6 +217,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					// Check for detail overlay (handles attachment navigation)
 					const handledAsDetail = yield* inputHandlers.handleDetailOverlayInput(key)
 					if (handledAsDetail) return
+
+					// Check for projectSelector overlay (handles number key selection)
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag === "projectSelector") {
+						const handledAsProjectSelector = yield* inputHandlers.handleProjectSelectorInput(key)
+						if (handledAsProjectSelector) return
+					}
 
 					const effectiveMode = yield* inputHandlers.getEffectiveMode()
 

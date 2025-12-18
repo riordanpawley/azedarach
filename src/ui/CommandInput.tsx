@@ -1,7 +1,7 @@
 /**
  * CommandInput - Bottom bar command input for sending commands to VC REPL
  */
-import { theme } from "./theme"
+import { theme } from "./theme.js"
 
 export interface CommandInputProps {
 	input: string

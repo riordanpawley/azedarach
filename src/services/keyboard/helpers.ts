@@ -7,14 +7,15 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import type { TaskWithSession } from "../../ui/types"
-import type { BoardService } from "../BoardService"
-import type { CommandQueueService } from "../CommandQueueService"
-import type { EditorService } from "../EditorService"
-import { formatForToast } from "../ErrorFormatter"
-import type { NavigationService } from "../NavigationService"
-import type { OverlayService } from "../OverlayService"
-import type { ToastService } from "../ToastService"
+import type { TaskWithSession } from "../../ui/types.js"
+import type { BoardService } from "../BoardService.js"
+import type { CommandQueueService } from "../CommandQueueService.js"
+import type { EditorService } from "../EditorService.js"
+import { formatForToast } from "../ErrorFormatter.js"
+import type { NavigationService } from "../NavigationService.js"
+import type { OverlayService } from "../OverlayService.js"
+import type { ProjectService } from "../ProjectService.js"
+import type { ToastService } from "../ToastService.js"
 
 // ============================================================================
 // Helper Factory Functions
@@ -144,3 +145,18 @@ export const createCheckBusy =
 
 			return false
 		})
+
+/**
+ * Create a function that gets the current project path
+ *
+ * Returns the selected project path from ProjectService, or falls back to
+ * process.cwd() if no project is selected. This enables multi-project support
+ * while maintaining backwards compatibility.
+ *
+ * @param projectService - ProjectService instance
+ */
+export const createGetProjectPath = (projectService: ProjectService) => (): Effect.Effect<string> =>
+	Effect.gen(function* () {
+		const path = yield* projectService.getCurrentPath()
+		return path ?? process.cwd()
+	})

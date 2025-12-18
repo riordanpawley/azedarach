@@ -10,8 +10,8 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import { hasClipboardSupportAtom, imageAttachOverlayStateAtom } from "./atoms"
-import { theme } from "./theme"
+import { hasClipboardSupportAtom, imageAttachOverlayStateAtom } from "./atoms.js"
+import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
 

@@ -5,8 +5,8 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
-import { elapsedFormattedAtom } from "./atoms"
-import { theme } from "./theme"
+import { elapsedFormattedAtom } from "./atoms.js"
+import { theme } from "./theme.js"
 
 export interface ElapsedTimerProps {
 	/** ISO 8601 timestamp when the session started */
