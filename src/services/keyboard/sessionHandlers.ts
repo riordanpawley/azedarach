@@ -102,6 +102,51 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 		}),
 
 	/**
+	 * Start session with prompt and --dangerously-skip-permissions (Space+!)
+	 *
+	 * Starts Claude with a detailed prompt AND the --dangerously-skip-permissions flag.
+	 * This allows Claude to run without permission prompts - useful for trusted tasks
+	 * but should be used with caution.
+	 * Queued to prevent race conditions with other operations on the same task.
+	 * Blocked if task already has an operation in progress.
+	 */
+	startSessionDangerous: () =>
+		Effect.gen(function* () {
+			const task = yield* ctx.getSelectedTask()
+			if (!task) return
+
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
+
+			if (task.sessionState !== "idle") {
+				yield* ctx.toast.show("error", `Cannot start: task is ${task.sessionState}`)
+				return
+			}
+
+			// Build prompt (same as startSessionWithPrompt)
+			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+
+			yield* ctx.withQueue(
+				task.id,
+				"start",
+				ctx.sessionManager
+					.start({
+						beadId: task.id,
+						projectPath: process.cwd(),
+						initialPrompt,
+						dangerouslySkipPermissions: true,
+					})
+					.pipe(
+						Effect.tap(() =>
+							ctx.toast.show("success", `Started session for ${task.id} (skip-permissions)`),
+						),
+						Effect.catchAll(ctx.showErrorToast("Failed to start")),
+					),
+			)
+		}),
+
+	/**
 	 * Chat about task (Space+c)
 	 *
 	 * Opens a Haiku chat in a tmux popup to discuss/understand the task.
