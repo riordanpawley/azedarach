@@ -247,10 +247,31 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				taskId: null,
 			})
 
+			/**
+			 * State for the image preview overlay.
+			 * Holds the rendered ANSI art string for the currently previewed image.
+			 */
+			const previewState = yield* SubscriptionRef.make<{
+				readonly taskId: string | null
+				readonly attachmentId: string | null
+				readonly filename: string | null
+				readonly renderedImage: string | null
+				readonly isLoading: boolean
+				readonly error: string | null
+			}>({
+				taskId: null,
+				attachmentId: null,
+				filename: null,
+				renderedImage: null,
+				isLoading: false,
+				error: null,
+			})
+
 			return {
 				// Expose SubscriptionRefs for atom subscription
 				currentAttachments,
 				overlayState,
+				previewState,
 
 				/**
 				 * Open the image attach overlay for a task
@@ -746,6 +767,146 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							result[id] = (index[id] ?? []).length
 						}
 						return result
+					}),
+
+				// ========================================================================
+				// Image Preview Methods
+				// ========================================================================
+
+				/**
+				 * Open preview for the currently selected attachment.
+				 * Renders the image to terminal-compatible text and stores in previewState.
+				 */
+				openPreview: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.selectedIndex < 0) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "No attachment selected" }),
+							)
+						}
+						const attachment = current.attachments[current.selectedIndex]
+						if (!attachment) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({ message: "Attachment not found" }),
+							)
+						}
+
+						// Set loading state
+						yield* SubscriptionRef.set(previewState, {
+							taskId: current.taskId,
+							attachmentId: attachment.id,
+							filename: attachment.filename,
+							renderedImage: null,
+							isLoading: true,
+							error: null,
+						})
+
+						// Get full file path
+						const filePath = path.join(getIssueDir(current.taskId), attachment.filename)
+
+						// Import terminal-image dynamically and render
+						const { default: terminalImage } = yield* Effect.tryPromise({
+							try: () => import("terminal-image"),
+							catch: (e) =>
+								new ImageAttachmentError({
+									message: `Failed to load terminal-image: ${e}`,
+								}),
+						})
+
+						// Get terminal dimensions for sizing (leave room for borders and info)
+						const termCols = process.stdout.columns || 80
+						const termRows = process.stdout.rows || 24
+						// Reserve space for borders (4 cols), header (2 rows), footer (3 rows)
+						const maxWidth = Math.max(20, termCols - 10)
+						const maxHeight = Math.max(10, termRows - 10)
+
+						const rendered = yield* Effect.tryPromise({
+							try: () =>
+								terminalImage.file(filePath, {
+									width: maxWidth,
+									height: maxHeight,
+									preserveAspectRatio: true,
+								}),
+							catch: (e) =>
+								new ImageAttachmentError({
+									message: `Failed to render image: ${e}`,
+								}),
+						})
+
+						// Store rendered result
+						yield* SubscriptionRef.set(previewState, {
+							taskId: current.taskId,
+							attachmentId: attachment.id,
+							filename: attachment.filename,
+							renderedImage: rendered,
+							isLoading: false,
+							error: null,
+						})
+
+						return attachment
+					}).pipe(
+						Effect.catchAll((error) =>
+							Effect.gen(function* () {
+								const msg =
+									error && typeof error === "object" && "message" in error
+										? String(error.message)
+										: String(error)
+								yield* SubscriptionRef.update(previewState, (s) => ({
+									...s,
+									isLoading: false,
+									error: msg,
+								}))
+								return yield* Effect.fail(error)
+							}),
+						),
+					),
+
+				/**
+				 * Close the image preview and clear state
+				 */
+				closePreview: () =>
+					SubscriptionRef.set(previewState, {
+						taskId: null,
+						attachmentId: null,
+						filename: null,
+						renderedImage: null,
+						isLoading: false,
+						error: null,
+					}),
+
+				/**
+				 * Navigate to next attachment while in preview mode
+				 */
+				previewNext: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.attachments.length === 0) return
+
+						const newIndex = Math.min(current.attachments.length - 1, current.selectedIndex + 1)
+						if (newIndex !== current.selectedIndex) {
+							yield* SubscriptionRef.set(currentAttachments, {
+								...current,
+								selectedIndex: newIndex,
+							})
+						}
+					}),
+
+				/**
+				 * Navigate to previous attachment while in preview mode
+				 */
+				previewPrevious: () =>
+					Effect.gen(function* () {
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (!current || current.attachments.length === 0) return
+
+						const newIndex = Math.max(0, current.selectedIndex - 1)
+						if (newIndex !== current.selectedIndex) {
+							yield* SubscriptionRef.set(currentAttachments, {
+								...current,
+								selectedIndex: newIndex,
+							})
+						}
 					}),
 			}
 		}),

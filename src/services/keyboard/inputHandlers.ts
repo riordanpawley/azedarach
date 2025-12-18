@@ -257,6 +257,28 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 				return true
 			}
 
+			// Preview selected attachment with 'v'
+			if (key === "v") {
+				// Check if there's a selected attachment
+				const selected = yield* ctx.imageAttachment.getSelectedAttachment()
+				if (selected) {
+					// Open preview and load the image
+					yield* ctx.overlay.push({ _tag: "imagePreview", taskId })
+					yield* ctx.imageAttachment.openPreview().pipe(
+						Effect.catchAll((error) => {
+							const msg =
+								error && typeof error === "object" && "message" in error
+									? String(error.message)
+									: String(error)
+							return ctx.toast.show("error", `Preview: ${msg}`)
+						}),
+					)
+				} else {
+					yield* ctx.toast.show("info", "Select an attachment to preview (j/k)")
+				}
+				return true
+			}
+
 			// Don't consume other keys - let them fall through (e.g., for Space menu)
 			return false
 		}),
@@ -437,6 +459,82 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 				}),
 			),
 		),
+
+	/**
+	 * Handle imagePreview overlay keyboard input
+	 *
+	 * @param key - The key that was pressed
+	 * @returns true if the key was handled
+	 *
+	 * Keys:
+	 * - j/down: Next attachment (load new preview)
+	 * - k/up: Previous attachment (load new preview)
+	 * - o: Open in external viewer
+	 * - escape/q: Close preview
+	 */
+	handleImagePreviewInput: (key: string) =>
+		Effect.gen(function* () {
+			const currentOverlay = yield* ctx.overlay.current()
+			if (currentOverlay?._tag !== "imagePreview") {
+				return false
+			}
+
+			// Escape or 'q' closes the preview
+			if (key === "escape" || key === "q") {
+				yield* ctx.imageAttachment.closePreview()
+				yield* ctx.overlay.pop()
+				return true
+			}
+
+			// Navigate to next attachment with j/down
+			if (key === "j" || key === "down") {
+				yield* ctx.imageAttachment.previewNext()
+				// Re-render the new image
+				yield* ctx.imageAttachment.openPreview().pipe(
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return ctx.toast.show("error", `Preview: ${msg}`)
+					}),
+				)
+				return true
+			}
+
+			// Navigate to previous attachment with k/up
+			if (key === "k" || key === "up") {
+				yield* ctx.imageAttachment.previewPrevious()
+				// Re-render the new image
+				yield* ctx.imageAttachment.openPreview().pipe(
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return ctx.toast.show("error", `Preview: ${msg}`)
+					}),
+				)
+				return true
+			}
+
+			// Open in external viewer with 'o'
+			if (key === "o") {
+				yield* ctx.imageAttachment.openSelectedAttachment().pipe(
+					Effect.tap(() => ctx.toast.show("success", "Opening image...")),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return ctx.toast.show("error", msg)
+					}),
+				)
+				return true
+			}
+
+			return true // Consume all other keys in overlay
+		}),
 
 	/**
 	 * Compute jump labels for all visible tasks
