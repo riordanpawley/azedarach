@@ -9,7 +9,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Effect } from "effect"
 import { useMemo } from "react"
-import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms"
+import { currentOverlayAtom, popOverlayAtom, pushOverlayAtom } from "../atoms.js"
 
 // onConfirm effects require CommandExecutor (exception to no-leaking-requirements rule)
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
@@ -27,6 +27,7 @@ export type OverlayType =
 			readonly onConfirm: AnyEffect
 	  }
 	| { readonly _tag: "diagnostics" }
+	| { readonly _tag: "projectSelector" }
 
 /**
  * Hook for managing overlay stack
@@ -86,6 +87,10 @@ export function useOverlays() {
 				push({ _tag: "diagnostics" })
 			},
 
+			showProjectSelector: () => {
+				push({ _tag: "projectSelector" })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -104,6 +109,7 @@ export function useOverlays() {
 			showingConfirm: currentOverlay?._tag === "confirm",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
+			showingProjectSelector: currentOverlay?._tag === "projectSelector",
 		}),
 		[currentOverlay],
 	)

@@ -1,7 +1,7 @@
 /**
  * HelpOverlay component - modal showing all keybindings
  */
-import { theme } from "./theme"
+import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
 

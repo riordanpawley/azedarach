@@ -10,7 +10,7 @@
  */
 
 import { Effect } from "effect"
-import type { HandlerContext } from "./types"
+import type { HandlerContext } from "./types.js"
 
 // ============================================================================
 // Session Handler Factory
@@ -44,10 +44,13 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 				return
 			}
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
 			yield* ctx.withQueue(
 				task.id,
 				"start",
-				ctx.sessionManager.start({ beadId: task.id, projectPath: process.cwd() }).pipe(
+				ctx.sessionManager.start({ beadId: task.id, projectPath }).pipe(
 					Effect.tap(() => ctx.toast.show("success", `Started session for ${task.id}`)),
 					Effect.catchAll(ctx.showErrorToast("Failed to start")),
 				),
@@ -83,13 +86,16 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			// - title gives immediate context without needing to run `bd show`
 			const initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
 
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
+
 			yield* ctx.withQueue(
 				task.id,
 				"start",
 				ctx.sessionManager
 					.start({
 						beadId: task.id,
-						projectPath: process.cwd(),
+						projectPath,
 						initialPrompt,
 					})
 					.pipe(

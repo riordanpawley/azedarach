@@ -7,10 +7,10 @@
  */
 import type { Record as R } from "effect"
 import { useMemo } from "react"
-import { Column } from "./Column"
-import { CompactView } from "./CompactView"
-import type { JumpTarget, TaskWithSession, ViewMode } from "./types"
-import { COLUMNS } from "./types"
+import { Column } from "./Column.js"
+import { CompactView } from "./CompactView.js"
+import type { JumpTarget, TaskWithSession, ViewMode } from "./types.js"
+import { COLUMNS } from "./types.js"
 
 export interface BoardProps {
 	tasks: readonly TaskWithSession[]

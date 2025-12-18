@@ -2,10 +2,26 @@
  * TaskCard component - displays a single task in the Kanban board
  */
 
-import { ElapsedTimer } from "./ElapsedTimer"
-import { getPriorityColor, theme } from "./theme"
-import type { TaskWithSession } from "./types"
-import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { taskRunningOperationAtom } from "./atoms.js"
+import { ElapsedTimer } from "./ElapsedTimer.js"
+import { getPriorityColor, theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
+import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
+
+/**
+ * Operation indicators shown when an async operation is running on the task
+ *
+ * Displayed as a spinning indicator in the header line to show the task
+ * has a background operation in progress (merge, cleanup, etc.)
+ */
+const OPERATION_INDICATORS: Record<string, string> = {
+	merge: "⏳",
+	"create-pr": "⏳",
+	cleanup: "🧹",
+	start: "⚡",
+	stop: "⏹️",
+}
 
 /** Height of each task card in terminal rows */
 export const TASK_CARD_HEIGHT = 6
@@ -55,6 +71,12 @@ export interface TaskCardProps {
 export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
 	const maxTitleWidth = getTitleMaxWidth()
+
+	// Subscribe to running operation state for this task
+	const runningOperation = useAtomValue(taskRunningOperationAtom(props.task.id))
+	const operationIndicator = runningOperation
+		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
+		: ""
 
 	// Get context health border color based on contextPercent
 	// Only applies when session is active (not idle) and has context data
@@ -121,6 +143,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
 		if (phaseIndicator) {
 			line += ` ${phaseIndicator}`
+		}
+		// Show operation indicator when an async operation is running (e.g., merge, cleanup)
+		if (operationIndicator) {
+			line += ` ${operationIndicator}`
 		}
 		// Show attachment indicator if there are attachments
 		if (props.attachmentCount && props.attachmentCount > 0) {

@@ -1,7 +1,7 @@
 /**
  * SearchInput - Bottom bar search input for filtering tasks
  */
-import { theme } from "./theme"
+import { theme } from "./theme.js"
 
 export interface SearchInputProps {
 	query: string
