@@ -86,11 +86,21 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			const projectPath = yield* ctx.getProjectPath()
 
 			// Build a clear prompt that explicitly identifies this as a beads issue.
-			// Format: "work on bead az-xxx (type): title"
-			// - "bead" prefix tells Claude this is a tracked issue
-			// - issue_type helps set expectations (bug fix vs feature vs task)
-			// - title gives immediate context without needing to run `bd show`
-			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+			// The prompt encourages Claude to:
+			// 1. Read the full bead context via `bd show`
+			// 2. Ask clarifying questions if anything is unclear
+			// 3. Update the bead with design/acceptance criteria for future sessions
+			//
+			// This ensures beads become self-sufficient over time - any Claude session
+			// can pick them up without extra research or context from the user.
+			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
+
+Before starting implementation:
+1. Run \`bd show ${task.id}\` to read the full description, design notes, and acceptance criteria
+2. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
+3. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
+
+Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
 			// Check for attached images and include their paths
 			// This allows Claude to use the Read tool to view them
@@ -149,7 +159,18 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			const projectPath = yield* ctx.getProjectPath()
 
 			// Build prompt (same as startSessionWithPrompt)
-			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}`
+			// The prompt encourages Claude to:
+			// 1. Read the full bead context via `bd show`
+			// 2. Ask clarifying questions if anything is unclear
+			// 3. Update the bead with design/acceptance criteria for future sessions
+			let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
+
+Before starting implementation:
+1. Run \`bd show ${task.id}\` to read the full description, design notes, and acceptance criteria
+2. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
+3. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
+
+Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
 			// Check for attached images and include their paths
 			const attachments = yield* ctx.imageAttachment
@@ -201,7 +222,17 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 			const escapeForShell = (s: string) =>
 				s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
-			const prompt = `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`
+			const prompt = `Let's chat about bead ${task.id}: ${task.title}
+
+Run \`bd show ${task.id}\` to see the current state.
+
+Help me with one of:
+- Clarifying requirements or scope
+- Improving the description so any Claude session could pick it up
+- Breaking down into subtasks if too large
+- Adding acceptance criteria
+
+What would you like to discuss?`
 			const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
 
 			// Use chat-<beadId> naming to distinguish from work sessions
