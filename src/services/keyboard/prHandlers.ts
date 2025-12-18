@@ -8,6 +8,7 @@
  */
 
 import { Effect } from "effect"
+import { getWorktreePath } from "../../core/paths.js"
 import { formatForToast } from "../ErrorFormatter.js"
 import type { HandlerContext } from "./types.js"
 
@@ -259,6 +260,46 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 						)
 					}),
 				)
+			}),
+
+		/**
+		 * Show diff action (Space+f)
+		 *
+		 * Opens a tmux popup showing the git diff between the bead's branch and main.
+		 * Useful for code review before merging. Uses delta or git diff with color
+		 * piped to less for navigation.
+		 * Requires an active session with a worktree.
+		 */
+		showDiff: () =>
+			Effect.gen(function* () {
+				const task = yield* ctx.getSelectedTask()
+				if (!task) return
+
+				if (task.sessionState === "idle") {
+					yield* ctx.toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
+				// Compute worktree path using centralized function
+				const worktreePath = getWorktreePath(projectPath, task.id)
+
+				// Build git diff command that works in the worktree
+				// - diff main...HEAD shows changes since branching from main
+				// - --color=always ensures ANSI colors in the popup
+				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
+				const diffCommand = `cd "${worktreePath}" && git diff main...HEAD --stat --color=always && echo "" && git diff main...HEAD --color=always | less -RS +Gg`
+
+				yield* ctx.tmux
+					.displayPopup({
+						command: diffCommand,
+						width: "95%",
+						height: "95%",
+						title: ` Diff: ${task.id} vs main (q to quit) `,
+					})
+					.pipe(Effect.catchAll(ctx.showErrorToast("Failed to show diff")))
 			}),
 	}
 }
