@@ -12,8 +12,9 @@
  * This ensures the selected task is always correct regardless of filtering/sorting.
  */
 
-import { Effect, SubscriptionRef } from "effect"
+import { Effect, Stream, SubscriptionRef } from "effect"
 import { BoardService } from "./BoardService.js"
+import { DiagnosticsService } from "./DiagnosticsService"
 import { EditorService } from "./EditorService.js"
 
 // ============================================================================
@@ -38,12 +39,16 @@ export interface Position {
 // ============================================================================
 
 export class NavigationService extends Effect.Service<NavigationService>()("NavigationService", {
-	dependencies: [BoardService.Default, EditorService.Default],
+	dependencies: [BoardService.Default, DiagnosticsService.Default, EditorService.Default],
 
-	effect: Effect.gen(function* () {
+	scoped: Effect.gen(function* () {
 		// Inject services
 		const board = yield* BoardService
+		const diagnostics = yield* DiagnosticsService
 		const editor = yield* EditorService
+
+		// Register with diagnostics - tracks service health
+		yield* diagnostics.trackService("NavigationService", "Cursor navigation and focus management")
 
 		// Primary cursor state: the ID of the focused task
 		const focusedTaskId = yield* SubscriptionRef.make<string | null>(null)
@@ -133,6 +138,21 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					}
 				}
 			})
+
+		// Watch for mode changes (especially search query changes) and ensure focus is valid
+		// When the search filter changes, the currently focused task may no longer be visible
+		// This keeps focusedTaskId in sync with the filtered view
+		yield* Effect.forkScoped(
+			Stream.runForEach(editor.mode.changes, () =>
+				ensureValidFocus().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logDebug("NavigationService ensureValidFocus failed", { cause }).pipe(
+							Effect.asVoid,
+						),
+					),
+				),
+			),
+		)
 
 		return {
 			// Expose SubscriptionRefs for atom subscription
