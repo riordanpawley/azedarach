@@ -182,6 +182,86 @@ export const createInputHandlers = (ctx: HandlerContext) => ({
 		}),
 
 	/**
+	 * Handle detail overlay keyboard input for attachment navigation
+	 *
+	 * @param key - The key that was pressed
+	 * @returns true if the key was handled
+	 *
+	 * Keys:
+	 * - j/down: Select next attachment
+	 * - k/up: Select previous attachment (or deselect if at first)
+	 * - o/return: Open selected attachment in viewer
+	 * - x/delete: Remove selected attachment
+	 * - i: Add new attachment (opens imageAttach overlay)
+	 * - escape: Close detail overlay
+	 */
+	handleDetailOverlayInput: (key: string) =>
+		Effect.gen(function* () {
+			const currentOverlay = yield* ctx.overlay.current()
+			if (currentOverlay?._tag !== "detail") {
+				return false
+			}
+
+			const taskId = currentOverlay.taskId
+
+			// Escape closes the overlay
+			if (key === "escape" || key === "return") {
+				yield* ctx.overlay.pop()
+				return true
+			}
+
+			// Navigate attachments with j/k or arrow keys
+			if (key === "j" || key === "down") {
+				yield* ctx.imageAttachment.selectNextAttachment()
+				return true
+			}
+
+			if (key === "k" || key === "up") {
+				yield* ctx.imageAttachment.selectPreviousAttachment()
+				return true
+			}
+
+			// Open selected attachment with 'o'
+			if (key === "o") {
+				yield* ctx.imageAttachment.openSelectedAttachment().pipe(
+					Effect.tap(() => ctx.toast.show("success", "Opening image...")),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return ctx.toast.show("error", msg)
+					}),
+				)
+				return true
+			}
+
+			// Remove selected attachment with 'x'
+			if (key === "x") {
+				yield* ctx.imageAttachment.removeSelectedAttachment().pipe(
+					Effect.tap((removed) => ctx.toast.show("success", `Removed: ${removed.filename}`)),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "message" in error
+								? String(error.message)
+								: String(error)
+						return ctx.toast.show("error", msg)
+					}),
+				)
+				return true
+			}
+
+			// Add new attachment with 'i'
+			if (key === "i") {
+				yield* ctx.overlay.push({ _tag: "imageAttach", taskId })
+				return true
+			}
+
+			// Don't consume other keys - let them fall through (e.g., for Space menu)
+			return false
+		}),
+
+	/**
 	 * Handle imageAttach overlay keyboard input
 	 *
 	 * @param key - The key that was pressed
