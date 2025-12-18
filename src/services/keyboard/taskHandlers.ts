@@ -99,11 +99,14 @@ export const createTaskHandlers = (ctx: HandlerContext) => ({
 			// If there's an active session, clean up the worktree first
 			// (like space+d does, but without closing the bead since we're deleting it)
 			if (task.sessionState !== "idle") {
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* ctx.getProjectPath()
+
 				yield* ctx.toast.show("info", `Cleaning up worktree for ${task.id}...`)
 				yield* ctx.prWorkflow
 					.cleanup({
 						beadId: task.id,
-						projectPath: process.cwd(),
+						projectPath,
 						closeBead: false, // Don't close - we're deleting it entirely
 					})
 					.pipe(

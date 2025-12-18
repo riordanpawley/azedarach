@@ -185,7 +185,7 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	 * Chat about task (Space+c)
 	 *
 	 * Opens a Haiku chat in a tmux popup to discuss/understand the task.
-	 * This is an ephemeral session that runs in the current directory (not a worktree).
+	 * This is an ephemeral session that runs in the project directory (not a worktree).
 	 * The popup closes automatically when Claude exits.
 	 * Uses Haiku model for faster, cheaper responses.
 	 */
@@ -193,6 +193,9 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
+
+			// Get current project path (from ProjectService or cwd fallback)
+			const projectPath = yield* ctx.getProjectPath()
 
 			// Build the Claude command with Haiku model and initial prompt
 			const { command: claudeCommand } = ctx.resolvedConfig.session
@@ -208,6 +211,7 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 					width: "90%",
 					height: "90%",
 					title: ` Chat: ${task.id} (Haiku) - Ctrl-C to exit `,
+					cwd: projectPath,
 				})
 				.pipe(Effect.catchAll(ctx.showErrorToast("Failed to start chat")))
 		}),
