@@ -23,6 +23,7 @@ import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { EditorService, type SortConfig } from "./EditorService.js"
+import { ProjectService } from "./ProjectService.js"
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -180,6 +181,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		BeadsClient.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
+		ProjectService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
@@ -187,6 +189,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const sessionManager = yield* SessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
+		const projectService = yield* ProjectService
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
@@ -204,8 +207,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		 */
 		const loadTasks = () =>
 			Effect.gen(function* () {
-				// Fetch all issues from beads
-				const issues = yield* beadsClient.list()
+				// Get current project path (falls back to cwd if no project configured)
+				const projectPath = yield* projectService.getCurrentPath()
+
+				// Fetch all issues from beads (pass project path for multi-project support)
+				const issues = yield* beadsClient.list(undefined, projectPath)
 
 				// Get active sessions to merge their state and metrics
 				const activeSessions = yield* sessionManager.listActive()

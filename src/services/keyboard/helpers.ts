@@ -14,6 +14,7 @@ import type { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
+import type { ProjectService } from "../ProjectService.js"
 import type { ToastService } from "../ToastService.js"
 
 // ============================================================================
@@ -144,3 +145,18 @@ export const createCheckBusy =
 
 			return false
 		})
+
+/**
+ * Create a function that gets the current project path
+ *
+ * Returns the selected project path from ProjectService, or falls back to
+ * process.cwd() if no project is selected. This enables multi-project support
+ * while maintaining backwards compatibility.
+ *
+ * @param projectService - ProjectService instance
+ */
+export const createGetProjectPath = (projectService: ProjectService) => (): Effect.Effect<string> =>
+	Effect.gen(function* () {
+		const path = yield* projectService.getCurrentPath()
+		return path ?? process.cwd()
+	})

@@ -8,7 +8,7 @@
 import { useAtomValue } from "@effect-atom/atom-react"
 import type { ReadonlyRecord } from "effect/Record"
 import { useMemo } from "react"
-import { taskRunningOperationAtom } from "./atoms"
+import { taskRunningOperationAtom } from "./atoms.js"
 import { columnColors, getPriorityColor, theme } from "./theme.js"
 import type { JumpTarget, TaskWithSession } from "./types.js"
 import { COLUMNS, SESSION_INDICATORS } from "./types.js"
