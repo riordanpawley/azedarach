@@ -9,6 +9,7 @@
 export {
 	boardTasksAtom,
 	boardTasksByColumnAtom,
+	drillDownFilteredTasksAtom,
 	errorAtom,
 	filteredTasksByColumnAtom,
 	refreshBoardAtom,
@@ -82,7 +83,13 @@ export {
 } from "./mode.js"
 // Navigation atoms
 export {
+	drillDownChildIdsAtom,
+	drillDownEpicAtom,
+	enterDrillDownAtom,
+	exitDrillDownAtom,
 	focusedTaskIdAtom,
+	getEpicChildrenAtom,
+	getEpicInfoAtom,
 	initializeNavigationAtom,
 	jumpToAtom,
 	jumpToTaskAtom,

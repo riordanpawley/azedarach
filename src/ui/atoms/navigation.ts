@@ -5,6 +5,7 @@
  */
 
 import { Effect } from "effect"
+import { BeadsClient } from "../../core/BeadsClient.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -86,4 +87,103 @@ export const jumpToTaskAtom = appRuntime.fn((taskId: string) =>
 		const nav = yield* NavigationService
 		yield* nav.jumpToTask(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+// ============================================================================
+// Epic Drill-Down Atoms
+// ============================================================================
+
+/**
+ * Drill-down epic atom - subscribes to NavigationService drillDownEpic
+ *
+ * When set, the board shows only children of this epic.
+ * When null, normal board view is shown.
+ *
+ * Usage: const drillDownEpic = useAtomValue(drillDownEpicAtom)
+ */
+export const drillDownEpicAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.drillDownEpic
+	}),
+)
+
+/**
+ * Drill-down child IDs atom - subscribes to NavigationService drillDownChildIds
+ *
+ * Contains the set of task IDs to show when in drill-down mode.
+ *
+ * Usage: const childIds = useAtomValue(drillDownChildIdsAtom)
+ */
+export const drillDownChildIdsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.drillDownChildIds
+	}),
+)
+
+/**
+ * Enter drill-down mode for an epic
+ *
+ * Takes an object with epicId and childIds since appRuntime.fn supports single arg.
+ * Note: The normal keybinding handles drill-down entry directly - this is for
+ * programmatic use if needed.
+ */
+export const enterDrillDownAtom = appRuntime.fn(
+	(params: { epicId: string; childIds: ReadonlySet<string> }) =>
+		Effect.gen(function* () {
+			const nav = yield* NavigationService
+			yield* nav.enterDrillDown(params.epicId, params.childIds)
+		}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Exit drill-down mode
+ *
+ * Usage: const exitDrillDown = useAtomSet(exitDrillDownAtom, { mode: "promise" })
+ *        await exitDrillDown()
+ */
+export const exitDrillDownAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		yield* nav.exitDrillDown()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Get epic children - fetches children for the current drill-down epic
+ *
+ * Usage: const epicChildren = useAtomValue(epicChildrenAtom(epicId))
+ */
+export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
+	Effect.gen(function* () {
+		const beads = yield* BeadsClient
+		return yield* beads.getEpicChildren(epicId)
+	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
+)
+
+/**
+ * Epic info atom - fetches epic details for the header
+ *
+ * Usage: const epic = useAtomValue(epicInfoAtom(epicId))
+ */
+export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
+	Effect.gen(function* () {
+		const beads = yield* BeadsClient
+		return yield* beads.show(epicId)
+	}).pipe(
+		Effect.catchAll((e) =>
+			Effect.logError(e).pipe(
+				Effect.as({
+					id: epicId,
+					title: "Unknown Epic",
+					status: "open" as const,
+					priority: 2,
+					issue_type: "epic" as const,
+					created_at: "",
+					updated_at: "",
+				}),
+			),
+		),
+	),
 )

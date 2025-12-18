@@ -4,10 +4,11 @@
  * Handles board data and filtering.
  */
 
-import { Atom } from "@effect-atom/atom"
+import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
 import { BoardService } from "../../services/BoardService.js"
 import { ViewService } from "../../services/ViewService.js"
+import { drillDownChildIdsAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -100,3 +101,40 @@ export const viewModeAtom = appRuntime.subscriptionRef(
 		return viewService.viewMode
 	}),
 )
+
+// ============================================================================
+// Drill-Down Filtered Atoms
+// ============================================================================
+
+/**
+ * Drill-down filtered tasks by column - applies epic drill-down filtering
+ *
+ * Derives from filteredTasksByColumnAtom and drillDownChildIdsAtom:
+ * - When drillDownChildIds is empty, returns all tasks (normal mode)
+ * - When drillDownChildIds has values, filters to only those tasks
+ *
+ * This is the atom App.tsx should use for rendering the board.
+ *
+ * Usage: const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+ */
+export const drillDownFilteredTasksAtom = Atom.readable((get) => {
+	// Get the child IDs for filtering
+	const childIdsResult = get(drillDownChildIdsAtom)
+	if (!Result.isSuccess(childIdsResult)) return []
+
+	const childIds = childIdsResult.value
+
+	// Get the filtered tasks
+	const tasksResult = get(filteredTasksByColumnAtom)
+	if (!Result.isSuccess(tasksResult)) return []
+
+	const tasksByColumn = tasksResult.value
+
+	// If no drill-down active (empty childIds), return all tasks
+	if (childIds.size === 0) {
+		return tasksByColumn
+	}
+
+	// Filter each column to only include children
+	return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+})
