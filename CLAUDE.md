@@ -25,6 +25,19 @@ Purpose: Claude Code entry point for Azedarach development
 
 6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
 
+7. **Effect Service Patterns**:
+   - NEVER create global scope Effect-returning functions with service requirements (antipattern)
+   - NEVER use `Effect.provide` or `Effect.provideService` inside service methods - that's wrong
+   - Services grab dependencies at layer construction (`yield* SomeService`), then use them directly
+   - If you need `Path.Path` operations, grab `pathService` at layer construction, then call `pathService.resolve()`, `pathService.join()`, etc. directly - don't create wrappers
+   - Don't wrap one-liners in helper functions - just use the method directly
+
+8. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
+   - `node:path` → Use `Path.Path` service methods (`pathService.resolve()`, `.join()`, etc.)
+   - `node:crypto` → Use `crypto.randomUUID()` (Web Crypto API, works in Bun/Node)
+   - `node:child_process` → Use `@effect/platform` `Command`
+   - `node:os` → Use `process.env.HOME` for homedir
+
 ## Quick Commands
 
 ```bash
