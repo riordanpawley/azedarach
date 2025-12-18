@@ -226,11 +226,31 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "View logs in tmux popup",
 		action: Effect.gen(function* () {
 			const projectPath = yield* bc.helpers.getProjectPath()
+			const logFile = `${projectPath}/az.log`
+			// Shell wrapper providing menu with view/edit/quit options
+			const wrapperScript = `
+while true; do
+  clear
+  echo ""
+  echo "  az.log"
+  echo ""
+  echo "  [v] View logs (less +F)"
+  echo "  [e] Edit in \\$EDITOR"
+  echo "  [q] Quit"
+  echo ""
+  read -rsn1 key
+  case "$key" in
+    v|V|"") less +F "${logFile}" ;;
+    e|E) \${EDITOR:-\${VISUAL:-vim}} "${logFile}"; exit ;;
+    q|Q) exit ;;
+  esac
+done
+`
 			yield* bc.tmux.displayPopup({
-				command: `less +F ${projectPath}/az.log`,
+				command: `bash -c '${wrapperScript.replace(/'/g, "'\\''")}'`,
 				width: "90%",
 				height: "90%",
-				title: " az.log (Ctrl-C to scroll, q to quit) ",
+				title: " az.log ",
 				cwd: projectPath,
 			})
 		}).pipe(Effect.catchAll(Effect.logError)),

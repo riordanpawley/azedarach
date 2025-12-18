@@ -67,10 +67,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
 						Effect.tap(() => board.refresh()),
 						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
-						Effect.catchAll((error: unknown) => {
-							const formatted = formatForToast(error)
-							return toast.show("error", `Merge failed: ${formatted}`)
-						}),
+						Effect.catchAll(helpers.showErrorToast("Merge failed")),
 					)
 				}),
 			)
