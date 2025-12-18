@@ -236,10 +236,11 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 *
 			 * Spawns a Haiku chat in a dedicated tmux session to discuss/understand the task.
 			 * Unlike startSession, this runs in the current project directory (not a worktree).
-			 * Session persists in the background, allowing you to continue using Azedarach.
+			 * Session is created in the background - user remains in Azedarach TUI.
 			 * Uses Haiku model for faster, cheaper responses.
 			 *
 			 * The session name is `chat-<beadId>` to distinguish from work sessions.
+			 * User can attach to the chat session via Space+a (attach external).
 			 */
 			const chatAboutTask = () =>
 				Effect.gen(function* () {
@@ -275,13 +276,13 @@ What would you like to discuss?`
 					const hasSession = yield* tmux.hasSession(chatSessionName)
 
 					if (hasSession) {
-						// Session exists - just switch to it
-						yield* tmux.switchClient(chatSessionName).pipe(
-							Effect.tap(() => toast.show("info", "Attached to existing chat session")),
-							Effect.catchAll(helpers.showErrorToast("Failed to attach to chat session")),
+						// Session already exists - inform user they can attach
+						yield* toast.show(
+							"info",
+							`Chat session already exists for ${task.id} - press Space+a to attach`,
 						)
 					} else {
-						// Create new chat session
+						// Create new chat session in background
 						// Use interactive shell so we can resume if Claude exits
 						yield* tmux
 							.newSession(chatSessionName, {
@@ -290,9 +291,12 @@ What would you like to discuss?`
 								prefix: tmuxPrefix,
 							})
 							.pipe(
-								Effect.tap(() => toast.show("success", `Chat session started for ${task.id}`)),
-								// Switch to the new session immediately
-								Effect.tap(() => tmux.switchClient(chatSessionName)),
+								Effect.tap(() =>
+									toast.show(
+										"success",
+										`Chat session started for ${task.id} - press Space+a to attach`,
+									),
+								),
 								Effect.catchAll(helpers.showErrorToast("Failed to start chat session")),
 							)
 					}
