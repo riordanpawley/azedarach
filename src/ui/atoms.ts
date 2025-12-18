@@ -1322,19 +1322,8 @@ export const pushOverlayAtom = appRuntime.fn(
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
+			// OverlayService.push() now handles attachment loading for detail/imageAttach overlays
 			yield* overlayService.push(overlay)
-
-			// Load attachments when opening detail overlay
-			if (overlay._tag === "detail") {
-				const imageService = yield* ImageAttachmentService
-				yield* imageService.loadForTask(overlay.taskId)
-			}
-
-			// Initialize overlay state when opening imageAttach overlay
-			if (overlay._tag === "imageAttach") {
-				const imageService = yield* ImageAttachmentService
-				yield* imageService.openOverlay(overlay.taskId)
-			}
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -1347,19 +1336,8 @@ export const pushOverlayAtom = appRuntime.fn(
 export const popOverlayAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const overlayService = yield* OverlayService
-		const popped = yield* overlayService.pop()
-
-		// Clear attachments when closing detail overlay
-		if (popped?._tag === "detail") {
-			const imageService = yield* ImageAttachmentService
-			yield* imageService.clearCurrent()
-		}
-
-		// Close overlay state when closing imageAttach overlay
-		if (popped?._tag === "imageAttach") {
-			const imageService = yield* ImageAttachmentService
-			yield* imageService.closeOverlay()
-		}
+		// OverlayService.pop() now handles clearing attachments for detail/imageAttach overlays
+		yield* overlayService.pop()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
