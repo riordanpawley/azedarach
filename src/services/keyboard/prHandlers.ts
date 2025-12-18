@@ -129,22 +129,32 @@ export const createPRHandlers = (ctx: HandlerContext) => {
 				const projectPath = yield* ctx.getProjectPath()
 
 				// Check for potential merge conflicts before proceeding
-				const conflictCheck = yield* ctx.prWorkflow
+				// If check fails, we must NOT proceed - failing to check doesn't mean it's safe
+				const conflictCheckResult = yield* ctx.prWorkflow
 					.checkMergeConflicts({
 						beadId: task.id,
 						projectPath,
 					})
 					.pipe(
-						Effect.catchAll(() =>
-							// If check fails, assume no conflicts and proceed
+						Effect.map((check) => ({ _tag: "success" as const, check })),
+						Effect.catchAll((error) =>
 							Effect.succeed({
-								hasConflictRisk: false,
-								conflictingFiles: [] as readonly string[],
-								branchChangedFiles: 0,
-								mainChangedFiles: 0,
+								_tag: "error" as const,
+								message: formatForToast(error),
 							}),
 						),
 					)
+
+				// If conflict check failed, block the merge
+				if (conflictCheckResult._tag === "error") {
+					yield* ctx.toast.show(
+						"error",
+						`Cannot verify merge safety: ${conflictCheckResult.message}. Aborting.`,
+					)
+					return
+				}
+
+				const conflictCheck = conflictCheckResult.check
 
 				if (conflictCheck.hasConflictRisk) {
 					// Offer to ask Claude to resolve the conflicts
