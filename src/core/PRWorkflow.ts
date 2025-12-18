@@ -146,6 +146,16 @@ export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
 	readonly message: string
 }> {}
 
+/**
+ * Error when type-check fails after merge
+ * This indicates the merged code has type errors that need fixing
+ */
+export class TypeCheckError extends Data.TaggedError("TypeCheckError")<{
+	readonly beadId: string
+	readonly message: string
+	readonly output: string
+}> {}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -264,6 +274,7 @@ export interface PRWorkflowService {
 		void,
 		| PRError
 		| MergeConflictError
+		| TypeCheckError
 		| GitError
 		| NotAGitRepoError
 		| SessionError
@@ -350,6 +361,42 @@ export interface PRWorkflowService {
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
+
+/**
+ * Run type-check command and return success/failure with output
+ */
+const runTypeCheck = (
+	cwd: string,
+): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const command = Command.make("bun", "run", "type-check").pipe(Command.workingDirectory(cwd))
+		const result = yield* Effect.all({
+			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
+			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
+		})
+		return {
+			success: result.exitCode === 0,
+			output: result.output,
+		}
+	})
+
+/**
+ * Run fix command (biome check --write)
+ */
+const runFix = (
+	cwd: string,
+): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const command = Command.make("bun", "run", "fix").pipe(Command.workingDirectory(cwd))
+		const result = yield* Effect.all({
+			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
+			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
+		})
+		return {
+			success: result.exitCode === 0,
+			output: result.output,
+		}
+	})
 
 /**
  * Execute a git command and return stdout
@@ -849,6 +896,91 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
 						}),
 					)
+
+					// 7.5. Run type-check and fix to ensure merged code is valid
+					// This catches type errors introduced by the merge before pushing
+					yield* Effect.gen(function* () {
+						yield* Effect.log("Running type-check after merge...")
+
+						// First type-check
+						const firstCheck = yield* runTypeCheck(projectPath)
+						if (firstCheck.success) {
+							yield* Effect.log("Type-check passed")
+							return
+						}
+
+						yield* Effect.log("Type-check failed, running fix...")
+
+						// Run fix to auto-fix biome/formatting issues
+						yield* runFix(projectPath)
+
+						// Re-run type-check
+						const secondCheck = yield* runTypeCheck(projectPath)
+						if (secondCheck.success) {
+							yield* Effect.log("Type-check passed after fix")
+
+							// Commit the fixes
+							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* runGit(
+								["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+								projectPath,
+							).pipe(Effect.catchAll(() => Effect.void))
+
+							return
+						}
+
+						// Still failing - try fix one more time (some fixes cascade)
+						yield* Effect.log("Type-check still failing, running fix again...")
+						yield* runFix(projectPath)
+
+						const thirdCheck = yield* runTypeCheck(projectPath)
+						if (thirdCheck.success) {
+							yield* Effect.log("Type-check passed after second fix")
+
+							// Commit the fixes
+							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* runGit(
+								["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+								projectPath,
+							).pipe(Effect.catchAll(() => Effect.void))
+
+							return
+						}
+
+						// Type-check still failing - start a Claude session to fix
+						yield* Effect.log("Type-check still failing after auto-fix, starting Claude session...")
+
+						// Commit any partial fixes so far
+						yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+						yield* runGit(
+							["commit", "-m", `wip: partial fix after merging ${beadId}`],
+							projectPath,
+						).pipe(Effect.catchAll(() => Effect.void))
+
+						// Start Claude session to fix type errors
+						// We start it in the projectPath (main branch) since the worktree is still around
+						const fixPrompt = `Type-check is failing after merge. Please fix the type errors:\n\n${thirdCheck.output}\n\nRun \`bun run type-check\` after fixing to verify.`
+
+						yield* sessionManager
+							.start({
+								beadId,
+								projectPath,
+								initialPrompt: fixPrompt,
+							})
+							.pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`Failed to start Claude session for type fixes: ${e}`),
+								),
+							)
+
+						return yield* Effect.fail(
+							new TypeCheckError({
+								beadId,
+								message: `Type-check failed after merge. Claude session started to fix. Retry merge after fixing.`,
+								output: thirdCheck.output,
+							}),
+						)
+					})
 
 					// 8. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
