@@ -184,57 +184,58 @@ export const createSessionHandlers = (ctx: HandlerContext) => ({
 	/**
 	 * Chat about task (Space+c)
 	 *
-	 * Spawns a Haiku chat in a dedicated tmux session to discuss/understand the task.
-	 * Unlike startSession, this runs in the current project directory (not a worktree).
-	 * Session persists in the background, allowing you to continue using Azedarach.
-	 * Uses Haiku model for faster, cheaper responses.
-	 *
-	 * The session name is `chat-<beadId>` to distinguish from work sessions.
+	 * Spawns a Haiku chat session with worktree (like Space+S but with Haiku model).
+	 * Creates worktree so you can seamlessly transition from discussion to implementation.
+	 * Uses Haiku model for faster, cheaper responses during exploration/discussion.
 	 */
 	chatAboutTask: () =>
 		Effect.gen(function* () {
 			const task = yield* ctx.getSelectedTask()
 			if (!task) return
 
-			// Get current project path (from ProjectService or cwd fallback)
+			// Check if task has an operation in progress
+			const isBusy = yield* ctx.checkBusy(task.id)
+			if (isBusy) return
+
+			// If task already has a session, just attach to it
+			if (task.sessionState !== "idle") {
+				yield* ctx.attachment.attachExternal(task.id).pipe(
+					Effect.tap(() => ctx.toast.show("info", "Attached to existing session")),
+					Effect.catchAll(ctx.showErrorToast("Failed to attach")),
+				)
+				return
+			}
+
+			// Get current project path
 			const projectPath = yield* ctx.getProjectPath()
 
-			// Build the Claude command with Haiku model and initial prompt
-			const { command: claudeCommand, shell, tmuxPrefix } = ctx.resolvedConfig.session
-			const escapeForShell = (s: string) =>
-				s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
+			// Build chat-focused prompt (different from work prompt)
+			// Includes reminder to switch to Sonnet when ready to implement
+			const initialPrompt = `Let's chat about ${task.id} (${task.issue_type}): ${task.title}
 
-			const prompt = `Let's chat about ${task.id}. Help me understand this task better or improve its description/context.`
-			const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
+		Help me understand this task better, explore approaches, or improve its description/context.
 
-			// Use chat-<beadId> naming to distinguish from work sessions
-			const chatSessionName = `chat-${task.id}`
+		Note: You're running with Haiku for fast, cheap discussion. When planning is done and you're ready to implement, use /model sonnet to switch models.`
 
-			// Check if chat session already exists
-			const hasSession = yield* ctx.tmux.hasSession(chatSessionName)
-
-			if (hasSession) {
-				// Session exists - just switch to it
-				yield* ctx.tmux.switchClient(chatSessionName).pipe(
-					Effect.tap(() => ctx.toast.show("info", "Attached to existing chat session")),
-					Effect.catchAll(ctx.showErrorToast("Failed to attach to chat session")),
-				)
-			} else {
-				// Create new chat session
-				// Use interactive shell so we can resume if Claude exits
-				yield* ctx.tmux
-					.newSession(chatSessionName, {
-						cwd: projectPath,
-						command: `${shell} -i -c '${fullCommand}; exec ${shell}'`,
-						prefix: tmuxPrefix,
+			// Use regular start() with Haiku model - creates worktree like Space+S
+			// This allows seamless transition from chat to implementation
+			yield* ctx.withQueue(
+				task.id,
+				"start",
+				ctx.sessionManager
+					.start({
+						beadId: task.id,
+						projectPath,
+						initialPrompt,
+						model: "haiku", // Use Haiku for faster/cheaper discussion
 					})
 					.pipe(
-						Effect.tap(() => ctx.toast.show("success", `Chat session started for ${task.id}`)),
-						// Switch to the new session immediately
-						Effect.tap(() => ctx.tmux.switchClient(chatSessionName)),
+						Effect.tap(() =>
+							ctx.toast.show("success", `Chat session started for ${task.id} (Haiku)`),
+						),
 						Effect.catchAll(ctx.showErrorToast("Failed to start chat session")),
-					)
-			}
+					),
+			)
 		}),
 
 	/**
