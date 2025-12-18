@@ -8,6 +8,7 @@
 import {
 	Array as Arr,
 	Cause,
+	DateTime,
 	Effect,
 	HashMap,
 	Order,
@@ -236,9 +237,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					return {
 						...issue,
-						sessionState: session?.state ?? ("idle" as const),
+						sessionState: session?.state ?? "idle",
 						// Session metrics from SessionManager
-						sessionStartedAt: session?.startedAt?.toISOString(),
+						sessionStartedAt: session?.startedAt
+							? DateTime.formatIso(session.startedAt)
+							: undefined,
 						// PTY-extracted metrics from PTYMonitor
 						estimatedTokens: metrics.estimatedTokens,
 						recentOutput: metrics.recentOutput,
