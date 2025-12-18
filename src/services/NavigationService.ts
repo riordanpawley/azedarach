@@ -68,13 +68,27 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 		/**
 		 * Get the filtered/sorted tasks by column using current search/sort config
+		 *
+		 * When in drill-down mode, also filters to only the epic's children.
+		 * This ensures navigation operates on the same view that the user sees.
 		 */
 		const getFilteredTasksByColumn = () =>
 			Effect.gen(function* () {
 				const mode = yield* editor.getMode()
 				const sortConfig = yield* editor.getSortConfig()
 				const searchQuery = mode._tag === "search" ? mode.query : ""
-				return yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+
+				// Get base filtered tasks
+				const tasksByColumn = yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+
+				// Apply drill-down filter if active
+				const childIds = yield* SubscriptionRef.get(drillDownChildIds)
+				if (childIds.size === 0) {
+					return tasksByColumn
+				}
+
+				// Filter each column to only include children
+				return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
 			})
 
 		/**
