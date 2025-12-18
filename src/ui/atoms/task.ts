@@ -8,12 +8,12 @@ import { Command } from "@effect/platform"
 import { Effect, Schema } from "effect"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { BeadEditorService } from "../../core/EditorService.js"
+import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { ToastService } from "../../services/ToastService.js"
-import { BoardService } from "../../services/BoardService.js"
 import type { TaskWithSession } from "../types.js"
 import { appRuntime } from "./runtime.js"
 
@@ -194,8 +194,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 		// Parse JSON
 		const jsonParsed = yield* Effect.try({
 			try: () => JSON.parse(cleanOutput),
-			catch: (e) =>
-				new Error(`Failed to parse Claude output: ${e}\nRaw output: ${rawOutput}`),
+			catch: (e) => new Error(`Failed to parse Claude output: ${e}\nRaw output: ${rawOutput}`),
 		})
 
 		// Validate with Schema

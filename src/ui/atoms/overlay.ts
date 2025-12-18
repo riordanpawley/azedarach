@@ -4,7 +4,7 @@
  * Handles overlay stack management and toast notifications.
  */
 
-import { type CommandExecutor } from "@effect/platform"
+import type { CommandExecutor } from "@effect/platform"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
 import { OverlayService } from "../../services/OverlayService.js"
