@@ -398,6 +398,7 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -434,6 +435,29 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 - You want to resolve conflicts manually instead
 
 **Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
+
+#### Show Diff (Space+f)
+
+Opens a tmux popup showing all changes between the bead's branch and main. Perfect for code review before merging.
+
+**What it shows:**
+1. First, a summary of changed files (--stat output)
+2. Then, the full colored diff
+
+**Navigation (in less):**
+- `j/k` or arrow keys: Scroll line by line
+- `Space` / `b`: Page down / up
+- `g` / `G`: Go to start / end
+- `/pattern`: Search forward
+- `n` / `N`: Next / previous search result
+- `q`: Quit and return to az
+
+**Use cases:**
+- Review Claude's changes before merging
+- Check what files were modified
+- Verify the scope of changes matches the task
+
+**Note:** The diff shows `main...HEAD` which includes all commits on the branch since it diverged from main. This ensures you see the complete set of changes.
 
 ### Movement Actions
 

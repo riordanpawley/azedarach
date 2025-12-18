@@ -388,6 +388,14 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		),
 	},
 	{
+		key: "f",
+		mode: "action",
+		description: "Show diff vs main",
+		action: Effect.suspend(() =>
+			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
+		),
+	},
+	{
 		key: "S-d",
 		mode: "action",
 		description: "Delete bead",
