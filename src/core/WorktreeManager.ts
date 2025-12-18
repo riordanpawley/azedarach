@@ -223,6 +223,23 @@ const getCurrentBranch = (
 	})
 
 /**
+ * Check if a branch exists in the repository
+ */
+const branchExists = (
+	branchName: string,
+	projectPath: string,
+): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const command = Command.make("git", "rev-parse", "--verify", `refs/heads/${branchName}`).pipe(
+			Command.workingDirectory(projectPath),
+		)
+		return yield* Command.exitCode(command).pipe(
+			Effect.map((code) => code === 0),
+			Effect.catchAll(() => Effect.succeed(false)),
+		)
+	})
+
+/**
  * Parse git worktree list --porcelain output
  *
  * Format:
@@ -423,15 +440,28 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					if (existingWorktree) {
 						// Idempotent: worktree already exists
+						yield* Effect.logInfo(
+							`Worktree for ${beadId} already exists at ${existingWorktree.path}, reusing it`,
+						)
 						return existingWorktree
 					}
 
-					// Determine base branch
-					const base = baseBranch || (yield* getCurrentBranch(projectPath))
+					// Check if the branch already exists (e.g., from a previous session)
+					const hasBranch = yield* branchExists(beadId, projectPath)
 
-					// Create new branch and worktree
-					// git worktree add -b <branch-name> <path> <start-point>
-					yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
+					if (hasBranch) {
+						// Branch exists - create worktree using existing branch
+						// git worktree add <path> <branch>
+						yield* Effect.logInfo(
+							`Branch ${beadId} already exists, creating worktree using existing branch`,
+						)
+						yield* runGit(["worktree", "add", worktreePath, beadId], projectPath)
+					} else {
+						// Create new branch and worktree
+						// git worktree add -b <branch-name> <path> <start-point>
+						const base = baseBranch || (yield* getCurrentBranch(projectPath))
+						yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
+					}
 
 					// Copy Claude's local settings and inject hook configuration
 					yield* copyClaudeLocalSettings(projectPath, worktreePath, beadId)
@@ -454,7 +484,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						return yield* Effect.fail(
 							new GitError({
 								message: `Worktree created but not found in list. Looking for: ${beadId}, found: [${foundBeadIds.join(", ")}]`,
-								command: `git worktree add -b ${beadId} ${worktreePath} ${base}`,
+								command: `git worktree add ${worktreePath} ${beadId}`,
 							}),
 						)
 					}
