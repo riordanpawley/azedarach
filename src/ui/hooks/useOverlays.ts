@@ -21,6 +21,7 @@ export type OverlayType =
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
+	| { readonly _tag: "imagePreview"; readonly taskId: string }
 	| {
 			readonly _tag: "confirm"
 			readonly message: string
@@ -83,6 +84,10 @@ export function useOverlays() {
 				push({ _tag: "imageAttach", taskId })
 			},
 
+			showImagePreview: (taskId: string) => {
+				push({ _tag: "imagePreview", taskId })
+			},
+
 			showDiagnostics: () => {
 				push({ _tag: "diagnostics" })
 			},
@@ -108,6 +113,7 @@ export function useOverlays() {
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
+			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
 		}),
