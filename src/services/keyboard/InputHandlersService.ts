@@ -18,7 +18,7 @@
 import { Effect, Record, SubscriptionRef } from "effect"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { VCService } from "../../core/VCService.js"
-import { COLUMNS, generateJumpLabels } from "../../ui/types.js"
+import { generateJumpLabels } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService, type JumpTarget } from "../EditorService.js"
 import { NavigationService } from "../NavigationService.js"
@@ -576,10 +576,28 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 *
 			 * Generates 2-character labels (aa, ab, ac, ...) for each task on the board.
 			 * Used by the goto-jump mode for quick navigation.
+			 *
+			 * IMPORTANT: Must use the same filtered/sorted data that the board renders,
+			 * otherwise labels won't match visual positions.
 			 */
 			const computeJumpLabels = (): Effect.Effect<Record.ReadonlyRecord<string, JumpTarget>> =>
 				Effect.gen(function* () {
-					const tasksByColumn = yield* board.getTasksByColumn()
+					// Get current search query and sort config to match board rendering
+					const mode = yield* editor.getMode()
+					const sortConfig = yield* editor.getSortConfig()
+					const searchQuery = mode._tag === "search" ? mode.query : ""
+
+					// Get filtered and sorted tasks (matching what the board displays)
+					const tasksByColumn = yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+
+					// Apply drill-down filtering (matching drillDownFilteredTasksAtom)
+					const drillDownChildIds = yield* SubscriptionRef.get(nav.drillDownChildIds)
+					const filteredTasksByColumn =
+						drillDownChildIds.size === 0
+							? tasksByColumn
+							: tasksByColumn.map((column) =>
+									column.filter((task) => drillDownChildIds.has(task.id)),
+								)
 
 					// Flatten tasks with position info
 					const allTasks: Array<{
@@ -588,8 +606,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						taskIndex: number
 					}> = []
 
-					COLUMNS.forEach((col, colIdx) => {
-						const tasks = tasksByColumn[col.status] ?? []
+					filteredTasksByColumn.forEach((tasks, colIdx) => {
 						tasks.forEach((task, taskIdx) => {
 							allTasks.push({
 								taskId: task.id,
