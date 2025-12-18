@@ -20,7 +20,8 @@ export function getSessionName(beadId: string): string {
  * @returns Absolute path to the worktree directory
  */
 export function getWorktreePath(projectPath: string, beadId: string): string {
-	const projectName = projectPath.split("/").pop() || "project"
-	const parentDir = projectPath.split("/").slice(0, -1).join("/")
+	const lastSlash = projectPath.lastIndexOf("/")
+	const parentDir = projectPath.slice(0, lastSlash)
+	const projectName = projectPath.slice(lastSlash + 1)
 	return `${parentDir}/${projectName}-${beadId}`
 }
