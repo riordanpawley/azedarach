@@ -7,8 +7,8 @@
  */
 
 import { Effect } from "effect"
-import { NavigationService } from "./NavigationService"
-import { ToastService } from "./ToastService"
+import { NavigationService } from "./NavigationService.js"
+import { ToastService } from "./ToastService.js"
 
 // ============================================================================
 // Service Definition
