@@ -187,7 +187,7 @@ export interface HookReceiverService {
  * ```
  */
 export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
-	effect: Effect.gen(function* () {
+	scoped: Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
 
 		// Track processed files to avoid duplicates
@@ -242,6 +242,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 				yield* fs.remove(fullPath).pipe(Effect.catchAll(() => Effect.void))
 
 				// Clean up processed set (remove after 1 minute to prevent memory leak)
+				// Use forkScoped so the cleanup fiber survives the parent effect
 				yield* Effect.sleep("1 minute").pipe(
 					Effect.flatMap(() =>
 						Ref.update(processedRef, (s) => {
@@ -250,7 +251,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 							return next
 						}),
 					),
-					Effect.fork,
+					Effect.forkScoped,
 				)
 
 				return event

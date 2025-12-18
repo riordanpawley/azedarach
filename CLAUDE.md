@@ -323,6 +323,41 @@ yield* Effect.scheduleForked(Schedule.spaced("500 millis"))(pollingEffect)
 - `Effect.scheduleForked` - Scheduled polling with proper scoping (preferred)
 - `Effect.forkDaemon` - Background task that survives parent interruption
 
+**Service definition: `scoped:` vs `effect:`**
+
+Use `scoped:` when the service spawns fibers that need to outlive the constructor:
+
+```typescript
+// ✅ GOOD: Service spawns long-running fibers
+export class PollingService extends Effect.Service<PollingService>()("PollingService", {
+  scoped: Effect.gen(function* () {  // scoped: provides scope for forkScoped
+    yield* pollEffect.pipe(Effect.forkScoped)  // Lives for service lifetime
+    return { /* methods */ }
+  }),
+}) {}
+
+// ✅ GOOD: Service only has state and methods, no background fibers
+export class StateService extends Effect.Service<StateService>()("StateService", {
+  effect: Effect.gen(function* () {  // effect: no scope needed
+    const state = yield* SubscriptionRef.make(initial)
+    return { state, update: (x) => SubscriptionRef.set(state, x) }
+  }),
+}) {}
+
+// ❌ BAD: Uses effect: but spawns fibers with forkScoped - no scope available!
+export class BrokenService extends Effect.Service<BrokenService>()("BrokenService", {
+  effect: Effect.gen(function* () {
+    yield* cleanup.pipe(Effect.forkScoped)  // ❌ No scope! Will fail or be immediately interrupted
+    return { /* methods */ }
+  }),
+}) {}
+```
+
+**Decision checklist:**
+- Service spawns `Effect.forkScoped` or `Effect.scheduleForked` → use `scoped:`
+- Service methods spawn fibers that must outlive the method call → use `scoped:`
+- Service only has state (SubscriptionRef/Ref) and synchronous methods → use `effect:`
+
 ### Mutation Flow
 
 ```
