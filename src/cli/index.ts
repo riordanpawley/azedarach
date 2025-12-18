@@ -737,6 +737,39 @@ const projectCommand = Command.make("project", {}, () =>
 	Command.withDescription("Manage multiple projects"),
 )
 
+// ============================================================================
+// Top-level Shortcut Commands
+// ============================================================================
+
+/**
+ * az add <path> - Top-level shortcut for az project add
+ *
+ * This allows users to run `az add /path/to/project` instead of
+ * `az project add /path/to/project` for convenience.
+ */
+const addCommand = Command.make(
+	"add",
+	{
+		path: projectPathArg,
+		name: projectNameOption,
+		verbose: verboseOption,
+	},
+	projectAddHandler,
+).pipe(Command.withDescription("Register a new project (shortcut for 'az project add')"))
+
+/**
+ * az list - Top-level shortcut for az project list
+ *
+ * This allows users to run `az list` instead of `az project list` for convenience.
+ */
+const listCommand = Command.make(
+	"list",
+	{
+		verbose: verboseOption,
+	},
+	projectListHandler,
+).pipe(Command.withDescription("Show all registered projects (shortcut for 'az project list')"))
+
 /**
  * Main CLI - combines all commands
  *
@@ -762,11 +795,16 @@ const az = Command.make(
  */
 const cli = az.pipe(
 	Command.withSubcommands([
+		// Top-level shortcuts (most commonly used)
+		addCommand,
+		listCommand,
+		// Session management
 		startCommand,
 		attachCommand,
 		pauseCommand,
 		statusCommand,
 		syncCommand,
+		// Internal/advanced commands
 		notifyCommand,
 		hooksCommand,
 		projectCommand,

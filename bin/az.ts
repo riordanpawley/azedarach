@@ -3,7 +3,7 @@
 /**
  * Azedarach CLI Entry Point
  *
- * Auto-wraps in tmux if running outside tmux, then
+ * Auto-wraps in tmux ONLY for the bare TUI command (no subcommands), then
  * parses command-line arguments and executes the appropriate command.
  *
  * Environment variables:
@@ -13,9 +13,43 @@
 
 import { execInTmux, shouldWrapInTmux } from "../src/lib/tmux-wrap.js"
 
+/**
+ * Known subcommands that should NOT trigger tmux wrapping.
+ * These commands run in the current terminal and don't need the TUI.
+ */
+const CLI_SUBCOMMANDS = new Set([
+	"add",
+	"list",
+	"start",
+	"attach",
+	"pause",
+	"status",
+	"sync",
+	"notify",
+	"hooks",
+	"project",
+	"--help",
+	"-h",
+	"--version",
+])
+
+/**
+ * Check if this invocation is a CLI subcommand (not the TUI).
+ * Returns true if we should skip tmux wrapping.
+ */
+function isCliSubcommand(): boolean {
+	// argv[0] = bun, argv[1] = script path, argv[2] = first user arg
+	const firstArg = process.argv[2]
+	if (!firstArg) return false
+
+	// Check if it's a known subcommand
+	return CLI_SUBCOMMANDS.has(firstArg)
+}
+
 // CRITICAL: Check tmux BEFORE any Effect initialization
 // This must happen early to avoid loading heavy modules we'll discard when exec'ing
-if (shouldWrapInTmux()) {
+// Only wrap in tmux for the bare TUI command, NOT for CLI subcommands
+if (shouldWrapInTmux() && !isCliSubcommand()) {
 	// This never returns - it execs into tmux and exits with that process's code
 	await execInTmux(process.argv)
 } else {
