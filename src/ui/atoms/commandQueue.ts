@@ -7,8 +7,8 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap } from "effect"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
-import { appRuntime } from "./runtime.js"
 import { focusedTaskIdAtom } from "./navigation.js"
+import { appRuntime } from "./runtime.js"
 
 // ============================================================================
 // Command Queue Atoms
