@@ -500,10 +500,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							message: `initCommands failed for ${beadId}`,
 							details: `Failed commands:\n${failedInitCommands.map((c) => `  - ${c}`).join("\n")}`,
 						})
-						yield* toast.show(
-							"warning",
-							`initCommands failed for ${beadId}\nPress Shift+D for details`,
-						)
+						yield* toast.show("warning", `initCommands failed for ${beadId}\nPress d for details`)
 					}
 
 					// Generate tmux session name
