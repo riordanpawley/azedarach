@@ -217,17 +217,23 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
-			 * Handle detail overlay keyboard input for attachment navigation
+			 * Handle detail overlay keyboard input for attachment navigation and scrolling
 			 *
 			 * @param key - The key that was pressed
 			 * @returns true if the key was handled
 			 *
-			 * Keys:
+			 * Scroll keys (always scroll, even with attachments):
+			 * - C-u: Scroll up half page
+			 * - C-d: Scroll down half page
+			 *
+			 * Attachment navigation (when attachments exist):
 			 * - j/down: Select next attachment
 			 * - k/up: Select previous attachment (or deselect if at first)
 			 * - o/return: Open selected attachment in viewer
 			 * - x/delete: Remove selected attachment
 			 * - i: Add new attachment (opens imageAttach overlay)
+			 *
+			 * General:
 			 * - escape: Close detail overlay
 			 */
 			const handleDetailOverlayInput = (key: string) =>
@@ -242,6 +248,16 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					// Escape closes the overlay
 					if (key === "escape" || key === "return") {
 						yield* overlay.pop()
+						return true
+					}
+
+					// Scroll commands - always work, even with attachments
+					if (key === "C-u") {
+						yield* overlay.scroll("halfPage", -1) // up
+						return true
+					}
+					if (key === "C-d") {
+						yield* overlay.scroll("halfPage", 1) // down
 						return true
 					}
 
