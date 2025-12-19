@@ -359,7 +359,7 @@ const ERROR_FORMATTERS: Record<
 	// VC Errors
 	// ─────────────────────────────────────────────────────────────────────────
 	VCNotInstalledError: () => ({
-		message: "VC (Visual Claude) not installed",
+		message: "VC (vibe coder) not installed",
 		suggestion: "Try: Install VC or disable the VC feature in settings",
 		category: "system",
 	}),

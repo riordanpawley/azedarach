@@ -12,11 +12,11 @@ import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
+import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { HookReceiver } from "../../core/HookReceiver.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
@@ -55,7 +55,7 @@ const appLayer = Layer.mergeAll(
 	OverlayService.Default,
 	ToastService.Default,
 	NavigationService.Default,
-	SessionManager.Default,
+	ClaudeSessionManager.Default,
 	BeadsClient.Default,
 	AppConfig.Default,
 	VCService.Default,
