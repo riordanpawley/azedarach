@@ -5,7 +5,7 @@
  */
 
 import { Atom, Result } from "@effect-atom/atom"
-import { Effect } from "effect"
+import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
 import { BoardService } from "../../services/BoardService.js"
 import { ViewService } from "../../services/ViewService.js"
 import { drillDownChildIdsAtom } from "./navigation.js"
@@ -61,17 +61,26 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 )
 
 /**
- * Board loading state atom - subscribes to BoardService isLoading changes
+ * Board loading state atom - debounced to prevent flashing during quick refreshes
  *
- * True when the board is refreshing data (e.g., after project switch).
- * Use this to show loading indicators in the UI.
+ * Only shows "Loading..." if refresh takes longer than 500ms. This prevents
+ * the loading indicator from flashing every 2 seconds during background polling.
+ *
+ * Uses Subscribable.make to wrap the SubscriptionRef with a debounced changes stream.
  *
  * Usage: const isLoading = useAtomValue(boardIsLoadingAtom)
  */
-export const boardIsLoadingAtom = appRuntime.subscriptionRef(
+export const boardIsLoadingAtom = appRuntime.subscribable(
 	Effect.gen(function* () {
 		const board = yield* BoardService
-		return board.isLoading
+		const ref = board.isLoading
+
+		// Create a Subscribable with debounced changes stream
+		// Only emit after 500ms of stability - prevents flashing on quick polls
+		return Subscribable.make({
+			get: SubscriptionRef.get(ref),
+			changes: ref.changes.pipe(Stream.debounce("500 millis")),
+		})
 	}),
 )
 
