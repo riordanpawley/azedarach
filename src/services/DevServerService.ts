@@ -9,6 +9,7 @@
  * - Multi-port injection (PORT, VITE_PORT, VITE_SERVER_PORT, etc.)
  * - Automatic port detection from server output
  * - Command detection from package.json/lock files
+ * - Health monitoring: detects dead sessions every 5s and updates state
  * - Auto-cleanup on service scope exit
  */
 
@@ -31,6 +32,9 @@ const PORT_POLL_INTERVAL = 500
 
 /** Maximum time to wait for port detection (ms) */
 const PORT_DETECTION_TIMEOUT = 30000
+
+/** How often to check if dev server sessions are still alive (ms) */
+const HEALTH_CHECK_INTERVAL = 5000
 
 // ============================================================================
 // Type Definitions
@@ -489,6 +493,52 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return worktreePath
 			})
 
+		// ========================================================================
+		// Health Check Fiber - detects dead dev server sessions
+		// ========================================================================
+
+		/**
+		 * Check all running dev servers and update state if session died
+		 */
+		const healthCheckAllServers = Effect.gen(function* () {
+			const servers = yield* SubscriptionRef.get(serversRef)
+
+			for (const [beadId, state] of HashMap.entries(servers)) {
+				if (state.status === "running" && state.tmuxSession) {
+					const hasSession = yield* tmux.hasSession(state.tmuxSession)
+					if (!hasSession) {
+						yield* Effect.log(`Dev server session ${state.tmuxSession} died, marking as stopped`)
+
+						// Release the port
+						if (state.port) {
+							yield* releasePort(state.port)
+						}
+
+						// Update state to indicate server stopped unexpectedly
+						yield* updateServerState(beadId, {
+							...idleState,
+							error: "Server stopped unexpectedly",
+						})
+					}
+				}
+			}
+		})
+
+		// Start the health check polling fiber
+		const healthCheckFiber = yield* healthCheckAllServers.pipe(
+			Effect.repeat(Schedule.spaced(`${HEALTH_CHECK_INTERVAL} millis`)),
+			Effect.catchAll(() => Effect.void), // Don't crash on errors
+			Effect.forkIn(serviceScope),
+		)
+
+		// Register with diagnostics for visibility
+		yield* diagnostics.registerFiberIn(serviceScope, {
+			id: "dev-server-health-check",
+			name: "Dev Server Health",
+			description: "Monitors dev server sessions and detects when they die",
+			fiber: healthCheckFiber,
+		})
+
 		// Auto-cleanup on scope exit
 		yield* Effect.addFinalizer(() =>
 			Effect.gen(function* () {
@@ -551,7 +601,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const envString = Object.entries(env)
 						.map(([k, v]) => `${k}=${v}`)
 						.join(" ")
-					const fullCommand = `${envString} ${command}`
+					const rawCommand = `${envString} ${command}`
 
 					// Create tmux session
 					const tmuxSession = getDevSessionName(beadId)
@@ -559,6 +609,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
+
+					// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+					// This ensures the project's .envrc environment is loaded automatically
+					// Keep session alive after command exits for debugging (exec ${shell})
+					const shell = config.session.shell
+					const fullCommand = `${shell} -i -c '${rawCommand}; exec ${shell}'`
 
 					yield* tmux.newSession(tmuxSession, {
 						cwd,
@@ -666,7 +722,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const envString = Object.entries(env)
 						.map(([k, v]) => `${k}=${v}`)
 						.join(" ")
-					const fullCommand = `${envString} ${command}`
+					const rawCommand = `${envString} ${command}`
 
 					// Create tmux session
 					const tmuxSession = getDevSessionName(beadId)
@@ -674,6 +730,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
+
+					// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+					// This ensures the project's .envrc environment is loaded automatically
+					// Keep session alive after command exits for debugging (exec ${shell})
+					const shell = config.session.shell
+					const fullCommand = `${shell} -i -c '${rawCommand}; exec ${shell}'`
 
 					yield* tmux.newSession(tmuxSession, {
 						cwd,
