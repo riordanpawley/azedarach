@@ -109,6 +109,21 @@ const GitConfigSchema = Schema.Struct({
 	 * Common values: "main", "master", "develop", "preview"
 	 */
 	baseBranch: Schema.optional(Schema.String),
+
+	/**
+	 * Enable git push operations (default: true)
+	 *
+	 * When false, all git push operations are silently skipped.
+	 * Useful for offline mode or local-only workflows.
+	 */
+	pushEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Enable git fetch/pull operations (default: true)
+	 *
+	 * When false, git fetch and pull operations are silently skipped.
+	 */
+	fetchEnabled: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -117,6 +132,14 @@ const GitConfigSchema = Schema.Struct({
  * Controls automatic PR creation behavior.
  */
 const PRConfigSchema = Schema.Struct({
+	/**
+	 * Enable PR creation (default: true)
+	 *
+	 * When false, PR creation is disabled. The action menu will show
+	 * "Create PR (disabled)" and attempting it will show an info message.
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
 	/** Create PRs as draft (default: true) */
 	autoDraft: Schema.optional(Schema.Boolean),
 
@@ -157,6 +180,65 @@ const MergeConfigSchema = Schema.Struct({
 })
 
 /**
+ * Port configuration for a named port type
+ *
+ * Defines a port with a base value and environment variable aliases.
+ */
+const PortConfigSchema = Schema.Struct({
+	/** Base port for this port type (e.g., 3000 for web, 8000 for server) */
+	default: Schema.Number,
+
+	/** Environment variable names to inject this port value into */
+	aliases: Schema.Array(Schema.String),
+})
+
+/**
+ * Dev server configuration
+ *
+ * Controls how dev servers are spawned for worktrees.
+ * Each worktree can have its own dev server with injected port environment variables.
+ *
+ * @example
+ * ```json
+ * {
+ *   "devServer": {
+ *     "command": "bun run dev",
+ *     "ports": {
+ *       "web": { "default": 3000, "aliases": ["PORT", "VITE_PORT"] },
+ *       "server": { "default": 8000, "aliases": ["SERVER_PORT", "VITE_SERVER_PORT"] }
+ *     }
+ *   }
+ * }
+ * ```
+ */
+const DevServerConfigSchema = Schema.Struct({
+	/**
+	 * Command to run the dev server (overrides auto-detection)
+	 * If not set, uses package.json scripts (dev → start → serve)
+	 */
+	command: Schema.optional(Schema.String),
+
+	/**
+	 * Named port configurations with base values and env var aliases
+	 * Each worktree gets sequential offsets from the base ports
+	 *
+	 * Default: { "web": { "default": 3000, "aliases": ["PORT"] } }
+	 */
+	ports: Schema.optional(Schema.Record({ key: Schema.String, value: PortConfigSchema })),
+
+	/**
+	 * Regex pattern to detect port from server output
+	 * Default: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"
+	 */
+	portPattern: Schema.optional(Schema.String),
+
+	/**
+	 * Working directory relative to worktree root (default: ".")
+	 */
+	cwd: Schema.optional(Schema.String),
+})
+
+/**
  * Notification configuration
  *
  * Controls how users are notified of session state changes.
@@ -167,6 +249,46 @@ const NotificationsConfigSchema = Schema.Struct({
 
 	/** System notifications via osascript/notify-send (default: false) */
 	system: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Beads configuration
+ *
+ * Controls beads issue tracker behavior.
+ */
+const BeadsConfigSchema = Schema.Struct({
+	/**
+	 * Enable beads sync operations (default: true)
+	 *
+	 * When false, `bd sync` is silently skipped. Issues are still
+	 * tracked locally but not synced to the remote repository.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Network configuration
+ *
+ * Controls automatic network connectivity detection.
+ */
+const NetworkConfigSchema = Schema.Struct({
+	/**
+	 * Automatically detect network connectivity (default: true)
+	 *
+	 * When true, periodically checks if github.com is reachable.
+	 * If unreachable, network-dependent operations are disabled.
+	 */
+	autoDetect: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Interval in seconds between connectivity checks (default: 30)
+	 */
+	checkIntervalSeconds: Schema.optional(Schema.Number),
+
+	/**
+	 * Host to check for connectivity (default: "github.com")
+	 */
+	checkHost: Schema.optional(Schema.String),
 })
 
 /**
@@ -196,6 +318,7 @@ const ProjectConfigSchema = Schema.Struct({
  * This was moved to git section in v1.
  */
 const LegacyPRConfigSchema = Schema.Struct({
+	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
 	/** @deprecated Moved to git.baseBranch in v1 */
@@ -309,10 +432,17 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		session: current.session,
 		patterns: current.patterns,
 		pr: current.pr
-			? { autoDraft: current.pr.autoDraft, autoMerge: current.pr.autoMerge }
+			? {
+					autoDraft: current.pr.autoDraft,
+					autoMerge: current.pr.autoMerge,
+					enabled: current.pr.enabled,
+				}
 			: undefined,
 		merge: current.merge,
+		devServer: current.devServer,
 		notifications: current.notifications,
+		beads: current.beads,
+		network: current.network,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -339,7 +469,20 @@ const RawConfigSchema = Schema.Struct({
 	/** May contain legacy baseBranch field */
 	pr: Schema.optional(LegacyPRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
+
+	/** Dev server configuration */
+	devServer: Schema.optional(DevServerConfigSchema),
+
+	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
+
+	/** Beads issue tracker configuration */
+	beads: Schema.optional(BeadsConfigSchema),
+
+	/** Network connectivity configuration */
+	network: Schema.optional(NetworkConfigSchema),
+
+	/** Project configurations */
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -358,7 +501,10 @@ const CurrentConfigSchema = Schema.Struct({
 	patterns: Schema.optional(PatternsConfigSchema),
 	pr: Schema.optional(PRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
+	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
+	beads: Schema.optional(BeadsConfigSchema),
+	network: Schema.optional(NetworkConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -408,5 +554,17 @@ export type MergeConfig = Schema.Schema.Type<typeof MergeConfigSchema>
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>
 
+/** Beads config section type */
+export type BeadsConfig = Schema.Schema.Type<typeof BeadsConfigSchema>
+
+/** Network config section type */
+export type NetworkConfig = Schema.Schema.Type<typeof NetworkConfigSchema>
+
 /** Project config section type */
 export type ProjectConfig = Schema.Schema.Type<typeof ProjectConfigSchema>
+
+/** Port config for a single port type */
+export type PortConfig = Schema.Schema.Type<typeof PortConfigSchema>
+
+/** Dev server config section type */
+export type DevServerConfig = Schema.Schema.Type<typeof DevServerConfigSchema>

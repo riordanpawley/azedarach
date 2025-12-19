@@ -1,6 +1,7 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
+import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 
@@ -8,6 +9,12 @@ export interface ActionPaletteProps {
 	task?: TaskWithSession
 	/** Running operation label (e.g., "merge", "cleanup") - dims queued actions */
 	runningOperation?: string | null
+	/** Whether network is available (affects PR/merge/cleanup actions) */
+	isOnline?: boolean
+	/** Dev server status for the current task */
+	devServerStatus?: DevServerStatus
+	/** Dev server port (if running) */
+	devServerPort?: number
 }
 
 const _ATTR_BOLD = 1
@@ -28,9 +35,15 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d"])
  * When an operation is in progress (runningOperation is set), queued actions
  * are dimmed and will show an error toast if pressed.
  */
+/** Actions that require network connectivity */
+const NETWORK_ACTIONS = new Set(["P", "m", "d"])
+
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
 	const runningOperation = props.runningOperation ?? null
+	const isOnline = props.isOnline ?? true
+	const devServerStatus = props.devServerStatus ?? "idle"
+	const devServerPort = props.devServerPort
 
 	// Helper to check if an action is available based on session state
 	const isAvailableByState = (action: string): boolean => {
@@ -45,7 +58,9 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
-			case "r": // Resume - only if paused
+			case "r": // Dev server - only if worktree exists (session not idle)
+				return sessionState !== "idle"
+			case "R": // Resume - only if paused
 				return sessionState === "paused"
 			case "x": // Stop - only if not idle
 				return sessionState !== "idle"
@@ -69,21 +84,48 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		}
 	}
 
-	// Full availability check: state + queue busyness
+	// Get dev server status text
+	const getDevServerLabel = (): string => {
+		switch (devServerStatus) {
+			case "running":
+				return devServerPort ? `dev :${devServerPort}` : "dev (running)"
+			case "starting":
+				return "dev (starting)"
+			case "error":
+				return "dev (error)"
+			default:
+				return "dev server"
+		}
+	}
+
+	// Full availability check: state + queue busyness + network
 	const isAvailable = (action: string): boolean => {
 		// If task is busy with a queued operation, block queued actions
 		if (runningOperation !== null && QUEUED_ACTIONS.has(action)) {
 			return false
 		}
+		// Network actions unavailable when offline
+		if (!isOnline && NETWORK_ACTIONS.has(action)) {
+			return false
+		}
 		return isAvailableByState(action)
+	}
+
+	// Check if action is disabled due to offline
+	const isOfflineBlocked = (action: string): boolean => {
+		return !isOnline && NETWORK_ACTIONS.has(action)
 	}
 
 	// Action line component
 	const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {
 		const available = isAvailable(keyName)
+		const offlineBlocked = isOfflineBlocked(keyName)
 		const fgColor = available ? theme.text : theme.overlay0
 		const keyColor = available ? theme.lavender : theme.overlay0
 		const attrs = available ? 0 : ATTR_DIM
+
+		// Show "(offline)" suffix for network actions when offline
+		const displayDesc = offlineBlocked ? `${description} (offline)` : description
 
 		return (
 			<box flexDirection="row">
@@ -91,7 +133,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 					{keyName}
 				</text>
 				<text fg={fgColor} attributes={attrs}>
-					{` ${description}`}
+					{` ${displayDesc}`}
 				</text>
 			</box>
 		)
@@ -120,8 +162,12 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<ActionLine keyName="c" description="chat" />
 				<ActionLine keyName="a" description="attach" />
 				<ActionLine keyName="p" description="pause" />
-				<ActionLine keyName="r" description="resume" />
+				<ActionLine keyName="R" description="resume" />
 				<ActionLine keyName="x" description="stop" />
+				<text fg={theme.surface1}>{"─────────"}</text>
+
+				{/* Dev server */}
+				<ActionLine keyName="r" description={getDevServerLabel()} />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Task actions */}

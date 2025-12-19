@@ -25,10 +25,13 @@ import { VCService } from "../../core/VCService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
+import { DevServerService } from "../../services/DevServerService.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { EditorService } from "../../services/EditorService.js"
 import { KeyboardService } from "../../services/KeyboardService.js"
 import { NavigationService } from "../../services/NavigationService.js"
+import { NetworkService } from "../../services/NetworkService.js"
+import { OfflineService } from "../../services/OfflineService.js"
 import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { SessionService } from "../../services/SessionService.js"
@@ -65,6 +68,9 @@ const appLayer = Layer.mergeAll(
 	DiagnosticsService.Default,
 	ProjectService.Default,
 	TemplateService.Default,
+	NetworkService.Default,
+	OfflineService.Default,
+	DevServerService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

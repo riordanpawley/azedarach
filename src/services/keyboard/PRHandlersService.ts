@@ -385,7 +385,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// - DFT_COLOR=always ensures difftastic colors in tmux popup
 				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && git diff $MERGE_BASE --stat --color=always && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always | less -RS`
+				// - ':!.beads' excludes beads database changes (infrastructure noise)
+				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS`
 
 				yield* tmux
 					.displayPopup({

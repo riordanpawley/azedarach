@@ -8,6 +8,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
 import * as Schema from "effect/Schema"
+import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
 
 // ============================================================================
@@ -314,6 +315,28 @@ export interface BeadsClientService {
 		BeadsError | NotFoundError | ParseError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Add a dependency between two issues
+	 *
+	 * Creates a dependency where `issueId` depends on `dependsOnId`.
+	 * For epic-child relationships, use type "parent-child".
+	 *
+	 * @example
+	 * ```ts
+	 * // Make task a child of an epic
+	 * BeadsClient.addDependency("az-task", "az-epic", "parent-child")
+	 *
+	 * // Default "blocks" dependency
+	 * BeadsClient.addDependency("az-blocked", "az-blocker")
+	 * ```
+	 */
+	readonly addDependency: (
+		issueId: string,
+		dependsOnId: string,
+		type?: "blocks" | "related" | "parent-child" | "discovered-from",
+		cwd?: string,
+	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -427,9 +450,10 @@ const parseJson = <A, I, R>(
  * ```
  */
 export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
-	dependencies: [ProjectService.Default],
+	dependencies: [ProjectService.Default, OfflineService.Default],
 	effect: Effect.gen(function* () {
 		const projectService = yield* ProjectService
+		const offlineService = yield* OfflineService
 
 		/**
 		 * Get effective cwd for bd commands:
@@ -554,6 +578,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
+					// Check if beads sync is enabled (config + network)
+					const syncStatus = yield* offlineService.isBeadsSyncEnabled()
+					if (!syncStatus.enabled) {
+						// Return empty result when offline - issues are tracked locally
+						return { pushed: 0, pulled: 0 }
+					}
+
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["sync"], effectiveCwd)
 
@@ -722,6 +753,23 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					return { epic, children }
 				}),
+
+			addDependency: (
+				issueId: string,
+				dependsOnId: string,
+				type?: "blocks" | "related" | "parent-child" | "discovered-from",
+				cwd?: string,
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const args: string[] = ["dep", "add", issueId, dependsOnId]
+
+					if (type) {
+						args.push("--type", type)
+					}
+
+					yield* runBd(args, effectiveCwd)
+				}),
 		}
 	}),
 }) {}
@@ -858,3 +906,14 @@ export const getEpicWithChildren = (
 	BeadsError | NotFoundError | ParseError,
 	BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.getEpicWithChildren(epicId, cwd))
+
+/**
+ * Add a dependency between two issues
+ */
+export const addDependency = (
+	issueId: string,
+	dependsOnId: string,
+	type?: "blocks" | "related" | "parent-child" | "discovered-from",
+	cwd?: string,
+): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(BeadsClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))

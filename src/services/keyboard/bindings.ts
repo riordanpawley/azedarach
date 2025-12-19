@@ -13,6 +13,7 @@ import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
 import type { ToastService } from "../ToastService.js"
 import type { ViewService } from "../ViewService.js"
+import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
@@ -38,6 +39,7 @@ export interface BindingContext {
 	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
+	devServerHandlers: DevServerHandlersService
 	helpers: KeyboardHelpersService
 
 	// Core services for direct bindings
@@ -191,9 +193,21 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const inDrillDown = yield* bc.nav.isInDrillDown()
 			if (inDrillDown) {
 				yield* bc.nav.exitDrillDown()
-			} else {
-				process.exit(0)
+				return
 			}
+
+			// Check if any operations are running
+			const busy = yield* bc.helpers.isAnyBusy()
+
+			if (busy) {
+				// Get running operation labels for the toast message
+				const labels = yield* bc.helpers.getRunningOperationLabels()
+				const labelStr = labels.length > 0 ? labels.join(", ") : "operation"
+				yield* bc.toast.show("warning", `Cannot quit: ${labelStr} in progress`)
+				return
+			}
+
+			process.exit(0)
 		}),
 	},
 	{
@@ -382,6 +396,22 @@ done
 	},
 	{
 		key: "r",
+		mode: "action",
+		description: "Toggle dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.toggleDevServer())),
+		),
+	},
+	{
+		key: "C-r",
+		mode: "action",
+		description: "Restart dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.restartDevServer())),
+		),
+	},
+	{
+		key: "S-r",
 		mode: "action",
 		description: "Resume session",
 		action: Effect.suspend(() =>
