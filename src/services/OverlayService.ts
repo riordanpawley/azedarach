@@ -27,6 +27,13 @@ export type Overlay =
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "imagePreview"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
+	| {
+			readonly _tag: "mergeChoice"
+			readonly message: string
+			readonly commitsBehind: number
+			readonly onMerge: AnyEffect
+			readonly onSkip: AnyEffect
+	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 

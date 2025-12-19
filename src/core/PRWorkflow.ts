@@ -1539,6 +1539,194 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					return comments as readonly PRComment[]
 				}),
+
+			/**
+			 * Check if a worktree branch is behind main
+			 *
+			 * Uses git rev-list to count commits between HEAD and main.
+			 * Returns { behind, ahead } so caller can show informative message.
+			 */
+			checkBranchBehindMain: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						// No worktree = not behind (task has no session)
+						return { behind: 0, ahead: 0 }
+					}
+
+					// Count commits branch is behind main
+					// HEAD..main = commits in main that are not in HEAD (how many we're behind)
+					const behindOutput = yield* runGit(
+						["rev-list", "--count", "HEAD..main"],
+						worktree.path,
+					).pipe(
+						Effect.map((output) => Number.parseInt(output.trim(), 10)),
+						Effect.catchAll(() => Effect.succeed(0)),
+					)
+
+					// Count commits branch is ahead of main
+					// main..HEAD = commits in HEAD that are not in main (how many we're ahead)
+					const aheadOutput = yield* runGit(
+						["rev-list", "--count", "main..HEAD"],
+						worktree.path,
+					).pipe(
+						Effect.map((output) => Number.parseInt(output.trim(), 10)),
+						Effect.catchAll(() => Effect.succeed(0)),
+					)
+
+					return { behind: behindOutput, ahead: aheadOutput }
+				}),
+
+			/**
+			 * Merge main into a worktree branch
+			 *
+			 * Auto-stashes uncommitted changes, merges main, pops stash.
+			 * If conflicts, spawns Claude session to resolve them.
+			 *
+			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
+			 */
+			mergeMainIntoBranch: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// 1. Check for uncommitted changes and stash them
+					const statusOutput = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+					const hasUncommitted = statusOutput.trim().length > 0
+					let stashed = false
+
+					if (hasUncommitted) {
+						// Stash with message so we can identify it
+						const stashResult = yield* runGit(
+							["stash", "push", "-m", "azedarach-merge-stash"],
+							worktree.path,
+						).pipe(
+							Effect.map(() => true),
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to stash changes: ${e.message}`).pipe(Effect.as(false)),
+							),
+						)
+						stashed = stashResult
+					}
+
+					// 2. Check for conflicts using merge-tree (safe, in-memory check)
+					const mergeTreeResult = yield* Effect.gen(function* () {
+						const command = Command.make("git", "merge-tree", "--write-tree", "main", "HEAD").pipe(
+							Command.workingDirectory(worktree.path),
+						)
+
+						const exitCode = yield* Command.exitCode(command).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+							),
+						)
+
+						if (exitCode === 0) {
+							return { hasConflicts: false, conflictingFiles: [] as string[] }
+						}
+
+						// Get conflicting files
+						const output = yield* runGit(
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", "HEAD"],
+							worktree.path,
+						).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+									Effect.map(() => ""),
+								),
+							),
+						)
+
+						const lines = output.trim().split("\n")
+						const conflictingFiles = lines
+							.slice(1)
+							.filter((f) => f.length > 0)
+							// Filter OUT .beads/ files - we handle those separately via bd sync
+							.filter((f) => !f.startsWith(".beads/"))
+
+						return {
+							hasConflicts: conflictingFiles.length > 0,
+							conflictingFiles,
+						}
+					})
+
+					// 3. If conflicts, start merge and spawn Claude
+					if (mergeTreeResult.hasConflicts) {
+						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+						// Start merge in worktree so conflict markers are created
+						yield* runGit(["merge", "main", "-m", `Merge main into ${beadId}`], worktree.path).pipe(
+							Effect.catchAll(() => Effect.void), // Will fail with conflicts, that's expected
+						)
+
+						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+
+						const sessionStarted = yield* sessionManager
+							.start({
+								beadId,
+								projectPath,
+								initialPrompt: resolvePrompt,
+							})
+							.pipe(
+								Effect.map(() => true),
+								Effect.catchAll((e) =>
+									Effect.logError(
+										`Failed to start Claude session for conflict resolution: ${e}`,
+									).pipe(Effect.map(() => false)),
+								),
+							)
+
+						const message = sessionStarted
+							? `Merge conflicts detected in: ${fileList}. Started Claude session to resolve. Retry attach after resolution.`
+							: `Merge conflicts detected in: ${fileList}. Failed to start Claude - resolve manually, then retry.`
+
+						return yield* Effect.fail(
+							new MergeConflictError({
+								beadId,
+								branch: beadId,
+								message,
+							}),
+						)
+					}
+
+					// 4. No conflicts - do the merge
+					yield* runGit(["merge", "main", "--no-edit"], worktree.path).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Failed to merge main: ${e.message}`,
+									command: "git merge main",
+									stderr: e.stderr,
+								}),
+						),
+					)
+
+					// 5. Pop stash if we stashed
+					if (stashed) {
+						yield* runGit(["stash", "pop"], worktree.path).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to pop stash: ${e.message}`).pipe(Effect.asVoid),
+							),
+						)
+					}
+
+					yield* Effect.log(`Successfully merged main into ${beadId}`)
+				}),
 		}
 	}),
 }) {}

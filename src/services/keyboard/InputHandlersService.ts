@@ -217,6 +217,48 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
+			 * Handle mergeChoice overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled.
+			 *
+			 * m → execute onMerge effect (merge main into branch, then attach), pop overlay
+			 * s → execute onSkip effect (attach without merging), pop overlay
+			 * Escape → just pop overlay (cancel)
+			 */
+			const handleMergeChoiceInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "mergeChoice") {
+						return false
+					}
+
+					// m to merge and attach
+					if (key === "m") {
+						// Pop overlay FIRST for immediate UI feedback, then run the async operation
+						yield* overlay.pop()
+						yield* currentOverlay.onMerge
+						return true
+					}
+
+					// s to skip and attach directly
+					if (key === "s") {
+						yield* overlay.pop()
+						yield* currentOverlay.onSkip
+						return true
+					}
+
+					// Escape to cancel
+					if (key === "escape") {
+						yield* overlay.pop()
+						return true
+					}
+
+					// Consume all other keys while overlay is open
+					return true
+				})
+
+			/**
 			 * Handle detail overlay keyboard input for attachment navigation and scrolling
 			 *
 			 * @param key - The key that was pressed
@@ -712,6 +754,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleTextInput,
 				handleJumpInput,
 				handleConfirmInput,
+				handleMergeChoiceInput,
 				handleDetailOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,
