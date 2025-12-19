@@ -19,9 +19,9 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
+import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
-import { SessionManager } from "../core/SessionManager.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
@@ -282,7 +282,7 @@ export interface ColumnInfo {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		SessionManager.Default,
+		ClaudeSessionManager.Default,
 		BeadsClient.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -292,7 +292,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
-		const sessionManager = yield* SessionManager
+		const sessionManager = yield* ClaudeSessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
@@ -371,7 +371,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								...issue,
 								sessionState,
 								hasMergeConflict,
-								// Session metrics from SessionManager
+								// Session metrics from ClaudeSessionManager
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
 									: undefined,

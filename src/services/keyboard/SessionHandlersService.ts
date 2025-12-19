@@ -14,9 +14,9 @@
 import { Effect } from "effect"
 import { AppConfig, type ResolvedConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
+import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -32,7 +32,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		dependencies: [
 			KeyboardHelpersService.Default,
 			ToastService.Default,
-			SessionManager.Default,
+			ClaudeSessionManager.Default,
 			AttachmentService.Default,
 			ImageAttachmentService.Default,
 			TmuxService.Default,
@@ -45,7 +45,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			// Inject services at construction time
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
-			const sessionManager = yield* SessionManager
+			const sessionManager = yield* ClaudeSessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
