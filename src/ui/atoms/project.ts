@@ -45,6 +45,9 @@ export const projectsAtom = appRuntime.subscriptionRef(
 /**
  * Switch project atom - change the active project
  *
+ * The refresh is forked (non-blocking) so the UI stays responsive.
+ * A "Loading..." indicator shows in the status bar during refresh.
+ *
  * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
  *        await switchProject("project-name")
  */
@@ -54,8 +57,19 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		const board = yield* BoardService
 		const toast = yield* ToastService
 
+		// Switch project (fast - just updates SubscriptionRef)
 		yield* projectService.switchProject(projectName)
-		yield* board.refresh()
-		yield* toast.show("success", `Switched to project: ${projectName}`)
+
+		// Show toast immediately (user sees feedback right away)
+		yield* toast.show("success", `Switching to: ${projectName}`)
+
+		// Fork as daemon so it survives parent completion
+		// (Effect.fork would be interrupted when the atom effect returns)
+		// The loading indicator in StatusBar shows progress
+		yield* board.refresh().pipe(
+			Effect.tap(() => toast.show("success", `Loaded: ${projectName}`)),
+			Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)),
+			Effect.forkDaemon,
+		)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
