@@ -185,9 +185,21 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const inDrillDown = yield* bc.nav.isInDrillDown()
 			if (inDrillDown) {
 				yield* bc.nav.exitDrillDown()
-			} else {
-				process.exit(0)
+				return
 			}
+
+			// Check if any operations are running
+			const busy = yield* bc.helpers.isAnyBusy()
+
+			if (busy) {
+				// Get running operation labels for the toast message
+				const labels = yield* bc.helpers.getRunningOperationLabels()
+				const labelStr = labels.length > 0 ? labels.join(", ") : "operation"
+				yield* bc.toast.show("warning", `Cannot quit: ${labelStr} in progress`)
+				return
+			}
+
+			process.exit(0)
 		}),
 	},
 	{
