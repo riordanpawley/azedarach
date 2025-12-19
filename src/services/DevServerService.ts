@@ -13,9 +13,20 @@
  */
 
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
+import {
+	Data,
+	Effect,
+	HashMap,
+	Option,
+	Ref,
+	Schedule,
+	Schema,
+	Scope,
+	SubscriptionRef,
+} from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import { type TmuxError, TmuxService } from "../core/TmuxService.js"
+import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ProjectService } from "./ProjectService.js"
 
 // ============================================================================
@@ -124,7 +135,12 @@ const idleState: DevServerState = {
 // ============================================================================
 
 export class DevServerService extends Effect.Service<DevServerService>()("DevServerService", {
-	dependencies: [TmuxService.Default, AppConfig.Default, ProjectService.Default],
+	dependencies: [
+		TmuxService.Default,
+		AppConfig.Default,
+		ProjectService.Default,
+		DiagnosticsService.Default,
+	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
@@ -132,10 +148,14 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const projectService = yield* ProjectService
+		const diagnostics = yield* DiagnosticsService
 
 		// Capture service scope for forking background tasks
 		// This ensures polling fibers are cleaned up when service shuts down
 		const serviceScope = yield* Effect.scope
+
+		// Register with diagnostics - tracks service health
+		yield* diagnostics.trackService("DevServerService", "Per-worktree dev server lifecycle")
 
 		// Persistence file path
 		const devServersFilePath = ".azedarach/devservers.json"
@@ -565,7 +585,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Start port polling in background to get actual port
 					// Fork into service scope so fiber is cleaned up on service shutdown
-					yield* pollForPort(beadId, tmuxSession).pipe(
+					const pollerFiber = yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
 								? updateServerState(beadId, { port: detectedPort })
@@ -573,7 +593,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						),
 						Effect.catchAll(() => Effect.void),
 						Effect.forkIn(serviceScope),
-						Effect.asVoid,
+					)
+
+					// Register fiber with diagnostics for visibility
+					// Use Scope.extend to run registerFiber in service scope
+					yield* Scope.extend(serviceScope)(
+						diagnostics.registerFiber({
+							id: `dev-server-port-poller-${beadId}`,
+							name: `Port Poller (${beadId})`,
+							description: `Detecting port for ${beadId} dev server`,
+							fiber: pollerFiber,
+						}),
 					)
 
 					return yield* getServerState(beadId)
@@ -673,7 +703,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Poll for port in background
 					// Fork into service scope so fiber is cleaned up on service shutdown
-					yield* pollForPort(beadId, tmuxSession).pipe(
+					const pollerFiber = yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
 								? updateServerState(beadId, { port: detectedPort })
@@ -681,7 +711,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						),
 						Effect.catchAll(() => Effect.void),
 						Effect.forkIn(serviceScope),
-						Effect.asVoid,
+					)
+
+					// Register fiber with diagnostics for visibility
+					// Use Scope.extend to run registerFiber in service scope
+					yield* Scope.extend(serviceScope)(
+						diagnostics.registerFiber({
+							id: `dev-server-port-poller-${beadId}`,
+							name: `Port Poller (${beadId})`,
+							description: `Detecting port for ${beadId} dev server`,
+							fiber: pollerFiber,
+						}),
 					)
 
 					return yield* getServerState(beadId)
