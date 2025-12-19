@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 2.0.0
-Updated: 2025-12-15
+Version: 2.1.0
+Updated: 2025-12-19
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -44,6 +44,14 @@ Purpose: Claude Code entry point for Azedarach development
    - Use atoms for: parameterized derivations, cross-service composition
    - Use services for: core state, business logic, background tasks
    - See `internal-docs/effect-atom-architecture.md` for full decision matrix
+
+10. **OpenTUI Text Nesting**: NEVER nest `<text>` inside `<text>`. Use `<span>` for inline styled text:
+    - `<text>` → `TextRenderable` (container, accepts: string | TextNodeRenderable | StyledText)
+    - `<span>` → `SpanRenderable` → `TextNodeRenderable` (can be nested inside `<text>`)
+    - **Wrong:** `<text fg="gray"><text fg="blue">→</text> Back</text>` - inner `<text>` is a `TextRenderable`, not accepted
+    - **Right:** `<text fg="gray"><span fg="blue">→</span> Back</text>` - `<span>` is a `TextNodeRenderable`, works!
+    - **Also Right:** Use sibling `<text>` in `<box flexDirection="row">` for different colors
+    - Error message: "TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances"
 
 ## Quick Commands
 
@@ -141,6 +149,41 @@ src/
 - **Other worktrees**: Run `bd sync` manually at session end
 
 **Full reference:** `.claude/skills/workflow/beads-tracking.skill.md`
+
+### Epic Orchestration (Swarm Pattern)
+
+**Use epics to orchestrate parallel agent work.** When a feature requires multiple independent tasks that can run concurrently, create an epic with child tasks:
+
+```bash
+# 1. Create the epic
+bd create --title="Implement user settings page" --type=epic --priority=1
+
+# 2. Create child tasks (can be worked in parallel)
+bd create --title="Settings UI components" --type=task
+bd create --title="Settings API endpoints" --type=task
+bd create --title="Settings persistence layer" --type=task
+
+# 3. Link children to epic (child depends on parent)
+bd dep add az-ui az-epic --type=parent-child
+bd dep add az-api az-epic --type=parent-child
+bd dep add az-persist az-epic --type=parent-child
+```
+
+**Azedarach swarm workflow:**
+1. Create epic with decomposed child tasks
+2. Use `Space+s` on each child to spawn parallel Claude sessions
+3. Each session runs in its own git worktree (isolation)
+4. Monitor progress via epic drill-down (`Enter` on epic)
+5. Sessions auto-create PRs on completion
+6. Merge completed work back to main
+
+**When to use epics:**
+- Feature spans 3+ independent tasks
+- Tasks can be worked in parallel (no blocking deps between them)
+- You want focused drill-down view of related work
+- Orchestrating multiple Claude Code sessions
+
+**Epic drill-down:** Press `Enter` on an epic card to see only its children, with a progress bar showing completion status.
 
 ## State Management Architecture
 
@@ -342,6 +385,72 @@ yield* Effect.scheduleForked(Schedule.spaced("500 millis"))(pollingEffect)
 - `Effect.forkScoped` - Background task that should live for scope duration
 - `Effect.scheduleForked` - Scheduled polling with proper scoping (preferred)
 - `Effect.forkDaemon` - Background task that survives parent interruption
+
+**Service definition: `scoped:` vs `effect:`**
+
+Use `scoped:` when the service spawns fibers that need to outlive the constructor:
+
+```typescript
+// ✅ GOOD: Service spawns long-running fibers
+export class PollingService extends Effect.Service<PollingService>()("PollingService", {
+  scoped: Effect.gen(function* () {  // scoped: provides scope for forkScoped
+    yield* pollEffect.pipe(Effect.forkScoped)  // Lives for service lifetime
+    return { /* methods */ }
+  }),
+}) {}
+
+// ✅ GOOD: Service only has state and methods, no background fibers
+export class StateService extends Effect.Service<StateService>()("StateService", {
+  effect: Effect.gen(function* () {  // effect: no scope needed
+    const state = yield* SubscriptionRef.make(initial)
+    return { state, update: (x) => SubscriptionRef.set(state, x) }
+  }),
+}) {}
+
+// ❌ BAD: Uses effect: but spawns fibers with forkScoped - no scope available!
+export class BrokenService extends Effect.Service<BrokenService>()("BrokenService", {
+  effect: Effect.gen(function* () {
+    yield* cleanup.pipe(Effect.forkScoped)  // ❌ No scope! Will fail or be immediately interrupted
+    return { /* methods */ }
+  }),
+}) {}
+```
+
+**Decision checklist:**
+- Service spawns `Effect.forkScoped` or `Effect.scheduleForked` → use `scoped:`
+- Service methods spawn fibers that must outlive the method call → use `scoped:`
+- Service only has state (SubscriptionRef/Ref) and synchronous methods → use `effect:`
+
+**Service dependencies - use `dependencies:` to avoid leaking requirements:**
+
+When a service depends on another service, declare it in `dependencies:` so `.Default` provides its own deps:
+
+```typescript
+// ✅ GOOD: HookReceiver declares its dependency on DiagnosticsService
+export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
+  dependencies: [DiagnosticsService.Default],  // ← Provides own dependency
+  scoped: Effect.gen(function* () {
+    const diagnostics = yield* DiagnosticsService  // Available because of dependencies
+    // ...
+  }),
+}) {}
+
+// Now HookReceiver.Default has NO unsatisfied requirements
+// Can be used in Layer.mergeAll without leaking DiagnosticsService requirement
+
+// ❌ BAD: Missing dependencies declaration - leaks requirement to app layer
+export class BrokenReceiver extends Effect.Service<BrokenReceiver>()("BrokenReceiver", {
+  scoped: Effect.gen(function* () {
+    const diagnostics = yield* DiagnosticsService  // ❌ Requirement leaks!
+    // ...
+  }),
+}) {}
+
+// BrokenReceiver.Default now REQUIRES DiagnosticsService from the layer composition
+// This forces awkward Layer.provideMerge ordering in the app layer
+```
+
+**Rule**: If your service uses `yield* SomeOtherService`, add `SomeOtherService.Default` to `dependencies:[]`.
 
 ### Mutation Flow
 

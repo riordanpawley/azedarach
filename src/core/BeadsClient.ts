@@ -279,6 +279,24 @@ export interface BeadsClientService {
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
+	 * Get children of an epic (issues with parent-child dependency)
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.getEpicChildren("az-gds")
+	 * // Returns array of child issue IDs
+	 * ```
+	 */
+	readonly getEpicChildren: (
+		epicId: string,
+		cwd?: string,
+	) => Effect.Effect<
+		DependencyRef[],
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
+
+	/**
 	 * Get an epic with its child tasks
 	 *
 	 * Fetches an epic issue and filters its dependents to return only parent-child relationships.
@@ -657,6 +675,27 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					// 1. The daemon doesn't support the delete operation
 					// 2. --force is required to actually delete (not just preview)
 					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
+				}),
+
+			getEpicChildren: (epicId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["show", epicId], effectiveCwd)
+
+					// bd show returns an array with a single item
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
+					}
+
+					const epic = parsed[0]!
+
+					// Filter dependents to only parent-child relationships
+					const children =
+						epic.dependents?.filter((dep) => dep.dependency_type === "parent-child") ?? []
+
+					return children
 				}),
 
 			getEpicWithChildren: (epicId: string, cwd?: string) =>

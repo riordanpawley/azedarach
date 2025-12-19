@@ -7,14 +7,18 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { useEffect, useMemo } from "react"
-import { killActivePopup } from "../core/EditorService.js"
+import { useEffect, useMemo, useState } from "react"
+import { killActivePopup } from "../core/BeadEditorService.js"
+import type { DependencyRef, Issue } from "../core/BeadsClient.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
-	filteredTasksByColumnAtom,
+	drillDownEpicAtom,
+	drillDownFilteredTasksAtom,
 	focusedTaskRunningOperationAtom,
+	getEpicChildrenAtom,
+	getEpicInfoAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
 	refreshBoardAtom,
@@ -28,6 +32,7 @@ import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
+import { EpicHeader } from "./EpicHeader.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
@@ -102,13 +107,45 @@ export const App = () => {
 	// Data Atoms
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	// Use BoardService as single source of truth for task data
-	// BoardService handles all filtering and sorting - React just renders the result
-	const filteredTasksResult = useAtomValue(filteredTasksByColumnAtom)
-	const tasksByColumn = Result.isSuccess(filteredTasksResult) ? filteredTasksResult.value : []
+	// Use derived atom that handles both normal and drill-down filtering
+	// All computation happens in atoms - React just renders
+	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
 
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
+
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Epic Drill-Down State
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	// Subscribe to drill-down state for header rendering
+	const drillDownEpicResult = useAtomValue(drillDownEpicAtom)
+	const drillDownEpicId = Result.isSuccess(drillDownEpicResult) ? drillDownEpicResult.value : null
+
+	// Actions for fetching epic info (for header display only)
+	const fetchEpicInfo = useAtomSet(getEpicInfoAtom, { mode: "promise" })
+	const fetchEpicChildren = useAtomSet(getEpicChildrenAtom, { mode: "promise" })
+
+	// Local state for epic header display
+	const [epicInfo, setEpicInfo] = useState<Issue | null>(null)
+	const [epicChildren, setEpicChildren] = useState<DependencyRef[]>([])
+
+	// Fetch epic info for header when drill-down mode activates
+	useEffect(() => {
+		if (drillDownEpicId) {
+			// Fetch epic info and children for header display
+			Promise.all([fetchEpicInfo(drillDownEpicId), fetchEpicChildren(drillDownEpicId)]).then(
+				([info, children]) => {
+					setEpicInfo(info)
+					setEpicChildren(children)
+				},
+			)
+		} else {
+			// Clear epic data when exiting drill-down
+			setEpicInfo(null)
+			setEpicChildren([])
+		}
+	}, [drillDownEpicId, fetchEpicInfo, fetchEpicChildren])
 
 	// Start the hook receiver for Claude Code native hook integration
 	// This watches for notification files and updates session state
@@ -215,6 +252,8 @@ export const App = () => {
 				return `select (${selectedIds.length})`
 			case "sort":
 				return "sort"
+			case "orchestrate":
+				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 		}
 	}, [mode, searchQuery, selectedIds])
 
@@ -223,25 +262,14 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const renderContent = () => {
-		if (Result.isInitial(filteredTasksResult)) {
-			return (
-				<box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-					<text fg={theme.sky}>Loading tasks...</text>
-				</box>
-			)
-		}
-
-		if (Result.isFailure(filteredTasksResult)) {
-			return (
-				<box flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1}>
-					<text fg={theme.red}>Error loading tasks:</text>
-					<text fg={theme.red}>{String(filteredTasksResult.cause)}</text>
-				</box>
-			)
-		}
+		// The derived atom returns an empty array if sources are loading/failed
+		// This is handled gracefully - the board just shows empty columns
 
 		return (
-			<box flexGrow={1}>
+			<box flexGrow={1} flexDirection="column">
+				{/* Epic header when in drill-down mode */}
+				{drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} />}
+
 				<Board
 					tasks={tasksByColumn.flat()}
 					selectedTaskId={selectedTask?.id}
@@ -250,7 +278,7 @@ export const App = () => {
 					selectedIds={new Set(selectedIds)}
 					jumpLabels={isJump ? jumpLabels : null}
 					pendingJumpKey={pendingJumpKey ?? null}
-					terminalHeight={maxVisibleTasks}
+					terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
 					viewMode={viewMode}
 					isActionMode={isAction}
 				/>
