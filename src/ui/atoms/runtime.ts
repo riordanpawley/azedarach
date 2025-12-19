@@ -8,7 +8,6 @@ import { PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Atom } from "@effect-atom/atom"
 import { Layer, Logger } from "effect"
-import { ModeService } from "../../atoms/runtime.js"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
@@ -46,7 +45,6 @@ const appLayer = Layer.mergeAll(
 	ClockService.Default,
 	TmuxService.Default,
 	BeadEditorService.Default,
-	ModeService.Default,
 	PRWorkflow.Default,
 	TerminalService.Default,
 	EditorService.Default,

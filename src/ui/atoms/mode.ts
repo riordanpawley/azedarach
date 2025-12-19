@@ -6,8 +6,12 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, type Record } from "effect"
-import { ModeService } from "../../atoms/runtime.js"
-import type { FilterField, OrchestrationTask, SortField } from "../../services/EditorService.js"
+import {
+	EditorService,
+	type FilterField,
+	type OrchestrationTask,
+	type SortField,
+} from "../../services/EditorService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -15,7 +19,7 @@ import { appRuntime } from "./runtime.js"
 // ============================================================================
 
 /**
- * Editor mode atom - subscribes to ModeService mode changes
+ * Editor mode atom - subscribes to EditorService mode changes
  *
  * Uses appRuntime.subscriptionRef() for automatic reactive updates.
  *
@@ -23,7 +27,7 @@ import { appRuntime } from "./runtime.js"
  */
 export const modeAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		return editor.mode
 	}),
 )
@@ -65,13 +69,13 @@ export const commandInputAtom = Atom.readable((get) => {
 })
 
 /**
- * Sort configuration atom - subscribes to ModeService sortConfig changes
+ * Sort configuration atom - subscribes to EditorService sortConfig changes
  *
  * Usage: const sortConfig = useAtomValue(sortConfigAtom)
  */
 export const sortConfigAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		return editor.sortConfig
 	}),
 )
@@ -88,7 +92,7 @@ export const sortConfigAtom = appRuntime.subscriptionRef(
  */
 export const enterSelectAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterSelect()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -101,7 +105,7 @@ export const enterSelectAtom = appRuntime.fn(() =>
  */
 export const exitSelectAtom = appRuntime.fn((clearSelections: boolean | undefined) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.exitSelect(clearSelections ?? false)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -114,7 +118,7 @@ export const exitSelectAtom = appRuntime.fn((clearSelections: boolean | undefine
  */
 export const toggleSelectionAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.toggleSelection(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -127,7 +131,7 @@ export const toggleSelectionAtom = appRuntime.fn((taskId: string) =>
  */
 export const enterGotoAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterGoto()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -146,7 +150,7 @@ export const enterJumpAtom = appRuntime.fn(
 		>,
 	) =>
 		Effect.gen(function* () {
-			const editor = yield* ModeService
+			const editor = yield* EditorService
 			yield* editor.enterJump(labels)
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -159,7 +163,7 @@ export const enterJumpAtom = appRuntime.fn(
  */
 export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.setPendingJumpKey(key)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -172,7 +176,7 @@ export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
  */
 export const enterActionAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterAction()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -185,7 +189,7 @@ export const enterActionAtom = appRuntime.fn(() =>
  */
 export const enterSearchAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterSearch()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -198,7 +202,7 @@ export const enterSearchAtom = appRuntime.fn(() =>
  */
 export const updateSearchAtom = appRuntime.fn((query: string) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.updateSearch(query)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -211,7 +215,7 @@ export const updateSearchAtom = appRuntime.fn((query: string) =>
  */
 export const clearSearchAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.clearSearch()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -224,7 +228,7 @@ export const clearSearchAtom = appRuntime.fn(() =>
  */
 export const enterCommandAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterCommand()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -237,7 +241,7 @@ export const enterCommandAtom = appRuntime.fn(() =>
  */
 export const updateCommandAtom = appRuntime.fn((input: string) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.updateCommand(input)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -250,7 +254,7 @@ export const updateCommandAtom = appRuntime.fn((input: string) =>
  */
 export const clearCommandAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.clearCommand()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -263,7 +267,7 @@ export const clearCommandAtom = appRuntime.fn(() =>
  */
 export const exitToNormalAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.exitToNormal()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -276,7 +280,7 @@ export const exitToNormalAtom = appRuntime.fn(() =>
  */
 export const enterSortAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterSort()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -289,7 +293,7 @@ export const enterSortAtom = appRuntime.fn(() =>
  */
 export const cycleSortAtom = appRuntime.fn((field: SortField) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.cycleSort(field)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -299,13 +303,13 @@ export const cycleSortAtom = appRuntime.fn((field: SortField) =>
 // ============================================================================
 
 /**
- * Filter configuration atom - subscribes to ModeService filterConfig changes
+ * Filter configuration atom - subscribes to EditorService filterConfig changes
  *
  * Usage: const filterConfig = useAtomValue(filterConfigAtom)
  */
 export const filterConfigAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		return editor.filterConfig
 	}),
 )
@@ -341,7 +345,7 @@ export const isFilterAtom = Atom.readable((get) => {
  */
 export const enterFilterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.enterFilter()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -354,7 +358,7 @@ export const enterFilterAtom = appRuntime.fn(() =>
  */
 export const clearFiltersAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.clearFilters()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -441,7 +445,7 @@ export const enterOrchestrateAtom = appRuntime.fn(
 		children: ReadonlyArray<OrchestrationTask>
 	}) =>
 		Effect.gen(function* () {
-			const editor = yield* ModeService
+			const editor = yield* EditorService
 			yield* editor.enterOrchestrate(epicId, epicTitle, children)
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -454,7 +458,7 @@ export const enterOrchestrateAtom = appRuntime.fn(
  */
 export const orchestrateMoveDownAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.orchestrateMoveDown()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -467,7 +471,7 @@ export const orchestrateMoveDownAtom = appRuntime.fn(() =>
  */
 export const orchestrateMoveUpAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.orchestrateMoveUp()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -480,7 +484,7 @@ export const orchestrateMoveUpAtom = appRuntime.fn(() =>
  */
 export const orchestrateToggleAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.orchestrateToggle(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -493,7 +497,7 @@ export const orchestrateToggleAtom = appRuntime.fn((taskId: string) =>
  */
 export const orchestrateSelectAllAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.orchestrateSelectAll()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -506,7 +510,7 @@ export const orchestrateSelectAllAtom = appRuntime.fn(() =>
  */
 export const orchestrateSelectNoneAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.orchestrateSelectNone()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -519,7 +523,7 @@ export const orchestrateSelectNoneAtom = appRuntime.fn(() =>
  */
 export const exitOrchestrateAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* ModeService
+		const editor = yield* EditorService
 		yield* editor.exitOrchestrate()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
