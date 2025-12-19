@@ -429,6 +429,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
+| `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
 | `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
 

@@ -385,6 +385,14 @@ done
 		),
 	},
 	{
+		key: "C-r",
+		mode: "action",
+		description: "Restart dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.restartDevServer())),
+		),
+	},
+	{
 		key: "S-r",
 		mode: "action",
 		description: "Resume session",

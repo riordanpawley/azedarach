@@ -3,6 +3,7 @@
  *
  * Provides action handlers for dev server operations:
  * - Toggle dev server (Space+r)
+ * - Restart dev server (Space+Ctrl+r)
  */
 
 import { Effect } from "effect"
@@ -78,8 +79,63 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					}
 				})
 
+			/**
+			 * Restart dev server for the currently selected bead
+			 *
+			 * Stops the server if running, then starts it again.
+			 * Only works if a dev server is currently running.
+			 */
+			const restartDevServer = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getSelectedTask()
+					if (!task) {
+						yield* toast.show("error", "No task selected")
+						return
+					}
+
+					const project = yield* projectService.requireCurrentProject().pipe(
+						Effect.catchAll(() =>
+							Effect.gen(function* () {
+								yield* toast.show("error", "No project selected")
+								return undefined
+							}),
+						),
+					)
+					if (!project) return
+
+					const currentState = yield* devServer.getStatus(task.id)
+
+					if (currentState.status !== "running" && currentState.status !== "starting") {
+						yield* toast.show("error", "No dev server running to restart")
+						return
+					}
+
+					// Stop then start
+					yield* toast.show("info", `Restarting dev server for ${task.id}...`)
+					yield* devServer.stop(task.id)
+
+					yield* devServer.toggle(task.id, project.path).pipe(
+						Effect.tap((state) =>
+							toast.show(
+								"success",
+								state.port
+									? `Dev server restarted at localhost:${state.port}`
+									: `Dev server restarting for ${task.id}...`,
+							),
+						),
+						Effect.catchTag("NoWorktreeError", (err: NoWorktreeError) =>
+							toast.show("error", err.message),
+						),
+						Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
+						Effect.catchTag("TmuxError", (err) =>
+							toast.show("error", `tmux error: ${err.message}`),
+						),
+					)
+				})
+
 			return {
 				toggleDevServer,
+				restartDevServer,
 			}
 		}),
 	},
