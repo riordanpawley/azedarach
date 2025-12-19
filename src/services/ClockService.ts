@@ -9,6 +9,7 @@
  */
 
 import { DateTime, Effect, Schedule, SubscriptionRef } from "effect"
+import { DiagnosticsService } from "./DiagnosticsService.js"
 
 /**
  * Format elapsed milliseconds as MM:SS
@@ -41,7 +42,11 @@ export const computeElapsedFormatted = (startedAt: string, now: DateTime.Utc): s
 }
 
 export class ClockService extends Effect.Service<ClockService>()("ClockService", {
+	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
+		const diagnostics = yield* DiagnosticsService
+		yield* diagnostics.trackService("ClockService", "1s clock tick for elapsed timers")
+
 		// Get initial timestamp using Effect's DateTime (uses Clock service)
 		const initial = yield* DateTime.now
 
