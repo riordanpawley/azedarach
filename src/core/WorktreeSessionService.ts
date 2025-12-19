@@ -24,7 +24,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { AppConfig } from "../config/index.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -45,8 +45,13 @@ export interface CreateWorktreeSessionOptions {
 	readonly cwd?: string
 	/** Custom tmux prefix key (overrides config) */
 	readonly tmuxPrefix?: string
-	/** Whether to run initCommands before starting (default: true) */
-	readonly runInitCommands?: boolean
+	/**
+	 * Init commands to run before main command (chained with &&).
+	 * IMPORTANT: Caller should load these from the TARGET project's config,
+	 * not from the azedarach app's config.
+	 * If undefined, no init commands are run.
+	 */
+	readonly initCommands?: readonly string[]
 }
 
 /**
@@ -83,7 +88,6 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 		effect: Effect.gen(function* () {
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
-			const config: ResolvedConfig = appConfig.config
 
 			return {
 				/**
@@ -117,18 +121,20 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					CommandExecutor.CommandExecutor
 				> =>
 					Effect.gen(function* () {
+						// Get session config for shell and tmuxPrefix defaults
+						const sessionConfig = yield* appConfig.getSessionConfig()
+
 						const {
 							sessionName,
 							worktreePath,
 							command,
 							cwd = worktreePath,
-							tmuxPrefix = config.session.tmuxPrefix,
-							runInitCommands: shouldRunInit = true,
+							tmuxPrefix = sessionConfig.tmuxPrefix,
+							initCommands = [],
 						} = options
 
-						// Get shell and worktree config
-						const shell = config.session.shell
-						const worktreeConfig = config.worktree
+						// Get shell from config (for interactive mode)
+						const shell = sessionConfig.shell
 
 						// Build the full command chain:
 						// 1. Init commands (chained with &&, so failure stops the chain)
@@ -143,9 +149,9 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						// - Any failure in init commands prevents main command from running
 
 						let commandChain: string
-						if (shouldRunInit && worktreeConfig.initCommands.length > 0) {
+						if (initCommands.length > 0) {
 							// Chain init commands with && (fail-fast), then run main command
-							const initChain = worktreeConfig.initCommands.join(" && ")
+							const initChain = initCommands.join(" && ")
 							commandChain = `${initChain} && ${command}`
 						} else {
 							// No init commands, just run main command

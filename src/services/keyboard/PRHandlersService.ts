@@ -47,7 +47,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const prWorkflow = yield* PRWorkflow
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
-		const gitConfig = appConfig.getGitConfig()
+		const gitConfig = yield* appConfig.getGitConfig()
 
 		// ================================================================
 		// Internal Helpers

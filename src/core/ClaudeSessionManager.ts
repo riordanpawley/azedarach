@@ -20,7 +20,7 @@
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
@@ -318,7 +318,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const worktreeSession = yield* WorktreeSessionService
 			const beadsClient = yield* BeadsClient
 			const appConfig = yield* AppConfig
-			const resolvedConfig: ResolvedConfig = appConfig.config
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
 
@@ -449,8 +448,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
 						// No additional copying needed here.
 
-						// Get session config
-						const sessionConfig = resolvedConfig.session
+						// Get session and worktree config from current project
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const worktreeConfig = yield* appConfig.getWorktreeConfig()
 
 						// Generate tmux session name
 						const tmuxSessionName = getSessionName(beadId)
@@ -479,6 +479,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShell(initialPrompt)}"`
 							: `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag}`
 
+						// Get initCommands from current project config
+						const initCommands = worktreeConfig.initCommands
+
 						// Use acquireUseRelease to ensure atomicity:
 						// - acquire: Create tmux session + update bead status (both are "resources")
 						// - use: Register session in memory + publish event
@@ -502,7 +505,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 										worktreePath: worktree.path,
 										command: claudeWithOptions,
 										tmuxPrefix,
-										// runInitCommands defaults to true - chains init commands with Claude
+										initCommands,
 									})
 									createdNewSession = true
 								}
