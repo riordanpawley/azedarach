@@ -3,6 +3,9 @@
  *
  * Generates and manages Claude Code hook configuration that enables
  * session state detection via `az notify` commands.
+ *
+ * Also provides pure helper functions for merging settings.local.json
+ * (the Effect-based merge is in WorktreeManager which has the services).
  */
 
 /**
@@ -163,5 +166,81 @@ export const deepMerge = (
 		}
 	}
 
+	return result
+}
+
+/**
+ * Deduplicate an array by JSON stringification
+ *
+ * Works for arrays of primitives or objects - uses full equality via JSON.stringify.
+ * Preserves order, keeping the first occurrence of each unique value.
+ */
+const deduplicateArray = (arr: unknown[]): unknown[] => {
+	const seen = new Set<string>()
+	return arr.filter((item) => {
+		const key = JSON.stringify(item)
+		if (seen.has(key)) return false
+		seen.add(key)
+		return true
+	})
+}
+
+/**
+ * Deep merge with deduplication (for merging permission settings)
+ *
+ * Like deepMerge, but deduplicates arrays instead of just concatenating.
+ * This prevents duplicate entries in allowedTools, trustedPaths, etc.
+ */
+export const deepMergeWithDedup = (
+	target: Record<string, unknown>,
+	source: Record<string, unknown>,
+): Record<string, unknown> => {
+	const result = { ...target }
+
+	for (const key of Object.keys(source)) {
+		const sourceValue = source[key]
+		const targetValue = target[key]
+
+		if (isPlainObject(sourceValue) && isPlainObject(targetValue)) {
+			// Both are objects - recursively merge
+			result[key] = deepMergeWithDedup(targetValue, sourceValue)
+		} else if (Array.isArray(sourceValue) && Array.isArray(targetValue)) {
+			// Both are arrays - concatenate and deduplicate
+			result[key] = deduplicateArray([...targetValue, ...sourceValue])
+		} else if (Array.isArray(sourceValue)) {
+			// Source is array, target is not - deduplicate source
+			result[key] = deduplicateArray(sourceValue)
+		} else {
+			// Otherwise, source wins
+			result[key] = sourceValue
+		}
+	}
+
+	return result
+}
+
+/**
+ * Keys to exclude when merging settings from worktree to main
+ *
+ * These are bead-specific configurations that should not be copied
+ * from the worktree to the main settings.
+ */
+const EXCLUDED_KEYS = new Set(["hooks"])
+
+/**
+ * Extract permission-related settings from a settings object
+ *
+ * Filters out excluded keys (like hooks) that are bead-specific
+ * and shouldn't be merged back to main.
+ */
+export const extractMergeableSettings = (
+	settings: Record<string, unknown>,
+): Record<string, unknown> => {
+	const result: Record<string, unknown> = {}
+	for (const key of Object.keys(settings)) {
+		if (!EXCLUDED_KEYS.has(key)) {
+			result[key] = settings[key]
+		}
+	}
 	return result
 }

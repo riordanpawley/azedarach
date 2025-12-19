@@ -11,6 +11,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import {
 	BeadsClient,
 	type BeadsError,
@@ -146,6 +147,16 @@ export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
 	readonly message: string
 }> {}
 
+/**
+ * Error when type-check fails after merge
+ * This indicates the merged code has type errors that need fixing
+ */
+export class TypeCheckError extends Data.TaggedError("TypeCheckError")<{
+	readonly beadId: string
+	readonly message: string
+	readonly output: string
+}> {}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -264,6 +275,7 @@ export interface PRWorkflowService {
 		void,
 		| PRError
 		| MergeConflictError
+		| TypeCheckError
 		| GitError
 		| NotAGitRepoError
 		| SessionError
@@ -350,6 +362,34 @@ export interface PRWorkflowService {
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
+
+/**
+ * Run a shell command and return success/failure with output
+ *
+ * Used for post-merge validation and fix commands.
+ */
+const runShellCommand = (
+	commandStr: string,
+	cwd: string,
+): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		// Split command into program and args
+		const parts = commandStr.split(" ")
+		const [program, ...args] = parts
+		if (!program) {
+			return { success: false, output: "Empty command" }
+		}
+
+		const command = Command.make(program, ...args).pipe(Command.workingDirectory(cwd))
+		const result = yield* Effect.all({
+			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
+			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
+		})
+		return {
+			success: result.exitCode === 0,
+			output: result.output,
+		}
+	})
 
 /**
  * Execute a git command and return stdout
@@ -485,6 +525,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		SessionManager.Default,
 		TmuxService.Default,
 		FileLockManager.Default,
+		AppConfig.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -492,6 +533,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const fileLockManager = yield* FileLockManager
+		const appConfig = yield* AppConfig
+		const mergeConfig = appConfig.getMergeConfig()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -850,15 +893,120 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
-					// 8. Remove worktree directory
+					// 7.5. Run post-merge validation (configurable via .azedarach.json)
+					// Only runs if merge.validateCommands is configured
+					if (mergeConfig.validateCommands.length > 0) {
+						yield* Effect.gen(function* () {
+							const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
+								mergeConfig
+
+							/**
+							 * Run all validation commands and return first failure
+							 */
+							const runValidation = (): Effect.Effect<
+								{ success: boolean; output: string; failedCommand?: string },
+								never,
+								CommandExecutor.CommandExecutor
+							> =>
+								Effect.gen(function* () {
+									for (const cmd of validateCommands) {
+										yield* Effect.log(`Running: ${cmd}`)
+										const result = yield* runShellCommand(cmd, projectPath)
+										if (!result.success) {
+											return { success: false, output: result.output, failedCommand: cmd }
+										}
+									}
+									return { success: true, output: "" }
+								})
+
+							// Initial validation
+							let lastResult = yield* runValidation()
+							if (lastResult.success) {
+								yield* Effect.log("Post-merge validation passed")
+								return
+							}
+
+							// Try fix attempts if fixCommand is configured
+							if (fixCommand) {
+								for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
+									yield* Effect.log(
+										`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
+									)
+									yield* runShellCommand(fixCommand, projectPath)
+
+									lastResult = yield* runValidation()
+									if (lastResult.success) {
+										yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
+
+										// Commit the fixes
+										yield* runGit(["add", "-A"], projectPath).pipe(
+											Effect.catchAll(() => Effect.void),
+										)
+										yield* runGit(
+											["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+											projectPath,
+										).pipe(Effect.catchAll(() => Effect.void))
+
+										return
+									}
+								}
+							}
+
+							// Still failing after all fix attempts
+							yield* Effect.log("Validation still failing after auto-fix attempts")
+
+							// Commit any partial fixes
+							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* runGit(
+								["commit", "-m", `wip: partial fix after merging ${beadId}`],
+								projectPath,
+							).pipe(Effect.catchAll(() => Effect.void))
+
+							// Start Claude session if configured
+							if (startClaudeOnFailure) {
+								const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
+								const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
+
+								yield* sessionManager
+									.start({
+										beadId,
+										projectPath,
+										initialPrompt: fixPrompt,
+									})
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
+										),
+									)
+							}
+
+							return yield* Effect.fail(
+								new TypeCheckError({
+									beadId,
+									message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
+									output: lastResult.output,
+								}),
+							)
+						})
+					}
+
+					// 8. Merge Claude's local settings from worktree to main
+					// This preserves permission grants (allowedTools, trustedPaths) that Claude
+					// added during the session. Must happen BEFORE worktree deletion.
+					yield* worktreeManager.mergeClaudeLocalSettings({
+						worktreePath: worktree.path,
+						mainProjectPath: projectPath,
+					})
+
+					// 9. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 9. Delete local branch
+					// 10. Delete local branch
 					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
 						Effect.catchAll(() => Effect.void),
 					)
 
-					// 10. Close bead issue
+					// 11. Close bead issue
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
@@ -875,7 +1023,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 11. Push to origin
+					// 12. Push to origin
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(

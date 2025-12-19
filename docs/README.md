@@ -11,6 +11,7 @@
    - [Creating Tasks](#creating-tasks)
    - [Detail Panel](#detail-panel)
    - [Task Movement](#task-movement)
+   - [Epics](#epics)
    - [VC Integration](#vc-integration-vibecoder)
    - [Session Attachment](#session-attachment-requires-active-sessions)
 5. [Testing Features](#testing-features)
@@ -162,6 +163,68 @@ Use Action mode (`Space` + `h`/`l`) to move tasks between columns:
 - Moving to "In Progress" starts work on a task
 - Moving to "Closed" completes a task
 - Changes are immediately synced to beads
+
+### Epics
+
+Epics are container tasks that group related work. Use them to:
+- **Organize features** into smaller, manageable tasks
+- **Track progress** across multiple related issues
+- **Focus the board** on a specific body of work with drill-down view
+
+#### Creating an Epic
+
+1. Press `c` to create a new task
+2. Set the **Type** to `epic` (use `h`/`l` to cycle)
+3. Give it a descriptive title (e.g., "User Authentication System")
+4. Press `Enter` to create
+
+Or via CLI:
+```bash
+bd create --title="User Authentication System" --type=epic
+```
+
+#### Adding Children to an Epic
+
+Children are tasks with a parent-child dependency to the epic. Create the dependency:
+
+```bash
+# Create a child task
+bd create --title="Implement login form" --type=task
+
+# Link it to the epic (child depends on parent)
+bd dep add az-xyz az-epic --type=parent-child
+```
+
+Where `az-xyz` is the child task and `az-epic` is the epic ID.
+
+#### Epic Drill-Down View
+
+Press `Enter` on an epic card to enter **drill-down mode**:
+
+```
+┌─ Open ─────┬─ In Progress ─┬─ Done ──────┐
+│  ◀ az-gds  │   Epic View   │  ████░ 3/5  │  ← Header bar
+│  az-lqb    │  az-7sr ⚙    │  az-aiu ✓   │
+│  az-bjp    │               │  az-xxx ✓   │
+└────────────┴───────────────┴─────────────┘
+```
+
+The header shows:
+- **Back arrow** (`◀`) with epic ID
+- **Epic title** (centered)
+- **Progress bar** with completed/total count
+
+Press `q` or `Esc` to exit drill-down and return to the main board.
+
+See [Keybindings: Epic Drill-Down](keybindings.md#epic-drill-down) for full navigation details.
+
+#### Epic Workflow Tips
+
+1. **Start with an epic** for any feature spanning multiple tasks
+2. **Break down work** into child tasks before starting
+3. **Use drill-down** to focus during implementation
+4. **Track progress** via the progress bar in drill-down header
+5. **Close children first**, then close the epic when all work is complete
 
 ### VC Integration (VibeCoder)
 

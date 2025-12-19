@@ -279,6 +279,44 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						)
 				})
 
+			/**
+			 * Remove attachment link from bead notes when image is deleted.
+			 * Removes lines matching the pattern: 📎 [filename](...)
+			 */
+			const unlinkAttachmentFromNotes = (
+				issueId: string,
+				attachment: ImageAttachment,
+			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					// Get current issue to read existing notes
+					const issue = yield* beadsClient
+						.show(issueId)
+						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+
+					const existingNotes = issue?.notes
+					if (!existingNotes) return
+
+					// Remove lines that start with the attachment link pattern for this file
+					// Pattern: 📎 [filename](path) (source, timestamp)
+					const lines = existingNotes.split("\n")
+					const attachmentPrefix = `📎 [${attachment.filename}]`
+					const filteredLines = lines.filter((line) => !line.startsWith(attachmentPrefix))
+
+					// Only update if we actually removed something
+					if (filteredLines.length === lines.length) return
+
+					const newNotes = filteredLines.join("\n").trim()
+
+					// Update the bead with cleaned notes
+					yield* beadsClient
+						.update(issueId, { notes: newNotes || "" })
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Failed to update bead notes: ${error}`),
+							),
+						)
+				})
+
 			// ========================================================================
 			// Reactive State
 			// ========================================================================
@@ -521,6 +559,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							selectedIndex: newSelectedIndex,
 						})
 
+						// Remove attachment link from notes
+						yield* unlinkAttachmentFromNotes(current.taskId, attachment)
+
 						return attachment
 					}),
 
@@ -757,6 +798,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 								selectedIndex: newSelectedIndex,
 							})
 						}
+
+						// Remove attachment link from notes
+						yield* unlinkAttachmentFromNotes(issueId, attachment)
 					}),
 
 				/**

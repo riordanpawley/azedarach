@@ -6,6 +6,7 @@
  */
 
 import { Effect } from "effect"
+import { AttachmentService } from "../../core/AttachmentService.js"
 import { HookReceiver, mapEventToState } from "../../core/HookReceiver.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { SessionManager } from "../../core/SessionManager.js"
@@ -59,16 +60,8 @@ export const hookReceiverStarterAtom = appRuntime.atom(
 			details: "Polling /tmp for notifications every 500ms",
 		})
 
-		// Start the receiver - it will be interrupted when this atom unmounts
+		// Start the receiver (fiber tracking happens inside HookReceiver service)
 		const fiber = yield* receiver.start(handler)
-
-		// Register the fiber with diagnostics for monitoring
-		yield* diagnostics.registerFiber({
-			id: "hook-receiver-poller",
-			name: "HookReceiver Poller",
-			description: "Polls /tmp for azedarach-notify-*.json files",
-			fiber,
-		})
 
 		yield* Effect.log("HookReceiver started - watching for Claude Code hook notifications")
 
@@ -172,7 +165,6 @@ export const stopSessionAtom = appRuntime.fn((beadId: string) =>
  */
 export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
-		const { AttachmentService } = yield* import("../../core/AttachmentService.js")
 		const service = yield* AttachmentService
 		yield* service.attachExternal(sessionId)
 	}).pipe(Effect.catchAll(Effect.logError)),
@@ -183,7 +175,6 @@ export const attachExternalAtom = appRuntime.fn((sessionId: string) =>
  */
 export const attachInlineAtom = appRuntime.fn((sessionId: string) =>
 	Effect.gen(function* () {
-		const { AttachmentService } = yield* import("../../core/AttachmentService.js")
 		const service = yield* AttachmentService
 		yield* service.attachInline(sessionId)
 	}).pipe(Effect.catchAll(Effect.logError)),
