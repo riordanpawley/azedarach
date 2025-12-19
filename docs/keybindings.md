@@ -535,7 +535,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
 | `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
 | `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
-| `Space` `a` | Attach to session | Session exists (switches tmux client) |
+| `Space` `a` | Attach to session | Session exists (offers to merge main if behind) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
 | `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
