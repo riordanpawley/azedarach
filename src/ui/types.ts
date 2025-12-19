@@ -63,6 +63,8 @@ export interface SessionMetrics {
  */
 export interface TaskWithSession extends Issue, SessionMetrics {
 	sessionState: SessionState
+	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
+	hasMergeConflict?: boolean
 }
 
 /**
@@ -90,6 +92,12 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 	paused: "⏸️",
 	warning: "⚠️",
 }
+
+/**
+ * Conflict indicator shown when worktree has an active merge conflict
+ * Displayed alongside session indicator (e.g., "🔵 ⚔️" = busy + conflict)
+ */
+export const CONFLICT_INDICATOR = "⚔️"
 
 /**
  * Agent phase indicators
