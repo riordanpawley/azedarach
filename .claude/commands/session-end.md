@@ -18,6 +18,42 @@ argument-hint: Optional - focus area for retrospective
 
 Execute the session-end workflow in this order:
 
+### Phase 0: Git Status Check (CRITICAL)
+
+**NEVER leave uncommitted changes.** Before anything else:
+
+```bash
+git status
+```
+
+**If there are uncommitted changes:**
+
+1. **Review what changed:**
+   ```bash
+   git diff --stat
+   ```
+
+2. **Stage and commit all work:**
+   ```bash
+   git add -A
+   git commit -m "wip: session checkpoint
+
+   🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+   Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+   ```
+
+   Or if work is complete, use a proper commit message describing the changes.
+
+3. **Verify clean state:**
+   ```bash
+   git status  # Should show "nothing to commit"
+   ```
+
+**Only proceed to Phase 1 after git is clean.**
+
+---
+
 ### Phase 1: Beads Update Verification
 
 #### 1.1 Check Current Beads Status
@@ -134,6 +170,10 @@ After retrospective completes, show user:
 ================================================================================
 Session End Complete
 ================================================================================
+
+Git Status:
+   - Committed: [commit hash] [message summary]
+   - Working tree: clean ✓
 
 Beads Status:
    - Updated: 2 issue(s) with session notes

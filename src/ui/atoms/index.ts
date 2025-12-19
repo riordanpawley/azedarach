@@ -7,6 +7,7 @@
 
 // Board state atoms
 export {
+	boardIsLoadingAtom,
 	boardTasksAtom,
 	boardTasksByColumnAtom,
 	drillDownFilteredTasksAtom,
