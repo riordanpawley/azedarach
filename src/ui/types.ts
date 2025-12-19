@@ -100,6 +100,12 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 export const CONFLICT_INDICATOR = "⚔️"
 
 /**
+ * Dev server indicator shown when a dev server is running for the task
+ * Displayed alongside other indicators (e.g., "🔵 🖥️" = busy session + dev server)
+ */
+export const DEV_SERVER_INDICATOR = "🖥️"
+
+/**
  * Agent phase indicators
  *
  * Displayed alongside session indicator when phase is detected.

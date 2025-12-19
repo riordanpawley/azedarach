@@ -4,9 +4,11 @@
  * Provides action handlers for dev server operations:
  * - Toggle dev server (Space+r)
  * - Restart dev server (Space+Ctrl+r)
+ * - Attach to dev server (Space+v)
  */
 
 import { Effect } from "effect"
+import { TmuxService } from "../../core/TmuxService.js"
 import { DevServerService, type NoWorktreeError } from "../DevServerService.js"
 import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
@@ -20,12 +22,14 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			ProjectService.Default,
 			ToastService.Default,
 			KeyboardHelpersService.Default,
+			TmuxService.Default,
 		],
 		effect: Effect.gen(function* () {
 			const devServer = yield* DevServerService
 			const projectService = yield* ProjectService
 			const toast = yield* ToastService
 			const helpers = yield* KeyboardHelpersService
+			const tmux = yield* TmuxService
 
 			/**
 			 * Toggle dev server for the currently selected bead
@@ -133,9 +137,49 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					)
 				})
 
+			/**
+			 * Attach to the dev server tmux session for the currently selected bead
+			 *
+			 * Switches the tmux client to the dev server session, allowing the user
+			 * to view the dev server output. User can return with Ctrl-a Ctrl-a.
+			 */
+			const attachDevServer = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getSelectedTask()
+					if (!task) {
+						yield* toast.show("error", "No task selected")
+						return
+					}
+
+					const currentState = yield* devServer.getStatus(task.id)
+
+					if (currentState.status !== "running" && currentState.status !== "starting") {
+						yield* toast.show("error", "No dev server running. Start one with Space+r")
+						return
+					}
+
+					if (!currentState.tmuxSession) {
+						yield* toast.show("error", "Dev server session not found")
+						return
+					}
+
+					// Switch to the dev server session
+					yield* tmux
+						.switchClient(currentState.tmuxSession)
+						.pipe(
+							Effect.catchAll((err) =>
+								toast.show(
+									"error",
+									`Failed to attach: ${err instanceof Error ? err.message : String(err)}`,
+								),
+							),
+						)
+				})
+
 			return {
 				toggleDevServer,
 				restartDevServer,
+				attachDevServer,
 			}
 		}),
 	},

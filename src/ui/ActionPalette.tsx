@@ -58,8 +58,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
-			case "r": // Dev server - only if worktree exists (session not idle)
+			case "r": // Dev server toggle - only if worktree exists (session not idle)
 				return sessionState !== "idle"
+			case "v": // View dev server - only if dev server is running
+				return devServerStatus === "running" || devServerStatus === "starting"
 			case "R": // Resume - only if paused
 				return sessionState === "paused"
 			case "x": // Stop - only if not idle
@@ -170,6 +172,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Dev server */}
 				<ActionLine keyName="r" description={getDevServerLabel()} />
+				<ActionLine keyName="v" description="view server" />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Task actions */}
