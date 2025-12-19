@@ -551,7 +551,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const envString = Object.entries(env)
 						.map(([k, v]) => `${k}=${v}`)
 						.join(" ")
-					const fullCommand = `${envString} ${command}`
+					const rawCommand = `${envString} ${command}`
 
 					// Create tmux session
 					const tmuxSession = getDevSessionName(beadId)
@@ -559,6 +559,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
+
+					// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+					// This ensures the project's .envrc environment is loaded automatically
+					// Keep session alive after command exits for debugging (exec ${shell})
+					const shell = config.session.shell
+					const fullCommand = `${shell} -i -c '${rawCommand}; exec ${shell}'`
 
 					yield* tmux.newSession(tmuxSession, {
 						cwd,
@@ -666,7 +672,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const envString = Object.entries(env)
 						.map(([k, v]) => `${k}=${v}`)
 						.join(" ")
-					const fullCommand = `${envString} ${command}`
+					const rawCommand = `${envString} ${command}`
 
 					// Create tmux session
 					const tmuxSession = getDevSessionName(beadId)
@@ -674,6 +680,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
+
+					// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
+					// This ensures the project's .envrc environment is loaded automatically
+					// Keep session alive after command exits for debugging (exec ${shell})
+					const shell = config.session.shell
+					const fullCommand = `${shell} -i -c '${rawCommand}; exec ${shell}'`
 
 					yield* tmux.newSession(tmuxSession, {
 						cwd,
