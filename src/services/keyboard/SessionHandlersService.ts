@@ -15,6 +15,7 @@ import { Effect } from "effect"
 import { AppConfig, type ResolvedConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
+import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { ToastService } from "../ToastService.js"
@@ -35,6 +36,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			ImageAttachmentService.Default,
 			TmuxService.Default,
 			AppConfig.Default,
+			PRWorkflow.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -46,6 +48,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
+			const prWorkflow = yield* PRWorkflow
 			const resolvedConfig: ResolvedConfig = appConfig.config
 
 			// ================================================================
@@ -306,6 +309,7 @@ What would you like to discuss?`
 			 * Attach to session externally (Space+a)
 			 *
 			 * Switches to the tmux session in a new terminal window.
+			 * After successful attach, checks for PR comments and injects them into the session.
 			 * The user can return with Ctrl-a Ctrl-a.
 			 */
 			const attachExternal = () =>
@@ -314,7 +318,34 @@ What would you like to discuss?`
 					if (!task) return
 
 					yield* attachment.attachExternal(task.id).pipe(
-						Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
+						Effect.tap(() =>
+							Effect.gen(function* () {
+								// After successful attach, check for PR comments
+								const projectPath = yield* helpers.getProjectPath()
+								const comments = yield* prWorkflow
+									.getPRComments({ beadId: task.id, projectPath })
+									.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+
+								if (comments.length > 0) {
+									// Format comments for Claude
+									const formattedComments = comments
+										.map((c) => `**${c.author}** (${c.createdAt}):\n${c.body}`)
+										.join("\n\n---\n\n")
+
+									const prompt = `The following PR comments need to be addressed:\n\n${formattedComments}\n\nPlease review and address these comments.`
+
+									// Inject into session using tmux send-keys
+									yield* tmux.sendKeys(task.id, prompt).pipe(Effect.catchAll(() => Effect.void))
+
+									yield* toast.show(
+										"info",
+										`Injected ${comments.length} PR comment(s) into session`,
+									)
+								} else {
+									yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
+								}
+							}),
+						),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
