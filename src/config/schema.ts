@@ -3,9 +3,25 @@
  *
  * Uses @effect/schema for runtime validation, matching patterns in BeadsClient.ts.
  * Schema definitions provide both TypeScript types and runtime validation.
+ *
+ * ## Config Versioning
+ *
+ * The config file includes a `configVersion` field to track schema changes.
+ * When loading, the schema automatically migrates old formats to current.
+ *
+ * Version history:
+ * - 1: Initial versioned schema (moved pr.baseBranch → git.baseBranch)
+ * - 0/undefined: Legacy unversioned configs
  */
 
 import * as Schema from "effect/Schema"
+
+// ============================================================================
+// Version Constants
+// ============================================================================
+
+/** Current config schema version */
+export const CURRENT_CONFIG_VERSION = 1
 
 // ============================================================================
 // Nested Config Schemas
@@ -85,6 +101,14 @@ const GitConfigSchema = Schema.Struct({
 
 	/** Prefix for branch names (default: "az-") */
 	branchPrefix: Schema.optional(Schema.String),
+
+	/**
+	 * Base branch for merges, diffs, and PRs (default: "main")
+	 *
+	 * This is the branch that worktree branches are compared against and merged into.
+	 * Common values: "main", "master", "develop", "preview"
+	 */
+	baseBranch: Schema.optional(Schema.String),
 })
 
 /**
@@ -98,9 +122,6 @@ const PRConfigSchema = Schema.Struct({
 
 	/** Auto-merge after CI passes (default: false) */
 	autoMerge: Schema.optional(Schema.Boolean),
-
-	/** Base branch for PRs (default: "main") */
-	baseBranch: Schema.optional(Schema.String),
 })
 
 /**
@@ -165,41 +186,195 @@ const ProjectConfigSchema = Schema.Struct({
 })
 
 // ============================================================================
+// Legacy Schemas (for migration)
+// ============================================================================
+
+/**
+ * Legacy PR config schema (v0)
+ *
+ * In v0 configs, baseBranch was under pr section.
+ * This was moved to git section in v1.
+ */
+const LegacyPRConfigSchema = Schema.Struct({
+	autoDraft: Schema.optional(Schema.Boolean),
+	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to git.baseBranch in v1 */
+	baseBranch: Schema.optional(Schema.String),
+})
+
+// ============================================================================
+// Migration System
+// ============================================================================
+
+/**
+ * Raw config type from schema - used as input to migrations
+ */
+type RawConfig = Schema.Schema.Type<typeof RawConfigSchema>
+
+/**
+ * Current config type from schema - output of migrations
+ */
+type CurrentConfig = Schema.Schema.Type<typeof CurrentConfigSchema>
+
+/**
+ * A migration transforms config from one version to the next.
+ *
+ * Each migration is self-contained and documents what it changes.
+ * This pattern makes it easy to:
+ * - See exactly what changed in each version
+ * - Test migrations in isolation
+ * - Add new migrations without touching old code
+ */
+interface Migration {
+	/** Version this migration produces */
+	readonly toVersion: number
+	/** Human-readable description of what changed */
+	readonly description: string
+	/** Transform function */
+	readonly migrate: (config: RawConfig) => RawConfig
+}
+
+/**
+ * Migration registry - add new migrations here
+ *
+ * Each migration handles ONE version bump.
+ * Migrations are applied in sequence from the config's current version to CURRENT_CONFIG_VERSION.
+ */
+const migrations: readonly Migration[] = [
+	{
+		toVersion: 1,
+		description: "Move pr.baseBranch → git.baseBranch",
+		migrate: (config) => {
+			const pr = config.pr
+			const git = config.git
+
+			// Extract legacy baseBranch from pr section
+			const legacyBaseBranch = pr?.baseBranch
+			const currentGitBaseBranch = git?.baseBranch
+
+			// Migrate if legacy exists and current doesn't
+			const migratedBaseBranch =
+				legacyBaseBranch !== undefined && currentGitBaseBranch === undefined
+					? legacyBaseBranch
+					: currentGitBaseBranch
+
+			// Build new pr config without legacy baseBranch field
+			const newPr =
+				pr !== undefined ? { autoDraft: pr.autoDraft, autoMerge: pr.autoMerge } : undefined
+
+			return {
+				...config,
+				configVersion: 1,
+				git: migratedBaseBranch !== undefined ? { ...git, baseBranch: migratedBaseBranch } : git,
+				pr: newPr,
+			}
+		},
+	},
+	// ────────────────────────────────────────────────────────────────────────
+	// Future migrations go here. Example:
+	// ────────────────────────────────────────────────────────────────────────
+	// {
+	//   toVersion: 2,
+	//   description: "Add session.timeout option",
+	//   migrate: (config) => ({
+	//     ...config,
+	//     configVersion: 2,
+	//     // New fields get defaults, existing fields pass through
+	//   }),
+	// },
+]
+
+/**
+ * Apply all necessary migrations to bring config to current version
+ *
+ * Migrations are applied in sequence. A config at v0 will go through
+ * all migrations (v0→v1, v1→v2, etc.) until it reaches CURRENT_CONFIG_VERSION.
+ */
+const applyMigrations = (config: RawConfig): CurrentConfig => {
+	let current = config
+	const startVersion = current.configVersion ?? 0
+
+	for (const migration of migrations) {
+		if (startVersion < migration.toVersion) {
+			current = migration.migrate(current)
+		}
+	}
+
+	// Ensure version is set even if no migrations were needed
+	// Strip legacy fields to match CurrentConfig
+	return {
+		configVersion: CURRENT_CONFIG_VERSION,
+		worktree: current.worktree,
+		git: current.git,
+		session: current.session,
+		patterns: current.patterns,
+		pr: current.pr
+			? { autoDraft: current.pr.autoDraft, autoMerge: current.pr.autoMerge }
+			: undefined,
+		merge: current.merge,
+		notifications: current.notifications,
+		projects: current.projects,
+		defaultProject: current.defaultProject,
+	}
+}
+
+// ============================================================================
 // Root Schema
 // ============================================================================
 
 /**
- * Root configuration schema for Azedarach
+ * Raw input schema for Azedarach config
  *
- * All sections are optional - missing sections use defaults.
+ * Accepts both legacy (v0) and current (v1) formats.
+ * Used as the input side of the migration transform.
  */
-export const AzedarachConfigSchema = Schema.Struct({
-	/** Worktree lifecycle configuration */
+const RawConfigSchema = Schema.Struct({
+	/** Config version - undefined/0 for legacy, 1 for current */
+	configVersion: Schema.optional(Schema.Number),
+
 	worktree: Schema.optional(WorktreeConfigSchema),
-
-	/** Git behavior configuration */
 	git: Schema.optional(GitConfigSchema),
-
-	/** Claude session configuration */
 	session: Schema.optional(SessionConfigSchema),
-
-	/** State detection pattern overrides */
 	patterns: Schema.optional(PatternsConfigSchema),
-
-	/** PR workflow configuration */
-	pr: Schema.optional(PRConfigSchema),
-
-	/** Merge workflow configuration */
+	/** May contain legacy baseBranch field */
+	pr: Schema.optional(LegacyPRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
-
-	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
-
-	/** Project configurations */
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
-
-	/** Default project name to use */
 	defaultProject: Schema.optional(Schema.String),
+})
+
+/**
+ * Current config schema (v1)
+ *
+ * This is the canonical schema after migration.
+ * Does NOT include legacy fields - they should be migrated away.
+ */
+const CurrentConfigSchema = Schema.Struct({
+	configVersion: Schema.optional(Schema.Number),
+	worktree: Schema.optional(WorktreeConfigSchema),
+	git: Schema.optional(GitConfigSchema),
+	session: Schema.optional(SessionConfigSchema),
+	patterns: Schema.optional(PatternsConfigSchema),
+	pr: Schema.optional(PRConfigSchema),
+	merge: Schema.optional(MergeConfigSchema),
+	notifications: Schema.optional(NotificationsConfigSchema),
+	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
+	defaultProject: Schema.optional(Schema.String),
+})
+
+/**
+ * Root configuration schema for Azedarach with automatic migration
+ *
+ * The transform pipeline:
+ * 1. RawConfigSchema validates basic structure (accepts legacy fields)
+ * 2. applyMigrations() transforms to current version
+ * 3. Result matches CurrentConfigSchema
+ */
+export const AzedarachConfigSchema = Schema.transform(RawConfigSchema, CurrentConfigSchema, {
+	strict: true,
+	decode: applyMigrations,
+	encode: (current) => ({ ...current, configVersion: CURRENT_CONFIG_VERSION }),
 })
 
 // ============================================================================

@@ -56,6 +56,9 @@ export interface AppConfigService {
 	/** Get session configuration section */
 	readonly getSessionConfig: () => ResolvedConfig["session"]
 
+	/** Get git configuration section */
+	readonly getGitConfig: () => ResolvedConfig["git"]
+
 	/** Get patterns configuration section */
 	readonly getPatternsConfig: () => ResolvedConfig["patterns"]
 
@@ -99,6 +102,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// ============================================================================
 		// Config Loading Helpers
 		// ============================================================================
+		//
+		// Note: Config migration is handled automatically by AzedarachConfigSchema
+		// which uses Schema.transform to migrate legacy formats (e.g., pr.baseBranch → git.baseBranch)
+		//
 
 		/**
 		 * Try to load .azedarach.json from project root
@@ -137,6 +144,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						}),
 				})
 
+				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
 					Effect.mapError(
 						(e) =>
@@ -177,7 +185,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				)
 
 				const pkg = yield* Effect.try({
-					try: () => JSON.parse(content) as { azedarach?: unknown },
+					try: () => JSON.parse(content),
 					catch: () =>
 						new ConfigParseError({
 							message: "Invalid JSON in package.json",
@@ -185,11 +193,23 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						}),
 				})
 
-				if (!pkg.azedarach) {
+				// Check if azedarach key exists using schema validation
+				const PackageJsonSchema = Schema.Struct({
+					azedarach: Schema.optional(Schema.Unknown),
+				})
+
+				const pkgResult = yield* Schema.decodeUnknown(PackageJsonSchema)(pkg).pipe(
+					Effect.catchAll(() => Effect.succeed({ azedarach: undefined })),
+				)
+
+				if (pkgResult.azedarach === undefined) {
 					return null
 				}
 
-				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(pkg.azedarach).pipe(
+				// Schema.transform in AzedarachConfigSchema handles migration automatically
+				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(
+					pkgResult.azedarach,
+				).pipe(
 					Effect.mapError(
 						(e) =>
 							new ConfigParseError({
@@ -275,6 +295,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 							}),
 					})
 
+					// Schema.transform in AzedarachConfigSchema handles migration automatically
 					const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
 						Effect.mapError(
 							(e) =>
@@ -318,6 +339,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			config,
 			getWorktreeConfig: () => config.worktree,
 			getSessionConfig: () => config.session,
+			getGitConfig: () => config.git,
 			getPatternsConfig: () => config.patterns,
 			getPRConfig: () => config.pr,
 			getMergeConfig: () => config.merge,

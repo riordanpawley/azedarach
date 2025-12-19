@@ -74,6 +74,8 @@ const getLoginShellSync = (): string => process.env.SHELL || "bash"
  * use getLoginShell() Effect and override the default when creating AppConfig.
  */
 export const DEFAULT_CONFIG = {
+	/** Current config version - used for automatic migrations */
+	configVersion: 1,
 	worktree: {
 		initCommands: [] satisfies string[],
 		env: {} satisfies Record<string, string>,
@@ -86,6 +88,12 @@ export const DEFAULT_CONFIG = {
 		tmuxPrefix: "C-a",
 		dangerouslySkipPermissions: false,
 	},
+	git: {
+		pushBranchOnCreate: true,
+		remote: "origin",
+		branchPrefix: "az-",
+		baseBranch: "main",
+	},
 	patterns: {
 		waiting: [] satisfies string[],
 		done: [] satisfies string[],
@@ -94,7 +102,6 @@ export const DEFAULT_CONFIG = {
 	pr: {
 		autoDraft: true,
 		autoMerge: false,
-		baseBranch: "main",
 	},
 	merge: {
 		// No validation by default - must be explicitly configured in .azedarach.json
@@ -122,6 +129,8 @@ export const DEFAULT_CONFIG = {
  * has all fields defined after merging with defaults.
  */
 export interface ResolvedConfig {
+	/** Config version - used for automatic migrations */
+	configVersion: number
 	worktree: {
 		initCommands: readonly string[]
 		env: Readonly<Record<string, string>>
@@ -134,6 +143,12 @@ export interface ResolvedConfig {
 		tmuxPrefix: string
 		dangerouslySkipPermissions: boolean
 	}
+	git: {
+		pushBranchOnCreate: boolean
+		remote: string
+		branchPrefix: string
+		baseBranch: string
+	}
 	patterns: {
 		waiting: readonly string[]
 		done: readonly string[]
@@ -142,7 +157,6 @@ export interface ResolvedConfig {
 	pr: {
 		autoDraft: boolean
 		autoMerge: boolean
-		baseBranch: string
 	}
 	merge: {
 		validateCommands: readonly string[]
@@ -176,6 +190,7 @@ export interface ResolvedConfig {
  */
 export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 	return {
+		configVersion: config.configVersion ?? DEFAULT_CONFIG.configVersion,
 		worktree: {
 			initCommands: config.worktree?.initCommands ?? DEFAULT_CONFIG.worktree.initCommands,
 			env: config.worktree?.env ?? DEFAULT_CONFIG.worktree.env,
@@ -191,6 +206,12 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 				config.session?.dangerouslySkipPermissions ??
 				DEFAULT_CONFIG.session.dangerouslySkipPermissions,
 		},
+		git: {
+			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,
+			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
+			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
+			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
+		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
 			done: config.patterns?.done ?? DEFAULT_CONFIG.patterns.done,
@@ -199,7 +220,6 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		pr: {
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
-			baseBranch: config.pr?.baseBranch ?? DEFAULT_CONFIG.pr.baseBranch,
 		},
 		merge: {
 			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,
