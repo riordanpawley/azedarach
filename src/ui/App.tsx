@@ -15,6 +15,7 @@ import {
 	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
+	currentProjectAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	focusedTaskRunningOperationAtom,
@@ -118,6 +119,12 @@ export const App = () => {
 	// Board loading state for status bar indicator
 	const boardIsLoadingResult = useAtomValue(boardIsLoadingAtom)
 	const isLoading = Result.isSuccess(boardIsLoadingResult) ? boardIsLoadingResult.value : false
+
+	// Current project for status bar display
+	const currentProjectResult = useAtomValue(currentProjectAtom)
+	const projectName = Result.isSuccess(currentProjectResult)
+		? currentProjectResult.value?.name
+		: undefined
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Epic Drill-Down State
@@ -305,6 +312,7 @@ export const App = () => {
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 				viewMode={viewMode}
 				isLoading={isLoading}
+				projectName={projectName}
 			/>
 
 			{/* Help overlay */}
