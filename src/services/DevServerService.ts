@@ -13,7 +13,7 @@
  */
 
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, HashMap, Option, Ref, Schema, SubscriptionRef } from "effect"
+import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import { type TmuxError, TmuxService } from "../core/TmuxService.js"
 import { ProjectService } from "./ProjectService.js"
@@ -367,7 +367,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		/**
-		 * Poll tmux pane for port detection
+		 * Poll tmux pane for port detection using proper Effect scheduling
+		 *
+		 * Uses Schedule.spaced with upTo and untilInput for:
+		 * - Periodic polling every PORT_POLL_INTERVAL
+		 * - Timeout after PORT_DETECTION_TIMEOUT
+		 * - Early termination when port is detected
 		 */
 		const pollForPort = (
 			beadId: string,
@@ -375,26 +380,39 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const pattern = new RegExp(config.devServer.portPattern)
-				const startTime = Date.now()
+				const portRef = yield* Ref.make<number | undefined>(undefined)
 
-				// Poll until timeout
-				while (Date.now() - startTime < PORT_DETECTION_TIMEOUT) {
+				// Single poll attempt - captures port in ref and returns true if found
+				const tryDetectPort = Effect.gen(function* () {
 					const output = yield* tmux.capturePane(tmuxSession, 100)
 					const match = output.match(pattern)
 
 					if (match) {
 						const port = parseInt(match[1] || match[2], 10)
 						if (!Number.isNaN(port)) {
-							yield* Effect.log(`Detected port ${port} for ${beadId}`)
-							return port
+							yield* Ref.set(portRef, port)
+							return true
 						}
 					}
+					return false
+				}).pipe(Effect.catchAll(() => Effect.succeed(false)))
 
-					yield* Effect.sleep(PORT_POLL_INTERVAL)
+				// Schedule: poll every 500ms, up to 30 seconds, stop when port found
+				const schedule = Schedule.spaced(`${PORT_POLL_INTERVAL} millis`).pipe(
+					Schedule.upTo(`${PORT_DETECTION_TIMEOUT} millis`),
+					Schedule.untilInput((found: boolean) => found),
+				)
+
+				// Run the repeated poll (ignoring the schedule output)
+				yield* Effect.repeat(tryDetectPort, schedule).pipe(Effect.ignore)
+
+				const port = yield* Ref.get(portRef)
+				if (port !== undefined) {
+					yield* Effect.log(`Detected port ${port} for ${beadId}`)
+				} else {
+					yield* Effect.log(`Port detection timed out for ${beadId}`)
 				}
-
-				yield* Effect.log(`Port detection timed out for ${beadId}`)
-				return undefined
+				return port
 			})
 
 		/**
@@ -544,15 +562,16 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					})
 
 					// Start port polling in background to get actual port
-					yield* Effect.fork(
-						pollForPort(beadId, tmuxSession).pipe(
-							Effect.tap((detectedPort) =>
-								detectedPort !== undefined
-									? updateServerState(beadId, { port: detectedPort })
-									: Effect.void,
-							),
-							Effect.catchAll(() => Effect.void),
+					// Use forkDaemon so the fiber survives after start() returns
+					yield* pollForPort(beadId, tmuxSession).pipe(
+						Effect.tap((detectedPort) =>
+							detectedPort !== undefined
+								? updateServerState(beadId, { port: detectedPort })
+								: Effect.void,
 						),
+						Effect.catchAll(() => Effect.void),
+						Effect.forkDaemon,
+						Effect.asVoid,
 					)
 
 					return yield* getServerState(beadId)
@@ -651,15 +670,16 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					})
 
 					// Poll for port in background
-					yield* Effect.fork(
-						pollForPort(beadId, tmuxSession).pipe(
-							Effect.tap((detectedPort) =>
-								detectedPort !== undefined
-									? updateServerState(beadId, { port: detectedPort })
-									: Effect.void,
-							),
-							Effect.catchAll(() => Effect.void),
+					// Use forkDaemon so the fiber survives after toggle() returns
+					yield* pollForPort(beadId, tmuxSession).pipe(
+						Effect.tap((detectedPort) =>
+							detectedPort !== undefined
+								? updateServerState(beadId, { port: detectedPort })
+								: Effect.void,
 						),
+						Effect.catchAll(() => Effect.void),
+						Effect.forkDaemon,
+						Effect.asVoid,
 					)
 
 					return yield* getServerState(beadId)
