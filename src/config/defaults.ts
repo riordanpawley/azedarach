@@ -86,9 +86,9 @@ export const DEFAULT_CONFIG = {
 		pushBranchOnCreate: true,
 		remote: "origin",
 		branchPrefix: "az-",
+		baseBranch: "main",
 		pushEnabled: true,
 		fetchEnabled: true,
-		baseBranch: "main",
 	},
 	session: {
 		command: "claude",
@@ -160,9 +160,9 @@ export interface ResolvedConfig {
 		pushBranchOnCreate: boolean
 		remote: string
 		branchPrefix: string
+		baseBranch: string
 		pushEnabled: boolean
 		fetchEnabled: boolean
-		baseBranch: string
 	}
 	session: {
 		command: string
@@ -226,20 +226,13 @@ export interface ResolvedConfig {
  */
 export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 	return {
+		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
 		worktree: {
 			initCommands: config.worktree?.initCommands ?? DEFAULT_CONFIG.worktree.initCommands,
 			env: config.worktree?.env ?? DEFAULT_CONFIG.worktree.env,
 			continueOnFailure:
 				config.worktree?.continueOnFailure ?? DEFAULT_CONFIG.worktree.continueOnFailure,
 			parallel: config.worktree?.parallel ?? DEFAULT_CONFIG.worktree.parallel,
-		},
-		git: {
-			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,
-			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
-			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
-			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
-			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
-			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
 		},
 		session: {
 			command: config.session?.command ?? DEFAULT_CONFIG.session.command,
@@ -248,6 +241,14 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			dangerouslySkipPermissions:
 				config.session?.dangerouslySkipPermissions ??
 				DEFAULT_CONFIG.session.dangerouslySkipPermissions,
+		},
+		git: {
+			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,
+			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
+			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
+			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
+			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
+			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
@@ -270,6 +271,8 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,
 			system: config.notifications?.system ?? DEFAULT_CONFIG.notifications.system,
 		},
+		projects: config.projects ?? DEFAULT_CONFIG.projects,
+		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
 		beads: {
 			syncEnabled: config.beads?.syncEnabled ?? DEFAULT_CONFIG.beads.syncEnabled,
 		},
@@ -285,8 +288,5 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
 			cwd: config.devServer?.cwd ?? DEFAULT_CONFIG.devServer.cwd,
 		},
-		projects: config.projects ?? DEFAULT_CONFIG.projects,
-		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
-		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
 	}
 }

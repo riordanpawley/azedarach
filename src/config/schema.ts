@@ -6,7 +6,7 @@
  *
  * ## Version History
  * - Version 1: Original schema (no $schema field) - legacy format
- * - Version 2: Adds $schema field, same structure
+ * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
  *
  * ## Adding New Versions
  * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
@@ -104,6 +104,14 @@ const GitConfigSchema = Schema.Struct({
 	branchPrefix: Schema.optional(Schema.String),
 
 	/**
+	 * Base branch for merges, diffs, and PRs (default: "main")
+	 *
+	 * This is the branch that worktree branches are compared against and merged into.
+	 * Common values: "main", "master", "develop", "preview"
+	 */
+	baseBranch: Schema.optional(Schema.String),
+
+	/**
 	 * Enable git push operations (default: true)
 	 *
 	 * When false, all git push operations are silently skipped.
@@ -117,14 +125,6 @@ const GitConfigSchema = Schema.Struct({
 	 * When false, git fetch and pull operations are silently skipped.
 	 */
 	fetchEnabled: Schema.optional(Schema.Boolean),
-
-	/**
-	 * Base branch for merges, diffs, and PRs (default: "main")
-	 *
-	 * This is the branch that worktree branches are compared against and merged into.
-	 * Common values: "main", "master", "develop", "preview"
-	 */
-	baseBranch: Schema.optional(Schema.String),
 })
 
 /**
