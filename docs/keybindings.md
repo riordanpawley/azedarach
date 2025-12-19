@@ -538,6 +538,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
+| `Space` `v` | View dev server | Dev server is running (attach to tmux session) |
 | `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
 | `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
@@ -586,6 +587,25 @@ Toggle a dev server for the selected task's worktree. Each worktree can have its
 **Requirements:**
 - A worktree must exist for the bead (start a session first with `Space+s`)
 - The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
+
+#### View Dev Server (Space+v)
+
+Attach to the dev server's tmux session to view its output. This is useful for:
+- Monitoring server logs and errors
+- Checking startup messages
+- Debugging connection issues
+
+**How it works:**
+1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
+2. You can see all server output in real-time
+3. Return to Azedarach with `Ctrl-a Ctrl-a` (double-tap tmux prefix)
+
+**Requirements:**
+- A dev server must be running for the bead (start with `Space+r` first)
+
+**TaskCard indicator:**
+- Tasks with running dev servers show 🖥️ in their header line
+- This helps identify which tasks have active dev servers at a glance
 
 ### Git/PR Actions
 
