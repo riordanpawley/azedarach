@@ -535,6 +535,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
 		const mergeConfig = appConfig.getMergeConfig()
+		const gitConfig = appConfig.getGitConfig()
+		const baseBranch = gitConfig.baseBranch
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -750,7 +752,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							"main",
+							baseBranch,
 							beadId,
 						).pipe(Command.workingDirectory(projectPath))
 
@@ -766,7 +768,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							projectPath,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -794,9 +796,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
 						// Start merge in worktree so Claude can resolve
-						yield* runGit(["merge", "main", "-m", `Merge main into ${beadId}`], worktree.path).pipe(
-							Effect.catchAll(() => Effect.void),
-						) // Will fail with conflicts, that's expected
+						yield* runGit(
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							worktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
@@ -829,13 +832,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 5. No code conflicts - safe to merge
-					// Switch to main branch in main repo
-					yield* runGit(["checkout", "main"], projectPath).pipe(
+					// Switch to base branch in main repo
+					yield* runGit(["checkout", baseBranch], projectPath).pipe(
 						Effect.mapError(
 							(e) =>
 								new GitError({
-									message: `Failed to checkout main: ${e.message}`,
-									command: "git checkout main",
+									message: `Failed to checkout ${baseBranch}: ${e.message}`,
+									command: `git checkout ${baseBranch}`,
 								}),
 						),
 					)
@@ -1025,12 +1028,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// 12. Push to origin
 					if (pushToOrigin) {
-						yield* runGit(["push", "origin", "main"], projectPath).pipe(
+						yield* runGit(["push", "origin", baseBranch], projectPath).pipe(
 							Effect.mapError(
 								(e) =>
 									new GitError({
 										message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-										command: "git push origin main",
+										command: `git push origin ${baseBranch}`,
 										stderr: e.stderr,
 									}),
 							),
@@ -1049,7 +1052,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						"git",
 						"merge-tree",
 						"--write-tree",
-						"main",
+						baseBranch,
 						beadId,
 					).pipe(Command.workingDirectory(projectPath))
 
@@ -1066,7 +1069,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Run merge-tree again to get the conflicted file list
 						// Use --no-messages to suppress "Auto-merging" messages and get clean file list
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							projectPath,
 						).pipe(Effect.catchAll(() => Effect.succeed("")))
 
@@ -1077,13 +1080,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// Get file change counts for informational purposes
-					const mergeBase = yield* runGit(["merge-base", "main", beadId], projectPath).pipe(
+					const mergeBase = yield* runGit(["merge-base", baseBranch, beadId], projectPath).pipe(
 						Effect.map((output) => output.trim()),
 						Effect.catchAll(() => Effect.succeed("")),
 					)
 
 					let branchChangedFiles = 0
-					let mainChangedFiles = 0
+					let baseChangedFiles = 0
 
 					if (mergeBase) {
 						const branchOutput = yield* runGit(
@@ -1101,8 +1104,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 						branchChangedFiles = branchOutput
 
-						const mainOutput = yield* runGit(
-							["diff", "--name-only", `${mergeBase}..main`],
+						const baseOutput = yield* runGit(
+							["diff", "--name-only", `${mergeBase}..${baseBranch}`],
 							projectPath,
 						).pipe(
 							Effect.map(
@@ -1114,14 +1117,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							),
 							Effect.catchAll(() => Effect.succeed(0)),
 						)
-						mainChangedFiles = mainOutput
+						baseChangedFiles = baseOutput
 					}
 
 					return {
 						hasConflictRisk,
 						conflictingFiles,
 						branchChangedFiles,
-						mainChangedFiles,
+						mainChangedFiles: baseChangedFiles,
 					} satisfies MergeConflictCheck
 				}),
 
