@@ -23,6 +23,23 @@ import { Effect, Fiber, FiberId, SubscriptionRef } from "effect"
 export type FiberStatus = "running" | "completed" | "interrupted" | "failed"
 
 /**
+ * Severity level for diagnostic events
+ */
+export type DiagnosticSeverity = "info" | "warning" | "error"
+
+/**
+ * A diagnostic event for logging issues and notifications
+ */
+export interface DiagnosticEvent {
+	readonly id: string
+	readonly timestamp: Date
+	readonly severity: DiagnosticSeverity
+	readonly source: string
+	readonly message: string
+	readonly details?: string
+}
+
+/**
  * Registered fiber info
  */
 export interface RegisteredFiber {
@@ -52,6 +69,7 @@ export interface ServiceHealth {
 export interface DiagnosticsState {
 	readonly fibers: readonly RegisteredFiber[]
 	readonly services: readonly ServiceHealth[]
+	readonly events: readonly DiagnosticEvent[]
 	readonly lastUpdated: Date
 }
 
@@ -80,6 +98,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 		const stateRef = yield* SubscriptionRef.make<DiagnosticsState>({
 			fibers: [],
 			services: [],
+			events: [],
 			lastUpdated: new Date(),
 		})
 
@@ -216,6 +235,41 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 				}),
 			)
 
+		/**
+		 * Log a diagnostic event
+		 *
+		 * Events are stored in state and can be viewed in the diagnostics overlay.
+		 * Use for warnings, errors, or notable info that should be visible to users.
+		 */
+		const logEvent = (options: {
+			severity: DiagnosticSeverity
+			source: string
+			message: string
+			details?: string
+		}) =>
+			SubscriptionRef.update(stateRef, (s) => ({
+				...s,
+				events: [
+					...s.events,
+					{
+						id: crypto.randomUUID(),
+						timestamp: new Date(),
+						...options,
+					},
+				],
+				lastUpdated: new Date(),
+			}))
+
+		/**
+		 * Clear all events
+		 */
+		const clearEvents = () =>
+			SubscriptionRef.update(stateRef, (s) => ({
+				...s,
+				events: [],
+				lastUpdated: new Date(),
+			}))
+
 		return {
 			state: stateRef,
 			registerFiber,
@@ -224,6 +278,8 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			getSnapshot,
 			clearCompletedFibers,
 			trackService,
+			logEvent,
+			clearEvents,
 		}
 	}),
 }) {}

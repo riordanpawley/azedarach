@@ -36,7 +36,7 @@ export const toastsAtom = appRuntime.subscriptionRef(
  *        await showToast({ type: "success", message: "Task completed!" })
  */
 export const showToastAtom = appRuntime.fn(
-	({ type, message }: { type: "success" | "error" | "info"; message: string }) =>
+	({ type, message }: { type: "success" | "error" | "info" | "warning"; message: string }) =>
 		Effect.gen(function* () {
 			const toast = yield* ToastService
 			yield* toast.show(type, message)
