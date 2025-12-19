@@ -13,17 +13,7 @@
  */
 
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import {
-	Data,
-	Effect,
-	HashMap,
-	Option,
-	Ref,
-	Schedule,
-	Schema,
-	Scope,
-	SubscriptionRef,
-} from "effect"
+import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import { type TmuxError, TmuxService } from "../core/TmuxService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
@@ -596,15 +586,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					)
 
 					// Register fiber with diagnostics for visibility
-					// Use Scope.extend to run registerFiber in service scope
-					yield* Scope.extend(serviceScope)(
-						diagnostics.registerFiber({
-							id: `dev-server-port-poller-${beadId}`,
-							name: `Port Poller (${beadId})`,
-							description: `Detecting port for ${beadId} dev server`,
-							fiber: pollerFiber,
-						}),
-					)
+					yield* diagnostics.registerFiberIn(serviceScope, {
+						id: `dev-server-port-poller-${beadId}`,
+						name: `Port Poller (${beadId})`,
+						description: `Detecting port for ${beadId} dev server`,
+						fiber: pollerFiber,
+					})
 
 					return yield* getServerState(beadId)
 				}),
@@ -714,15 +701,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					)
 
 					// Register fiber with diagnostics for visibility
-					// Use Scope.extend to run registerFiber in service scope
-					yield* Scope.extend(serviceScope)(
-						diagnostics.registerFiber({
-							id: `dev-server-port-poller-${beadId}`,
-							name: `Port Poller (${beadId})`,
-							description: `Detecting port for ${beadId} dev server`,
-							fiber: pollerFiber,
-						}),
-					)
+					yield* diagnostics.registerFiberIn(serviceScope, {
+						id: `dev-server-port-poller-${beadId}`,
+						name: `Port Poller (${beadId})`,
+						description: `Detecting port for ${beadId} dev server`,
+						fiber: pollerFiber,
+					})
 
 					return yield* getServerState(beadId)
 				}),
