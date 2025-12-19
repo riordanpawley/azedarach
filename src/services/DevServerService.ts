@@ -133,6 +133,10 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const pathService = yield* Path.Path
 		const projectService = yield* ProjectService
 
+		// Capture service scope for forking background tasks
+		// This ensures polling fibers are cleaned up when service shuts down
+		const serviceScope = yield* Effect.scope
+
 		// Persistence file path
 		const devServersFilePath = ".azedarach/devservers.json"
 
@@ -560,7 +564,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					})
 
 					// Start port polling in background to get actual port
-					// Use forkDaemon so the fiber survives after start() returns
+					// Fork into service scope so fiber is cleaned up on service shutdown
 					yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
@@ -568,7 +572,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 								: Effect.void,
 						),
 						Effect.catchAll(() => Effect.void),
-						Effect.forkDaemon,
+						Effect.forkIn(serviceScope),
 						Effect.asVoid,
 					)
 
@@ -668,7 +672,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					})
 
 					// Poll for port in background
-					// Use forkDaemon so the fiber survives after toggle() returns
+					// Fork into service scope so fiber is cleaned up on service shutdown
 					yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
@@ -676,7 +680,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 								: Effect.void,
 						),
 						Effect.catchAll(() => Effect.void),
-						Effect.forkDaemon,
+						Effect.forkIn(serviceScope),
 						Effect.asVoid,
 					)
 
