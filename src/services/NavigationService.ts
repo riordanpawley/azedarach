@@ -67,7 +67,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
 
 		/**
-		 * Get the filtered/sorted tasks by column using current search/sort config
+		 * Get the filtered/sorted tasks by column using current search/sort/filter config
 		 *
 		 * When in drill-down mode, also filters to only the epic's children.
 		 * This ensures navigation operates on the same view that the user sees.
@@ -76,10 +76,15 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			Effect.gen(function* () {
 				const mode = yield* editor.getMode()
 				const sortConfig = yield* editor.getSortConfig()
+				const filterConfig = yield* editor.getFilterConfig()
 				const searchQuery = mode._tag === "search" ? mode.query : ""
 
 				// Get base filtered tasks
-				const tasksByColumn = yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+				const tasksByColumn = yield* board.getFilteredTasksByColumn(
+					searchQuery,
+					sortConfig,
+					filterConfig,
+				)
 
 				// Apply drill-down filter if active
 				const childIds = yield* SubscriptionRef.get(drillDownChildIds)

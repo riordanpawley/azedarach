@@ -35,6 +35,7 @@ import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { EpicHeader } from "./EpicHeader.js"
+import { FilterMenu } from "./FilterMenu.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
@@ -97,11 +98,14 @@ export const App = () => {
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,
+		filterConfig,
+		activeFilterField,
 		isJump,
 		isAction,
 		isSearch,
 		isCommand,
 		isSort,
+		isFilter,
 		isOrchestrate,
 	} = useEditorMode()
 
@@ -264,6 +268,8 @@ export const App = () => {
 				return `select (${selectedIds.length})`
 			case "sort":
 				return "sort"
+			case "filter":
+				return mode.activeField ? `filter: ${mode.activeField}` : "filter"
 			case "orchestrate":
 				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 		}
@@ -329,6 +335,9 @@ export const App = () => {
 
 			{/* Sort menu */}
 			{isSort && <SortMenu currentSort={sortConfig} />}
+
+			{/* Filter menu */}
+			{isFilter && <FilterMenu config={filterConfig} activeField={activeFilterField} />}
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}

@@ -88,6 +88,16 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "u", action: "Updated" },
 		{ key: "Esc", action: "Cancel" },
 	],
+	filter: [
+		{ key: "s", action: "Status" },
+		{ key: "p", action: "Priority" },
+		{ key: "t", action: "Type" },
+		{ key: "S", action: "Session" },
+		{ key: "e", action: "Epic" },
+		{ key: "c", action: "Clear" },
+		{ key: "0-4", action: "P0-P4" },
+		{ key: "Esc", action: "Cancel" },
+	],
 	orchestrate: [
 		{ key: "jk", action: "Nav" },
 		{ key: "Space", action: "Toggle" },
@@ -140,6 +150,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.mauve
 			case "sort":
 				return theme.teal
+			case "filter":
+				return theme.lavender
 			case "command":
 				return theme.pink
 			default:
@@ -162,6 +174,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SEL"
 			case "sort":
 				return "SRT"
+			case "filter":
+				return "FLT"
 			case "command":
 				return "CMD"
 			default:
