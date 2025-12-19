@@ -9,6 +9,7 @@
 
 import { Data, Effect, Ref, SubscriptionRef } from "effect"
 import { emptyArray } from "../lib/empty.js"
+import { DiagnosticsService } from "./DiagnosticsService.js"
 
 // ============================================================================
 // Types
@@ -26,7 +27,11 @@ export interface Toast {
 // ============================================================================
 
 export class ToastService extends Effect.Service<ToastService>()("ToastService", {
+	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
+		const diagnostics = yield* DiagnosticsService
+		yield* diagnostics.trackService("ToastService", "100ms toast auto-expiration")
+
 		// SubscriptionRef for reactive toasts array
 		const toasts = yield* SubscriptionRef.make<ReadonlyArray<Toast>>(emptyArray())
 		// Config refs (don't need reactivity)

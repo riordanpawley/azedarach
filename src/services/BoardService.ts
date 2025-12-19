@@ -23,6 +23,7 @@ import { SessionManager } from "../core/SessionManager.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
+import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService, type SortConfig } from "./EditorService.js"
 import { ProjectService } from "./ProjectService.js"
 
@@ -193,6 +194,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
+		DiagnosticsService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
@@ -201,6 +203,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
+		const diagnostics = yield* DiagnosticsService
+
+		// Register with diagnostics
+		yield* diagnostics.trackService("BoardService", "2s beads polling + session state merge")
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
