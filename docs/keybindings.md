@@ -548,7 +548,16 @@ Tasks can have images attached to provide visual context for Claude sessions.
 
 ### Viewing & Managing Attachments (Detail Panel)
 
-When viewing a task's details (`Enter`), if it has attachments, you can navigate and manage them:
+When viewing a task's details (`Enter`), you can scroll and manage attachments:
+
+**Scrolling (always available):**
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `Ctrl-u` | Scroll up | Scroll up half page |
+| `Ctrl-d` | Scroll down | Scroll down half page |
+
+**Attachment navigation (when attachments exist):**
 
 | Key | Action | Description |
 |-----|--------|-------------|
@@ -558,7 +567,7 @@ When viewing a task's details (`Enter`), if it has attachments, you can navigate
 | `o` | Open | Open selected attachment in system image viewer |
 | `x` | Remove | Delete selected attachment |
 | `i` | Add | Open image attachment overlay to add more |
-| `Esc` | Close | Close detail panel |
+| `Enter` / `Esc` | Close | Close detail panel |
 
 **Visual Feedback:**
 - Selected attachment is highlighted with `▶` prefix and mauve color
