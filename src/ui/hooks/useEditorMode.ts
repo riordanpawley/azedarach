@@ -191,19 +191,19 @@ export function useEditorMode() {
 			},
 
 			enterSort: () => {
-				enterSort().catch(console.error)
+				enterSort()
 			},
 
 			cycleSort: (field: SortField) => {
-				cycleSort(field).catch(console.error)
+				cycleSort(field)
 			},
 
 			enterFilter: () => {
-				enterFilter().catch(console.error)
+				enterFilter()
 			},
 
 			clearFilters: () => {
-				clearFilters().catch(console.error)
+				clearFilters()
 			},
 		}),
 		[
