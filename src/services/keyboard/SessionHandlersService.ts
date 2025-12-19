@@ -12,7 +12,7 @@
  */
 
 import { Effect } from "effect"
-import { AppConfig, type ResolvedConfig } from "../../config/index.js"
+import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
@@ -52,7 +52,6 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
-			const resolvedConfig: ResolvedConfig = appConfig.config
 
 			// ================================================================
 			// Session Handler Methods
@@ -254,7 +253,8 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					if (!task) return
 
 					// Build the Claude command with Haiku model and initial prompt
-					const { command: claudeCommand, shell, tmuxPrefix } = resolvedConfig.session
+					const sessionConfig = yield* appConfig.getSessionConfig()
+					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
 					const escapeForShell = (s: string) =>
 						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 

@@ -43,8 +43,7 @@ export class NetworkService extends Effect.Service<NetworkService>()("NetworkSer
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
-
-		const networkConfig = appConfig.getNetworkConfig()
+		const networkConfig = yield* appConfig.getNetworkConfig()
 
 		yield* diagnostics.trackService(
 			"NetworkService",

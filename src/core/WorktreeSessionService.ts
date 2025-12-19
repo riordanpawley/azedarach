@@ -24,7 +24,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { AppConfig } from "../config/index.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -88,7 +88,6 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 		effect: Effect.gen(function* () {
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
-			const config: ResolvedConfig = appConfig.config
 
 			return {
 				/**
@@ -122,17 +121,20 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					CommandExecutor.CommandExecutor
 				> =>
 					Effect.gen(function* () {
+						// Get session config for shell and tmuxPrefix defaults
+						const sessionConfig = yield* appConfig.getSessionConfig()
+
 						const {
 							sessionName,
 							worktreePath,
 							command,
 							cwd = worktreePath,
-							tmuxPrefix = config.session.tmuxPrefix,
+							tmuxPrefix = sessionConfig.tmuxPrefix,
 							initCommands = [],
 						} = options
 
 						// Get shell from config (for interactive mode)
-						const shell = config.session.shell
+						const shell = sessionConfig.shell
 
 						// Build the full command chain:
 						// 1. Init commands (chained with &&, so failure stops the chain)
