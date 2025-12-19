@@ -21,7 +21,9 @@ import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platfor
 import { BunContext } from "@effect/platform-bun"
 import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
+import { ToastService } from "../services/ToastService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getSessionName, getWorktreePath } from "./paths.js"
@@ -56,7 +58,15 @@ export interface Session {
 /**
  * Schema for session state - validates against SessionState literals
  */
-const SessionStateSchema = Schema.Literal("idle", "busy", "waiting", "done", "error", "paused")
+const SessionStateSchema = Schema.Literal(
+	"idle",
+	"busy",
+	"waiting",
+	"done",
+	"error",
+	"paused",
+	"warning",
+)
 
 /**
  * Schema for persisted session - matches Session interface
@@ -294,6 +304,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		AppConfig.Default,
 		StateDetector.Default,
 		ProjectService.Default,
+		DiagnosticsService.Default,
+		ToastService.Default,
 	],
 	effect: Effect.gen(function* () {
 		// Get dependencies
@@ -303,6 +315,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const appConfig = yield* AppConfig
 		const resolvedConfig: ResolvedConfig = appConfig.config
 		const projectService = yield* ProjectService
+		const diagnostics = yield* DiagnosticsService
+		const toast = yield* ToastService
 
 		// Track active sessions in memory
 		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
@@ -427,7 +441,10 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					const sessionConfig = resolvedConfig.session
 
 					// Run init commands after worktree creation (e.g., "direnv allow", "bun install")
+					// Track failed commands to set warning state and log to diagnostics
 					const { initCommands, env, continueOnFailure, parallel } = worktreeConfig
+					const failedInitCommands: string[] = []
+
 					if (initCommands.length > 0) {
 						const runInitCommand = (cmd: string) =>
 							Effect.gen(function* () {
@@ -439,6 +456,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 									Effect.catchAll(() => Effect.succeed(1)),
 								)
 								if (exitCode !== 0) {
+									failedInitCommands.push(cmd)
 									yield* Effect.logWarning(`Init command failed: ${cmd}`)
 									if (!continueOnFailure) {
 										return yield* Effect.fail(
@@ -460,6 +478,21 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								yield* runInitCommand(cmd)
 							}
 						}
+					}
+
+					// Log failed init commands to diagnostics and show toast
+					const hasInitFailures = failedInitCommands.length > 0
+					if (hasInitFailures) {
+						yield* diagnostics.logEvent({
+							severity: "warning",
+							source: "SessionManager",
+							message: `initCommands failed for ${beadId}`,
+							details: `Failed commands:\n${failedInitCommands.map((c) => `  - ${c}`).join("\n")}`,
+						})
+						yield* toast.show(
+							"warning",
+							`initCommands failed for ${beadId}\nPress Shift+D for details`,
+						)
 					}
 
 					// Generate tmux session name
@@ -523,12 +556,15 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						// USE: Register session in memory and publish event
 						() =>
 							Effect.gen(function* () {
+								// Use "warning" state if init commands failed, otherwise "busy"
+								const initialState: SessionState = hasInitFailures ? "warning" : "busy"
+
 								// Create session object
 								const sessionObj: Session = {
 									beadId,
 									worktreePath: worktree.path,
 									tmuxSessionName,
-									state: "busy",
+									state: initialState,
 									startedAt: yield* DateTime.now,
 									projectPath,
 								}
@@ -542,8 +578,8 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								const sessions = yield* Ref.get(sessionsRef)
 								yield* persistSessions(sessions)
 
-								// Publish state change event (from idle to busy)
-								yield* publishStateChange(beadId, "idle", "busy")
+								// Publish state change event (from idle to initial state)
+								yield* publishStateChange(beadId, "idle", initialState)
 
 								return sessionObj
 							}),
