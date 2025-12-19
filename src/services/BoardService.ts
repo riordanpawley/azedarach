@@ -5,6 +5,7 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
+import { Command } from "@effect/platform"
 import {
 	Array as Arr,
 	Cause,
@@ -19,6 +20,7 @@ import {
 } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
+import { getWorktreePath } from "../core/paths.js"
 import { SessionManager } from "../core/SessionManager.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
@@ -314,6 +316,23 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 
 		/**
+		 * Check if a worktree has an active merge conflict
+		 *
+		 * Uses `git rev-parse MERGE_HEAD` which returns 0 if in merge state, 128 otherwise.
+		 * Works correctly for worktrees (handles .git file pointing to real git dir).
+		 */
+		const checkMergeConflict = (worktreePath: string) =>
+			Effect.gen(function* () {
+				const command = Command.make("git", "-C", worktreePath, "rev-parse", "MERGE_HEAD").pipe(
+					Command.exitCode,
+				)
+				// Exit code 0 = MERGE_HEAD exists (in merge state)
+				// Exit code 128 = not in merge state (normal)
+				const exitCode = yield* command.pipe(Effect.catchAll(() => Effect.succeed(128)))
+				return exitCode === 0
+			})
+
+		/**
 		 * Load tasks from BeadsClient and merge with session state + PTY metrics
 		 */
 		const loadTasks = () =>
@@ -332,24 +351,39 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Map issues to TaskWithSession, merging session state and PTY metrics
-				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
-					const session = sessionMap.get(issue.id)
-					const metricsOpt = HashMap.get(allMetrics, issue.id)
-					const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+				// Then check merge conflicts in parallel for tasks with active sessions
+				const tasksWithSession: TaskWithSession[] = yield* Effect.all(
+					issues.map((issue) =>
+						Effect.gen(function* () {
+							const session = sessionMap.get(issue.id)
+							const metricsOpt = HashMap.get(allMetrics, issue.id)
+							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+							const sessionState = session?.state ?? "idle"
 
-					return {
-						...issue,
-						sessionState: session?.state ?? "idle",
-						// Session metrics from SessionManager
-						sessionStartedAt: session?.startedAt
-							? DateTime.formatIso(session.startedAt)
-							: undefined,
-						// PTY-extracted metrics from PTYMonitor
-						estimatedTokens: metrics.estimatedTokens,
-						recentOutput: metrics.recentOutput,
-						agentPhase: metrics.agentPhase,
-					}
-				})
+							// Check for merge conflicts only if task has an active session
+							let hasMergeConflict = false
+							if (sessionState !== "idle" && projectPath) {
+								const worktreePath = getWorktreePath(projectPath, issue.id)
+								hasMergeConflict = yield* checkMergeConflict(worktreePath)
+							}
+
+							return {
+								...issue,
+								sessionState,
+								hasMergeConflict,
+								// Session metrics from SessionManager
+								sessionStartedAt: session?.startedAt
+									? DateTime.formatIso(session.startedAt)
+									: undefined,
+								// PTY-extracted metrics from PTYMonitor
+								estimatedTokens: metrics.estimatedTokens,
+								recentOutput: metrics.recentOutput,
+								agentPhase: metrics.agentPhase,
+							}
+						}),
+					),
+					{ concurrency: "unbounded" },
+				)
 
 				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
 				const withSessions = tasksWithSession.filter((t) => t.sessionState !== "idle").length
