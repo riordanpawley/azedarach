@@ -6,8 +6,11 @@
  * 2. Running initCommands (e.g., "direnv allow", "envdev", "pnpm install")
  * 3. Running a main command (e.g., "claude", "pnpm run dev")
  *
- * CRITICAL: Init commands and main command run in the SAME tmux session shell.
- * This ensures environment set by direnv/envdev persists for the main command.
+ * CRITICAL: Init commands run SEQUENTIALLY via send-keys, NOT chained with &&.
+ * This allows the shell prompt to appear between commands, which:
+ * - Triggers direnv hooks to load environment after "direnv allow"
+ * - Enables proper failure detection for each command
+ * - Ensures environment persists correctly for subsequent commands
  *
  * This service is agnostic about WHAT runs in the session - it could be:
  * - Claude Code (via ClaudeSessionManager)
@@ -15,9 +18,9 @@
  * - Any other long-running process
  *
  * Key features:
- * - Chains initCommands with main command using && (fail-fast)
- * - Uses interactive shell (-i) for alias/function support
- * - Environment persists from init commands to main command
+ * - Sends initCommands one at a time, waiting for each to complete
+ * - Uses interactive shell (-i) for alias/function support and direnv hooks
+ * - Monitors for command failures via exit status marker
  * - Keeps session alive after command exits (exec $shell fallback)
  * - Configurable shell and tmux prefix from AppConfig
  */
@@ -117,7 +120,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					options: CreateWorktreeSessionOptions,
 				): Effect.Effect<
 					WorktreeSessionResult,
-					WorktreeSessionError | TmuxError,
+					WorktreeSessionError | TmuxError | SessionNotFoundError,
 					CommandExecutor.CommandExecutor
 				> =>
 					Effect.gen(function* () {
@@ -136,40 +139,30 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						// Get shell from config (for interactive mode)
 						const shell = sessionConfig.shell
 
-						// Build the full command chain:
-						// 1. Init commands (chained with &&, so failure stops the chain)
-						// 2. Main command
-						// 3. Keep shell alive for debugging (exec $shell)
-						//
-						// Example: zsh -i -c 'direnv allow && envdev && pnpm install && claude "prompt"; exec zsh'
-						//
-						// CRITICAL: Everything runs in the SAME shell, so:
-						// - Aliases like "envdev" work (interactive shell loads .zshrc)
-						// - Environment from direnv/envdev persists for main command
-						// - Any failure in init commands prevents main command from running
-
-						let commandChain: string
-						if (initCommands.length > 0) {
-							// Chain init commands with && (fail-fast), then run main command
-							const initChain = initCommands.join(" && ")
-							commandChain = `${initChain} && ${command}`
-						} else {
-							// No init commands, just run main command
-							commandChain = command
-						}
-
-						// Wrap in interactive shell with exec fallback
-						const fullCommand = `${shell} -i -c '${commandChain}; exec ${shell}'`
-
 						yield* Effect.log(`Creating tmux session: ${sessionName}`)
-						yield* Effect.log(`Command chain: ${commandChain}`)
 
-						// Create tmux session
+						// Create tmux session with an interactive shell
+						// The -i flag loads .zshrc/.bashrc which sets up direnv hooks
 						yield* tmux.newSession(sessionName, {
 							cwd,
-							command: fullCommand,
+							command: `${shell} -i`,
 							prefix: tmuxPrefix,
 						})
+
+						// Give shell time to initialize
+						yield* Effect.sleep("300 millis")
+
+						// Send each init command via send-keys
+						// Zsh queues them and executes in order, with prompt appearing
+						// after each - this triggers direnv hooks between commands
+						for (const initCmd of initCommands) {
+							yield* Effect.log(`Queuing init command: ${initCmd}`)
+							yield* tmux.sendKeys(sessionName, initCmd)
+						}
+
+						// Send the main command last
+						yield* Effect.log(`Queuing main command: ${command}`)
+						yield* tmux.sendKeys(sessionName, command)
 
 						return {
 							sessionName,
