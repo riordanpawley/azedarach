@@ -257,3 +257,32 @@ export const deleteBeadAtom = appRuntime.fn((beadId: string) =>
 		yield* client.delete(beadId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
+
+// ============================================================================
+// Epic Children Atoms
+// ============================================================================
+
+/**
+ * Get epic children for a task (only if task is an epic)
+ *
+ * Returns children array or empty array if not an epic or on error.
+ * This is a parameterized atom factory that returns a new atom for each epicId.
+ *
+ * Usage: const epicChildren = useAtomSet(epicChildrenAtom(epicId), { mode: "promise" })
+ *        const children = await epicChildren()
+ */
+export const epicChildrenAtom = (epicId: string) =>
+	appRuntime.fn(() =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			const result = yield* client.getEpicWithChildren(epicId)
+			return result.children
+		}).pipe(
+			Effect.catchAll((error) =>
+				Effect.gen(function* () {
+					yield* Effect.logError(error)
+					return [] as const
+				}),
+			),
+		),
+	)
