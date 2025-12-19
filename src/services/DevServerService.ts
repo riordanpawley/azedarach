@@ -170,6 +170,36 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		/**
+		 * Load initCommands from a project's .azedarach.json config
+		 *
+		 * This loads the TARGET project's config, not the azedarach app's config.
+		 * Returns empty array if no config found or on error.
+		 */
+		const loadProjectInitCommands = (projectPath: string): Effect.Effect<readonly string[]> =>
+			Effect.gen(function* () {
+				const configPath = pathService.join(projectPath, ".azedarach.json")
+				const exists = yield* fs
+					.exists(configPath)
+					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+				if (!exists) return []
+
+				const content = yield* fs
+					.readFileString(configPath)
+					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+				const json = yield* Effect.try({
+					try: () => JSON.parse(content),
+					catch: () => ({}),
+				})
+
+				// Extract initCommands, defaulting to empty array
+				const initCommands = json?.worktree?.initCommands
+				if (Array.isArray(initCommands)) {
+					return initCommands as readonly string[]
+				}
+				return []
+			}).pipe(Effect.catchAll(() => Effect.succeed([] as readonly string[])))
+
+		/**
 		 * Load persisted dev servers from disk
 		 */
 		const loadPersistedServers = (): Effect.Effect<DevServersState> =>
@@ -609,6 +639,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
+					// Load initCommands from TARGET project's config (not azedarach's config)
+					const initCommands = yield* loadProjectInitCommands(projectPath)
+
 					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
@@ -621,6 +654,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						worktreePath,
 						command: rawCommand,
 						cwd,
+						initCommands,
 					})
 
 					// Update state
@@ -726,6 +760,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
+					// Load initCommands from TARGET project's config (not azedarach's config)
+					const initCommands = yield* loadProjectInitCommands(projectPath)
+
 					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
@@ -738,6 +775,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						worktreePath,
 						command: rawCommand,
 						cwd,
+						initCommands,
 					})
 
 					// Update state
