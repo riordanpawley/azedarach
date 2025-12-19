@@ -990,15 +990,23 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						})
 					}
 
-					// 8. Remove worktree directory
+					// 8. Merge Claude's local settings from worktree to main
+					// This preserves permission grants (allowedTools, trustedPaths) that Claude
+					// added during the session. Must happen BEFORE worktree deletion.
+					yield* worktreeManager.mergeClaudeLocalSettings({
+						worktreePath: worktree.path,
+						mainProjectPath: projectPath,
+					})
+
+					// 9. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 9. Delete local branch
+					// 10. Delete local branch
 					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
 						Effect.catchAll(() => Effect.void),
 					)
 
-					// 10. Close bead issue
+					// 11. Close bead issue
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
@@ -1015,7 +1023,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 11. Push to origin
+					// 12. Push to origin
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(

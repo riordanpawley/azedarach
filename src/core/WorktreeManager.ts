@@ -13,8 +13,13 @@
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Ref, Schedule, type Scope } from "effect"
-import { deepMerge, generateHookConfig } from "./hooks.js"
+import { Data, Effect, Ref, Schedule, Schema, type Scope } from "effect"
+import {
+	deepMerge,
+	deepMergeWithDedup,
+	extractMergeableSettings,
+	generateHookConfig,
+} from "./hooks.js"
 
 // ============================================================================
 // Types
@@ -163,6 +168,26 @@ export interface WorktreeManagerService {
 		beadId: string
 		projectPath: string
 	}) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Merge Claude's local settings from worktree back to main
+	 *
+	 * When a worktree is merged to main, this preserves permission grants
+	 * (allowedTools, trustedPaths, etc.) that Claude added during the session.
+	 * Excludes hook configurations which are bead-specific.
+	 *
+	 * @example
+	 * ```ts
+	 * WorktreeManager.mergeClaudeLocalSettings({
+	 *   worktreePath: "/Users/user/project-az-05y",
+	 *   mainProjectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly mergeClaudeLocalSettings: (options: {
+		worktreePath: string
+		mainProjectPath: string
+	}) => Effect.Effect<void, never, never>
 }
 
 // ============================================================================
@@ -302,6 +327,91 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				// Don't fail worktree creation if settings copy fails - just log and continue
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Failed to copy Claude local settings: ${error}`),
+				),
+			)
+
+		/**
+		 * Schema for parsing settings.local.json
+		 *
+		 * Uses Schema.parseJson to safely parse JSON string into a record.
+		 * Falls back to empty object on parse failure.
+		 */
+		const SettingsJsonSchema = Schema.parseJson(
+			Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+		)
+		const decodeSettings = Schema.decodeUnknown(SettingsJsonSchema)
+
+		/**
+		 * Merge Claude's local settings from worktree back to main
+		 *
+		 * Preserves permission grants (allowedTools, trustedPaths) that Claude
+		 * added during the session. Excludes hook configurations which are bead-specific.
+		 */
+		const mergeClaudeLocalSettings = (options: {
+			worktreePath: string
+			mainProjectPath: string
+		}): Effect.Effect<void, never, never> =>
+			Effect.gen(function* () {
+				const { worktreePath, mainProjectPath } = options
+				const worktreeSettings = pathService.join(worktreePath, ".claude", "settings.local.json")
+				const mainSettings = pathService.join(mainProjectPath, ".claude", "settings.local.json")
+
+				// Read worktree settings
+				const worktreeExists = yield* fs.exists(worktreeSettings)
+				if (!worktreeExists) {
+					yield* Effect.logDebug("No worktree settings.local.json to merge")
+					return
+				}
+
+				const worktreeContent = yield* fs
+					.readFileString(worktreeSettings)
+					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+
+				// Parse with Schema - fallback to empty object on failure
+				const worktreeData = yield* decodeSettings(worktreeContent).pipe(
+					Effect.catchAll(() => Effect.succeed({})),
+				)
+
+				// Extract only permission-related settings (exclude hooks)
+				const mergeableSettings = extractMergeableSettings(worktreeData)
+
+				// If nothing to merge, skip
+				if (Object.keys(mergeableSettings).length === 0) {
+					yield* Effect.logDebug("No permission settings to merge from worktree")
+					return
+				}
+
+				// Read main settings
+				const mainExists = yield* fs.exists(mainSettings)
+				let mainData: Record<string, unknown> = {}
+
+				if (mainExists) {
+					const mainContent = yield* fs
+						.readFileString(mainSettings)
+						.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+
+					mainData = yield* decodeSettings(mainContent).pipe(
+						Effect.catchAll(() => Effect.succeed({})),
+					)
+				}
+
+				// Merge with deduplication
+				const mergedData = deepMergeWithDedup(mainData, mergeableSettings)
+
+				// Ensure .claude directory exists
+				const mainClaudeDir = pathService.join(mainProjectPath, ".claude")
+				const mainDirExists = yield* fs.exists(mainClaudeDir)
+				if (!mainDirExists) {
+					yield* fs.makeDirectory(mainClaudeDir, { recursive: true })
+				}
+
+				// Write merged settings
+				yield* fs.writeFileString(mainSettings, JSON.stringify(mergedData, null, "\t"))
+				yield* Effect.log("Merged permission settings from worktree to main")
+			}).pipe(
+				// Don't fail the merge if settings merge fails - just log warning
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Failed to merge Claude local settings: ${error}`),
 				),
 			)
 
@@ -506,6 +616,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const worktrees = yield* Ref.get(worktreesRef)
 					return worktrees.get(beadId) || null
 				}),
+
+			mergeClaudeLocalSettings,
 		}
 	}),
 }) {}
