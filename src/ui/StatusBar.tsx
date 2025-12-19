@@ -17,6 +17,7 @@ export interface StatusBarProps {
 	vcStatus?: VCStatus
 	viewMode?: ViewMode
 	isLoading?: boolean
+	projectName?: string
 }
 
 /**
@@ -203,9 +204,10 @@ export const StatusBar = (props: StatusBarProps) => {
 	const modeLabel = getModeLabel()
 
 	// Calculate available width for keybindings
-	// Fixed elements: border(2) + padding(2) + "azedarach"(9) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
+	// Fixed elements: border(2) + padding(2) + project name(~10) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
 	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12)
-	const fixedLeftWidth = 25
+	const projectNameWidth = (props.projectName ?? "azedarach").length
+	const fixedLeftWidth = 16 + projectNameWidth
 	const fixedRightWidth = 40 // Approximate, includes stats and potential VC status
 	const modeDisplayWidth =
 		shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
@@ -239,7 +241,7 @@ export const StatusBar = (props: StatusBarProps) => {
 			<box flexDirection="row" gap={2} width="100%">
 				{/* Project name and connection status - left side */}
 				<text fg={theme.text} attributes={ATTR_BOLD}>
-					azedarach
+					{props.projectName ?? "azedarach"}
 				</text>
 				<text fg={connIndicator.color}>{connIndicator.icon}</text>
 
