@@ -36,7 +36,6 @@ Purpose: Claude Code entry point for Azedarach development
    - Services grab dependencies at layer construction (`yield* SomeService`), then use them directly
    - If you need `Path.Path` operations, grab `pathService` at layer construction, then call `pathService.resolve()`, `pathService.join()`, etc. directly - don't create wrappers
    - Don't wrap one-liners in helper functions - just use the method directly
-   - **Reference patterns**: Search https://github.com/PaulJPhilp/EffectPatterns for idiomatic Effect usage examples
 
 9. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
    - `node:path` → Use `Path.Path` service methods (`pathService.resolve()`, `.join()`, etc.)
