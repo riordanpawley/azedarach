@@ -27,6 +27,7 @@ import type { BeadsError } from "../../core/BeadsClient.js"
  * - command: VC command with text input
  * - overlay: Any overlay is open
  * - sort: Sort menu
+ * - filter: Filter menu for status/priority/type/session filtering
  * - orchestrate: Epic orchestration mode for managing child tasks
  * - *: Universal (matches any mode)
  */
@@ -40,6 +41,7 @@ export type KeyMode =
 	| "command"
 	| "overlay"
 	| "sort"
+	| "filter"
 	| "orchestrate"
 	| "*"
 

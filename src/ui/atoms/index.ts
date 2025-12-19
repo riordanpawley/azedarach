@@ -68,12 +68,15 @@ export {
 export { handleKeyAtom } from "./keyboard.js"
 // Mode service atoms
 export {
+	activeFilterFieldAtom,
 	clearCommandAtom,
+	clearFiltersAtom,
 	clearSearchAtom,
 	commandInputAtom,
 	cycleSortAtom,
 	enterActionAtom,
 	enterCommandAtom,
+	enterFilterAtom,
 	enterGotoAtom,
 	enterJumpAtom,
 	enterOrchestrateAtom,
@@ -83,6 +86,8 @@ export {
 	exitOrchestrateAtom,
 	exitSelectAtom,
 	exitToNormalAtom,
+	filterConfigAtom,
+	isFilterAtom,
 	isOrchestrateAtom,
 	modeAtom,
 	orchestrateFocusIndexAtom,
@@ -119,6 +124,7 @@ export {
 // Overlay and toast atoms
 export {
 	currentOverlayAtom,
+	detailScrollAtom,
 	dismissToastAtom,
 	overlaysAtom,
 	popOverlayAtom,

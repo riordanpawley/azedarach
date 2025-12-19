@@ -15,6 +15,7 @@ import {
 	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
+	currentProjectAtom,
 	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
@@ -35,6 +36,7 @@ import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { EpicHeader } from "./EpicHeader.js"
+import { FilterMenu } from "./FilterMenu.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
@@ -97,11 +99,14 @@ export const App = () => {
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,
+		filterConfig,
+		activeFilterField,
 		isJump,
 		isAction,
 		isSearch,
 		isCommand,
 		isSort,
+		isFilter,
 		isOrchestrate,
 	} = useEditorMode()
 
@@ -119,6 +124,12 @@ export const App = () => {
 	// Board loading state for status bar indicator
 	const boardIsLoadingResult = useAtomValue(boardIsLoadingAtom)
 	const isLoading = Result.isSuccess(boardIsLoadingResult) ? boardIsLoadingResult.value : false
+
+	// Current project for status bar display
+	const currentProjectResult = useAtomValue(currentProjectAtom)
+	const projectName = Result.isSuccess(currentProjectResult)
+		? currentProjectResult.value?.name
+		: undefined
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Epic Drill-Down State
@@ -262,6 +273,8 @@ export const App = () => {
 				return `select (${selectedIds.length})`
 			case "sort":
 				return "sort"
+			case "filter":
+				return mode.activeField ? `filter: ${mode.activeField}` : "filter"
 			case "orchestrate":
 				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 		}
@@ -312,6 +325,7 @@ export const App = () => {
 				isLoading={isLoading}
 				devServerStatus={devServerState.status}
 				devServerPort={devServerState.port}
+				projectName={projectName}
 			/>
 
 			{/* Help overlay */}
@@ -335,6 +349,9 @@ export const App = () => {
 
 			{/* Sort menu */}
 			{isSort && <SortMenu currentSort={sortConfig} />}
+
+			{/* Filter menu */}
+			{isFilter && <FilterMenu config={filterConfig} activeField={activeFilterField} />}
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}

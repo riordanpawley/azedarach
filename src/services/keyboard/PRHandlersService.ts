@@ -371,18 +371,20 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
 				// Build git diff command that works in the worktree
-				// - diff main...HEAD shows changes since branching from main
+				// - Uses $(git merge-base main HEAD) to compare from branch point
+				// - Compares to working tree (not HEAD) to include uncommitted changes
+				// - Shows only changes made on THIS branch (not changes main made after we branched)
 				// - DFT_COLOR=always ensures difftastic colors in tmux popup
 				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				const diffCommand = `cd "${worktreePath}" && git diff main...HEAD --stat --color=always && echo "" && DFT_COLOR=always git diff main...HEAD --color=always | less -RS +Gg`
+				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base main HEAD) && git diff $MERGE_BASE --stat --color=always && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always | less -RS`
 
 				yield* tmux
 					.displayPopup({
 						command: diffCommand,
 						width: "95%",
 						height: "95%",
-						title: ` Diff: ${task.id} vs main (q to quit) `,
+						title: ` Diff: ${task.id} changes since main (q to quit) `,
 						cwd: worktreePath,
 					})
 					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))

@@ -5,21 +5,21 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ## Mode Overview
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                       NORMAL MODE (NOR)                                │
-│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  :: cmd    │
-└────────────────────────────────────────────────────────────────────────┘
-         │           │           │           │           │           │           │
-         │           ▼           ▼           ▼           ▼           ▼           ▼
-         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ COMMAND  │
-         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (CMD)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ send to  │
-         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ VC REPL  │
-         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
-         │         │             │           │             │            │            │
-         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┘
-                              Esc: return to Normal
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                               NORMAL MODE (NOR)                                      │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  f: filter  :: cmd │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+         │           │           │           │           │           │           │           │
+         │           ▼           ▼           ▼           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ FILTER   │ │ COMMAND  │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (FLT)    │ │ (CMD)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ status/  │ │ send to  │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ pri/type │ │ VC REPL  │
+         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │            │            │            │
+         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┴────────────┘
+                                        Esc: return to Normal
 ```
 
 ## Normal Mode
@@ -48,6 +48,7 @@ The default mode for navigation and basic actions.
 | `Enter` | View/Enter | Show task details; on epics, enters drill-down |
 | `Space` | Enter Action mode | Prefix for commands |
 | `,` | Enter Sort mode | Change task sort order |
+| `f` | Enter Filter mode | Filter tasks by status/priority/type/session |
 | `/` | Enter Search mode | Filter tasks by title/ID |
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
@@ -414,6 +415,114 @@ All sort modes prioritize active sessions first, then apply multi-level sorting 
 2. Secondary: Priority (P1 first)
 3. Tertiary: Session state
 
+## Filter Mode
+
+Press `f` to enter filter mode for filtering tasks by various attributes. Unlike search mode which filters by text, filter mode lets you filter by structured fields.
+
+### Filter Menu
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `s` | Status sub-menu | Toggle filtering by issue status |
+| `p` | Priority sub-menu | Toggle filtering by priority (P0-P4) |
+| `t` | Type sub-menu | Toggle filtering by issue type |
+| `S` | Session sub-menu | Toggle filtering by session state |
+| `e` | Toggle epic children | Hide/show tasks that are children of epics |
+| `c` | Clear all filters | Remove all filters and return to normal mode |
+| `Esc` | Cancel | Exit filter mode without changes |
+
+### Status Sub-Menu
+
+When `s` is pressed, these keys toggle status filters:
+
+| Key | Status | Description |
+|-----|--------|-------------|
+| `o` | Open | Toggle showing open tasks |
+| `i` | In Progress | Toggle showing in-progress tasks |
+| `b` | Blocked | Toggle showing blocked tasks |
+| `d` | Closed | Toggle showing closed tasks |
+
+### Priority Sub-Menu
+
+Number keys toggle priority filters:
+
+| Key | Priority | Description |
+|-----|----------|-------------|
+| `0` | P0 | Toggle critical priority |
+| `1` | P1 | Toggle high priority |
+| `2` | P2 | Toggle medium priority |
+| `3` | P3 | Toggle low priority |
+| `4` | P4 | Toggle backlog priority |
+
+### Type Sub-Menu
+
+When `t` is pressed, these keys toggle type filters (uppercase):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `B` | Bug | Toggle showing bugs |
+| `F` | Feature | Toggle showing features |
+| `T` | Task | Toggle showing tasks |
+| `E` | Epic | Toggle showing epics |
+| `C` | Chore | Toggle showing chores |
+
+### Session Sub-Menu
+
+When `S` is pressed, these keys toggle session state filters (uppercase):
+
+| Key | State | Description |
+|-----|-------|-------------|
+| `I` | Idle | Toggle showing tasks with no session |
+| `U` | Busy | Toggle showing tasks with active Claude sessions |
+| `W` | Waiting | Toggle showing tasks waiting for input |
+| `D` | Done | Toggle showing completed sessions |
+| `X` | Error | Toggle showing errored sessions |
+| `P` | Paused | Toggle showing paused sessions |
+
+### How Filter Mode Works
+
+- **Multiple values within a field**: OR logic (e.g., `open OR blocked`)
+- **Different fields**: AND logic (e.g., `status=open AND priority=P1`)
+- **Empty filters**: Show all (no filtering for that field)
+- **Hide epic children**: ON by default - hides tasks that are children of epics (encourages drill-down)
+- **Persistent filters**: Filters remain active until cleared with `c`
+- **Visual feedback**: Menu shows `(N)` next to each field with active filters
+
+### Example Workflows
+
+**Show only high-priority open tasks:**
+```
+1. Press `f` to enter filter mode
+2. Press `s` then `o` to toggle "open" status
+3. Press `p` then `1` to toggle P1 priority
+4. Press `Esc` to exit filter mode
+5. Only open P1 tasks are now visible
+```
+
+**Show tasks with active sessions:**
+```
+1. Press `f` to enter filter mode
+2. Press `S` to open session sub-menu
+3. Press `U` for busy sessions
+4. Press `W` for waiting sessions
+5. Press `Esc` to apply
+6. Only tasks with busy or waiting sessions are visible
+```
+
+**Clear all filters:**
+```
+1. Press `f` to enter filter mode
+2. Press `c` to clear all filters
+3. All tasks are visible again
+```
+
+### Combining with Search Mode
+
+Filter mode (`f`) and search mode (`/`) work together:
+- **Filter mode**: Structured field filtering (status, priority, type, session)
+- **Search mode**: Text-based filtering (title, ID)
+- Both can be active simultaneously - tasks must match both to be visible
+
 ## Action Mode
 
 Press `Space` in Normal mode to enter action mode. A floating palette shows available actions.
@@ -584,7 +693,16 @@ Tasks can have images attached to provide visual context for Claude sessions.
 
 ### Viewing & Managing Attachments (Detail Panel)
 
-When viewing a task's details (`Enter`), if it has attachments, you can navigate and manage them:
+When viewing a task's details (`Enter`), you can scroll and manage attachments:
+
+**Scrolling (always available):**
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `Ctrl-u` | Scroll up | Scroll up half page |
+| `Ctrl-d` | Scroll down | Scroll down half page |
+
+**Attachment navigation (when attachments exist):**
 
 | Key | Action | Description |
 |-----|--------|-------------|
@@ -594,7 +712,7 @@ When viewing a task's details (`Enter`), if it has attachments, you can navigate
 | `o` | Open | Open selected attachment in system image viewer |
 | `x` | Remove | Delete selected attachment |
 | `i` | Add | Open image attachment overlay to add more |
-| `Esc` | Close | Close detail panel |
+| `Enter` / `Esc` | Close | Close detail panel |
 
 **Visual Feedback:**
 - Selected attachment is highlighted with `▶` prefix and mauve color

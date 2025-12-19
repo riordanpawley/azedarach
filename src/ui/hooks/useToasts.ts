@@ -49,6 +49,10 @@ export function useToasts() {
 				showToast({ type: "error", message })
 			},
 
+			showWarning: (message: string) => {
+				showToast({ type: "warning", message })
+			},
+
 			showSuccess: (message: string) => {
 				showToast({ type: "success", message })
 			},

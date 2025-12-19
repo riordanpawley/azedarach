@@ -18,6 +18,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect, Ref, Schedule } from "effect"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -240,9 +241,13 @@ export interface VCServiceImpl {
  * ```
  */
 export class VCService extends Effect.Service<VCService>()("VCService", {
-	dependencies: [TmuxService.Default],
+	dependencies: [TmuxService.Default, DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
+		const diagnostics = yield* DiagnosticsService
+
+		// Register with diagnostics
+		yield* diagnostics.trackService("VCService", "5s VC status polling")
 
 		// Track executor state
 		const executorStateRef = yield* Ref.make<VCExecutorInfo>({
