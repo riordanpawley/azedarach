@@ -13,6 +13,7 @@
  */
 
 import { Effect } from "effect"
+import { AppConfig } from "../../config/AppConfig.js"
 import { MergeConflictError, PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
@@ -34,6 +35,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		OverlayService.Default,
 		PRWorkflow.Default,
 		TmuxService.Default,
+		AppConfig.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -44,6 +46,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const overlay = yield* OverlayService
 		const prWorkflow = yield* PRWorkflow
 		const tmux = yield* TmuxService
+		const appConfig = yield* AppConfig
+		const gitConfig = appConfig.getGitConfig()
 
 		// ================================================================
 		// Internal Helpers
@@ -425,7 +429,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens a tmux popup showing the git diff between the bead's branch and main.
+		 * Opens a tmux popup showing the git diff between the bead's branch and base branch.
+		 * Base branch is configurable via pr.baseBranch in .azedarach.json (default: "main").
 		 * Useful for code review before merging. Respects user's git diff configuration
 		 * (difftastic, delta, etc.) with DFT_COLOR=always for difftastic support.
 		 * Requires an active session with a worktree.
@@ -446,22 +451,25 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
+				// Get base branch from config (default: "main")
+				const baseBranch = gitConfig.baseBranch
+
 				// Build git diff command that works in the worktree
-				// - Uses $(git merge-base main HEAD) to compare from branch point
+				// - Uses $(git merge-base <baseBranch> HEAD) to compare from branch point
 				// - Compares to working tree (not HEAD) to include uncommitted changes
-				// - Shows only changes made on THIS branch (not changes main made after we branched)
+				// - Shows only changes made on THIS branch (not changes base made after we branched)
 				// - DFT_COLOR=always ensures difftastic colors in tmux popup
 				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
 				// - ':!.beads' excludes beads database changes (infrastructure noise)
-				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base main HEAD) && git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS`
+				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS`
 
 				yield* tmux
 					.displayPopup({
 						command: diffCommand,
 						width: "95%",
 						height: "95%",
-						title: ` Diff: ${task.id} changes since main (q to quit) `,
+						title: ` Diff: ${task.id} changes since ${baseBranch} (q to quit) `,
 						cwd: worktreePath,
 					})
 					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))
