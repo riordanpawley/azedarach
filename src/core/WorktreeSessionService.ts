@@ -45,8 +45,13 @@ export interface CreateWorktreeSessionOptions {
 	readonly cwd?: string
 	/** Custom tmux prefix key (overrides config) */
 	readonly tmuxPrefix?: string
-	/** Whether to run initCommands before starting (default: true) */
-	readonly runInitCommands?: boolean
+	/**
+	 * Init commands to run before main command (chained with &&).
+	 * IMPORTANT: Caller should load these from the TARGET project's config,
+	 * not from the azedarach app's config.
+	 * If undefined, no init commands are run.
+	 */
+	readonly initCommands?: readonly string[]
 }
 
 /**
@@ -123,12 +128,11 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							command,
 							cwd = worktreePath,
 							tmuxPrefix = config.session.tmuxPrefix,
-							runInitCommands: shouldRunInit = true,
+							initCommands = [],
 						} = options
 
-						// Get shell and worktree config
+						// Get shell from config (for interactive mode)
 						const shell = config.session.shell
-						const worktreeConfig = config.worktree
 
 						// Build the full command chain:
 						// 1. Init commands (chained with &&, so failure stops the chain)
@@ -143,9 +147,9 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						// - Any failure in init commands prevents main command from running
 
 						let commandChain: string
-						if (shouldRunInit && worktreeConfig.initCommands.length > 0) {
+						if (initCommands.length > 0) {
 							// Chain init commands with && (fail-fast), then run main command
-							const initChain = worktreeConfig.initCommands.join(" && ")
+							const initChain = initCommands.join(" && ")
 							commandChain = `${initChain} && ${command}`
 						} else {
 							// No init commands, just run main command

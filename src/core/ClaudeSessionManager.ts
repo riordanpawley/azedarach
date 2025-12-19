@@ -321,6 +321,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const resolvedConfig: ResolvedConfig = appConfig.config
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
 
 			// Note: ClaudeSessionManager uses effect: not scoped:, so trackService (which uses acquireRelease)
 			// would need scoped. Instead we just update health status manually.
@@ -362,6 +364,38 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					const projectPath = yield* projectService.getCurrentPath()
 					return projectPath ?? process.cwd()
 				})
+
+			/**
+			 * Load initCommands from a project's .azedarach.json config
+			 *
+			 * This loads the TARGET project's config, not the azedarach app's config.
+			 * Returns empty array if no config found or on error.
+			 */
+			const loadProjectInitCommands = (
+				targetProjectPath: string,
+			): Effect.Effect<readonly string[]> =>
+				Effect.gen(function* () {
+					const configPath = pathService.join(targetProjectPath, ".azedarach.json")
+					const exists = yield* fs
+						.exists(configPath)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					if (!exists) return []
+
+					const content = yield* fs
+						.readFileString(configPath)
+						.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+					const json = yield* Effect.try({
+						try: () => JSON.parse(content),
+						catch: () => ({}),
+					})
+
+					// Extract initCommands, defaulting to empty array
+					const initCommands = json?.worktree?.initCommands
+					if (Array.isArray(initCommands)) {
+						return initCommands as readonly string[]
+					}
+					return []
+				}).pipe(Effect.catchAll(() => Effect.succeed([] as readonly string[])))
 
 			// Helper: Load persisted sessions from disk
 			const loadPersistedSessions = Effect.gen(function* () {
@@ -479,6 +513,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShell(initialPrompt)}"`
 							: `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag}`
 
+						// Load initCommands from TARGET project's config (not azedarach's config)
+						const initCommands = yield* loadProjectInitCommands(projectPath)
+
 						// Use acquireUseRelease to ensure atomicity:
 						// - acquire: Create tmux session + update bead status (both are "resources")
 						// - use: Register session in memory + publish event
@@ -502,7 +539,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 										worktreePath: worktree.path,
 										command: claudeWithOptions,
 										tmuxPrefix,
-										// runInitCommands defaults to true - chains init commands with Claude
+										initCommands,
 									})
 									createdNewSession = true
 								}
