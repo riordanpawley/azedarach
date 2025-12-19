@@ -135,13 +135,40 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			 *
 			 * Opens $EDITOR with a template for a new bead.
 			 * After creation, jumps to the new task.
+			 * If in epic drill-down mode, automatically adds the new task as a child of the epic.
 			 */
 			const createBead = () =>
 				Effect.gen(function* () {
 					yield* beadEditor.createBead().pipe(
+						Effect.tap((result) =>
+							Effect.gen(function* () {
+								// Check if we're in epic drill-down mode
+								const epicId = yield* nav.getDrillDownEpic()
+
+								if (epicId) {
+									// Add parent-child dependency to link task to epic
+									yield* beadsClient.addDependency(result.id, epicId, "parent-child").pipe(
+										Effect.tap(() => toast.show("success", `Created ${result.id} (added to epic)`)),
+										Effect.catchAll((error) =>
+											Effect.gen(function* () {
+												// Log warning but don't fail - the task was still created
+												yield* Effect.logWarning(
+													`Failed to link ${result.id} to epic ${epicId}: ${error}`,
+												)
+												yield* toast.show(
+													"warning",
+													`Created ${result.id} (failed to link to epic)`,
+												)
+											}),
+										),
+									)
+								} else {
+									yield* toast.show("success", `Created ${result.id}`)
+								}
+							}),
+						),
 						Effect.tap(() => board.refresh()),
 						Effect.tap((result) => nav.jumpToTask(result.id)),
-						Effect.tap((result) => toast.show("success", `Created ${result.id}`)),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error

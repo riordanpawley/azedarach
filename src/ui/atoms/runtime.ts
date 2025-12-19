@@ -25,6 +25,7 @@ import { VCService } from "../../core/VCService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
+import { DevServerService } from "../../services/DevServerService.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { EditorService } from "../../services/EditorService.js"
 import { KeyboardService } from "../../services/KeyboardService.js"
@@ -69,6 +70,7 @@ const appLayer = Layer.mergeAll(
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,
+	DevServerService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

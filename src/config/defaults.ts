@@ -123,6 +123,14 @@ export const DEFAULT_CONFIG = {
 		checkIntervalSeconds: 30,
 		checkHost: "github.com",
 	},
+	devServer: {
+		command: undefined,
+		ports: {
+			web: { default: 3000, aliases: ["PORT"] },
+		},
+		portPattern: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
+		cwd: ".",
+	},
 	projects: [],
 	defaultProject: undefined,
 } as const
@@ -185,6 +193,12 @@ export interface ResolvedConfig {
 		autoDetect: boolean
 		checkIntervalSeconds: number
 		checkHost: string
+	}
+	devServer: {
+		command: string | undefined
+		ports: Readonly<Record<string, { default: number; aliases: readonly string[] }>>
+		portPattern: string
+		cwd: string
 	}
 	projects: ReadonlyArray<{
 		name: string
@@ -260,6 +274,12 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			checkIntervalSeconds:
 				config.network?.checkIntervalSeconds ?? DEFAULT_CONFIG.network.checkIntervalSeconds,
 			checkHost: config.network?.checkHost ?? DEFAULT_CONFIG.network.checkHost,
+		},
+		devServer: {
+			command: config.devServer?.command ?? DEFAULT_CONFIG.devServer.command,
+			ports: config.devServer?.ports ?? DEFAULT_CONFIG.devServer.ports,
+			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
+			cwd: config.devServer?.cwd ?? DEFAULT_CONFIG.devServer.cwd,
 		},
 		projects: config.projects ?? DEFAULT_CONFIG.projects,
 		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
