@@ -89,6 +89,8 @@ export interface StartSessionOptions {
 	readonly model?: ClaudeModel
 	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
 	readonly dangerouslySkipPermissions?: boolean
+	/** Enable auto-compact for long-running sessions (default: false, uses user setting) */
+	readonly autoCompact?: boolean
 }
 
 /**
@@ -394,6 +396,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						initialPrompt,
 						model,
 						dangerouslySkipPermissions,
+						autoCompact,
 					} = options
 
 					// Check if session already exists (idempotent)
@@ -474,9 +477,18 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 					const modelFlag = model ? ` --model ${model}` : ""
 					const dangerousFlag = dangerouslySkipPermissions ? " --dangerously-skip-permissions" : ""
+
+					// Build settings object for --settings flag (consolidates all session settings)
+					const sessionSettings: Record<string, unknown> = {}
+					if (autoCompact) sessionSettings.autoCompactEnabled = true
+					const settingsFlag =
+						Object.keys(sessionSettings).length > 0
+							? ` --settings '${JSON.stringify(sessionSettings)}'`
+							: ""
+
 					const claudeWithOptions = initialPrompt
-						? `${claudeCommand}${modelFlag}${dangerousFlag} "${escapeForShell(initialPrompt)}"`
-						: `${claudeCommand}${modelFlag}${dangerousFlag}`
+						? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShell(initialPrompt)}"`
+						: `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag}`
 
 					// Use acquireUseRelease to ensure atomicity:
 					// - acquire: Create tmux session + update bead status (both are "resources")
