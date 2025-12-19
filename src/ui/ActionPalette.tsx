@@ -17,7 +17,7 @@ const ATTR_DIM = 2
  * Actions that use the command queue and should be blocked when busy.
  * These are the actions that call ctx.withQueue() in their handlers.
  */
-const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d"])
+const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
 
 /**
  * ActionPalette component
@@ -56,6 +56,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "d": // Cleanup/Delete worktree - only if session exists
 				return sessionState !== "idle"
 			case "f": // Diff vs main - only if session has worktree (not idle)
+				return sessionState !== "idle"
+			case "u": // Update from main - only if session has worktree (not idle)
 				return sessionState !== "idle"
 			case "D": // Delete bead - always available
 				return true
@@ -129,6 +131,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Git/PR */}
+				<ActionLine keyName="u" description="update" />
 				<ActionLine keyName="f" description="diff" />
 				<ActionLine keyName="P" description="PR" />
 				<ActionLine keyName="m" description="merge" />
