@@ -116,6 +116,7 @@ export {
 // Overlay and toast atoms
 export {
 	currentOverlayAtom,
+	detailScrollAtom,
 	dismissToastAtom,
 	overlaysAtom,
 	popOverlayAtom,

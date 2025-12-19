@@ -133,3 +133,22 @@ export const popOverlayAtom = appRuntime.fn(() =>
 		yield* overlayService.pop()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
+
+// ============================================================================
+// Scroll Atoms
+// ============================================================================
+
+/**
+ * Detail scroll command atom - subscribes to scroll commands for the detail panel
+ *
+ * Each emission triggers a scroll action in the DetailPanel component.
+ * The timestamp ensures each command is unique and triggers useEffect.
+ *
+ * Usage: const scrollCommand = useAtomValue(detailScrollAtom)
+ */
+export const detailScrollAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return overlay.scrollCommand
+	}),
+)
