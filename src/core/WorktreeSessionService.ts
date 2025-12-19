@@ -2,9 +2,12 @@
  * WorktreeSessionService - Generic tmux session management for worktrees
  *
  * Handles the common pattern of:
- * 1. Running initCommands in a worktree (e.g., "direnv allow", "pnpm install")
- * 2. Creating a tmux session with an interactive shell
- * 3. Running a command in that session
+ * 1. Creating a tmux session with an interactive shell
+ * 2. Running initCommands (e.g., "direnv allow", "envdev", "pnpm install")
+ * 3. Running a main command (e.g., "claude", "pnpm run dev")
+ *
+ * CRITICAL: Init commands and main command run in the SAME tmux session shell.
+ * This ensures environment set by direnv/envdev persists for the main command.
  *
  * This service is agnostic about WHAT runs in the session - it could be:
  * - Claude Code (via ClaudeSessionManager)
@@ -12,8 +15,9 @@
  * - Any other long-running process
  *
  * Key features:
- * - Runs initCommands before starting the session command
- * - Uses interactive shell (-i) for direnv/environment loading
+ * - Chains initCommands with main command using && (fail-fast)
+ * - Uses interactive shell (-i) for alias/function support
+ * - Environment persists from init commands to main command
  * - Keeps session alive after command exits (exec $shell fallback)
  * - Configurable shell and tmux prefix from AppConfig
  */
@@ -21,7 +25,6 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
-import { type InitCommandError, runInitCommands } from "./initCommands.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -54,10 +57,6 @@ export interface WorktreeSessionResult {
 	readonly sessionName: string
 	/** Path to the worktree */
 	readonly worktreePath: string
-	/** Whether any init commands failed (only if runInitCommands was true) */
-	readonly initCommandsHadFailures: boolean
-	/** List of failed init commands (empty if all succeeded) */
-	readonly failedInitCommands: readonly string[]
 }
 
 // ============================================================================
@@ -114,7 +113,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					options: CreateWorktreeSessionOptions,
 				): Effect.Effect<
 					WorktreeSessionResult,
-					WorktreeSessionError | TmuxError | InitCommandError,
+					WorktreeSessionError | TmuxError,
 					CommandExecutor.CommandExecutor
 				> =>
 					Effect.gen(function* () {
@@ -127,37 +126,37 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							runInitCommands: shouldRunInit = true,
 						} = options
 
-						// Track init command results
-						let initCommandsHadFailures = false
-						let failedInitCommands: readonly string[] = []
+						// Get shell and worktree config
+						const shell = config.session.shell
+						const worktreeConfig = config.worktree
 
-						// Run init commands if enabled
-						if (shouldRunInit) {
-							const worktreeConfig = config.worktree
-							const initResult = yield* runInitCommands({
-								worktreePath,
-								initCommands: worktreeConfig.initCommands,
-								env: worktreeConfig.env,
-								continueOnFailure: worktreeConfig.continueOnFailure,
-								parallel: worktreeConfig.parallel,
-							})
+						// Build the full command chain:
+						// 1. Init commands (chained with &&, so failure stops the chain)
+						// 2. Main command
+						// 3. Keep shell alive for debugging (exec $shell)
+						//
+						// Example: zsh -i -c 'direnv allow && envdev && pnpm install && claude "prompt"; exec zsh'
+						//
+						// CRITICAL: Everything runs in the SAME shell, so:
+						// - Aliases like "envdev" work (interactive shell loads .zshrc)
+						// - Environment from direnv/envdev persists for main command
+						// - Any failure in init commands prevents main command from running
 
-							initCommandsHadFailures = initResult.hasFailures
-							failedInitCommands = initResult.failedCommands
-
-							if (initResult.hasFailures) {
-								yield* Effect.log(
-									`Some init commands failed: ${initResult.failedCommands.join(", ")}`,
-								)
-							}
+						let commandChain: string
+						if (shouldRunInit && worktreeConfig.initCommands.length > 0) {
+							// Chain init commands with && (fail-fast), then run main command
+							const initChain = worktreeConfig.initCommands.join(" && ")
+							commandChain = `${initChain} && ${command}`
+						} else {
+							// No init commands, just run main command
+							commandChain = command
 						}
 
-						// Build the full command with interactive shell
-						// Use interactive shell (-i) so .zshrc/.bashrc load, which triggers direnv hooks
-						// This ensures the project's .envrc environment is loaded automatically
-						// Keep session alive after command exits for debugging (exec ${shell})
-						const shell = config.session.shell
-						const fullCommand = `${shell} -i -c '${command}; exec ${shell}'`
+						// Wrap in interactive shell with exec fallback
+						const fullCommand = `${shell} -i -c '${commandChain}; exec ${shell}'`
+
+						yield* Effect.log(`Creating tmux session: ${sessionName}`)
+						yield* Effect.log(`Command chain: ${commandChain}`)
 
 						// Create tmux session
 						yield* tmux.newSession(sessionName, {
@@ -169,8 +168,6 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						return {
 							sessionName,
 							worktreePath,
-							initCommandsHadFailures,
-							failedInitCommands,
 						}
 					}),
 
