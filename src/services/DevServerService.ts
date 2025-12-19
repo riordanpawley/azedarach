@@ -16,7 +16,7 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
-import { type TmuxError, TmuxService } from "../core/TmuxService.js"
+import { type SessionNotFoundError, type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
 	WorktreeSessionService,
@@ -578,7 +578,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				projectPath: string,
 			): Effect.Effect<
 				DevServerState,
-				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError,
+				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError | SessionNotFoundError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
@@ -690,7 +690,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				projectPath: string,
 			): Effect.Effect<
 				DevServerState,
-				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError,
+				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError | SessionNotFoundError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
