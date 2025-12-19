@@ -538,6 +538,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `a` | Attach to session | Session exists (offers to merge main if behind) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
+| `Space` `v` | View dev server | Dev server is running (attach to tmux session) |
 | `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
 | `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
@@ -587,15 +588,74 @@ Toggle a dev server for the selected task's worktree. Each worktree can have its
 - A worktree must exist for the bead (start a session first with `Space+s`)
 - The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
 
+#### View Dev Server (Space+v)
+
+Attach to the dev server's tmux session to view its output. This is useful for:
+- Monitoring server logs and errors
+- Checking startup messages
+- Debugging connection issues
+
+**How it works:**
+1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
+2. You can see all server output in real-time
+3. Return to Azedarach with `Ctrl-a Ctrl-a` (double-tap tmux prefix)
+
+**Requirements:**
+- A dev server must be running for the bead (start with `Space+r` first)
+
+**TaskCard indicator:**
+- Tasks with running dev servers show 🖥️ in their header line
+- This helps identify which tasks have active dev servers at a glance
+
 ### Git/PR Actions
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `u` | Update from main | Worktree exists (merge main into branch) |
 | `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
+
+#### Update from Main (Space+u)
+
+The update action merges the latest changes from main into your worktree branch. This keeps your branch up to date with the main branch and is useful before creating a PR or when you need the latest changes from main.
+
+**What it does:**
+
+1. Fetches the latest changes from `origin/main`
+2. Merges `origin/main` into your worktree branch
+3. If there are conflicts, starts a Claude session to resolve them
+4. If no conflicts, the merge completes successfully
+
+**When to use:**
+
+- Before creating a PR to ensure your changes are based on the latest main
+- To stay up to date with changes other people have merged to main
+- When you need a feature or fix that was merged to main after you created your branch
+
+**Conflict resolution:**
+
+If the merge results in conflicts:
+- A Claude session is automatically started in the worktree
+- Claude will attempt to resolve the conflicts
+- You can attach to the session with `Space` `a` to guide Claude or review the resolution
+- If Claude gets stuck, use `Space` `M` to abort the merge and try again manually
+
+**Note:** This operation works in the worktree, so your local main branch is not affected. The merge only updates the worktree branch.
+
+#### Create PR (Space+P)
+
+Creating a PR now **automatically syncs with main first** to ensure your branch is up to date. The workflow is:
+
+1. Fetches the latest changes from `origin/main`
+2. Merges `origin/main` into your branch (same as `Space` `u`)
+3. If conflicts occur, starts a Claude session to resolve them
+4. After successful merge, pushes your branch to origin
+5. Creates a GitHub PR using `gh pr create`
+
+This ensures PRs are always based on the latest main and reduces the chance of merge conflicts after review.
 
 #### Merge to Main (Space+m)
 

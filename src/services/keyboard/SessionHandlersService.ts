@@ -50,9 +50,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
-			const resolvedConfig: ResolvedConfig = appConfig.config
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
+			const resolvedConfig: ResolvedConfig = appConfig.config
 
 			// ================================================================
 			// Session Handler Methods
@@ -334,6 +334,7 @@ What would you like to discuss?`
 			 * Attach to session externally (Space+a)
 			 *
 			 * Switches to the tmux session in a new terminal window.
+			 * After successful attach, checks for PR comments and injects them into the session.
 			 * The user can return with Ctrl-a Ctrl-a.
 			 *
 			 * If the worktree branch is behind main, shows a choice dialog:
