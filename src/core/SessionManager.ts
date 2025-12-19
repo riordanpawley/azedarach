@@ -320,6 +320,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const diagnostics = yield* DiagnosticsService
 		const toast = yield* ToastService
 
+		// Note: SessionManager uses effect: not scoped:, so trackService (which uses acquireRelease)
+		// would need scoped. Instead we just update health status manually.
+		yield* diagnostics.updateServiceHealth({
+			name: "SessionManager",
+			status: "healthy",
+			details: "Claude session orchestration",
+		})
+
 		// Track active sessions in memory
 		const sessionsRef = yield* Ref.make<HashMap.HashMap<string, Session>>(HashMap.empty())
 
