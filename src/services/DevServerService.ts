@@ -1,0 +1,695 @@
+/**
+ * DevServerService - Manages per-worktree dev servers
+ *
+ * Each worktree can have its own dev server running with injected port environment variables.
+ * Ports are allocated sequentially to avoid conflicts between parallel sessions.
+ *
+ * Key features:
+ * - Per-worktree dev server lifecycle
+ * - Multi-port injection (PORT, VITE_PORT, VITE_SERVER_PORT, etc.)
+ * - Automatic port detection from server output
+ * - Command detection from package.json/lock files
+ * - Auto-cleanup on service scope exit
+ */
+
+import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { Data, Effect, HashMap, Option, Ref, Schema, SubscriptionRef } from "effect"
+import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { type TmuxError, TmuxService } from "../core/TmuxService.js"
+import { ProjectService } from "./ProjectService.js"
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/** tmux session name prefix for dev servers */
+const DEV_SESSION_PREFIX = "az-dev-"
+
+/** How often to poll for port detection (ms) */
+const PORT_POLL_INTERVAL = 500
+
+/** Maximum time to wait for port detection (ms) */
+const PORT_DETECTION_TIMEOUT = 30000
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+/**
+ * Dev server status
+ */
+export type DevServerStatus = "idle" | "starting" | "running" | "error"
+
+/**
+ * Dev server state for a single worktree
+ */
+export interface DevServerState {
+	readonly status: DevServerStatus
+	readonly port: number | undefined
+	readonly tmuxSession: string | undefined
+	readonly worktreePath: string | undefined
+	readonly startedAt: Date | undefined
+	readonly error: string | undefined
+}
+
+/**
+ * All dev servers state (map from beadId to state)
+ */
+export type DevServersState = HashMap.HashMap<string, DevServerState>
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+export class DevServerError extends Data.TaggedError("DevServerError")<{
+	readonly message: string
+	readonly beadId?: string
+}> {}
+
+export class NoWorktreeError extends Data.TaggedError("NoWorktreeError")<{
+	readonly beadId: string
+	readonly message: string
+}> {}
+
+// ============================================================================
+// Persistence Schema
+// ============================================================================
+
+/**
+ * Schema for persisted dev server state
+ * Uses UndefinedOr with proper JSON representation
+ */
+const PersistedDevServerStateSchema = Schema.Struct({
+	status: Schema.Literal("idle", "starting", "running", "error"),
+	port: Schema.UndefinedOr(Schema.Number),
+	tmuxSession: Schema.UndefinedOr(Schema.String),
+	worktreePath: Schema.UndefinedOr(Schema.String),
+	startedAt: Schema.UndefinedOr(Schema.Date),
+	error: Schema.UndefinedOr(Schema.String),
+})
+
+/**
+ * Schema for persisted dev servers map (with JSON parsing)
+ */
+const PersistedDevServersSchema = Schema.parseJson(
+	Schema.HashMap({
+		key: Schema.String,
+		value: PersistedDevServerStateSchema,
+	}),
+)
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Get tmux session name for a bead's dev server
+ */
+const getDevSessionName = (beadId: string): string => `${DEV_SESSION_PREFIX}${beadId}`
+
+/**
+ * Create empty/idle state
+ */
+const idleState: DevServerState = {
+	status: "idle",
+	port: undefined,
+	tmuxSession: undefined,
+	worktreePath: undefined,
+	startedAt: undefined,
+	error: undefined,
+}
+
+// ============================================================================
+// Service Implementation
+// ============================================================================
+
+export class DevServerService extends Effect.Service<DevServerService>()("DevServerService", {
+	dependencies: [TmuxService.Default, AppConfig.Default, ProjectService.Default],
+	scoped: Effect.gen(function* () {
+		const tmux = yield* TmuxService
+		const appConfig = yield* AppConfig
+		const config: ResolvedConfig = appConfig.config
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const projectService = yield* ProjectService
+
+		// Persistence file path
+		const devServersFilePath = ".azedarach/devservers.json"
+
+		/**
+		 * Get the current project path from ProjectService, falling back to process.cwd()
+		 */
+		const getEffectiveProjectPath = (): Effect.Effect<string> =>
+			Effect.gen(function* () {
+				const projectPath = yield* projectService.getCurrentPath()
+				return projectPath ?? process.cwd()
+			})
+
+		/**
+		 * Load persisted dev servers from disk
+		 */
+		const loadPersistedServers = (): Effect.Effect<DevServersState> =>
+			Effect.gen(function* () {
+				const projectPath = yield* getEffectiveProjectPath()
+				const filePath = pathService.join(projectPath, devServersFilePath)
+
+				const exists = yield* fs.exists(filePath)
+				if (!exists) return HashMap.empty<string, DevServerState>()
+
+				const content = yield* fs.readFileString(filePath)
+				// Schema.parseJson handles JSON parsing
+				const decoded = yield* Schema.decodeUnknown(PersistedDevServersSchema)(content)
+
+				return decoded
+			}).pipe(Effect.catchAll(() => Effect.succeed(HashMap.empty<string, DevServerState>())))
+
+		/**
+		 * Save dev servers to disk
+		 */
+		const persistServers = (servers: DevServersState): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const projectPath = yield* getEffectiveProjectPath()
+				const dirPath = pathService.join(projectPath, ".azedarach")
+				const filePath = pathService.join(dirPath, "devservers.json")
+
+				yield* fs.makeDirectory(dirPath, { recursive: true }).pipe(Effect.ignore)
+				// Schema.parseJson handles JSON stringification
+				const json = yield* Schema.encode(PersistedDevServersSchema)(servers)
+				yield* fs.writeFileString(filePath, json).pipe(Effect.ignore)
+			}).pipe(Effect.catchAll(() => Effect.void))
+
+		/**
+		 * Sync persisted state with actual tmux sessions
+		 * Removes entries for sessions that no longer exist
+		 */
+		const syncWithTmux = (
+			servers: DevServersState,
+		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				let updated = servers
+				for (const [beadId, state] of HashMap.entries(servers)) {
+					if (state.tmuxSession) {
+						const hasSession = yield* tmux.hasSession(state.tmuxSession)
+						if (!hasSession) {
+							// Session died, mark as idle
+							yield* Effect.log(`Dev server for ${beadId} no longer running, marking idle`)
+							updated = HashMap.set(updated, beadId, idleState)
+						}
+					}
+				}
+				return updated
+			})
+
+		// Load persisted state and sync with tmux on startup
+		const persisted = yield* loadPersistedServers()
+		const synced = yield* syncWithTmux(persisted)
+
+		// Populate allocated ports from recovered state
+		const initialPorts = new Set<number>()
+		for (const state of HashMap.values(synced)) {
+			if (state.port) {
+				initialPorts.add(state.port)
+			}
+		}
+
+		// Track all dev servers state
+		const serversRef = yield* SubscriptionRef.make<DevServersState>(synced)
+
+		// Track allocated ports to avoid conflicts
+		const allocatedPortsRef = yield* Ref.make<Set<number>>(initialPorts)
+
+		yield* Effect.log(`DevServerService: Recovered ${HashMap.size(synced)} dev servers`)
+
+		/**
+		 * Allocate a port for a given port type, avoiding conflicts
+		 */
+		const allocatePort = (basePort: number): Effect.Effect<number> =>
+			Ref.modify(allocatedPortsRef, (allocated) => {
+				let port = basePort
+				// Find next available port starting from base
+				while (allocated.has(port)) {
+					port++
+				}
+				const newAllocated = new Set(allocated)
+				newAllocated.add(port)
+				return [port, newAllocated]
+			})
+
+		/**
+		 * Release a port back to the pool
+		 */
+		const releasePort = (port: number): Effect.Effect<void> =>
+			Ref.update(allocatedPortsRef, (allocated) => {
+				const newAllocated = new Set(allocated)
+				newAllocated.delete(port)
+				return newAllocated
+			})
+
+		/**
+		 * Build environment variables for port injection
+		 */
+		const buildPortEnv = (
+			portOffset: number,
+		): Effect.Effect<{ env: Record<string, string>; primaryPort: number }> =>
+			Effect.gen(function* () {
+				const portsConfig = config.devServer.ports
+				const env: Record<string, string> = {}
+				let primaryPort: number | undefined
+
+				for (const [portType, portConfig] of Object.entries(portsConfig)) {
+					const basePort = portConfig.default + portOffset
+					const port = yield* allocatePort(basePort)
+
+					// First port type becomes the primary (displayed in StatusBar)
+					if (primaryPort === undefined) {
+						primaryPort = port
+					}
+
+					// Set all aliases to this port
+					for (const alias of portConfig.aliases) {
+						env[alias] = String(port)
+					}
+
+					yield* Effect.log(
+						`Allocated ${portType} port ${port} for aliases: ${portConfig.aliases.join(", ")}`,
+					)
+				}
+
+				return { env, primaryPort: primaryPort ?? 3000 }
+			})
+
+		/**
+		 * Detect package manager from lock files
+		 */
+		const detectPackageManager = (
+			worktreePath: string,
+		): Effect.Effect<"bun" | "pnpm" | "yarn" | "npm"> =>
+			Effect.gen(function* () {
+				const bunLock = pathService.join(worktreePath, "bun.lockb")
+				const pnpmLock = pathService.join(worktreePath, "pnpm-lock.yaml")
+				const yarnLock = pathService.join(worktreePath, "yarn.lock")
+				const npmLock = pathService.join(worktreePath, "package-lock.json")
+
+				if (yield* fs.exists(bunLock).pipe(Effect.catchAll(() => Effect.succeed(false)))) {
+					return "bun"
+				}
+				if (yield* fs.exists(pnpmLock).pipe(Effect.catchAll(() => Effect.succeed(false)))) {
+					return "pnpm"
+				}
+				if (yield* fs.exists(yarnLock).pipe(Effect.catchAll(() => Effect.succeed(false)))) {
+					return "yarn"
+				}
+				if (yield* fs.exists(npmLock).pipe(Effect.catchAll(() => Effect.succeed(false)))) {
+					return "npm"
+				}
+				return "npm" // fallback
+			})
+
+		/**
+		 * Detect dev command from package.json
+		 */
+		const detectDevCommand = (
+			worktreePath: string,
+		): Effect.Effect<string, DevServerError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// If config override exists, use it
+				if (config.devServer.command) {
+					return config.devServer.command
+				}
+
+				const packageJsonPath = pathService.join(worktreePath, "package.json")
+				const exists = yield* fs
+					.exists(packageJsonPath)
+					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+				if (!exists) {
+					return yield* Effect.fail(
+						new DevServerError({
+							message: "No package.json found in worktree",
+						}),
+					)
+				}
+
+				// Read and parse package.json
+				const content = yield* fs.readFileString(packageJsonPath).pipe(
+					Effect.mapError(
+						() =>
+							new DevServerError({
+								message: "Failed to read package.json",
+							}),
+					),
+				)
+
+				const pkg = yield* Effect.try({
+					try: () => JSON.parse(content),
+					catch: () =>
+						new DevServerError({
+							message: "Invalid JSON in package.json",
+						}),
+				})
+
+				const scripts = pkg.scripts ?? {}
+				const pm = yield* detectPackageManager(worktreePath)
+
+				// Check for dev, start, serve scripts in order
+				if (scripts.dev) {
+					return `${pm} run dev`
+				}
+				if (scripts.start) {
+					return `${pm} run start`
+				}
+				if (scripts.serve) {
+					return `${pm} run serve`
+				}
+
+				// Fallback
+				return `${pm} run dev`
+			})
+
+		/**
+		 * Poll tmux pane for port detection
+		 */
+		const pollForPort = (
+			beadId: string,
+			tmuxSession: string,
+		): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				const pattern = new RegExp(config.devServer.portPattern)
+				const startTime = Date.now()
+
+				// Poll until timeout
+				while (Date.now() - startTime < PORT_DETECTION_TIMEOUT) {
+					const output = yield* tmux.capturePane(tmuxSession, 100)
+					const match = output.match(pattern)
+
+					if (match) {
+						const port = parseInt(match[1] || match[2], 10)
+						if (!Number.isNaN(port)) {
+							yield* Effect.log(`Detected port ${port} for ${beadId}`)
+							return port
+						}
+					}
+
+					yield* Effect.sleep(PORT_POLL_INTERVAL)
+				}
+
+				yield* Effect.log(`Port detection timed out for ${beadId}`)
+				return undefined
+			})
+
+		/**
+		 * Update server state and persist to disk
+		 */
+		const updateServerState = (
+			beadId: string,
+			update: Partial<DevServerState>,
+		): Effect.Effect<DevServerState> =>
+			Effect.gen(function* () {
+				const newState = yield* SubscriptionRef.modify(serversRef, (servers) => {
+					const current = HashMap.get(servers, beadId)
+					const currentState = Option.getOrElse(current, () => idleState)
+					const newState: DevServerState = { ...currentState, ...update }
+					const newServers = HashMap.set(servers, beadId, newState)
+					return [newState, newServers]
+				})
+
+				// Persist after state update
+				const servers = yield* SubscriptionRef.get(serversRef)
+				yield* persistServers(servers)
+
+				return newState
+			})
+
+		/**
+		 * Get server state for a bead
+		 */
+		const getServerState = (beadId: string): Effect.Effect<DevServerState> =>
+			Effect.gen(function* () {
+				const servers = yield* SubscriptionRef.get(serversRef)
+				const state = HashMap.get(servers, beadId)
+				return Option.getOrElse(state, () => idleState)
+			})
+
+		/**
+		 * Check if worktree exists for a bead
+		 */
+		const checkWorktreeExists = (
+			beadId: string,
+			projectPath: string,
+		): Effect.Effect<string, NoWorktreeError> =>
+			Effect.gen(function* () {
+				// Worktree path pattern: ../ProjectName-beadId/
+				const projectName = pathService.basename(projectPath)
+				const parentDir = pathService.dirname(projectPath)
+				const worktreePath = pathService.join(parentDir, `${projectName}-${beadId}`)
+
+				const exists = yield* fs
+					.exists(worktreePath)
+					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+				if (!exists) {
+					return yield* Effect.fail(
+						new NoWorktreeError({
+							beadId,
+							message: `No worktree found. Start a session first (Space+s)`,
+						}),
+					)
+				}
+
+				return worktreePath
+			})
+
+		// Auto-cleanup on scope exit
+		yield* Effect.addFinalizer(() =>
+			Effect.gen(function* () {
+				const servers = yield* SubscriptionRef.get(serversRef)
+				for (const [beadId, state] of HashMap.entries(servers)) {
+					if (state.tmuxSession) {
+						yield* tmux.killSession(state.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
+						yield* Effect.log(`Cleaned up dev server for ${beadId}`)
+					}
+				}
+			}),
+		)
+
+		return {
+			// Expose the SubscriptionRef for atoms to subscribe to
+			servers: serversRef,
+
+			/**
+			 * Get the state of a specific dev server
+			 */
+			getStatus: (beadId: string) => getServerState(beadId),
+
+			/**
+			 * Start a dev server for a bead's worktree
+			 */
+			start: (
+				beadId: string,
+				projectPath: string,
+			): Effect.Effect<
+				DevServerState,
+				DevServerError | NoWorktreeError | TmuxError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					// Check current state
+					const current = yield* getServerState(beadId)
+					if (current.status === "running" || current.status === "starting") {
+						return current
+					}
+
+					// Verify worktree exists
+					const worktreePath = yield* checkWorktreeExists(beadId, projectPath)
+
+					// Update to starting
+					yield* updateServerState(beadId, {
+						status: "starting",
+						worktreePath,
+						error: undefined,
+					})
+
+					// Detect command and build env
+					const command = yield* detectDevCommand(worktreePath)
+
+					// Calculate port offset based on number of running servers
+					const servers = yield* SubscriptionRef.get(serversRef)
+					const runningCount = HashMap.size(HashMap.filter(servers, (s) => s.status === "running"))
+					const { env, primaryPort } = yield* buildPortEnv(runningCount)
+
+					// Build the full command with env vars
+					const envString = Object.entries(env)
+						.map(([k, v]) => `${k}=${v}`)
+						.join(" ")
+					const fullCommand = `${envString} ${command}`
+
+					// Create tmux session
+					const tmuxSession = getDevSessionName(beadId)
+					const cwd =
+						config.devServer.cwd === "."
+							? worktreePath
+							: pathService.join(worktreePath, config.devServer.cwd)
+
+					yield* tmux.newSession(tmuxSession, {
+						cwd,
+						command: fullCommand,
+					})
+
+					// Update state
+					yield* updateServerState(beadId, {
+						status: "running",
+						tmuxSession,
+						port: primaryPort,
+						startedAt: new Date(),
+					})
+
+					// Start port polling in background to get actual port
+					yield* Effect.fork(
+						pollForPort(beadId, tmuxSession).pipe(
+							Effect.tap((detectedPort) =>
+								detectedPort !== undefined
+									? updateServerState(beadId, { port: detectedPort })
+									: Effect.void,
+							),
+							Effect.catchAll(() => Effect.void),
+						),
+					)
+
+					return yield* getServerState(beadId)
+				}),
+
+			/**
+			 * Stop a dev server
+			 */
+			stop: (beadId: string): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const current = yield* getServerState(beadId)
+
+					if (current.tmuxSession) {
+						yield* tmux.killSession(current.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
+					}
+
+					// Release the port
+					if (current.port) {
+						yield* releasePort(current.port)
+					}
+
+					yield* updateServerState(beadId, idleState)
+				}),
+
+			/**
+			 * Toggle a dev server (start if stopped, stop if running)
+			 */
+			toggle: (
+				beadId: string,
+				projectPath: string,
+			): Effect.Effect<
+				DevServerState,
+				DevServerError | NoWorktreeError | TmuxError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					const current = yield* getServerState(beadId)
+
+					if (current.status === "running" || current.status === "starting") {
+						yield* Effect.log(`Stopping dev server for ${beadId}`)
+
+						if (current.tmuxSession) {
+							yield* tmux.killSession(current.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
+						}
+						if (current.port) {
+							yield* releasePort(current.port)
+						}
+
+						return yield* updateServerState(beadId, idleState)
+					}
+
+					yield* Effect.log(`Starting dev server for ${beadId}`)
+
+					// Verify worktree exists
+					const worktreePath = yield* checkWorktreeExists(beadId, projectPath)
+
+					// Update to starting
+					yield* updateServerState(beadId, {
+						status: "starting",
+						worktreePath,
+						error: undefined,
+					})
+
+					// Detect command
+					const command = yield* detectDevCommand(worktreePath)
+
+					// Calculate port offset
+					const servers = yield* SubscriptionRef.get(serversRef)
+					const runningCount = HashMap.size(HashMap.filter(servers, (s) => s.status === "running"))
+					const { env, primaryPort } = yield* buildPortEnv(runningCount)
+
+					// Build command with env
+					const envString = Object.entries(env)
+						.map(([k, v]) => `${k}=${v}`)
+						.join(" ")
+					const fullCommand = `${envString} ${command}`
+
+					// Create tmux session
+					const tmuxSession = getDevSessionName(beadId)
+					const cwd =
+						config.devServer.cwd === "."
+							? worktreePath
+							: pathService.join(worktreePath, config.devServer.cwd)
+
+					yield* tmux.newSession(tmuxSession, {
+						cwd,
+						command: fullCommand,
+					})
+
+					// Update state
+					yield* updateServerState(beadId, {
+						status: "running",
+						tmuxSession,
+						port: primaryPort,
+						startedAt: new Date(),
+					})
+
+					// Poll for port in background
+					yield* Effect.fork(
+						pollForPort(beadId, tmuxSession).pipe(
+							Effect.tap((detectedPort) =>
+								detectedPort !== undefined
+									? updateServerState(beadId, { port: detectedPort })
+									: Effect.void,
+							),
+							Effect.catchAll(() => Effect.void),
+						),
+					)
+
+					return yield* getServerState(beadId)
+				}),
+
+			/**
+			 * Check if tmux session is still alive and sync state
+			 */
+			syncState: (
+				beadId: string,
+			): Effect.Effect<DevServerState, never, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const current = yield* getServerState(beadId)
+
+					if (current.tmuxSession) {
+						const hasSession = yield* tmux.hasSession(current.tmuxSession)
+						if (!hasSession && current.status === "running") {
+							// Session died, update state
+							if (current.port) {
+								yield* releasePort(current.port)
+							}
+							return yield* updateServerState(beadId, {
+								...idleState,
+								error: "Server stopped unexpectedly",
+							})
+						}
+					}
+
+					return current
+				}),
+		}
+	}),
+}) {}

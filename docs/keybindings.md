@@ -428,7 +428,8 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
-| `Space` `r` | Resume session | Session is paused |
+| `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
+| `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
 
 #### Start (yolo) Mode (Space+!)
@@ -441,6 +442,40 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 - When you're ready to accept all changes Claude makes
 
 **Caution:** Since Claude won't ask for permission, it can make changes faster but with less oversight. Use this for tasks where you trust Claude's judgment.
+
+#### Toggle Dev Server (Space+r)
+
+Toggle a dev server for the selected task's worktree. Each worktree can have its own dev server running with injected port environment variables to avoid conflicts.
+
+**How it works:**
+1. If no dev server is running for this bead, starts one in a new tmux session
+2. If a dev server is already running, stops it
+
+**Port injection:**
+- Ports are auto-allocated starting from 3000
+- Environment variables are injected (e.g., `PORT=3001`)
+- Configure additional port variables in `.azedarach.json`:
+
+```json
+{
+  "devServer": {
+    "command": "bun run dev",
+    "ports": {
+      "web": { "default": 3000, "aliases": ["PORT", "VITE_PORT"] },
+      "server": { "default": 8000, "aliases": ["SERVER_PORT", "VITE_SERVER_PORT"] }
+    }
+  }
+}
+```
+
+**StatusBar indicator:**
+- Shows `DEV: localhost:3001` when dev server is running for the selected bead
+- Shows `DEV: starting...` during startup
+- Shows `DEV: error` if the server failed
+
+**Requirements:**
+- A worktree must exist for the bead (start a session first with `Space+s`)
+- The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
 
 ### Git/PR Actions
 
