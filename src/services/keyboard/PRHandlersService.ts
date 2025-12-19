@@ -371,11 +371,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
 				// Build git diff command that works in the worktree
-				// - diff main...HEAD shows changes since branching from main
+				// - diff main shows ALL changes vs main (committed + staged + unstaged)
+				// - Using main instead of main...HEAD ensures uncommitted work is visible
 				// - DFT_COLOR=always ensures difftastic colors in tmux popup
 				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				const diffCommand = `cd "${worktreePath}" && git diff main...HEAD --stat --color=always && echo "" && DFT_COLOR=always git diff main...HEAD --color=always | less -RS +Gg`
+				const diffCommand = `cd "${worktreePath}" && git diff main --stat --color=always && echo "" && DFT_COLOR=always git diff main --color=always | less -RS`
 
 				yield* tmux
 					.displayPopup({
