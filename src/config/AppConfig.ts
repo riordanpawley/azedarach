@@ -7,7 +7,7 @@
  * 3. package.json under "azedarach" key
  * 4. Defaults
  *
- * Follows the service patterns established in BeadsClient.ts and SessionManager.ts.
+ * Follows the service patterns established in BeadsClient.ts and ClaudeSessionManager.ts.
  */
 
 import { FileSystem, Path } from "@effect/platform"

@@ -4,7 +4,7 @@
  * Continuously monitors tmux pane output for active sessions and:
  * - Detects session state (busy, error, done) via pattern matching
  * - Extracts session metrics (tokens, agent phase, recent output)
- * - Reports state changes to SessionManager
+ * - Reports state changes to ClaudeSessionManager
  *
  * Works in tandem with HookReceiver:
  * - PTY provides: busy detection, error detection, done detection, metrics
@@ -15,13 +15,13 @@
  * 1. PTYMonitor polls tmux panes every 500ms
  * 2. Output is fed to StateDetector for pattern matching
  * 3. Detected state is compared against hook priority window
- * 4. If hooks haven't fired recently, PTY state updates SessionManager
+ * 4. If hooks haven't fired recently, PTY state updates ClaudeSessionManager
  */
 
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
-import { SessionManager } from "./SessionManager.js"
+import { ClaudeSessionManager } from "./ClaudeSessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
 
@@ -150,13 +150,13 @@ const extractRecentOutput = (output: string): string | undefined => {
 export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 	dependencies: [
 		TmuxService.Default,
-		SessionManager.Default,
+		ClaudeSessionManager.Default,
 		StateDetector.Default,
 		DiagnosticsService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
-		const sessionManager = yield* SessionManager
+		const sessionManager = yield* ClaudeSessionManager
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
 
@@ -261,7 +261,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				const hookHasPriority = hookRecency < HOOK_PRIORITY_WINDOW_MS
 
 				if (detectedState && !hookHasPriority) {
-					// Get current state from SessionManager
+					// Get current state from ClaudeSessionManager
 					const currentState = yield* sessionManager
 						.getState(beadId)
 						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))

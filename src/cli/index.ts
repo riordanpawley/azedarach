@@ -10,8 +10,8 @@ import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
+import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import { SessionManager } from "../core/SessionManager.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
 
@@ -130,13 +130,13 @@ const startHandler = (args: {
 		// Create the combined layer with config and platform dependencies
 		const appConfigLayer = AppConfigConfig.Default(cwd, configPath)
 		const fullLayer = Layer.provideMerge(
-			SessionManager.Default,
+			ClaudeSessionManager.Default,
 			Layer.merge(appConfigLayer, BunContext.layer),
 		)
 
-		// Start the session using SessionManager
+		// Start the session using ClaudeSessionManager
 		const session = yield* Effect.gen(function* () {
-			const sessionManager = yield* SessionManager
+			const sessionManager = yield* ClaudeSessionManager
 			return yield* sessionManager.start({
 				beadId: args.issueId,
 				projectPath: cwd,
