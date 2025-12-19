@@ -1,17 +1,18 @@
 /**
  * Configuration Schema for Azedarach
  *
- * Uses @effect/schema for runtime validation, matching patterns in BeadsClient.ts.
- * Schema definitions provide both TypeScript types and runtime validation.
+ * Uses @effect/schema for runtime validation with versioned schemas and automatic
+ * migration. Old config formats are automatically upgraded to the current version.
  *
- * ## Config Versioning
+ * ## Version History
+ * - Version 1: Original schema (no $schema field) - legacy format
+ * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
  *
- * The config file includes a `configVersion` field to track schema changes.
- * When loading, the schema automatically migrates old formats to current.
- *
- * Version history:
- * - 1: Initial versioned schema (moved pr.baseBranch → git.baseBranch)
- * - 0/undefined: Legacy unversioned configs
+ * ## Adding New Versions
+ * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
+ * 2. Add VN-1ToVNTransform migration
+ * 3. Update MigratingConfigSchema union
+ * 4. Update CURRENT_CONFIG_VERSION
  */
 
 import * as Schema from "effect/Schema"
@@ -21,7 +22,7 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 1
+export const CURRENT_CONFIG_VERSION = 2
 
 // ============================================================================
 // Nested Config Schemas
@@ -251,6 +252,24 @@ const NotificationsConfigSchema = Schema.Struct({
 	system: Schema.optional(Schema.Boolean),
 })
 
+// ============================================================================
+// Legacy Schemas (for migration)
+// ============================================================================
+
+/**
+ * Legacy PR config schema (v1/unversioned)
+ *
+ * In legacy configs, baseBranch was under pr section.
+ * This was moved to git section in v2.
+ */
+const LegacyPRConfigSchema = Schema.Struct({
+	enabled: Schema.optional(Schema.Boolean),
+	autoDraft: Schema.optional(Schema.Boolean),
+	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to git.baseBranch in v2 */
+	baseBranch: Schema.optional(Schema.String),
+})
+
 /**
  * Beads configuration
  *
@@ -308,24 +327,6 @@ const ProjectConfigSchema = Schema.Struct({
 })
 
 // ============================================================================
-// Legacy Schemas (for migration)
-// ============================================================================
-
-/**
- * Legacy PR config schema (v0)
- *
- * In v0 configs, baseBranch was under pr section.
- * This was moved to git section in v1.
- */
-const LegacyPRConfigSchema = Schema.Struct({
-	enabled: Schema.optional(Schema.Boolean),
-	autoDraft: Schema.optional(Schema.Boolean),
-	autoMerge: Schema.optional(Schema.Boolean),
-	/** @deprecated Moved to git.baseBranch in v1 */
-	baseBranch: Schema.optional(Schema.String),
-})
-
-// ============================================================================
 // Migration System
 // ============================================================================
 
@@ -365,7 +366,7 @@ interface Migration {
  */
 const migrations: readonly Migration[] = [
 	{
-		toVersion: 1,
+		toVersion: 2,
 		description: "Move pr.baseBranch → git.baseBranch",
 		migrate: (config) => {
 			const pr = config.pr
@@ -387,7 +388,7 @@ const migrations: readonly Migration[] = [
 
 			return {
 				...config,
-				configVersion: 1,
+				$schema: 2,
 				git: migratedBaseBranch !== undefined ? { ...git, baseBranch: migratedBaseBranch } : git,
 				pr: newPr,
 			}
@@ -397,11 +398,11 @@ const migrations: readonly Migration[] = [
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
 	// {
-	//   toVersion: 2,
+	//   toVersion: 3,
 	//   description: "Add session.timeout option",
 	//   migrate: (config) => ({
 	//     ...config,
-	//     configVersion: 2,
+	//     $schema: 3,
 	//     // New fields get defaults, existing fields pass through
 	//   }),
 	// },
@@ -410,12 +411,12 @@ const migrations: readonly Migration[] = [
 /**
  * Apply all necessary migrations to bring config to current version
  *
- * Migrations are applied in sequence. A config at v0 will go through
- * all migrations (v0→v1, v1→v2, etc.) until it reaches CURRENT_CONFIG_VERSION.
+ * Migrations are applied in sequence. A config at v1 will go through
+ * all migrations (v1→v2, v2→v3, etc.) until it reaches CURRENT_CONFIG_VERSION.
  */
 const applyMigrations = (config: RawConfig): CurrentConfig => {
 	let current = config
-	const startVersion = current.configVersion ?? 0
+	const startVersion = current.$schema ?? 1
 
 	for (const migration of migrations) {
 		if (startVersion < migration.toVersion) {
@@ -426,16 +427,16 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 	// Ensure version is set even if no migrations were needed
 	// Strip legacy fields to match CurrentConfig
 	return {
-		configVersion: CURRENT_CONFIG_VERSION,
+		$schema: CURRENT_CONFIG_VERSION,
 		worktree: current.worktree,
 		git: current.git,
 		session: current.session,
 		patterns: current.patterns,
 		pr: current.pr
 			? {
+					enabled: current.pr.enabled,
 					autoDraft: current.pr.autoDraft,
 					autoMerge: current.pr.autoMerge,
-					enabled: current.pr.enabled,
 				}
 			: undefined,
 		merge: current.merge,
@@ -455,12 +456,12 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 /**
  * Raw input schema for Azedarach config
  *
- * Accepts both legacy (v0) and current (v1) formats.
+ * Accepts both legacy (v1/unversioned) and current (v2) formats.
  * Used as the input side of the migration transform.
  */
 const RawConfigSchema = Schema.Struct({
-	/** Config version - undefined/0 for legacy, 1 for current */
-	configVersion: Schema.optional(Schema.Number),
+	/** Config version - undefined/1 for legacy, 2+ for current */
+	$schema: Schema.optional(Schema.Number),
 
 	worktree: Schema.optional(WorktreeConfigSchema),
 	git: Schema.optional(GitConfigSchema),
@@ -469,11 +470,7 @@ const RawConfigSchema = Schema.Struct({
 	/** May contain legacy baseBranch field */
 	pr: Schema.optional(LegacyPRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
-
-	/** Dev server configuration */
 	devServer: Schema.optional(DevServerConfigSchema),
-
-	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
 
 	/** Beads issue tracker configuration */
@@ -482,19 +479,18 @@ const RawConfigSchema = Schema.Struct({
 	/** Network connectivity configuration */
 	network: Schema.optional(NetworkConfigSchema),
 
-	/** Project configurations */
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
 
 /**
- * Current config schema (v1)
+ * Current config schema (v2)
  *
  * This is the canonical schema after migration.
  * Does NOT include legacy fields - they should be migrated away.
  */
 const CurrentConfigSchema = Schema.Struct({
-	configVersion: Schema.optional(Schema.Number),
+	$schema: Schema.optional(Schema.Number),
 	worktree: Schema.optional(WorktreeConfigSchema),
 	git: Schema.optional(GitConfigSchema),
 	session: Schema.optional(SessionConfigSchema),
@@ -520,7 +516,7 @@ const CurrentConfigSchema = Schema.Struct({
 export const AzedarachConfigSchema = Schema.transform(RawConfigSchema, CurrentConfigSchema, {
 	strict: true,
 	decode: applyMigrations,
-	encode: (current) => ({ ...current, configVersion: CURRENT_CONFIG_VERSION }),
+	encode: (current) => ({ ...current, $schema: CURRENT_CONFIG_VERSION }),
 })
 
 // ============================================================================

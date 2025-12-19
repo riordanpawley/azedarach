@@ -16,31 +16,31 @@ const decodeConfig = (raw: unknown) => Schema.decodeUnknownSync(AzedarachConfigS
 
 describe("AzedarachConfigSchema", () => {
 	describe("version handling", () => {
-		it("sets configVersion to current for empty config", () => {
+		it("sets $schema to current for empty config", () => {
 			const result = decodeConfig({})
-			expect(result.configVersion).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 		})
 
-		it("sets configVersion to current for v0 config", () => {
-			const result = decodeConfig({ configVersion: 0 })
-			expect(result.configVersion).toBe(CURRENT_CONFIG_VERSION)
+		it("sets $schema to current for v1 config (legacy)", () => {
+			const result = decodeConfig({ $schema: 1 })
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 		})
 
-		it("preserves configVersion for current version config", () => {
-			const result = decodeConfig({ configVersion: CURRENT_CONFIG_VERSION })
-			expect(result.configVersion).toBe(CURRENT_CONFIG_VERSION)
+		it("preserves $schema for current version config", () => {
+			const result = decodeConfig({ $schema: CURRENT_CONFIG_VERSION })
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 		})
 
 		it("handles config with no version field (legacy)", () => {
 			const result = decodeConfig({
 				session: { command: "claude" },
 			})
-			expect(result.configVersion).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(result.session?.command).toBe("claude")
 		})
 	})
 
-	describe("v0 → v1 migration: pr.baseBranch → git.baseBranch", () => {
+	describe("v1 → v2 migration: pr.baseBranch → git.baseBranch", () => {
 		it("migrates pr.baseBranch to git.baseBranch", () => {
 			const result = decodeConfig({
 				pr: {
@@ -52,7 +52,7 @@ describe("AzedarachConfigSchema", () => {
 			// baseBranch should be in git section now
 			expect(result.git?.baseBranch).toBe("develop")
 			// pr section should NOT have baseBranch
-			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined })
+			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
 		})
 
 		it("does not overwrite existing git.baseBranch", () => {
@@ -67,7 +67,7 @@ describe("AzedarachConfigSchema", () => {
 
 		it("handles config with only git.baseBranch (no legacy)", () => {
 			const result = decodeConfig({
-				configVersion: 1,
+				$schema: 2,
 				git: { baseBranch: "release" },
 			})
 
@@ -83,8 +83,8 @@ describe("AzedarachConfigSchema", () => {
 				},
 			})
 
-			// pr should only have autoDraft and autoMerge
-			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true })
+			// pr should only have autoDraft, autoMerge, and enabled
+			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true, enabled: undefined })
 			// baseBranch should NOT be in pr
 			expect("baseBranch" in (result.pr ?? {})).toBe(false)
 		})
@@ -160,7 +160,7 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("complex migration scenarios", () => {
-		it("handles full v0 config with all sections", () => {
+		it("handles full v1 config with all sections", () => {
 			const result = decodeConfig({
 				worktree: { initCommands: ["npm install"] },
 				session: { command: "claude" },
@@ -180,7 +180,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.git?.branchPrefix).toBe("feature-")
 
 			// pr should not have baseBranch
-			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true })
+			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true, enabled: undefined })
 
 			// Other sections should pass through
 			expect(result.worktree?.initCommands).toEqual(["npm install"])
@@ -189,37 +189,37 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.notifications?.bell).toBe(true)
 
 			// Version should be current
-			expect(result.configVersion).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 		})
 
-		it("handles already-migrated v1 config cleanly", () => {
-			const v1Config = {
-				configVersion: 1,
+		it("handles already-migrated v2 config cleanly", () => {
+			const v2Config = {
+				$schema: 2,
 				git: { baseBranch: "main", remote: "origin" },
 				pr: { autoDraft: true },
 				session: { command: "claude" },
 			}
 
-			const result = decodeConfig(v1Config)
+			const result = decodeConfig(v2Config)
 
-			expect(result.configVersion).toBe(1)
+			expect(result.$schema).toBe(2)
 			expect(result.git?.baseBranch).toBe("main")
 			expect(result.git?.remote).toBe("origin")
-			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined })
+			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
 		})
 	})
 
 	describe("encoding", () => {
 		it("encodes current config with version", () => {
 			const config = {
-				configVersion: 1,
+				$schema: 2,
 				git: { baseBranch: "main" },
 				pr: { autoDraft: true },
 			}
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 
-			expect(encoded.configVersion).toBe(CURRENT_CONFIG_VERSION)
+			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(encoded.git?.baseBranch).toBe("main")
 		})
 	})
