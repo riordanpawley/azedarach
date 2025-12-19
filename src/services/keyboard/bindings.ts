@@ -399,7 +399,15 @@ done
 		mode: "action",
 		description: "Toggle dev server",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.toggleDevServer())),
+			bc.editor.exitToNormal().pipe(
+				Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
+				Effect.catchAll((e) =>
+					Effect.gen(function* () {
+						yield* Effect.logError("Dev server toggle failed", e)
+						yield* bc.toast.show("error", `Dev server error: ${e.message}`)
+					}),
+				),
+			),
 		),
 	},
 	{
@@ -407,7 +415,15 @@ done
 		mode: "action",
 		description: "Restart dev server",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.restartDevServer())),
+			bc.editor.exitToNormal().pipe(
+				Effect.tap(() => bc.devServerHandlers.restartDevServer()),
+				Effect.catchAll((e) =>
+					Effect.gen(function* () {
+						yield* Effect.logError("Dev server restart failed", e)
+						yield* bc.toast.show("error", `Dev server error: ${e.message}`)
+					}),
+				),
+			),
 		),
 	},
 	{

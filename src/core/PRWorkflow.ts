@@ -20,8 +20,8 @@ import {
 	type NotFoundError,
 	type ParseError,
 } from "./BeadsClient.js"
+import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
 import { FileLockManager } from "./FileLockManager.js"
-import { type SessionError, SessionManager } from "./SessionManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 
@@ -654,7 +654,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	dependencies: [
 		WorktreeManager.Default,
 		BeadsClient.Default,
-		SessionManager.Default,
+		ClaudeSessionManager.Default,
 		TmuxService.Default,
 		FileLockManager.Default,
 		AppConfig.Default,
@@ -663,7 +663,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
 		const beadsClient = yield* BeadsClient
-		const sessionManager = yield* SessionManager
+		const sessionManager = yield* ClaudeSessionManager
 		const tmuxService = yield* TmuxService
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
@@ -803,7 +803,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
 
 					// 1. Stop any running session (ignore errors)
-					// First try SessionManager.stop (handles beads sync from worktree)
+					// First try ClaudeSessionManager.stop (handles beads sync from worktree)
 					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
 					// Also directly kill tmux session in case it wasn't tracked in memory
 					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
