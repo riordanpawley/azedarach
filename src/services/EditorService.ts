@@ -42,6 +42,53 @@ export type SortField = "session" | "priority" | "updated"
  */
 export type SortDirection = "asc" | "desc"
 
+// ============================================================================
+// Filter Types
+// ============================================================================
+
+/**
+ * Issue status for filtering
+ */
+export type IssueStatus = "open" | "in_progress" | "blocked" | "closed"
+
+/**
+ * Issue type for filtering
+ */
+export type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
+
+/**
+ * Session state for filtering
+ */
+export type FilterSessionState = "idle" | "busy" | "waiting" | "done" | "error" | "paused"
+
+/**
+ * Filter field categories
+ */
+export type FilterField = "status" | "priority" | "type" | "session"
+
+/**
+ * Filter configuration for filtering tasks
+ * Empty sets mean "show all" for that field
+ */
+export interface FilterConfig {
+	readonly status: ReadonlySet<IssueStatus>
+	readonly priority: ReadonlySet<number>
+	readonly type: ReadonlySet<IssueType>
+	readonly session: ReadonlySet<FilterSessionState>
+	readonly hideEpicSubtasks: boolean
+}
+
+/**
+ * Default filter config (show all)
+ */
+export const DEFAULT_FILTER_CONFIG: FilterConfig = {
+	status: new Set(),
+	priority: new Set(),
+	type: new Set(),
+	session: new Set(),
+	hideEpicSubtasks: true,
+}
+
 /**
  * Sort configuration
  */
@@ -61,6 +108,7 @@ export interface SortConfig {
  * - search: Search/filter mode triggered by '/'
  * - command: VC command input mode triggered by ':'
  * - sort: Sort menu mode triggered by ','
+ * - filter: Filter menu mode triggered by 'f' - filter by status/priority/type/session
  * - orchestrate: Epic orchestration mode for managing child tasks ('o' from epic detail)
  */
 export type EditorMode =
@@ -76,6 +124,7 @@ export type EditorMode =
 	| { readonly _tag: "search"; readonly query: string }
 	| { readonly _tag: "command"; readonly input: string }
 	| { readonly _tag: "sort" }
+	| { readonly _tag: "filter"; readonly activeField: FilterField | null }
 	| {
 			readonly _tag: "orchestrate"
 			readonly epicId: string
@@ -97,11 +146,13 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 	effect: Effect.gen(function* () {
 		const mode = yield* SubscriptionRef.make<EditorMode>(Data.struct({ _tag: "normal" as const }))
 		const sortConfig = yield* SubscriptionRef.make<SortConfig>(DEFAULT_SORT_CONFIG)
+		const filterConfig = yield* SubscriptionRef.make<FilterConfig>(DEFAULT_FILTER_CONFIG)
 
 		return {
 			// Expose SubscriptionRef for atom subscription
 			mode,
 			sortConfig,
+			filterConfig,
 
 			// ========================================================================
 			// Mode Getters
@@ -291,6 +342,131 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 						current.field === field ? (current.direction === "desc" ? "asc" : "desc") : "desc"
 					yield* SubscriptionRef.set(sortConfig, Data.struct({ field, direction: newDirection }))
 					yield* SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const }))
+				}),
+
+			// ========================================================================
+			// Filter Mode
+			// ========================================================================
+
+			/**
+			 * Enter filter menu mode
+			 */
+			enterFilter: () =>
+				SubscriptionRef.set(mode, Data.struct({ _tag: "filter" as const, activeField: null })),
+
+			/**
+			 * Set the active filter sub-menu field
+			 */
+			setActiveFilterField: (field: FilterField | null) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "filter") return m
+					return Data.struct({ _tag: "filter" as const, activeField: field })
+				}),
+
+			/**
+			 * Get current filter configuration
+			 */
+			getFilterConfig: () => SubscriptionRef.get(filterConfig),
+
+			/**
+			 * Toggle a status filter value
+			 */
+			toggleFilterStatus: (status: IssueStatus) =>
+				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+					const newSet = new Set(config.status)
+					if (newSet.has(status)) {
+						newSet.delete(status)
+					} else {
+						newSet.add(status)
+					}
+					return { ...config, status: newSet }
+				}),
+
+			/**
+			 * Toggle a priority filter value
+			 */
+			toggleFilterPriority: (priority: number) =>
+				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+					const newSet = new Set(config.priority)
+					if (newSet.has(priority)) {
+						newSet.delete(priority)
+					} else {
+						newSet.add(priority)
+					}
+					return { ...config, priority: newSet }
+				}),
+
+			/**
+			 * Toggle a type filter value
+			 */
+			toggleFilterType: (issueType: IssueType) =>
+				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+					const newSet = new Set(config.type)
+					if (newSet.has(issueType)) {
+						newSet.delete(issueType)
+					} else {
+						newSet.add(issueType)
+					}
+					return { ...config, type: newSet }
+				}),
+
+			/**
+			 * Toggle a session filter value
+			 */
+			toggleFilterSession: (session: FilterSessionState) =>
+				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+					const newSet = new Set(config.session)
+					if (newSet.has(session)) {
+						newSet.delete(session)
+					} else {
+						newSet.add(session)
+					}
+					return { ...config, session: newSet }
+				}),
+
+			/**
+			 * Toggle hideEpicSubtasks setting
+			 */
+			toggleHideEpicSubtasks: () =>
+				SubscriptionRef.update(
+					filterConfig,
+					(config): FilterConfig => ({
+						...config,
+						hideEpicSubtasks: !config.hideEpicSubtasks,
+					}),
+				),
+
+			/**
+			 * Clear all filters
+			 */
+			clearFilters: () => SubscriptionRef.set(filterConfig, DEFAULT_FILTER_CONFIG),
+
+			/**
+			 * Get count of active filter fields (for status bar display)
+			 */
+			getActiveFilterCount: (): Effect.Effect<number> =>
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(filterConfig)
+					let count = 0
+					if (config.status.size > 0) count++
+					if (config.priority.size > 0) count++
+					if (config.type.size > 0) count++
+					if (config.session.size > 0) count++
+					return count
+				}),
+
+			/**
+			 * Check if any filters are active
+			 */
+			hasActiveFilters: (): Effect.Effect<boolean> =>
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(filterConfig)
+					return (
+						config.status.size > 0 ||
+						config.priority.size > 0 ||
+						config.type.size > 0 ||
+						config.session.size > 0
+					)
 				}),
 
 			// ========================================================================

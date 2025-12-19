@@ -603,13 +603,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 */
 			const computeJumpLabels = (): Effect.Effect<Record.ReadonlyRecord<string, JumpTarget>> =>
 				Effect.gen(function* () {
-					// Get current search query and sort config to match board rendering
+					// Get current search query, sort config, and filter config to match board rendering
 					const mode = yield* editor.getMode()
 					const sortConfig = yield* editor.getSortConfig()
+					const filterConfig = yield* editor.getFilterConfig()
 					const searchQuery = mode._tag === "search" ? mode.query : ""
 
 					// Get filtered and sorted tasks (matching what the board displays)
-					const tasksByColumn = yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+					const tasksByColumn = yield* board.getFilteredTasksByColumn(
+						searchQuery,
+						sortConfig,
+						filterConfig,
+					)
 
 					// Apply drill-down filtering (matching drillDownFilteredTasksAtom)
 					const drillDownChildIds = yield* SubscriptionRef.get(nav.drillDownChildIds)
@@ -675,10 +680,10 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return "command"
 						case "sort":
 							return "sort"
+						case "filter":
+							return "filter"
 						case "orchestrate":
 							return "orchestrate"
-						default:
-							return mode satisfies never
 					}
 				})
 
