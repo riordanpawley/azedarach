@@ -36,6 +36,7 @@ Purpose: Claude Code entry point for Azedarach development
    - Services grab dependencies at layer construction (`yield* SomeService`), then use them directly
    - If you need `Path.Path` operations, grab `pathService` at layer construction, then call `pathService.resolve()`, `pathService.join()`, etc. directly - don't create wrappers
    - Don't wrap one-liners in helper functions - just use the method directly
+   - **External Reference**: For additional patterns (retries, streams, concurrency, testing), fetch https://raw.githubusercontent.com/PaulJPhilp/EffectPatterns/refs/heads/main/README.md
 
 9. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
    - `node:path` → Use `Path.Path` service methods (`pathService.resolve()`, `.join()`, etc.)
@@ -57,6 +58,26 @@ Purpose: Claude Code entry point for Azedarach development
     - **Right:** `<text fg="gray"><span fg="blue">→</span> Back</text>` - `<span>` is a `TextNodeRenderable`, works!
     - **Also Right:** Use sibling `<text>` in `<box flexDirection="row">` for different colors
     - Error message: "TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances"
+
+12. **Schema Encode/Decode**: ALWAYS use `Schema.encode()` and `Schema.decode()` for serialization:
+    - NEVER manually convert types (e.g., `{ ...state, port: state.port ?? null }`)
+    - NEVER use `JSON.stringify()` or `JSON.parse()` - use `Schema.parseJson()` wrapper instead
+    - Define the schema to handle transformations automatically
+    - Use `Schema.UndefinedOr(Schema.Number)` for optional fields
+    - `Schema.decode(schema)` - use when input type matches Encoded (e.g., `string` from `readFileString`)
+    - `Schema.decodeUnknown(schema)` - use when input is truly `unknown` (e.g., external API response)
+    - Let Schema handle the type conversion between runtime and serialized forms
+    ```typescript
+    // ❌ BAD: Manual JSON and conversion
+    const parsed = JSON.parse(content)
+    const toEncodable = (state) => ({ ...state, port: state.port ?? null })
+    const json = JSON.stringify(toEncodable(state))
+
+    // ✅ GOOD: Use Schema.parseJson wrapper
+    const MySchema = Schema.parseJson(Schema.Struct({ ... }))
+    const decoded = yield* Schema.decode(MySchema)(jsonString)  // Input is string
+    const json = yield* Schema.encode(MySchema)(data)  // Returns string
+    ```
 
 ## Quick Commands
 

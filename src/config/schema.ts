@@ -136,6 +136,65 @@ const MergeConfigSchema = Schema.Struct({
 })
 
 /**
+ * Port configuration for a named port type
+ *
+ * Defines a port with a base value and environment variable aliases.
+ */
+const PortConfigSchema = Schema.Struct({
+	/** Base port for this port type (e.g., 3000 for web, 8000 for server) */
+	default: Schema.Number,
+
+	/** Environment variable names to inject this port value into */
+	aliases: Schema.Array(Schema.String),
+})
+
+/**
+ * Dev server configuration
+ *
+ * Controls how dev servers are spawned for worktrees.
+ * Each worktree can have its own dev server with injected port environment variables.
+ *
+ * @example
+ * ```json
+ * {
+ *   "devServer": {
+ *     "command": "bun run dev",
+ *     "ports": {
+ *       "web": { "default": 3000, "aliases": ["PORT", "VITE_PORT"] },
+ *       "server": { "default": 8000, "aliases": ["SERVER_PORT", "VITE_SERVER_PORT"] }
+ *     }
+ *   }
+ * }
+ * ```
+ */
+const DevServerConfigSchema = Schema.Struct({
+	/**
+	 * Command to run the dev server (overrides auto-detection)
+	 * If not set, uses package.json scripts (dev → start → serve)
+	 */
+	command: Schema.optional(Schema.String),
+
+	/**
+	 * Named port configurations with base values and env var aliases
+	 * Each worktree gets sequential offsets from the base ports
+	 *
+	 * Default: { "web": { "default": 3000, "aliases": ["PORT"] } }
+	 */
+	ports: Schema.optional(Schema.Record({ key: Schema.String, value: PortConfigSchema })),
+
+	/**
+	 * Regex pattern to detect port from server output
+	 * Default: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"
+	 */
+	portPattern: Schema.optional(Schema.String),
+
+	/**
+	 * Working directory relative to worktree root (default: ".")
+	 */
+	cwd: Schema.optional(Schema.String),
+})
+
+/**
  * Notification configuration
  *
  * Controls how users are notified of session state changes.
@@ -192,6 +251,9 @@ export const AzedarachConfigSchema = Schema.Struct({
 	/** Merge workflow configuration */
 	merge: Schema.optional(MergeConfigSchema),
 
+	/** Dev server configuration */
+	devServer: Schema.optional(DevServerConfigSchema),
+
 	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
 
@@ -235,3 +297,9 @@ export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigS
 
 /** Project config section type */
 export type ProjectConfig = Schema.Schema.Type<typeof ProjectConfigSchema>
+
+/** Port config for a single port type */
+export type PortConfig = Schema.Schema.Type<typeof PortConfigSchema>
+
+/** Dev server config section type */
+export type DevServerConfig = Schema.Schema.Type<typeof DevServerConfigSchema>
