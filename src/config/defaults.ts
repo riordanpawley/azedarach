@@ -7,7 +7,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import type { AzedarachConfig } from "./schema.js"
+import { type AzedarachConfig, CURRENT_CONFIG_VERSION } from "./schema.js"
 
 // ============================================================================
 // Login Shell Detection
@@ -75,7 +75,7 @@ const getLoginShellSync = (): string => process.env.SHELL || "bash"
  */
 export const DEFAULT_CONFIG = {
 	/** Current config version - used for automatic migrations */
-	configVersion: 1,
+	$schema: CURRENT_CONFIG_VERSION,
 	worktree: {
 		initCommands: [] satisfies string[],
 		env: {} satisfies Record<string, string>,
@@ -148,8 +148,8 @@ export const DEFAULT_CONFIG = {
  * has all fields defined after merging with defaults.
  */
 export interface ResolvedConfig {
-	/** Config version - used for automatic migrations */
-	configVersion: number
+	/** Config schema version */
+	$schema: number
 	worktree: {
 		initCommands: readonly string[]
 		env: Readonly<Record<string, string>>
@@ -226,7 +226,7 @@ export interface ResolvedConfig {
  */
 export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 	return {
-		configVersion: config.configVersion ?? DEFAULT_CONFIG.configVersion,
+		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
 		worktree: {
 			initCommands: config.worktree?.initCommands ?? DEFAULT_CONFIG.worktree.initCommands,
 			env: config.worktree?.env ?? DEFAULT_CONFIG.worktree.env,

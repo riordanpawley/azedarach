@@ -3,6 +3,7 @@
  *
  * Handles PR workflow:
  * - Create PR (P)
+ * - Update from base (u)
  * - Merge to main (m)
  * - Abort merge (M)
  * - Cleanup worktree (d)
@@ -13,7 +14,7 @@
 
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
+import { MergeConflictError, PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
@@ -101,9 +102,50 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		// ================================================================
 
 		/**
+		 * Update from base action (Space+u)
+		 *
+		 * Updates the worktree branch with latest changes from main.
+		 * Useful for syncing before creating a PR or resolving conflicts.
+		 * Requires an active session with a worktree.
+		 * Queued to prevent race conditions with other operations on the same task.
+		 * Blocked if task already has an operation in progress.
+		 */
+		const updateFromBase = () =>
+			Effect.gen(function* () {
+				const task = yield* helpers.getSelectedTask()
+				if (!task) return
+
+				// Check if task has an operation in progress
+				const isBusy = yield* helpers.checkBusy(task.id)
+				if (isBusy) return
+
+				if (task.sessionState === "idle") {
+					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
+					return
+				}
+
+				yield* helpers.withQueue(
+					task.id,
+					"update",
+					Effect.gen(function* () {
+						yield* toast.show("info", "Updating from main...")
+
+						// Get current project path (from ProjectService or cwd fallback)
+						const projectPath = yield* helpers.getProjectPath()
+
+						yield* prWorkflow.updateFromBase({ beadId: task.id, projectPath }).pipe(
+							Effect.tap(() => toast.show("success", "Updated from main")),
+							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
+						)
+					}),
+				)
+			})
+
+		/**
 		 * Create PR action (Space+P)
 		 *
 		 * Creates a GitHub PR for the current task's worktree branch.
+		 * First updates from main to ensure the branch is synced and resolve any conflicts.
 		 * Requires an active session with a worktree.
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
@@ -122,14 +164,48 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
+
+				// Update from base first to resolve any conflicts
+				yield* toast.show("info", "Syncing with main before PR...")
+				const updateResult = yield* prWorkflow
+					.updateFromBase({ beadId: task.id, projectPath })
+					.pipe(
+						Effect.match({
+							onFailure: (error) => {
+								// MergeConflictError means Claude is resolving - don't proceed
+								if (
+									error &&
+									typeof error === "object" &&
+									"_tag" in error &&
+									error._tag === "MergeConflictError"
+								) {
+									return { _tag: "conflict" as const, error }
+								}
+								// Other errors - log but continue
+								return { _tag: "error" as const, error }
+							},
+							onSuccess: () => ({ _tag: "success" as const }),
+						}),
+					)
+
+				if (updateResult._tag === "conflict") {
+					yield* toast.show("info", "Resolving conflicts - retry PR after Claude finishes")
+					return
+				}
+
+				if (updateResult._tag === "error") {
+					yield* Effect.logWarning("Update from base failed, proceeding with PR creation anyway", {
+						error: updateResult.error,
+					})
+				}
+
 				yield* helpers.withQueue(
 					task.id,
 					"create-pr",
 					Effect.gen(function* () {
 						yield* toast.show("info", `Creating PR for ${task.id}...`)
-
-						// Get current project path (from ProjectService or cwd fallback)
-						const projectPath = yield* helpers.getProjectPath()
 
 						yield* prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
@@ -405,6 +481,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 		return {
 			createPR,
+			updateFromBase,
 			mergeToMain,
 			cleanup,
 			abortMerge,
