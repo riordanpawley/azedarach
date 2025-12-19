@@ -31,6 +31,7 @@ export type Overlay =
 			readonly _tag: "mergeChoice"
 			readonly message: string
 			readonly commitsBehind: number
+			readonly baseBranch: string
 			readonly onMerge: AnyEffect
 			readonly onSkip: AnyEffect
 	  }

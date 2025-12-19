@@ -1,8 +1,8 @@
 /**
  * MergeChoiceOverlay - Modal dialog for merge choice when attaching to a session
  *
- * Displays when a worktree branch is behind main, offering three choices:
- * - m: Merge main into branch, then attach
+ * Displays when a worktree branch is behind the base branch, offering three choices:
+ * - m: Merge base branch into worktree branch, then attach
  * - s: Skip merge and attach directly
  * - Esc: Cancel and return to board
  *
@@ -19,7 +19,7 @@ const ATTR_BOLD = 1
  * MergeChoiceOverlay component
  *
  * Three-option dialog for merge decision. Press:
- * - 'm' to merge main into branch and attach
+ * - 'm' to merge base branch into worktree and attach
  * - 's' to skip merge and attach directly
  * - 'Esc' to cancel
  *
@@ -29,10 +29,11 @@ export const MergeChoiceOverlay = () => {
 	const currentOverlay = useAtomValue(currentOverlayAtom)
 
 	// Extract data from mergeChoice overlay
+	const baseBranch = currentOverlay?._tag === "mergeChoice" ? currentOverlay.baseBranch : "main"
 	const message =
 		currentOverlay?._tag === "mergeChoice"
 			? currentOverlay.message
-			: "Branch is behind main. Merge latest?"
+			: `Branch is behind ${baseBranch}. Merge latest?`
 
 	const commitsBehind = currentOverlay?._tag === "mergeChoice" ? currentOverlay.commitsBehind : 0
 
@@ -64,7 +65,8 @@ export const MergeChoiceOverlay = () => {
 				{/* Title */}
 				<box>
 					<text fg={theme.blue} attributes={ATTR_BOLD}>
-						↓ Branch Behind Main{"\n"}
+						↓ Branch Behind {baseBranch}
+						{"\n"}
 					</text>
 				</box>
 
@@ -85,7 +87,7 @@ export const MergeChoiceOverlay = () => {
 					<box>
 						<text fg={theme.green}>m</text>
 						<text fg={theme.overlay0}>: Merge & Attach </text>
-						<text fg={theme.subtext0}>(pull latest main into branch)</text>
+						<text fg={theme.subtext0}>(pull latest {baseBranch} into branch)</text>
 					</box>
 					<box marginTop={0}>
 						<text fg={theme.yellow}>s</text>
