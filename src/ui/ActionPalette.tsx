@@ -9,6 +9,8 @@ export interface ActionPaletteProps {
 	task?: TaskWithSession
 	/** Running operation label (e.g., "merge", "cleanup") - dims queued actions */
 	runningOperation?: string | null
+	/** Whether network is available (affects PR/merge/cleanup actions) */
+	isOnline?: boolean
 	/** Dev server status for the current task */
 	devServerStatus?: DevServerStatus
 	/** Dev server port (if running) */
@@ -33,9 +35,13 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d"])
  * When an operation is in progress (runningOperation is set), queued actions
  * are dimmed and will show an error toast if pressed.
  */
+/** Actions that require network connectivity */
+const NETWORK_ACTIONS = new Set(["P", "m", "d"])
+
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
 	const runningOperation = props.runningOperation ?? null
+	const isOnline = props.isOnline ?? true
 	const devServerStatus = props.devServerStatus ?? "idle"
 	const devServerPort = props.devServerPort
 
@@ -92,21 +98,34 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		}
 	}
 
-	// Full availability check: state + queue busyness
+	// Full availability check: state + queue busyness + network
 	const isAvailable = (action: string): boolean => {
 		// If task is busy with a queued operation, block queued actions
 		if (runningOperation !== null && QUEUED_ACTIONS.has(action)) {
 			return false
 		}
+		// Network actions unavailable when offline
+		if (!isOnline && NETWORK_ACTIONS.has(action)) {
+			return false
+		}
 		return isAvailableByState(action)
+	}
+
+	// Check if action is disabled due to offline
+	const isOfflineBlocked = (action: string): boolean => {
+		return !isOnline && NETWORK_ACTIONS.has(action)
 	}
 
 	// Action line component
 	const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {
 		const available = isAvailable(keyName)
+		const offlineBlocked = isOfflineBlocked(keyName)
 		const fgColor = available ? theme.text : theme.overlay0
 		const keyColor = available ? theme.lavender : theme.overlay0
 		const attrs = available ? 0 : ATTR_DIM
+
+		// Show "(offline)" suffix for network actions when offline
+		const displayDesc = offlineBlocked ? `${description} (offline)` : description
 
 		return (
 			<box flexDirection="row">
@@ -114,7 +133,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 					{keyName}
 				</text>
 				<text fg={fgColor} attributes={attrs}>
-					{` ${description}`}
+					{` ${displayDesc}`}
 				</text>
 			</box>
 		)

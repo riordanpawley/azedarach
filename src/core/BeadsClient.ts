@@ -8,6 +8,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
 import * as Schema from "effect/Schema"
+import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
 
 // ============================================================================
@@ -449,9 +450,10 @@ const parseJson = <A, I, R>(
  * ```
  */
 export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
-	dependencies: [ProjectService.Default],
+	dependencies: [ProjectService.Default, OfflineService.Default],
 	effect: Effect.gen(function* () {
 		const projectService = yield* ProjectService
+		const offlineService = yield* OfflineService
 
 		/**
 		 * Get effective cwd for bd commands:
@@ -576,6 +578,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
+					// Check if beads sync is enabled (config + network)
+					const syncStatus = yield* offlineService.isBeadsSyncEnabled()
+					if (!syncStatus.enabled) {
+						// Return empty result when offline - issues are tracked locally
+						return { pushed: 0, pulled: 0 }
+					}
+
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["sync"], effectiveCwd)
 

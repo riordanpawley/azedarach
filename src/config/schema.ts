@@ -85,6 +85,21 @@ const GitConfigSchema = Schema.Struct({
 
 	/** Prefix for branch names (default: "az-") */
 	branchPrefix: Schema.optional(Schema.String),
+
+	/**
+	 * Enable git push operations (default: true)
+	 *
+	 * When false, all git push operations are silently skipped.
+	 * Useful for offline mode or local-only workflows.
+	 */
+	pushEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Enable git fetch/pull operations (default: true)
+	 *
+	 * When false, git fetch and pull operations are silently skipped.
+	 */
+	fetchEnabled: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -93,6 +108,14 @@ const GitConfigSchema = Schema.Struct({
  * Controls automatic PR creation behavior.
  */
 const PRConfigSchema = Schema.Struct({
+	/**
+	 * Enable PR creation (default: true)
+	 *
+	 * When false, PR creation is disabled. The action menu will show
+	 * "Create PR (disabled)" and attempting it will show an info message.
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
 	/** Create PRs as draft (default: true) */
 	autoDraft: Schema.optional(Schema.Boolean),
 
@@ -208,6 +231,46 @@ const NotificationsConfigSchema = Schema.Struct({
 })
 
 /**
+ * Beads configuration
+ *
+ * Controls beads issue tracker behavior.
+ */
+const BeadsConfigSchema = Schema.Struct({
+	/**
+	 * Enable beads sync operations (default: true)
+	 *
+	 * When false, `bd sync` is silently skipped. Issues are still
+	 * tracked locally but not synced to the remote repository.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Network configuration
+ *
+ * Controls automatic network connectivity detection.
+ */
+const NetworkConfigSchema = Schema.Struct({
+	/**
+	 * Automatically detect network connectivity (default: true)
+	 *
+	 * When true, periodically checks if github.com is reachable.
+	 * If unreachable, network-dependent operations are disabled.
+	 */
+	autoDetect: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Interval in seconds between connectivity checks (default: 30)
+	 */
+	checkIntervalSeconds: Schema.optional(Schema.Number),
+
+	/**
+	 * Host to check for connectivity (default: "github.com")
+	 */
+	checkHost: Schema.optional(Schema.String),
+})
+
+/**
  * Project configuration
  *
  * Defines a project that can be managed by Azedarach.
@@ -257,6 +320,12 @@ export const AzedarachConfigSchema = Schema.Struct({
 	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
 
+	/** Beads issue tracker configuration */
+	beads: Schema.optional(BeadsConfigSchema),
+
+	/** Network connectivity configuration */
+	network: Schema.optional(NetworkConfigSchema),
+
 	/** Project configurations */
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 
@@ -294,6 +363,12 @@ export type MergeConfig = Schema.Schema.Type<typeof MergeConfigSchema>
 
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>
+
+/** Beads config section type */
+export type BeadsConfig = Schema.Schema.Type<typeof BeadsConfigSchema>
+
+/** Network config section type */
+export type NetworkConfig = Schema.Schema.Type<typeof NetworkConfigSchema>
 
 /** Project config section type */
 export type ProjectConfig = Schema.Schema.Type<typeof ProjectConfigSchema>
