@@ -452,6 +452,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * Number keys 1-9 select a project by index.
 			 * All other keys are consumed to prevent falling through.
 			 *
+			 * The refresh is forked (non-blocking) so the UI stays responsive.
+			 * A loading indicator shows in the status bar during refresh.
+			 *
 			 * @returns true if key was handled, false otherwise
 			 */
 			const handleProjectSelectorInput = (key: string) =>
@@ -465,10 +468,28 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
+								// Switch project (fast - just updates SubscriptionRef)
 								yield* projectService.switchProject(project.name)
+
+								// Close overlay immediately for responsive UI
 								yield* overlay.pop()
-								yield* board.refresh()
-								yield* toast.show("success", `Switched to: ${project.name}`)
+
+								// Show toast immediately (user sees feedback right away)
+								yield* toast.show("success", `Switching to: ${project.name}`)
+
+								// Fork as daemon so it survives parent completion
+								// (Effect.fork would be interrupted when handler returns)
+								// The loading indicator in StatusBar shows progress
+								yield* board.refresh().pipe(
+									Effect.tap(() => toast.show("success", `Loaded: ${project.name}`)),
+									Effect.catchAllCause((cause) =>
+										Effect.gen(function* () {
+											yield* Effect.logError("Board refresh failed", cause)
+											yield* toast.show("error", "Failed to load project data")
+										}),
+									),
+									Effect.forkDaemon,
+								)
 							}
 						} else {
 							yield* toast.show("error", `No project at position ${num}`)

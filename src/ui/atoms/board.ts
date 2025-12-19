@@ -61,6 +61,21 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
 )
 
 /**
+ * Board loading state atom - subscribes to BoardService isLoading changes
+ *
+ * True when the board is refreshing data (e.g., after project switch).
+ * Use this to show loading indicators in the UI.
+ *
+ * Usage: const isLoading = useAtomValue(boardIsLoadingAtom)
+ */
+export const boardIsLoadingAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.isLoading
+	}),
+)
+
+/**
  * Refresh board data from BeadsClient
  *
  * Must be called before navigation can work.

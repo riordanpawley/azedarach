@@ -206,6 +206,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
 		>(emptyRecord())
 
+		// Loading state for non-blocking refresh feedback
+		const isLoading = yield* SubscriptionRef.make<boolean>(false)
+
 		// Filtered and sorted tasks by column - single source of truth for UI
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
@@ -310,9 +313,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		/**
 		 * Refresh board data from BeadsClient
+		 *
+		 * Sets isLoading=true during refresh for UI feedback.
+		 * Can be run in background via Effect.fork for non-blocking behavior.
 		 */
 		const refresh = () =>
 			Effect.gen(function* () {
+				yield* SubscriptionRef.set(isLoading, true)
+
 				const loadedTasks = yield* loadTasks()
 				yield* SubscriptionRef.set(tasks, loadedTasks)
 
@@ -321,7 +329,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Also update filtered/sorted view
 				yield* updateFilteredTasks()
-			})
+			}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
 		// Initial data load - run immediately since Schedule.spaced waits before first execution
 		yield* refresh().pipe(
@@ -361,6 +369,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			tasks,
 			tasksByColumn,
 			filteredTasksByColumn,
+			isLoading,
 
 			/**
 			 * Get all tasks
