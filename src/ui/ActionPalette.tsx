@@ -1,6 +1,7 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
+import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 
@@ -10,6 +11,10 @@ export interface ActionPaletteProps {
 	runningOperation?: string | null
 	/** Whether network is available (affects PR/merge/cleanup actions) */
 	isOnline?: boolean
+	/** Dev server status for the current task */
+	devServerStatus?: DevServerStatus
+	/** Dev server port (if running) */
+	devServerPort?: number
 }
 
 const _ATTR_BOLD = 1
@@ -37,6 +42,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
 	const runningOperation = props.runningOperation ?? null
 	const isOnline = props.isOnline ?? true
+	const devServerStatus = props.devServerStatus ?? "idle"
+	const devServerPort = props.devServerPort
 
 	// Helper to check if an action is available based on session state
 	const isAvailableByState = (action: string): boolean => {
@@ -51,7 +58,9 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
-			case "r": // Resume - only if paused
+			case "r": // Dev server - only if worktree exists (session not idle)
+				return sessionState !== "idle"
+			case "R": // Resume - only if paused
 				return sessionState === "paused"
 			case "x": // Stop - only if not idle
 				return sessionState !== "idle"
@@ -72,6 +81,20 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return true
 			default:
 				return false
+		}
+	}
+
+	// Get dev server status text
+	const getDevServerLabel = (): string => {
+		switch (devServerStatus) {
+			case "running":
+				return devServerPort ? `dev :${devServerPort}` : "dev (running)"
+			case "starting":
+				return "dev (starting)"
+			case "error":
+				return "dev (error)"
+			default:
+				return "dev server"
 		}
 	}
 
@@ -139,8 +162,12 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<ActionLine keyName="c" description="chat" />
 				<ActionLine keyName="a" description="attach" />
 				<ActionLine keyName="p" description="pause" />
-				<ActionLine keyName="r" description="resume" />
+				<ActionLine keyName="R" description="resume" />
 				<ActionLine keyName="x" description="stop" />
+				<text fg={theme.surface1}>{"─────────"}</text>
+
+				{/* Dev server */}
+				<ActionLine keyName="r" description={getDevServerLabel()} />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Task actions */}
