@@ -128,13 +128,13 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					task.id,
 					"update",
 					Effect.gen(function* () {
-						yield* toast.show("info", "Updating from main...")
+						yield* toast.show("info", `Updating from ${gitConfig.baseBranch}...`)
 
 						// Get current project path (from ProjectService or cwd fallback)
 						const projectPath = yield* helpers.getProjectPath()
 
 						yield* prWorkflow.updateFromBase({ beadId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", "Updated from main")),
+							Effect.tap(() => toast.show("success", `Updated from ${gitConfig.baseBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
 						)
 					}),
@@ -168,7 +168,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const projectPath = yield* helpers.getProjectPath()
 
 				// Update from base first to resolve any conflicts
-				yield* toast.show("info", "Syncing with main before PR...")
+				yield* toast.show("info", `Syncing with ${gitConfig.baseBranch} before PR...`)
 				const updateResult = yield* prWorkflow
 					.updateFromBase({ beadId: task.id, projectPath })
 					.pipe(

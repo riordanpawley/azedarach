@@ -52,6 +52,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
+			const gitConfig = yield* appConfig.getGitConfig()
 
 			// ================================================================
 			// Session Handler Methods
@@ -364,11 +365,12 @@ What would you like to discuss?`
 					}
 
 					// Branch is behind - show merge choice dialog
-					const message = `Merge main into your branch before attaching?`
+					const baseBranch = gitConfig.baseBranch
+					const message = `Merge ${baseBranch} into your branch before attaching?`
 
-					// Define the merge action (merge main, then attach)
+					// Define the merge action (merge base branch, then attach)
 					const onMerge = Effect.gen(function* () {
-						yield* toast.show("info", "Merging main into branch...")
+						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
 						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
 							Effect.tap(() => doAttach(task.id)),
@@ -396,6 +398,7 @@ What would you like to discuss?`
 						_tag: "mergeChoice",
 						message,
 						commitsBehind: branchStatus.behind,
+						baseBranch,
 						onMerge,
 						onSkip,
 					})
