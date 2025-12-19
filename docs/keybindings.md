@@ -659,7 +659,7 @@ This ensures PRs are always based on the latest main and reduces the chance of m
 
 #### Merge to Main (Space+m)
 
-The merge action includes **conflict detection**:
+The merge action merges your branch to main **without cleanup** - you can keep iterating:
 
 1. Before merging, az checks if files were modified in both your branch and main
 2. If potential conflicts are detected, a **confirmation dialog** appears:
@@ -668,6 +668,18 @@ The merge action includes **conflict detection**:
    - Press `y` to proceed, `n` to cancel
 3. If no conflicts detected, the merge proceeds directly
 4. On success, the branch changes are merged into main locally
+
+**After merge, your worktree and session remain active** so you can:
+- Test changes in main's dev server
+- Make additional changes and merge again
+- Use `Space+d` when done to cleanup (delete worktree, branch)
+
+**Typical workflow:**
+```
+Space+m  → merge to main, continue working
+Space+m  → merge again after more changes
+Space+d  → cleanup when completely done
+```
 
 **Note:** This is a local merge operation, not a GitHub PR merge. Use `Space+P` to create a PR for code review workflows.
 

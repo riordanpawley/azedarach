@@ -93,8 +93,17 @@ export interface MergeToMainOptions {
 	readonly projectPath: string
 	/** Push to origin after merge (default: true) */
 	readonly pushToOrigin?: boolean
-	/** Close the bead issue after successful merge (default: true) */
+	/** Close the bead issue after successful merge (default: false) */
 	readonly closeBead?: boolean
+	/**
+	 * Keep the worktree and branch after merge (default: true)
+	 *
+	 * When true (default): merge to main, keep worktree and session running for iteration
+	 * When false: full cleanup (stop session, delete worktree, delete branch)
+	 *
+	 * Typical workflow: Space+m to merge (keep iterating), Space+d to cleanup when done
+	 */
+	readonly keepWorktree?: boolean
 }
 
 /**
@@ -852,7 +861,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 			mergeToMain: (options: MergeToMainOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, pushToOrigin = true, closeBead = true } = options
+					const {
+						beadId,
+						projectPath,
+						pushToOrigin = true,
+						closeBead = false,
+						keepWorktree = true,
+					} = options
 
 					// Get bead info for merge commit message
 					const bead = yield* beadsClient.show(beadId)
@@ -877,13 +892,16 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// Solution: Use git merge with -X ours for .beads/ paths, then reconcile
 					// beads separately using bd sync which handles JSONL semantically.
 
-					// 1. Stop any running session first (before we modify git state)
-					yield* sessionManager
-						.stop(beadId)
-						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
-					yield* tmuxService
-						.killSession(beadId)
-						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)))
+					// 1. Stop any running session first (only if doing full cleanup)
+					// When keepWorktree=true, we want to keep iterating in the same session
+					if (!keepWorktree) {
+						yield* sessionManager
+							.stop(beadId)
+							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
+						yield* tmuxService
+							.killSession(beadId)
+							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)))
+					}
 
 					// 2. Stage and commit any uncommitted changes in worktree
 					yield* runGit(["add", "-A"], worktree.path).pipe(
@@ -1142,21 +1160,24 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						})
 					}
 
-					// 8. Merge Claude's local settings from worktree to main
-					// This preserves permission grants (allowedTools, trustedPaths) that Claude
-					// added during the session. Must happen BEFORE worktree deletion.
-					yield* worktreeManager.mergeClaudeLocalSettings({
-						worktreePath: worktree.path,
-						mainProjectPath: projectPath,
-					})
+					// 8-10. Cleanup worktree and branch (only if not keeping worktree)
+					if (!keepWorktree) {
+						// 8. Merge Claude's local settings from worktree to main
+						// This preserves permission grants (allowedTools, trustedPaths) that Claude
+						// added during the session. Must happen BEFORE worktree deletion.
+						yield* worktreeManager.mergeClaudeLocalSettings({
+							worktreePath: worktree.path,
+							mainProjectPath: projectPath,
+						})
 
-					// 9. Remove worktree directory
-					yield* worktreeManager.remove({ beadId, projectPath })
+						// 9. Remove worktree directory
+						yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 10. Delete local branch
-					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
-						Effect.catchAll(() => Effect.void),
-					)
+						// 10. Delete local branch
+						yield* runGit(["branch", "-d", beadId], projectPath).pipe(
+							Effect.catchAll(() => Effect.void),
+						)
+					}
 
 					// 11. Close bead issue
 					if (closeBead) {
