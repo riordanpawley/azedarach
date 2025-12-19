@@ -7,7 +7,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import type { AzedarachConfig } from "./schema.js"
+import { type AzedarachConfig, CURRENT_CONFIG_VERSION } from "./schema.js"
 
 // ============================================================================
 // Login Shell Detection
@@ -74,6 +74,8 @@ const getLoginShellSync = (): string => process.env.SHELL || "bash"
  * use getLoginShell() Effect and override the default when creating AppConfig.
  */
 export const DEFAULT_CONFIG = {
+	/** Current config version - used for automatic migrations */
+	$schema: CURRENT_CONFIG_VERSION,
 	worktree: {
 		initCommands: [] satisfies string[],
 		env: {} satisfies Record<string, string>,
@@ -86,6 +88,7 @@ export const DEFAULT_CONFIG = {
 		branchPrefix: "az-",
 		pushEnabled: true,
 		fetchEnabled: true,
+		baseBranch: "main",
 	},
 	session: {
 		command: "claude",
@@ -102,7 +105,6 @@ export const DEFAULT_CONFIG = {
 		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
-		baseBranch: "main",
 	},
 	merge: {
 		// No validation by default - must be explicitly configured in .azedarach.json
@@ -146,6 +148,8 @@ export const DEFAULT_CONFIG = {
  * has all fields defined after merging with defaults.
  */
 export interface ResolvedConfig {
+	/** Config schema version */
+	$schema: number
 	worktree: {
 		initCommands: readonly string[]
 		env: Readonly<Record<string, string>>
@@ -158,6 +162,7 @@ export interface ResolvedConfig {
 		branchPrefix: string
 		pushEnabled: boolean
 		fetchEnabled: boolean
+		baseBranch: string
 	}
 	session: {
 		command: string
@@ -174,7 +179,6 @@ export interface ResolvedConfig {
 		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
-		baseBranch: string
 	}
 	merge: {
 		validateCommands: readonly string[]
@@ -235,6 +239,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
 			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
 			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
+			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
 		},
 		session: {
 			command: config.session?.command ?? DEFAULT_CONFIG.session.command,
@@ -253,7 +258,6 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
-			baseBranch: config.pr?.baseBranch ?? DEFAULT_CONFIG.pr.baseBranch,
 		},
 		merge: {
 			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,
@@ -283,5 +287,6 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		},
 		projects: config.projects ?? DEFAULT_CONFIG.projects,
 		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
+		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
 	}
 }
