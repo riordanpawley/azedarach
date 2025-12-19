@@ -15,8 +15,10 @@ import { Effect } from "effect"
 import { AppConfig, type ResolvedConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
+import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
@@ -35,6 +37,8 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			ImageAttachmentService.Default,
 			TmuxService.Default,
 			AppConfig.Default,
+			PRWorkflow.Default,
+			OverlayService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -47,6 +51,8 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
 			const resolvedConfig: ResolvedConfig = appConfig.config
+			const prWorkflow = yield* PRWorkflow
+			const overlay = yield* OverlayService
 
 			// ================================================================
 			// Session Handler Methods
@@ -303,31 +309,95 @@ What would you like to discuss?`
 				})
 
 			/**
+			 * Perform the actual attach action
+			 *
+			 * Internal helper that does the tmux switch.
+			 */
+			const doAttach = (taskId: string) =>
+				attachment.attachExternal(taskId).pipe(
+					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error
+								? error._tag === "SessionNotFoundError"
+									? `No session for ${taskId} - press Space+s to start`
+									: String((error as { message?: string }).message || error)
+								: String(error)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Attach external: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
+					}),
+				)
+
+			/**
 			 * Attach to session externally (Space+a)
 			 *
 			 * Switches to the tmux session in a new terminal window.
 			 * The user can return with Ctrl-a Ctrl-a.
+			 *
+			 * If the worktree branch is behind main, shows a choice dialog:
+			 * - Merge & Attach: merges main into branch, then attaches
+			 * - Skip & Attach: attaches without merging
+			 * - Cancel: returns to board
+			 *
+			 * If merge has conflicts, spawns Claude to resolve them.
 			 */
 			const attachExternal = () =>
 				Effect.gen(function* () {
 					const task = yield* helpers.getSelectedTask()
 					if (!task) return
 
-					yield* attachment.attachExternal(task.id).pipe(
-						Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
-						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "SessionNotFoundError"
-										? `No session for ${task.id} - press Space+s to start`
-										: String((error as { message?: string }).message || error)
-									: String(error)
-							return Effect.gen(function* () {
-								yield* Effect.logError(`Attach external: ${msg}`, { error })
-								yield* toast.show("error", msg)
-							})
-						}),
-					)
+					// Get current project path
+					const projectPath = yield* helpers.getProjectPath()
+
+					// Check if branch is behind main
+					const branchStatus = yield* prWorkflow
+						.checkBranchBehindMain({ beadId: task.id, projectPath })
+						.pipe(Effect.catchAll(() => Effect.succeed({ behind: 0, ahead: 0 })))
+
+					// If not behind, just attach directly
+					if (branchStatus.behind === 0) {
+						yield* doAttach(task.id)
+						return
+					}
+
+					// Branch is behind - show merge choice dialog
+					const message = `Merge main into your branch before attaching?`
+
+					// Define the merge action (merge main, then attach)
+					const onMerge = Effect.gen(function* () {
+						yield* toast.show("info", "Merging main into branch...")
+						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
+							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
+							Effect.tap(() => doAttach(task.id)),
+							Effect.catchAll((error) => {
+								// MergeConflictError means Claude was started to resolve
+								const msg =
+									error && typeof error === "object" && "_tag" in error
+										? error._tag === "MergeConflictError"
+											? String((error as { message?: string }).message || "Conflicts detected")
+											: String((error as { message?: string }).message || error)
+										: String(error)
+								return Effect.gen(function* () {
+									yield* Effect.logError(`Merge failed: ${msg}`, { error })
+									yield* toast.show("error", msg)
+								})
+							}),
+						)
+					})
+
+					// Define the skip action (attach directly without merging)
+					const onSkip = doAttach(task.id)
+
+					// Show the merge choice dialog
+					yield* overlay.push({
+						_tag: "mergeChoice",
+						message,
+						commitsBehind: branchStatus.behind,
+						onMerge,
+						onSkip,
+					})
 				})
 
 			/**

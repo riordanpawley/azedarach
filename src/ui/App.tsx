@@ -42,6 +42,7 @@ import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
 import { ImagePreviewOverlay } from "./ImagePreviewOverlay.js"
+import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
@@ -88,6 +89,7 @@ export const App = () => {
 		showingImageAttach,
 		showingImagePreview,
 		showingConfirm,
+		showingMergeChoice,
 		showingDiagnostics,
 		showingProjectSelector,
 	} = useOverlays()
@@ -396,6 +398,9 @@ export const App = () => {
 
 			{/* Confirm overlay */}
 			{showingConfirm && <ConfirmOverlay />}
+
+			{/* Merge choice overlay */}
+			{showingMergeChoice && <MergeChoiceOverlay />}
 
 			{/* Orchestration overlay - rendered when in orchestrate mode */}
 			{isOrchestrate && mode._tag === "orchestrate" && (

@@ -27,6 +27,13 @@ export type OverlayType =
 			readonly message: string
 			readonly onConfirm: AnyEffect
 	  }
+	| {
+			readonly _tag: "mergeChoice"
+			readonly message: string
+			readonly commitsBehind: number
+			readonly onMerge: AnyEffect
+			readonly onSkip: AnyEffect
+	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 
@@ -112,6 +119,7 @@ export function useOverlays() {
 			showingClaudeCreate: currentOverlay?._tag === "claudeCreate",
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
+			showingMergeChoice: currentOverlay?._tag === "mergeChoice",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
 			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
