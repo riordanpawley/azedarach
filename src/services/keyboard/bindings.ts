@@ -2,15 +2,23 @@
  * Default Keybindings
  *
  * Central registry of all keyboard shortcuts organized by mode.
- * Uses handler factories for domain-specific actions.
+ * Uses Effect.Service layers for domain-specific actions.
  */
 
 import { Effect } from "effect"
-import type { InputHandlers } from "./inputHandlers.js"
-import type { PRHandlers } from "./prHandlers.js"
-import type { SessionHandlers } from "./sessionHandlers.js"
-import type { TaskHandlers } from "./taskHandlers.js"
-import type { HandlerContext, Keybinding } from "./types.js"
+import type { BeadsClient } from "../../core/BeadsClient.js"
+import type { TmuxService } from "../../core/TmuxService.js"
+import type { EditorService } from "../EditorService.js"
+import type { NavigationService } from "../NavigationService.js"
+import type { OverlayService } from "../OverlayService.js"
+import type { ToastService } from "../ToastService.js"
+import type { ViewService } from "../ViewService.js"
+import type { InputHandlersService } from "./InputHandlersService.js"
+import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
+import type { PRHandlersService } from "./PRHandlersService.js"
+import type { SessionHandlersService } from "./SessionHandlersService.js"
+import type { TaskHandlersService } from "./TaskHandlersService.js"
+import type { Keybinding } from "./types.js"
 
 // ============================================================================
 // Binding Context
@@ -19,19 +27,25 @@ import type { HandlerContext, Keybinding } from "./types.js"
 /**
  * Context for creating keybindings
  *
- * Contains all handler modules and services needed to define keybindings.
+ * Contains all service instances needed to define keybindings.
+ * Services are injected at KeyboardService construction time.
  */
 export interface BindingContext {
-	/** Session-related handlers */
-	sessionHandlers: SessionHandlers
-	/** Task/bead handlers */
-	taskHandlers: TaskHandlers
-	/** PR workflow handlers */
-	prHandlers: PRHandlers
-	/** Input processing handlers */
-	inputHandlers: InputHandlers
-	/** Full handler context for direct service access */
-	ctx: HandlerContext
+	// Handler services
+	sessionHandlers: SessionHandlersService
+	taskHandlers: TaskHandlersService
+	prHandlers: PRHandlersService
+	inputHandlers: InputHandlersService
+	helpers: KeyboardHelpersService
+
+	// Core services for direct bindings
+	nav: NavigationService
+	editor: EditorService
+	overlay: OverlayService
+	toast: ToastService
+	viewService: ViewService
+	tmux: TmuxService
+	beadsClient: BeadsClient
 }
 
 // ============================================================================
@@ -50,7 +64,7 @@ export interface BindingContext {
  * - Universal: Cross-mode bindings (escape)
  * - Overlay: Overlay-specific bindings
  *
- * @param bc - Binding context with all handlers and services
+ * @param bc - Binding context with all services
  */
 export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybinding> => [
 	// ========================================================================
@@ -60,61 +74,61 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "j",
 		mode: "normal",
 		description: "Move down",
-		action: bc.ctx.nav.move("down"),
+		action: bc.nav.move("down"),
 	},
 	{
 		key: "k",
 		mode: "normal",
 		description: "Move up",
-		action: bc.ctx.nav.move("up"),
+		action: bc.nav.move("up"),
 	},
 	{
 		key: "h",
 		mode: "normal",
 		description: "Move left",
-		action: bc.ctx.nav.move("left"),
+		action: bc.nav.move("left"),
 	},
 	{
 		key: "l",
 		mode: "normal",
 		description: "Move right",
-		action: bc.ctx.nav.move("right"),
+		action: bc.nav.move("right"),
 	},
 	{
 		key: "down",
 		mode: "normal",
 		description: "Move down",
-		action: bc.ctx.nav.move("down"),
+		action: bc.nav.move("down"),
 	},
 	{
 		key: "up",
 		mode: "normal",
 		description: "Move up",
-		action: bc.ctx.nav.move("up"),
+		action: bc.nav.move("up"),
 	},
 	{
 		key: "left",
 		mode: "normal",
 		description: "Move left",
-		action: bc.ctx.nav.move("left"),
+		action: bc.nav.move("left"),
 	},
 	{
 		key: "right",
 		mode: "normal",
 		description: "Move right",
-		action: bc.ctx.nav.move("right"),
+		action: bc.nav.move("right"),
 	},
 	{
 		key: "CS-d",
 		mode: "normal",
 		description: "Half page down",
-		action: bc.ctx.nav.halfPageDown(),
+		action: bc.nav.halfPageDown(),
 	},
 	{
 		key: "CS-u",
 		mode: "normal",
 		description: "Half page up",
-		action: bc.ctx.nav.halfPageUp(),
+		action: bc.nav.halfPageUp(),
 	},
 
 	// ========================================================================
@@ -124,37 +138,37 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "g",
 		mode: "normal",
 		description: "Enter goto mode",
-		action: bc.ctx.editor.enterGoto(),
+		action: bc.editor.enterGoto(),
 	},
 	{
 		key: "v",
 		mode: "normal",
 		description: "Enter select mode",
-		action: bc.ctx.editor.enterSelect(),
+		action: bc.editor.enterSelect(),
 	},
 	{
 		key: "space",
 		mode: "normal",
 		description: "Enter action mode",
-		action: bc.ctx.editor.enterAction(),
+		action: bc.editor.enterAction(),
 	},
 	{
 		key: "/",
 		mode: "normal",
 		description: "Enter search mode",
-		action: bc.ctx.editor.enterSearch(),
+		action: bc.editor.enterSearch(),
 	},
 	{
 		key: ":",
 		mode: "normal",
 		description: "Enter command mode",
-		action: bc.ctx.editor.enterCommand(),
+		action: bc.editor.enterCommand(),
 	},
 	{
 		key: ",",
 		mode: "normal",
 		description: "Enter sort mode",
-		action: bc.ctx.editor.enterSort(),
+		action: bc.editor.enterSort(),
 	},
 
 	// ========================================================================
@@ -163,26 +177,49 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "q",
 		mode: "normal",
-		description: "Quit",
-		action: Effect.sync(() => process.exit(0)),
+		description: "Quit (or exit drill-down)",
+		action: Effect.gen(function* () {
+			// If in drill-down mode, exit it instead of quitting
+			const inDrillDown = yield* bc.nav.isInDrillDown()
+			if (inDrillDown) {
+				yield* bc.nav.exitDrillDown()
+			} else {
+				process.exit(0)
+			}
+		}),
 	},
 	{
 		key: "?",
 		mode: "normal",
 		description: "Show help",
-		action: bc.ctx.overlay.push({ _tag: "help" }),
+		action: bc.overlay.push({ _tag: "help" }),
 	},
 	{
 		key: "d",
 		mode: "normal",
 		description: "Show diagnostics",
-		action: bc.ctx.overlay.push({ _tag: "diagnostics" }),
+		action: bc.overlay.push({ _tag: "diagnostics" }),
 	},
 	{
 		key: "return",
 		mode: "normal",
-		description: "View detail",
-		action: Effect.suspend(() => bc.ctx.openCurrentDetail()),
+		description: "View detail (or enter epic)",
+		action: Effect.gen(function* () {
+			// Get selected task to check if it's an epic
+			const task = yield* bc.helpers.getSelectedTask()
+			if (task && task.issue_type === "epic") {
+				// Fetch epic children
+				const children = yield* bc.beadsClient
+					.getEpicChildren(task.id)
+					.pipe(Effect.catchAll(() => Effect.succeed([])))
+				const childIds = new Set(children.map((c: { id: string }) => c.id))
+				// Enter drill-down mode for the epic with children
+				yield* bc.nav.enterDrillDown(task.id, childIds)
+			} else {
+				// Normal detail view for non-epics
+				yield* bc.helpers.openCurrentDetail()
+			}
+		}),
 	},
 	{
 		key: "c",
@@ -194,7 +231,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "S-c",
 		mode: "normal",
 		description: "Create bead via Claude",
-		action: bc.ctx.overlay.push({ _tag: "claudeCreate" }),
+		action: bc.overlay.push({ _tag: "claudeCreate" }),
 	},
 	{
 		key: "a",
@@ -206,20 +243,42 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "tab",
 		mode: "normal",
 		description: "Toggle view mode (kanban/compact)",
-		action: bc.ctx.viewService.toggleViewMode(),
+		action: bc.viewService.toggleViewMode(),
 	},
 	{
 		key: "S-l",
 		mode: "normal",
 		description: "View logs in tmux popup",
-		action: bc.ctx.tmux
-			.displayPopup({
-				command: `less +F ${process.cwd()}/az.log`,
+		action: Effect.gen(function* () {
+			const projectPath = yield* bc.helpers.getProjectPath()
+			const logFile = `${projectPath}/az.log`
+			// Shell wrapper providing menu with view/edit/quit options
+			const wrapperScript = `
+while true; do
+  clear
+  echo ""
+  echo "  az.log"
+  echo ""
+  echo "  [v] View logs (less +F)"
+  echo "  [e] Edit in \\$EDITOR"
+  echo "  [q] Quit"
+  echo ""
+  read -rsn1 key
+  case "$key" in
+    v|V|"") less +F "${logFile}" ;;
+    e|E) \${EDITOR:-\${VISUAL:-vim}} "${logFile}"; exit ;;
+    q|Q) exit ;;
+  esac
+done
+`
+			yield* bc.tmux.displayPopup({
+				command: `bash -c '${wrapperScript.replace(/'/g, "'\\''")}'`,
 				width: "90%",
 				height: "90%",
-				title: " az.log (Ctrl-C to scroll, q to quit) ",
+				title: " az.log ",
+				cwd: projectPath,
 			})
-			.pipe(Effect.catchAll(Effect.logError)),
+		}).pipe(Effect.catchAll(Effect.logError)),
 	},
 
 	// ========================================================================
@@ -262,7 +321,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Start session",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSession())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSession())),
 		),
 	},
 	{
@@ -270,9 +329,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Start+work (prompt Claude)",
 		action: Effect.suspend(() =>
-			bc.ctx.editor
-				.exitToNormal()
-				.pipe(Effect.tap(() => bc.sessionHandlers.startSessionWithPrompt())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionWithPrompt())),
 		),
 	},
 	{
@@ -280,9 +337,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Start+work (skip permissions)",
 		action: Effect.suspend(() =>
-			bc.ctx.editor
-				.exitToNormal()
-				.pipe(Effect.tap(() => bc.sessionHandlers.startSessionDangerous())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionDangerous())),
 		),
 	},
 	{
@@ -290,7 +345,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Chat (Haiku)",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.chatAboutTask())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.chatAboutTask())),
 		),
 	},
 	{
@@ -298,7 +353,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Attach to session",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachExternal())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachExternal())),
 		),
 	},
 	{
@@ -306,7 +361,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Attach inline",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachInline())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.attachInline())),
 		),
 	},
 	{
@@ -314,7 +369,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Pause session",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.pauseSession())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.pauseSession())),
 		),
 	},
 	{
@@ -322,7 +377,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Resume session",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.resumeSession())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.resumeSession())),
 		),
 	},
 	{
@@ -330,7 +385,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Stop session",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
 		),
 	},
 	{
@@ -338,7 +393,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Edit bead ($EDITOR)",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.editBead())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.editBead())),
 		),
 	},
 	{
@@ -346,11 +401,11 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Edit bead (Claude)",
 		action: Effect.suspend(() =>
-			bc.ctx.editor
+			bc.editor
 				.exitToNormal()
 				.pipe(
 					Effect.tap(() =>
-						bc.ctx.toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
+						bc.toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
 					),
 				),
 		),
@@ -360,7 +415,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Create PR",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
 		),
 	},
 	{
@@ -368,7 +423,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Cleanup worktree",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.cleanup())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.cleanup())),
 		),
 	},
 	{
@@ -376,7 +431,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Merge to main",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.mergeToMain())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.mergeToMain())),
 		),
 	},
 	{
@@ -384,7 +439,15 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Abort merge",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.abortMerge())),
+		),
+	},
+	{
+		key: "f",
+		mode: "action",
+		description: "Show diff vs main",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
 		),
 	},
 	{
@@ -392,7 +455,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Delete bead",
 		action: Effect.suspend(() =>
-			bc.ctx.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.deleteBead())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.deleteBead())),
 		),
 	},
 	{
@@ -400,10 +463,10 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "action",
 		description: "Attach image",
 		action: Effect.gen(function* () {
-			const task = yield* bc.ctx.getSelectedTask()
-			yield* bc.ctx.editor.exitToNormal()
+			const task = yield* bc.helpers.getSelectedTask()
+			yield* bc.editor.exitToNormal()
 			if (task) {
-				yield* bc.ctx.overlay.push({ _tag: "imageAttach", taskId: task.id })
+				yield* bc.overlay.push({ _tag: "imageAttach", taskId: task.id })
 			}
 		}),
 	},
@@ -415,25 +478,25 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "g",
 		mode: "goto-pending",
 		description: "Go to top of column",
-		action: bc.ctx.nav.goToFirst().pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+		action: bc.nav.goToFirst().pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 	{
 		key: "e",
 		mode: "goto-pending",
 		description: "Go to bottom of column",
-		action: bc.ctx.nav.goToLast().pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+		action: bc.nav.goToLast().pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 	{
 		key: "h",
 		mode: "goto-pending",
 		description: "Go to first column",
-		action: bc.ctx.nav.goToFirstColumn().pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+		action: bc.nav.goToFirstColumn().pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 	{
 		key: "l",
 		mode: "goto-pending",
 		description: "Go to last column",
-		action: bc.ctx.nav.goToLastColumn().pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+		action: bc.nav.goToLastColumn().pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 	{
 		key: "w",
@@ -441,16 +504,16 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "Enter jump mode",
 		action: Effect.gen(function* () {
 			const labels = yield* bc.inputHandlers.computeJumpLabels()
-			yield* bc.ctx.editor.enterJump(labels)
+			yield* bc.editor.enterJump(labels)
 		}),
 	},
 	{
 		key: "p",
 		mode: "goto-pending",
 		description: "Open project selector",
-		action: bc.ctx.overlay
+		action: bc.overlay
 			.push({ _tag: "projectSelector" })
-			.pipe(Effect.tap(() => bc.ctx.editor.exitToNormal())),
+			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 
 	// ========================================================================
@@ -460,61 +523,61 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "j",
 		mode: "select",
 		description: "Move down",
-		action: bc.ctx.nav.move("down"),
+		action: bc.nav.move("down"),
 	},
 	{
 		key: "k",
 		mode: "select",
 		description: "Move up",
-		action: bc.ctx.nav.move("up"),
+		action: bc.nav.move("up"),
 	},
 	{
 		key: "h",
 		mode: "select",
 		description: "Move left",
-		action: bc.ctx.nav.move("left"),
+		action: bc.nav.move("left"),
 	},
 	{
 		key: "l",
 		mode: "select",
 		description: "Move right",
-		action: bc.ctx.nav.move("right"),
+		action: bc.nav.move("right"),
 	},
 	{
 		key: "down",
 		mode: "select",
 		description: "Move down",
-		action: bc.ctx.nav.move("down"),
+		action: bc.nav.move("down"),
 	},
 	{
 		key: "up",
 		mode: "select",
 		description: "Move up",
-		action: bc.ctx.nav.move("up"),
+		action: bc.nav.move("up"),
 	},
 	{
 		key: "left",
 		mode: "select",
 		description: "Move left",
-		action: bc.ctx.nav.move("left"),
+		action: bc.nav.move("left"),
 	},
 	{
 		key: "right",
 		mode: "select",
 		description: "Move right",
-		action: bc.ctx.nav.move("right"),
+		action: bc.nav.move("right"),
 	},
 	{
 		key: "space",
 		mode: "select",
 		description: "Toggle selection",
-		action: Effect.suspend(() => bc.ctx.toggleCurrentSelection()),
+		action: Effect.suspend(() => bc.helpers.toggleCurrentSelection()),
 	},
 	{
 		key: "v",
 		mode: "select",
 		description: "Exit select mode",
-		action: bc.ctx.editor.exitSelect(),
+		action: bc.editor.exitSelect(),
 	},
 
 	// ========================================================================
@@ -524,8 +587,8 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "s",
 		mode: "sort",
 		description: "Sort by session status",
-		action: bc.ctx.editor.cycleSort("session").pipe(
-			Effect.tap(() => bc.ctx.editor.exitToNormal()),
+		action: bc.editor.cycleSort("session").pipe(
+			Effect.tap(() => bc.editor.exitToNormal()),
 			Effect.catchAll(Effect.logError),
 		),
 	},
@@ -533,8 +596,8 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "p",
 		mode: "sort",
 		description: "Sort by priority",
-		action: bc.ctx.editor.cycleSort("priority").pipe(
-			Effect.tap(() => bc.ctx.editor.exitToNormal()),
+		action: bc.editor.cycleSort("priority").pipe(
+			Effect.tap(() => bc.editor.exitToNormal()),
 			Effect.catchAll(Effect.logError),
 		),
 	},
@@ -542,8 +605,8 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "u",
 		mode: "sort",
 		description: "Sort by updated at",
-		action: bc.ctx.editor.cycleSort("updated").pipe(
-			Effect.tap(() => bc.ctx.editor.exitToNormal()),
+		action: bc.editor.cycleSort("updated").pipe(
+			Effect.tap(() => bc.editor.exitToNormal()),
 			Effect.catchAll(Effect.logError),
 		),
 	},
@@ -565,6 +628,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "escape",
 		mode: "overlay",
 		description: "Close overlay",
-		action: bc.ctx.overlay.pop().pipe(Effect.asVoid),
+		action: bc.overlay.pop().pipe(Effect.asVoid),
 	},
 ]

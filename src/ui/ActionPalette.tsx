@@ -39,8 +39,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			case "S": // Start+work - only if idle
 			case "!": // Start+work (skip permissions) - only if idle
 				return sessionState === "idle"
-			case "c": // Chat (Haiku) - always available (ephemeral popup)
-				return true
+			case "c": // Chat (Haiku) - only if idle (starts tracked session)
+				return sessionState === "idle"
 			case "a": // Attach - only if not idle
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy

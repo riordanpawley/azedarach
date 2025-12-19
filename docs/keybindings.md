@@ -45,7 +45,7 @@ The default mode for navigation and basic actions.
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Enter` | Show task details | Modal overlay |
+| `Enter` | View/Enter | Show task details; on epics, enters drill-down |
 | `Space` | Enter Action mode | Prefix for commands |
 | `,` | Enter Sort mode | Change task sort order |
 | `/` | Enter Search mode | Filter tasks by title/ID |
@@ -57,9 +57,57 @@ The default mode for navigation and basic actions.
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
-| `L` | View logs | Opens az.log in tmux popup |
-| `q` | Quit | Exit application |
+| `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
+| `q` | Quit/Back | Exits drill-down; otherwise quits app |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
+
+## Epic Drill-Down
+
+When the cursor is on an epic card, pressing `Enter` enters **drill-down mode** instead of showing the detail panel. This focuses the board to show only that epic's children.
+
+### Entering Drill-Down
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Enter` (on epic) | Enter drill-down | Shows only epic's children |
+
+### Drill-Down View
+
+When in drill-down mode:
+
+```
+┌─ Open ─────┬─ In Progress ─┬─ Done ──────┐
+│  ◀ az-gds  │   Epic View   │  ████░ 3/5  │  ← Header bar
+│  az-lqb    │  az-7sr ⚙    │  az-aiu ✓   │
+│  az-bjp    │               │  az-xxx ✓   │
+└────────────┴───────────────┴─────────────┘
+```
+
+**Header bar shows:**
+- Back arrow (`◀`) with epic ID
+- Epic title (centered)
+- Progress bar (`████░░`) with count (e.g., `3/5` children closed)
+
+### Navigation in Drill-Down
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `h/j/k/l` | Navigate | Works normally within children |
+| `Enter` | Open detail | On child tasks, opens detail panel |
+| `q` | Exit drill-down | Returns to main board |
+| `Esc` | Exit drill-down | Same as `q` |
+
+### Cursor Restoration
+
+When you exit drill-down mode:
+- The cursor returns to the epic you drilled into
+- Your previous position is remembered
+
+### Notes
+
+- **Epic children** are tasks with a parent-child dependency to the epic
+- All normal actions (Space menu, search, sort) work in drill-down
+- The progress bar fills based on closed/total children ratio
 
 ## View Modes
 
@@ -377,7 +425,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
 | `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
-| `Space` `c` | Chat (Haiku) | Always (opens Haiku in tmux popup to discuss task) |
+| `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
 | `Space` `a` | Attach to session | Session exists (switches tmux client) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Resume session | Session is paused |
@@ -398,6 +446,7 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -434,6 +483,29 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 - You want to resolve conflicts manually instead
 
 **Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
+
+#### Show Diff (Space+f)
+
+Opens a tmux popup showing all changes between the bead's branch and main. Perfect for code review before merging.
+
+**What it shows:**
+1. First, a summary of changed files (--stat output)
+2. Then, the full colored diff
+
+**Navigation (in less):**
+- `j/k` or arrow keys: Scroll line by line
+- `Space` / `b`: Page down / up
+- `g` / `G`: Go to start / end
+- `/pattern`: Search forward
+- `n` / `N`: Next / previous search result
+- `q`: Quit and return to az
+
+**Use cases:**
+- Review Claude's changes before merging
+- Check what files were modified
+- Verify the scope of changes matches the task
+
+**Note:** The diff shows `main...HEAD` which includes all commits on the branch since it diverged from main. This ensures you see the complete set of changes.
 
 ### Movement Actions
 

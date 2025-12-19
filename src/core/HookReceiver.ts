@@ -20,6 +20,7 @@
 
 import { FileSystem } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { SessionState } from "../ui/types.js"
 
 // ============================================================================
@@ -187,8 +188,10 @@ export interface HookReceiverService {
  * ```
  */
 export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
-	effect: Effect.gen(function* () {
+	dependencies: [DiagnosticsService.Default],
+	scoped: Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
+		const diagnostics = yield* DiagnosticsService
 
 		// Track processed files to avoid duplicates
 		const processedRef = yield* Ref.make<Set<string>>(new Set())
@@ -242,6 +245,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 				yield* fs.remove(fullPath).pipe(Effect.catchAll(() => Effect.void))
 
 				// Clean up processed set (remove after 1 minute to prevent memory leak)
+				// Use forkScoped so the cleanup fiber survives the parent effect
 				yield* Effect.sleep("1 minute").pipe(
 					Effect.flatMap(() =>
 						Ref.update(processedRef, (s) => {
@@ -250,7 +254,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 							return next
 						}),
 					),
-					Effect.fork,
+					Effect.forkScoped,
 				)
 
 				return event
@@ -295,6 +299,14 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 					Effect.repeat(Schedule.spaced(`${POLL_INTERVAL_MS} millis`)),
 					Effect.forkScoped,
 				)
+
+				// Track the polling fiber in diagnostics
+				yield* diagnostics.registerFiber({
+					id: "hook-receiver-poller",
+					name: "HookReceiver Poller",
+					description: "Polls /tmp for Claude Code hook notifications",
+					fiber: pollerFiber,
+				})
 
 				return pollerFiber
 			})

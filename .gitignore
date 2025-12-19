@@ -1,3 +1,6 @@
+# Azedarach session cache
+.azedarach/
+
 # Dependencies
 node_modules/
 

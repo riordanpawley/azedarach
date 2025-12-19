@@ -96,6 +96,13 @@ export const DEFAULT_CONFIG = {
 		autoMerge: false,
 		baseBranch: "main",
 	},
+	merge: {
+		// No validation by default - must be explicitly configured in .azedarach.json
+		validateCommands: [] satisfies string[],
+		fixCommand: "",
+		maxFixAttempts: 2,
+		startClaudeOnFailure: true,
+	},
 	notifications: {
 		bell: true,
 		system: false,
@@ -136,6 +143,12 @@ export interface ResolvedConfig {
 		autoDraft: boolean
 		autoMerge: boolean
 		baseBranch: string
+	}
+	merge: {
+		validateCommands: readonly string[]
+		fixCommand: string
+		maxFixAttempts: number
+		startClaudeOnFailure: boolean
 	}
 	notifications: {
 		bell: boolean
@@ -187,6 +200,13 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
 			baseBranch: config.pr?.baseBranch ?? DEFAULT_CONFIG.pr.baseBranch,
+		},
+		merge: {
+			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,
+			fixCommand: config.merge?.fixCommand ?? DEFAULT_CONFIG.merge.fixCommand,
+			maxFixAttempts: config.merge?.maxFixAttempts ?? DEFAULT_CONFIG.merge.maxFixAttempts,
+			startClaudeOnFailure:
+				config.merge?.startClaudeOnFailure ?? DEFAULT_CONFIG.merge.startClaudeOnFailure,
 		},
 		notifications: {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,

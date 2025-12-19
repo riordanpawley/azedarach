@@ -6,42 +6,22 @@
  * allowing for dynamic registration, mode-based filtering, and overlay precedence.
  *
  * This service handles ALL keyboard input for the application, delegating
- * to domain-specific handler modules for complex actions.
+ * to domain-specific handler services for complex actions.
  */
 
 import { Effect, Ref } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index.js"
-import { AttachmentService } from "../core/AttachmentService.js"
 import { BeadsClient } from "../core/BeadsClient.js"
-import { BeadEditorService } from "../core/EditorService.js"
-import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
-import { PRWorkflow } from "../core/PRWorkflow.js"
-import { SessionManager } from "../core/SessionManager.js"
 import { TmuxService } from "../core/TmuxService.js"
-import { VCService } from "../core/VCService.js"
-import { BoardService } from "./BoardService.js"
-import { CommandQueueService } from "./CommandQueueService.js"
 import { EditorService } from "./EditorService.js"
-// Import handler modules
 import { createDefaultBindings } from "./keyboard/bindings.js"
-import {
-	createCheckBusy,
-	createGetColumnIndex,
-	createGetProjectPath,
-	createGetSelectedTask,
-	createOpenCurrentDetail,
-	createShowErrorToast,
-	createToggleCurrentSelection,
-	createWithQueue,
-} from "./keyboard/helpers.js"
-import { createInputHandlers } from "./keyboard/inputHandlers.js"
-import { createPRHandlers } from "./keyboard/prHandlers.js"
-import { createSessionHandlers } from "./keyboard/sessionHandlers.js"
-import { createTaskHandlers } from "./keyboard/taskHandlers.js"
-import type { HandlerContext, Keybinding, KeyMode } from "./keyboard/types.js"
+import { InputHandlersService } from "./keyboard/InputHandlersService.js"
+import { KeyboardHelpersService } from "./keyboard/KeyboardHelpersService.js"
+import { PRHandlersService } from "./keyboard/PRHandlersService.js"
+import { SessionHandlersService } from "./keyboard/SessionHandlersService.js"
+import { TaskHandlersService } from "./keyboard/TaskHandlersService.js"
+import type { Keybinding, KeyMode } from "./keyboard/types.js"
 import { NavigationService } from "./NavigationService.js"
 import { OverlayService } from "./OverlayService.js"
-import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 import { ViewService } from "./ViewService.js"
 
@@ -55,116 +35,61 @@ export type { Keybinding, KeybindingDeps, KeyMode } from "./keyboard/types.js"
 export class KeyboardService extends Effect.Service<KeyboardService>()("KeyboardService", {
 	// Declare ALL dependencies - Effect resolves the full graph
 	dependencies: [
+		// Handler services (each brings its own deps)
+		KeyboardHelpersService.Default,
+		SessionHandlersService.Default,
+		TaskHandlersService.Default,
+		PRHandlersService.Default,
+		InputHandlersService.Default,
+		// Core services for direct binding access
 		ToastService.Default,
 		OverlayService.Default,
 		NavigationService.Default,
 		EditorService.Default,
-		BoardService.Default,
-		SessionManager.Default,
-		AttachmentService.Default,
-		PRWorkflow.Default,
-		VCService.Default,
-		BeadsClient.Default,
-		BeadEditorService.Default,
 		ViewService.Default,
-		ImageAttachmentService.Default,
 		TmuxService.Default,
-		CommandQueueService.Default,
-		AppConfig.Default,
-		ProjectService.Default,
+		BeadsClient.Default,
 	],
 
 	effect: Effect.gen(function* () {
 		// ====================================================================
-		// Inject ALL services at construction time
+		// Inject handler services
+		// ====================================================================
+		const helpers = yield* KeyboardHelpersService
+		const sessionHandlers = yield* SessionHandlersService
+		const taskHandlers = yield* TaskHandlersService
+		const prHandlers = yield* PRHandlersService
+		const inputHandlers = yield* InputHandlersService
+
+		// ====================================================================
+		// Inject core services for direct binding access
 		// ====================================================================
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
 		const nav = yield* NavigationService
 		const editor = yield* EditorService
-		const board = yield* BoardService
-		const sessionManager = yield* SessionManager
-		const attachment = yield* AttachmentService
-		const prWorkflow = yield* PRWorkflow
-		const vc = yield* VCService
-		const beadsClient = yield* BeadsClient
-		const beadEditor = yield* BeadEditorService
 		const viewService = yield* ViewService
-		const imageAttachment = yield* ImageAttachmentService
 		const tmux = yield* TmuxService
-		const commandQueue = yield* CommandQueueService
-		const appConfig = yield* AppConfig
-		const projectService = yield* ProjectService
-		const resolvedConfig: ResolvedConfig = appConfig.config
-
-		// ====================================================================
-		// Create shared helper functions (pre-bound to services)
-		// ====================================================================
-		const getSelectedTask = createGetSelectedTask(nav, board)
-		const getColumnIndex = createGetColumnIndex(nav)
-		const showErrorToast = createShowErrorToast(toast)
-		const openCurrentDetail = createOpenCurrentDetail(overlay, getSelectedTask)
-		const toggleCurrentSelection = createToggleCurrentSelection(editor, getSelectedTask)
-		const withQueue = createWithQueue(commandQueue, toast)
-		const checkBusy = createCheckBusy(commandQueue, toast)
-		const getProjectPath = createGetProjectPath(projectService)
-
-		// ====================================================================
-		// Build handler context
-		// ====================================================================
-		const ctx: HandlerContext = {
-			// Services
-			toast,
-			overlay,
-			nav,
-			editor,
-			board,
-			sessionManager,
-			attachment,
-			prWorkflow,
-			beadsClient,
-			beadEditor,
-			viewService,
-			imageAttachment,
-			tmux,
-			vc,
-			commandQueue,
-			projectService,
-
-			// Config
-			resolvedConfig,
-
-			// Pre-bound helpers
-			getSelectedTask,
-			getColumnIndex,
-			getProjectPath,
-			showErrorToast,
-			openCurrentDetail,
-			toggleCurrentSelection,
-			withQueue,
-			checkBusy,
-
-			// ImageAttachment state for inputHandlers
-			imageAttachmentOverlayState: imageAttachment.overlayState,
-		}
-
-		// ====================================================================
-		// Create domain-specific handlers
-		// ====================================================================
-		const sessionHandlers = createSessionHandlers(ctx)
-		const taskHandlers = createTaskHandlers(ctx)
-		const prHandlers = createPRHandlers(ctx)
-		const inputHandlers = createInputHandlers(ctx)
+		const beadsClient = yield* BeadsClient
 
 		// ====================================================================
 		// Create default keybindings
 		// ====================================================================
 		const defaultBindings = createDefaultBindings({
+			// Handler services
 			sessionHandlers,
 			taskHandlers,
 			prHandlers,
 			inputHandlers,
-			ctx,
+			helpers,
+			// Core services for direct bindings
+			nav,
+			editor,
+			overlay,
+			toast,
+			viewService,
+			tmux,
+			beadsClient,
 		})
 
 		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)
