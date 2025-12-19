@@ -101,9 +101,13 @@ export const CONFLICT_INDICATOR = "⚔️"
 
 /**
  * Dev server indicator shown when a dev server is running for the task
- * Displayed alongside other indicators (e.g., "🔵 🖥️" = busy session + dev server)
+ * Displayed alongside other indicators (e.g., "🔵 💻" = busy session + dev server)
+ *
+ * Note: Using 💻 (U+1F4BB) instead of 🖥️ (U+1F5A5 + U+FE0F) because the variation
+ * selector in the desktop computer emoji renders poorly in many terminals,
+ * showing as small icon with vertical lines (||).
  */
-export const DEV_SERVER_INDICATOR = "🖥️"
+export const DEV_SERVER_INDICATOR = "💻"
 
 /**
  * Agent phase indicators
