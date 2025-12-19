@@ -489,6 +489,14 @@ done
 		),
 	},
 	{
+		key: "u",
+		mode: "action",
+		description: "Update from main",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
+		),
+	},
+	{
 		key: "S-d",
 		mode: "action",
 		description: "Delete bead",
