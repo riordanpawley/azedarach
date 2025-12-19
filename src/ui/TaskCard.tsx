@@ -3,11 +3,16 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
-import { taskRunningOperationAtom } from "./atoms.js"
+import { devServerStateAtom, taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import { CONFLICT_INDICATOR, PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
+import {
+	CONFLICT_INDICATOR,
+	DEV_SERVER_INDICATOR,
+	PHASE_INDICATORS,
+	SESSION_INDICATORS,
+} from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task
@@ -78,6 +83,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
 		: ""
 
+	// Subscribe to dev server state for this task
+	const devServerState = useAtomValue(devServerStateAtom(props.task.id))
+	const hasDevServer = devServerState.status === "running" || devServerState.status === "starting"
+
 	// Get context health border color based on contextPercent
 	// Only applies when session is active (not idle) and has context data
 	const getContextHealthColor = (): string | undefined => {
@@ -147,6 +156,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
 		if (phaseIndicator) {
 			line += ` ${phaseIndicator}`
+		}
+		// Show dev server indicator when a dev server is running (e.g., "🔵 🖥️" = busy + dev server)
+		if (hasDevServer) {
+			line += ` ${DEV_SERVER_INDICATOR}`
 		}
 		// Show operation indicator when an async operation is running (e.g., merge, cleanup)
 		if (operationIndicator) {
