@@ -7,14 +7,14 @@
  * - Progress bar showing completed/total children
  */
 
-import type { Dependent, Issue } from "../core/BeadsClient.js"
+import type { DependencyRef, Issue } from "../core/BeadsClient.js"
 import { theme } from "./theme.js"
 
 interface EpicHeaderProps {
 	/** The epic being viewed */
 	epic: Issue
 	/** Child tasks of the epic (for progress calculation) */
-	epicChildren: Dependent[]
+	epicChildren: DependencyRef[]
 }
 
 /**

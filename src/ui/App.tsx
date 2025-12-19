@@ -9,7 +9,7 @@ import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
 import { killActivePopup } from "../core/BeadEditorService.js"
-import type { Dependent, Issue } from "../core/BeadsClient.js"
+import type { DependencyRef, Issue } from "../core/BeadsClient.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
 	claudeCreateSessionAtom,
@@ -37,6 +37,7 @@ import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
 import { ImagePreviewOverlay } from "./ImagePreviewOverlay.js"
+import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
 import { SortMenu } from "./SortMenu.js"
@@ -99,6 +100,7 @@ export const App = () => {
 		isSearch,
 		isCommand,
 		isSort,
+		isOrchestrate,
 	} = useEditorMode()
 
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -126,7 +128,7 @@ export const App = () => {
 
 	// Local state for epic header display
 	const [epicInfo, setEpicInfo] = useState<Issue | null>(null)
-	const [epicChildren, setEpicChildren] = useState<Dependent[]>([])
+	const [epicChildren, setEpicChildren] = useState<DependencyRef[]>([])
 
 	// Fetch epic info for header when drill-down mode activates
 	useEffect(() => {
@@ -250,6 +252,8 @@ export const App = () => {
 				return `select (${selectedIds.length})`
 			case "sort":
 				return "sort"
+			case "orchestrate":
+				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 		}
 	}, [mode, searchQuery, selectedIds])
 
@@ -349,6 +353,17 @@ export const App = () => {
 
 			{/* Confirm overlay */}
 			{showingConfirm && <ConfirmOverlay />}
+
+			{/* Orchestration overlay - rendered when in orchestrate mode */}
+			{isOrchestrate && mode._tag === "orchestrate" && (
+				<OrchestrationOverlay
+					epicId={mode.epicId}
+					epicTitle={mode.epicTitle}
+					childTasks={mode.childTasks}
+					selectedIds={mode.selectedIds}
+					focusIndex={mode.focusIndex}
+				/>
+			)}
 
 			{/* Toast notifications */}
 			<ToastContainer toasts={toasts} onDismiss={dismissToast} />

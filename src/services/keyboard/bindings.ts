@@ -15,6 +15,7 @@ import type { ToastService } from "../ToastService.js"
 import type { ViewService } from "../ViewService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
+import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
 import type { PRHandlersService } from "./PRHandlersService.js"
 import type { SessionHandlersService } from "./SessionHandlersService.js"
 import type { TaskHandlersService } from "./TaskHandlersService.js"
@@ -36,6 +37,7 @@ export interface BindingContext {
 	taskHandlers: TaskHandlersService
 	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
+	orchestrateHandlers: OrchestrateHandlersService
 	helpers: KeyboardHelpersService
 
 	// Core services for direct bindings
@@ -629,5 +631,80 @@ done
 		mode: "overlay",
 		description: "Close overlay",
 		action: bc.overlay.pop().pipe(Effect.asVoid),
+	},
+
+	// ========================================================================
+	// Orchestrate Mode - Epic child task management
+	// ========================================================================
+	{
+		key: "j",
+		mode: "orchestrate",
+		description: "Move down",
+		action: bc.editor.orchestrateMoveDown(),
+	},
+	{
+		key: "k",
+		mode: "orchestrate",
+		description: "Move up",
+		action: bc.editor.orchestrateMoveUp(),
+	},
+	{
+		key: "down",
+		mode: "orchestrate",
+		description: "Move down",
+		action: bc.editor.orchestrateMoveDown(),
+	},
+	{
+		key: "up",
+		mode: "orchestrate",
+		description: "Move up",
+		action: bc.editor.orchestrateMoveUp(),
+	},
+	{
+		key: "space",
+		mode: "orchestrate",
+		description: "Toggle task selection",
+		action: Effect.suspend(() => {
+			return Effect.gen(function* () {
+				const mode = yield* bc.editor.getMode()
+				if (mode._tag !== "orchestrate") return
+				const task = mode.childTasks[mode.focusIndex]
+				if (task) {
+					yield* bc.editor.orchestrateToggle(task.id)
+				}
+			})
+		}),
+	},
+	{
+		key: "a",
+		mode: "orchestrate",
+		description: "Select all spawnable tasks",
+		action: bc.editor.orchestrateSelectAll(),
+	},
+	{
+		key: "A",
+		mode: "orchestrate",
+		description: "Clear all selections",
+		action: bc.editor.orchestrateSelectNone(),
+	},
+	{
+		key: "return",
+		mode: "orchestrate",
+		description: "Confirm spawn selected tasks",
+		action: bc.orchestrateHandlers.confirmSpawn(),
+	},
+	{
+		key: "escape",
+		mode: "orchestrate",
+		description: "Exit orchestrate mode",
+		action: bc.editor.exitOrchestrate(),
+	},
+	{
+		key: "o",
+		mode: "overlay",
+		description: "Orchestrate epic (from detail)",
+		action: bc.orchestrateHandlers
+			.enterFromDetail()
+			.pipe(Effect.catchAll(Effect.logError), Effect.asVoid),
 	},
 ]

@@ -18,6 +18,7 @@ import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { SessionManager } from "../../core/SessionManager.js"
+import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { VCService } from "../../core/VCService.js"
@@ -63,6 +64,7 @@ const appLayer = Layer.mergeAll(
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
 	ProjectService.Default,
+	TemplateService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

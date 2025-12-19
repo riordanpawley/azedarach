@@ -654,6 +654,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return "command"
 						case "sort":
 							return "sort"
+						case "orchestrate":
+							return "orchestrate"
 						default:
 							return mode satisfies never
 					}

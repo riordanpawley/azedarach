@@ -1,13 +1,13 @@
 /**
  * Mode Service Atoms
  *
- * Handles editor mode state: normal, select, goto, jump, action, search, command, sort.
+ * Handles editor mode state: normal, select, goto, jump, action, search, command, sort, orchestrate.
  */
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, type Record } from "effect"
 import { ModeService } from "../../atoms/runtime.js"
-import type { SortField } from "../../services/EditorService.js"
+import type { OrchestrationTask, SortField } from "../../services/EditorService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -291,5 +291,170 @@ export const cycleSortAtom = appRuntime.fn((field: SortField) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.cycleSort(field)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+// ============================================================================
+// Orchestrate Mode Atoms
+// ============================================================================
+
+/**
+ * Check if currently in orchestrate mode
+ *
+ * Usage: const isOrchestrate = useAtomValue(isOrchestrateAtom)
+ */
+export const isOrchestrateAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return false
+	return modeResult.value._tag === "orchestrate"
+})
+
+/**
+ * Get full orchestrate state or null
+ *
+ * Usage: const orchestrateState = useAtomValue(orchestrateStateAtom)
+ */
+export const orchestrateStateAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return null
+	const mode = modeResult.value
+	return mode._tag === "orchestrate" ? mode : null
+})
+
+/**
+ * Get selected task IDs in orchestrate mode
+ *
+ * Usage: const selectedIds = useAtomValue(orchestrateSelectedIdsAtom)
+ */
+export const orchestrateSelectedIdsAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return []
+	const mode = modeResult.value
+	return mode._tag === "orchestrate" ? mode.selectedIds : []
+})
+
+/**
+ * Get focus index in orchestrate mode
+ *
+ * Usage: const focusIndex = useAtomValue(orchestrateFocusIndexAtom)
+ */
+export const orchestrateFocusIndexAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return 0
+	const mode = modeResult.value
+	return mode._tag === "orchestrate" ? mode.focusIndex : 0
+})
+
+/**
+ * Count spawnable tasks in orchestrate mode
+ * Spawnable = status is "open" and no active session
+ *
+ * Usage: const spawnableCount = useAtomValue(orchestrateSpawnableCountAtom)
+ */
+export const orchestrateSpawnableCountAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return 0
+	const mode = modeResult.value
+	if (mode._tag !== "orchestrate") return 0
+	return mode.childTasks.filter((t) => t.status === "open" && !t.hasSession).length
+})
+
+/**
+ * Enter orchestrate mode for an epic
+ *
+ * Usage: const [, enterOrchestrate] = useAtom(enterOrchestrateAtom, { mode: "promise" })
+ *        await enterOrchestrate({ epicId, epicTitle, children })
+ */
+export const enterOrchestrateAtom = appRuntime.fn(
+	({
+		epicId,
+		epicTitle,
+		children,
+	}: {
+		epicId: string
+		epicTitle: string
+		children: ReadonlyArray<OrchestrationTask>
+	}) =>
+		Effect.gen(function* () {
+			const editor = yield* ModeService
+			yield* editor.enterOrchestrate(epicId, epicTitle, children)
+		}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Move focus down in orchestrate mode
+ *
+ * Usage: const [, orchestrateMoveDown] = useAtom(orchestrateMoveDownAtom, { mode: "promise" })
+ *        await orchestrateMoveDown()
+ */
+export const orchestrateMoveDownAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.orchestrateMoveDown()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Move focus up in orchestrate mode
+ *
+ * Usage: const [, orchestrateMoveUp] = useAtom(orchestrateMoveUpAtom, { mode: "promise" })
+ *        await orchestrateMoveUp()
+ */
+export const orchestrateMoveUpAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.orchestrateMoveUp()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Toggle task selection in orchestrate mode
+ *
+ * Usage: const [, orchestrateToggle] = useAtom(orchestrateToggleAtom, { mode: "promise" })
+ *        await orchestrateToggle(taskId)
+ */
+export const orchestrateToggleAtom = appRuntime.fn((taskId: string) =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.orchestrateToggle(taskId)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Select all spawnable tasks in orchestrate mode
+ *
+ * Usage: const [, orchestrateSelectAll] = useAtom(orchestrateSelectAllAtom, { mode: "promise" })
+ *        await orchestrateSelectAll()
+ */
+export const orchestrateSelectAllAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.orchestrateSelectAll()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Clear all selections in orchestrate mode
+ *
+ * Usage: const [, orchestrateSelectNone] = useAtom(orchestrateSelectNoneAtom, { mode: "promise" })
+ *        await orchestrateSelectNone()
+ */
+export const orchestrateSelectNoneAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.orchestrateSelectNone()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Exit orchestrate mode and return to normal
+ *
+ * Usage: const [, exitOrchestrate] = useAtom(exitOrchestrateAtom, { mode: "promise" })
+ *        await exitOrchestrate()
+ */
+export const exitOrchestrateAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.exitOrchestrate()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
