@@ -15,7 +15,7 @@
 
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
-import { AppConfig, type ResolvedConfig } from "../config/index.js"
+import { AppConfig } from "../config/index.js"
 import { type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
@@ -144,7 +144,6 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const tmux = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
 		const appConfig = yield* AppConfig
-		const config: ResolvedConfig = appConfig.config
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const projectService = yield* ProjectService
@@ -168,36 +167,6 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				const projectPath = yield* projectService.getCurrentPath()
 				return projectPath ?? process.cwd()
 			})
-
-		/**
-		 * Load initCommands from a project's .azedarach.json config
-		 *
-		 * This loads the TARGET project's config, not the azedarach app's config.
-		 * Returns empty array if no config found or on error.
-		 */
-		const loadProjectInitCommands = (projectPath: string): Effect.Effect<readonly string[]> =>
-			Effect.gen(function* () {
-				const configPath = pathService.join(projectPath, ".azedarach.json")
-				const exists = yield* fs
-					.exists(configPath)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
-				if (!exists) return []
-
-				const content = yield* fs
-					.readFileString(configPath)
-					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
-				const json = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: () => ({}),
-				})
-
-				// Extract initCommands, defaulting to empty array
-				const initCommands = json?.worktree?.initCommands
-				if (Array.isArray(initCommands)) {
-					return initCommands as readonly string[]
-				}
-				return []
-			}).pipe(Effect.catchAll(() => Effect.succeed([] as readonly string[])))
 
 		/**
 		 * Load persisted dev servers from disk
@@ -304,7 +273,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			portOffset: number,
 		): Effect.Effect<{ env: Record<string, string>; primaryPort: number }> =>
 			Effect.gen(function* () {
-				const portsConfig = config.devServer.ports
+				const devServerConfig = yield* appConfig.getDevServerConfig()
+				const portsConfig = devServerConfig.ports
 				const env: Record<string, string> = {}
 				let primaryPort: number | undefined
 
@@ -364,9 +334,11 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			worktreePath: string,
 		): Effect.Effect<string, DevServerError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
+				const devServerConfig = yield* appConfig.getDevServerConfig()
+
 				// If config override exists, use it
-				if (config.devServer.command) {
-					return config.devServer.command
+				if (devServerConfig.command) {
+					return devServerConfig.command
 				}
 
 				const packageJsonPath = pathService.join(worktreePath, "package.json")
@@ -431,7 +403,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			tmuxSession: string,
 		): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				const pattern = new RegExp(config.devServer.portPattern)
+				const devServerConfig = yield* appConfig.getDevServerConfig()
+				const pattern = new RegExp(devServerConfig.portPattern)
 				const portRef = yield* Ref.make<number | undefined>(undefined)
 
 				// Single poll attempt - captures port in ref and returns true if found
@@ -639,15 +612,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
-					// Load initCommands from TARGET project's config (not azedarach's config)
-					const initCommands = yield* loadProjectInitCommands(projectPath)
+					// Get initCommands and devServer config from current project
+					const worktreeConfig = yield* appConfig.getWorktreeConfig()
+					const devServerConfig = yield* appConfig.getDevServerConfig()
+					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
-						config.devServer.cwd === "."
+						devServerConfig.cwd === "."
 							? worktreePath
-							: pathService.join(worktreePath, config.devServer.cwd)
+							: pathService.join(worktreePath, devServerConfig.cwd)
 
 					yield* worktreeSession.create({
 						sessionName: tmuxSession,
@@ -760,15 +735,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
-					// Load initCommands from TARGET project's config (not azedarach's config)
-					const initCommands = yield* loadProjectInitCommands(projectPath)
+					// Get initCommands and devServer config from current project
+					const worktreeConfig = yield* appConfig.getWorktreeConfig()
+					const devServerConfig = yield* appConfig.getDevServerConfig()
+					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
-						config.devServer.cwd === "."
+						devServerConfig.cwd === "."
 							? worktreePath
-							: pathService.join(worktreePath, config.devServer.cwd)
+							: pathService.join(worktreePath, devServerConfig.cwd)
 
 					yield* worktreeSession.create({
 						sessionName: tmuxSession,

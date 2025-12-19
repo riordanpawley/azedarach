@@ -45,9 +45,9 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 
 		yield* diagnostics.trackService("OfflineService", "Offline mode decision service")
 
-		const gitConfig = appConfig.getGitConfig()
-		const prConfig = appConfig.getPRConfig()
-		const beadsConfig = appConfig.getBeadsConfig()
+		const gitConfig = yield* appConfig.getGitConfig()
+		const prConfig = yield* appConfig.getPRConfig()
+		const beadsConfig = yield* appConfig.getBeadsConfig()
 
 		/**
 		 * Helper to check if operation is enabled based on config + network

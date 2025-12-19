@@ -677,8 +677,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
-		const mergeConfig = appConfig.getMergeConfig()
-		const gitConfig = appConfig.getGitConfig()
+		const mergeConfig = yield* appConfig.getMergeConfig()
+		const gitConfig = yield* appConfig.getGitConfig()
 		const baseBranch = gitConfig.baseBranch
 
 		/**
