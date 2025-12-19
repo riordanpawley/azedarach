@@ -10,7 +10,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Duration, Effect, Option } from "effect"
+import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
 	BeadsClient,
@@ -116,6 +116,43 @@ export interface PRComment {
 	readonly path?: string // For review comments on specific files
 	readonly line?: number // For review comments on specific lines
 }
+
+// ============================================================================
+// GitHub API Response Schemas
+// ============================================================================
+
+/**
+ * Schema for GitHub PR comment author
+ */
+const GHAuthorSchema = Schema.Struct({
+	login: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR issue comment
+ */
+const GHCommentSchema = Schema.Struct({
+	author: Schema.optional(GHAuthorSchema),
+	body: Schema.optional(Schema.String),
+	createdAt: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR review
+ */
+const GHReviewSchema = Schema.Struct({
+	author: Schema.optional(GHAuthorSchema),
+	body: Schema.optional(Schema.String),
+	submittedAt: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR comments API response
+ */
+const GHPRCommentsResponseSchema = Schema.Struct({
+	comments: Schema.optional(Schema.Array(GHCommentSchema)),
+	reviews: Schema.optional(Schema.Array(GHReviewSchema)),
+})
 
 /**
  * Options for getting PR comments
@@ -1420,46 +1457,46 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// Fetch PR comments (both issue comments and review comments)
-					// Using gh pr view with --comments flag gets us a nice formatted output
-					// But for structured data, we use the JSON API
 					const commentsJson = yield* runGH(
 						["pr", "view", beadId, "--json", "comments,reviews"],
 						projectPath,
 					).pipe(Effect.catchAll(() => Effect.succeed("{}")))
 
-					try {
-						const data = JSON.parse(commentsJson)
-						const comments: PRComment[] = []
+					// Parse JSON using Effect.try
+					const parsed = yield* Effect.try({
+						try: () => JSON.parse(commentsJson) as unknown,
+						catch: () => new PRError({ message: "Failed to parse PR comments JSON" }),
+					}).pipe(Effect.catchAll(() => Effect.succeed({} as unknown)))
 
-						// Parse issue comments
-						if (data.comments && Array.isArray(data.comments)) {
-							for (const c of data.comments) {
-								comments.push({
-									author: c.author?.login ?? "unknown",
-									body: c.body ?? "",
-									createdAt: c.createdAt ?? "",
-								})
-							}
-						}
+					// Decode using Schema
+					const data = yield* Schema.decodeUnknown(GHPRCommentsResponseSchema)(parsed).pipe(
+						Effect.catchAll(() => Effect.succeed({ comments: [], reviews: [] })),
+					)
 
-						// Parse review comments (which include file/line info)
-						if (data.reviews && Array.isArray(data.reviews)) {
-							for (const review of data.reviews) {
-								// Review body (general review comment)
-								if (review.body && review.body.trim()) {
-									comments.push({
-										author: review.author?.login ?? "unknown",
-										body: review.body,
-										createdAt: review.submittedAt ?? "",
-									})
-								}
-							}
-						}
+					const comments: PRComment[] = []
 
-						return comments as readonly PRComment[]
-					} catch {
-						return [] as readonly PRComment[]
+					// Parse issue comments
+					for (const c of data.comments ?? []) {
+						comments.push({
+							author: c.author?.login ?? "unknown",
+							body: c.body ?? "",
+							createdAt: c.createdAt ?? "",
+						})
 					}
+
+					// Parse review comments (which include file/line info)
+					for (const review of data.reviews ?? []) {
+						// Review body (general review comment)
+						if (review.body?.trim()) {
+							comments.push({
+								author: review.author?.login ?? "unknown",
+								body: review.body,
+								createdAt: review.submittedAt ?? "",
+							})
+						}
+					}
+
+					return comments as readonly PRComment[]
 				}),
 		}
 	}),
