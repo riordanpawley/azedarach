@@ -24,7 +24,7 @@ import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
-import { EditorService, type SortConfig } from "./EditorService.js"
+import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import { ProjectService } from "./ProjectService.js"
 
 // ============================================================================
@@ -152,7 +152,7 @@ const sortTasks = (tasks: TaskWithSession[], sortConfig: SortConfig): TaskWithSe
 /**
  * Filter tasks by search query
  */
-const filterTasks = (tasks: TaskWithSession[], query: string): TaskWithSession[] => {
+const filterTasksByQuery = (tasks: TaskWithSession[], query: string): TaskWithSession[] => {
 	if (!query) return tasks
 	const lowerQuery = query.toLowerCase()
 	return tasks.filter((task) => {
@@ -160,6 +160,97 @@ const filterTasks = (tasks: TaskWithSession[], query: string): TaskWithSession[]
 		const idMatch = task.id.toLowerCase().includes(lowerQuery)
 		return titleMatch || idMatch
 	})
+}
+
+/**
+ * Check if a task is a child of an epic (has parent-child dependency)
+ */
+const isEpicChild = (task: TaskWithSession): boolean => {
+	if (!task.dependencies) return false
+	return task.dependencies.some((dep) => dep.dependency_type === "parent-child")
+}
+
+/**
+ * Apply FilterConfig to tasks
+ *
+ * Empty sets mean "show all" for that field.
+ * Multiple values within a field use OR logic.
+ * Different fields use AND logic.
+ */
+const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): TaskWithSession[] => {
+	return tasks.filter((task) => {
+		// Status filter (OR within set)
+		if (config.status.size > 0) {
+			const taskStatus = task.status
+			// Map the task status to FilterConfig status types (excluding tombstone)
+			if (
+				taskStatus !== "open" &&
+				taskStatus !== "in_progress" &&
+				taskStatus !== "blocked" &&
+				taskStatus !== "closed"
+			) {
+				return false
+			}
+			if (!config.status.has(taskStatus)) {
+				return false
+			}
+		}
+
+		// Priority filter (OR within set)
+		if (config.priority.size > 0) {
+			if (!config.priority.has(task.priority)) {
+				return false
+			}
+		}
+
+		// Type filter (OR within set)
+		if (config.type.size > 0) {
+			if (!config.type.has(task.issue_type)) {
+				return false
+			}
+		}
+
+		// Session filter (OR within set)
+		if (config.session.size > 0) {
+			// Map task sessionState to FilterSessionState (warning maps to idle for filtering)
+			const sessionState = task.sessionState === "warning" ? "idle" : task.sessionState
+			if (
+				sessionState !== "idle" &&
+				sessionState !== "busy" &&
+				sessionState !== "waiting" &&
+				sessionState !== "done" &&
+				sessionState !== "error" &&
+				sessionState !== "paused"
+			) {
+				return false
+			}
+			if (!config.session.has(sessionState)) {
+				return false
+			}
+		}
+
+		// Hide epic subtasks filter
+		if (config.hideEpicSubtasks && isEpicChild(task)) {
+			return false
+		}
+
+		return true
+	})
+}
+
+/**
+ * Filter tasks by search query and filter config
+ */
+const filterTasks = (
+	tasks: TaskWithSession[],
+	query: string,
+	filterConfig?: FilterConfig,
+): TaskWithSession[] => {
+	let filtered = filterTasksByQuery(tasks, query)
+	if (filterConfig) {
+		filtered = applyFilterConfig(filtered, filterConfig)
+	}
+	return filtered
 }
 
 // ============================================================================
@@ -297,10 +388,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			allTasks: ReadonlyArray<TaskWithSession>,
 			searchQuery: string,
 			sortConfig: SortConfig,
+			filterConfig: FilterConfig,
 		): TaskWithSession[][] => {
 			return COLUMNS.map((col) => {
 				const columnTasks = allTasks.filter((task) => task.status === col.status)
-				const filtered = filterTasks(columnTasks, searchQuery)
+				const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 				return sortTasks(filtered, sortConfig)
 			})
 		}
@@ -313,9 +405,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const allTasks = yield* SubscriptionRef.get(tasks)
 				const mode = yield* editorService.getMode()
 				const sortConfig = yield* editorService.getSortConfig()
+				const filterConfig = yield* editorService.getFilterConfig()
 				const searchQuery = mode._tag === "search" ? mode.query : ""
 
-				const computed = computeFilteredTasksByColumn(allTasks, searchQuery, sortConfig)
+				const computed = computeFilteredTasksByColumn(
+					allTasks,
+					searchQuery,
+					sortConfig,
+					filterConfig,
+				)
 				yield* SubscriptionRef.set(filteredTasksByColumn, computed)
 			})
 
@@ -357,11 +455,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		// Watch for EditorService changes (mode, sortConfig) and update filteredTasksByColumn
+		// Watch for EditorService changes (mode, sortConfig, filterConfig) and update filteredTasksByColumn
 		// Merge the change streams so any change triggers an update
 		const modeChanges = editorService.mode.changes
 		const sortConfigChanges = editorService.sortConfig.changes
-		const editorChanges = Stream.merge(modeChanges, sortConfigChanges)
+		const filterConfigChanges = editorService.filterConfig.changes
+		const editorChanges = Stream.merge(
+			Stream.merge(modeChanges, sortConfigChanges),
+			filterConfigChanges,
+		)
 
 		yield* Effect.forkScoped(
 			Stream.runForEach(editorChanges, () =>
@@ -495,11 +597,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			 * Get filtered and sorted tasks grouped by column
 			 *
 			 * This is the method that should be used for display and navigation,
-			 * as it applies the current search query and sort configuration.
+			 * as it applies the current search query, sort, and filter configuration.
 			 */
 			getFilteredTasksByColumn: (
 				searchQuery: string,
 				sortConfig: SortConfig,
+				filterConfig: FilterConfig,
 			): Effect.Effect<TaskWithSession[][]> =>
 				Effect.gen(function* () {
 					const allTasks = yield* SubscriptionRef.get(tasks)
@@ -507,8 +610,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return COLUMNS.map((col) => {
 						// Filter by status
 						const columnTasks = allTasks.filter((task) => task.status === col.status)
-						// Apply search filter
-						const filtered = filterTasks(columnTasks, searchQuery)
+						// Apply search and filter config
+						const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 						// Apply sorting
 						return sortTasks(filtered, sortConfig)
 					})
@@ -524,6 +627,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				taskIndex: number,
 				searchQuery: string,
 				sortConfig: SortConfig,
+				filterConfig: FilterConfig,
 			): Effect.Effect<TaskWithSession | undefined> =>
 				Effect.gen(function* () {
 					if (columnIndex < 0 || columnIndex >= COLUMNS.length) {
@@ -535,8 +639,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					// Filter by status
 					const columnTasks = allTasks.filter((task) => task.status === column.status)
-					// Apply search filter
-					const filtered = filterTasks(columnTasks, searchQuery)
+					// Apply search and filter config
+					const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 					// Apply sorting
 					const sorted = sortTasks(filtered, sortConfig)
 

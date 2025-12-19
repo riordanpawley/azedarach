@@ -9,14 +9,17 @@ import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
-import type { SortConfig, SortField } from "../../services/EditorService.js"
+import type { FilterConfig, SortConfig, SortField } from "../../services/EditorService.js"
 import {
+	activeFilterFieldAtom,
 	clearCommandAtom,
+	clearFiltersAtom,
 	clearSearchAtom,
 	commandInputAtom,
 	cycleSortAtom,
 	enterActionAtom,
 	enterCommandAtom,
+	enterFilterAtom,
 	enterGotoAtom,
 	enterJumpAtom,
 	enterSearchAtom,
@@ -24,6 +27,7 @@ import {
 	enterSortAtom,
 	exitSelectAtom,
 	exitToNormalAtom,
+	filterConfigAtom,
 	modeAtom,
 	searchQueryAtom,
 	selectedIdsAtom,
@@ -40,6 +44,15 @@ const DEFAULT_MODE = { _tag: "normal" } as const
 
 // Default sort config when loading
 const DEFAULT_SORT_CONFIG: SortConfig = { field: "session", direction: "desc" }
+
+// Default filter config when loading
+const DEFAULT_FILTER_CONFIG: FilterConfig = {
+	status: new Set(),
+	priority: new Set(),
+	type: new Set(),
+	session: new Set(),
+	hideEpicSubtasks: true,
+}
 
 /**
  * Hook for managing editor mode state
@@ -60,11 +73,13 @@ export function useEditorMode() {
 	// State - modeResult is Result-wrapped, derived atoms are plain values
 	const modeResult = useAtomValue(modeAtom)
 	const sortConfigResult = useAtomValue(sortConfigAtom)
+	const filterConfigResult = useAtomValue(filterConfigAtom)
 
 	// Derived atoms (selectedIdsAtom, etc.) now return plain values, not Result
 	const selectedIds = useAtomValue(selectedIdsAtom)
 	const searchQuery = useAtomValue(searchQueryAtom)
 	const commandInput = useAtomValue(commandInputAtom)
+	const activeFilterField = useAtomValue(activeFilterFieldAtom)
 
 	// Unwrap mode Result with default
 	const mode = Result.isSuccess(modeResult) ? modeResult.value : DEFAULT_MODE
@@ -73,6 +88,11 @@ export function useEditorMode() {
 	const sortConfig = Result.isSuccess(sortConfigResult)
 		? sortConfigResult.value
 		: DEFAULT_SORT_CONFIG
+
+	// Unwrap filterConfig Result with default
+	const filterConfig = Result.isSuccess(filterConfigResult)
+		? filterConfigResult.value
+		: DEFAULT_FILTER_CONFIG
 
 	// Action atoms
 	const [, enterSelect] = useAtom(enterSelectAtom, { mode: "promise" })
@@ -91,6 +111,8 @@ export function useEditorMode() {
 	const [, exitToNormal] = useAtom(exitToNormalAtom, { mode: "promise" })
 	const [, enterSort] = useAtom(enterSortAtom, { mode: "promise" })
 	const [, cycleSort] = useAtom(cycleSortAtom, { mode: "promise" })
+	const [, enterFilter] = useAtom(enterFilterAtom, { mode: "promise" })
+	const [, clearFilters] = useAtom(clearFiltersAtom, { mode: "promise" })
 
 	// Mode convenience checks (memoized)
 	const modeFlags = useMemo(
@@ -104,6 +126,7 @@ export function useEditorMode() {
 			isSearch: mode._tag === "search",
 			isCommand: mode._tag === "command",
 			isSort: mode._tag === "sort",
+			isFilter: mode._tag === "filter",
 			isOrchestrate: mode._tag === "orchestrate",
 		}),
 		[mode],
@@ -179,6 +202,14 @@ export function useEditorMode() {
 			cycleSort: (field: SortField) => {
 				cycleSort(field).catch(console.error)
 			},
+
+			enterFilter: () => {
+				enterFilter().catch(console.error)
+			},
+
+			clearFilters: () => {
+				clearFilters().catch(console.error)
+			},
 		}),
 		[
 			enterSelect,
@@ -197,6 +228,8 @@ export function useEditorMode() {
 			exitToNormal,
 			enterSort,
 			cycleSort,
+			enterFilter,
+			clearFilters,
 		],
 	)
 
@@ -209,6 +242,8 @@ export function useEditorMode() {
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,
+		filterConfig,
+		activeFilterField,
 
 		// Mode checks
 		...modeFlags,

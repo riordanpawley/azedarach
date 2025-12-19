@@ -172,6 +172,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "Enter sort mode",
 		action: bc.editor.enterSort(),
 	},
+	{
+		key: "f",
+		mode: "normal",
+		description: "Enter filter mode",
+		action: bc.editor.enterFilter(),
+	},
 
 	// ========================================================================
 	// Normal Mode - Actions
@@ -611,6 +617,173 @@ done
 			Effect.tap(() => bc.editor.exitToNormal()),
 			Effect.catchAll(Effect.logError),
 		),
+	},
+
+	// ========================================================================
+	// Filter Mode
+	// ========================================================================
+	// Sub-menu keys
+	{
+		key: "s",
+		mode: "filter",
+		description: "Status sub-menu",
+		action: bc.editor.setActiveFilterField("status"),
+	},
+	{
+		key: "p",
+		mode: "filter",
+		description: "Priority sub-menu",
+		action: bc.editor.setActiveFilterField("priority"),
+	},
+	{
+		key: "t",
+		mode: "filter",
+		description: "Type sub-menu",
+		action: bc.editor.setActiveFilterField("type"),
+	},
+	{
+		key: "S-s",
+		mode: "filter",
+		description: "Session sub-menu",
+		action: bc.editor.setActiveFilterField("session"),
+	},
+	// Clear filters
+	{
+		key: "c",
+		mode: "filter",
+		description: "Clear all filters",
+		action: bc.editor.clearFilters().pipe(Effect.tap(() => bc.editor.exitToNormal())),
+	},
+	// Toggle epic subtasks
+	{
+		key: "e",
+		mode: "filter",
+		description: "Toggle hide epic subtasks",
+		action: bc.editor.toggleHideEpicSubtasks(),
+	},
+	// Priority toggles (0-4)
+	{
+		key: "0",
+		mode: "filter",
+		description: "Toggle P0 filter",
+		action: bc.editor.toggleFilterPriority(0),
+	},
+	{
+		key: "1",
+		mode: "filter",
+		description: "Toggle P1 filter",
+		action: bc.editor.toggleFilterPriority(1),
+	},
+	{
+		key: "2",
+		mode: "filter",
+		description: "Toggle P2 filter",
+		action: bc.editor.toggleFilterPriority(2),
+	},
+	{
+		key: "3",
+		mode: "filter",
+		description: "Toggle P3 filter",
+		action: bc.editor.toggleFilterPriority(3),
+	},
+	{
+		key: "4",
+		mode: "filter",
+		description: "Toggle P4 filter",
+		action: bc.editor.toggleFilterPriority(4),
+	},
+	// Status toggles (o, i, b, d - first letter of each status except 'closed' uses 'd' for done)
+	{
+		key: "o",
+		mode: "filter",
+		description: "Toggle open status",
+		action: bc.editor.toggleFilterStatus("open"),
+	},
+	{
+		key: "i",
+		mode: "filter",
+		description: "Toggle in_progress status",
+		action: bc.editor.toggleFilterStatus("in_progress"),
+	},
+	{
+		key: "b",
+		mode: "filter",
+		description: "Toggle blocked status",
+		action: bc.editor.toggleFilterStatus("blocked"),
+	},
+	{
+		key: "d",
+		mode: "filter",
+		description: "Toggle closed status",
+		action: bc.editor.toggleFilterStatus("closed"),
+	},
+	// Type toggles (B, F, T, E, C - uppercase to distinguish from status)
+	{
+		key: "S-b",
+		mode: "filter",
+		description: "Toggle bug type",
+		action: bc.editor.toggleFilterType("bug"),
+	},
+	{
+		key: "S-f",
+		mode: "filter",
+		description: "Toggle feature type",
+		action: bc.editor.toggleFilterType("feature"),
+	},
+	{
+		key: "S-t",
+		mode: "filter",
+		description: "Toggle task type",
+		action: bc.editor.toggleFilterType("task"),
+	},
+	{
+		key: "S-e",
+		mode: "filter",
+		description: "Toggle epic type",
+		action: bc.editor.toggleFilterType("epic"),
+	},
+	{
+		key: "S-c",
+		mode: "filter",
+		description: "Toggle chore type",
+		action: bc.editor.toggleFilterType("chore"),
+	},
+	// Session toggles (lowercase when session sub-menu is active)
+	{
+		key: "S-i",
+		mode: "filter",
+		description: "Toggle idle session",
+		action: bc.editor.toggleFilterSession("idle"),
+	},
+	{
+		key: "S-u",
+		mode: "filter",
+		description: "Toggle busy session",
+		action: bc.editor.toggleFilterSession("busy"),
+	},
+	{
+		key: "S-w",
+		mode: "filter",
+		description: "Toggle waiting session",
+		action: bc.editor.toggleFilterSession("waiting"),
+	},
+	{
+		key: "S-d",
+		mode: "filter",
+		description: "Toggle done session",
+		action: bc.editor.toggleFilterSession("done"),
+	},
+	{
+		key: "S-x",
+		mode: "filter",
+		description: "Toggle error session",
+		action: bc.editor.toggleFilterSession("error"),
+	},
+	{
+		key: "S-p",
+		mode: "filter",
+		description: "Toggle paused session",
+		action: bc.editor.toggleFilterSession("paused"),
 	},
 
 	// ========================================================================
