@@ -81,13 +81,13 @@ export interface FilterConfig {
 /**
  * Default filter config (show all)
  */
-export const DEFAULT_FILTER_CONFIG: FilterConfig = {
-	status: new Set(),
-	priority: new Set(),
-	type: new Set(),
-	session: new Set(),
+export const DEFAULT_FILTER_CONFIG: FilterConfig = Data.struct({
+	status: new Set<IssueStatus>(),
+	priority: new Set<number>(),
+	type: new Set<IssueType>(),
+	session: new Set<FilterSessionState>(),
 	hideEpicSubtasks: true,
-}
+})
 
 /**
  * Sort configuration
@@ -379,7 +379,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					} else {
 						newSet.add(status)
 					}
-					return { ...config, status: newSet }
+					return Data.struct({ ...config, status: newSet })
 				}),
 
 			/**
@@ -393,7 +393,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					} else {
 						newSet.add(priority)
 					}
-					return { ...config, priority: newSet }
+					return Data.struct({ ...config, priority: newSet })
 				}),
 
 			/**
@@ -407,7 +407,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					} else {
 						newSet.add(issueType)
 					}
-					return { ...config, type: newSet }
+					return Data.struct({ ...config, type: newSet })
 				}),
 
 			/**
@@ -421,7 +421,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					} else {
 						newSet.add(session)
 					}
-					return { ...config, session: newSet }
+					return Data.struct({ ...config, session: newSet })
 				}),
 
 			/**
@@ -430,10 +430,11 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			toggleHideEpicSubtasks: () =>
 				SubscriptionRef.update(
 					filterConfig,
-					(config): FilterConfig => ({
-						...config,
-						hideEpicSubtasks: !config.hideEpicSubtasks,
-					}),
+					(config): FilterConfig =>
+						Data.struct({
+							...config,
+							hideEpicSubtasks: !config.hideEpicSubtasks,
+						}),
 				),
 
 			/**

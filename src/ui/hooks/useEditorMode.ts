@@ -9,7 +9,11 @@ import { Result } from "@effect-atom/atom"
 import { useAtom, useAtomValue } from "@effect-atom/atom-react"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
-import type { FilterConfig, SortConfig, SortField } from "../../services/EditorService.js"
+import {
+	DEFAULT_FILTER_CONFIG,
+	type SortConfig,
+	type SortField,
+} from "../../services/EditorService.js"
 import {
 	activeFilterFieldAtom,
 	clearCommandAtom,
@@ -44,15 +48,6 @@ const DEFAULT_MODE = { _tag: "normal" } as const
 
 // Default sort config when loading
 const DEFAULT_SORT_CONFIG: SortConfig = { field: "session", direction: "desc" }
-
-// Default filter config when loading
-const DEFAULT_FILTER_CONFIG: FilterConfig = {
-	status: new Set(),
-	priority: new Set(),
-	type: new Set(),
-	session: new Set(),
-	hideEpicSubtasks: true,
-}
 
 /**
  * Hook for managing editor mode state
