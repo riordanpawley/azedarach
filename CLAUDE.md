@@ -644,6 +644,12 @@ Skills auto-load when you edit files or mention keywords:
 **Workflow Skills:**
 - `.claude/skills/workflow/beads-tracking.skill.md` - Issue tracking workflow
 
+**Effect Skills:**
+- `.claude/skills/effect/effect-services.skill.md` - Services, layers, dependency injection
+- `.claude/skills/effect/effect-errors.skill.md` - Tagged errors, retry, timeout patterns
+- `.claude/skills/effect/effect-concurrency.skill.md` - Fibers, forking, scheduling, Ref/SubscriptionRef
+- `.claude/skills/effect/effect-resources.skill.md` - Scopes, acquireRelease, resource lifecycle
+
 ## Development Tips
 
 - **Type errors:** Always run `bun run type-check` for validation
