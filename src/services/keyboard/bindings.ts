@@ -13,6 +13,7 @@ import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
 import type { ToastService } from "../ToastService.js"
 import type { ViewService } from "../ViewService.js"
+import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
@@ -38,6 +39,7 @@ export interface BindingContext {
 	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
+	devServerHandlers: DevServerHandlersService
 	helpers: KeyboardHelpersService
 
 	// Core services for direct bindings
@@ -376,6 +378,14 @@ done
 	},
 	{
 		key: "r",
+		mode: "action",
+		description: "Toggle dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.toggleDevServer())),
+		),
+	},
+	{
+		key: "S-r",
 		mode: "action",
 		description: "Resume session",
 		action: Effect.suspend(() =>

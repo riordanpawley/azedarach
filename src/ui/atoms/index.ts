@@ -27,6 +27,14 @@ export {
 	getQueueInfoAtom,
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
+// Dev server atoms
+export {
+	devServerStateAtom,
+	devServersAtom,
+	stopDevServerAtom,
+	syncDevServerStateAtom,
+	toggleDevServerAtom,
+} from "./devServer.js"
 export type { DiagnosticsState } from "./diagnostics.js"
 
 // Diagnostics atoms

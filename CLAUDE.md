@@ -58,6 +58,24 @@ Purpose: Claude Code entry point for Azedarach development
     - **Also Right:** Use sibling `<text>` in `<box flexDirection="row">` for different colors
     - Error message: "TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances"
 
+12. **Schema Encode/Decode**: ALWAYS use `Schema.encode()` and `Schema.decodeUnknown()` for serialization:
+    - NEVER manually convert types (e.g., `{ ...state, port: state.port ?? null }`)
+    - NEVER use `JSON.stringify()` or `JSON.parse()` - use `Schema.parseJson()` wrapper instead
+    - Define the schema to handle transformations automatically
+    - Use `Schema.UndefinedOr(Schema.Number)` for optional fields
+    - Let Schema handle the type conversion between runtime and serialized forms
+    ```typescript
+    // ❌ BAD: Manual JSON and conversion
+    const parsed = JSON.parse(content)
+    const toEncodable = (state) => ({ ...state, port: state.port ?? null })
+    const json = JSON.stringify(toEncodable(state))
+
+    // ✅ GOOD: Use Schema.parseJson wrapper
+    const MySchema = Schema.parseJson(Schema.Struct({ ... }))
+    const decoded = yield* Schema.decodeUnknown(MySchema)(jsonString)
+    const json = yield* Schema.encode(MySchema)(data)  // Returns string
+    ```
+
 ## Quick Commands
 
 ```bash
