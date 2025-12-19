@@ -341,6 +341,32 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 						return taskState.value.running !== null || taskState.value.queue.length > 0
 					}),
+
+				/**
+				 * Check if ANY task has commands running or queued
+				 * Used to prevent app quit while operations are in progress
+				 */
+				isAnyBusy: (): Effect.Effect<boolean, never, never> =>
+					Effect.gen(function* () {
+						const state = yield* SubscriptionRef.get(stateRef)
+						return HashMap.reduce(
+							state,
+							false,
+							(acc, taskState) => acc || taskState.running !== null || taskState.queue.length > 0,
+						)
+					}),
+
+				/**
+				 * Get labels of all currently running operations
+				 * Used to show what's blocking app quit
+				 */
+				getRunningOperationLabels: (): Effect.Effect<readonly string[], never, never> =>
+					Effect.gen(function* () {
+						const state = yield* SubscriptionRef.get(stateRef)
+						return HashMap.reduce(state, [] as readonly string[], (acc, taskState) =>
+							taskState.running !== null ? [...acc, taskState.running.label] : acc,
+						)
+					}),
 			}
 		}),
 	},

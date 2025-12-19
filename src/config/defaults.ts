@@ -82,17 +82,19 @@ export const DEFAULT_CONFIG = {
 		continueOnFailure: true,
 		parallel: false,
 	},
-	session: {
-		command: "claude",
-		shell: getLoginShellSync(),
-		tmuxPrefix: "C-a",
-		dangerouslySkipPermissions: false,
-	},
 	git: {
 		pushBranchOnCreate: true,
 		remote: "origin",
 		branchPrefix: "az-",
 		baseBranch: "main",
+		pushEnabled: true,
+		fetchEnabled: true,
+	},
+	session: {
+		command: "claude",
+		shell: getLoginShellSync(),
+		tmuxPrefix: "C-a",
+		dangerouslySkipPermissions: false,
 	},
 	patterns: {
 		waiting: [] satisfies string[],
@@ -100,6 +102,7 @@ export const DEFAULT_CONFIG = {
 		error: [] satisfies string[],
 	},
 	pr: {
+		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
 	},
@@ -113,6 +116,22 @@ export const DEFAULT_CONFIG = {
 	notifications: {
 		bell: true,
 		system: false,
+	},
+	beads: {
+		syncEnabled: true,
+	},
+	network: {
+		autoDetect: true,
+		checkIntervalSeconds: 30,
+		checkHost: "github.com",
+	},
+	devServer: {
+		command: undefined,
+		ports: {
+			web: { default: 3000, aliases: ["PORT"] },
+		},
+		portPattern: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
+		cwd: ".",
 	},
 	projects: [],
 	defaultProject: undefined,
@@ -137,17 +156,19 @@ export interface ResolvedConfig {
 		continueOnFailure: boolean
 		parallel: boolean
 	}
-	session: {
-		command: string
-		shell: string
-		tmuxPrefix: string
-		dangerouslySkipPermissions: boolean
-	}
 	git: {
 		pushBranchOnCreate: boolean
 		remote: string
 		branchPrefix: string
 		baseBranch: string
+		pushEnabled: boolean
+		fetchEnabled: boolean
+	}
+	session: {
+		command: string
+		shell: string
+		tmuxPrefix: string
+		dangerouslySkipPermissions: boolean
 	}
 	patterns: {
 		waiting: readonly string[]
@@ -155,6 +176,7 @@ export interface ResolvedConfig {
 		error: readonly string[]
 	}
 	pr: {
+		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
 	}
@@ -167,6 +189,20 @@ export interface ResolvedConfig {
 	notifications: {
 		bell: boolean
 		system: boolean
+	}
+	beads: {
+		syncEnabled: boolean
+	}
+	network: {
+		autoDetect: boolean
+		checkIntervalSeconds: number
+		checkHost: string
+	}
+	devServer: {
+		command: string | undefined
+		ports: Readonly<Record<string, { default: number; aliases: readonly string[] }>>
+		portPattern: string
+		cwd: string
 	}
 	projects: ReadonlyArray<{
 		name: string
@@ -211,6 +247,8 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
 			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
 			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
+			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
+			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
@@ -218,6 +256,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			error: config.patterns?.error ?? DEFAULT_CONFIG.patterns.error,
 		},
 		pr: {
+			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
 		},
@@ -234,5 +273,20 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		},
 		projects: config.projects ?? DEFAULT_CONFIG.projects,
 		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
+		beads: {
+			syncEnabled: config.beads?.syncEnabled ?? DEFAULT_CONFIG.beads.syncEnabled,
+		},
+		network: {
+			autoDetect: config.network?.autoDetect ?? DEFAULT_CONFIG.network.autoDetect,
+			checkIntervalSeconds:
+				config.network?.checkIntervalSeconds ?? DEFAULT_CONFIG.network.checkIntervalSeconds,
+			checkHost: config.network?.checkHost ?? DEFAULT_CONFIG.network.checkHost,
+		},
+		devServer: {
+			command: config.devServer?.command ?? DEFAULT_CONFIG.devServer.command,
+			ports: config.devServer?.ports ?? DEFAULT_CONFIG.devServer.ports,
+			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
+			cwd: config.devServer?.cwd ?? DEFAULT_CONFIG.devServer.cwd,
+		},
 	}
 }
