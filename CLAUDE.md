@@ -25,27 +25,32 @@ Purpose: Claude Code entry point for Azedarach development
 
 6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
 
-7. **Effect Service Patterns**:
+7. **Session End - Commit Everything**: NEVER leave uncommitted changes when stopping. Before saying "done":
+   - Run `git status` to check for changes
+   - Commit all work (even partial work as "wip: ..." commit)
+   - Use `/session-end` command for full workflow (commits, beads sync, retrospective)
+
+8. **Effect Service Patterns**:
    - NEVER create global scope Effect-returning functions with service requirements (antipattern)
    - NEVER use `Effect.provide` or `Effect.provideService` inside service methods - that's wrong
    - Services grab dependencies at layer construction (`yield* SomeService`), then use them directly
    - If you need `Path.Path` operations, grab `pathService` at layer construction, then call `pathService.resolve()`, `pathService.join()`, etc. directly - don't create wrappers
    - Don't wrap one-liners in helper functions - just use the method directly
 
-8. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
+9. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
    - `node:path` → Use `Path.Path` service methods (`pathService.resolve()`, `.join()`, etc.)
    - `node:crypto` → Use `crypto.randomUUID()` (Web Crypto API, works in Bun/Node)
    - `node:child_process` → Use `@effect/platform` `Command`
    - `node:os` → Use `process.env.HOME` for homedir
 
-9. **effect-atom is a React Bridge, NOT State Management**:
+10. **effect-atom is a React Bridge, NOT State Management**:
    - State belongs in Effect Services (via `SubscriptionRef`)
    - Atoms bridge that state to React via `appRuntime.subscriptionRef()`
    - Use atoms for: parameterized derivations, cross-service composition
    - Use services for: core state, business logic, background tasks
    - See `internal-docs/effect-atom-architecture.md` for full decision matrix
 
-10. **OpenTUI Text Nesting**: NEVER nest `<text>` inside `<text>`. Use `<span>` for inline styled text:
+11. **OpenTUI Text Nesting**: NEVER nest `<text>` inside `<text>`. Use `<span>` for inline styled text:
     - `<text>` → `TextRenderable` (container, accepts: string | TextNodeRenderable | StyledText)
     - `<span>` → `SpanRenderable` → `TextNodeRenderable` (can be nested inside `<text>`)
     - **Wrong:** `<text fg="gray"><text fg="blue">→</text> Back</text>` - inner `<text>` is a `TextRenderable`, not accepted
