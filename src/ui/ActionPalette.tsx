@@ -64,6 +64,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "d": // Cleanup/Delete worktree - only if session exists
 				return sessionState !== "idle"
+			case "f": // Diff vs main - only if session has worktree (not idle)
+				return sessionState !== "idle"
 			case "D": // Delete bead - always available
 				return true
 			case "i": // Image attach - always available
@@ -154,6 +156,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Git/PR */}
+				<ActionLine keyName="f" description="diff" />
 				<ActionLine keyName="P" description="PR" />
 				<ActionLine keyName="m" description="merge" />
 				<ActionLine keyName="d" description="cleanup" />

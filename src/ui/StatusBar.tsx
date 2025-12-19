@@ -22,6 +22,7 @@ export interface StatusBarProps {
 	devServerStatus?: DevServerStatus
 	/** Dev server port (if detected) for currently selected bead */
 	devServerPort?: number
+	projectName?: string
 }
 
 /**
@@ -93,6 +94,16 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "u", action: "Updated" },
 		{ key: "Esc", action: "Cancel" },
 	],
+	filter: [
+		{ key: "s", action: "Status" },
+		{ key: "p", action: "Priority" },
+		{ key: "t", action: "Type" },
+		{ key: "S", action: "Session" },
+		{ key: "e", action: "Epic" },
+		{ key: "c", action: "Clear" },
+		{ key: "0-4", action: "P0-P4" },
+		{ key: "Esc", action: "Cancel" },
+	],
 	orchestrate: [
 		{ key: "jk", action: "Nav" },
 		{ key: "Space", action: "Toggle" },
@@ -145,6 +156,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.mauve
 			case "sort":
 				return theme.teal
+			case "filter":
+				return theme.lavender
 			case "command":
 				return theme.pink
 			default:
@@ -167,6 +180,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SEL"
 			case "sort":
 				return "SRT"
+			case "filter":
+				return "FLT"
 			case "command":
 				return "CMD"
 			default:
@@ -209,9 +224,10 @@ export const StatusBar = (props: StatusBarProps) => {
 	const modeLabel = getModeLabel()
 
 	// Calculate available width for keybindings
-	// Fixed elements: border(2) + padding(2) + "azedarach"(9) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
+	// Fixed elements: border(2) + padding(2) + project name(~10) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
 	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12)
-	const fixedLeftWidth = 25
+	const projectNameWidth = (props.projectName ?? "azedarach").length
+	const fixedLeftWidth = 16 + projectNameWidth
 	const fixedRightWidth = 40 // Approximate, includes stats and potential VC status
 	const modeDisplayWidth =
 		shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
@@ -245,7 +261,7 @@ export const StatusBar = (props: StatusBarProps) => {
 			<box flexDirection="row" gap={2} width="100%">
 				{/* Project name and connection status - left side */}
 				<text fg={theme.text} attributes={ATTR_BOLD}>
-					azedarach
+					{props.projectName ?? "azedarach"}
 				</text>
 				<text fg={connIndicator.color}>{connIndicator.icon}</text>
 

@@ -36,7 +36,7 @@ export const toastsAtom = appRuntime.subscriptionRef(
  *        await showToast({ type: "success", message: "Task completed!" })
  */
 export const showToastAtom = appRuntime.fn(
-	({ type, message }: { type: "success" | "error" | "info"; message: string }) =>
+	({ type, message }: { type: "success" | "error" | "info" | "warning"; message: string }) =>
 		Effect.gen(function* () {
 			const toast = yield* ToastService
 			yield* toast.show(type, message)
@@ -132,4 +132,23 @@ export const popOverlayAtom = appRuntime.fn(() =>
 		// OverlayService.pop() now handles clearing attachments for detail/imageAttach overlays
 		yield* overlayService.pop()
 	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+// ============================================================================
+// Scroll Atoms
+// ============================================================================
+
+/**
+ * Detail scroll command atom - subscribes to scroll commands for the detail panel
+ *
+ * Each emission triggers a scroll action in the DetailPanel component.
+ * The timestamp ensures each command is unique and triggers useEffect.
+ *
+ * Usage: const scrollCommand = useAtomValue(detailScrollAtom)
+ */
+export const detailScrollAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return overlay.scrollCommand
+	}),
 )

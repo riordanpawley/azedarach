@@ -14,6 +14,7 @@ export type SessionState =
 	| "done" // Task completed successfully
 	| "error" // Task failed
 	| "paused" // Session paused
+	| "warning" // Session started but with issues (e.g., initCommands failed)
 
 /**
  * Agent workflow phase
@@ -87,6 +88,7 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 	done: "✅",
 	error: "❌",
 	paused: "⏸️",
+	warning: "⚠️",
 }
 
 /**

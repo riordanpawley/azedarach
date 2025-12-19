@@ -1,13 +1,13 @@
 /**
  * Mode Service Atoms
  *
- * Handles editor mode state: normal, select, goto, jump, action, search, command, sort, orchestrate.
+ * Handles editor mode state: normal, select, goto, jump, action, search, command, sort, filter, orchestrate.
  */
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, type Record } from "effect"
 import { ModeService } from "../../atoms/runtime.js"
-import type { OrchestrationTask, SortField } from "../../services/EditorService.js"
+import type { FilterField, OrchestrationTask, SortField } from "../../services/EditorService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -291,6 +291,71 @@ export const cycleSortAtom = appRuntime.fn((field: SortField) =>
 	Effect.gen(function* () {
 		const editor = yield* ModeService
 		yield* editor.cycleSort(field)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+// ============================================================================
+// Filter Mode Atoms
+// ============================================================================
+
+/**
+ * Filter configuration atom - subscribes to ModeService filterConfig changes
+ *
+ * Usage: const filterConfig = useAtomValue(filterConfigAtom)
+ */
+export const filterConfigAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		return editor.filterConfig
+	}),
+)
+
+/**
+ * Active filter field atom - derived from modeAtom
+ *
+ * Usage: const activeFilterField = useAtomValue(activeFilterFieldAtom)
+ */
+export const activeFilterFieldAtom = Atom.readable((get): FilterField | null => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return null
+	const mode = modeResult.value
+	return mode._tag === "filter" ? mode.activeField : null
+})
+
+/**
+ * Check if currently in filter mode
+ *
+ * Usage: const isFilter = useAtomValue(isFilterAtom)
+ */
+export const isFilterAtom = Atom.readable((get) => {
+	const modeResult = get(modeAtom)
+	if (!Result.isSuccess(modeResult)) return false
+	return modeResult.value._tag === "filter"
+})
+
+/**
+ * Enter filter mode
+ *
+ * Usage: const [, enterFilter] = useAtom(enterFilterAtom, { mode: "promise" })
+ *        await enterFilter()
+ */
+export const enterFilterAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.enterFilter()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
+ * Clear all filters
+ *
+ * Usage: const [, clearFilters] = useAtom(clearFiltersAtom, { mode: "promise" })
+ *        await clearFilters()
+ */
+export const clearFiltersAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const editor = yield* ModeService
+		yield* editor.clearFilters()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

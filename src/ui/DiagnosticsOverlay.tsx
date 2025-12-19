@@ -3,7 +3,7 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import type { FiberStatus } from "../services/DiagnosticsService.js"
+import type { DiagnosticSeverity, FiberStatus } from "../services/DiagnosticsService.js"
 import { diagnosticsAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
@@ -55,6 +55,38 @@ const healthColor = (status: "healthy" | "degraded" | "unhealthy"): string => {
 			return theme.red
 		default:
 			return theme.subtext0
+	}
+}
+
+/**
+ * Get color for event severity
+ */
+const severityColor = (severity: DiagnosticSeverity): string => {
+	switch (severity) {
+		case "info":
+			return theme.blue
+		case "warning":
+			return theme.yellow
+		case "error":
+			return theme.red
+		default:
+			return theme.subtext0
+	}
+}
+
+/**
+ * Get icon for event severity
+ */
+const severityIcon = (severity: DiagnosticSeverity): string => {
+	switch (severity) {
+		case "info":
+			return "ℹ"
+		case "warning":
+			return "⚠"
+		case "error":
+			return "✗"
+		default:
+			return "•"
 	}
 }
 
@@ -133,6 +165,41 @@ const FiberRow = ({
 )
 
 /**
+ * Diagnostic event row
+ */
+const EventRow = ({
+	severity,
+	source,
+	message,
+	details,
+	timestamp,
+}: {
+	severity: DiagnosticSeverity
+	source: string
+	message: string
+	details?: string
+	timestamp: Date
+}) => (
+	<box flexDirection="column">
+		<box flexDirection="row">
+			<text fg={severityColor(severity)}>{severityIcon(severity)}</text>
+			<text fg={theme.text}>{` [${source}] `}</text>
+			<text fg={severityColor(severity)}>{message}</text>
+			<text fg={theme.subtext1}>{` (${formatRelativeTime(timestamp)})`}</text>
+		</box>
+		{details && (
+			<box flexDirection="column" paddingLeft={2}>
+				{details.split("\n").map((line) => (
+					<text key={line} fg={theme.subtext0}>
+						{line}
+					</text>
+				))}
+			</box>
+		)}
+	</box>
+)
+
+/**
  * DiagnosticsOverlay component
  *
  * Displays a centered modal overlay with system diagnostics including:
@@ -143,9 +210,10 @@ const FiberRow = ({
 export const DiagnosticsOverlay = () => {
 	const diagnosticsResult = useAtomValue(diagnosticsAtom)
 
-	// Handle loading/error states - extract fibers and services with defaults
+	// Handle loading/error states - extract fibers, services, and events with defaults
 	const fibers = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.fibers : []
 	const services = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.services : []
+	const events = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.events : []
 
 	return (
 		<box
@@ -215,6 +283,27 @@ export const DiagnosticsOverlay = () => {
 							error={fiber.error}
 						/>
 					))
+				)}
+				<text> </text>
+
+				{/* Events section - show warnings/errors from system */}
+				<SectionHeader title="Recent Events:" />
+				{events.length === 0 ? (
+					<text fg={theme.subtext0}>{"  No events"}</text>
+				) : (
+					events
+						.slice(-10) // Show last 10 events
+						.reverse() // Most recent first
+						.map((event) => (
+							<EventRow
+								key={event.id}
+								severity={event.severity}
+								source={event.source}
+								message={event.message}
+								details={event.details}
+								timestamp={event.timestamp}
+							/>
+						))
 				)}
 				<text> </text>
 

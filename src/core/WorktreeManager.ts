@@ -297,6 +297,37 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
 		/**
+		 * Copy .direnv directory to a new worktree
+		 *
+		 * The .direnv directory contains Nix flake evaluation caches. Since it's
+		 * gitignored, it's not copied when git creates a worktree, forcing each
+		 * new worktree to re-evaluate the flake from scratch. Copying this directory
+		 * saves significant startup time.
+		 */
+		const copyDirenvCache = (
+			sourceProjectPath: string,
+			targetWorktreePath: string,
+		): Effect.Effect<void, never, never> =>
+			Effect.gen(function* () {
+				const sourceDirenv = pathService.join(sourceProjectPath, ".direnv")
+				const targetDirenv = pathService.join(targetWorktreePath, ".direnv")
+
+				// Check if source .direnv exists
+				const sourceExists = yield* fs.exists(sourceDirenv)
+				if (!sourceExists) {
+					yield* Effect.logDebug("No .direnv directory to copy")
+					return
+				}
+
+				// Copy entire directory recursively
+				yield* fs.copy(sourceDirenv, targetDirenv)
+				yield* Effect.log("Copied .direnv cache to worktree")
+			}).pipe(
+				// Don't fail worktree creation if .direnv copy fails - just log and continue
+				Effect.catchAll((error) => Effect.logWarning(`Failed to copy .direnv cache: ${error}`)),
+			)
+
+		/**
 		 * Copy Claude's local settings to a new worktree and inject hook configuration
 		 *
 		 * Claude Code stores personal permission grants in .claude/settings.local.json,
@@ -545,6 +576,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					// Copy Claude's local settings and inject hook configuration
 					yield* copyClaudeLocalSettings(projectPath, worktreePath, beadId)
+
+					// Copy .direnv cache to avoid Nix flake re-evaluation
+					yield* copyDirenvCache(projectPath, worktreePath)
 
 					// Refresh cache and look for the new worktree with retry logic.
 					// Git worktree list can sometimes miss newly created worktrees due to
