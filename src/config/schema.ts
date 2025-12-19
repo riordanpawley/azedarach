@@ -104,6 +104,38 @@ const PRConfigSchema = Schema.Struct({
 })
 
 /**
+ * Merge workflow configuration
+ *
+ * Controls post-merge validation behavior (Space+m).
+ */
+const MergeConfigSchema = Schema.Struct({
+	/**
+	 * Commands to run after merge to validate the result
+	 * All commands must pass for merge to be considered successful
+	 * Default: ["bun run type-check"]
+	 */
+	validateCommands: Schema.optional(Schema.Array(Schema.String)),
+
+	/**
+	 * Command to run when validation fails to attempt auto-fix
+	 * Default: "bun run fix"
+	 */
+	fixCommand: Schema.optional(Schema.String),
+
+	/**
+	 * Maximum number of fix attempts before giving up
+	 * Default: 2
+	 */
+	maxFixAttempts: Schema.optional(Schema.Number),
+
+	/**
+	 * Start a Claude session to fix issues if auto-fix fails
+	 * Default: true
+	 */
+	startClaudeOnFailure: Schema.optional(Schema.Boolean),
+})
+
+/**
  * Notification configuration
  *
  * Controls how users are notified of session state changes.
@@ -157,6 +189,9 @@ export const AzedarachConfigSchema = Schema.Struct({
 	/** PR workflow configuration */
 	pr: Schema.optional(PRConfigSchema),
 
+	/** Merge workflow configuration */
+	merge: Schema.optional(MergeConfigSchema),
+
 	/** Notification configuration */
 	notifications: Schema.optional(NotificationsConfigSchema),
 
@@ -191,6 +226,9 @@ export type PatternsConfig = Schema.Schema.Type<typeof PatternsConfigSchema>
 
 /** PR config section type */
 export type PRConfig = Schema.Schema.Type<typeof PRConfigSchema>
+
+/** Merge config section type */
+export type MergeConfig = Schema.Schema.Type<typeof MergeConfigSchema>
 
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>

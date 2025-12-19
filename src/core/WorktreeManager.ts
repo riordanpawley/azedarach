@@ -13,7 +13,7 @@
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Ref, type Scope } from "effect"
+import { Data, Effect, Ref, Schedule, type Scope } from "effect"
 import { deepMerge, generateHookConfig } from "./hooks.js"
 
 // ============================================================================
@@ -436,30 +436,57 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// Copy Claude's local settings and inject hook configuration
 					yield* copyClaudeLocalSettings(projectPath, worktreePath, beadId)
 
-					// Refresh cache to get the new worktree info
-					yield* refreshWorktrees(projectPath)
-					const updated = yield* Ref.get(worktreesRef)
-					const newWorktree = updated.get(beadId)
+					// Refresh cache and look for the new worktree with retry logic.
+					// Git worktree list can sometimes miss newly created worktrees due to
+					// filesystem sync timing issues, especially on macOS APFS. We retry
+					// a few times with short delays to handle this race condition.
+					const findNewWorktree = Effect.gen(function* () {
+						yield* refreshWorktrees(projectPath)
+						const updated = yield* Ref.get(worktreesRef)
+						const newWorktree = updated.get(beadId)
 
-					if (!newWorktree) {
-						// Log diagnostic info to help debug this issue
-						const foundBeadIds = Array.from(updated.keys())
-						yield* Effect.logError("Worktree created but not found in cache", {
-							beadId,
-							worktreePath,
-							projectPath,
-							foundBeadIds,
-							cacheSize: updated.size,
-						})
-						return yield* Effect.fail(
-							new GitError({
-								message: `Worktree created but not found in list. Looking for: ${beadId}, found: [${foundBeadIds.join(", ")}]`,
-								command: `git worktree add ${worktreePath} ${beadId}`,
-							}),
-						)
-					}
+						if (!newWorktree) {
+							const foundBeadIds = Array.from(updated.keys())
+							return yield* Effect.fail({
+								_tag: "NotFound" as const,
+								foundBeadIds,
+								cacheSize: updated.size,
+							})
+						}
+						return newWorktree
+					})
 
-					return newWorktree
+					// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
+					const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
+
+					const result = yield* findNewWorktree.pipe(
+						Effect.retry({
+							schedule: retrySchedule,
+							while: (e) => e._tag === "NotFound",
+						}),
+						Effect.catchIf(
+							(e): e is { _tag: "NotFound"; foundBeadIds: string[]; cacheSize: number } =>
+								"_tag" in e && e._tag === "NotFound",
+							(e) => {
+								// All retries exhausted, log and fail with descriptive error
+								Effect.logError("Worktree created but not found in cache after retries", {
+									beadId,
+									worktreePath,
+									projectPath,
+									foundBeadIds: e.foundBeadIds,
+									cacheSize: e.cacheSize,
+								})
+								return Effect.fail(
+									new GitError({
+										message: `Worktree created but not found in list after retries. Looking for: ${beadId}, found: [${e.foundBeadIds.join(", ")}]`,
+										command: `git worktree add ${worktreePath} ${beadId}`,
+									}),
+								)
+							},
+						),
+					)
+
+					return result
 				}),
 
 			remove: (options: { beadId: string; projectPath: string }) =>

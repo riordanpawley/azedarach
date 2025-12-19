@@ -324,6 +324,12 @@ const ERROR_FORMATTERS: Record<
 		category: "pr",
 	}),
 
+	TypeCheckError: (error) => ({
+		message: `Type errors after merging ${error.beadId}`,
+		suggestion: "Try: Claude session started to fix. Run 'bun run type-check' after fixing",
+		category: "pr",
+	}),
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Session Errors
 	// ─────────────────────────────────────────────────────────────────────────

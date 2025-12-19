@@ -35,11 +35,8 @@ recover_issue() {
     return 1
   fi
 
-  # Skip if already tombstone in source
-  if [ "$status" = "tombstone" ]; then
-    echo "  Skipping (already tombstone in source): $id"
-    return 1
-  fi
+  # Note: tombstone check is now done BEFORE calling this function
+  # so we can search git history for a non-tombstone version
 
   # Apply recovery
   if [ "$status" = "closed" ]; then
@@ -66,16 +63,22 @@ recover_issue() {
 for id in $tombstoned; do
   echo "Checking $id..."
 
-  # Strategy 1: Try current JSONL
+  # Strategy 1: Try current JSONL (but only if it's not a tombstone)
   jsonl_line=$(jq -c "select(.id == \"$id\")" .beads/issues.jsonl 2>/dev/null | head -1)
 
   if [ -n "$jsonl_line" ]; then
-    if recover_issue "$id" "$jsonl_line"; then
-      ((recovered++)) || true
-    else
-      ((skipped++)) || true
+    jsonl_status=$(echo "$jsonl_line" | jq -r '.status')
+    if [ "$jsonl_status" != "tombstone" ]; then
+      # JSONL has a non-tombstone version, use it
+      if recover_issue "$id" "$jsonl_line"; then
+        ((recovered++)) || true
+      else
+        ((skipped++)) || true
+      fi
+      continue
     fi
-    continue
+    # JSONL has tombstone - fall through to git history search
+    echo "  JSONL has tombstone, searching git history..."
   fi
 
   # Strategy 2: Search git history

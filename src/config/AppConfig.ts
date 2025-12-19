@@ -62,6 +62,9 @@ export interface AppConfigService {
 	/** Get PR configuration section */
 	readonly getPRConfig: () => ResolvedConfig["pr"]
 
+	/** Get merge configuration section */
+	readonly getMergeConfig: () => ResolvedConfig["merge"]
+
 	/** Get notifications configuration section */
 	readonly getNotificationsConfig: () => ResolvedConfig["notifications"]
 }
@@ -317,6 +320,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getSessionConfig: () => config.session,
 			getPatternsConfig: () => config.patterns,
 			getPRConfig: () => config.pr,
+			getMergeConfig: () => config.merge,
 			getNotificationsConfig: () => config.notifications,
 		}
 	}),

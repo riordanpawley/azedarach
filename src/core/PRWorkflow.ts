@@ -11,6 +11,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import {
 	BeadsClient,
 	type BeadsError,
@@ -146,6 +147,16 @@ export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
 	readonly message: string
 }> {}
 
+/**
+ * Error when type-check fails after merge
+ * This indicates the merged code has type errors that need fixing
+ */
+export class TypeCheckError extends Data.TaggedError("TypeCheckError")<{
+	readonly beadId: string
+	readonly message: string
+	readonly output: string
+}> {}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -264,6 +275,7 @@ export interface PRWorkflowService {
 		void,
 		| PRError
 		| MergeConflictError
+		| TypeCheckError
 		| GitError
 		| NotAGitRepoError
 		| SessionError
@@ -318,11 +330,66 @@ export interface PRWorkflowService {
 		beadId: string
 		projectPath: string
 	}) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Check for uncommitted changes in the worktree
+	 *
+	 * Detects modified, added, deleted, or untracked files using `git status --porcelain`.
+	 * Used to warn users before merge operations when autostash is enabled,
+	 * since autostash conflicts can be hard to recover from.
+	 *
+	 * @example
+	 * ```ts
+	 * const result = yield* prWorkflow.checkUncommittedChanges({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * if (result.hasUncommittedChanges) {
+	 *   // Show warning or block operation
+	 * }
+	 * ```
+	 */
+	readonly checkUncommittedChanges: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<
+		{ hasUncommittedChanges: boolean; changedFiles: readonly string[] },
+		PRError | GitError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
 // Implementation Helpers
 // ============================================================================
+
+/**
+ * Run a shell command and return success/failure with output
+ *
+ * Used for post-merge validation and fix commands.
+ */
+const runShellCommand = (
+	commandStr: string,
+	cwd: string,
+): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		// Split command into program and args
+		const parts = commandStr.split(" ")
+		const [program, ...args] = parts
+		if (!program) {
+			return { success: false, output: "Empty command" }
+		}
+
+		const command = Command.make(program, ...args).pipe(Command.workingDirectory(cwd))
+		const result = yield* Effect.all({
+			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
+			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
+		})
+		return {
+			success: result.exitCode === 0,
+			output: result.output,
+		}
+	})
 
 /**
  * Execute a git command and return stdout
@@ -458,6 +525,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		SessionManager.Default,
 		TmuxService.Default,
 		FileLockManager.Default,
+		AppConfig.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -465,6 +533,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const fileLockManager = yield* FileLockManager
+		const appConfig = yield* AppConfig
+		const mergeConfig = appConfig.getMergeConfig()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -647,112 +717,119 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 1. Sync beads in worktree (bd sync --from-main) BEFORE stopping session
-					// Use lock to prevent races with daemon or other sessions
-					yield* withSyncLock(
-						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
-					)
+					// === STRATEGY: Exclude JSONL from git merge, handle beads separately ===
+					// The .beads/issues.jsonl file causes most merge conflicts because:
+					// 1. It's line-delimited JSON where line order can change
+					// 2. Different beads on same line numbers = text conflict
+					// 3. The bd merge driver (if configured) has known bugs with 3-way merge
+					//
+					// Solution: Use git merge with -X ours for .beads/ paths, then reconcile
+					// beads separately using bd sync which handles JSONL semantically.
+
+					// 1. Stop any running session first (before we modify git state)
+					yield* sessionManager
+						.stop(beadId)
+						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
+					yield* tmuxService
+						.killSession(beadId)
+						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)))
 
 					// 2. Stage and commit any uncommitted changes in worktree
-					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+					yield* runGit(["add", "-A"], worktree.path).pipe(
+						Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
+					)
 					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
 						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 					)
 
-					// 3. Fetch main and merge INTO worktree first to catch conflicts early
-					// This ensures any conflicts are resolved in the worktree context,
-					// where Claude can fix them before we merge to main.
-					yield* runGit(["fetch", "origin", "main"], worktree.path).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if offline or no remote
-					)
+					// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
+					// We only care about conflicts in actual code files, not .beads/
+					const mergeTreeResult = yield* Effect.gen(function* () {
+						const command = Command.make(
+							"git",
+							"merge-tree",
+							"--write-tree",
+							"--name-only",
+							"main",
+							beadId,
+						).pipe(Command.workingDirectory(projectPath))
 
-					// Try to merge main into the worktree
-					const mainMergeResult = yield* runGit(
-						["merge", "origin/main", "-m", `Merge main into ${beadId}`],
-						worktree.path,
-					).pipe(
-						Effect.map(() => ({ hasConflicts: false, conflictOutput: "" })),
-						Effect.catchAll((e) => {
-							const isConflict =
-								e.stderr?.includes("CONFLICT") ||
-								e.stderr?.includes("Automatic merge failed") ||
-								e.message.includes("CONFLICT") ||
-								e.message.includes("Automatic merge failed")
-							if (isConflict) {
-								return Effect.succeed({
-									hasConflicts: true,
-									conflictOutput: e.stderr || e.message,
-								})
-							}
-							// Non-conflict error - could be "Already up to date" which is fine
-							if (e.message.includes("Already up to date")) {
-								return Effect.succeed({ hasConflicts: false, conflictOutput: "" })
-							}
-							// Real error
-							return Effect.fail(e)
-						}),
-					)
-
-					if (mainMergeResult.hasConflicts) {
-						// Get list of conflicted files
-						const conflictedFiles = yield* runGit(
-							["diff", "--name-only", "--diff-filter=U"],
-							worktree.path,
-						).pipe(
-							Effect.map((output) =>
-								output
-									.trim()
-									.split("\n")
-									.filter((f) => f.length > 0),
+						const exitCode = yield* Command.exitCode(command).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
 							),
-							Effect.catchAll(() => Effect.succeed([] as string[])),
 						)
 
-						// Check if there's a running Claude session we can ask to resolve
-						const hasSession = yield* tmuxService.hasSession(beadId)
-
-						if (hasSession) {
-							// Send a prompt to Claude asking it to resolve conflicts
-							const fileList = conflictedFiles.join(", ") || "unknown files"
-							const prompt = `There are merge conflicts that need to be resolved before this branch can be merged to main. Please resolve the conflicts in these files: ${fileList}. After resolving, stage and commit the merge resolution.`
-							yield* tmuxService.sendKeys(beadId, prompt).pipe(Effect.catchAll(() => Effect.void))
-
-							// Return with a special error that tells the user what happened
-							return yield* Effect.fail(
-								new MergeConflictError({
-									beadId,
-									branch: beadId,
-									message: `Conflicts detected. Claude has been asked to resolve: ${fileList}. Retry merge after resolution.`,
-								}),
-							)
-						} else {
-							// No session running - start one with a prompt to resolve conflicts
-							const fileList = conflictedFiles.join(", ") || "unknown files"
-							const resolvePrompt = `There are merge conflicts that need to be resolved before this branch can be merged to main. Please resolve the conflicts in these files: ${fileList}. After resolving, stage and commit the merge resolution.`
-
-							yield* sessionManager
-								.start({
-									beadId,
-									projectPath,
-									initialPrompt: resolvePrompt,
-								})
-								.pipe(Effect.catchAll(() => Effect.void))
-
-							return yield* Effect.fail(
-								new MergeConflictError({
-									beadId,
-									branch: beadId,
-									message: `Conflicts detected. Started Claude session to resolve: ${fileList}. Retry merge after resolution.`,
-								}),
-							)
+						if (exitCode === 0) {
+							return { hasConflicts: false, conflictingFiles: [] as string[] }
 						}
+
+						// Get conflicting files
+						const output = yield* runGit(
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							projectPath,
+						).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+									Effect.map(() => ""),
+								),
+							),
+						)
+
+						const lines = output.trim().split("\n")
+						const conflictingFiles = lines
+							.slice(1)
+							.filter((f) => f.length > 0)
+							// Filter OUT .beads/ files - we handle those separately
+							.filter((f) => !f.startsWith(".beads/"))
+
+						return {
+							hasConflicts: conflictingFiles.length > 0,
+							conflictingFiles,
+						}
+					})
+
+					// 4. If there are real code conflicts (not .beads/), ask Claude to resolve
+					if (mergeTreeResult.hasConflicts) {
+						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+						// Start merge in worktree so Claude can resolve
+						yield* runGit(["merge", "main", "-m", `Merge main into ${beadId}`], worktree.path).pipe(
+							Effect.catchAll(() => Effect.void),
+						) // Will fail with conflicts, that's expected
+
+						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+
+						const sessionStarted = yield* sessionManager
+							.start({
+								beadId,
+								projectPath,
+								initialPrompt: resolvePrompt,
+							})
+							.pipe(
+								Effect.map(() => true),
+								Effect.catchAll((e) =>
+									Effect.logError(
+										`Failed to start Claude session for conflict resolution: ${e}`,
+									).pipe(Effect.map(() => false)),
+								),
+							)
+
+						const message = sessionStarted
+							? `Code conflicts detected in: ${fileList}. Started Claude session to resolve. Retry merge after resolution.`
+							: `Code conflicts detected in: ${fileList}. Failed to start Claude - resolve manually in worktree, then retry merge.`
+
+						return yield* Effect.fail(
+							new MergeConflictError({
+								beadId,
+								branch: beadId,
+								message,
+							}),
+						)
 					}
 
-					// 4. Stop any running session now that worktree is ready
-					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
-					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
-
-					// 5. Switch to main branch in main repo
+					// 5. No code conflicts - safe to merge
+					// Switch to main branch in main repo
 					yield* runGit(["checkout", "main"], projectPath).pipe(
 						Effect.mapError(
 							(e) =>
@@ -763,22 +840,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						),
 					)
 
-					// 6. Merge branch with --no-ff (should be clean since we already merged main into branch)
+					// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
+					// This ensures .beads/issues.jsonl from main is preserved during merge
 					const mergeMessage = `Merge ${beadId}: ${bead.title}`
-					yield* runGit(["merge", beadId, "--no-ff", "-m", mergeMessage], projectPath).pipe(
+					yield* runGit(
+						["merge", beadId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+						projectPath,
+					).pipe(
 						Effect.mapError((e) => {
-							// Check if it's a merge conflict (shouldn't happen after step 3)
-							if (
-								e.stderr?.includes("CONFLICT") ||
-								e.stderr?.includes("Automatic merge failed") ||
-								e.message.includes("CONFLICT") ||
-								e.message.includes("Automatic merge failed")
-							) {
+							// If merge still fails, report conflict or error
+							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
 								return new MergeConflictError({
 									beadId,
 									branch: beadId,
-									message:
-										"Unexpected merge conflict. Resolve manually and run: git merge --continue",
+									message: `Merge conflict. Resolve manually: git checkout main && git merge ${beadId}`,
 								})
 							}
 							return new GitError({
@@ -789,46 +864,158 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}),
 					)
 
-					// 6b. Re-import beads from merged JSONL to recover any beads incorrectly
-					// removed by the bd merge driver. The merge driver uses 3-way merge semantics
-					// which can delete beads that exist in main but not in the branch.
-					// Use lock for import+recovery to prevent races
+					// 7. Sync beads AFTER merge to reconcile any bead changes from branch
+					// This imports beads from the branch that might have been excluded by -X ours
 					yield* withSyncLock(
 						Effect.gen(function* () {
+							// Import beads from the merged JSONL
 							yield* beadsClient
 								.syncImportOnly(projectPath)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to import beads after merge: ${e}`),
+									),
+								)
 
-							// 6c. Recover tombstoned issues as fallback - syncImportOnly doesn't fix
-							// issues that were incorrectly tombstoned (see az-zby for bug details)
+							// Recover any tombstoned issues
 							yield* beadsClient
 								.recoverTombstones(projectPath)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
+									),
+								)
+
+							// Full sync to commit any bead changes
+							yield* beadsClient
+								.sync(projectPath)
+								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
 						}),
 					)
 
-					// 7. Remove worktree directory
+					// 7.5. Run post-merge validation (configurable via .azedarach.json)
+					// Only runs if merge.validateCommands is configured
+					if (mergeConfig.validateCommands.length > 0) {
+						yield* Effect.gen(function* () {
+							const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
+								mergeConfig
+
+							/**
+							 * Run all validation commands and return first failure
+							 */
+							const runValidation = (): Effect.Effect<
+								{ success: boolean; output: string; failedCommand?: string },
+								never,
+								CommandExecutor.CommandExecutor
+							> =>
+								Effect.gen(function* () {
+									for (const cmd of validateCommands) {
+										yield* Effect.log(`Running: ${cmd}`)
+										const result = yield* runShellCommand(cmd, projectPath)
+										if (!result.success) {
+											return { success: false, output: result.output, failedCommand: cmd }
+										}
+									}
+									return { success: true, output: "" }
+								})
+
+							// Initial validation
+							let lastResult = yield* runValidation()
+							if (lastResult.success) {
+								yield* Effect.log("Post-merge validation passed")
+								return
+							}
+
+							// Try fix attempts if fixCommand is configured
+							if (fixCommand) {
+								for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
+									yield* Effect.log(
+										`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
+									)
+									yield* runShellCommand(fixCommand, projectPath)
+
+									lastResult = yield* runValidation()
+									if (lastResult.success) {
+										yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
+
+										// Commit the fixes
+										yield* runGit(["add", "-A"], projectPath).pipe(
+											Effect.catchAll(() => Effect.void),
+										)
+										yield* runGit(
+											["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+											projectPath,
+										).pipe(Effect.catchAll(() => Effect.void))
+
+										return
+									}
+								}
+							}
+
+							// Still failing after all fix attempts
+							yield* Effect.log("Validation still failing after auto-fix attempts")
+
+							// Commit any partial fixes
+							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* runGit(
+								["commit", "-m", `wip: partial fix after merging ${beadId}`],
+								projectPath,
+							).pipe(Effect.catchAll(() => Effect.void))
+
+							// Start Claude session if configured
+							if (startClaudeOnFailure) {
+								const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
+								const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
+
+								yield* sessionManager
+									.start({
+										beadId,
+										projectPath,
+										initialPrompt: fixPrompt,
+									})
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
+										),
+									)
+							}
+
+							return yield* Effect.fail(
+								new TypeCheckError({
+									beadId,
+									message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
+									output: lastResult.output,
+								}),
+							)
+						})
+					}
+
+					// 8. Remove worktree directory
 					yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 8. Delete local branch
+					// 9. Delete local branch
 					yield* runGit(["branch", "-d", beadId], projectPath).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if already deleted
+						Effect.catchAll(() => Effect.void),
 					)
 
-					// 9. Close bead issue BEFORE pushing (so status is included in push)
-					// This fixes az-o5m9: merged tasks being left in in_progress status
+					// 10. Close bead issue
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${beadId}: ${e}`)),
+							)
 
-						// Sync the closed status to JSONL and commit it
 						yield* withSyncLock(
-							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+							beadsClient
+								.sync(projectPath)
+								.pipe(
+									Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
+								),
 						)
 					}
 
-					// 10. Push to origin (optional) - now includes the closed status
+					// 11. Push to origin
 					if (pushToOrigin) {
 						yield* runGit(["push", "origin", "main"], projectPath).pipe(
 							Effect.mapError(
@@ -956,6 +1143,41 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								}),
 						),
 					)
+				}),
+
+			checkUncommittedChanges: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// Run git status --porcelain to get changed files
+					// This is faster than git status and easier to parse
+					// Format: XY filename (where X=index status, Y=worktree status)
+					const output = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+
+					// Parse output - each non-empty line is a changed file
+					const changedFiles = output
+						.trim()
+						.split("\n")
+						.filter((line) => line.length > 0)
+						.map((line) => line.slice(3)) // Remove "XY " prefix to get filename
+
+					return {
+						hasUncommittedChanges: changedFiles.length > 0,
+						changedFiles,
+					}
 				}),
 		}
 	}),
