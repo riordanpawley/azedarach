@@ -18,6 +18,7 @@ import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
@@ -37,6 +38,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			TmuxService.Default,
 			AppConfig.Default,
 			PRWorkflow.Default,
+			OverlayService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -49,6 +51,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
+			const overlay = yield* OverlayService
 			const resolvedConfig: ResolvedConfig = appConfig.config
 
 			// ================================================================
@@ -306,59 +309,96 @@ What would you like to discuss?`
 				})
 
 			/**
+			 * Perform the actual attach action
+			 *
+			 * Internal helper that does the tmux switch.
+			 */
+			const doAttach = (taskId: string) =>
+				attachment.attachExternal(taskId).pipe(
+					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
+					Effect.catchAll((error) => {
+						const msg =
+							error && typeof error === "object" && "_tag" in error
+								? error._tag === "SessionNotFoundError"
+									? `No session for ${taskId} - press Space+s to start`
+									: String((error as { message?: string }).message || error)
+								: String(error)
+						return Effect.gen(function* () {
+							yield* Effect.logError(`Attach external: ${msg}`, { error })
+							yield* toast.show("error", msg)
+						})
+					}),
+				)
+
+			/**
 			 * Attach to session externally (Space+a)
 			 *
 			 * Switches to the tmux session in a new terminal window.
 			 * After successful attach, checks for PR comments and injects them into the session.
 			 * The user can return with Ctrl-a Ctrl-a.
+			 *
+			 * If the worktree branch is behind main, shows a choice dialog:
+			 * - Merge & Attach: merges main into branch, then attaches
+			 * - Skip & Attach: attaches without merging
+			 * - Cancel: returns to board
+			 *
+			 * If merge has conflicts, spawns Claude to resolve them.
 			 */
 			const attachExternal = () =>
 				Effect.gen(function* () {
 					const task = yield* helpers.getSelectedTask()
 					if (!task) return
 
-					yield* attachment.attachExternal(task.id).pipe(
-						Effect.tap(() =>
-							Effect.gen(function* () {
-								// After successful attach, check for PR comments
-								const projectPath = yield* helpers.getProjectPath()
-								const comments = yield* prWorkflow
-									.getPRComments({ beadId: task.id, projectPath })
-									.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+					// Get current project path
+					const projectPath = yield* helpers.getProjectPath()
 
-								if (comments.length > 0) {
-									// Format comments for Claude
-									const formattedComments = comments
-										.map((c) => `**${c.author}** (${c.createdAt}):\n${c.body}`)
-										.join("\n\n---\n\n")
+					// Check if branch is behind main
+					const branchStatus = yield* prWorkflow
+						.checkBranchBehindMain({ beadId: task.id, projectPath })
+						.pipe(Effect.catchAll(() => Effect.succeed({ behind: 0, ahead: 0 })))
 
-									const prompt = `The following PR comments need to be addressed:\n\n${formattedComments}\n\nPlease review and address these comments.`
+					// If not behind, just attach directly
+					if (branchStatus.behind === 0) {
+						yield* doAttach(task.id)
+						return
+					}
 
-									// Inject into session using tmux send-keys
-									yield* tmux.sendKeys(task.id, prompt).pipe(Effect.catchAll(() => Effect.void))
+					// Branch is behind - show merge choice dialog
+					const message = `Merge main into your branch before attaching?`
 
-									yield* toast.show(
-										"info",
-										`Injected ${comments.length} PR comment(s) into session`,
-									)
-								} else {
-									yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
-								}
+					// Define the merge action (merge main, then attach)
+					const onMerge = Effect.gen(function* () {
+						yield* toast.show("info", "Merging main into branch...")
+						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
+							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
+							Effect.tap(() => doAttach(task.id)),
+							Effect.catchAll((error) => {
+								// MergeConflictError means Claude was started to resolve
+								const msg =
+									error && typeof error === "object" && "_tag" in error
+										? error._tag === "MergeConflictError"
+											? String((error as { message?: string }).message || "Conflicts detected")
+											: String((error as { message?: string }).message || error)
+										: String(error)
+								return Effect.gen(function* () {
+									yield* Effect.logError(`Merge failed: ${msg}`, { error })
+									yield* toast.show("error", msg)
+								})
 							}),
-						),
-						Effect.catchAll((error) => {
-							const msg =
-								error && typeof error === "object" && "_tag" in error
-									? error._tag === "SessionNotFoundError"
-										? `No session for ${task.id} - press Space+s to start`
-										: String((error as { message?: string }).message || error)
-									: String(error)
-							return Effect.gen(function* () {
-								yield* Effect.logError(`Attach external: ${msg}`, { error })
-								yield* toast.show("error", msg)
-							})
-						}),
-					)
+						)
+					})
+
+					// Define the skip action (attach directly without merging)
+					const onSkip = doAttach(task.id)
+
+					// Show the merge choice dialog
+					yield* overlay.push({
+						_tag: "mergeChoice",
+						message,
+						commitsBehind: branchStatus.behind,
+						onMerge,
+						onSkip,
+					})
 				})
 
 			/**

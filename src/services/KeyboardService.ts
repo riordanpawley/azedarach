@@ -143,6 +143,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					const handledAsConfirm = yield* inputHandlers.handleConfirmInput(key)
 					if (handledAsConfirm) return
 
+					// Check for mergeChoice overlay (handles its own keys)
+					const handledAsMergeChoice = yield* inputHandlers.handleMergeChoiceInput(key)
+					if (handledAsMergeChoice) return
+
 					// Check for imageAttach overlay (handles its own keys)
 					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)
 					if (handledAsImageAttach) return
