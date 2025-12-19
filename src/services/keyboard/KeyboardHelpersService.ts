@@ -174,6 +174,23 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 					return false
 				})
 
+			/**
+			 * Check if ANY task has operations running or queued.
+			 * Used to prevent app quit while operations are in progress.
+			 *
+			 * @returns Effect that resolves to true if any task is busy
+			 */
+			const isAnyBusy = (): Effect.Effect<boolean, never, never> => commandQueue.isAnyBusy()
+
+			/**
+			 * Get labels of all currently running operations.
+			 * Used to show what's blocking app quit.
+			 *
+			 * @returns Effect that resolves to array of operation labels
+			 */
+			const getRunningOperationLabels = (): Effect.Effect<readonly string[], never, never> =>
+				commandQueue.getRunningOperationLabels()
+
 			// ================================================================
 			// Public API
 			// ================================================================
@@ -187,6 +204,8 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 				toggleCurrentSelection,
 				withQueue,
 				checkBusy,
+				isAnyBusy,
+				getRunningOperationLabels,
 			}
 		}),
 	},
