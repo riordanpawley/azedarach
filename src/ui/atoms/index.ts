@@ -121,6 +121,8 @@ export {
 	jumpToTaskAtom,
 	navigateAtom,
 } from "./navigation.js"
+// Network status atoms
+export { isOnlineAtom } from "./network.js"
 // Overlay and toast atoms
 export {
 	currentOverlayAtom,

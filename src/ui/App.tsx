@@ -24,6 +24,7 @@ import {
 	getEpicInfoAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
+	isOnlineAtom,
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
@@ -203,6 +204,10 @@ export const App = () => {
 	// Derives from NavigationService + CommandQueueService - no props needed
 	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
 
+	// Network status for offline mode indicators
+	const isOnlineResult = useAtomValue(isOnlineAtom)
+	const isOnline = Result.isSuccess(isOnlineResult) ? isOnlineResult.value : true
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Keyboard Handler - Delegates to KeyboardService
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -342,6 +347,7 @@ export const App = () => {
 				<ActionPalette
 					task={selectedTask}
 					runningOperation={runningOperation}
+					isOnline={isOnline}
 					devServerStatus={devServerState.status}
 					devServerPort={devServerState.port}
 				/>

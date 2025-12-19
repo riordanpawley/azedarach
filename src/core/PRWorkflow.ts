@@ -12,6 +12,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { OfflineService } from "../services/OfflineService.js"
 import {
 	BeadsClient,
 	type BeadsError,
@@ -157,6 +158,15 @@ export class TypeCheckError extends Data.TaggedError("TypeCheckError")<{
 	readonly output: string
 }> {}
 
+/**
+ * Error when operation is blocked by offline mode
+ * Contains a descriptive message explaining why the operation was skipped
+ */
+export class OfflineError extends Data.TaggedError("OfflineError")<{
+	readonly operation: string
+	readonly reason: "config" | "offline" | "both"
+}> {}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -187,7 +197,14 @@ export interface PRWorkflowService {
 		options: CreatePROptions,
 	) => Effect.Effect<
 		PR,
-		PRError | GHCLIError | GitError | NotAGitRepoError | BeadsError | NotFoundError | ParseError,
+		| PRError
+		| GHCLIError
+		| GitError
+		| NotAGitRepoError
+		| BeadsError
+		| NotFoundError
+		| ParseError
+		| OfflineError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -526,6 +543,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		TmuxService.Default,
 		FileLockManager.Default,
 		AppConfig.Default,
+		OfflineService.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -534,6 +552,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const tmuxService = yield* TmuxService
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
+		const offlineService = yield* OfflineService
 		const mergeConfig = appConfig.getMergeConfig()
 
 		/**
@@ -562,6 +581,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			createPR: (options: CreatePROptions) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath, draft = true, baseBranch = "main" } = options
+
+					// Check if PR creation is enabled (config + network)
+					const prStatus = yield* offlineService.isPREnabled()
+					if (!prStatus.enabled) {
+						return yield* Effect.fail(
+							new OfflineError({
+								operation: "PR creation",
+								reason: prStatus.reason,
+							}),
+						)
+					}
 
 					// Get bead info for PR title/body
 					const bead = yield* beadsClient.show(beadId)
@@ -664,11 +694,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// 2. Delete worktree
 					yield* worktreeManager.remove({ beadId, projectPath })
 
-					// 3. Delete remote branch (optional)
+					// 3. Delete remote branch (optional, only if online)
 					if (deleteRemoteBranch) {
-						yield* runGit(["push", "origin", "--delete", beadId], projectPath).pipe(
-							Effect.catchAll(() => Effect.void), // Ignore if already deleted
-						)
+						const pushStatus = yield* offlineService.isGitPushEnabled()
+						if (pushStatus.enabled) {
+							yield* runGit(["push", "origin", "--delete", beadId], projectPath).pipe(
+								Effect.catchAll(() => Effect.void), // Ignore if already deleted
+							)
+						}
+						// Silently skip if offline - remote branch can be cleaned up later
 					}
 
 					// 4. Delete local branch
@@ -1023,18 +1057,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 12. Push to origin
+					// 12. Push to origin (if enabled and online)
 					if (pushToOrigin) {
-						yield* runGit(["push", "origin", "main"], projectPath).pipe(
-							Effect.mapError(
-								(e) =>
-									new GitError({
-										message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-										command: "git push origin main",
-										stderr: e.stderr,
-									}),
-							),
-						)
+						const pushStatus = yield* offlineService.isGitPushEnabled()
+						if (pushStatus.enabled) {
+							yield* runGit(["push", "origin", "main"], projectPath).pipe(
+								Effect.mapError(
+									(e) =>
+										new GitError({
+											message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
+											command: "git push origin main",
+											stderr: e.stderr,
+										}),
+								),
+							)
+						}
+						// Silently skip if offline/disabled - merge already succeeded locally
 					}
 				}),
 

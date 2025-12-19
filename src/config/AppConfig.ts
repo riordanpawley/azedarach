@@ -53,6 +53,9 @@ export interface AppConfigService {
 	/** Get worktree configuration section */
 	readonly getWorktreeConfig: () => ResolvedConfig["worktree"]
 
+	/** Get git configuration section */
+	readonly getGitConfig: () => ResolvedConfig["git"]
+
 	/** Get session configuration section */
 	readonly getSessionConfig: () => ResolvedConfig["session"]
 
@@ -67,6 +70,12 @@ export interface AppConfigService {
 
 	/** Get notifications configuration section */
 	readonly getNotificationsConfig: () => ResolvedConfig["notifications"]
+
+	/** Get beads configuration section */
+	readonly getBeadsConfig: () => ResolvedConfig["beads"]
+
+	/** Get network configuration section */
+	readonly getNetworkConfig: () => ResolvedConfig["network"]
 }
 
 export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfig", {
@@ -317,11 +326,14 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		return {
 			config,
 			getWorktreeConfig: () => config.worktree,
+			getGitConfig: () => config.git,
 			getSessionConfig: () => config.session,
 			getPatternsConfig: () => config.patterns,
 			getPRConfig: () => config.pr,
 			getMergeConfig: () => config.merge,
 			getNotificationsConfig: () => config.notifications,
+			getBeadsConfig: () => config.beads,
+			getNetworkConfig: () => config.network,
 		}
 	}),
 }) {}

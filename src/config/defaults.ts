@@ -80,6 +80,13 @@ export const DEFAULT_CONFIG = {
 		continueOnFailure: true,
 		parallel: false,
 	},
+	git: {
+		pushBranchOnCreate: true,
+		remote: "origin",
+		branchPrefix: "az-",
+		pushEnabled: true,
+		fetchEnabled: true,
+	},
 	session: {
 		command: "claude",
 		shell: getLoginShellSync(),
@@ -92,6 +99,7 @@ export const DEFAULT_CONFIG = {
 		error: [] satisfies string[],
 	},
 	pr: {
+		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
 		baseBranch: "main",
@@ -106,6 +114,14 @@ export const DEFAULT_CONFIG = {
 	notifications: {
 		bell: true,
 		system: false,
+	},
+	beads: {
+		syncEnabled: true,
+	},
+	network: {
+		autoDetect: true,
+		checkIntervalSeconds: 30,
+		checkHost: "github.com",
 	},
 	devServer: {
 		command: undefined,
@@ -136,6 +152,13 @@ export interface ResolvedConfig {
 		continueOnFailure: boolean
 		parallel: boolean
 	}
+	git: {
+		pushBranchOnCreate: boolean
+		remote: string
+		branchPrefix: string
+		pushEnabled: boolean
+		fetchEnabled: boolean
+	}
 	session: {
 		command: string
 		shell: string
@@ -148,6 +171,7 @@ export interface ResolvedConfig {
 		error: readonly string[]
 	}
 	pr: {
+		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
 		baseBranch: string
@@ -161,6 +185,14 @@ export interface ResolvedConfig {
 	notifications: {
 		bell: boolean
 		system: boolean
+	}
+	beads: {
+		syncEnabled: boolean
+	}
+	network: {
+		autoDetect: boolean
+		checkIntervalSeconds: number
+		checkHost: string
 	}
 	devServer: {
 		command: string | undefined
@@ -197,6 +229,13 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 				config.worktree?.continueOnFailure ?? DEFAULT_CONFIG.worktree.continueOnFailure,
 			parallel: config.worktree?.parallel ?? DEFAULT_CONFIG.worktree.parallel,
 		},
+		git: {
+			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,
+			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
+			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
+			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
+			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
+		},
 		session: {
 			command: config.session?.command ?? DEFAULT_CONFIG.session.command,
 			shell: config.session?.shell ?? DEFAULT_CONFIG.session.shell,
@@ -211,6 +250,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			error: config.patterns?.error ?? DEFAULT_CONFIG.patterns.error,
 		},
 		pr: {
+			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
 			baseBranch: config.pr?.baseBranch ?? DEFAULT_CONFIG.pr.baseBranch,
@@ -225,6 +265,15 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		notifications: {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,
 			system: config.notifications?.system ?? DEFAULT_CONFIG.notifications.system,
+		},
+		beads: {
+			syncEnabled: config.beads?.syncEnabled ?? DEFAULT_CONFIG.beads.syncEnabled,
+		},
+		network: {
+			autoDetect: config.network?.autoDetect ?? DEFAULT_CONFIG.network.autoDetect,
+			checkIntervalSeconds:
+				config.network?.checkIntervalSeconds ?? DEFAULT_CONFIG.network.checkIntervalSeconds,
+			checkHost: config.network?.checkHost ?? DEFAULT_CONFIG.network.checkHost,
 		},
 		devServer: {
 			command: config.devServer?.command ?? DEFAULT_CONFIG.devServer.command,
