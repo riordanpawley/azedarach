@@ -1281,19 +1281,28 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// Fetch latest from origin to ensure we have current main
-					yield* runGit(["fetch", "origin", baseBranch], worktree.path).pipe(
+					// === Step 1: Update local base branch to match origin ===
+					// Fetch latest from origin
+					yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
 						Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
 					)
 
-					// Check for conflicts using git merge-tree (in-memory, safe)
+					// Fast-forward local base branch to origin (done in main project, not worktree)
+					// This updates the local branch without checking it out
+					yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
+						),
+					)
+
+					// === Step 2: Check for conflicts using git merge-tree (in-memory, safe) ===
 					const mergeTreeResult = yield* Effect.gen(function* () {
 						const command = Command.make(
 							"git",
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							`origin/${baseBranch}`,
+							baseBranch,
 							beadId,
 						).pipe(Command.workingDirectory(worktree.path))
 
@@ -1309,14 +1318,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							[
-								"merge-tree",
-								"--write-tree",
-								"--name-only",
-								"--no-messages",
-								`origin/${baseBranch}`,
-								beadId,
-							],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							worktree.path,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -1339,13 +1341,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 					})
 
-					// If there are real code conflicts, start merge and have Claude resolve
+					// === Step 3: Handle conflicts or merge ===
 					if (mergeTreeResult.hasConflicts) {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
 						// Start merge in worktree (will result in conflict state)
 						yield* runGit(
-							["merge", `origin/${baseBranch}`, "-m", `Merge ${baseBranch} into ${beadId}`],
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
 							worktree.path,
 						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
 
@@ -1379,16 +1381,16 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// No conflicts - safe to merge (fast-forward if possible, otherwise regular merge)
+					// No conflicts - safe to merge local base branch (fast-forward if possible)
 					yield* runGit(
-						["merge", `origin/${baseBranch}`, "-m", `Merge ${baseBranch} into ${beadId}`],
+						["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
 						worktree.path,
 					).pipe(
 						Effect.mapError(
 							(e) =>
 								new GitError({
 									message: `Merge failed: ${e.message}`,
-									command: `git merge origin/${baseBranch}`,
+									command: `git merge ${baseBranch}`,
 									stderr: e.stderr,
 								}),
 						),
