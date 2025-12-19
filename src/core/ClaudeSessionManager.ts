@@ -23,10 +23,8 @@ import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } fr
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import { ToastService } from "../services/ToastService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
-import { runInitCommands } from "./initCommands.js"
 import { getSessionName, getWorktreePath } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
@@ -311,7 +309,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			StateDetector.Default,
 			ProjectService.Default,
 			DiagnosticsService.Default,
-			ToastService.Default,
 			WorktreeSessionService.Default,
 		],
 		effect: Effect.gen(function* () {
@@ -324,7 +321,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const resolvedConfig: ResolvedConfig = appConfig.config
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
-			const toast = yield* ToastService
 
 			// Note: ClaudeSessionManager uses effect: not scoped:, so trackService (which uses acquireRelease)
 			// would need scoped. Instead we just update health status manually.
@@ -453,31 +449,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
 						// No additional copying needed here.
 
-						// Get configuration for init commands and session settings
-						const worktreeConfig = resolvedConfig.worktree
+						// Get session config
 						const sessionConfig = resolvedConfig.session
-
-						// Run init commands after worktree creation (e.g., "direnv allow", "bun install")
-						// Uses shared runInitCommands helper from initCommands.ts
-						const initResult = yield* runInitCommands({
-							worktreePath: worktree.path,
-							initCommands: worktreeConfig.initCommands,
-							env: worktreeConfig.env,
-							continueOnFailure: worktreeConfig.continueOnFailure,
-							parallel: worktreeConfig.parallel,
-						})
-
-						// Log failed init commands to diagnostics and show toast
-						const hasInitFailures = initResult.hasFailures
-						if (hasInitFailures) {
-							yield* diagnostics.logEvent({
-								severity: "warning",
-								source: "ClaudeSessionManager",
-								message: `initCommands failed for ${beadId}`,
-								details: `Failed commands:\n${initResult.failedCommands.map((c) => `  - ${c}`).join("\n")}`,
-							})
-							yield* toast.show("warning", `initCommands failed for ${beadId}\nPress d for details`)
-						}
 
 						// Generate tmux session name
 						const tmuxSessionName = getSessionName(beadId)
@@ -521,15 +494,15 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								let updatedBeadStatus = false
 
 								// Step 1: Create tmux session if needed
-								// Use WorktreeSessionService.create() with runInitCommands: false
-								// since initCommands already ran above
+								// WorktreeSessionService.create() chains initCommands with main command
+								// in the same shell, so environment from direnv/envdev persists
 								if (!hasSession) {
 									yield* worktreeSession.create({
 										sessionName: tmuxSessionName,
 										worktreePath: worktree.path,
 										command: claudeWithOptions,
 										tmuxPrefix,
-										runInitCommands: false, // Already ran above
+										// runInitCommands defaults to true - chains init commands with Claude
 									})
 									createdNewSession = true
 								}
@@ -548,8 +521,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// USE: Register session in memory and publish event
 							() =>
 								Effect.gen(function* () {
-									// Use "warning" state if init commands failed, otherwise "busy"
-									const initialState: SessionState = hasInitFailures ? "warning" : "busy"
+									// Session starts as "busy" - init commands and Claude are now chained
+									// in the tmux session, so if init fails, Claude won't start
+									const initialState: SessionState = "busy"
 
 									// Create session object
 									const sessionObj: Session = {

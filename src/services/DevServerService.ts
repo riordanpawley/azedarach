@@ -16,7 +16,6 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig, type ResolvedConfig } from "../config/index.js"
-import type { InitCommandError } from "../core/initCommands.js" // Type only - actual call via WorktreeSessionService
 import { type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
@@ -576,7 +575,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				projectPath: string,
 			): Effect.Effect<
 				DevServerState,
-				DevServerError | NoWorktreeError | TmuxError | InitCommandError | WorktreeSessionError,
+				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
@@ -610,25 +609,19 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
-					// Create tmux session with initCommands via WorktreeSessionService
+					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
 
-					const sessionResult = yield* worktreeSession.create({
+					yield* worktreeSession.create({
 						sessionName: tmuxSession,
 						worktreePath,
 						command: rawCommand,
 						cwd,
 					})
-
-					if (sessionResult.initCommandsHadFailures) {
-						yield* Effect.log(
-							`Some init commands failed: ${sessionResult.failedInitCommands.join(", ")}`,
-						)
-					}
 
 					// Update state
 					yield* updateServerState(beadId, {
@@ -688,7 +681,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				projectPath: string,
 			): Effect.Effect<
 				DevServerState,
-				DevServerError | NoWorktreeError | TmuxError | InitCommandError | WorktreeSessionError,
+				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
@@ -733,25 +726,19 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						.join(" ")
 					const rawCommand = `${envString} ${command}`
 
-					// Create tmux session with initCommands via WorktreeSessionService
+					// Create tmux session - initCommands are chained with dev command in same shell
 					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
 						config.devServer.cwd === "."
 							? worktreePath
 							: pathService.join(worktreePath, config.devServer.cwd)
 
-					const sessionResult = yield* worktreeSession.create({
+					yield* worktreeSession.create({
 						sessionName: tmuxSession,
 						worktreePath,
 						command: rawCommand,
 						cwd,
 					})
-
-					if (sessionResult.initCommandsHadFailures) {
-						yield* Effect.log(
-							`Some init commands failed: ${sessionResult.failedInitCommands.join(", ")}`,
-						)
-					}
 
 					// Update state
 					yield* updateServerState(beadId, {
