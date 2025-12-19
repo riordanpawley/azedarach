@@ -16,6 +16,7 @@ export interface StatusBarProps {
 	connected?: boolean
 	vcStatus?: VCStatus
 	viewMode?: ViewMode
+	isLoading?: boolean
 }
 
 /**
@@ -253,6 +254,15 @@ export const StatusBar = (props: StatusBarProps) => {
 				<box backgroundColor={theme.surface1} paddingLeft={1} paddingRight={1}>
 					<text fg={theme.text}>{props.viewMode === "compact" ? "LST" : "KAN"}</text>
 				</box>
+
+				{/* Loading indicator - shows when board is refreshing */}
+				{props.isLoading && (
+					<box backgroundColor={theme.yellow} paddingLeft={1} paddingRight={1}>
+						<text fg={theme.base} attributes={ATTR_BOLD}>
+							Loading...
+						</text>
+					</box>
+				)}
 
 				{/* Mode detail (shows pending keys, selection count, etc) */}
 				{shouldShowModeDisplay && props.modeDisplay && (

@@ -12,6 +12,7 @@ import { killActivePopup } from "../core/BeadEditorService.js"
 import type { DependencyRef, Issue } from "../core/BeadsClient.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
+	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	drillDownEpicAtom,
@@ -113,6 +114,10 @@ export const App = () => {
 
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
+
+	// Board loading state for status bar indicator
+	const boardIsLoadingResult = useAtomValue(boardIsLoadingAtom)
+	const isLoading = Result.isSuccess(boardIsLoadingResult) ? boardIsLoadingResult.value : false
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Epic Drill-Down State
@@ -299,6 +304,7 @@ export const App = () => {
 				selectedCount={selectedIds.length}
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 				viewMode={viewMode}
+				isLoading={isLoading}
 			/>
 
 			{/* Help overlay */}
