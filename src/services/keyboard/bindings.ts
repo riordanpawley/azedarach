@@ -411,6 +411,14 @@ done
 		),
 	},
 	{
+		key: "v",
+		mode: "action",
+		description: "View dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.attachDevServer())),
+		),
+	},
+	{
 		key: "S-r",
 		mode: "action",
 		description: "Resume session",
@@ -486,6 +494,14 @@ done
 		description: "Show diff vs main",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
+		),
+	},
+	{
+		key: "u",
+		mode: "action",
+		description: "Update from main",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
 		),
 	},
 	{

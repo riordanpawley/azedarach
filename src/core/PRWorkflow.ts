@@ -10,7 +10,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Duration, Effect, Option } from "effect"
+import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { OfflineService } from "../services/OfflineService.js"
 import {
@@ -95,6 +95,72 @@ export interface MergeToMainOptions {
 	readonly pushToOrigin?: boolean
 	/** Close the bead issue after successful merge (default: true) */
 	readonly closeBead?: boolean
+}
+
+/**
+ * Options for updating worktree from base branch
+ */
+export interface UpdateFromBaseOptions {
+	readonly beadId: string
+	readonly projectPath: string
+	/** Base branch to merge from (default: main) */
+	readonly baseBranch?: string
+}
+
+/**
+ * Result of fetching PR comments
+ */
+export interface PRComment {
+	readonly author: string
+	readonly body: string
+	readonly createdAt: string
+	readonly path?: string // For review comments on specific files
+	readonly line?: number // For review comments on specific lines
+}
+
+// ============================================================================
+// GitHub API Response Schemas
+// ============================================================================
+
+/**
+ * Schema for GitHub PR comment author
+ */
+const GHAuthorSchema = Schema.Struct({
+	login: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR issue comment
+ */
+const GHCommentSchema = Schema.Struct({
+	author: Schema.optional(GHAuthorSchema),
+	body: Schema.optional(Schema.String),
+	createdAt: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR review
+ */
+const GHReviewSchema = Schema.Struct({
+	author: Schema.optional(GHAuthorSchema),
+	body: Schema.optional(Schema.String),
+	submittedAt: Schema.optional(Schema.String),
+})
+
+/**
+ * Schema for GitHub PR comments API response
+ */
+const GHPRCommentsResponseSchema = Schema.Struct({
+	comments: Schema.optional(Schema.Array(GHCommentSchema)),
+	reviews: Schema.optional(Schema.Array(GHReviewSchema)),
+})
+
+/**
+ * Options for getting PR comments
+ */
+export interface GetPRCommentsOptions {
+	readonly beadId: string
+	readonly projectPath: string
 }
 
 /**
@@ -374,6 +440,55 @@ export interface PRWorkflowService {
 		PRError | GitError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Update worktree from base branch (typically main)
+	 *
+	 * Merges the base branch into the worktree, resolving conflicts with Claude if needed.
+	 * This is the inverse of mergeToMain - it brings main INTO the worktree.
+	 *
+	 * Workflow:
+	 * 1. Fetch latest from origin
+	 * 2. Check for conflicts using git merge-tree
+	 * 3. If conflicts: start merge, have Claude resolve
+	 * 4. If no conflicts: fast-forward merge
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.updateFromBase({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly updateFromBase: (
+		options: UpdateFromBaseOptions,
+	) => Effect.Effect<
+		void,
+		PRError | MergeConflictError | GitError | NotAGitRepoError | BeadsError | NotFoundError,
+		CommandExecutor.CommandExecutor
+	>
+
+	/**
+	 * Get PR comments for a bead's branch
+	 *
+	 * Fetches all comments (issue comments + review comments) from the PR.
+	 * Returns empty array if no PR exists or no comments.
+	 *
+	 * @example
+	 * ```ts
+	 * const comments = yield* prWorkflow.getPRComments({
+	 *   beadId: "az-05y",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * if (comments.length > 0) {
+	 *   // Inject into Claude context
+	 * }
+	 * ```
+	 */
+	readonly getPRComments: (
+		options: GetPRCommentsOptions,
+	) => Effect.Effect<readonly PRComment[], PRError | GHCLIError, CommandExecutor.CommandExecutor>
 }
 
 // ============================================================================
@@ -554,6 +669,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
 		const mergeConfig = appConfig.getMergeConfig()
+		const gitConfig = appConfig.getGitConfig()
+		const baseBranch = gitConfig.baseBranch
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -784,7 +901,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							"main",
+							baseBranch,
 							beadId,
 						).pipe(Command.workingDirectory(projectPath))
 
@@ -800,7 +917,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							projectPath,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -828,9 +945,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
 						// Start merge in worktree so Claude can resolve
-						yield* runGit(["merge", "main", "-m", `Merge main into ${beadId}`], worktree.path).pipe(
-							Effect.catchAll(() => Effect.void),
-						) // Will fail with conflicts, that's expected
+						yield* runGit(
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							worktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
@@ -863,13 +981,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 5. No code conflicts - safe to merge
-					// Switch to main branch in main repo
-					yield* runGit(["checkout", "main"], projectPath).pipe(
+					// Switch to base branch in main repo
+					yield* runGit(["checkout", baseBranch], projectPath).pipe(
 						Effect.mapError(
 							(e) =>
 								new GitError({
-									message: `Failed to checkout main: ${e.message}`,
-									command: "git checkout main",
+									message: `Failed to checkout ${baseBranch}: ${e.message}`,
+									command: `git checkout ${baseBranch}`,
 								}),
 						),
 					)
@@ -1061,12 +1179,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					if (pushToOrigin) {
 						const pushStatus = yield* offlineService.isGitPushEnabled()
 						if (pushStatus.enabled) {
-							yield* runGit(["push", "origin", "main"], projectPath).pipe(
+							yield* runGit(["push", "origin", baseBranch], projectPath).pipe(
 								Effect.mapError(
 									(e) =>
 										new GitError({
 											message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-											command: "git push origin main",
+											command: `git push origin ${baseBranch}`,
 											stderr: e.stderr,
 										}),
 								),
@@ -1087,7 +1205,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						"git",
 						"merge-tree",
 						"--write-tree",
-						"main",
+						baseBranch,
 						beadId,
 					).pipe(Command.workingDirectory(projectPath))
 
@@ -1104,7 +1222,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Run merge-tree again to get the conflicted file list
 						// Use --no-messages to suppress "Auto-merging" messages and get clean file list
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							projectPath,
 						).pipe(Effect.catchAll(() => Effect.succeed("")))
 
@@ -1115,13 +1233,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// Get file change counts for informational purposes
-					const mergeBase = yield* runGit(["merge-base", "main", beadId], projectPath).pipe(
+					const mergeBase = yield* runGit(["merge-base", baseBranch, beadId], projectPath).pipe(
 						Effect.map((output) => output.trim()),
 						Effect.catchAll(() => Effect.succeed("")),
 					)
 
 					let branchChangedFiles = 0
-					let mainChangedFiles = 0
+					let baseChangedFiles = 0
 
 					if (mergeBase) {
 						const branchOutput = yield* runGit(
@@ -1139,8 +1257,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 						branchChangedFiles = branchOutput
 
-						const mainOutput = yield* runGit(
-							["diff", "--name-only", `${mergeBase}..main`],
+						const baseOutput = yield* runGit(
+							["diff", "--name-only", `${mergeBase}..${baseBranch}`],
 							projectPath,
 						).pipe(
 							Effect.map(
@@ -1152,14 +1270,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							),
 							Effect.catchAll(() => Effect.succeed(0)),
 						)
-						mainChangedFiles = mainOutput
+						baseChangedFiles = baseOutput
 					}
 
 					return {
 						hasConflictRisk,
 						conflictingFiles,
 						branchChangedFiles,
-						mainChangedFiles,
+						mainChangedFiles: baseChangedFiles,
 					} satisfies MergeConflictCheck
 				}),
 
@@ -1224,6 +1342,202 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						hasUncommittedChanges: changedFiles.length > 0,
 						changedFiles,
 					}
+				}),
+
+			updateFromBase: (options: UpdateFromBaseOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath, baseBranch = "main" } = options
+
+					// Get worktree info
+					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					if (!worktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for ${beadId}`,
+								beadId,
+							}),
+						)
+					}
+
+					// === Step 1: Update local base branch to match origin ===
+					// Fetch latest from origin
+					yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+						Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
+					)
+
+					// Fast-forward local base branch to origin (done in main project, not worktree)
+					// This updates the local branch without checking it out
+					yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
+						),
+					)
+
+					// === Step 2: Check for conflicts using git merge-tree (in-memory, safe) ===
+					const mergeTreeResult = yield* Effect.gen(function* () {
+						const command = Command.make(
+							"git",
+							"merge-tree",
+							"--write-tree",
+							"--name-only",
+							baseBranch,
+							beadId,
+						).pipe(Command.workingDirectory(worktree.path))
+
+						const exitCode = yield* Command.exitCode(command).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+							),
+						)
+
+						if (exitCode === 0) {
+							return { hasConflicts: false, conflictingFiles: [] as string[] }
+						}
+
+						// Get conflicting files
+						const output = yield* runGit(
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
+							worktree.path,
+						).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+									Effect.map(() => ""),
+								),
+							),
+						)
+
+						const lines = output.trim().split("\n")
+						const conflictingFiles = lines
+							.slice(1)
+							.filter((f) => f.length > 0)
+							// Filter OUT .beads/ files - we handle those separately
+							.filter((f) => !f.startsWith(".beads/"))
+
+						return {
+							hasConflicts: conflictingFiles.length > 0,
+							conflictingFiles,
+						}
+					})
+
+					// === Step 3: Handle conflicts or merge ===
+					if (mergeTreeResult.hasConflicts) {
+						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+						// Start merge in worktree (will result in conflict state)
+						yield* runGit(
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							worktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+
+						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
+
+						const sessionStarted = yield* sessionManager
+							.start({
+								beadId,
+								projectPath,
+								initialPrompt: resolvePrompt,
+							})
+							.pipe(
+								Effect.map(() => true),
+								Effect.catchAll((e) =>
+									Effect.logError(
+										`Failed to start Claude session for conflict resolution: ${e}`,
+									).pipe(Effect.map(() => false)),
+								),
+							)
+
+						const message = sessionStarted
+							? `Conflicts detected in: ${fileList}. Started Claude session to resolve.`
+							: `Conflicts detected in: ${fileList}. Failed to start Claude - resolve manually.`
+
+						return yield* Effect.fail(
+							new MergeConflictError({
+								beadId,
+								branch: beadId,
+								message,
+							}),
+						)
+					}
+
+					// No conflicts - safe to merge local base branch (fast-forward if possible)
+					yield* runGit(
+						["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+						worktree.path,
+					).pipe(
+						Effect.mapError(
+							(e) =>
+								new GitError({
+									message: `Merge failed: ${e.message}`,
+									command: `git merge ${baseBranch}`,
+									stderr: e.stderr,
+								}),
+						),
+					)
+
+					// Sync beads after merge to pick up any bead changes from main
+					yield* withSyncLock(
+						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+					)
+				}),
+
+			getPRComments: (options: GetPRCommentsOptions) =>
+				Effect.gen(function* () {
+					const { beadId, projectPath } = options
+
+					// First check if a PR exists for this branch
+					const prExists = yield* runGH(
+						["pr", "view", beadId, "--json", "number"],
+						projectPath,
+					).pipe(
+						Effect.map(() => true),
+						Effect.catchAll(() => Effect.succeed(false)),
+					)
+
+					if (!prExists) {
+						return [] as readonly PRComment[]
+					}
+
+					// Fetch PR comments (both issue comments and review comments)
+					const commentsJson = yield* runGH(
+						["pr", "view", beadId, "--json", "comments,reviews"],
+						projectPath,
+					).pipe(Effect.catchAll(() => Effect.succeed("{}")))
+
+					// Parse JSON using Effect.try
+					const parsed = yield* Effect.try({
+						try: () => JSON.parse(commentsJson) as unknown,
+						catch: () => new PRError({ message: "Failed to parse PR comments JSON" }),
+					}).pipe(Effect.catchAll(() => Effect.succeed({} as unknown)))
+
+					// Decode using Schema
+					const data = yield* Schema.decodeUnknown(GHPRCommentsResponseSchema)(parsed).pipe(
+						Effect.catchAll(() => Effect.succeed({ comments: [], reviews: [] })),
+					)
+
+					const comments: PRComment[] = []
+
+					// Parse issue comments
+					for (const c of data.comments ?? []) {
+						comments.push({
+							author: c.author?.login ?? "unknown",
+							body: c.body ?? "",
+							createdAt: c.createdAt ?? "",
+						})
+					}
+
+					// Parse review comments (which include file/line info)
+					for (const review of data.reviews ?? []) {
+						// Review body (general review comment)
+						if (review.body?.trim()) {
+							comments.push({
+								author: review.author?.login ?? "unknown",
+								body: review.body,
+								createdAt: review.submittedAt ?? "",
+							})
+						}
+					}
+
+					return comments as readonly PRComment[]
 				}),
 
 			/**
