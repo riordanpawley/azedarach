@@ -16,6 +16,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	currentProjectAtom,
+	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	focusedTaskRunningOperationAtom,
@@ -194,6 +195,10 @@ export const App = () => {
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
+	// Dev server state for selected task (for StatusBar display)
+	// Returns idle state if no task selected or no dev server running
+	const devServerState = useAtomValue(devServerStateAtom(selectedTask?.id ?? ""))
+
 	// Running operation for focused task (for ActionPalette busy state)
 	// Derives from NavigationService + CommandQueueService - no props needed
 	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
@@ -318,6 +323,8 @@ export const App = () => {
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 				viewMode={viewMode}
 				isLoading={isLoading}
+				devServerStatus={devServerState.status}
+				devServerPort={devServerState.port}
 				projectName={projectName}
 			/>
 
@@ -331,7 +338,14 @@ export const App = () => {
 			{showingDiagnostics && <DiagnosticsOverlay />}
 
 			{/* Action palette */}
-			{isAction && <ActionPalette task={selectedTask} runningOperation={runningOperation} />}
+			{isAction && (
+				<ActionPalette
+					task={selectedTask}
+					runningOperation={runningOperation}
+					devServerStatus={devServerState.status}
+					devServerPort={devServerState.port}
+				/>
+			)}
 
 			{/* Sort menu */}
 			{isSort && <SortMenu currentSort={sortConfig} />}
