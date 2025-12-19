@@ -11,7 +11,8 @@
  */
 
 import { FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Option, Schema } from "effect"
+import { Data, Effect, Option, Schema, Stream, SubscriptionRef } from "effect"
+import { ProjectService } from "../services/ProjectService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
 import { type AzedarachConfig, AzedarachConfigSchema } from "./schema.js"
 
@@ -44,38 +45,42 @@ export class ConfigParseError extends Data.TaggedError("ConfigParseError")<{
  * AppConfig service interface
  *
  * Provides access to validated, resolved application configuration.
+ * Config is reactive - changes when ProjectService's current project changes.
  * All fields are guaranteed to have values (defaults applied).
  */
 export interface AppConfigService {
-	/** The fully resolved configuration with all defaults applied */
-	readonly config: ResolvedConfig
+	/** The reactive configuration - updates when current project changes */
+	readonly config: SubscriptionRef.SubscriptionRef<ResolvedConfig>
 
 	/** Get worktree configuration section */
-	readonly getWorktreeConfig: () => ResolvedConfig["worktree"]
+	readonly getWorktreeConfig: () => Effect.Effect<ResolvedConfig["worktree"]>
 
 	/** Get git configuration section */
-	readonly getGitConfig: () => ResolvedConfig["git"]
+	readonly getGitConfig: () => Effect.Effect<ResolvedConfig["git"]>
 
 	/** Get session configuration section */
-	readonly getSessionConfig: () => ResolvedConfig["session"]
+	readonly getSessionConfig: () => Effect.Effect<ResolvedConfig["session"]>
 
 	/** Get patterns configuration section */
-	readonly getPatternsConfig: () => ResolvedConfig["patterns"]
+	readonly getPatternsConfig: () => Effect.Effect<ResolvedConfig["patterns"]>
 
 	/** Get PR configuration section */
-	readonly getPRConfig: () => ResolvedConfig["pr"]
+	readonly getPRConfig: () => Effect.Effect<ResolvedConfig["pr"]>
 
 	/** Get merge configuration section */
-	readonly getMergeConfig: () => ResolvedConfig["merge"]
+	readonly getMergeConfig: () => Effect.Effect<ResolvedConfig["merge"]>
 
 	/** Get notifications configuration section */
-	readonly getNotificationsConfig: () => ResolvedConfig["notifications"]
+	readonly getNotificationsConfig: () => Effect.Effect<ResolvedConfig["notifications"]>
 
 	/** Get beads configuration section */
-	readonly getBeadsConfig: () => ResolvedConfig["beads"]
+	readonly getBeadsConfig: () => Effect.Effect<ResolvedConfig["beads"]>
 
 	/** Get network configuration section */
-	readonly getNetworkConfig: () => ResolvedConfig["network"]
+	readonly getNetworkConfig: () => Effect.Effect<ResolvedConfig["network"]>
+
+	/** Get devServer configuration section */
+	readonly getDevServerConfig: () => Effect.Effect<ResolvedConfig["devServer"]>
 }
 
 export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfig", {
@@ -87,21 +92,22 @@ export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfi
 }) {}
 
 /**
- * AppConfig service tag
+ * AppConfig service
  *
- * Note: AppConfig uses Context.Tag with factory functions (AppConfigLive)
- * because it requires runtime parameters (projectPath, configPath).
- * It cannot use Effect.Service pattern without additional indirection.
+ * Reactive configuration that updates when ProjectService's current project changes.
+ * Uses scoped service pattern to manage the project change watcher fiber.
  */
 export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
-	effect: Effect.gen(function* () {
-		const path = yield* Path.Path
+	dependencies: [ProjectService.Default],
+	scoped: Effect.gen(function* () {
+		const pathService = yield* Path.Path
 		const fs = yield* FileSystem.FileSystem
-		const { projectPath, configPath } = yield* Effect.serviceOption(AppConfigConfig).pipe(
+		const projectService = yield* ProjectService
+		const { configPath } = yield* Effect.serviceOption(AppConfigConfig).pipe(
 			Effect.map(
 				Option.getOrElse(() => ({
 					projectPath: process.cwd(),
-					configPath: null,
+					configPath: null as string | null,
 				})),
 			),
 		)
@@ -117,24 +123,24 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		 * Try to load .azedarach.json from project root
 		 */
 		const loadJsonConfig = (
-			projectPath: string,
-		): Effect.Effect<AzedarachConfig | null, ConfigParseError, FileSystem.FileSystem> =>
+			targetPath: string,
+		): Effect.Effect<AzedarachConfig | null, ConfigParseError> =>
 			Effect.gen(function* () {
-				const configPath = path.join(projectPath, ".azedarach.json")
+				const targetConfigPath = pathService.join(targetPath, ".azedarach.json")
 
 				const exists = yield* fs
-					.exists(configPath)
+					.exists(targetConfigPath)
 					.pipe(Effect.catchAll(() => Effect.succeed(false)))
 				if (!exists) {
 					return null
 				}
 
-				const content = yield* fs.readFileString(configPath).pipe(
+				const content = yield* fs.readFileString(targetConfigPath).pipe(
 					Effect.mapError(
 						(e) =>
 							new ConfigParseError({
 								message: "Failed to read config file",
-								path: configPath,
+								path: targetConfigPath,
 								details: String(e),
 							}),
 					),
@@ -145,7 +151,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					catch: (e) =>
 						new ConfigParseError({
 							message: "Invalid JSON in config file",
-							path: configPath,
+							path: targetConfigPath,
 							details: String(e),
 						}),
 				})
@@ -156,7 +162,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						(e) =>
 							new ConfigParseError({
 								message: "Config validation failed",
-								path: configPath,
+								path: targetConfigPath,
 								details: String(e),
 							}),
 					),
@@ -169,10 +175,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		 * Try to load config from package.json "azedarach" key
 		 */
 		const loadPackageJsonConfig = (
-			projectPath: string,
-		): Effect.Effect<AzedarachConfig | null, ConfigParseError, FileSystem.FileSystem> =>
+			targetPath: string,
+		): Effect.Effect<AzedarachConfig | null, ConfigParseError> =>
 			Effect.gen(function* () {
-				const pkgPath = path.join(projectPath, "package.json")
+				const pkgPath = pathService.join(targetPath, "package.json")
 
 				const exists = yield* fs.exists(pkgPath).pipe(Effect.catchAll(() => Effect.succeed(false)))
 				if (!exists) {
@@ -270,14 +276,13 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// ============================================================================
 
 		/**
-		 * Load configuration with fallback chain
+		 * Load configuration for a project path with fallback chain
 		 *
-		 * Priority: explicit path > .azedarach.json > package.json > env vars > defaults
-		 *
-		 * @param projectPath - Root directory of the project
-		 * @param configPath - Optional explicit config file path (--config flag)
+		 * Priority: explicit configPath > .azedarach.json > package.json > env vars > defaults
 		 */
-		const loadConfig = (): Effect.Effect<ResolvedConfig, ConfigParseError, FileSystem.FileSystem> =>
+		const loadConfigForPath = (
+			projectPath: string,
+		): Effect.Effect<ResolvedConfig, ConfigParseError> =>
 			Effect.gen(function* () {
 				// If explicit config path provided, use only that
 				if (configPath) {
@@ -339,19 +344,50 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				return mergeWithDefaults(envConfig)
 			})
 
-		const config = yield* loadConfig()
+		// ============================================================================
+		// Reactive Config Setup
+		// ============================================================================
+
+		// Get initial project path from ProjectService
+		const initialProjectPath = yield* projectService.getCurrentPath()
+		const effectiveProjectPath = initialProjectPath ?? process.cwd()
+
+		// Load initial config
+		const initialConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
+			Effect.catchAll(() => Effect.succeed(mergeWithDefaults({}))),
+		)
+
+		// Create reactive config ref
+		const configRef = yield* SubscriptionRef.make<ResolvedConfig>(initialConfig)
+
+		// Watch for project changes and reload config
+		yield* Effect.forkScoped(
+			projectService.currentProject.changes.pipe(
+				Stream.runForEach((project) =>
+					Effect.gen(function* () {
+						const newProjectPath = project?.path ?? process.cwd()
+						const newConfig = yield* loadConfigForPath(newProjectPath).pipe(
+							Effect.catchAll(() => Effect.succeed(mergeWithDefaults({}))),
+						)
+						yield* SubscriptionRef.set(configRef, newConfig)
+					}),
+				),
+			),
+		)
 
 		return {
-			config,
-			getWorktreeConfig: () => config.worktree,
-			getGitConfig: () => config.git,
-			getSessionConfig: () => config.session,
-			getPatternsConfig: () => config.patterns,
-			getPRConfig: () => config.pr,
-			getMergeConfig: () => config.merge,
-			getNotificationsConfig: () => config.notifications,
-			getBeadsConfig: () => config.beads,
-			getNetworkConfig: () => config.network,
+			config: configRef,
+			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
+			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
+			getSessionConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.session),
+			getPatternsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.patterns),
+			getPRConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.pr),
+			getMergeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.merge),
+			getNotificationsConfig: () =>
+				Effect.map(SubscriptionRef.get(configRef), (c) => c.notifications),
+			getBeadsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.beads),
+			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
+			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
 		}
 	}),
 }) {}
