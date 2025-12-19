@@ -7,7 +7,7 @@ import { taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import { PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
+import { CONFLICT_INDICATOR, PHASE_INDICATORS, SESSION_INDICATORS } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task
@@ -139,6 +139,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		// Show conflict indicator when worktree has active merge conflict (e.g., "🔵 ⚔️")
+		if (props.task.hasMergeConflict) {
+			line += ` ${CONFLICT_INDICATOR}`
 		}
 		// Show phase indicator after session indicator (e.g., "🔵 📋" = busy + planning)
 		if (phaseIndicator) {
