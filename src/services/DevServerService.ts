@@ -157,10 +157,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				if (!exists) return HashMap.empty<string, DevServerState>()
 
 				const content = yield* fs.readFileString(filePath)
-				// Schema.parseJson handles JSON parsing
-				const decoded = yield* Schema.decodeUnknown(PersistedDevServersSchema)(content)
-
-				return decoded
+				// Schema.parseJson expects string input, so decode (not decodeUnknown) is correct
+				return yield* Schema.decode(PersistedDevServersSchema)(content)
 			}).pipe(Effect.catchAll(() => Effect.succeed(HashMap.empty<string, DevServerState>())))
 
 		/**
