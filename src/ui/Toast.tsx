@@ -10,7 +10,7 @@ import { theme } from "./theme.js"
 export interface ToastMessage {
 	readonly id: string
 	readonly message: string
-	readonly type: "error" | "info" | "success"
+	readonly type: "error" | "info" | "success" | "warning"
 	readonly timestamp: number
 }
 
@@ -32,6 +32,8 @@ function getToastStyle(type: ToastMessage["type"]) {
 	switch (type) {
 		case "error":
 			return { bg: theme.red, fg: theme.crust, icon: "!" }
+		case "warning":
+			return { bg: theme.yellow, fg: theme.crust, icon: "⚠" }
 		case "success":
 			return { bg: theme.green, fg: theme.crust, icon: "+" }
 		default:
