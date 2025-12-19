@@ -373,10 +373,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Build git diff command that works in the worktree
 				// - diff main shows ALL changes vs main (committed + staged + unstaged)
 				// - Using main instead of main...HEAD ensures uncommitted work is visible
+				// - --diff-filter=d excludes deletions (files in main but missing from worktree)
 				// - DFT_COLOR=always ensures difftastic colors in tmux popup
 				// - --color=always ensures colors for delta/git built-in diff
 				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				const diffCommand = `cd "${worktreePath}" && git diff main --stat --color=always && echo "" && DFT_COLOR=always git diff main --color=always | less -RS`
+				const diffCommand = `cd "${worktreePath}" && git diff main --diff-filter=d --stat --color=always && echo "" && DFT_COLOR=always git diff main --diff-filter=d --color=always | less -RS`
 
 				yield* tmux
 					.displayPopup({
