@@ -16,7 +16,7 @@ import { emptyArray } from "../lib/empty.js"
 
 export interface Toast {
 	readonly id: string
-	readonly type: "success" | "error" | "info"
+	readonly type: "success" | "error" | "info" | "warning"
 	readonly message: string
 	readonly createdAt: number
 }

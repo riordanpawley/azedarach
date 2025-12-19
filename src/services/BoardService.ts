@@ -37,16 +37,18 @@ const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => 
 	switch (state) {
 		case "busy":
 			return 0
+		case "warning":
+			return 1 // Warning state: session started but with issues
 		case "waiting":
-			return 1
-		case "paused":
 			return 2
-		case "done":
+		case "paused":
 			return 3
-		case "error":
+		case "done":
 			return 4
-		case "idle":
+		case "error":
 			return 5
+		case "idle":
+			return 6
 	}
 }
 
