@@ -1038,21 +1038,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// This imports beads from the branch that might have been excluded by -X ours
 					yield* withSyncLock(
 						Effect.gen(function* () {
-							// Import beads from the merged JSONL
+							// Import beads from the merged JSONL to sync database
 							yield* beadsClient
 								.syncImportOnly(projectPath)
 								.pipe(
 									Effect.catchAll((e) =>
 										Effect.logWarning(`Failed to import beads after merge: ${e}`),
-									),
-								)
-
-							// Recover any tombstoned issues
-							yield* beadsClient
-								.recoverTombstones(projectPath)
-								.pipe(
-									Effect.catchAll((e) =>
-										Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
 									),
 								)
 

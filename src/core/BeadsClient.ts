@@ -198,22 +198,11 @@ export interface BeadsClientService {
 
 	/**
 	 * Import-only sync - re-imports beads from JSONL into database without git operations.
-	 * Use after git merge to recover any beads incorrectly removed by the merge driver.
+	 * Use after git merge to ensure database is in sync with JSONL.
 	 */
 	readonly syncImportOnly: (
 		cwd?: string,
 	) => Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor>
-
-	/**
-	 * Recover tombstoned issues from JSONL.
-	 * Workaround for bd sync bug where issues get incorrectly tombstoned during merge.
-	 * See issue az-zby for details.
-	 *
-	 * @returns Number of issues recovered
-	 */
-	readonly recoverTombstones: (
-		cwd?: string,
-	) => Effect.Effect<number, BeadsError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get ready (unblocked) issues
@@ -594,43 +583,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			/**
 			 * Import-only sync - re-imports beads from JSONL into database without git operations.
-			 * Use after git merge to recover any beads that might have been incorrectly
-			 * removed by the bd merge driver.
+			 * Use after git merge to ensure database is in sync with JSONL.
 			 */
 			syncImportOnly: (cwd?: string) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
 					return yield* parseJson(SyncResultSchema, output)
-				}),
-
-			recoverTombstones: (cwd?: string) =>
-				Effect.gen(function* () {
-					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					// Run recovery script that fixes tombstoned issues from JSONL
-					// This is a workaround for bd sync bug (see az-zby)
-					const scriptPath = effectiveCwd
-						? `${effectiveCwd}/.beads/recover-tombstones.sh`
-						: ".beads/recover-tombstones.sh"
-
-					const command = Command.make("bash", scriptPath).pipe(
-						effectiveCwd ? Command.workingDirectory(effectiveCwd) : (x) => x,
-					)
-
-					const result = yield* Command.string(command).pipe(
-						Effect.mapError((error) => {
-							const stderr = "stderr" in error ? String(error.stderr) : String(error)
-							return new BeadsError({
-								message: `Tombstone recovery failed: ${stderr}`,
-								command: `bash ${scriptPath}`,
-								stderr,
-							})
-						}),
-					)
-
-					// Parse "=== Recovered N issues ===" from output
-					const match = result.match(/Recovered (\d+) issues/)
-					return match ? Number.parseInt(match[1]!, 10) : 0
 				}),
 
 			ready: (cwd?: string) =>
