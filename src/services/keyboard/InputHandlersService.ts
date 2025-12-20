@@ -197,10 +197,14 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return false
 					}
 
+					// DIAGNOSTIC: Log all keys received while confirm is open (az-f3iw)
+					yield* Effect.log(`[confirm:key] Received key="${key}" while confirm overlay is open`)
+
 					// y or Enter to confirm
 					if (key === "y" || key === "return") {
 						// Pop overlay FIRST for immediate UI feedback, then run the async operation
 						// The onConfirm effect (e.g., merge) shows its own toast progress
+						yield* Effect.log(`[confirm:execute] Executing onConfirm effect`)
 						yield* overlay.pop()
 						yield* currentOverlay.onConfirm
 						return true
