@@ -1,24 +1,23 @@
 /**
  * HookReceiver - Effect service for receiving Claude Code hook notifications
  *
- * Watches for notification files written by `az notify` command and translates
- * hook events into session state changes. This enables authoritative state
- * detection from Claude Code's native hook system.
+ * Polls tmux session options to detect session state changes set by
+ * `az notify` commands. This enables authoritative state detection
+ * from Claude Code's native hook system.
  *
- * Notification file format: /tmp/azedarach-notify-<bead-id>.json
- * {
- *   "event": "idle_prompt" | "stop" | "session_end",
- *   "beadId": "az-123",
- *   "timestamp": 1234567890
- * }
+ * State detection flow:
+ * 1. Claude Code hooks call `az notify <event> <beadId>`
+ * 2. `az notify` sets tmux session option `@az_status` on the Claude session
+ * 3. HookReceiver polls tmux sessions and reads their `@az_status`
+ * 4. State changes trigger handler callbacks
  *
- * Event to SessionState mapping:
- * - idle_prompt → "waiting" (Claude waiting for user input 60s+, fallback)
- * - stop → "waiting" (Claude finished responding, waiting for user input)
- * - session_end → "idle" (Session terminated)
+ * Status values:
+ * - "busy" → SessionState "busy" (Claude is working)
+ * - "waiting" → SessionState "waiting" (Claude awaits input)
+ * - "idle" → SessionState "idle" (Session ended)
  */
 
-import { FileSystem } from "@effect/platform"
+import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { SessionState } from "../ui/types.js"
@@ -28,35 +27,23 @@ import type { SessionState } from "../ui/types.js"
 // ============================================================================
 
 /**
- * Hook event types from Claude Code
- *
- * Event timing and state mapping:
- * - pretooluse: Fires BEFORE permission check when Claude attempts any tool → "busy"
- * - permission_request: Fires when Claude needs user approval → "waiting"
- * - idle_prompt: Fires after 60s+ of no input (fallback) → "waiting"
- * - stop: Fires when Claude finishes responding → "waiting"
- * - session_end: Fires when session terminates → "idle"
+ * Tmux status values (what `az notify` sets)
  */
-export type HookEventType =
-	| "idle_prompt"
-	| "permission_request"
-	| "pretooluse"
-	| "stop"
-	| "session_end"
+export type TmuxStatus = "busy" | "waiting" | "idle"
 
 /**
- * Hook event payload (matches what `az notify` writes)
+ * Session state update from tmux polling
  */
-export interface HookEvent {
-	readonly event: HookEventType
+export interface SessionStateUpdate {
 	readonly beadId: string
-	readonly timestamp: number
+	readonly status: TmuxStatus
+	readonly sessionName: string
 }
 
 /**
- * Callback for processing hook events
+ * Callback for processing state updates
  */
-export type HookEventHandler = (event: HookEvent) => Effect.Effect<void, never>
+export type StateUpdateHandler = (update: SessionStateUpdate) => Effect.Effect<void, never>
 
 // ============================================================================
 // Error Types
@@ -75,51 +62,30 @@ export class HookReceiverError extends Data.TaggedError("HookReceiverError")<{
 // ============================================================================
 
 /**
- * Notification file pattern
+ * Prefix for Claude session names
  */
-const NOTIFY_DIR = "/tmp"
-const NOTIFY_PREFIX = "azedarach-notify-"
-const NOTIFY_SUFFIX = ".json"
+const CLAUDE_SESSION_PREFIX = "claude-"
 
 /**
- * Polling interval for watching notification files
+ * Polling interval for watching tmux sessions
  */
 const POLL_INTERVAL_MS = 500
 
 // ============================================================================
-// Event Mapping
+// Status Mapping
 // ============================================================================
 
 /**
- * Map hook event type to SessionState
- *
- * State transitions follow Claude Code's hook execution order:
- * 1. PreToolUse fires → "busy" (Claude attempting tool)
- * 2. PermissionRequest fires → "waiting" (needs user approval)
- * 3. User approves → tool executes → stays "busy"
- * 4. Stop fires → "waiting" (Claude done, awaiting next prompt)
- *
- * Returns null if the event should not trigger a state change.
+ * Map tmux status to SessionState
  */
-export const mapEventToState = (event: HookEventType): SessionState | null => {
-	switch (event) {
-		case "pretooluse":
-			// Claude is attempting to use a tool - actively working
+export const mapStatusToState = (status: TmuxStatus): SessionState => {
+	switch (status) {
+		case "busy":
 			return "busy"
-		case "permission_request":
-			// Claude needs user approval to proceed
+		case "waiting":
 			return "waiting"
-		case "idle_prompt":
-			// Claude has been waiting for input for 60+ seconds (fallback)
-			return "waiting"
-		case "stop":
-			// Claude finished responding and is now waiting for user input
-			return "waiting"
-		case "session_end":
-			// Session terminated - return to idle
+		case "idle":
 			return "idle"
-		default:
-			return null
 	}
 }
 
@@ -130,35 +96,32 @@ export const mapEventToState = (event: HookEventType): SessionState | null => {
 /**
  * HookReceiver service interface
  *
- * Provides hook event watching capabilities for receiving notifications
+ * Provides tmux session polling capabilities for detecting session state
  * from Claude Code sessions running in worktrees.
  */
 export interface HookReceiverService {
 	/**
-	 * Start watching for hook notifications
+	 * Start watching for session state changes
 	 *
 	 * Returns a Fiber that can be interrupted to stop watching.
-	 * Events are pushed to the provided handler.
+	 * State changes are pushed to the provided handler.
 	 *
 	 * IMPORTANT: The returned fiber is scoped to the caller's scope.
 	 * Use Effect.forkScoped internally so the fiber survives after start() returns.
 	 */
 	readonly start: (
-		handler: HookEventHandler,
+		handler: StateUpdateHandler,
 	) => Effect.Effect<Fiber.RuntimeFiber<number, never>, never, Scope.Scope>
 
 	/**
-	 * Process a single notification file
-	 *
-	 * Reads, parses, and deletes the notification file.
-	 * Called internally by the watcher, but exposed for testing.
+	 * Get current status for a specific session
 	 */
-	readonly processNotification: (path: string) => Effect.Effect<HookEvent | null, never>
+	readonly getSessionStatus: (beadId: string) => Effect.Effect<TmuxStatus | null, never>
 
 	/**
-	 * Get list of pending notification files
+	 * List all active Claude sessions with their status
 	 */
-	readonly listPendingNotifications: () => Effect.Effect<readonly string[], never>
+	readonly listSessions: () => Effect.Effect<readonly SessionStateUpdate[], never>
 }
 
 // ============================================================================
@@ -168,19 +131,17 @@ export interface HookReceiverService {
 /**
  * HookReceiver service
  *
- * Polls for notification files and processes them when found.
- * Uses a simple file-based IPC mechanism for reliability.
+ * Polls tmux sessions to detect state changes set by `az notify` hooks.
+ * Uses tmux session option `@az_status` for IPC.
  *
  * @example
  * ```ts
  * const program = Effect.gen(function* () {
  *   const receiver = yield* HookReceiver
- *   const fiber = yield* receiver.start((event) =>
+ *   const fiber = yield* receiver.start((update) =>
  *     Effect.gen(function* () {
- *       const newState = mapEventToState(event.event)
- *       if (newState) {
- *         yield* sessionManager.updateState(event.beadId, newState)
- *       }
+ *       const newState = mapStatusToState(update.status)
+ *       yield* sessionManager.updateState(update.beadId, newState)
  *     })
  *   )
  *   // Later: yield* Fiber.interrupt(fiber)
@@ -190,112 +151,154 @@ export interface HookReceiverService {
 export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
 	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem
 		const diagnostics = yield* DiagnosticsService
 
-		// Track processed files to avoid duplicates
-		const processedRef = yield* Ref.make<Set<string>>(new Set())
+		// Track previous state to detect changes
+		const previousStateRef = yield* Ref.make<Map<string, TmuxStatus>>(new Map())
 
-		const listPendingNotifications = () =>
+		/**
+		 * List all tmux sessions starting with "claude-"
+		 */
+		const listClaudeSessions = (): Effect.Effect<readonly string[], never> =>
 			Effect.gen(function* () {
-				const entries = yield* fs
-					.readDirectory(NOTIFY_DIR)
-					.pipe(Effect.catchAll(() => Effect.succeed([] as readonly string[])))
-
-				return entries.filter(
-					(entry) => entry.startsWith(NOTIFY_PREFIX) && entry.endsWith(NOTIFY_SUFFIX),
-				)
-			})
-
-		const processNotification = (filename: string) =>
-			Effect.gen(function* () {
-				const fullPath = `${NOTIFY_DIR}/${filename}`
-
-				// Check if already processed
-				const processed = yield* Ref.get(processedRef)
-				if (processed.has(fullPath)) {
-					return null
-				}
-
-				// Read file content
-				const content = yield* fs
-					.readFileString(fullPath)
-					.pipe(Effect.catchAll(() => Effect.succeed(null)))
-
-				if (content === null) {
-					return null
-				}
-
-				// Parse JSON
-				const event = yield* Effect.try({
-					try: () => JSON.parse(content) as HookEvent,
-					catch: () => null,
-				}).pipe(Effect.catchAll(() => Effect.succeed(null)))
-
-				if (event === null) {
-					// Invalid JSON, delete the file anyway
-					yield* fs.remove(fullPath).pipe(Effect.catchAll(() => Effect.void))
-					return null
-				}
-
-				// Mark as processed
-				yield* Ref.update(processedRef, (s) => new Set([...s, fullPath]))
-
-				// Delete the notification file
-				yield* fs.remove(fullPath).pipe(Effect.catchAll(() => Effect.void))
-
-				// Clean up processed set (remove after 1 minute to prevent memory leak)
-				// Use forkScoped so the cleanup fiber survives the parent effect
-				yield* Effect.sleep("1 minute").pipe(
-					Effect.flatMap(() =>
-						Ref.update(processedRef, (s) => {
-							const next = new Set(s)
-							next.delete(fullPath)
-							return next
-						}),
-					),
-					Effect.forkScoped,
+				const command = Command.make(
+					"tmux",
+					"list-sessions",
+					"-F",
+					"#{session_name}",
 				)
 
-				return event
+				const output = yield* Command.string(command).pipe(
+					Effect.catchAll(() => Effect.succeed("")),
+				)
+
+				return output
+					.split("\n")
+					.map((s) => s.trim())
+					.filter((s) => s.startsWith(CLAUDE_SESSION_PREFIX))
 			})
 
-		const start = (handler: HookEventHandler) =>
+		/**
+		 * Get the @az_status option for a tmux session
+		 */
+		const getSessionOption = (sessionName: string): Effect.Effect<TmuxStatus | null, never> =>
 			Effect.gen(function* () {
-				// Poll once immediately on startup to process any pending notifications
-				const files = yield* listPendingNotifications()
-				if (files.length > 0) {
+				const command = Command.make(
+					"tmux",
+					"show-option",
+					"-t",
+					sessionName,
+					"-v",
+					"@az_status",
+				)
+
+				const output = yield* Command.string(command).pipe(
+					Effect.catchAll(() => Effect.succeed("")),
+				)
+
+				const status = output.trim()
+				if (status === "busy" || status === "waiting" || status === "idle") {
+					return status
+				}
+				return null
+			})
+
+		/**
+		 * Extract bead ID from session name
+		 */
+		const extractBeadId = (sessionName: string): string | null => {
+			if (sessionName.startsWith(CLAUDE_SESSION_PREFIX)) {
+				return sessionName.slice(CLAUDE_SESSION_PREFIX.length)
+			}
+			return null
+		}
+
+		/**
+		 * List all sessions with their current status
+		 */
+		const listSessions = (): Effect.Effect<readonly SessionStateUpdate[], never> =>
+			Effect.gen(function* () {
+				const sessions = yield* listClaudeSessions()
+				const results: SessionStateUpdate[] = []
+
+				for (const sessionName of sessions) {
+					const beadId = extractBeadId(sessionName)
+					if (!beadId) continue
+
+					const status = yield* getSessionOption(sessionName)
+					if (status) {
+						results.push({ beadId, status, sessionName })
+					}
+				}
+
+				return results
+			})
+
+		/**
+		 * Get status for a specific session
+		 */
+		const getSessionStatus = (beadId: string): Effect.Effect<TmuxStatus | null, never> =>
+			getSessionOption(`${CLAUDE_SESSION_PREFIX}${beadId}`)
+
+		/**
+		 * Start polling for state changes
+		 */
+		const start = (handler: StateUpdateHandler) =>
+			Effect.gen(function* () {
+				// Initial poll to populate state
+				const initialSessions = yield* listSessions()
+				const initialMap = new Map<string, TmuxStatus>()
+				for (const session of initialSessions) {
+					initialMap.set(session.beadId, session.status)
+				}
+				yield* Ref.set(previousStateRef, initialMap)
+
+				// Log initial state
+				if (initialSessions.length > 0) {
 					yield* Effect.log(
-						`HookReceiver: Processing ${files.length} pending notifications on startup`,
+						`HookReceiver: Found ${initialSessions.length} active Claude sessions`,
 					)
 				}
-				for (const file of files) {
-					const event = yield* processNotification(file)
-					if (event) {
-						yield* Effect.log(`HookReceiver: Processing ${event.event} for ${event.beadId}`)
-						yield* handler(event)
-					}
-				}
 
-				// Start a scoped polling fiber that processes notifications
-				// Uses forkScoped so the fiber survives after start() returns
-				// and is tied to the caller's scope lifetime
+				// Start polling fiber
 				const pollerFiber = yield* Effect.gen(function* () {
-					const pendingFiles = yield* listPendingNotifications()
+					const sessions = yield* listSessions()
+					const previousState = yield* Ref.get(previousStateRef)
+					const newState = new Map<string, TmuxStatus>()
 
-					for (const file of pendingFiles) {
-						const event = yield* processNotification(file)
-						if (event) {
-							yield* Effect.log(`HookReceiver: Processing ${event.event} for ${event.beadId}`)
-							yield* handler(event)
+					for (const session of sessions) {
+						newState.set(session.beadId, session.status)
+
+						const prevStatus = previousState.get(session.beadId)
+						if (prevStatus !== session.status) {
+							// State changed - call handler
+							yield* Effect.log(
+								`HookReceiver: ${session.beadId} status changed: ${prevStatus ?? "none"} → ${session.status}`,
+							)
+							yield* handler(session)
 						}
 					}
+
+					// Check for sessions that disappeared (session ended)
+					for (const [beadId, _prevStatus] of previousState) {
+						if (!newState.has(beadId)) {
+							// Session disappeared - treat as idle
+							yield* Effect.log(`HookReceiver: ${beadId} session ended`)
+							yield* handler({
+								beadId,
+								status: "idle",
+								sessionName: `${CLAUDE_SESSION_PREFIX}${beadId}`,
+							})
+						}
+					}
+
+					yield* Ref.set(previousStateRef, newState)
 				}).pipe(
-					// Catch errors inside the loop to prevent stopping
+					// Catch errors to prevent stopping
 					Effect.catchAll((e) =>
 						Effect.logWarning(`HookReceiver poll error: ${e}`).pipe(Effect.asVoid),
 					),
-					// Repeat indefinitely with 500ms interval
+					// Repeat with polling interval
 					Effect.repeat(Schedule.spaced(`${POLL_INTERVAL_MS} millis`)),
 					Effect.forkScoped,
 				)
@@ -304,7 +307,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 				yield* diagnostics.registerFiber({
 					id: "hook-receiver-poller",
 					name: "HookReceiver Poller",
-					description: "Polls /tmp for Claude Code hook notifications",
+					description: "Polls tmux sessions for Claude Code hook state",
 					fiber: pollerFiber,
 				})
 
@@ -313,8 +316,8 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 
 		return {
 			start,
-			processNotification,
-			listPendingNotifications,
+			getSessionStatus,
+			listSessions,
 		}
 	}),
 }) {}
@@ -327,12 +330,20 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
  * Start the hook receiver with a handler (convenience function)
  */
 export const startHookReceiver = (
-	handler: HookEventHandler,
+	handler: StateUpdateHandler,
 ): Effect.Effect<Fiber.RuntimeFiber<number, never>, never, HookReceiver | Scope.Scope> =>
 	Effect.flatMap(HookReceiver, (receiver) => receiver.start(handler))
 
 /**
- * List pending notification files (convenience function)
+ * List all active Claude sessions (convenience function)
  */
-export const listPendingNotifications = (): Effect.Effect<readonly string[], never, HookReceiver> =>
-	Effect.flatMap(HookReceiver, (receiver) => receiver.listPendingNotifications())
+export const listSessions = (): Effect.Effect<readonly SessionStateUpdate[], never, HookReceiver> =>
+	Effect.flatMap(HookReceiver, (receiver) => receiver.listSessions())
+
+/**
+ * Get status for a specific session (convenience function)
+ */
+export const getSessionStatus = (
+	beadId: string,
+): Effect.Effect<TmuxStatus | null, never, HookReceiver> =>
+	Effect.flatMap(HookReceiver, (receiver) => receiver.getSessionStatus(beadId))
