@@ -6,7 +6,7 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { Command as PlatformCommand, FileSystem, Path } from "@effect/platform"
+import { FileSystem, Path, Command as PlatformCommand } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
@@ -347,13 +347,12 @@ const notifyHandler = (args: {
 		)
 
 		yield* PlatformCommand.exitCode(tmuxCommand).pipe(
-			Effect.catchAll((error) => {
+			Effect.catchAll((error) =>
 				// Session may not exist (e.g., during startup) - log but don't fail
-				if (args.verbose) {
-					yield* Console.log(`Could not set tmux status: ${error}`)
-				}
-				return Effect.succeed(1)
-			}),
+				args.verbose
+					? Console.log(`Could not set tmux status: ${error}`).pipe(Effect.as(1))
+					: Effect.succeed(1),
+			),
 		)
 
 		if (args.verbose) {
