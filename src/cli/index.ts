@@ -12,6 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
+import type { TmuxStatus } from "../core/HookReceiver.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
 
@@ -290,7 +291,7 @@ const isValidHookEvent = (event: string): event is HookEvent =>
  * - waiting: Claude is waiting for user input
  * - idle: Session is inactive/ended
  */
-const mapEventToStatus = (event: HookEvent): "busy" | "waiting" | "idle" => {
+const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 	switch (event) {
 		case "user_prompt":
 		case "pretooluse":
