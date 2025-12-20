@@ -443,6 +443,16 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			clearFilters: () => SubscriptionRef.set(filterConfig, DEFAULT_FILTER_CONFIG),
 
 			/**
+			 * Restore sort and filter configuration from saved state
+			 * Used when switching projects to restore previous UI state
+			 */
+			restoreState: (savedSort: SortConfig, savedFilter: FilterConfig) =>
+				Effect.gen(function* () {
+					yield* SubscriptionRef.set(sortConfig, savedSort)
+					yield* SubscriptionRef.set(filterConfig, savedFilter)
+				}),
+
+			/**
 			 * Get count of active filter fields (for status bar display)
 			 */
 			getActiveFilterCount: (): Effect.Effect<number> =>
