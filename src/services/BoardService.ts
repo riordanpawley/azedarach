@@ -18,12 +18,13 @@ import {
 	Stream,
 	SubscriptionRef,
 } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import { BeadsClient } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
 import { emptyRecord } from "../lib/empty.js"
-import type { TaskWithSession } from "../ui/types.js"
+import type { GitStatus, TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
@@ -288,6 +289,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		PTYMonitor.Default,
 		ProjectService.Default,
 		DiagnosticsService.Default,
+		AppConfig.Default,
 	],
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
@@ -297,6 +299,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
 		const diagnostics = yield* DiagnosticsService
+		const appConfig = yield* AppConfig
 
 		// Register with diagnostics
 		yield* diagnostics.trackService("BoardService", "2s beads polling + session state merge")
@@ -333,12 +336,102 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		/**
+		 * Get git status for a worktree
+		 *
+		 * Returns information about:
+		 * - How many commits the branch is behind the base branch
+		 * - Whether there are uncommitted changes (dirty worktree)
+		 * - Line additions/deletions (if showLineChanges is enabled)
+		 */
+		const checkGitStatus = (worktreePath: string, baseBranch: string, showLineChanges: boolean) =>
+			Effect.gen(function* () {
+				// Check commits behind: git rev-list --count HEAD..origin/<baseBranch>
+				// This counts how many commits are on the base branch that aren't on HEAD
+				const behindCommand = Command.make(
+					"git",
+					"-C",
+					worktreePath,
+					"rev-list",
+					"--count",
+					`HEAD..origin/${baseBranch}`,
+				).pipe(Command.string)
+
+				const behindCount = yield* behindCommand.pipe(
+					Effect.map((output) => {
+						const count = Number.parseInt(output.trim(), 10)
+						return Number.isNaN(count) ? 0 : count
+					}),
+					Effect.catchAll(() => Effect.succeed(0)),
+				)
+
+				// Check for uncommitted changes: git status --porcelain
+				// Non-empty output means there are changes
+				const dirtyCommand = Command.make("git", "-C", worktreePath, "status", "--porcelain").pipe(
+					Command.string,
+				)
+
+				const hasUncommittedChanges = yield* dirtyCommand.pipe(
+					Effect.map((output) => output.trim().length > 0),
+					Effect.catchAll(() => Effect.succeed(false)),
+				)
+
+				// Get line changes if enabled
+				let gitAdditions: number | undefined
+				let gitDeletions: number | undefined
+
+				if (showLineChanges) {
+					// git diff --stat HEAD gives line stats for uncommitted changes
+					// git diff --stat origin/<baseBranch>...HEAD gives stats vs base branch
+					// Using numstat for easier parsing: +<add>\t-<del>\t<file>
+					const diffCommand = Command.make(
+						"git",
+						"-C",
+						worktreePath,
+						"diff",
+						"--numstat",
+						`origin/${baseBranch}...HEAD`,
+					).pipe(Command.string)
+
+					const diffStats = yield* diffCommand.pipe(
+						Effect.map((output) => {
+							let additions = 0
+							let deletions = 0
+							for (const line of output.trim().split("\n")) {
+								if (!line) continue
+								const parts = line.split("\t")
+								const add = Number.parseInt(parts[0] ?? "0", 10)
+								const del = Number.parseInt(parts[1] ?? "0", 10)
+								if (!Number.isNaN(add)) additions += add
+								if (!Number.isNaN(del)) deletions += del
+							}
+							return { additions, deletions }
+						}),
+						Effect.catchAll(() => Effect.succeed({ additions: 0, deletions: 0 })),
+					)
+
+					gitAdditions = diffStats.additions
+					gitDeletions = diffStats.deletions
+				}
+
+				return {
+					gitBehindCount: behindCount > 0 ? behindCount : undefined,
+					hasUncommittedChanges: hasUncommittedChanges || undefined,
+					gitAdditions: gitAdditions !== undefined && gitAdditions > 0 ? gitAdditions : undefined,
+					gitDeletions: gitDeletions !== undefined && gitDeletions > 0 ? gitDeletions : undefined,
+				}
+			})
+
+		/**
 		 * Load tasks from BeadsClient and merge with session state + PTY metrics
 		 */
 		const loadTasks = () =>
 			Effect.gen(function* () {
 				// Get current project path (falls back to cwd if no project configured)
 				const projectPath = yield* projectService.getCurrentPath()
+
+				// Get git config for status checks
+				const gitConfig = yield* appConfig.getGitConfig()
+				const { baseBranch, showLineChanges } = gitConfig
 
 				// Fetch all issues from beads (pass project path for multi-project support)
 				const issues = yield* beadsClient.list(undefined, projectPath)
@@ -351,7 +444,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Map issues to TaskWithSession, merging session state and PTY metrics
-				// Then check merge conflicts in parallel for tasks with active sessions
+				// Then check merge conflicts and git status in parallel for tasks with active sessions
 				const tasksWithSession: TaskWithSession[] = yield* Effect.all(
 					issues.map((issue) =>
 						Effect.gen(function* () {
@@ -360,17 +453,26 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
 							const sessionState = session?.state ?? "idle"
 
-							// Check for merge conflicts only if task has an active session
+							// Check for merge conflicts and git status only if task has an active session
 							let hasMergeConflict = false
+							let gitStatus: GitStatus = {}
 							if (sessionState !== "idle" && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
-								hasMergeConflict = yield* checkMergeConflict(worktreePath)
+								// Run merge conflict check and git status check in parallel
+								const [mergeConflict, status] = yield* Effect.all([
+									checkMergeConflict(worktreePath),
+									checkGitStatus(worktreePath, baseBranch, showLineChanges),
+								])
+								hasMergeConflict = mergeConflict
+								gitStatus = status
 							}
 
 							return {
 								...issue,
 								sessionState,
 								hasMergeConflict,
+								// Git status from checkGitStatus
+								...gitStatus,
 								// Session metrics from ClaudeSessionManager
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
