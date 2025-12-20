@@ -13,6 +13,7 @@ import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
 import type { ToastService } from "../ToastService.js"
 import type { ViewService } from "../ViewService.js"
+import type { DevServerHandlersService } from "./DevServerHandlersService.js"
 import type { InputHandlersService } from "./InputHandlersService.js"
 import type { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import type { OrchestrateHandlersService } from "./OrchestrateHandlersService.js"
@@ -38,6 +39,7 @@ export interface BindingContext {
 	prHandlers: PRHandlersService
 	inputHandlers: InputHandlersService
 	orchestrateHandlers: OrchestrateHandlersService
+	devServerHandlers: DevServerHandlersService
 	helpers: KeyboardHelpersService
 
 	// Core services for direct bindings
@@ -172,6 +174,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		description: "Enter sort mode",
 		action: bc.editor.enterSort(),
 	},
+	{
+		key: "f",
+		mode: "normal",
+		description: "Enter filter mode",
+		action: bc.editor.enterFilter(),
+	},
 
 	// ========================================================================
 	// Normal Mode - Actions
@@ -185,9 +193,21 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const inDrillDown = yield* bc.nav.isInDrillDown()
 			if (inDrillDown) {
 				yield* bc.nav.exitDrillDown()
-			} else {
-				process.exit(0)
+				return
 			}
+
+			// Check if any operations are running
+			const busy = yield* bc.helpers.isAnyBusy()
+
+			if (busy) {
+				// Get running operation labels for the toast message
+				const labels = yield* bc.helpers.getRunningOperationLabels()
+				const labelStr = labels.length > 0 ? labels.join(", ") : "operation"
+				yield* bc.toast.show("warning", `Cannot quit: ${labelStr} in progress`)
+				return
+			}
+
+			process.exit(0)
 		}),
 	},
 	{
@@ -377,6 +397,46 @@ done
 	{
 		key: "r",
 		mode: "action",
+		description: "Toggle dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(
+				Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
+				Effect.catchAll((e) =>
+					Effect.gen(function* () {
+						yield* Effect.logError("Dev server toggle failed", e)
+						yield* bc.toast.show("error", `Dev server error: ${e.message}`)
+					}),
+				),
+			),
+		),
+	},
+	{
+		key: "C-r",
+		mode: "action",
+		description: "Restart dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(
+				Effect.tap(() => bc.devServerHandlers.restartDevServer()),
+				Effect.catchAll((e) =>
+					Effect.gen(function* () {
+						yield* Effect.logError("Dev server restart failed", e)
+						yield* bc.toast.show("error", `Dev server error: ${e.message}`)
+					}),
+				),
+			),
+		),
+	},
+	{
+		key: "v",
+		mode: "action",
+		description: "View dev server",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.attachDevServer())),
+		),
+	},
+	{
+		key: "S-r",
+		mode: "action",
 		description: "Resume session",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.resumeSession())),
@@ -450,6 +510,14 @@ done
 		description: "Show diff vs main",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
+		),
+	},
+	{
+		key: "u",
+		mode: "action",
+		description: "Update from main",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
 		),
 	},
 	{
@@ -611,6 +679,173 @@ done
 			Effect.tap(() => bc.editor.exitToNormal()),
 			Effect.catchAll(Effect.logError),
 		),
+	},
+
+	// ========================================================================
+	// Filter Mode
+	// ========================================================================
+	// Sub-menu keys
+	{
+		key: "s",
+		mode: "filter",
+		description: "Status sub-menu",
+		action: bc.editor.setActiveFilterField("status"),
+	},
+	{
+		key: "p",
+		mode: "filter",
+		description: "Priority sub-menu",
+		action: bc.editor.setActiveFilterField("priority"),
+	},
+	{
+		key: "t",
+		mode: "filter",
+		description: "Type sub-menu",
+		action: bc.editor.setActiveFilterField("type"),
+	},
+	{
+		key: "S-s",
+		mode: "filter",
+		description: "Session sub-menu",
+		action: bc.editor.setActiveFilterField("session"),
+	},
+	// Clear filters
+	{
+		key: "c",
+		mode: "filter",
+		description: "Clear all filters",
+		action: bc.editor.clearFilters().pipe(Effect.tap(() => bc.editor.exitToNormal())),
+	},
+	// Toggle epic subtasks
+	{
+		key: "e",
+		mode: "filter",
+		description: "Toggle hide epic subtasks",
+		action: bc.editor.toggleHideEpicSubtasks(),
+	},
+	// Priority toggles (0-4)
+	{
+		key: "0",
+		mode: "filter",
+		description: "Toggle P0 filter",
+		action: bc.editor.toggleFilterPriority(0),
+	},
+	{
+		key: "1",
+		mode: "filter",
+		description: "Toggle P1 filter",
+		action: bc.editor.toggleFilterPriority(1),
+	},
+	{
+		key: "2",
+		mode: "filter",
+		description: "Toggle P2 filter",
+		action: bc.editor.toggleFilterPriority(2),
+	},
+	{
+		key: "3",
+		mode: "filter",
+		description: "Toggle P3 filter",
+		action: bc.editor.toggleFilterPriority(3),
+	},
+	{
+		key: "4",
+		mode: "filter",
+		description: "Toggle P4 filter",
+		action: bc.editor.toggleFilterPriority(4),
+	},
+	// Status toggles (o, i, b, d - first letter of each status except 'closed' uses 'd' for done)
+	{
+		key: "o",
+		mode: "filter",
+		description: "Toggle open status",
+		action: bc.editor.toggleFilterStatus("open"),
+	},
+	{
+		key: "i",
+		mode: "filter",
+		description: "Toggle in_progress status",
+		action: bc.editor.toggleFilterStatus("in_progress"),
+	},
+	{
+		key: "b",
+		mode: "filter",
+		description: "Toggle blocked status",
+		action: bc.editor.toggleFilterStatus("blocked"),
+	},
+	{
+		key: "d",
+		mode: "filter",
+		description: "Toggle closed status",
+		action: bc.editor.toggleFilterStatus("closed"),
+	},
+	// Type toggles (B, F, T, E, C - uppercase to distinguish from status)
+	{
+		key: "S-b",
+		mode: "filter",
+		description: "Toggle bug type",
+		action: bc.editor.toggleFilterType("bug"),
+	},
+	{
+		key: "S-f",
+		mode: "filter",
+		description: "Toggle feature type",
+		action: bc.editor.toggleFilterType("feature"),
+	},
+	{
+		key: "S-t",
+		mode: "filter",
+		description: "Toggle task type",
+		action: bc.editor.toggleFilterType("task"),
+	},
+	{
+		key: "S-e",
+		mode: "filter",
+		description: "Toggle epic type",
+		action: bc.editor.toggleFilterType("epic"),
+	},
+	{
+		key: "S-c",
+		mode: "filter",
+		description: "Toggle chore type",
+		action: bc.editor.toggleFilterType("chore"),
+	},
+	// Session toggles (lowercase when session sub-menu is active)
+	{
+		key: "S-i",
+		mode: "filter",
+		description: "Toggle idle session",
+		action: bc.editor.toggleFilterSession("idle"),
+	},
+	{
+		key: "S-u",
+		mode: "filter",
+		description: "Toggle busy session",
+		action: bc.editor.toggleFilterSession("busy"),
+	},
+	{
+		key: "S-w",
+		mode: "filter",
+		description: "Toggle waiting session",
+		action: bc.editor.toggleFilterSession("waiting"),
+	},
+	{
+		key: "S-d",
+		mode: "filter",
+		description: "Toggle done session",
+		action: bc.editor.toggleFilterSession("done"),
+	},
+	{
+		key: "S-x",
+		mode: "filter",
+		description: "Toggle error session",
+		action: bc.editor.toggleFilterSession("error"),
+	},
+	{
+		key: "S-p",
+		mode: "filter",
+		description: "Toggle paused session",
+		action: bc.editor.toggleFilterSession("paused"),
 	},
 
 	// ========================================================================

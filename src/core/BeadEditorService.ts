@@ -3,9 +3,6 @@
  *
  * Serializes beads to structured markdown, opens $EDITOR, parses changes,
  * and applies updates via BeadsClient.
- *
- * NOTE: Renamed from EditorService to avoid collision with ModeService
- * (src/services/EditorService.ts which handles editor modes in the UI)
  */
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"

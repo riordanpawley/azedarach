@@ -62,6 +62,46 @@ Purpose: Claude Code entry point for Azedarach development
     - **Also Right:** Use sibling `<text>` in `<box flexDirection="row">` for different colors
     - Error message: "TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances"
 
+12. **Schema Encode/Decode**: ALWAYS use `Schema.encode()` and `Schema.decode()` for serialization:
+    - NEVER manually convert types (e.g., `{ ...state, port: state.port ?? null }`)
+    - NEVER use `JSON.stringify()` or `JSON.parse()` - use `Schema.parseJson()` wrapper instead
+    - Define the schema to handle transformations automatically
+    - Use `Schema.UndefinedOr(Schema.Number)` for optional fields
+    - `Schema.decode(schema)` - use when input type matches Encoded (e.g., `string` from `readFileString`)
+    - `Schema.decodeUnknown(schema)` - use when input is truly `unknown` (e.g., external API response)
+    - Let Schema handle the type conversion between runtime and serialized forms
+    ```typescript
+    // ❌ BAD: Manual JSON and conversion
+    const parsed = JSON.parse(content)
+    const toEncodable = (state) => ({ ...state, port: state.port ?? null })
+    const json = JSON.stringify(toEncodable(state))
+
+    // ✅ GOOD: Use Schema.parseJson wrapper
+    const MySchema = Schema.parseJson(Schema.Struct({ ... }))
+    const decoded = yield* Schema.decode(MySchema)(jsonString)  // Input is string
+    const json = yield* Schema.encode(MySchema)(data)  // Returns string
+    ```
+
+13. **tmux Session Creation**: ALWAYS use interactive shell with direnv loading for tmux sessions:
+    - Use `${shell} -i -c '${command}; exec ${shell}'` pattern
+    - **`-i` flag**: Loads `.zshrc`/`.bashrc`, which triggers direnv hooks
+    - **`exec ${shell}`**: Keeps session alive after command exits for debugging
+    - Without `-i`, direnv won't load and environment variables (DATABASE_URL, VITE_PORT, etc.) will be missing
+    ```typescript
+    // ❌ BAD: Raw command without shell wrapper
+    yield* tmux.newSession(sessionName, {
+      cwd,
+      command: "PORT=3000 pnpm run dev",  // direnv won't load!
+    })
+
+    // ✅ GOOD: Interactive shell with exec fallback
+    const shell = config.session.shell  // e.g., "zsh"
+    yield* tmux.newSession(sessionName, {
+      cwd,
+      command: `${shell} -i -c 'PORT=3000 pnpm run dev; exec ${shell}'`,
+    })
+    ```
+
 ## Quick Commands
 
 ```bash

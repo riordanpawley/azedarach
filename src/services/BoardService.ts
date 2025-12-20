@@ -5,6 +5,7 @@
  * Interfaces with BeadsClient for task data and provides methods for task access.
  */
 
+import { Command } from "@effect/platform"
 import {
 	Array as Arr,
 	Cause,
@@ -18,13 +19,14 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
+import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { SessionManager } from "../core/SessionManager.js"
+import { getWorktreePath } from "../core/paths.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
-import { EditorService, type SortConfig } from "./EditorService.js"
+import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import { ProjectService } from "./ProjectService.js"
 
 // ============================================================================
@@ -152,7 +154,7 @@ const sortTasks = (tasks: TaskWithSession[], sortConfig: SortConfig): TaskWithSe
 /**
  * Filter tasks by search query
  */
-const filterTasks = (tasks: TaskWithSession[], query: string): TaskWithSession[] => {
+const filterTasksByQuery = (tasks: TaskWithSession[], query: string): TaskWithSession[] => {
 	if (!query) return tasks
 	const lowerQuery = query.toLowerCase()
 	return tasks.filter((task) => {
@@ -160,6 +162,97 @@ const filterTasks = (tasks: TaskWithSession[], query: string): TaskWithSession[]
 		const idMatch = task.id.toLowerCase().includes(lowerQuery)
 		return titleMatch || idMatch
 	})
+}
+
+/**
+ * Check if a task is a child of an epic (has parent-child dependency)
+ */
+const isEpicChild = (task: TaskWithSession): boolean => {
+	if (!task.dependencies) return false
+	return task.dependencies.some((dep) => dep.dependency_type === "parent-child")
+}
+
+/**
+ * Apply FilterConfig to tasks
+ *
+ * Empty sets mean "show all" for that field.
+ * Multiple values within a field use OR logic.
+ * Different fields use AND logic.
+ */
+const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): TaskWithSession[] => {
+	return tasks.filter((task) => {
+		// Status filter (OR within set)
+		if (config.status.size > 0) {
+			const taskStatus = task.status
+			// Map the task status to FilterConfig status types (excluding tombstone)
+			if (
+				taskStatus !== "open" &&
+				taskStatus !== "in_progress" &&
+				taskStatus !== "blocked" &&
+				taskStatus !== "closed"
+			) {
+				return false
+			}
+			if (!config.status.has(taskStatus)) {
+				return false
+			}
+		}
+
+		// Priority filter (OR within set)
+		if (config.priority.size > 0) {
+			if (!config.priority.has(task.priority)) {
+				return false
+			}
+		}
+
+		// Type filter (OR within set)
+		if (config.type.size > 0) {
+			if (!config.type.has(task.issue_type)) {
+				return false
+			}
+		}
+
+		// Session filter (OR within set)
+		if (config.session.size > 0) {
+			// Map task sessionState to FilterSessionState (warning maps to idle for filtering)
+			const sessionState = task.sessionState === "warning" ? "idle" : task.sessionState
+			if (
+				sessionState !== "idle" &&
+				sessionState !== "busy" &&
+				sessionState !== "waiting" &&
+				sessionState !== "done" &&
+				sessionState !== "error" &&
+				sessionState !== "paused"
+			) {
+				return false
+			}
+			if (!config.session.has(sessionState)) {
+				return false
+			}
+		}
+
+		// Hide epic subtasks filter
+		if (config.hideEpicSubtasks && isEpicChild(task)) {
+			return false
+		}
+
+		return true
+	})
+}
+
+/**
+ * Filter tasks by search query and filter config
+ */
+const filterTasks = (
+	tasks: TaskWithSession[],
+	query: string,
+	filterConfig?: FilterConfig,
+): TaskWithSession[] => {
+	let filtered = filterTasksByQuery(tasks, query)
+	if (filterConfig) {
+		filtered = applyFilterConfig(filtered, filterConfig)
+	}
+	return filtered
 }
 
 // ============================================================================
@@ -189,7 +282,7 @@ export interface ColumnInfo {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		SessionManager.Default,
+		ClaudeSessionManager.Default,
 		BeadsClient.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -199,7 +292,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	scoped: Effect.gen(function* () {
 		// Inject dependencies
 		const beadsClient = yield* BeadsClient
-		const sessionManager = yield* SessionManager
+		const sessionManager = yield* ClaudeSessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
@@ -223,6 +316,23 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 
 		/**
+		 * Check if a worktree has an active merge conflict
+		 *
+		 * Uses `git rev-parse MERGE_HEAD` which returns 0 if in merge state, 128 otherwise.
+		 * Works correctly for worktrees (handles .git file pointing to real git dir).
+		 */
+		const checkMergeConflict = (worktreePath: string) =>
+			Effect.gen(function* () {
+				const command = Command.make("git", "-C", worktreePath, "rev-parse", "MERGE_HEAD").pipe(
+					Command.exitCode,
+				)
+				// Exit code 0 = MERGE_HEAD exists (in merge state)
+				// Exit code 128 = not in merge state (normal)
+				const exitCode = yield* command.pipe(Effect.catchAll(() => Effect.succeed(128)))
+				return exitCode === 0
+			})
+
+		/**
 		 * Load tasks from BeadsClient and merge with session state + PTY metrics
 		 */
 		const loadTasks = () =>
@@ -241,24 +351,39 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Map issues to TaskWithSession, merging session state and PTY metrics
-				const tasksWithSession: TaskWithSession[] = issues.map((issue) => {
-					const session = sessionMap.get(issue.id)
-					const metricsOpt = HashMap.get(allMetrics, issue.id)
-					const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+				// Then check merge conflicts in parallel for tasks with active sessions
+				const tasksWithSession: TaskWithSession[] = yield* Effect.all(
+					issues.map((issue) =>
+						Effect.gen(function* () {
+							const session = sessionMap.get(issue.id)
+							const metricsOpt = HashMap.get(allMetrics, issue.id)
+							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+							const sessionState = session?.state ?? "idle"
 
-					return {
-						...issue,
-						sessionState: session?.state ?? "idle",
-						// Session metrics from SessionManager
-						sessionStartedAt: session?.startedAt
-							? DateTime.formatIso(session.startedAt)
-							: undefined,
-						// PTY-extracted metrics from PTYMonitor
-						estimatedTokens: metrics.estimatedTokens,
-						recentOutput: metrics.recentOutput,
-						agentPhase: metrics.agentPhase,
-					}
-				})
+							// Check for merge conflicts only if task has an active session
+							let hasMergeConflict = false
+							if (sessionState !== "idle" && projectPath) {
+								const worktreePath = getWorktreePath(projectPath, issue.id)
+								hasMergeConflict = yield* checkMergeConflict(worktreePath)
+							}
+
+							return {
+								...issue,
+								sessionState,
+								hasMergeConflict,
+								// Session metrics from ClaudeSessionManager
+								sessionStartedAt: session?.startedAt
+									? DateTime.formatIso(session.startedAt)
+									: undefined,
+								// PTY-extracted metrics from PTYMonitor
+								estimatedTokens: metrics.estimatedTokens,
+								recentOutput: metrics.recentOutput,
+								agentPhase: metrics.agentPhase,
+							}
+						}),
+					),
+					{ concurrency: "unbounded" },
+				)
 
 				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
 				const withSessions = tasksWithSession.filter((t) => t.sessionState !== "idle").length
@@ -297,10 +422,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			allTasks: ReadonlyArray<TaskWithSession>,
 			searchQuery: string,
 			sortConfig: SortConfig,
+			filterConfig: FilterConfig,
 		): TaskWithSession[][] => {
 			return COLUMNS.map((col) => {
 				const columnTasks = allTasks.filter((task) => task.status === col.status)
-				const filtered = filterTasks(columnTasks, searchQuery)
+				const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 				return sortTasks(filtered, sortConfig)
 			})
 		}
@@ -313,9 +439,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const allTasks = yield* SubscriptionRef.get(tasks)
 				const mode = yield* editorService.getMode()
 				const sortConfig = yield* editorService.getSortConfig()
+				const filterConfig = yield* editorService.getFilterConfig()
 				const searchQuery = mode._tag === "search" ? mode.query : ""
 
-				const computed = computeFilteredTasksByColumn(allTasks, searchQuery, sortConfig)
+				const computed = computeFilteredTasksByColumn(
+					allTasks,
+					searchQuery,
+					sortConfig,
+					filterConfig,
+				)
 				yield* SubscriptionRef.set(filteredTasksByColumn, computed)
 			})
 
@@ -357,11 +489,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		// Watch for EditorService changes (mode, sortConfig) and update filteredTasksByColumn
+		// Watch for EditorService changes (mode, sortConfig, filterConfig) and update filteredTasksByColumn
 		// Merge the change streams so any change triggers an update
 		const modeChanges = editorService.mode.changes
 		const sortConfigChanges = editorService.sortConfig.changes
-		const editorChanges = Stream.merge(modeChanges, sortConfigChanges)
+		const filterConfigChanges = editorService.filterConfig.changes
+		const editorChanges = Stream.merge(
+			Stream.merge(modeChanges, sortConfigChanges),
+			filterConfigChanges,
+		)
 
 		yield* Effect.forkScoped(
 			Stream.runForEach(editorChanges, () =>
@@ -495,11 +631,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			 * Get filtered and sorted tasks grouped by column
 			 *
 			 * This is the method that should be used for display and navigation,
-			 * as it applies the current search query and sort configuration.
+			 * as it applies the current search query, sort, and filter configuration.
 			 */
 			getFilteredTasksByColumn: (
 				searchQuery: string,
 				sortConfig: SortConfig,
+				filterConfig: FilterConfig,
 			): Effect.Effect<TaskWithSession[][]> =>
 				Effect.gen(function* () {
 					const allTasks = yield* SubscriptionRef.get(tasks)
@@ -507,8 +644,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return COLUMNS.map((col) => {
 						// Filter by status
 						const columnTasks = allTasks.filter((task) => task.status === col.status)
-						// Apply search filter
-						const filtered = filterTasks(columnTasks, searchQuery)
+						// Apply search and filter config
+						const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 						// Apply sorting
 						return sortTasks(filtered, sortConfig)
 					})
@@ -524,6 +661,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				taskIndex: number,
 				searchQuery: string,
 				sortConfig: SortConfig,
+				filterConfig: FilterConfig,
 			): Effect.Effect<TaskWithSession | undefined> =>
 				Effect.gen(function* () {
 					if (columnIndex < 0 || columnIndex >= COLUMNS.length) {
@@ -535,8 +673,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					// Filter by status
 					const columnTasks = allTasks.filter((task) => task.status === column.status)
-					// Apply search filter
-					const filtered = filterTasks(columnTasks, searchQuery)
+					// Apply search and filter config
+					const filtered = filterTasks(columnTasks, searchQuery, filterConfig)
 					// Apply sorting
 					const sorted = sortTasks(filtered, sortConfig)
 

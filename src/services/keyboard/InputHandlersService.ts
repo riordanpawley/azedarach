@@ -217,17 +217,65 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
-			 * Handle detail overlay keyboard input for attachment navigation
+			 * Handle mergeChoice overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled.
+			 *
+			 * m → execute onMerge effect (merge main into branch, then attach), pop overlay
+			 * s → execute onSkip effect (attach without merging), pop overlay
+			 * Escape → just pop overlay (cancel)
+			 */
+			const handleMergeChoiceInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "mergeChoice") {
+						return false
+					}
+
+					// m to merge and attach
+					if (key === "m") {
+						// Pop overlay FIRST for immediate UI feedback, then run the async operation
+						yield* overlay.pop()
+						yield* currentOverlay.onMerge
+						return true
+					}
+
+					// s to skip and attach directly
+					if (key === "s") {
+						yield* overlay.pop()
+						yield* currentOverlay.onSkip
+						return true
+					}
+
+					// Escape to cancel
+					if (key === "escape") {
+						yield* overlay.pop()
+						return true
+					}
+
+					// Consume all other keys while overlay is open
+					return true
+				})
+
+			/**
+			 * Handle detail overlay keyboard input for attachment navigation and scrolling
 			 *
 			 * @param key - The key that was pressed
 			 * @returns true if the key was handled
 			 *
-			 * Keys:
+			 * Scroll keys (always scroll, even with attachments):
+			 * - C-u: Scroll up half page
+			 * - C-d: Scroll down half page
+			 *
+			 * Attachment navigation (when attachments exist):
 			 * - j/down: Select next attachment
 			 * - k/up: Select previous attachment (or deselect if at first)
 			 * - o/return: Open selected attachment in viewer
 			 * - x/delete: Remove selected attachment
 			 * - i: Add new attachment (opens imageAttach overlay)
+			 *
+			 * General:
 			 * - escape: Close detail overlay
 			 */
 			const handleDetailOverlayInput = (key: string) =>
@@ -242,6 +290,16 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					// Escape closes the overlay
 					if (key === "escape" || key === "return") {
 						yield* overlay.pop()
+						return true
+					}
+
+					// Scroll commands - always work, even with attachments
+					if (key === "C-u") {
+						yield* overlay.scroll("halfPage", -1) // up
+						return true
+					}
+					if (key === "C-d") {
+						yield* overlay.scroll("halfPage", 1) // down
 						return true
 					}
 
@@ -603,13 +661,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 */
 			const computeJumpLabels = (): Effect.Effect<Record.ReadonlyRecord<string, JumpTarget>> =>
 				Effect.gen(function* () {
-					// Get current search query and sort config to match board rendering
+					// Get current search query, sort config, and filter config to match board rendering
 					const mode = yield* editor.getMode()
 					const sortConfig = yield* editor.getSortConfig()
+					const filterConfig = yield* editor.getFilterConfig()
 					const searchQuery = mode._tag === "search" ? mode.query : ""
 
 					// Get filtered and sorted tasks (matching what the board displays)
-					const tasksByColumn = yield* board.getFilteredTasksByColumn(searchQuery, sortConfig)
+					const tasksByColumn = yield* board.getFilteredTasksByColumn(
+						searchQuery,
+						sortConfig,
+						filterConfig,
+					)
 
 					// Apply drill-down filtering (matching drillDownFilteredTasksAtom)
 					const drillDownChildIds = yield* SubscriptionRef.get(nav.drillDownChildIds)
@@ -675,10 +738,10 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return "command"
 						case "sort":
 							return "sort"
+						case "filter":
+							return "filter"
 						case "orchestrate":
 							return "orchestrate"
-						default:
-							return mode satisfies never
 					}
 				})
 
@@ -691,6 +754,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleTextInput,
 				handleJumpInput,
 				handleConfirmInput,
+				handleMergeChoiceInput,
 				handleDetailOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,

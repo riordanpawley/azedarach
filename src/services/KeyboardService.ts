@@ -14,6 +14,7 @@ import { BeadsClient } from "../core/BeadsClient.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { EditorService } from "./EditorService.js"
 import { createDefaultBindings } from "./keyboard/bindings.js"
+import { DevServerHandlersService } from "./keyboard/DevServerHandlersService.js"
 import { InputHandlersService } from "./keyboard/InputHandlersService.js"
 import { KeyboardHelpersService } from "./keyboard/KeyboardHelpersService.js"
 import { OrchestrateHandlersService } from "./keyboard/OrchestrateHandlersService.js"
@@ -43,6 +44,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		PRHandlersService.Default,
 		InputHandlersService.Default,
 		OrchestrateHandlersService.Default,
+		DevServerHandlersService.Default,
 		// Core services for direct binding access
 		ToastService.Default,
 		OverlayService.Default,
@@ -63,6 +65,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const prHandlers = yield* PRHandlersService
 		const inputHandlers = yield* InputHandlersService
 		const orchestrateHandlers = yield* OrchestrateHandlersService
+		const devServerHandlers = yield* DevServerHandlersService
 
 		// ====================================================================
 		// Inject core services for direct binding access
@@ -85,6 +88,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			prHandlers,
 			inputHandlers,
 			orchestrateHandlers,
+			devServerHandlers,
 			helpers,
 			// Core services for direct bindings
 			nav,
@@ -138,6 +142,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					// Check for confirm overlay first (handles its own keys)
 					const handledAsConfirm = yield* inputHandlers.handleConfirmInput(key)
 					if (handledAsConfirm) return
+
+					// Check for mergeChoice overlay (handles its own keys)
+					const handledAsMergeChoice = yield* inputHandlers.handleMergeChoiceInput(key)
+					if (handledAsMergeChoice) return
 
 					// Check for imageAttach overlay (handles its own keys)
 					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)

@@ -7,9 +7,9 @@
 
 import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
+import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { HookReceiver, mapEventToState } from "../../core/HookReceiver.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
@@ -22,7 +22,7 @@ import { appRuntime } from "./runtime.js"
  * Hook receiver starter atom - starts the hook receiver on mount
  *
  * Watches for notification files from Claude Code hooks and updates
- * session state in SessionManager. Also notifies PTYMonitor of hook
+ * session state in ClaudeSessionManager. Also notifies PTYMonitor of hook
  * signals so it can respect the hook priority window.
  *
  * The receiver is automatically stopped when the atom unmounts.
@@ -33,7 +33,7 @@ import { appRuntime } from "./runtime.js"
 export const hookReceiverStarterAtom = appRuntime.atom(
 	Effect.gen(function* () {
 		const receiver = yield* HookReceiver
-		const manager = yield* SessionManager
+		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
 		const diagnostics = yield* DiagnosticsService
 
@@ -103,7 +103,7 @@ export const sessionMetricsAtom = appRuntime.subscriptionRef(
  */
 export const startSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* SessionManager
+		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
 
@@ -125,7 +125,7 @@ export const startSessionAtom = appRuntime.fn((beadId: string) =>
  */
 export const pauseSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* SessionManager
+		const manager = yield* ClaudeSessionManager
 		yield* manager.pause(beadId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -135,7 +135,7 @@ export const pauseSessionAtom = appRuntime.fn((beadId: string) =>
  */
 export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* SessionManager
+		const manager = yield* ClaudeSessionManager
 		yield* manager.resume(beadId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -147,7 +147,7 @@ export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
  */
 export const stopSessionAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* SessionManager
+		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
 
 		// Unregister from PTYMonitor first (before session is stopped)

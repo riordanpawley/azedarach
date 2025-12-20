@@ -3,6 +3,7 @@
  */
 
 import type { VCStatus } from "../core/VCService.js"
+import type { DevServerStatus } from "../services/DevServerService.js"
 import type { EditorMode } from "../services/EditorService.js"
 import { theme } from "./theme.js"
 import type { ViewMode } from "./types.js"
@@ -17,6 +18,10 @@ export interface StatusBarProps {
 	vcStatus?: VCStatus
 	viewMode?: ViewMode
 	isLoading?: boolean
+	/** Dev server status for currently selected bead */
+	devServerStatus?: DevServerStatus
+	/** Dev server port (if detected) for currently selected bead */
+	devServerPort?: number
 	projectName?: string
 }
 
@@ -53,7 +58,8 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "a", action: "Attach" },
 		{ key: "A", action: "Inline" },
 		{ key: "p", action: "Pause" },
-		{ key: "r", action: "Resume" },
+		{ key: "r", action: "Dev" },
+		{ key: "R", action: "Resume" },
 		{ key: "x", action: "Stop" },
 		{ key: "e", action: "Edit" },
 		{ key: "P", action: "PR" },
@@ -86,6 +92,16 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "s", action: "Session" },
 		{ key: "p", action: "Priority" },
 		{ key: "u", action: "Updated" },
+		{ key: "Esc", action: "Cancel" },
+	],
+	filter: [
+		{ key: "s", action: "Status" },
+		{ key: "p", action: "Priority" },
+		{ key: "t", action: "Type" },
+		{ key: "S", action: "Session" },
+		{ key: "e", action: "Epic" },
+		{ key: "c", action: "Clear" },
+		{ key: "0-4", action: "P0-P4" },
 		{ key: "Esc", action: "Cancel" },
 	],
 	orchestrate: [
@@ -140,6 +156,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.mauve
 			case "sort":
 				return theme.teal
+			case "filter":
+				return theme.lavender
 			case "command":
 				return theme.pink
 			default:
@@ -162,6 +180,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SEL"
 			case "sort":
 				return "SRT"
+			case "filter":
+				return "FLT"
 			case "command":
 				return "CMD"
 			default:
@@ -286,6 +306,15 @@ export const StatusBar = (props: StatusBarProps) => {
 					{shouldShowSelectedCount && props.selectedCount > 0 && (
 						<text fg={theme.mauve}>Selected: {props.selectedCount}</text>
 					)}
+					{/* Dev server status - only show if running or starting for selected bead */}
+					{props.devServerStatus === "running" && props.devServerPort && (
+						<text fg={theme.green}>DEV: localhost:{props.devServerPort}</text>
+					)}
+					{props.devServerStatus === "running" && !props.devServerPort && (
+						<text fg={theme.green}>DEV: running</text>
+					)}
+					{props.devServerStatus === "starting" && <text fg={theme.yellow}>DEV: starting...</text>}
+					{props.devServerStatus === "error" && <text fg={theme.red}>DEV: error</text>}
 					{props.vcStatus && <text fg={getVCStatusColor()}>VC: {props.vcStatus}</text>}
 					<text fg={theme.green}>Tasks: {props.totalTasks}</text>
 					<text fg={theme.blue}>Active: {props.activeSessions}</text>
