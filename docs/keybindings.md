@@ -612,7 +612,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
-| `Space` `f` | Diff menu | Worktree exists (difftastic/git diff/lazygit) |
+| `Space` `f` | Diff menu | Worktree exists (difftastic/git diff) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -709,7 +709,6 @@ Opens an **interactive diff menu** in a tmux popup with multiple viewing options
 - `s` - **Side-by-side** (difftastic) - Syntax-aware side-by-side diff, best for reviewing changes
 - `i` - **Inline** (difftastic) - Compact inline diff with syntax highlighting
 - `g` - **Git diff** - Traditional unified diff format
-- `l` - **Lazygit** - Full interactive git UI for staging, committing, browsing history
 - `q` - Quit and return to az
 
 **Diff comparison:**
@@ -719,7 +718,6 @@ Opens an **interactive diff menu** in a tmux popup with multiple viewing options
 **Use cases:**
 - Review Claude's changes with syntax-aware highlighting
 - Choose the diff format that works best for the content
-- Stage and commit via lazygit when needed
 
 ### Movement Actions
 
