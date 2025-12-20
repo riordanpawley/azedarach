@@ -26,6 +26,7 @@ import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
 import { DevServerService } from "../../services/DevServerService.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
+import { DiffService } from "../../services/DiffService.js"
 import { EditorService } from "../../services/EditorService.js"
 import { KeyboardService } from "../../services/KeyboardService.js"
 import { NavigationService } from "../../services/NavigationService.js"
@@ -71,6 +72,7 @@ const appLayer = Layer.mergeAll(
 	NetworkService.Default,
 	OfflineService.Default,
 	DevServerService.Default,
+	DiffService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
