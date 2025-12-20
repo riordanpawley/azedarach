@@ -20,7 +20,6 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import type { SessionState } from "../ui/types.js"
 
 // ============================================================================
 // Type Definitions
@@ -70,24 +69,6 @@ const CLAUDE_SESSION_PREFIX = "claude-"
  * Polling interval for watching tmux sessions
  */
 const POLL_INTERVAL_MS = 500
-
-// ============================================================================
-// Status Mapping
-// ============================================================================
-
-/**
- * Map tmux status to SessionState
- */
-export const mapStatusToState = (status: TmuxStatus): SessionState => {
-	switch (status) {
-		case "busy":
-			return "busy"
-		case "waiting":
-			return "waiting"
-		case "idle":
-			return "idle"
-	}
-}
 
 // ============================================================================
 // Service Definition
@@ -322,28 +303,3 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 	}),
 }) {}
 
-// ============================================================================
-// Convenience Functions
-// ============================================================================
-
-/**
- * Start the hook receiver with a handler (convenience function)
- */
-export const startHookReceiver = (
-	handler: StateUpdateHandler,
-): Effect.Effect<Fiber.RuntimeFiber<number, never>, never, HookReceiver | Scope.Scope> =>
-	Effect.flatMap(HookReceiver, (receiver) => receiver.start(handler))
-
-/**
- * List all active Claude sessions (convenience function)
- */
-export const listSessions = (): Effect.Effect<readonly SessionStateUpdate[], never, HookReceiver> =>
-	Effect.flatMap(HookReceiver, (receiver) => receiver.listSessions())
-
-/**
- * Get status for a specific session (convenience function)
- */
-export const getSessionStatus = (
-	beadId: string,
-): Effect.Effect<TmuxStatus | null, never, HookReceiver> =>
-	Effect.flatMap(HookReceiver, (receiver) => receiver.getSessionStatus(beadId))
