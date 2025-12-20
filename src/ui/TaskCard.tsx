@@ -139,6 +139,36 @@ export const TaskCard = (props: TaskCardProps) => {
 		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
 		props.task.sessionStartedAt !== undefined
 
+	// Build git status string: "↓3 ● +42/-15"
+	// Shows behind count, dirty indicator, and line changes (if configured)
+	const getGitStatusString = (): string => {
+		const { gitBehindCount, hasUncommittedChanges, gitAdditions, gitDeletions } = props.task
+		const parts: string[] = []
+
+		// Behind count (↓N)
+		if (gitBehindCount !== undefined && gitBehindCount > 0) {
+			parts.push(`↓${gitBehindCount}`)
+		}
+
+		// Dirty indicator (●)
+		if (hasUncommittedChanges) {
+			parts.push("●")
+		}
+
+		// Line changes (+X/-Y) - only shown if configured and there are changes
+		if (gitAdditions !== undefined || gitDeletions !== undefined) {
+			const add = gitAdditions ?? 0
+			const del = gitDeletions ?? 0
+			if (add > 0 || del > 0) {
+				parts.push(`+${add}/-${del}`)
+			}
+		}
+
+		return parts.join(" ")
+	}
+
+	const gitStatusString = getGitStatusString()
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -175,6 +205,15 @@ export const TaskCard = (props: TaskCardProps) => {
 		return line
 	}
 
+	// Determine git status color based on what's shown
+	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
+	const getGitStatusColor = (): string => {
+		const { gitBehindCount, hasUncommittedChanges } = props.task
+		if (hasUncommittedChanges) return theme.red
+		if (gitBehindCount !== undefined && gitBehindCount > 0) return theme.yellow
+		return theme.overlay0
+	}
+
 	return (
 		<box
 			borderStyle={getBorderStyle()}
@@ -189,6 +228,7 @@ export const TaskCard = (props: TaskCardProps) => {
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
+				{gitStatusString && <text fg={getGitStatusColor()}>{gitStatusString}</text>}
 				{showTimer && props.task.sessionStartedAt && (
 					<ElapsedTimer startedAt={props.task.sessionStartedAt} />
 				)}

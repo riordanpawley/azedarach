@@ -146,6 +146,14 @@ const GitConfigSchema = Schema.Struct({
 	 * When false, git fetch and pull operations are silently skipped.
 	 */
 	fetchEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Show line change statistics (+/-) in TaskCard headers (default: false)
+	 *
+	 * When enabled, shows +X/-Y line stats comparing the worktree to the base branch.
+	 * Adds a small amount of overhead from running `git diff --stat`.
+	 */
+	showLineChanges: Schema.optional(Schema.Boolean),
 })
 
 /**
