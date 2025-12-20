@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 2.1.0
-Updated: 2025-12-19
+Version: 2.2.0
+Updated: 2025-12-21
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -25,10 +25,25 @@ Purpose: Claude Code entry point for Azedarach development
 
 6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
 
-7. **Session End - Commit Everything**: NEVER leave uncommitted changes when stopping. Before saying "done":
-   - Run `git status` to check for changes
-   - Commit all work (even partial work as "wip: ..." commit)
-   - Use `/session-end` command for full workflow (commits, beads sync, retrospective)
+7. **🚨 CRITICAL: Commit Before Done 🚨**: Before saying "done", "complete", "finished", or stopping work, you MUST commit all changes. Uncommitted work is LOST work.
+
+   **MANDATORY CHECKLIST** (run these commands):
+   ```bash
+   git status                    # Check for uncommitted changes
+   git add -A                    # Stage all changes
+   git commit -m "descriptive message"   # Commit with clear message
+   ```
+
+   **If work is complete:** Use a proper descriptive commit message
+   **If work is partial/WIP:** Use `git commit -m "wip: brief description of state"`
+
+   **This applies when you:**
+   - Say "done", "complete", "finished", "all set", etc.
+   - Are about to stop responding
+   - Have completed a task or subtask
+   - Are switching to a different task
+
+   ⚠️ DO NOT say "done" until `git status` shows "nothing to commit"
 
 8. **Effect Service Patterns**:
    - NEVER create global scope Effect-returning functions with service requirements (antipattern)
