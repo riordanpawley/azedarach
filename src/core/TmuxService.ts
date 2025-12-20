@@ -1,5 +1,5 @@
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect } from "effect"
+import { Data, Effect, Option } from "effect"
 
 // Errors
 // biome-ignore lint/complexity/noBannedTypes: <eh>
@@ -185,6 +185,41 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					return yield* runTmux(args)
 				}).pipe(
 					Effect.catchAll(() => Effect.succeed("")), // Return empty on error (session may be dead)
+				),
+
+			/**
+			 * Set a user-defined option on a tmux session
+			 *
+			 * User options start with @ and are stored on the session itself.
+			 * This makes tmux the source of truth for session metadata.
+			 *
+			 * @param session - tmux session name
+			 * @param key - option key (should start with @ for user options)
+			 * @param value - option value (string)
+			 */
+			setUserOption: (session: string, key: string, value: string) =>
+				runTmux(["set-option", "-t", session, key, value]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+				),
+
+			/**
+			 * Get a user-defined option from a tmux session
+			 *
+			 * Returns None if the option doesn't exist or session is not found.
+			 *
+			 * @param session - tmux session name
+			 * @param key - option key (should start with @ for user options)
+			 * @returns Option<string> - the option value or None if not found
+			 */
+			getUserOption: (session: string, key: string) =>
+				Effect.gen(function* () {
+					// -v returns just the value (not "key value" format)
+					const output = yield* runTmux(["show-option", "-t", session, "-v", key])
+					const value = output.trim()
+					return value.length > 0 ? Option.some(value) : Option.none()
+				}).pipe(
+					Effect.catchAll(() => Effect.succeed(Option.none())), // Return None on error
 				),
 		}
 	}),
