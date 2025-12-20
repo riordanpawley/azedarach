@@ -261,7 +261,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 					}
 
 					// Check for sessions that disappeared (session ended)
-					for (const [beadId, _prevStatus] of previousState) {
+					for (const beadId of previousState.keys()) {
 						if (!newState.has(beadId)) {
 							// Session disappeared - treat as idle
 							yield* Effect.log(`HookReceiver: ${beadId} session ended`)
