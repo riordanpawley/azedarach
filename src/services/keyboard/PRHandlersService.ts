@@ -12,6 +12,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import { FileSystem } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { MergeConflictError, PRWorkflow } from "../../core/PRWorkflow.js"
@@ -22,6 +23,22 @@ import { formatForToast } from "../ErrorFormatter.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
+
+/**
+ * Lazygit config for difftastic side-by-side diffing.
+ *
+ * This config enables:
+ * - difftastic as the external diff command with side-by-side display
+ * - Narrower side panel to give more space for side-by-side diffs
+ * - Syntax highlighting enabled (difft default)
+ */
+const LAZYGIT_DIFFTASTIC_CONFIG = `# Azedarach temporary config for difftastic diffing
+git:
+  pagers:
+    - externalDiffCommand: difft --color=always --display=side-by-side
+gui:
+  sidePanelWidth: 0.2
+`
 
 // ============================================================================
 // Service Definition
@@ -48,6 +65,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
 		const gitConfig = yield* appConfig.getGitConfig()
+		const fs = yield* FileSystem.FileSystem
 
 		// ================================================================
 		// Internal Helpers
@@ -429,8 +447,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens lazygit in the worktree directory, focused on the status/files panel.
-		 * Provides interactive diff viewing, file navigation, staging, and commit history.
+		 * Opens lazygit in the worktree directory with difftastic side-by-side diffing.
+		 * Creates a temporary lazygit config that configures:
+		 * - difftastic as the external diff command for syntax-aware diffs
+		 * - Side-by-side display mode for easier comparison
+		 * - Narrower side panel to maximize diff viewing area
+		 *
 		 * Requires an active session with a worktree.
 		 */
 		const showDiff = () =>
@@ -449,18 +471,34 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Launch lazygit in the worktree, focused on status panel for diff viewing
+				// Create temp config file for difftastic integration
+				// This ensures consistent diffing behavior regardless of user's global config
+				const tempConfigPath = `/tmp/azedarach-lazygit-${task.id}.yml`
+				yield* fs.writeFileString(tempConfigPath, LAZYGIT_DIFFTASTIC_CONFIG).pipe(
+					Effect.catchAll(() =>
+						Effect.gen(function* () {
+							yield* toast.show("error", "Failed to create lazygit config")
+							return Effect.void
+						}),
+					),
+				)
+
+				// Launch lazygit with our difftastic config
+				// - `--use-config-file` applies our temp config
 				// - `-p` sets the repo path
 				// - `status` positional arg opens on files/staging panel
 				yield* tmux
 					.displayPopup({
-						command: `lazygit -p "${worktreePath}" status`,
+						command: `lazygit --use-config-file="${tempConfigPath}" -p "${worktreePath}" status`,
 						width: "95%",
 						height: "95%",
 						title: ` lazygit: ${task.id} `,
 						cwd: worktreePath,
 					})
 					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to open lazygit")))
+
+				// Clean up temp config after lazygit closes
+				yield* fs.remove(tempConfigPath).pipe(Effect.ignore)
 			})
 
 		// ================================================================
