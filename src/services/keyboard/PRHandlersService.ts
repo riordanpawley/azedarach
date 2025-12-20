@@ -34,8 +34,8 @@ import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
  */
 const LAZYGIT_DIFFTASTIC_CONFIG = `# Azedarach temporary config for difftastic diffing
 git:
-  pagers:
-    - externalDiffCommand: difft --color=always --display=side-by-side
+  paging:
+    externalDiffCommand: difft --color=always --display=side-by-side
 gui:
   sidePanelWidth: 0.2
 `
