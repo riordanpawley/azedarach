@@ -12,18 +12,34 @@ import { DateTime, Effect, Schedule, SubscriptionRef } from "effect"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
 /**
- * Format elapsed milliseconds as MM:SS
+ * Format elapsed milliseconds to human-readable string showing only the two largest units.
+ * Never shows milliseconds.
  *
  * Examples:
- * - 5000ms  -> "00:05"
- * - 65000ms -> "01:05"
- * - 3665000ms -> "61:05" (no hours, just large minutes)
+ * - 5000ms     -> "5s"
+ * - 65000ms    -> "1m 5s"
+ * - 3665000ms  -> "1h 1m"
+ * - 90061000ms -> "1d 1h"
  */
 export const formatElapsedMs = (elapsedMs: number): string => {
 	const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
-	const minutes = Math.floor(totalSeconds / 60)
+
+	const days = Math.floor(totalSeconds / 86400)
+	const hours = Math.floor((totalSeconds % 86400) / 3600)
+	const minutes = Math.floor((totalSeconds % 3600) / 60)
 	const seconds = totalSeconds % 60
-	return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+
+	// Show at most 2 units, largest first
+	if (days > 0) {
+		return hours > 0 ? `${days}d ${hours}h` : `${days}d`
+	}
+	if (hours > 0) {
+		return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+	}
+	if (minutes > 0) {
+		return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+	}
+	return `${seconds}s`
 }
 
 /**
