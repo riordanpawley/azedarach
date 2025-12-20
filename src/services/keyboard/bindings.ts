@@ -507,7 +507,7 @@ done
 	{
 		key: "f",
 		mode: "action",
-		description: "Open lazygit",
+		description: "Diff menu",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.showDiff())),
 		),

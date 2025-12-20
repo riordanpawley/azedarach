@@ -12,7 +12,6 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import { FileSystem } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { MergeConflictError, PRWorkflow } from "../../core/PRWorkflow.js"
@@ -25,19 +24,69 @@ import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
 /**
- * Lazygit config for difftastic side-by-side diffing.
+ * Interactive diff menu script.
  *
- * This config enables:
- * - difftastic as the external diff command with side-by-side display
- * - Narrower side panel to give more space for side-by-side diffs
- * - Syntax highlighting enabled (difft default)
+ * Presents options for viewing diffs in different formats:
+ * - Side-by-side (difftastic) - best for reviewing changes
+ * - Inline (difftastic) - compact view
+ * - Git diff - traditional unified diff
+ * - Lazygit - full git UI for staging/committing
+ *
+ * Uses GIT_EXTERNAL_DIFF for difftastic integration which is more reliable
+ * than lazygit's externalDiffCommand config.
  */
-const LAZYGIT_DIFFTASTIC_CONFIG = `# Azedarach temporary config for difftastic diffing
-git:
-  paging:
-    externalDiffCommand: difft --color=always --display=side-by-side
-gui:
-  sidePanelWidth: 0.2
+const createDiffMenuScript = (baseBranch: string) => `
+# Colors
+CYAN='\\033[36m'
+YELLOW='\\033[33m'
+GREEN='\\033[32m'
+DIM='\\033[2m'
+RESET='\\033[0m'
+
+show_menu() {
+  clear
+  echo ""
+  echo "  \${CYAN}Diff Viewer\${RESET}"
+  echo ""
+  echo "  \${YELLOW}[s]\${RESET} Side-by-side  \${DIM}(difftastic)\${RESET}"
+  echo "  \${YELLOW}[i]\${RESET} Inline        \${DIM}(difftastic)\${RESET}"
+  echo "  \${YELLOW}[g]\${RESET} Git diff      \${DIM}(unified)\${RESET}"
+  echo "  \${YELLOW}[l]\${RESET} Lazygit       \${DIM}(full UI)\${RESET}"
+  echo ""
+  echo "  \${DIM}[q] quit\${RESET}"
+  echo ""
+}
+
+while true; do
+  show_menu
+  read -rsn1 key
+  case "$key" in
+    s|S)
+      clear
+      echo "\${DIM}Running difft side-by-side vs ${baseBranch}...\${RESET}"
+      echo ""
+      GIT_EXTERNAL_DIFF="difft --display=side-by-side" git diff ${baseBranch}...HEAD | less -R
+      ;;
+    i|I)
+      clear
+      echo "\${DIM}Running difft inline vs ${baseBranch}...\${RESET}"
+      echo ""
+      GIT_EXTERNAL_DIFF="difft --display=inline" git diff ${baseBranch}...HEAD | less -R
+      ;;
+    g|G)
+      clear
+      echo "\${DIM}Running git diff vs ${baseBranch}...\${RESET}"
+      echo ""
+      git diff ${baseBranch}...HEAD --color=always | less -R
+      ;;
+    l|L)
+      lazygit
+      ;;
+    q|Q|"")
+      exit 0
+      ;;
+  esac
+done
 `
 
 // ============================================================================
@@ -65,7 +114,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
 		const gitConfig = yield* appConfig.getGitConfig()
-		const fs = yield* FileSystem.FileSystem
 
 		// ================================================================
 		// Internal Helpers
@@ -447,11 +495,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens lazygit in the worktree directory with difftastic side-by-side diffing.
-		 * Creates a temporary lazygit config that configures:
-		 * - difftastic as the external diff command for syntax-aware diffs
-		 * - Side-by-side display mode for easier comparison
-		 * - Narrower side panel to maximize diff viewing area
+		 * Opens an interactive diff menu with options:
+		 * - Side-by-side (difftastic) - best for reviewing changes
+		 * - Inline (difftastic) - compact view
+		 * - Git diff - traditional unified diff
+		 * - Lazygit - full git UI for staging/committing
 		 *
 		 * Requires an active session with a worktree.
 		 */
@@ -471,34 +519,19 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Create temp config file for difftastic integration
-				// This ensures consistent diffing behavior regardless of user's global config
-				const tempConfigPath = `/tmp/azedarach-lazygit-${task.id}.yml`
-				yield* fs.writeFileString(tempConfigPath, LAZYGIT_DIFFTASTIC_CONFIG).pipe(
-					Effect.catchAll(() =>
-						Effect.gen(function* () {
-							yield* toast.show("error", "Failed to create lazygit config")
-							return Effect.void
-						}),
-					),
-				)
+				// Generate the menu script with the configured base branch
+				const menuScript = createDiffMenuScript(gitConfig.baseBranch)
 
-				// Launch lazygit with our difftastic config
-				// - `-ucf` applies our temp config (must use space, not =, due to lazygit's arg parser)
-				// - `-p` sets the repo path
-				// - `status` positional arg opens on files/staging panel
+				// Launch the interactive diff menu
 				yield* tmux
 					.displayPopup({
-						command: `lazygit -ucf "${tempConfigPath}" -p "${worktreePath}" status`,
+						command: `bash -c '${menuScript.replace(/'/g, "'\\''")}'`,
 						width: "95%",
 						height: "95%",
-						title: ` lazygit: ${task.id} `,
+						title: ` diff: ${task.id} `,
 						cwd: worktreePath,
 					})
-					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to open lazygit")))
-
-				// Clean up temp config after lazygit closes
-				yield* fs.remove(tempConfigPath).pipe(Effect.ignore)
+					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to open diff menu")))
 			})
 
 		// ================================================================

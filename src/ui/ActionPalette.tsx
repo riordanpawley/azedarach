@@ -181,7 +181,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Git/PR */}
 				<ActionLine keyName="u" description="update" />
-				<ActionLine keyName="f" description="lazygit" />
+				<ActionLine keyName="f" description="diff" />
 				<ActionLine keyName="P" description="PR" />
 				<ActionLine keyName="m" description="merge" />
 				<ActionLine keyName="d" description="cleanup" />
