@@ -42,6 +42,9 @@ YELLOW=$'\\033[33m'
 DIM=$'\\033[2m'
 RESET=$'\\033[0m'
 
+# Find merge-base once (where branch diverged from base)
+MERGE_BASE=$(git merge-base ${baseBranch} HEAD)
+
 show_menu() {
   clear
   printf "\\n"
@@ -62,18 +65,23 @@ while true; do
   case "$key" in
     s|S)
       clear
-      printf "%sRunning difft side-by-side vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
-      GIT_EXTERNAL_DIFF="difft --color=always --display=side-by-side" git diff ${baseBranch}...HEAD | less -R
+      # Show stat summary first, then difftastic side-by-side
+      # DFT_COLOR=always forces difftastic colors when piped
+      # Excludes .beads/ to reduce noise
+      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
+      DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" \\
+        git diff $MERGE_BASE -- ':!.beads' | less -RS
       ;;
     i|I)
       clear
-      printf "%sRunning difft inline vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
-      GIT_EXTERNAL_DIFF="difft --color=always --display=inline" git diff ${baseBranch}...HEAD | less -R
+      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
+      DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=inline" \\
+        git diff $MERGE_BASE -- ':!.beads' | less -RS
       ;;
     g|G)
       clear
-      printf "%sRunning git diff vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
-      git diff ${baseBranch}...HEAD --color=always | less -R
+      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
+      git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS
       ;;
     l|L)
       lazygit
