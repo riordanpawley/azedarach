@@ -19,6 +19,8 @@ import {
 	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
+	executeBreakIntoEpicAtom,
+	fetchBreakIntoEpicSuggestionsAtom,
 	focusedTaskRunningOperationAtom,
 	getEpicChildrenAtom,
 	getEpicInfoAtom,
@@ -30,6 +32,7 @@ import {
 	viewModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
+import { BreakIntoEpicOverlay } from "./BreakIntoEpicOverlay.js"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
 import { CommandInput } from "./CommandInput.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
@@ -82,6 +85,7 @@ export const App = () => {
 	const { toasts, dismissToast } = useToasts()
 	const {
 		dismiss: dismissOverlay,
+		currentOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
@@ -92,6 +96,7 @@ export const App = () => {
 		showingMergeChoice,
 		showingDiagnostics,
 		showingProjectSelector,
+		showingBreakIntoEpic,
 	} = useOverlays()
 
 	const {
@@ -181,6 +186,10 @@ export const App = () => {
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
+	const fetchBreakIntoEpicSuggestions = useAtomSet(fetchBreakIntoEpicSuggestionsAtom, {
+		mode: "promise",
+	})
+	const executeBreakIntoEpic = useAtomSet(executeBreakIntoEpicAtom, { mode: "promise" })
 
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
@@ -228,6 +237,11 @@ export const App = () => {
 
 		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
 		if (showingClaudeCreate) {
+			return
+		}
+
+		// Break into epic overlay handles its own keyboard input
+		if (showingBreakIntoEpic) {
 			return
 		}
 
@@ -385,6 +399,25 @@ export const App = () => {
 				<ClaudeCreatePrompt
 					onSubmit={(description) => {
 						claudeCreateSession(description)
+					}}
+					onCancel={() => dismissOverlay()}
+				/>
+			)}
+
+			{/* Break into epic overlay */}
+			{showingBreakIntoEpic && currentOverlay?._tag === "breakIntoEpic" && (
+				<BreakIntoEpicOverlay
+					taskId={currentOverlay.taskId}
+					taskTitle={currentOverlay.taskTitle}
+					taskDescription={currentOverlay.taskDescription}
+					fetchSuggestions={(title, description) =>
+						fetchBreakIntoEpicSuggestions({ title, description })
+					}
+					onConfirm={(childTasks) => {
+						executeBreakIntoEpic({
+							taskId: currentOverlay.taskId,
+							childTasks,
+						})
 					}}
 					onCancel={() => dismissOverlay()}
 				/>

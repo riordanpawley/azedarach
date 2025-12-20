@@ -36,6 +36,12 @@ export type OverlayType =
 	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
+	| {
+			readonly _tag: "breakIntoEpic"
+			readonly taskId: string
+			readonly taskTitle: string
+			readonly taskDescription?: string
+	  }
 
 /**
  * Hook for managing overlay stack
@@ -103,6 +109,10 @@ export function useOverlays() {
 				push({ _tag: "projectSelector" })
 			},
 
+			showBreakIntoEpic: (taskId: string, taskTitle: string, taskDescription?: string) => {
+				push({ _tag: "breakIntoEpic", taskId, taskTitle, taskDescription })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -124,6 +134,7 @@ export function useOverlays() {
 			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
+			showingBreakIntoEpic: currentOverlay?._tag === "breakIntoEpic",
 		}),
 		[currentOverlay],
 	)

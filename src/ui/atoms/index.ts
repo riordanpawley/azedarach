@@ -161,6 +161,8 @@ export {
 	deleteBeadAtom,
 	editBeadAtom,
 	epicChildrenAtom,
+	executeBreakIntoEpicAtom,
+	fetchBreakIntoEpicSuggestionsAtom,
 	moveTaskAtom,
 	moveTasksAtom,
 } from "./task.js"

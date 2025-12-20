@@ -18,6 +18,14 @@ export interface ScrollCommand {
 	readonly timestamp: number // unique per command
 }
 
+/**
+ * Suggested child task from Claude for breaking a task into an epic
+ */
+export interface SuggestedChildTask {
+	readonly title: string
+	readonly description?: string
+}
+
 export type Overlay =
 	| { readonly _tag: "help" }
 	| { readonly _tag: "detail"; readonly taskId: string }
@@ -37,6 +45,12 @@ export type Overlay =
 	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
+	| {
+			readonly _tag: "breakIntoEpic"
+			readonly taskId: string
+			readonly taskTitle: string
+			readonly taskDescription?: string
+	  }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	dependencies: [ImageAttachmentService.Default],

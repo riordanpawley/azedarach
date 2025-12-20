@@ -540,6 +540,30 @@ done
 			}
 		}),
 	},
+	{
+		key: "b",
+		mode: "action",
+		description: "Break into epic",
+		action: Effect.gen(function* () {
+			const task = yield* bc.helpers.getSelectedTask()
+			yield* bc.editor.exitToNormal()
+			if (!task) {
+				yield* bc.toast.show("warning", "No task selected")
+				return
+			}
+			// Prevent breaking epics into epics
+			if (task.issue_type === "epic") {
+				yield* bc.toast.show("warning", "Task is already an epic")
+				return
+			}
+			yield* bc.overlay.push({
+				_tag: "breakIntoEpic",
+				taskId: task.id,
+				taskTitle: task.title,
+				taskDescription: task.description,
+			})
+		}),
+	},
 
 	// ========================================================================
 	// Goto-Pending Mode (after pressing 'g')

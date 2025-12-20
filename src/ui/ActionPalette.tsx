@@ -80,6 +80,9 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return true
 			case "i": // Image attach - always available
 				return true
+			case "b": // Break into epic - only if not already an epic
+				// Note: Epic check happens in keybinding, here we just check if task exists
+				return true
 			case "h": // Move left - always available
 			case "l": // Move right - always available
 				return true
@@ -177,6 +180,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 				{/* Task actions */}
 				<ActionLine keyName="i" description="image" />
+				<ActionLine keyName="b" description="break→epic" />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Git/PR */}
