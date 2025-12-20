@@ -65,6 +65,27 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 				})
 
 			/**
+			 * Get the target task for action mode commands.
+			 * Uses the task ID captured when Space was pressed (not current cursor).
+			 * This prevents race conditions where cursor moves between Space and action key.
+			 * Falls back to current cursor position if not in action mode.
+			 */
+			const getActionTargetTask = (): Effect.Effect<TaskWithSession | undefined> =>
+				Effect.gen(function* () {
+					// Try to get the captured target from action mode
+					const targetId = yield* editor.getActionTargetTaskId()
+
+					// If we have a captured target, use it
+					if (targetId) {
+						const allTasks = yield* board.getTasks()
+						return allTasks.find((t) => t.id === targetId)
+					}
+
+					// Fallback to current cursor (for non-action-mode usage)
+					return yield* getSelectedTask()
+				})
+
+			/**
 			 * Get current cursor column index (0-3)
 			 */
 			const getColumnIndex = (): Effect.Effect<number> =>
@@ -197,6 +218,7 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 
 			return {
 				getSelectedTask,
+				getActionTargetTask,
 				getColumnIndex,
 				getProjectPath,
 				showErrorToast,

@@ -23,6 +23,20 @@ import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
+/**
+ * Diff command using difftastic side-by-side view.
+ *
+ * Shows changes since branch diverged from base:
+ * - Stat summary first for quick overview
+ * - Then difftastic side-by-side with syntax highlighting
+ * - Excludes .beads/ to reduce noise
+ */
+const createDiffCommand = (baseBranch: string) =>
+	`MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && ` +
+	`git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && ` +
+	`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+	`git diff $MERGE_BASE -- ':!.beads' | less -RS`
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -88,6 +102,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				beadId,
 				"cleanup",
 				Effect.gen(function* () {
+					// DIAGNOSTIC: Log the bead ID when cleanup actually executes (az-f3iw)
+					yield* Effect.log(`[cleanup:execute] Running cleanup for beadId=${beadId}`)
 					yield* toast.show("info", `Cleaning up ${beadId}...`)
 
 					yield* prWorkflow.cleanup({ beadId, projectPath }).pipe(
@@ -112,7 +128,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const updateFromBase = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -152,7 +168,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const createPR = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -243,7 +259,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const mergeToMain = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -361,8 +377,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const cleanup = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
+
+				// DIAGNOSTIC: Log the captured task ID when cleanup action is triggered (az-f3iw)
+				yield* Effect.log(`[cleanup:capture] Captured task.id=${task.id} at action time`)
 
 				// Check if task has an operation in progress
 				const isBusy = yield* helpers.checkBusy(task.id)
@@ -375,6 +394,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
+
+				// DIAGNOSTIC: Log before pushing confirm overlay (az-f3iw)
+				yield* Effect.log(`[cleanup:confirm] Showing confirm dialog for task.id=${task.id}`)
 
 				// Show confirmation dialog before cleanup
 				yield* overlay.push({
@@ -394,7 +416,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const abortMerge = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -429,15 +451,14 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens a tmux popup showing the git diff between the bead's branch and base branch.
-		 * Base branch is configurable via pr.baseBranch in .azedarach.json (default: "main").
-		 * Useful for code review before merging. Respects user's git diff configuration
-		 * (difftastic, delta, etc.) with DFT_COLOR=always for difftastic support.
+		 * Opens difftastic side-by-side diff showing changes since branch diverged from main.
+		 * Shows stat summary first, then full diff with syntax highlighting.
+		 *
 		 * Requires an active session with a worktree.
 		 */
 		const showDiff = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				if (task.sessionState === "idle") {
@@ -451,25 +472,13 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Get base branch from config (default: "main")
-				const baseBranch = gitConfig.baseBranch
-
-				// Build git diff command that works in the worktree
-				// - Uses $(git merge-base <baseBranch> HEAD) to compare from branch point
-				// - Compares to working tree (not HEAD) to include uncommitted changes
-				// - Shows only changes made on THIS branch (not changes base made after we branched)
-				// - DFT_COLOR=always ensures difftastic colors in tmux popup
-				// - --color=always ensures colors for delta/git built-in diff
-				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				// - ':!.beads' excludes beads database changes (infrastructure noise)
-				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS`
-
+				// Launch difftastic side-by-side diff
 				yield* tmux
 					.displayPopup({
-						command: diffCommand,
+						command: createDiffCommand(gitConfig.baseBranch),
 						width: "95%",
 						height: "95%",
-						title: ` Diff: ${task.id} changes since ${baseBranch} (q to quit) `,
+						title: ` diff: ${task.id} vs ${gitConfig.baseBranch} `,
 						cwd: worktreePath,
 					})
 					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))

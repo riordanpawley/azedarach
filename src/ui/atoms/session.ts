@@ -2,73 +2,86 @@
  * Session Management Atoms
  *
  * Handles Claude session lifecycle: start, stop, pause, resume.
- * Also includes hook receiver and PTY monitoring.
+ * Also includes tmux session monitoring and PTY metrics.
  */
 
 import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
-import { HookReceiver, mapEventToState } from "../../core/HookReceiver.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
+import { type SessionStateUpdate, TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import type { SessionState } from "../types.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
-// Hook Receiver (Claude Code native hooks integration)
+// TmuxSessionMonitor (Claude Code native hooks integration)
 // ============================================================================
 
 /**
- * Hook receiver starter atom - starts the hook receiver on mount
+ * Map TmuxStatus to SessionState
+ * TmuxStatus values map directly to SessionState values.
+ */
+const mapStatusToSessionState = (status: SessionStateUpdate["status"]): SessionState => status
+
+/**
+ * Session monitor starter atom - starts the tmux session monitor on mount
  *
- * Watches for notification files from Claude Code hooks and updates
- * session state in ClaudeSessionManager. Also notifies PTYMonitor of hook
+ * Polls tmux sessions for state changes set by Claude Code hooks and updates
+ * session state in ClaudeSessionManager. Also notifies PTYMonitor of state
  * signals so it can respect the hook priority window.
  *
- * The receiver is automatically stopped when the atom unmounts.
+ * The monitor is automatically stopped when the atom unmounts.
  *
- * Usage: Simply subscribe to this atom in the app root to start the receiver.
- *        useAtomValue(hookReceiverStarterAtom)
+ * Usage: Simply subscribe to this atom in the app root to start the monitor.
+ *        useAtomValue(sessionMonitorStarterAtom)
  */
-export const hookReceiverStarterAtom = appRuntime.atom(
+export const sessionMonitorStarterAtom = appRuntime.atom(
 	Effect.gen(function* () {
-		const receiver = yield* HookReceiver
+		const monitor = yield* TmuxSessionMonitor
 		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
 		const diagnostics = yield* DiagnosticsService
 
-		// Handler that maps hook events to session state changes
-		const handler = (event: { event: string; beadId: string }) =>
+		// Handler that maps tmux status to session state changes
+		const handler = (update: SessionStateUpdate) =>
 			Effect.gen(function* () {
-				const newState = mapEventToState(event.event as "idle_prompt" | "stop" | "session_end")
-				if (newState) {
-					// Notify PTYMonitor of hook signal (for priority handling)
-					yield* ptyMonitor.recordHookSignal(event.beadId, newState)
+				const newState = mapStatusToSessionState(update.status)
 
-					yield* manager
-						.updateState(event.beadId, newState)
-						.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
-				}
+				// Notify PTYMonitor of state signal (for priority handling)
+				yield* ptyMonitor.recordHookSignal(update.beadId, newState)
+
+				yield* manager
+					.updateState(update.beadId, newState)
+					.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
+
 				// Record activity for diagnostics
-				yield* diagnostics.recordActivity("HookReceiver", `${event.event} for ${event.beadId}`)
+				yield* diagnostics.recordActivity(
+					"TmuxSessionMonitor",
+					`${update.status} for ${update.beadId}`,
+				)
 			})
 
-		// Register HookReceiver as a service
+		// Register TmuxSessionMonitor as a service
 		yield* diagnostics.updateServiceHealth({
-			name: "HookReceiver",
+			name: "TmuxSessionMonitor",
 			status: "healthy",
-			details: "Polling /tmp for notifications every 500ms",
+			details: "Polling tmux sessions every 500ms",
 		})
 
-		// Start the receiver (fiber tracking happens inside HookReceiver service)
-		const fiber = yield* receiver.start(handler)
+		// Start the monitor (fiber tracking happens inside TmuxSessionMonitor service)
+		const fiber = yield* monitor.start(handler)
 
-		yield* Effect.log("HookReceiver started - watching for Claude Code hook notifications")
+		yield* Effect.log("TmuxSessionMonitor started - watching for Claude Code session state")
 
 		return fiber
 	}),
 	{ initialValue: undefined },
 )
+
+// Keep the old name as an alias for backwards compatibility
+export const hookReceiverStarterAtom = sessionMonitorStarterAtom
 
 // ============================================================================
 // PTY Monitor (session metrics via PTY output pattern matching)
