@@ -472,8 +472,8 @@ export class BrokenService extends Effect.Service<BrokenService>()("BrokenServic
 When a service depends on another service, declare it in `dependencies:` so `.Default` provides its own deps:
 
 ```typescript
-// ✅ GOOD: HookReceiver declares its dependency on DiagnosticsService
-export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
+// ✅ GOOD: TmuxSessionMonitor declares its dependency on DiagnosticsService
+export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("TmuxSessionMonitor", {
   dependencies: [DiagnosticsService.Default],  // ← Provides own dependency
   scoped: Effect.gen(function* () {
     const diagnostics = yield* DiagnosticsService  // Available because of dependencies
@@ -481,7 +481,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
   }),
 }) {}
 
-// Now HookReceiver.Default has NO unsatisfied requirements
+// Now TmuxSessionMonitor.Default has NO unsatisfied requirements
 // Can be used in Layer.mergeAll without leaking DiagnosticsService requirement
 
 // ❌ BAD: Missing dependencies declaration - leaks requirement to app layer

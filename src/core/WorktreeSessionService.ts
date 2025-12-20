@@ -151,7 +151,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							command: `${shell} -i`,
 							prefix: tmuxPrefix,
 							// Store worktree and project paths in tmux session options
-							// Enables crash recovery - HookReceiver can reconstruct state from tmux
+							// Enables crash recovery - TmuxSessionMonitor can reconstruct state from tmux
 							azOptions: {
 								worktreePath,
 								projectPath,

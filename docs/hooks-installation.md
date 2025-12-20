@@ -122,13 +122,13 @@ az hooks install az-4vp /path/to/project
 
 ## How `az notify` Works
 
-The `az notify` command writes a notification file that the `HookReceiver` service in the main Azedarach TUI process watches. This enables real-time state updates without polling.
+The `az notify` command sets a tmux session option (`@az_status`) that the `TmuxSessionMonitor` service in the main Azedarach TUI process polls. This enables real-time state updates.
 
 ```
-Claude Code → hooks fire → az notify → writes file → HookReceiver → updates TUI
+Claude Code → hooks fire → az notify → sets tmux option → TmuxSessionMonitor → updates TUI
 ```
 
-**Notification file location:** `/tmp/azedarach-notify-<bead-id>.json`
+**Tmux session option:** `@az_status` on the `claude-<bead-id>` tmux session
 
 ## Requirements
 

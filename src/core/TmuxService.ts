@@ -64,7 +64,7 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
 					// Set azedarach session options for state tracking
-					// These enable crash recovery - HookReceiver can reconstruct state from tmux
+					// These enable crash recovery - TmuxSessionMonitor can reconstruct state from tmux
 					if (opts?.azOptions?.worktreePath) {
 						yield* runTmux(["set-option", "-t", name, "@az_worktree", opts.azOptions.worktreePath])
 					}
