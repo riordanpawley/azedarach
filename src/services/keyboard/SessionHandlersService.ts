@@ -67,7 +67,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 */
 			const startSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -105,7 +105,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 */
 			const startSessionWithPrompt = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -178,7 +178,7 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 */
 			const startSessionDangerous = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -250,7 +250,7 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 */
 			const chatAboutTask = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Build the Claude command with Haiku model and initial prompt
@@ -347,7 +347,7 @@ What would you like to discuss?`
 			 */
 			const attachExternal = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Get current project path
@@ -411,7 +411,7 @@ What would you like to discuss?`
 			 */
 			const attachInline = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					yield* attachment
@@ -426,7 +426,7 @@ What would you like to discuss?`
 			 */
 			const pauseSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					if (task.sessionState !== "busy") {
@@ -447,7 +447,7 @@ What would you like to discuss?`
 			 */
 			const resumeSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					if (task.sessionState !== "paused") {
@@ -470,7 +470,7 @@ What would you like to discuss?`
 			 */
 			const stopSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress

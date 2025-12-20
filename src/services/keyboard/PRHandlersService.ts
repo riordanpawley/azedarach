@@ -102,6 +102,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				beadId,
 				"cleanup",
 				Effect.gen(function* () {
+					// DIAGNOSTIC: Log the bead ID when cleanup actually executes (az-f3iw)
+					yield* Effect.log(`[cleanup:execute] Running cleanup for beadId=${beadId}`)
 					yield* toast.show("info", `Cleaning up ${beadId}...`)
 
 					yield* prWorkflow.cleanup({ beadId, projectPath }).pipe(
@@ -126,7 +128,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const updateFromBase = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -166,7 +168,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const createPR = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -257,7 +259,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const mergeToMain = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -375,8 +377,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const cleanup = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
+
+				// DIAGNOSTIC: Log the captured task ID when cleanup action is triggered (az-f3iw)
+				yield* Effect.log(`[cleanup:capture] Captured task.id=${task.id} at action time`)
 
 				// Check if task has an operation in progress
 				const isBusy = yield* helpers.checkBusy(task.id)
@@ -389,6 +394,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
+
+				// DIAGNOSTIC: Log before pushing confirm overlay (az-f3iw)
+				yield* Effect.log(`[cleanup:confirm] Showing confirm dialog for task.id=${task.id}`)
 
 				// Show confirmation dialog before cleanup
 				yield* overlay.push({
@@ -408,7 +416,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const abortMerge = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				// Check if task has an operation in progress
@@ -450,7 +458,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 */
 		const showDiff = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getSelectedTask()
+				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
 				if (task.sessionState === "idle") {
