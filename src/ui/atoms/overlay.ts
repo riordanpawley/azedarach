@@ -111,7 +111,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					readonly onConfirm: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 			  }
 			| { readonly _tag: "diagnostics" }
-			| { readonly _tag: "projectSelector" },
+			| { readonly _tag: "projectSelector" }
+			| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService
