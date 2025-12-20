@@ -162,7 +162,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 * List all tmux sessions starting with "claude-"
 		 * Returns session name and creation timestamp in one call.
 		 */
-		const listClaudeSessions = (): Effect.Effect<readonly TmuxSessionInfo[], never> =>
+		const listClaudeSessions = () =>
 			Effect.gen(function* () {
 				// Get both session name and creation time in one tmux call
 				// Format: "session_name|unix_timestamp"
@@ -193,10 +193,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * Get a tmux session option by name
 		 */
-		const getTmuxOption = (
-			sessionName: string,
-			optionName: string,
-		): Effect.Effect<string | null, never> =>
+		const getTmuxOption = (sessionName: string, optionName: string) =>
 			Effect.gen(function* () {
 				const command = Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName)
 
@@ -211,7 +208,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * Get the @az_status option for a tmux session
 		 */
-		const getSessionOption = (sessionName: string): Effect.Effect<TmuxStatus | null, never> =>
+		const getSessionOption = (sessionName: string) =>
 			Effect.gen(function* () {
 				const status = yield* getTmuxOption(sessionName, "@az_status")
 				if (status === "busy" || status === "waiting" || status === "idle") {
@@ -233,7 +230,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * List all sessions with their current status and creation time
 		 */
-		const listSessions = (): Effect.Effect<readonly SessionStateUpdate[], never> =>
+		const listSessions = () =>
 			Effect.gen(function* () {
 				const sessions = yield* listClaudeSessions()
 				const results: SessionStateUpdate[] = []
@@ -265,14 +262,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * Get status for a specific session
 		 */
-		const getSessionStatus = (beadId: string): Effect.Effect<TmuxStatus | null, never> =>
+		const getSessionStatus = (beadId: string) =>
 			getSessionOption(`${CLAUDE_SESSION_PREFIX}${beadId}`)
 
 		/**
 		 * Get session creation time (Unix timestamp)
 		 * Uses tmux's built-in #{session_created} variable.
 		 */
-		const getSessionCreatedAt = (beadId: string): Effect.Effect<number | null, never> =>
+		const getSessionCreatedAt = (beadId: string) =>
 			Effect.gen(function* () {
 				const sessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
 				const command = Command.make(
