@@ -63,12 +63,12 @@ while true; do
     s|S)
       clear
       printf "%sRunning difft side-by-side vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
-      GIT_EXTERNAL_DIFF="difft --display=side-by-side" git diff ${baseBranch}...HEAD | less -R
+      GIT_EXTERNAL_DIFF="difft --color=always --display=side-by-side" git diff ${baseBranch}...HEAD | less -R
       ;;
     i|I)
       clear
       printf "%sRunning difft inline vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
-      GIT_EXTERNAL_DIFF="difft --display=inline" git diff ${baseBranch}...HEAD | less -R
+      GIT_EXTERNAL_DIFF="difft --color=always --display=inline" git diff ${baseBranch}...HEAD | less -R
       ;;
     g|G)
       clear
