@@ -503,6 +503,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									yield* worktreeSession.create({
 										sessionName: tmuxSessionName,
 										worktreePath: worktree.path,
+										projectPath,
 										command: claudeWithOptions,
 										tmuxPrefix,
 										initCommands,

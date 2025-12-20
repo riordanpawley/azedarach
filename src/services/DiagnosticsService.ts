@@ -3,7 +3,7 @@
  *
  * Provides a central place to monitor:
  * - Long-running fibers (polling loops, watchers) and their status
- * - Service health (HookReceiver, PTYMonitor, etc.)
+ * - Service health (TmuxSessionMonitor, PTYMonitor, etc.)
  * - Session states
  * - Recent activity
  *
@@ -86,9 +86,9 @@ export interface DiagnosticsState {
  * ```ts
  * // Register a fiber with automatic cleanup
  * yield* diagnostics.registerFiber({
- *   id: "hook-receiver-poller",
- *   name: "HookReceiver Poller",
- *   description: "Polls /tmp for notification files",
+ *   id: "tmux-session-monitor-poller",
+ *   name: "TmuxSessionMonitor Poller",
+ *   description: "Polls tmux sessions for state changes",
  *   fiber: pollerFiber,
  * })
  * ```
