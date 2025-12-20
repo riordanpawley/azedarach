@@ -8,22 +8,20 @@
  * Uses Effect's DateTime for consistent time handling via the Clock service.
  */
 
-import { DateTime, Effect, Schedule, SubscriptionRef } from "effect"
+import { DateTime, Duration, Effect, Schedule, SubscriptionRef } from "effect"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
 /**
- * Format elapsed milliseconds as MM:SS
+ * Format elapsed milliseconds to human-readable string using Effect's Duration.format.
  *
  * Examples:
- * - 5000ms  -> "00:05"
- * - 65000ms -> "01:05"
- * - 3665000ms -> "61:05" (no hours, just large minutes)
+ * - 5000ms     -> "5s"
+ * - 65000ms    -> "1m 5s"
+ * - 3665000ms  -> "1h 1m 5s"
+ * - 90061000ms -> "1d 1h 1m 1s"
  */
 export const formatElapsedMs = (elapsedMs: number): string => {
-	const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
-	const minutes = Math.floor(totalSeconds / 60)
-	const seconds = totalSeconds % 60
-	return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+	return Duration.format(Duration.millis(Math.max(0, elapsedMs)))
 }
 
 /**
