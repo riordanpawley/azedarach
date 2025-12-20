@@ -63,6 +63,8 @@ export interface SessionMetrics {
  */
 export interface TaskWithSession extends Issue, SessionMetrics {
 	sessionState: SessionState
+	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
+	hasMergeConflict?: boolean
 }
 
 /**
@@ -90,6 +92,22 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 	paused: "⏸️",
 	warning: "⚠️",
 }
+
+/**
+ * Conflict indicator shown when worktree has an active merge conflict
+ * Displayed alongside session indicator (e.g., "🔵 ⚔️" = busy + conflict)
+ */
+export const CONFLICT_INDICATOR = "⚔️"
+
+/**
+ * Dev server indicator shown when a dev server is running for the task
+ * Displayed alongside other indicators (e.g., "🔵 💻" = busy session + dev server)
+ *
+ * Note: Using 💻 (U+1F4BB) instead of 🖥️ (U+1F5A5 + U+FE0F) because the variation
+ * selector in the desktop computer emoji renders poorly in many terminals,
+ * showing as small icon with vertical lines (||).
+ */
+export const DEV_SERVER_INDICATOR = "💻"
 
 /**
  * Agent phase indicators

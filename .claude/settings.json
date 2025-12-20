@@ -2,7 +2,7 @@
 	"initCommands": ["direnv allow"],
 	"permissions": {
 		"allow": [
-			"Read(//Users/riordan/prog/azedarach/.beads/images/**)",
+			"Read(//**/.beads/images/**)",
 			"Bash(bd:*)",
 			"mcp__plugin_beads_beads__*",
 			"mcp__effect-docs__*",

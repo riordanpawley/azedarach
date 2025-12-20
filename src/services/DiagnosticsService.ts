@@ -11,7 +11,7 @@
  * status automatically updates when they're interrupted/complete.
  */
 
-import { Effect, Fiber, FiberId, SubscriptionRef } from "effect"
+import { Effect, Fiber, FiberId, Scope, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Types
@@ -236,6 +236,37 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			)
 
 		/**
+		 * Register a fiber for monitoring, using a specific scope for the watcher fiber
+		 *
+		 * Use this when registering fibers from service methods (not the constructor).
+		 * The scope parameter should be the service's scope, captured via `Effect.scope`.
+		 *
+		 * @example
+		 * ```ts
+		 * // In a scoped service:
+		 * const serviceScope = yield* Effect.scope
+		 *
+		 * // In a service method:
+		 * const fiber = yield* someEffect.pipe(Effect.forkIn(serviceScope))
+		 * yield* diagnostics.registerFiberIn(serviceScope, {
+		 *   id: "my-fiber",
+		 *   name: "My Fiber",
+		 *   description: "Does something useful",
+		 *   fiber,
+		 * })
+		 * ```
+		 */
+		const registerFiberIn = <A, E>(
+			scope: Scope.Scope,
+			options: {
+				id: string
+				name: string
+				description: string
+				fiber: Fiber.RuntimeFiber<A, E>
+			},
+		) => Scope.extend(scope)(registerFiber(options))
+
+		/**
 		 * Log a diagnostic event
 		 *
 		 * Events are stored in state and can be viewed in the diagnostics overlay.
@@ -273,6 +304,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 		return {
 			state: stateRef,
 			registerFiber,
+			registerFiberIn,
 			updateServiceHealth,
 			recordActivity,
 			getSnapshot,

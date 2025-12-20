@@ -5,21 +5,21 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ## Mode Overview
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                       NORMAL MODE (NOR)                                │
-│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  :: cmd    │
-└────────────────────────────────────────────────────────────────────────┘
-         │           │           │           │           │           │           │
-         │           ▼           ▼           ▼           ▼           ▼           ▼
-         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ COMMAND  │
-         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (CMD)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ send to  │
-         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ VC REPL  │
-         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
-         │         │             │           │             │            │            │
-         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┘
-                              Esc: return to Normal
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                               NORMAL MODE (NOR)                                      │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  f: filter  :: cmd │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+         │           │           │           │           │           │           │           │
+         │           ▼           ▼           ▼           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ FILTER   │ │ COMMAND  │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (FLT)    │ │ (CMD)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ status/  │ │ send to  │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ pri/type │ │ VC REPL  │
+         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │            │            │            │
+         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┴────────────┘
+                                        Esc: return to Normal
 ```
 
 ## Normal Mode
@@ -48,6 +48,7 @@ The default mode for navigation and basic actions.
 | `Enter` | View/Enter | Show task details; on epics, enters drill-down |
 | `Space` | Enter Action mode | Prefix for commands |
 | `,` | Enter Sort mode | Change task sort order |
+| `f` | Enter Filter mode | Filter tasks by status/priority/type/session |
 | `/` | Enter Search mode | Filter tasks by title/ID |
 | `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
@@ -414,6 +415,114 @@ All sort modes prioritize active sessions first, then apply multi-level sorting 
 2. Secondary: Priority (P1 first)
 3. Tertiary: Session state
 
+## Filter Mode
+
+Press `f` to enter filter mode for filtering tasks by various attributes. Unlike search mode which filters by text, filter mode lets you filter by structured fields.
+
+### Filter Menu
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `s` | Status sub-menu | Toggle filtering by issue status |
+| `p` | Priority sub-menu | Toggle filtering by priority (P0-P4) |
+| `t` | Type sub-menu | Toggle filtering by issue type |
+| `S` | Session sub-menu | Toggle filtering by session state |
+| `e` | Toggle epic children | Hide/show tasks that are children of epics |
+| `c` | Clear all filters | Remove all filters and return to normal mode |
+| `Esc` | Cancel | Exit filter mode without changes |
+
+### Status Sub-Menu
+
+When `s` is pressed, these keys toggle status filters:
+
+| Key | Status | Description |
+|-----|--------|-------------|
+| `o` | Open | Toggle showing open tasks |
+| `i` | In Progress | Toggle showing in-progress tasks |
+| `b` | Blocked | Toggle showing blocked tasks |
+| `d` | Closed | Toggle showing closed tasks |
+
+### Priority Sub-Menu
+
+Number keys toggle priority filters:
+
+| Key | Priority | Description |
+|-----|----------|-------------|
+| `0` | P0 | Toggle critical priority |
+| `1` | P1 | Toggle high priority |
+| `2` | P2 | Toggle medium priority |
+| `3` | P3 | Toggle low priority |
+| `4` | P4 | Toggle backlog priority |
+
+### Type Sub-Menu
+
+When `t` is pressed, these keys toggle type filters (uppercase):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `B` | Bug | Toggle showing bugs |
+| `F` | Feature | Toggle showing features |
+| `T` | Task | Toggle showing tasks |
+| `E` | Epic | Toggle showing epics |
+| `C` | Chore | Toggle showing chores |
+
+### Session Sub-Menu
+
+When `S` is pressed, these keys toggle session state filters (uppercase):
+
+| Key | State | Description |
+|-----|-------|-------------|
+| `I` | Idle | Toggle showing tasks with no session |
+| `U` | Busy | Toggle showing tasks with active Claude sessions |
+| `W` | Waiting | Toggle showing tasks waiting for input |
+| `D` | Done | Toggle showing completed sessions |
+| `X` | Error | Toggle showing errored sessions |
+| `P` | Paused | Toggle showing paused sessions |
+
+### How Filter Mode Works
+
+- **Multiple values within a field**: OR logic (e.g., `open OR blocked`)
+- **Different fields**: AND logic (e.g., `status=open AND priority=P1`)
+- **Empty filters**: Show all (no filtering for that field)
+- **Hide epic children**: ON by default - hides tasks that are children of epics (encourages drill-down)
+- **Persistent filters**: Filters remain active until cleared with `c`
+- **Visual feedback**: Menu shows `(N)` next to each field with active filters
+
+### Example Workflows
+
+**Show only high-priority open tasks:**
+```
+1. Press `f` to enter filter mode
+2. Press `s` then `o` to toggle "open" status
+3. Press `p` then `1` to toggle P1 priority
+4. Press `Esc` to exit filter mode
+5. Only open P1 tasks are now visible
+```
+
+**Show tasks with active sessions:**
+```
+1. Press `f` to enter filter mode
+2. Press `S` to open session sub-menu
+3. Press `U` for busy sessions
+4. Press `W` for waiting sessions
+5. Press `Esc` to apply
+6. Only tasks with busy or waiting sessions are visible
+```
+
+**Clear all filters:**
+```
+1. Press `f` to enter filter mode
+2. Press `c` to clear all filters
+3. All tasks are visible again
+```
+
+### Combining with Search Mode
+
+Filter mode (`f`) and search mode (`/`) work together:
+- **Filter mode**: Structured field filtering (status, priority, type, session)
+- **Search mode**: Text-based filtering (title, ID)
+- Both can be active simultaneously - tasks must match both to be visible
+
 ## Action Mode
 
 Press `Space` in Normal mode to enter action mode. A floating palette shows available actions.
@@ -426,9 +535,12 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
 | `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
 | `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
-| `Space` `a` | Attach to session | Session exists (switches tmux client) |
+| `Space` `a` | Attach to session | Session exists (offers to merge main if behind) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
-| `Space` `r` | Resume session | Session is paused |
+| `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
+| `Space` `v` | View dev server | Dev server is running (attach to tmux session) |
+| `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
+| `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
 
 #### Start (yolo) Mode (Space+!)
@@ -442,19 +554,112 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 
 **Caution:** Since Claude won't ask for permission, it can make changes faster but with less oversight. Use this for tasks where you trust Claude's judgment.
 
+#### Toggle Dev Server (Space+r)
+
+Toggle a dev server for the selected task's worktree. Each worktree can have its own dev server running with injected port environment variables to avoid conflicts.
+
+**How it works:**
+1. If no dev server is running for this bead, starts one in a new tmux session
+2. If a dev server is already running, stops it
+
+**Port injection:**
+- Ports are auto-allocated starting from 3000
+- Environment variables are injected (e.g., `PORT=3001`)
+- Configure additional port variables in `.azedarach.json`:
+
+```json
+{
+  "devServer": {
+    "command": "bun run dev",
+    "ports": {
+      "web": { "default": 3000, "aliases": ["PORT", "VITE_PORT"] },
+      "server": { "default": 8000, "aliases": ["SERVER_PORT", "VITE_SERVER_PORT"] }
+    }
+  }
+}
+```
+
+**StatusBar indicator:**
+- Shows `DEV: localhost:3001` when dev server is running for the selected bead
+- Shows `DEV: starting...` during startup
+- Shows `DEV: error` if the server failed
+
+**Requirements:**
+- A worktree must exist for the bead (start a session first with `Space+s`)
+- The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
+
+#### View Dev Server (Space+v)
+
+Attach to the dev server's tmux session to view its output. This is useful for:
+- Monitoring server logs and errors
+- Checking startup messages
+- Debugging connection issues
+
+**How it works:**
+1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
+2. You can see all server output in real-time
+3. Return to Azedarach with `Ctrl-a Ctrl-a` (double-tap tmux prefix)
+
+**Requirements:**
+- A dev server must be running for the bead (start with `Space+r` first)
+
+**TaskCard indicator:**
+- Tasks with running dev servers show 🖥️ in their header line
+- This helps identify which tasks have active dev servers at a glance
+
 ### Git/PR Actions
 
 | Sequence | Action | Available When |
 |----------|--------|----------------|
+| `Space` `u` | Update from main | Worktree exists (merge main into branch) |
 | `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 
+#### Update from Main (Space+u)
+
+The update action merges the latest changes from main into your worktree branch. This keeps your branch up to date with the main branch and is useful before creating a PR or when you need the latest changes from main.
+
+**What it does:**
+
+1. Fetches the latest changes from `origin/main`
+2. Merges `origin/main` into your worktree branch
+3. If there are conflicts, starts a Claude session to resolve them
+4. If no conflicts, the merge completes successfully
+
+**When to use:**
+
+- Before creating a PR to ensure your changes are based on the latest main
+- To stay up to date with changes other people have merged to main
+- When you need a feature or fix that was merged to main after you created your branch
+
+**Conflict resolution:**
+
+If the merge results in conflicts:
+- A Claude session is automatically started in the worktree
+- Claude will attempt to resolve the conflicts
+- You can attach to the session with `Space` `a` to guide Claude or review the resolution
+- If Claude gets stuck, use `Space` `M` to abort the merge and try again manually
+
+**Note:** This operation works in the worktree, so your local main branch is not affected. The merge only updates the worktree branch.
+
+#### Create PR (Space+P)
+
+Creating a PR now **automatically syncs with main first** to ensure your branch is up to date. The workflow is:
+
+1. Fetches the latest changes from `origin/main`
+2. Merges `origin/main` into your branch (same as `Space` `u`)
+3. If conflicts occur, starts a Claude session to resolve them
+4. After successful merge, pushes your branch to origin
+5. Creates a GitHub PR using `gh pr create`
+
+This ensures PRs are always based on the latest main and reduces the chance of merge conflicts after review.
+
 #### Merge to Main (Space+m)
 
-The merge action includes **conflict detection**:
+The merge action merges your branch to main **without cleanup** - you can keep iterating:
 
 1. Before merging, az checks if files were modified in both your branch and main
 2. If potential conflicts are detected, a **confirmation dialog** appears:
@@ -463,6 +668,18 @@ The merge action includes **conflict detection**:
    - Press `y` to proceed, `n` to cancel
 3. If no conflicts detected, the merge proceeds directly
 4. On success, the branch changes are merged into main locally
+
+**After merge, your worktree and session remain active** so you can:
+- Test changes in main's dev server
+- Make additional changes and merge again
+- Use `Space+d` when done to cleanup (delete worktree, branch)
+
+**Typical workflow:**
+```
+Space+m  → merge to main, continue working
+Space+m  → merge again after more changes
+Space+d  → cleanup when completely done
+```
 
 **Note:** This is a local merge operation, not a GitHub PR merge. Use `Space+P` to create a PR for code review workflows.
 
@@ -548,7 +765,16 @@ Tasks can have images attached to provide visual context for Claude sessions.
 
 ### Viewing & Managing Attachments (Detail Panel)
 
-When viewing a task's details (`Enter`), if it has attachments, you can navigate and manage them:
+When viewing a task's details (`Enter`), you can scroll and manage attachments:
+
+**Scrolling (always available):**
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `Ctrl-u` | Scroll up | Scroll up half page |
+| `Ctrl-d` | Scroll down | Scroll down half page |
+
+**Attachment navigation (when attachments exist):**
 
 | Key | Action | Description |
 |-----|--------|-------------|
@@ -558,7 +784,7 @@ When viewing a task's details (`Enter`), if it has attachments, you can navigate
 | `o` | Open | Open selected attachment in system image viewer |
 | `x` | Remove | Delete selected attachment |
 | `i` | Add | Open image attachment overlay to add more |
-| `Esc` | Close | Close detail panel |
+| `Enter` / `Esc` | Close | Close detail panel |
 
 **Visual Feedback:**
 - Selected attachment is highlighted with `▶` prefix and mauve color

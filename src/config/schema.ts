@@ -1,11 +1,28 @@
 /**
  * Configuration Schema for Azedarach
  *
- * Uses @effect/schema for runtime validation, matching patterns in BeadsClient.ts.
- * Schema definitions provide both TypeScript types and runtime validation.
+ * Uses @effect/schema for runtime validation with versioned schemas and automatic
+ * migration. Old config formats are automatically upgraded to the current version.
+ *
+ * ## Version History
+ * - Version 1: Original schema (no $schema field) - legacy format
+ * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
+ *
+ * ## Adding New Versions
+ * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
+ * 2. Add VN-1ToVNTransform migration
+ * 3. Update MigratingConfigSchema union
+ * 4. Update CURRENT_CONFIG_VERSION
  */
 
 import * as Schema from "effect/Schema"
+
+// ============================================================================
+// Version Constants
+// ============================================================================
+
+/** Current config schema version */
+export const CURRENT_CONFIG_VERSION = 2
 
 // ============================================================================
 // Nested Config Schemas
@@ -85,6 +102,29 @@ const GitConfigSchema = Schema.Struct({
 
 	/** Prefix for branch names (default: "az-") */
 	branchPrefix: Schema.optional(Schema.String),
+
+	/**
+	 * Base branch for merges, diffs, and PRs (default: "main")
+	 *
+	 * This is the branch that worktree branches are compared against and merged into.
+	 * Common values: "main", "master", "develop", "preview"
+	 */
+	baseBranch: Schema.optional(Schema.String),
+
+	/**
+	 * Enable git push operations (default: true)
+	 *
+	 * When false, all git push operations are silently skipped.
+	 * Useful for offline mode or local-only workflows.
+	 */
+	pushEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Enable git fetch/pull operations (default: true)
+	 *
+	 * When false, git fetch and pull operations are silently skipped.
+	 */
+	fetchEnabled: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -93,14 +133,19 @@ const GitConfigSchema = Schema.Struct({
  * Controls automatic PR creation behavior.
  */
 const PRConfigSchema = Schema.Struct({
+	/**
+	 * Enable PR creation (default: true)
+	 *
+	 * When false, PR creation is disabled. The action menu will show
+	 * "Create PR (disabled)" and attempting it will show an info message.
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
 	/** Create PRs as draft (default: true) */
 	autoDraft: Schema.optional(Schema.Boolean),
 
 	/** Auto-merge after CI passes (default: false) */
 	autoMerge: Schema.optional(Schema.Boolean),
-
-	/** Base branch for PRs (default: "main") */
-	baseBranch: Schema.optional(Schema.String),
 })
 
 /**
@@ -136,6 +181,65 @@ const MergeConfigSchema = Schema.Struct({
 })
 
 /**
+ * Port configuration for a named port type
+ *
+ * Defines a port with a base value and environment variable aliases.
+ */
+const PortConfigSchema = Schema.Struct({
+	/** Base port for this port type (e.g., 3000 for web, 8000 for server) */
+	default: Schema.Number,
+
+	/** Environment variable names to inject this port value into */
+	aliases: Schema.Array(Schema.String),
+})
+
+/**
+ * Dev server configuration
+ *
+ * Controls how dev servers are spawned for worktrees.
+ * Each worktree can have its own dev server with injected port environment variables.
+ *
+ * @example
+ * ```json
+ * {
+ *   "devServer": {
+ *     "command": "bun run dev",
+ *     "ports": {
+ *       "web": { "default": 3000, "aliases": ["PORT", "VITE_PORT"] },
+ *       "server": { "default": 8000, "aliases": ["SERVER_PORT", "VITE_SERVER_PORT"] }
+ *     }
+ *   }
+ * }
+ * ```
+ */
+const DevServerConfigSchema = Schema.Struct({
+	/**
+	 * Command to run the dev server (overrides auto-detection)
+	 * If not set, uses package.json scripts (dev → start → serve)
+	 */
+	command: Schema.optional(Schema.String),
+
+	/**
+	 * Named port configurations with base values and env var aliases
+	 * Each worktree gets sequential offsets from the base ports
+	 *
+	 * Default: { "web": { "default": 3000, "aliases": ["PORT"] } }
+	 */
+	ports: Schema.optional(Schema.Record({ key: Schema.String, value: PortConfigSchema })),
+
+	/**
+	 * Regex pattern to detect port from server output
+	 * Default: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"
+	 */
+	portPattern: Schema.optional(Schema.String),
+
+	/**
+	 * Working directory relative to worktree root (default: ".")
+	 */
+	cwd: Schema.optional(Schema.String),
+})
+
+/**
  * Notification configuration
  *
  * Controls how users are notified of session state changes.
@@ -146,6 +250,64 @@ const NotificationsConfigSchema = Schema.Struct({
 
 	/** System notifications via osascript/notify-send (default: false) */
 	system: Schema.optional(Schema.Boolean),
+})
+
+// ============================================================================
+// Legacy Schemas (for migration)
+// ============================================================================
+
+/**
+ * Legacy PR config schema (v1/unversioned)
+ *
+ * In legacy configs, baseBranch was under pr section.
+ * This was moved to git section in v2.
+ */
+const LegacyPRConfigSchema = Schema.Struct({
+	enabled: Schema.optional(Schema.Boolean),
+	autoDraft: Schema.optional(Schema.Boolean),
+	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to git.baseBranch in v2 */
+	baseBranch: Schema.optional(Schema.String),
+})
+
+/**
+ * Beads configuration
+ *
+ * Controls beads issue tracker behavior.
+ */
+const BeadsConfigSchema = Schema.Struct({
+	/**
+	 * Enable beads sync operations (default: true)
+	 *
+	 * When false, `bd sync` is silently skipped. Issues are still
+	 * tracked locally but not synced to the remote repository.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Network configuration
+ *
+ * Controls automatic network connectivity detection.
+ */
+const NetworkConfigSchema = Schema.Struct({
+	/**
+	 * Automatically detect network connectivity (default: true)
+	 *
+	 * When true, periodically checks if github.com is reachable.
+	 * If unreachable, network-dependent operations are disabled.
+	 */
+	autoDetect: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Interval in seconds between connectivity checks (default: 30)
+	 */
+	checkIntervalSeconds: Schema.optional(Schema.Number),
+
+	/**
+	 * Host to check for connectivity (default: "github.com")
+	 */
+	checkHost: Schema.optional(Schema.String),
 })
 
 /**
@@ -165,41 +327,196 @@ const ProjectConfigSchema = Schema.Struct({
 })
 
 // ============================================================================
+// Migration System
+// ============================================================================
+
+/**
+ * Raw config type from schema - used as input to migrations
+ */
+type RawConfig = Schema.Schema.Type<typeof RawConfigSchema>
+
+/**
+ * Current config type from schema - output of migrations
+ */
+type CurrentConfig = Schema.Schema.Type<typeof CurrentConfigSchema>
+
+/**
+ * A migration transforms config from one version to the next.
+ *
+ * Each migration is self-contained and documents what it changes.
+ * This pattern makes it easy to:
+ * - See exactly what changed in each version
+ * - Test migrations in isolation
+ * - Add new migrations without touching old code
+ */
+interface Migration {
+	/** Version this migration produces */
+	readonly toVersion: number
+	/** Human-readable description of what changed */
+	readonly description: string
+	/** Transform function */
+	readonly migrate: (config: RawConfig) => RawConfig
+}
+
+/**
+ * Migration registry - add new migrations here
+ *
+ * Each migration handles ONE version bump.
+ * Migrations are applied in sequence from the config's current version to CURRENT_CONFIG_VERSION.
+ */
+const migrations: readonly Migration[] = [
+	{
+		toVersion: 2,
+		description: "Move pr.baseBranch → git.baseBranch",
+		migrate: (config) => {
+			const pr = config.pr
+			const git = config.git
+
+			// Extract legacy baseBranch from pr section
+			const legacyBaseBranch = pr?.baseBranch
+			const currentGitBaseBranch = git?.baseBranch
+
+			// Migrate if legacy exists and current doesn't
+			const migratedBaseBranch =
+				legacyBaseBranch !== undefined && currentGitBaseBranch === undefined
+					? legacyBaseBranch
+					: currentGitBaseBranch
+
+			// Build new pr config without legacy baseBranch field
+			const newPr =
+				pr !== undefined ? { autoDraft: pr.autoDraft, autoMerge: pr.autoMerge } : undefined
+
+			return {
+				...config,
+				$schema: 2,
+				git: migratedBaseBranch !== undefined ? { ...git, baseBranch: migratedBaseBranch } : git,
+				pr: newPr,
+			}
+		},
+	},
+	// ────────────────────────────────────────────────────────────────────────
+	// Future migrations go here. Example:
+	// ────────────────────────────────────────────────────────────────────────
+	// {
+	//   toVersion: 3,
+	//   description: "Add session.timeout option",
+	//   migrate: (config) => ({
+	//     ...config,
+	//     $schema: 3,
+	//     // New fields get defaults, existing fields pass through
+	//   }),
+	// },
+]
+
+/**
+ * Apply all necessary migrations to bring config to current version
+ *
+ * Migrations are applied in sequence. A config at v1 will go through
+ * all migrations (v1→v2, v2→v3, etc.) until it reaches CURRENT_CONFIG_VERSION.
+ */
+const applyMigrations = (config: RawConfig): CurrentConfig => {
+	let current = config
+	const startVersion = current.$schema ?? 1
+
+	for (const migration of migrations) {
+		if (startVersion < migration.toVersion) {
+			current = migration.migrate(current)
+		}
+	}
+
+	// Ensure version is set even if no migrations were needed
+	// Strip legacy fields to match CurrentConfig
+	return {
+		$schema: CURRENT_CONFIG_VERSION,
+		worktree: current.worktree,
+		git: current.git,
+		session: current.session,
+		patterns: current.patterns,
+		pr: current.pr
+			? {
+					enabled: current.pr.enabled,
+					autoDraft: current.pr.autoDraft,
+					autoMerge: current.pr.autoMerge,
+				}
+			: undefined,
+		merge: current.merge,
+		devServer: current.devServer,
+		notifications: current.notifications,
+		beads: current.beads,
+		network: current.network,
+		projects: current.projects,
+		defaultProject: current.defaultProject,
+	}
+}
+
+// ============================================================================
 // Root Schema
 // ============================================================================
 
 /**
- * Root configuration schema for Azedarach
+ * Raw input schema for Azedarach config
  *
- * All sections are optional - missing sections use defaults.
+ * Accepts both legacy (v1/unversioned) and current (v2) formats.
+ * Used as the input side of the migration transform.
  */
-export const AzedarachConfigSchema = Schema.Struct({
-	/** Worktree lifecycle configuration */
+const RawConfigSchema = Schema.Struct({
+	/** Config version - undefined/1 for legacy, 2+ for current */
+	$schema: Schema.optional(Schema.Number),
+
 	worktree: Schema.optional(WorktreeConfigSchema),
-
-	/** Git behavior configuration */
 	git: Schema.optional(GitConfigSchema),
-
-	/** Claude session configuration */
 	session: Schema.optional(SessionConfigSchema),
-
-	/** State detection pattern overrides */
 	patterns: Schema.optional(PatternsConfigSchema),
-
-	/** PR workflow configuration */
-	pr: Schema.optional(PRConfigSchema),
-
-	/** Merge workflow configuration */
+	/** May contain legacy baseBranch field */
+	pr: Schema.optional(LegacyPRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
-
-	/** Notification configuration */
+	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 
-	/** Project configurations */
-	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
+	/** Beads issue tracker configuration */
+	beads: Schema.optional(BeadsConfigSchema),
 
-	/** Default project name to use */
+	/** Network connectivity configuration */
+	network: Schema.optional(NetworkConfigSchema),
+
+	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
+})
+
+/**
+ * Current config schema (v2)
+ *
+ * This is the canonical schema after migration.
+ * Does NOT include legacy fields - they should be migrated away.
+ */
+const CurrentConfigSchema = Schema.Struct({
+	$schema: Schema.optional(Schema.Number),
+	worktree: Schema.optional(WorktreeConfigSchema),
+	git: Schema.optional(GitConfigSchema),
+	session: Schema.optional(SessionConfigSchema),
+	patterns: Schema.optional(PatternsConfigSchema),
+	pr: Schema.optional(PRConfigSchema),
+	merge: Schema.optional(MergeConfigSchema),
+	devServer: Schema.optional(DevServerConfigSchema),
+	notifications: Schema.optional(NotificationsConfigSchema),
+	beads: Schema.optional(BeadsConfigSchema),
+	network: Schema.optional(NetworkConfigSchema),
+	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
+	defaultProject: Schema.optional(Schema.String),
+})
+
+/**
+ * Root configuration schema for Azedarach with automatic migration
+ *
+ * The transform pipeline:
+ * 1. RawConfigSchema validates basic structure (accepts legacy fields)
+ * 2. applyMigrations() transforms to current version
+ * 3. Result matches CurrentConfigSchema
+ */
+export const AzedarachConfigSchema = Schema.transform(RawConfigSchema, CurrentConfigSchema, {
+	strict: true,
+	decode: applyMigrations,
+	encode: (current) => ({ ...current, $schema: CURRENT_CONFIG_VERSION }),
 })
 
 // ============================================================================
@@ -233,5 +550,17 @@ export type MergeConfig = Schema.Schema.Type<typeof MergeConfigSchema>
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>
 
+/** Beads config section type */
+export type BeadsConfig = Schema.Schema.Type<typeof BeadsConfigSchema>
+
+/** Network config section type */
+export type NetworkConfig = Schema.Schema.Type<typeof NetworkConfigSchema>
+
 /** Project config section type */
 export type ProjectConfig = Schema.Schema.Type<typeof ProjectConfigSchema>
+
+/** Port config for a single port type */
+export type PortConfig = Schema.Schema.Type<typeof PortConfigSchema>
+
+/** Dev server config section type */
+export type DevServerConfig = Schema.Schema.Type<typeof DevServerConfigSchema>

@@ -16,6 +16,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	currentProjectAtom,
+	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	focusedTaskRunningOperationAtom,
@@ -23,6 +24,7 @@ import {
 	getEpicInfoAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
+	isOnlineAtom,
 	refreshBoardAtom,
 	vcStatusAtom,
 	viewModeAtom,
@@ -35,10 +37,12 @@ import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { EpicHeader } from "./EpicHeader.js"
+import { FilterMenu } from "./FilterMenu.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
 import { ImagePreviewOverlay } from "./ImagePreviewOverlay.js"
+import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
@@ -85,6 +89,7 @@ export const App = () => {
 		showingImageAttach,
 		showingImagePreview,
 		showingConfirm,
+		showingMergeChoice,
 		showingDiagnostics,
 		showingProjectSelector,
 	} = useOverlays()
@@ -97,11 +102,14 @@ export const App = () => {
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,
+		filterConfig,
+		activeFilterField,
 		isJump,
 		isAction,
 		isSearch,
 		isCommand,
 		isSort,
+		isFilter,
 		isOrchestrate,
 	} = useEditorMode()
 
@@ -190,9 +198,17 @@ export const App = () => {
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
+	// Dev server state for selected task (for StatusBar display)
+	// Returns idle state if no task selected or no dev server running
+	const devServerState = useAtomValue(devServerStateAtom(selectedTask?.id ?? ""))
+
 	// Running operation for focused task (for ActionPalette busy state)
 	// Derives from NavigationService + CommandQueueService - no props needed
 	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
+
+	// Network status for offline mode indicators
+	const isOnlineResult = useAtomValue(isOnlineAtom)
+	const isOnline = Result.isSuccess(isOnlineResult) ? isOnlineResult.value : true
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Keyboard Handler - Delegates to KeyboardService
@@ -264,6 +280,8 @@ export const App = () => {
 				return `select (${selectedIds.length})`
 			case "sort":
 				return "sort"
+			case "filter":
+				return mode.activeField ? `filter: ${mode.activeField}` : "filter"
 			case "orchestrate":
 				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 		}
@@ -312,6 +330,8 @@ export const App = () => {
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 				viewMode={viewMode}
 				isLoading={isLoading}
+				devServerStatus={devServerState.status}
+				devServerPort={devServerState.port}
 				projectName={projectName}
 			/>
 
@@ -325,10 +345,21 @@ export const App = () => {
 			{showingDiagnostics && <DiagnosticsOverlay />}
 
 			{/* Action palette */}
-			{isAction && <ActionPalette task={selectedTask} runningOperation={runningOperation} />}
+			{isAction && (
+				<ActionPalette
+					task={selectedTask}
+					runningOperation={runningOperation}
+					isOnline={isOnline}
+					devServerStatus={devServerState.status}
+					devServerPort={devServerState.port}
+				/>
+			)}
 
 			{/* Sort menu */}
 			{isSort && <SortMenu currentSort={sortConfig} />}
+
+			{/* Filter menu */}
+			{isFilter && <FilterMenu config={filterConfig} activeField={activeFilterField} />}
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}
@@ -367,6 +398,9 @@ export const App = () => {
 
 			{/* Confirm overlay */}
 			{showingConfirm && <ConfirmOverlay />}
+
+			{/* Merge choice overlay */}
+			{showingMergeChoice && <MergeChoiceOverlay />}
 
 			{/* Orchestration overlay - rendered when in orchestrate mode */}
 			{isOrchestrate && mode._tag === "orchestrate" && (

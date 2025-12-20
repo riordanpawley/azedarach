@@ -27,6 +27,14 @@ export {
 	getQueueInfoAtom,
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
+// Dev server atoms
+export {
+	devServerStateAtom,
+	devServersAtom,
+	stopDevServerAtom,
+	syncDevServerStateAtom,
+	toggleDevServerAtom,
+} from "./devServer.js"
 export type { DiagnosticsState } from "./diagnostics.js"
 
 // Diagnostics atoms
@@ -60,12 +68,15 @@ export {
 export { handleKeyAtom } from "./keyboard.js"
 // Mode service atoms
 export {
+	activeFilterFieldAtom,
 	clearCommandAtom,
+	clearFiltersAtom,
 	clearSearchAtom,
 	commandInputAtom,
 	cycleSortAtom,
 	enterActionAtom,
 	enterCommandAtom,
+	enterFilterAtom,
 	enterGotoAtom,
 	enterJumpAtom,
 	enterOrchestrateAtom,
@@ -75,6 +86,8 @@ export {
 	exitOrchestrateAtom,
 	exitSelectAtom,
 	exitToNormalAtom,
+	filterConfigAtom,
+	isFilterAtom,
 	isOrchestrateAtom,
 	modeAtom,
 	orchestrateFocusIndexAtom,
@@ -108,9 +121,12 @@ export {
 	jumpToTaskAtom,
 	navigateAtom,
 } from "./navigation.js"
+// Network status atoms
+export { isOnlineAtom } from "./network.js"
 // Overlay and toast atoms
 export {
 	currentOverlayAtom,
+	detailScrollAtom,
 	dismissToastAtom,
 	overlaysAtom,
 	popOverlayAtom,

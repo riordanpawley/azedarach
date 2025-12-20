@@ -28,6 +28,9 @@ Thumbs.db
 # Claude Code cache
 .claude/.cache/
 
+# Claude local settings (personal permissions/hooks)
+.claude/settings.local.json
+
 # Environment
 .env.local
 .env*.local
