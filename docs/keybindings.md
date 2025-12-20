@@ -612,7 +612,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
-| `Space` `f` | Open lazygit | Worktree exists (interactive git UI) |
+| `Space` `f` | Diff menu | Worktree exists (difftastic/git diff/lazygit) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -703,26 +703,23 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 
 #### Show Diff (Space+f)
 
-Opens **lazygit** in a tmux popup, focused on the status/files panel. This provides an interactive UI for viewing diffs, staging changes, and navigating commit history.
+Opens an **interactive diff menu** in a tmux popup with multiple viewing options:
 
-**lazygit opens with:**
-- Files panel focused (status view)
-- Full worktree context for the bead
+**Menu options:**
+- `s` - **Side-by-side** (difftastic) - Syntax-aware side-by-side diff, best for reviewing changes
+- `i` - **Inline** (difftastic) - Compact inline diff with syntax highlighting
+- `g` - **Git diff** - Traditional unified diff format
+- `l` - **Lazygit** - Full interactive git UI for staging, committing, browsing history
+- `q` - Quit and return to az
 
-**Key lazygit controls:**
-- `j/k`: Navigate files
-- `Enter`: View file diff (staged/unstaged)
-- `Space`: Stage/unstage file
-- `c`: Commit staged changes
-- `1-5`: Switch between panels (Status, Files, Branches, Commits, Stash)
-- `?`: Help
-- `q`: Quit and return to az
+**Diff comparison:**
+- Compares worktree branch against main (or configured base branch)
+- Shows all changes since the branch diverged from main
 
 **Use cases:**
-- Review Claude's changes before merging
-- Stage specific changes interactively
-- View commit history and branches
-- Make quick commits without leaving az
+- Review Claude's changes with syntax-aware highlighting
+- Choose the diff format that works best for the content
+- Stage and commit via lazygit when needed
 
 ### Movement Actions
 
