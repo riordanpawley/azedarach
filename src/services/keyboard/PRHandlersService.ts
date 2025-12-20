@@ -53,7 +53,6 @@ show_menu() {
   printf "  %s[s]%s Side-by-side  %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
   printf "  %s[i]%s Inline        %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
   printf "  %s[g]%s Git diff      %s(unified)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
-  printf "  %s[l]%s Lazygit       %s(full UI)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
   printf "\\n"
   printf "  %s[q] quit%s\\n" "$DIM" "$RESET"
   printf "\\n"
@@ -82,9 +81,6 @@ while true; do
       clear
       git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
       git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS
-      ;;
-    l|L)
-      lazygit
       ;;
     q|Q|"")
       exit 0
