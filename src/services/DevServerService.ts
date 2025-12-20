@@ -41,6 +41,31 @@ const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
 
 // ============================================================================
+// tmux User-Option Keys (source of truth for dev server state)
+// ============================================================================
+
+/** tmux option key for dev server port */
+const TMUX_OPT_PORT = "@az-devserver-port"
+
+/** tmux option key for dev server status */
+const TMUX_OPT_STATUS = "@az-devserver-status"
+
+/** tmux option key for bead ID this dev server belongs to */
+const TMUX_OPT_BEAD_ID = "@az-devserver-bead-id"
+
+/** tmux option key for worktree path */
+const TMUX_OPT_WORKTREE_PATH = "@az-devserver-worktree-path"
+
+/** tmux option key for start timestamp (ISO 8601) */
+const TMUX_OPT_STARTED_AT = "@az-devserver-started-at"
+
+/** tmux option key for error message */
+const TMUX_OPT_ERROR = "@az-devserver-error"
+
+/** tmux option key for project path (enables multi-project support) */
+const TMUX_OPT_PROJECT_PATH = "@az-devserver-project-path"
+
+// ============================================================================
 // Type Definitions
 // ============================================================================
 
@@ -81,33 +106,6 @@ export class NoWorktreeError extends Data.TaggedError("NoWorktreeError")<{
 }> {}
 
 // ============================================================================
-// Persistence Schema
-// ============================================================================
-
-/**
- * Schema for persisted dev server state
- * Uses UndefinedOr with proper JSON representation
- */
-const PersistedDevServerStateSchema = Schema.Struct({
-	status: Schema.Literal("idle", "starting", "running", "error"),
-	port: Schema.UndefinedOr(Schema.Number),
-	tmuxSession: Schema.UndefinedOr(Schema.String),
-	worktreePath: Schema.UndefinedOr(Schema.String),
-	startedAt: Schema.UndefinedOr(Schema.Date),
-	error: Schema.UndefinedOr(Schema.String),
-})
-
-/**
- * Schema for persisted dev servers map (with JSON parsing)
- */
-const PersistedDevServersSchema = Schema.parseJson(
-	Schema.HashMap({
-		key: Schema.String,
-		value: PersistedDevServerStateSchema,
-	}),
-)
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -115,6 +113,12 @@ const PersistedDevServersSchema = Schema.parseJson(
  * Get tmux session name for a bead's dev server
  */
 const getDevSessionName = (beadId: string): string => `${DEV_SESSION_PREFIX}${beadId}`
+
+/**
+ * Schema for parsing DevServerStatus from string
+ * Uses Schema.Literal for compile-time and runtime type safety
+ */
+const DevServerStatusSchema = Schema.Literal("idle", "starting", "running", "error")
 
 /**
  * Create empty/idle state
@@ -156,9 +160,6 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		// Register with diagnostics - tracks service health
 		yield* diagnostics.trackService("DevServerService", "Per-worktree dev server lifecycle")
 
-		// Persistence file path
-		const devServersFilePath = ".azedarach/devservers.json"
-
 		/**
 		 * Get the current project path from ProjectService, falling back to process.cwd()
 		 */
@@ -168,62 +169,146 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return projectPath ?? process.cwd()
 			})
 
-		/**
-		 * Load persisted dev servers from disk
-		 */
-		const loadPersistedServers = (): Effect.Effect<DevServersState> =>
-			Effect.gen(function* () {
-				const projectPath = yield* getEffectiveProjectPath()
-				const filePath = pathService.join(projectPath, devServersFilePath)
-
-				const exists = yield* fs.exists(filePath)
-				if (!exists) return HashMap.empty<string, DevServerState>()
-
-				const content = yield* fs.readFileString(filePath)
-				// Schema.parseJson expects string input, so decode (not decodeUnknown) is correct
-				return yield* Schema.decode(PersistedDevServersSchema)(content)
-			}).pipe(Effect.catchAll(() => Effect.succeed(HashMap.empty<string, DevServerState>())))
+		// ====================================================================
+		// tmux-based State - store/recover dev server state from tmux options
+		// ====================================================================
 
 		/**
-		 * Save dev servers to disk
+		 * Store dev server metadata in tmux user-options.
+		 * Makes tmux the source of truth for dev server state.
+		 * Stores project path for multi-project filtering on recovery.
 		 */
-		const persistServers = (servers: DevServersState): Effect.Effect<void> =>
+		const storeTmuxMetadata = (
+			sessionName: string,
+			beadId: string,
+			port: number,
+			worktreePath: string,
+			projectPath: string,
+			status: DevServerStatus,
+		): Effect.Effect<void, SessionNotFoundError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				const projectPath = yield* getEffectiveProjectPath()
-				const dirPath = pathService.join(projectPath, ".azedarach")
-				const filePath = pathService.join(dirPath, "devservers.json")
-
-				yield* fs.makeDirectory(dirPath, { recursive: true }).pipe(Effect.ignore)
-				// Schema.parseJson handles JSON stringification
-				const json = yield* Schema.encode(PersistedDevServersSchema)(servers)
-				yield* fs.writeFileString(filePath, json).pipe(Effect.ignore)
-			}).pipe(Effect.catchAll(() => Effect.void))
-
-		/**
-		 * Sync persisted state with actual tmux sessions
-		 * Removes entries for sessions that no longer exist
-		 */
-		const syncWithTmux = (
-			servers: DevServersState,
-		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
-			Effect.gen(function* () {
-				let updated = servers
-				for (const [beadId, state] of HashMap.entries(servers)) {
-					if (state.tmuxSession) {
-						const hasSession = yield* tmux.hasSession(state.tmuxSession)
-						if (!hasSession) {
-							// Session died, mark as idle
-							yield* Effect.log(`Dev server for ${beadId} no longer running, marking idle`)
-							updated = HashMap.set(updated, beadId, idleState)
-						}
-					}
-				}
-				return updated
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_BEAD_ID, beadId)
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_PORT, String(port))
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_WORKTREE_PATH, worktreePath)
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_PROJECT_PATH, projectPath)
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_STATUS, status)
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_STARTED_AT, new Date().toISOString())
 			})
 
-		// Load persisted state and sync with tmux on startup
-		const persisted = yield* loadPersistedServers()
-		const synced = yield* syncWithTmux(persisted)
+		/**
+		 * Update a single tmux option (e.g., status or port after detection)
+		 */
+		const updateTmuxOption = (
+			sessionName: string,
+			key: string,
+			value: string,
+		): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+			tmux.setUserOption(sessionName, key, value).pipe(Effect.catchAll(() => Effect.void))
+
+		/**
+		 * Read dev server state from a tmux session's user-options.
+		 * Returns None if session doesn't exist or options not found.
+		 */
+		const readTmuxMetadata = (
+			sessionName: string,
+		): Effect.Effect<Option.Option<DevServerState>, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Check if session exists first
+				const hasSession = yield* tmux.hasSession(sessionName)
+				if (!hasSession) return Option.none()
+
+				// Read all options
+				const beadIdOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_BEAD_ID)
+				const portOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_PORT)
+				const worktreePathOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_WORKTREE_PATH)
+				const statusOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_STATUS)
+				const startedAtOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_STARTED_AT)
+				const errorOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_ERROR)
+
+				// Validate we have minimum required fields
+				if (Option.isNone(beadIdOpt) || Option.isNone(statusOpt)) {
+					return Option.none()
+				}
+
+				// Parse status using Schema (parse don't validate)
+				const statusResult = yield* Schema.decodeUnknown(DevServerStatusSchema)(
+					statusOpt.value,
+				).pipe(Effect.option)
+
+				if (Option.isNone(statusResult)) {
+					return Option.none()
+				}
+				const status = statusResult.value
+
+				// Parse port (may be undefined)
+				const port = Option.match(portOpt, {
+					onNone: () => undefined,
+					onSome: (p) => {
+						const parsed = parseInt(p, 10)
+						return Number.isNaN(parsed) ? undefined : parsed
+					},
+				})
+
+				// Parse startedAt (may be undefined)
+				const startedAt = Option.match(startedAtOpt, {
+					onNone: () => undefined,
+					onSome: (s) => {
+						const date = new Date(s)
+						return Number.isNaN(date.getTime()) ? undefined : date
+					},
+				})
+
+				return Option.some({
+					status,
+					port,
+					tmuxSession: sessionName,
+					worktreePath: Option.getOrUndefined(worktreePathOpt),
+					startedAt,
+					error: Option.getOrUndefined(errorOpt),
+				})
+			})
+
+		/**
+		 * Discover all running dev server sessions from tmux for the current project.
+		 * Filters by project path to support multiple projects running Azedarach.
+		 * This enables recovery on startup - tmux holds the source of truth.
+		 */
+		const discoverDevServersFromTmux = (
+			currentProjectPath: string,
+		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Get all tmux sessions
+				const allSessions = yield* tmux.listSessions()
+
+				// Filter to dev server sessions (az-dev-* prefix)
+				const devSessions = allSessions.filter((s) => s.name.startsWith(DEV_SESSION_PREFIX))
+
+				let result = HashMap.empty<string, DevServerState>()
+
+				for (const session of devSessions) {
+					// Check if this session belongs to current project
+					const projectPathOpt = yield* tmux.getUserOption(session.name, TMUX_OPT_PROJECT_PATH)
+					if (Option.isNone(projectPathOpt) || projectPathOpt.value !== currentProjectPath) {
+						// Skip sessions from other projects (or legacy sessions without project path)
+						continue
+					}
+
+					const metadataOpt = yield* readTmuxMetadata(session.name)
+					if (Option.isSome(metadataOpt)) {
+						// Extract beadId from session name (az-dev-xxx -> xxx)
+						const beadId = session.name.slice(DEV_SESSION_PREFIX.length)
+						result = HashMap.set(result, beadId, metadataOpt.value)
+					}
+				}
+
+				return result
+			})
+
+		// Get current project path for filtering
+		const currentProjectPath = yield* getEffectiveProjectPath()
+
+		// Recover state from tmux on startup (filtered to current project)
+		const synced = yield* discoverDevServersFromTmux(currentProjectPath)
 
 		// Populate allocated ports from recovered state
 		const initialPorts = new Set<number>()
@@ -441,12 +526,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		/**
-		 * Update server state and persist to disk
+		 * Update server state and sync to tmux
 		 */
 		const updateServerState = (
 			beadId: string,
 			update: Partial<DevServerState>,
-		): Effect.Effect<DevServerState> =>
+		): Effect.Effect<DevServerState, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const newState = yield* SubscriptionRef.modify(serversRef, (servers) => {
 					const current = HashMap.get(servers, beadId)
@@ -456,9 +541,18 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					return [newState, newServers]
 				})
 
-				// Persist after state update
-				const servers = yield* SubscriptionRef.get(serversRef)
-				yield* persistServers(servers)
+				// Sync changed fields to tmux (tmux is the source of truth)
+				if (newState.tmuxSession) {
+					if (update.status !== undefined) {
+						yield* updateTmuxOption(newState.tmuxSession, TMUX_OPT_STATUS, update.status)
+					}
+					if (update.port !== undefined) {
+						yield* updateTmuxOption(newState.tmuxSession, TMUX_OPT_PORT, String(update.port))
+					}
+					if (update.error !== undefined) {
+						yield* updateTmuxOption(newState.tmuxSession, TMUX_OPT_ERROR, update.error)
+					}
+				}
 
 				return newState
 			})
@@ -632,7 +726,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						initCommands,
 					})
 
-					// Update state
+					// Store metadata in tmux user-options (source of truth for recovery)
+					yield* storeTmuxMetadata(
+						tmuxSession,
+						beadId,
+						primaryPort,
+						worktreePath,
+						projectPath,
+						"running",
+					)
+
+					// Update in-memory state (for reactive UI)
 					yield* updateServerState(beadId, {
 						status: "running",
 						tmuxSession,
@@ -755,7 +859,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						initCommands,
 					})
 
-					// Update state
+					// Store metadata in tmux user-options (source of truth for recovery)
+					yield* storeTmuxMetadata(
+						tmuxSession,
+						beadId,
+						primaryPort,
+						worktreePath,
+						projectPath,
+						"running",
+					)
+
+					// Update in-memory state (for reactive UI)
 					yield* updateServerState(beadId, {
 						status: "running",
 						tmuxSession,
