@@ -36,25 +36,24 @@ import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
  * than lazygit's externalDiffCommand config.
  */
 const createDiffMenuScript = (baseBranch: string) => `
-# Colors
-CYAN='\\033[36m'
-YELLOW='\\033[33m'
-GREEN='\\033[32m'
-DIM='\\033[2m'
-RESET='\\033[0m'
+# Colors using printf for reliable escape handling
+CYAN=$'\\033[36m'
+YELLOW=$'\\033[33m'
+DIM=$'\\033[2m'
+RESET=$'\\033[0m'
 
 show_menu() {
   clear
-  echo ""
-  echo "  \${CYAN}Diff Viewer\${RESET}"
-  echo ""
-  echo "  \${YELLOW}[s]\${RESET} Side-by-side  \${DIM}(difftastic)\${RESET}"
-  echo "  \${YELLOW}[i]\${RESET} Inline        \${DIM}(difftastic)\${RESET}"
-  echo "  \${YELLOW}[g]\${RESET} Git diff      \${DIM}(unified)\${RESET}"
-  echo "  \${YELLOW}[l]\${RESET} Lazygit       \${DIM}(full UI)\${RESET}"
-  echo ""
-  echo "  \${DIM}[q] quit\${RESET}"
-  echo ""
+  printf "\\n"
+  printf "  %sDiff Viewer%s\\n" "$CYAN" "$RESET"
+  printf "\\n"
+  printf "  %s[s]%s Side-by-side  %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
+  printf "  %s[i]%s Inline        %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
+  printf "  %s[g]%s Git diff      %s(unified)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
+  printf "  %s[l]%s Lazygit       %s(full UI)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
+  printf "\\n"
+  printf "  %s[q] quit%s\\n" "$DIM" "$RESET"
+  printf "\\n"
 }
 
 while true; do
@@ -63,20 +62,17 @@ while true; do
   case "$key" in
     s|S)
       clear
-      echo "\${DIM}Running difft side-by-side vs ${baseBranch}...\${RESET}"
-      echo ""
+      printf "%sRunning difft side-by-side vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
       GIT_EXTERNAL_DIFF="difft --display=side-by-side" git diff ${baseBranch}...HEAD | less -R
       ;;
     i|I)
       clear
-      echo "\${DIM}Running difft inline vs ${baseBranch}...\${RESET}"
-      echo ""
+      printf "%sRunning difft inline vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
       GIT_EXTERNAL_DIFF="difft --display=inline" git diff ${baseBranch}...HEAD | less -R
       ;;
     g|G)
       clear
-      echo "\${DIM}Running git diff vs ${baseBranch}...\${RESET}"
-      echo ""
+      printf "%sRunning git diff vs ${baseBranch}...%s\\n\\n" "$DIM" "$RESET"
       git diff ${baseBranch}...HEAD --color=always | less -R
       ;;
     l|L)
