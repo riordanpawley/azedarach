@@ -345,15 +345,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		 */
 		const checkGitStatus = (worktreePath: string, baseBranch: string, showLineChanges: boolean) =>
 			Effect.gen(function* () {
-				// Check commits behind: git rev-list --count HEAD..origin/<baseBranch>
-				// This counts how many commits are on the base branch that aren't on HEAD
+				// Check commits behind: git rev-list --count HEAD..<baseBranch>
+				// Uses LOCAL baseBranch (not origin/) since Azedarach merges are all local
 				const behindCommand = Command.make(
 					"git",
 					"-C",
 					worktreePath,
 					"rev-list",
 					"--count",
-					`HEAD..origin/${baseBranch}`,
+					`HEAD..${baseBranch}`,
 				).pipe(Command.string)
 
 				const behindCount = yield* behindCommand.pipe(
@@ -380,16 +380,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				let gitDeletions: number | undefined
 
 				if (showLineChanges) {
-					// git diff --stat HEAD gives line stats for uncommitted changes
-					// git diff --stat origin/<baseBranch>...HEAD gives stats vs base branch
-					// Using numstat for easier parsing: +<add>\t-<del>\t<file>
+					// Line stats comparing worktree branch to local baseBranch
+					// Using numstat for easier parsing: <add>\t<del>\t<file>
 					const diffCommand = Command.make(
 						"git",
 						"-C",
 						worktreePath,
 						"diff",
 						"--numstat",
-						`origin/${baseBranch}...HEAD`,
+						`${baseBranch}...HEAD`,
 					).pipe(Command.string)
 
 					const diffStats = yield* diffCommand.pipe(
