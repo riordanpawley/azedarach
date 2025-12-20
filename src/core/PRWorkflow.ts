@@ -1353,11 +1353,16 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					)
 
 					// Parse output - each non-empty line is a changed file
-					const changedFiles = output
+					const allChangedFiles = output
 						.trim()
 						.split("\n")
 						.filter((line) => line.length > 0)
 						.map((line) => line.slice(3)) // Remove "XY " prefix to get filename
+
+					// Filter out .beads/ files - these are expected to change during normal
+					// operation and are handled separately via `bd sync`. We only want to
+					// warn about actual code changes that could cause autostash conflicts.
+					const changedFiles = allChangedFiles.filter((file) => !file.startsWith(".beads/"))
 
 					return {
 						hasUncommittedChanges: changedFiles.length > 0,
