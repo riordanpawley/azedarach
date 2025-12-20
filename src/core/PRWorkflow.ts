@@ -1562,9 +1562,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			/**
-			 * Check if a worktree branch is behind main
+			 * Check if a worktree branch is behind the base branch
 			 *
-			 * Uses git rev-list to count commits between HEAD and main.
+			 * Uses git rev-list to count commits between HEAD and the configured base branch.
 			 * Returns { behind, ahead } so caller can show informative message.
 			 */
 			checkBranchBehindMain: (options: { beadId: string; projectPath: string }) =>
@@ -1578,20 +1578,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						return { behind: 0, ahead: 0 }
 					}
 
-					// Count commits branch is behind main
-					// HEAD..main = commits in main that are not in HEAD (how many we're behind)
+					// Count commits branch is behind base branch
+					// HEAD..<baseBranch> = commits in base branch that are not in HEAD (how many we're behind)
 					const behindOutput = yield* runGit(
-						["rev-list", "--count", "HEAD..main"],
+						["rev-list", "--count", `HEAD..${baseBranch}`],
 						worktree.path,
 					).pipe(
 						Effect.map((output) => Number.parseInt(output.trim(), 10)),
 						Effect.catchAll(() => Effect.succeed(0)),
 					)
 
-					// Count commits branch is ahead of main
-					// main..HEAD = commits in HEAD that are not in main (how many we're ahead)
+					// Count commits branch is ahead of base branch
+					// <baseBranch>..HEAD = commits in HEAD that are not in base branch (how many we're ahead)
 					const aheadOutput = yield* runGit(
-						["rev-list", "--count", "main..HEAD"],
+						["rev-list", "--count", `${baseBranch}..HEAD`],
 						worktree.path,
 					).pipe(
 						Effect.map((output) => Number.parseInt(output.trim(), 10)),
@@ -1602,9 +1602,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			/**
-			 * Merge main into a worktree branch
+			 * Merge base branch into a worktree branch
 			 *
-			 * Auto-stashes uncommitted changes, merges main, pops stash.
+			 * Auto-stashes uncommitted changes, merges base branch, pops stash.
 			 * If conflicts, spawns Claude session to resolve them.
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
@@ -1647,9 +1647,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// 2. Check for conflicts using merge-tree (safe, in-memory check)
 					const mergeTreeResult = yield* Effect.gen(function* () {
-						const command = Command.make("git", "merge-tree", "--write-tree", "main", "HEAD").pipe(
-							Command.workingDirectory(worktree.path),
-						)
+						const command = Command.make(
+							"git",
+							"merge-tree",
+							"--write-tree",
+							baseBranch,
+							"HEAD",
+						).pipe(Command.workingDirectory(worktree.path))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
 							Effect.catchAll((e) =>
@@ -1663,7 +1667,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "main", "HEAD"],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, "HEAD"],
 							worktree.path,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -1691,7 +1695,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
 						// Start merge in worktree so conflict markers are created
-						yield* runGit(["merge", "main", "-m", `Merge main into ${beadId}`], worktree.path).pipe(
+						yield* runGit(
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							worktree.path,
+						).pipe(
 							Effect.catchAll(() => Effect.void), // Will fail with conflicts, that's expected
 						)
 
@@ -1726,12 +1733,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 4. No conflicts - do the merge
-					yield* runGit(["merge", "main", "--no-edit"], worktree.path).pipe(
+					yield* runGit(["merge", baseBranch, "--no-edit"], worktree.path).pipe(
 						Effect.mapError(
 							(e) =>
 								new GitError({
-									message: `Failed to merge main: ${e.message}`,
-									command: "git merge main",
+									message: `Failed to merge ${baseBranch}: ${e.message}`,
+									command: `git merge ${baseBranch}`,
 									stderr: e.stderr,
 								}),
 						),
@@ -1746,7 +1753,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					yield* Effect.log(`Successfully merged main into ${beadId}`)
+					yield* Effect.log(`Successfully merged ${baseBranch} into ${beadId}`)
 				}),
 		}
 	}),
