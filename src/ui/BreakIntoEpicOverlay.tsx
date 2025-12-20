@@ -3,27 +3,16 @@
  *
  * Uses Claude AI to analyze the task and suggest parallelizable child tasks.
  * The user can review and confirm the suggestions before conversion.
+ *
+ * Note: All state is managed by BreakIntoEpicService via SubscriptionRef.
+ * Keyboard handling is in KeyboardService/InputHandlersService.
+ * This component is pure render only - just useAtomValue and JSX.
  */
 
-import { useKeyboard } from "@opentui/react"
-import { useCallback, useEffect, useState } from "react"
-import type { SuggestedChildTask } from "../services/OverlayService.js"
+import { Result } from "@effect-atom/atom"
+import { useAtomValue } from "@effect-atom/atom-react"
+import { breakIntoEpicStateAtom } from "./atoms.js"
 import { theme } from "./theme.js"
-
-export interface BreakIntoEpicOverlayProps {
-	taskId: string
-	taskTitle: string
-	taskDescription?: string
-	onConfirm: (childTasks: SuggestedChildTask[]) => void
-	onCancel: () => void
-	/** Fetch suggestions from Claude - called on mount */
-	fetchSuggestions: (title: string, description?: string) => Promise<SuggestedChildTask[] | "error">
-}
-
-type OverlayState =
-	| { _tag: "loading" }
-	| { _tag: "suggestions"; tasks: SuggestedChildTask[]; selectedIndex: number }
-	| { _tag: "error"; message: string }
 
 const ATTR_BOLD = 1
 const ATTR_DIM = 2
@@ -36,89 +25,26 @@ const ATTR_DIM = 2
  * 2. Lists suggested child tasks with navigation
  * 3. Allows confirming (Enter) or canceling (Esc)
  *
- * Navigation: j/k to move, Enter to confirm, Esc to cancel
+ * All state comes from BreakIntoEpicService via breakIntoEpicStateAtom.
+ * All keyboard handling is in the Effect layer (InputHandlersService).
  */
-export const BreakIntoEpicOverlay = (props: BreakIntoEpicOverlayProps) => {
-	const [state, setState] = useState<OverlayState>({ _tag: "loading" })
+export const BreakIntoEpicOverlay = () => {
+	// Subscribe to overlay state from Effect layer
+	const stateResult = useAtomValue(breakIntoEpicStateAtom)
+	const state = Result.isSuccess(stateResult) ? stateResult.value : { _tag: "closed" as const }
 
-	// Fetch suggestions on mount
-	useEffect(() => {
-		let cancelled = false
-
-		const fetch = async () => {
-			const result = await props.fetchSuggestions(props.taskTitle, props.taskDescription)
-			if (cancelled) return
-
-			if (result === "error") {
-				setState({ _tag: "error", message: "Failed to get suggestions from Claude" })
-			} else if (result.length === 0) {
-				setState({
-					_tag: "error",
-					message: "Claude couldn't suggest any subtasks for this task",
-				})
-			} else {
-				setState({ _tag: "suggestions", tasks: result, selectedIndex: 0 })
-			}
-		}
-
-		fetch()
-
-		return () => {
-			cancelled = true
-		}
-	}, [props.taskTitle, props.taskDescription, props.fetchSuggestions])
-
-	// Keyboard handling
-	const handleKeyboard = useCallback(
-		(event: { name: string }) => {
-			if (state._tag === "loading") {
-				// Only allow escape during loading
-				if (event.name === "escape") {
-					props.onCancel()
-				}
-				return
-			}
-
-			if (state._tag === "error") {
-				// Only allow escape on error
-				if (event.name === "escape") {
-					props.onCancel()
-				}
-				return
-			}
-
-			// Suggestions state
-			switch (event.name) {
-				case "escape":
-					props.onCancel()
-					break
-				case "return":
-					props.onConfirm(state.tasks)
-					break
-				case "j":
-				case "down":
-					setState((s) => {
-						if (s._tag !== "suggestions") return s
-						const newIndex = Math.min(s.selectedIndex + 1, s.tasks.length - 1)
-						return { ...s, selectedIndex: newIndex }
-					})
-					break
-				case "k":
-				case "up":
-					setState((s) => {
-						if (s._tag !== "suggestions") return s
-						const newIndex = Math.max(s.selectedIndex - 1, 0)
-						return { ...s, selectedIndex: newIndex }
-					})
-					break
-			}
-		},
-		[state, props],
-	)
-
-	useKeyboard(handleKeyboard)
+	// If closed, don't render anything (should be handled by parent but safety check)
+	if (state._tag === "closed") {
+		return null
+	}
 
 	const modalWidth = 70
+
+	// Extract taskTitle for display (available in loading, suggestions, and error states)
+	const taskTitle =
+		state._tag === "loading" || state._tag === "suggestions" || state._tag === "error"
+			? state.taskTitle
+			: "task"
 
 	return (
 		<box
@@ -154,13 +80,19 @@ export const BreakIntoEpicOverlay = (props: BreakIntoEpicOverlayProps) => {
 				{/* Task being converted */}
 				<box marginTop={1}>
 					<text fg={theme.subtext0}>Converting: </text>
-					<text fg={theme.text}>{props.taskTitle}</text>
+					<text fg={theme.text}>{taskTitle}</text>
 				</box>
 
 				{/* Content based on state */}
 				{state._tag === "loading" && (
 					<box marginTop={2}>
 						<text fg={theme.yellow}>⏳ Asking Claude to suggest subtasks...</text>
+					</box>
+				)}
+
+				{state._tag === "executing" && (
+					<box marginTop={2}>
+						<text fg={theme.yellow}>⏳ Creating subtasks...</text>
 					</box>
 				)}
 

@@ -19,8 +19,6 @@ import {
 	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
-	executeBreakIntoEpicAtom,
-	fetchBreakIntoEpicSuggestionsAtom,
 	focusedTaskRunningOperationAtom,
 	getEpicChildrenAtom,
 	getEpicInfoAtom,
@@ -85,7 +83,6 @@ export const App = () => {
 	const { toasts, dismissToast } = useToasts()
 	const {
 		dismiss: dismissOverlay,
-		currentOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
@@ -186,10 +183,6 @@ export const App = () => {
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
-	const fetchBreakIntoEpicSuggestions = useAtomSet(fetchBreakIntoEpicSuggestionsAtom, {
-		mode: "promise",
-	})
-	const executeBreakIntoEpic = useAtomSet(executeBreakIntoEpicAtom, { mode: "promise" })
 
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
@@ -240,12 +233,7 @@ export const App = () => {
 			return
 		}
 
-		// Break into epic overlay handles its own keyboard input
-		if (showingBreakIntoEpic) {
-			return
-		}
-
-		// Note: imageAttach overlay keyboard is handled by KeyboardService
+		// Note: breakIntoEpic and imageAttach overlays are handled by KeyboardService
 
 		// Build key sequence with modifiers (e.g., "C-d" for Ctrl+d, "S-c" for Shift+c, "CS-u" for Ctrl+Shift+u)
 		let keySeq = event.name
@@ -404,24 +392,8 @@ export const App = () => {
 				/>
 			)}
 
-			{/* Break into epic overlay */}
-			{showingBreakIntoEpic && currentOverlay?._tag === "breakIntoEpic" && (
-				<BreakIntoEpicOverlay
-					taskId={currentOverlay.taskId}
-					taskTitle={currentOverlay.taskTitle}
-					taskDescription={currentOverlay.taskDescription}
-					fetchSuggestions={(title, description) =>
-						fetchBreakIntoEpicSuggestions({ title, description })
-					}
-					onConfirm={(childTasks) => {
-						executeBreakIntoEpic({
-							taskId: currentOverlay.taskId,
-							childTasks,
-						})
-					}}
-					onCancel={() => dismissOverlay()}
-				/>
-			)}
+			{/* Break into epic overlay - state and keyboard handled by Effect layer */}
+			{showingBreakIntoEpic && <BreakIntoEpicOverlay />}
 
 			{/* Image attach overlay */}
 			{showingImageAttach && <ImageAttachOverlay />}

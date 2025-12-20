@@ -12,6 +12,7 @@ import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
+import { BreakIntoEpicService } from "../../core/BreakIntoEpicService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
@@ -45,6 +46,7 @@ const appLayer = Layer.mergeAll(
 	SessionService.Default,
 	AttachmentService.Default,
 	ImageAttachmentService.Default,
+	BreakIntoEpicService.Default,
 	BoardService.Default,
 	ClockService.Default,
 	TmuxService.Default,

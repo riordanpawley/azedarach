@@ -11,6 +11,7 @@
 
 import { Effect, Ref } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
+import { BreakIntoEpicService } from "../core/BreakIntoEpicService.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { EditorService } from "./EditorService.js"
 import { createDefaultBindings } from "./keyboard/bindings.js"
@@ -53,6 +54,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		ViewService.Default,
 		TmuxService.Default,
 		BeadsClient.Default,
+		BreakIntoEpicService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -77,6 +79,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
 		const beadsClient = yield* BeadsClient
+		const breakIntoEpic = yield* BreakIntoEpicService
 
 		// ====================================================================
 		// Create default keybindings
@@ -98,6 +101,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			viewService,
 			tmux,
 			beadsClient,
+			breakIntoEpic,
 		})
 
 		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)
@@ -150,6 +154,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					// Check for imageAttach overlay (handles its own keys)
 					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)
 					if (handledAsImageAttach) return
+
+					// Check for breakIntoEpic overlay (handles its own keys)
+					const handledAsBreakIntoEpic = yield* inputHandlers.handleBreakIntoEpicInput(key)
+					if (handledAsBreakIntoEpic) return
 
 					// Check for detail overlay (handles attachment navigation)
 					const handledAsDetail = yield* inputHandlers.handleDetailOverlayInput(key)

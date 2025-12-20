@@ -16,6 +16,7 @@
  */
 
 import { Effect, Record, SubscriptionRef } from "effect"
+import { BreakIntoEpicService } from "../../core/BreakIntoEpicService.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { VCService } from "../../core/VCService.js"
 import { generateJumpLabels } from "../../ui/types.js"
@@ -51,6 +52,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			BoardService.Default,
 			VCService.Default,
 			ImageAttachmentService.Default,
+			BreakIntoEpicService.Default,
 			ProjectService.Default,
 			ProjectStateService.Default,
 			ViewService.Default,
@@ -65,6 +67,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const board = yield* BoardService
 			const vc = yield* VCService
 			const imageAttachment = yield* ImageAttachmentService
+			const breakIntoEpic = yield* BreakIntoEpicService
 			const projectService = yield* ProjectService
 			const projectState = yield* ProjectStateService
 			const view = yield* ViewService
@@ -707,6 +710,65 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
+			 * Handle breakIntoEpic overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled
+			 */
+			const handleBreakIntoEpicInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "breakIntoEpic") {
+						return false
+					}
+
+					const state = yield* SubscriptionRef.get(breakIntoEpic.overlayState)
+
+					// Escape always closes
+					if (key === "escape") {
+						yield* breakIntoEpic.closeOverlay()
+						yield* overlay.pop()
+						return true
+					}
+
+					// Loading or error state - only escape works
+					if (state._tag === "loading" || state._tag === "error" || state._tag === "executing") {
+						return true // Consume all keys
+					}
+
+					// Suggestions state
+					if (state._tag === "suggestions") {
+						switch (key) {
+							case "j":
+							case "down":
+								yield* breakIntoEpic.selectNext()
+								return true
+							case "k":
+							case "up":
+								yield* breakIntoEpic.selectPrevious()
+								return true
+							case "return": {
+								// Execute the break into epic
+								const result = yield* breakIntoEpic.confirm()
+								if (result) {
+									yield* overlay.pop()
+									yield* toast.show(
+										"success",
+										`Created ${result.childCount} subtasks for ${result.epicId}`,
+									)
+									// Refresh board and enter drill-down
+									yield* board.refresh()
+									yield* nav.enterDrillDown(result.epicId, new Set(result.childIds))
+								}
+								return true
+							}
+						}
+					}
+
+					return true // Consume all other keys
+				})
+
+			/**
 			 * Compute jump labels for all visible tasks
 			 *
 			 * Generates 2-character labels (aa, ab, ac, ...) for each task on the board.
@@ -813,6 +875,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleMergeChoiceInput,
 				handleDetailOverlayInput,
 				handleImageAttachInput,
+				handleBreakIntoEpicInput,
 				handleProjectSelectorInput,
 				handleImagePreviewInput,
 				computeJumpLabels,

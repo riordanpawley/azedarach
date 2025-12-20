@@ -7,6 +7,7 @@
 
 import { Effect } from "effect"
 import type { BeadsClient } from "../../core/BeadsClient.js"
+import type { BreakIntoEpicService } from "../../core/BreakIntoEpicService.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { EditorService } from "../EditorService.js"
 import type { NavigationService } from "../NavigationService.js"
@@ -50,6 +51,7 @@ export interface BindingContext {
 	viewService: ViewService
 	tmux: TmuxService
 	beadsClient: BeadsClient
+	breakIntoEpic: BreakIntoEpicService
 }
 
 // ============================================================================
@@ -550,7 +552,7 @@ done
 		mode: "action",
 		description: "Break into epic",
 		action: Effect.gen(function* () {
-			const task = yield* bc.helpers.getSelectedTask()
+			const task = yield* bc.helpers.getActionTargetTask()
 			yield* bc.editor.exitToNormal()
 			if (!task) {
 				yield* bc.toast.show("warning", "No task selected")
@@ -561,12 +563,15 @@ done
 				yield* bc.toast.show("warning", "Task is already an epic")
 				return
 			}
+			// Push overlay and start fetching suggestions
 			yield* bc.overlay.push({
 				_tag: "breakIntoEpic",
 				taskId: task.id,
 				taskTitle: task.title,
 				taskDescription: task.description,
 			})
+			// Start the fetch via the service (will update SubscriptionRef)
+			yield* bc.breakIntoEpic.openOverlay(task.id, task.title, task.description)
 		}),
 	},
 
