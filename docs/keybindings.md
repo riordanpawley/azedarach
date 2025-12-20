@@ -612,7 +612,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
-| `Space` `f` | Diff menu | Worktree exists (difftastic/git diff) |
+| `Space` `f` | Show diff | Worktree exists (difftastic side-by-side) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -703,21 +703,19 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 
 #### Show Diff (Space+f)
 
-Opens an **interactive diff menu** in a tmux popup with multiple viewing options:
+Opens **difftastic side-by-side diff** in a tmux popup showing all changes since the branch diverged from main.
 
-**Menu options:**
-- `s` - **Side-by-side** (difftastic) - Syntax-aware side-by-side diff, best for reviewing changes
-- `i` - **Inline** (difftastic) - Compact inline diff with syntax highlighting
-- `g` - **Git diff** - Traditional unified diff format
-- `q` - Quit and return to az
+**What you see:**
+- Stat summary first (files changed, insertions, deletions)
+- Then full diff with syntax-aware highlighting
+- Side-by-side comparison for easy review
 
-**Diff comparison:**
-- Compares worktree branch against main (or configured base branch)
-- Shows all changes since the branch diverged from main
+**Navigation (less):**
+- `j/k` or arrows: Scroll up/down
+- `←/→`: Horizontal scroll for wide diffs
+- `q`: Quit and return to az
 
-**Use cases:**
-- Review Claude's changes with syntax-aware highlighting
-- Choose the diff format that works best for the content
+**Use case:** Review Claude's changes before merging to main.
 
 ### Movement Actions
 
