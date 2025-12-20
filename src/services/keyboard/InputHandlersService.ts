@@ -24,7 +24,16 @@ import { EditorService, type JumpTarget } from "../EditorService.js"
 import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
+import {
+	buildProjectUIState,
+	extractFilterConfig,
+	extractFocusedTaskId,
+	extractSortConfig,
+	extractViewMode,
+	ProjectStateService,
+} from "../ProjectStateService.js"
 import { ToastService } from "../ToastService.js"
+import { ViewService } from "../ViewService.js"
 import type { KeyMode } from "./types.js"
 
 // ============================================================================
@@ -43,6 +52,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			VCService.Default,
 			ImageAttachmentService.Default,
 			ProjectService.Default,
+			ProjectStateService.Default,
+			ViewService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -55,6 +66,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const vc = yield* VCService
 			const imageAttachment = yield* ImageAttachmentService
 			const projectService = yield* ProjectService
+			const projectState = yield* ProjectStateService
+			const view = yield* ViewService
 
 			// ================================================================
 			// Input Handler Methods
@@ -526,6 +539,23 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
+								// Save current project's UI state before switching
+								const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+								if (currentProject) {
+									const focusedTaskId = yield* SubscriptionRef.get(nav.focusedTaskId)
+									const filterConfig = yield* SubscriptionRef.get(editor.filterConfig)
+									const sortConfig = yield* SubscriptionRef.get(editor.sortConfig)
+									const viewMode = yield* SubscriptionRef.get(view.viewMode)
+
+									const state = buildProjectUIState(
+										focusedTaskId,
+										filterConfig,
+										sortConfig,
+										viewMode,
+									)
+									yield* projectState.saveState(currentProject.path, state)
+								}
+
 								// Switch project (fast - just updates SubscriptionRef)
 								yield* projectService.switchProject(project.name)
 
@@ -535,11 +565,33 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 								// Show toast immediately (user sees feedback right away)
 								yield* toast.show("success", `Switching to: ${project.name}`)
 
-								// Fork as daemon so it survives parent completion
+								// Fork refresh + state restoration as daemon so it survives parent completion
 								// (Effect.fork would be interrupted when handler returns)
 								// The loading indicator in StatusBar shows progress
-								yield* board.refresh().pipe(
-									Effect.tap(() => toast.show("success", `Loaded: ${project.name}`)),
+								yield* Effect.gen(function* () {
+									// Refresh board first to get the task list
+									yield* board.refresh()
+
+									// Load and restore saved UI state for the new project
+									const savedState = yield* projectState.loadState(project.path)
+
+									// Restore editor state (filters and sort)
+									yield* editor.restoreState(
+										extractSortConfig(savedState),
+										extractFilterConfig(savedState),
+									)
+
+									// Restore view mode
+									yield* view.setViewMode(extractViewMode(savedState))
+
+									// Restore cursor position (navigation will validate if task still exists)
+									const savedFocusId = extractFocusedTaskId(savedState)
+									if (savedFocusId) {
+										yield* nav.setFocusedTask(savedFocusId)
+									}
+
+									yield* toast.show("success", `Loaded: ${project.name}`)
+								}).pipe(
 									Effect.catchAllCause((cause) =>
 										Effect.gen(function* () {
 											yield* Effect.logError("Board refresh failed", cause)
