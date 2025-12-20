@@ -429,10 +429,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens a tmux popup showing the git diff between the bead's branch and base branch.
-		 * Base branch is configurable via pr.baseBranch in .azedarach.json (default: "main").
-		 * Useful for code review before merging. Respects user's git diff configuration
-		 * (difftastic, delta, etc.) with DFT_COLOR=always for difftastic support.
+		 * Opens lazygit in the worktree directory, focused on the status/files panel.
+		 * Provides interactive diff viewing, file navigation, staging, and commit history.
 		 * Requires an active session with a worktree.
 		 */
 		const showDiff = () =>
@@ -451,28 +449,18 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Get base branch from config (default: "main")
-				const baseBranch = gitConfig.baseBranch
-
-				// Build git diff command that works in the worktree
-				// - Uses $(git merge-base <baseBranch> HEAD) to compare from branch point
-				// - Compares to working tree (not HEAD) to include uncommitted changes
-				// - Shows only changes made on THIS branch (not changes base made after we branched)
-				// - DFT_COLOR=always ensures difftastic colors in tmux popup
-				// - --color=always ensures colors for delta/git built-in diff
-				// - pipes to less with -R for raw ANSI codes, -S for horizontal scroll
-				// - ':!.beads' excludes beads database changes (infrastructure noise)
-				const diffCommand = `cd "${worktreePath}" && MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && DFT_COLOR=always git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS`
-
+				// Launch lazygit in the worktree, focused on status panel for diff viewing
+				// - `-p` sets the repo path
+				// - `status` positional arg opens on files/staging panel
 				yield* tmux
 					.displayPopup({
-						command: diffCommand,
+						command: `lazygit -p "${worktreePath}" status`,
 						width: "95%",
 						height: "95%",
-						title: ` Diff: ${task.id} changes since ${baseBranch} (q to quit) `,
+						title: ` lazygit: ${task.id} `,
 						cwd: worktreePath,
 					})
-					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))
+					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to open lazygit")))
 			})
 
 		// ================================================================

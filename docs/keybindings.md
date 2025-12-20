@@ -612,7 +612,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
-| `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
+| `Space` `f` | Open lazygit | Worktree exists (interactive git UI) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -703,26 +703,26 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 
 #### Show Diff (Space+f)
 
-Opens a tmux popup showing all changes between the bead's branch and main. Perfect for code review before merging.
+Opens **lazygit** in a tmux popup, focused on the status/files panel. This provides an interactive UI for viewing diffs, staging changes, and navigating commit history.
 
-**What it shows:**
-1. First, a summary of changed files (--stat output)
-2. Then, the full colored diff
+**lazygit opens with:**
+- Files panel focused (status view)
+- Full worktree context for the bead
 
-**Navigation (in less):**
-- `j/k` or arrow keys: Scroll line by line
-- `Space` / `b`: Page down / up
-- `g` / `G`: Go to start / end
-- `/pattern`: Search forward
-- `n` / `N`: Next / previous search result
+**Key lazygit controls:**
+- `j/k`: Navigate files
+- `Enter`: View file diff (staged/unstaged)
+- `Space`: Stage/unstage file
+- `c`: Commit staged changes
+- `1-5`: Switch between panels (Status, Files, Branches, Commits, Stash)
+- `?`: Help
 - `q`: Quit and return to az
 
 **Use cases:**
 - Review Claude's changes before merging
-- Check what files were modified
-- Verify the scope of changes matches the task
-
-**Note:** The diff shows `main...HEAD` which includes all commits on the branch since it diverged from main. This ensures you see the complete set of changes.
+- Stage specific changes interactively
+- View commit history and branches
+- Make quick commits without leaving az
 
 ### Movement Actions
 
