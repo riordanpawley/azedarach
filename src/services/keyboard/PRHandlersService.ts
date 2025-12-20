@@ -484,12 +484,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				)
 
 				// Launch lazygit with our difftastic config
-				// - `--use-config-file` applies our temp config
+				// - `-ucf` applies our temp config (must use space, not =, due to lazygit's arg parser)
 				// - `-p` sets the repo path
 				// - `status` positional arg opens on files/staging panel
 				yield* tmux
 					.displayPopup({
-						command: `lazygit --use-config-file="${tempConfigPath}" -p "${worktreePath}" status`,
+						command: `lazygit -ucf "${tempConfigPath}" -p "${worktreePath}" status`,
 						width: "95%",
 						height: "95%",
 						title: ` lazygit: ${task.id} `,
