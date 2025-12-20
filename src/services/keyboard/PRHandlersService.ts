@@ -24,70 +24,18 @@ import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
 /**
- * Interactive diff menu script.
+ * Diff command using difftastic side-by-side view.
  *
- * Presents options for viewing diffs in different formats:
- * - Side-by-side (difftastic) - best for reviewing changes
- * - Inline (difftastic) - compact view
- * - Git diff - traditional unified diff
- * - Lazygit - full git UI for staging/committing
- *
- * Uses GIT_EXTERNAL_DIFF for difftastic integration which is more reliable
- * than lazygit's externalDiffCommand config.
+ * Shows changes since branch diverged from base:
+ * - Stat summary first for quick overview
+ * - Then difftastic side-by-side with syntax highlighting
+ * - Excludes .beads/ to reduce noise
  */
-const createDiffMenuScript = (baseBranch: string) => `
-# Colors using printf for reliable escape handling
-CYAN=$'\\033[36m'
-YELLOW=$'\\033[33m'
-DIM=$'\\033[2m'
-RESET=$'\\033[0m'
-
-# Find merge-base once (where branch diverged from base)
-MERGE_BASE=$(git merge-base ${baseBranch} HEAD)
-
-show_menu() {
-  clear
-  printf "\\n"
-  printf "  %sDiff Viewer%s\\n" "$CYAN" "$RESET"
-  printf "\\n"
-  printf "  %s[s]%s Side-by-side  %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
-  printf "  %s[i]%s Inline        %s(difftastic)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
-  printf "  %s[g]%s Git diff      %s(unified)%s\\n" "$YELLOW" "$RESET" "$DIM" "$RESET"
-  printf "\\n"
-  printf "  %s[q] quit%s\\n" "$DIM" "$RESET"
-  printf "\\n"
-}
-
-while true; do
-  show_menu
-  read -rsn1 key
-  case "$key" in
-    s|S)
-      clear
-      # Show stat summary first, then difftastic side-by-side
-      # DFT_COLOR=always forces difftastic colors when piped
-      # Excludes .beads/ to reduce noise
-      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
-      DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" \\
-        git diff $MERGE_BASE -- ':!.beads' | less -RS
-      ;;
-    i|I)
-      clear
-      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
-      DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=inline" \\
-        git diff $MERGE_BASE -- ':!.beads' | less -RS
-      ;;
-    g|G)
-      clear
-      git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && \\
-      git diff $MERGE_BASE --color=always -- ':!.beads' | less -RS
-      ;;
-    q|Q|"")
-      exit 0
-      ;;
-  esac
-done
-`
+const createDiffCommand = (baseBranch: string) =>
+	`MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && ` +
+	`git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && ` +
+	`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+	`git diff $MERGE_BASE -- ':!.beads' | less -RS`
 
 // ============================================================================
 // Service Definition
@@ -495,11 +443,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens an interactive diff menu with options:
-		 * - Side-by-side (difftastic) - best for reviewing changes
-		 * - Inline (difftastic) - compact view
-		 * - Git diff - traditional unified diff
-		 * - Lazygit - full git UI for staging/committing
+		 * Opens difftastic side-by-side diff showing changes since branch diverged from main.
+		 * Shows stat summary first, then full diff with syntax highlighting.
 		 *
 		 * Requires an active session with a worktree.
 		 */
@@ -519,19 +464,16 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Generate the menu script with the configured base branch
-				const menuScript = createDiffMenuScript(gitConfig.baseBranch)
-
-				// Launch the interactive diff menu
+				// Launch difftastic side-by-side diff
 				yield* tmux
 					.displayPopup({
-						command: `bash -c '${menuScript.replace(/'/g, "'\\''")}'`,
+						command: createDiffCommand(gitConfig.baseBranch),
 						width: "95%",
 						height: "95%",
-						title: ` diff: ${task.id} `,
+						title: ` diff: ${task.id} vs ${gitConfig.baseBranch} `,
 						cwd: worktreePath,
 					})
-					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to open diff menu")))
+					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))
 			})
 
 		// ================================================================
