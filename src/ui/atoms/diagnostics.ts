@@ -20,7 +20,7 @@ export type { DiagnosticsState } from "../../services/DiagnosticsService.js"
  *
  * Provides reactive access to system health info including:
  * - Running fibers and their status
- * - Service health (HookReceiver, PTYMonitor, etc.)
+ * - Service health (TmuxSessionMonitor, PTYMonitor, etc.)
  * - Last activity timestamps
  *
  * Usage: const diagnostics = useAtomValue(diagnosticsAtom)

@@ -442,8 +442,8 @@ const ERROR_FORMATTERS: Record<
 	// ─────────────────────────────────────────────────────────────────────────
 	// Other Errors
 	// ─────────────────────────────────────────────────────────────────────────
-	HookReceiverError: (error) => ({
-		message: `Hook receiver error: ${error.message}`,
+	TmuxSessionMonitorError: (error) => ({
+		message: `Session monitor error: ${error.message}`,
 		category: "system",
 	}),
 

@@ -98,7 +98,7 @@ const StateDetectionConfigSchema = Schema.Struct({
 	 * This is less reliable than hooks and can produce false positives.
 	 * Only enable if hooks aren't working or for debugging.
 	 *
-	 * Hooks (via HookReceiver) are always active and take precedence.
+	 * Hooks (via TmuxSessionMonitor) are always active and take precedence.
 	 */
 	patternMatching: Schema.optional(Schema.Boolean),
 })

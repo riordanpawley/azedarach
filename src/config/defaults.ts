@@ -104,7 +104,7 @@ export const DEFAULT_CONFIG = {
 	stateDetection: {
 		/**
 		 * Pattern matching is disabled by default.
-		 * Hooks (via HookReceiver) are the authoritative source of session state.
+		 * Hooks (via TmuxSessionMonitor) are the authoritative source of session state.
 		 * Only enable pattern matching if hooks aren't working or for debugging.
 		 */
 		patternMatching: false,

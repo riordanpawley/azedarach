@@ -1,5 +1,5 @@
 /**
- * HookReceiver - Effect service for receiving Claude Code hook notifications
+ * TmuxSessionMonitor - Effect service for monitoring Claude Code session state
  *
  * Polls tmux session options to detect session state changes set by
  * `az notify` commands. This enables authoritative state detection
@@ -8,7 +8,7 @@
  * State detection flow:
  * 1. Claude Code hooks call `az notify <event> <beadId>`
  * 2. `az notify` sets tmux session option `@az_status` on the Claude session
- * 3. HookReceiver polls tmux sessions and reads their `@az_status`
+ * 3. TmuxSessionMonitor polls tmux sessions and reads their `@az_status`
  * 4. State changes trigger handler callbacks
  *
  * Status values:
@@ -55,9 +55,9 @@ export type StateUpdateHandler = (update: SessionStateUpdate) => Effect.Effect<v
 // ============================================================================
 
 /**
- * Error when hook receiver fails
+ * Error when session monitor fails
  */
-export class HookReceiverError extends Data.TaggedError("HookReceiverError")<{
+export class TmuxSessionMonitorError extends Data.TaggedError("TmuxSessionMonitorError")<{
 	readonly message: string
 	readonly cause?: unknown
 }> {}
@@ -81,12 +81,12 @@ const POLL_INTERVAL_MS = 500
 // ============================================================================
 
 /**
- * HookReceiver service interface
+ * TmuxSessionMonitor service interface
  *
  * Provides tmux session polling capabilities for detecting session state
  * from Claude Code sessions running in worktrees.
  */
-export interface HookReceiverService {
+export interface TmuxSessionMonitorService {
 	/**
 	 * Start watching for session state changes
 	 *
@@ -123,7 +123,7 @@ export interface HookReceiverService {
 // ============================================================================
 
 /**
- * HookReceiver service
+ * TmuxSessionMonitor service
  *
  * Polls tmux sessions to detect state changes set by `az notify` hooks.
  * Uses tmux session option `@az_status` for IPC.
@@ -131,18 +131,18 @@ export interface HookReceiverService {
  * @example
  * ```ts
  * const program = Effect.gen(function* () {
- *   const receiver = yield* HookReceiver
- *   const fiber = yield* receiver.start((update) =>
+ *   const monitor = yield* TmuxSessionMonitor
+ *   const fiber = yield* monitor.start((update) =>
  *     Effect.gen(function* () {
  *       const newState = mapStatusToState(update.status)
  *       yield* sessionManager.updateState(update.beadId, newState)
  *     })
  *   )
  *   // Later: yield* Fiber.interrupt(fiber)
- * }).pipe(Effect.provide(HookReceiver.Default))
+ * }).pipe(Effect.provide(TmuxSessionMonitor.Default))
  * ```
  */
-export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver", {
+export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("TmuxSessionMonitor", {
 	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
@@ -308,7 +308,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 				// Log initial state
 				if (initialSessions.length > 0) {
 					yield* Effect.log(
-						`HookReceiver: Found ${initialSessions.length} active Claude sessions`,
+						`TmuxSessionMonitor: Found ${initialSessions.length} active Claude sessions`,
 					)
 				}
 
@@ -325,7 +325,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 						if (prevStatus !== session.status) {
 							// State changed - call handler
 							yield* Effect.log(
-								`HookReceiver: ${session.beadId} status changed: ${prevStatus ?? "none"} → ${session.status}`,
+								`TmuxSessionMonitor: ${session.beadId} status changed: ${prevStatus ?? "none"} → ${session.status}`,
 							)
 							yield* handler(session)
 						}
@@ -336,7 +336,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 						if (!newState.has(beadId)) {
 							// Session disappeared - treat as idle
 							// createdAt is 0 and paths are null since we can't query a dead session
-							yield* Effect.log(`HookReceiver: ${beadId} session ended`)
+							yield* Effect.log(`TmuxSessionMonitor: ${beadId} session ended`)
 							yield* handler({
 								beadId,
 								status: "idle",
@@ -352,7 +352,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 				}).pipe(
 					// Catch errors to prevent stopping
 					Effect.catchAll((e) =>
-						Effect.logWarning(`HookReceiver poll error: ${e}`).pipe(Effect.asVoid),
+						Effect.logWarning(`TmuxSessionMonitor poll error: ${e}`).pipe(Effect.asVoid),
 					),
 					// Repeat with polling interval
 					Effect.repeat(Schedule.spaced(`${POLL_INTERVAL_MS} millis`)),
@@ -361,9 +361,9 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 
 				// Track the polling fiber in diagnostics
 				yield* diagnostics.registerFiber({
-					id: "hook-receiver-poller",
-					name: "HookReceiver Poller",
-					description: "Polls tmux sessions for Claude Code hook state",
+					id: "tmux-session-monitor-poller",
+					name: "TmuxSessionMonitor Poller",
+					description: "Polls tmux sessions for Claude Code session state",
 					fiber: pollerFiber,
 				})
 
@@ -378,4 +378,3 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 		}
 	}),
 }) {}
-

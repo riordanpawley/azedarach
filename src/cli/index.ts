@@ -12,7 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import type { TmuxStatus } from "../core/HookReceiver.js"
+import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
 
@@ -659,7 +659,7 @@ const beadIdArg = Args.text({ name: "bead-id" }).pipe(
  * az notify <event> <bead-id> - Handle Claude Code hook notifications
  *
  * Called by Claude Code hooks to notify Azedarach of session state changes.
- * Writes a notification file that HookReceiver watches.
+ * Sets tmux session option that TmuxSessionMonitor polls.
  */
 const notifyCommand = Command.make(
 	"notify",
