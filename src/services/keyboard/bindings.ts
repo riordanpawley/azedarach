@@ -154,7 +154,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "space",
 		mode: "normal",
 		description: "Enter action mode",
-		action: bc.editor.enterAction(),
+		// Capture task ID at Space press time to prevent race conditions
+		// where cursor moves between Space and action key (fixes az-f3iw)
+		action: Effect.gen(function* () {
+			const taskId = yield* bc.nav.getFocusedTaskId()
+			yield* bc.editor.enterAction(taskId)
+		}),
 	},
 	{
 		key: "/",
@@ -533,7 +538,7 @@ done
 		mode: "action",
 		description: "Attach image",
 		action: Effect.gen(function* () {
-			const task = yield* bc.helpers.getSelectedTask()
+			const task = yield* bc.helpers.getActionTargetTask()
 			yield* bc.editor.exitToNormal()
 			if (task) {
 				yield* bc.overlay.push({ _tag: "imageAttach", taskId: task.id })
