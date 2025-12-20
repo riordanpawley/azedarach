@@ -31,7 +31,21 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 	dependencies: [],
 	effect: Effect.gen(function* () {
 		return {
-			newSession: (name: string, opts?: { cwd?: string; command?: string; prefix?: string }) =>
+			newSession: (
+				name: string,
+				opts?: {
+					cwd?: string
+					command?: string
+					prefix?: string
+					/** Azedarach-specific options for session state tracking */
+					azOptions?: {
+						/** Path to the worktree directory */
+						worktreePath?: string
+						/** Path to the main project directory */
+						projectPath?: string
+					}
+				},
+			) =>
 				Effect.gen(function* () {
 					const args = ["new-session", "-d", "-s", name]
 					if (opts?.cwd) args.push("-c", opts.cwd)
@@ -48,6 +62,15 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 					// Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
+
+					// Set azedarach session options for state tracking
+					// These enable crash recovery - TmuxSessionMonitor can reconstruct state from tmux
+					if (opts?.azOptions?.worktreePath) {
+						yield* runTmux(["set-option", "-t", name, "@az_worktree", opts.azOptions.worktreePath])
+					}
+					if (opts?.azOptions?.projectPath) {
+						yield* runTmux(["set-option", "-t", name, "@az_project", opts.azOptions.projectPath])
+					}
 				}),
 
 			killSession: (name: string) =>

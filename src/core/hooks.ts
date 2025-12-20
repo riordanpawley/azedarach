@@ -77,9 +77,22 @@ const buildNotifyCommand = (event: string, beadId: string, azBinaryPath?: string
  */
 export const generateHookConfig = (beadId: string, azBinaryPath?: string) => ({
 	hooks: {
+		UserPromptSubmit: [
+			{
+				// Fires immediately when user sends a prompt - instant "busy" detection
+				// This is the earliest possible signal that Claude is working
+				hooks: [
+					{
+						type: "command",
+						command: buildNotifyCommand("user_prompt", beadId, azBinaryPath),
+					},
+				],
+			},
+		],
 		PreToolUse: [
 			{
-				// Fires BEFORE permission check - immediate "busy" detection
+				// Fires BEFORE permission check when Claude attempts tool use
+				// Reinforces "busy" state during tool execution
 				hooks: [
 					{
 						type: "command",
