@@ -36,7 +36,10 @@ Purpose: Claude Code entry point for Azedarach development
    - Services grab dependencies at layer construction (`yield* SomeService`), then use them directly
    - If you need `Path.Path` operations, grab `pathService` at layer construction, then call `pathService.resolve()`, `pathService.join()`, etc. directly - don't create wrappers
    - Don't wrap one-liners in helper functions - just use the method directly
-   - **External Reference**: For additional patterns (retries, streams, concurrency, testing), fetch https://raw.githubusercontent.com/PaulJPhilp/EffectPatterns/refs/heads/main/README.md
+   - **Pattern Reference**: Use the `effect-docs` MCP server tools to look up idiomatic Effect patterns:
+     - `mcp__effect-docs__search_patterns` - Search patterns by keyword (e.g., "retry", "concurrency pool")
+     - `mcp__effect-docs__get_pattern` - Get full pattern details with code examples
+     - `mcp__effect-docs__generate_snippet` - Generate customized Effect code snippets
 
 9. **No Node.js Imports**: NEVER import from `node:*`. Use `@effect/platform` instead:
    - `node:path` → Use `Path.Path` service methods (`pathService.resolve()`, `.join()`, etc.)
@@ -680,6 +683,12 @@ Skills auto-load when you edit files or mention keywords:
 
 **Workflow Skills:**
 - `.claude/skills/workflow/beads-tracking.skill.md` - Issue tracking workflow
+
+**Effect Skills:**
+- `.claude/skills/effect/effect-services.skill.md` - Services, layers, dependency injection
+- `.claude/skills/effect/effect-errors.skill.md` - Tagged errors, retry, timeout patterns
+- `.claude/skills/effect/effect-concurrency.skill.md` - Fibers, forking, scheduling, Ref/SubscriptionRef
+- `.claude/skills/effect/effect-resources.skill.md` - Scopes, acquireRelease, resource lifecycle
 
 ## Development Tips
 
