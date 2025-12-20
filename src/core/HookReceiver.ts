@@ -37,6 +37,8 @@ export interface SessionStateUpdate {
 	readonly beadId: string
 	readonly status: TmuxStatus
 	readonly sessionName: string
+	/** Unix timestamp when the tmux session was created */
+	readonly createdAt: number
 }
 
 /**
@@ -100,6 +102,13 @@ export interface HookReceiverService {
 	readonly getSessionStatus: (beadId: string) => Effect.Effect<TmuxStatus | null, never>
 
 	/**
+	 * Get session creation time (Unix timestamp)
+	 *
+	 * Uses tmux's built-in #{session_created} variable.
+	 */
+	readonly getSessionCreatedAt: (beadId: string) => Effect.Effect<number | null, never>
+
+	/**
 	 * List all active Claude sessions with their status
 	 */
 	readonly listSessions: () => Effect.Effect<readonly SessionStateUpdate[], never>
@@ -138,15 +147,26 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 		const previousStateRef = yield* Ref.make<Map<string, TmuxStatus>>(new Map())
 
 		/**
-		 * List all tmux sessions starting with "claude-"
+		 * Session info from tmux list-sessions
 		 */
-		const listClaudeSessions = (): Effect.Effect<readonly string[], never> =>
+		interface TmuxSessionInfo {
+			readonly name: string
+			readonly createdAt: number
+		}
+
+		/**
+		 * List all tmux sessions starting with "claude-"
+		 * Returns session name and creation timestamp in one call.
+		 */
+		const listClaudeSessions = (): Effect.Effect<readonly TmuxSessionInfo[], never> =>
 			Effect.gen(function* () {
+				// Get both session name and creation time in one tmux call
+				// Format: "session_name|unix_timestamp"
 				const command = Command.make(
 					"tmux",
 					"list-sessions",
 					"-F",
-					"#{session_name}",
+					"#{session_name}|#{session_created}",
 				)
 
 				const output = yield* Command.string(command).pipe(
@@ -155,8 +175,15 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 
 				return output
 					.split("\n")
-					.map((s) => s.trim())
-					.filter((s) => s.startsWith(CLAUDE_SESSION_PREFIX))
+					.map((line) => line.trim())
+					.filter((line) => line.startsWith(CLAUDE_SESSION_PREFIX))
+					.map((line) => {
+						const [name, createdStr] = line.split("|")
+						return {
+							name,
+							createdAt: parseInt(createdStr, 10) || 0,
+						}
+					})
 			})
 
 		/**
@@ -195,20 +222,25 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 		}
 
 		/**
-		 * List all sessions with their current status
+		 * List all sessions with their current status and creation time
 		 */
 		const listSessions = (): Effect.Effect<readonly SessionStateUpdate[], never> =>
 			Effect.gen(function* () {
 				const sessions = yield* listClaudeSessions()
 				const results: SessionStateUpdate[] = []
 
-				for (const sessionName of sessions) {
-					const beadId = extractBeadId(sessionName)
+				for (const session of sessions) {
+					const beadId = extractBeadId(session.name)
 					if (!beadId) continue
 
-					const status = yield* getSessionOption(sessionName)
+					const status = yield* getSessionOption(session.name)
 					if (status) {
-						results.push({ beadId, status, sessionName })
+						results.push({
+							beadId,
+							status,
+							sessionName: session.name,
+							createdAt: session.createdAt,
+						})
 					}
 				}
 
@@ -220,6 +252,30 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 		 */
 		const getSessionStatus = (beadId: string): Effect.Effect<TmuxStatus | null, never> =>
 			getSessionOption(`${CLAUDE_SESSION_PREFIX}${beadId}`)
+
+		/**
+		 * Get session creation time (Unix timestamp)
+		 * Uses tmux's built-in #{session_created} variable.
+		 */
+		const getSessionCreatedAt = (beadId: string): Effect.Effect<number | null, never> =>
+			Effect.gen(function* () {
+				const sessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
+				const command = Command.make(
+					"tmux",
+					"display",
+					"-t",
+					sessionName,
+					"-p",
+					"#{session_created}",
+				)
+
+				const output = yield* Command.string(command).pipe(
+					Effect.catchAll(() => Effect.succeed("")),
+				)
+
+				const timestamp = parseInt(output.trim(), 10)
+				return Number.isNaN(timestamp) ? null : timestamp
+			})
 
 		/**
 		 * Start polling for state changes
@@ -264,11 +320,13 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 					for (const beadId of previousState.keys()) {
 						if (!newState.has(beadId)) {
 							// Session disappeared - treat as idle
+							// createdAt is 0 since we can't query a dead session
 							yield* Effect.log(`HookReceiver: ${beadId} session ended`)
 							yield* handler({
 								beadId,
 								status: "idle",
 								sessionName: `${CLAUDE_SESSION_PREFIX}${beadId}`,
+								createdAt: 0,
 							})
 						}
 					}
@@ -298,6 +356,7 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 		return {
 			start,
 			getSessionStatus,
+			getSessionCreatedAt,
 			listSessions,
 		}
 	}),
