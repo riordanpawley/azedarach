@@ -6,10 +6,10 @@
  * - Extracts session metrics (tokens, agent phase, recent output)
  * - Reports state changes to ClaudeSessionManager
  *
- * Works in tandem with HookReceiver:
+ * Works in tandem with TmuxSessionMonitor:
  * - PTY provides: busy detection, error detection, done detection, metrics
- * - Hooks provide: waiting, idle (authoritative)
- * - Hooks always take priority over PTY signals (2s priority window)
+ * - TmuxSessionMonitor provides: waiting, idle (authoritative)
+ * - TmuxSessionMonitor signals always take priority over PTY (2s priority window)
  *
  * State aggregation flow:
  * 1. PTYMonitor polls tmux panes every 500ms
@@ -57,7 +57,7 @@ interface SessionMonitor {
 // Constants
 // ============================================================================
 
-/** Polling interval for PTY capture (matches HookReceiver) */
+/** Polling interval for PTY capture (matches TmuxSessionMonitor) */
 const POLL_INTERVAL_MS = 500
 
 /** Number of lines to capture from tmux pane */
@@ -210,7 +210,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		/**
 		 * Record a hook signal for priority handling
 		 *
-		 * Called by HookReceiver integration to notify PTYMonitor of authoritative
+		 * Called by TmuxSessionMonitor integration to notify PTYMonitor of authoritative
 		 * state changes. The priority window ensures hooks always take precedence.
 		 */
 		const recordHookSignal = (beadId: string, state: SessionState) =>

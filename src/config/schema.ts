@@ -70,6 +70,7 @@ const SessionConfigSchema = Schema.Struct({
  * State detection pattern overrides
  *
  * Allows customizing the patterns used to detect Claude session state.
+ * Only used if stateDetection.patternMatching is enabled.
  */
 const PatternsConfigSchema = Schema.Struct({
 	/** Patterns that indicate Claude is waiting for user input */
@@ -80,6 +81,26 @@ const PatternsConfigSchema = Schema.Struct({
 
 	/** Patterns that indicate an error occurred */
 	error: Schema.optional(Schema.Array(Schema.String)),
+})
+
+/**
+ * State detection configuration
+ *
+ * Controls how session state (busy/waiting/done) is detected.
+ * By default, uses Claude Code hooks which are authoritative.
+ * Pattern matching can be enabled as a fallback for older Claude versions.
+ */
+const StateDetectionConfigSchema = Schema.Struct({
+	/**
+	 * Enable regex pattern matching for state detection (default: false)
+	 *
+	 * When enabled, StateDetector analyzes Claude's output to detect state.
+	 * This is less reliable than hooks and can produce false positives.
+	 * Only enable if hooks aren't working or for debugging.
+	 *
+	 * Hooks (via TmuxSessionMonitor) are always active and take precedence.
+	 */
+	patternMatching: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -432,6 +453,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		git: current.git,
 		session: current.session,
 		patterns: current.patterns,
+		stateDetection: current.stateDetection,
 		pr: current.pr
 			? {
 					enabled: current.pr.enabled,
@@ -467,6 +489,7 @@ const RawConfigSchema = Schema.Struct({
 	git: Schema.optional(GitConfigSchema),
 	session: Schema.optional(SessionConfigSchema),
 	patterns: Schema.optional(PatternsConfigSchema),
+	stateDetection: Schema.optional(StateDetectionConfigSchema),
 	/** May contain legacy baseBranch field */
 	pr: Schema.optional(LegacyPRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
@@ -495,6 +518,7 @@ const CurrentConfigSchema = Schema.Struct({
 	git: Schema.optional(GitConfigSchema),
 	session: Schema.optional(SessionConfigSchema),
 	patterns: Schema.optional(PatternsConfigSchema),
+	stateDetection: Schema.optional(StateDetectionConfigSchema),
 	pr: Schema.optional(PRConfigSchema),
 	merge: Schema.optional(MergeConfigSchema),
 	devServer: Schema.optional(DevServerConfigSchema),
@@ -540,6 +564,9 @@ export type SessionConfig = Schema.Schema.Type<typeof SessionConfigSchema>
 
 /** Patterns config section type */
 export type PatternsConfig = Schema.Schema.Type<typeof PatternsConfigSchema>
+
+/** State detection config section type */
+export type StateDetectionConfig = Schema.Schema.Type<typeof StateDetectionConfigSchema>
 
 /** PR config section type */
 export type PRConfig = Schema.Schema.Type<typeof PRConfigSchema>
