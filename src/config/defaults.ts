@@ -101,6 +101,14 @@ export const DEFAULT_CONFIG = {
 		done: [] satisfies string[],
 		error: [] satisfies string[],
 	},
+	stateDetection: {
+		/**
+		 * Pattern matching is disabled by default.
+		 * Hooks (via HookReceiver) are the authoritative source of session state.
+		 * Only enable pattern matching if hooks aren't working or for debugging.
+		 */
+		patternMatching: false,
+	},
 	pr: {
 		enabled: true,
 		autoDraft: true,
@@ -174,6 +182,9 @@ export interface ResolvedConfig {
 		waiting: readonly string[]
 		done: readonly string[]
 		error: readonly string[]
+	}
+	stateDetection: {
+		patternMatching: boolean
 	}
 	pr: {
 		enabled: boolean
@@ -254,6 +265,10 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
 			done: config.patterns?.done ?? DEFAULT_CONFIG.patterns.done,
 			error: config.patterns?.error ?? DEFAULT_CONFIG.patterns.error,
+		},
+		stateDetection: {
+			patternMatching:
+				config.stateDetection?.patternMatching ?? DEFAULT_CONFIG.stateDetection.patternMatching,
 		},
 		pr: {
 			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
