@@ -6,12 +6,13 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { FileSystem, Path } from "@effect/platform"
+import { Command as PlatformCommand, FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
+import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
 
@@ -267,6 +268,7 @@ const syncHandler = (args: {
  * Valid hook event types from Claude Code
  */
 const VALID_HOOK_EVENTS = [
+	"user_prompt",
 	"idle_prompt",
 	"permission_request",
 	"pretooluse",
@@ -276,11 +278,42 @@ const VALID_HOOK_EVENTS = [
 type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 
 /**
+ * Type guard to check if a string is a valid hook event
+ */
+const isValidHookEvent = (event: string): event is HookEvent =>
+	(VALID_HOOK_EVENTS as readonly string[]).includes(event)
+
+/**
+ * Map hook event to session status for tmux
+ *
+ * Converts detailed hook events to simple status values:
+ * - busy: Claude is actively working
+ * - waiting: Claude is waiting for user input
+ * - idle: Session is inactive/ended
+ */
+const mapEventToStatus = (event: HookEvent): TmuxStatus => {
+	switch (event) {
+		case "user_prompt":
+		case "pretooluse":
+			return "busy"
+		case "idle_prompt":
+		case "permission_request":
+		case "stop":
+			return "waiting"
+		case "session_end":
+			return "idle"
+	}
+}
+
+/**
  * Handle hook notifications from Claude Code sessions
  *
  * This command is called by Claude Code hooks configured in worktree's
- * .claude/settings.local.json. It writes a notification file that the
- * HookReceiver service in the main Azedarach process watches.
+ * .claude/settings.local.json. It updates a tmux session option that the
+ * azedarach TUI can poll to detect session state.
+ *
+ * Uses tmux session option `@az_status` on the Claude session.
+ * This is more reliable than file-based IPC with no race conditions.
  */
 const notifyHandler = (args: {
 	readonly event: string
@@ -288,31 +321,43 @@ const notifyHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const fs = yield* FileSystem.FileSystem
-
-		// Validate event type
-		if (!VALID_HOOK_EVENTS.includes(args.event as HookEvent)) {
+		// Validate event type using type guard
+		if (!isValidHookEvent(args.event)) {
 			yield* Console.error(`Invalid event type: ${args.event}`)
 			yield* Console.error(`Valid events: ${VALID_HOOK_EVENTS.join(", ")}`)
 			return yield* Effect.fail(new Error(`Invalid event: ${args.event}`))
 		}
 
+		const status = mapEventToStatus(args.event)
+		const sessionName = `claude-${args.beadId}`
+
 		if (args.verbose) {
-			yield* Console.log(`Received hook event: ${args.event} for ${args.beadId}`)
+			yield* Console.log(`Hook: ${args.event} for ${args.beadId} → status: ${status}`)
 		}
 
-		// Write notification file for HookReceiver to pick up
-		const notifyPath = `/tmp/azedarach-notify-${args.beadId}.json`
-		const payload = JSON.stringify({
-			event: args.event,
-			beadId: args.beadId,
-			timestamp: Date.now(),
-		})
+		// Update tmux session option for the Claude session
+		// The TUI can poll this with: tmux show-option -t <session> -v @az_status
+		const tmuxCommand = PlatformCommand.make(
+			"tmux",
+			"set-option",
+			"-t",
+			sessionName,
+			"@az_status",
+			status,
+		)
 
-		yield* fs.writeFileString(notifyPath, payload)
+		yield* PlatformCommand.exitCode(tmuxCommand).pipe(
+			Effect.catchAll((error) => {
+				// Session may not exist (e.g., during startup) - log but don't fail
+				if (args.verbose) {
+					yield* Console.log(`Could not set tmux status: ${error}`)
+				}
+				return Effect.succeed(1)
+			}),
+		)
 
 		if (args.verbose) {
-			yield* Console.log(`Wrote notification to: ${notifyPath}`)
+			yield* Console.log(`Set @az_status=${status} on session ${sessionName}`)
 		}
 	})
 
@@ -614,7 +659,7 @@ const beadIdArg = Args.text({ name: "bead-id" }).pipe(
  * az notify <event> <bead-id> - Handle Claude Code hook notifications
  *
  * Called by Claude Code hooks to notify Azedarach of session state changes.
- * Writes a notification file that HookReceiver watches.
+ * Sets tmux session option that TmuxSessionMonitor polls.
  */
 const notifyCommand = Command.make(
 	"notify",
