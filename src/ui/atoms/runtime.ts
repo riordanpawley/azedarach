@@ -13,13 +13,13 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
-import { HookReceiver } from "../../core/HookReceiver.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { VCService } from "../../core/VCService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
@@ -33,6 +33,7 @@ import { NetworkService } from "../../services/NetworkService.js"
 import { OfflineService } from "../../services/OfflineService.js"
 import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import { ProjectStateService } from "../../services/ProjectStateService.js"
 import { SessionService } from "../../services/SessionService.js"
 import { ToastService } from "../../services/ToastService.js"
 import { ViewService } from "../../services/ViewService.js"
@@ -60,11 +61,12 @@ const appLayer = Layer.mergeAll(
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,
-	HookReceiver.Default,
+	TmuxSessionMonitor.Default,
 	CommandQueueService.Default,
 	PTYMonitor.Default,
 	DiagnosticsService.Default,
 	ProjectService.Default,
+	ProjectStateService.Default,
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,

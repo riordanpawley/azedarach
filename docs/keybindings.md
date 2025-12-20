@@ -612,7 +612,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
-| `Space` `f` | Show diff vs main | Worktree exists (code review in tmux popup) |
+| `Space` `f` | Show diff | Worktree exists (difftastic side-by-side) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
@@ -703,26 +703,19 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 
 #### Show Diff (Space+f)
 
-Opens a tmux popup showing all changes between the bead's branch and main. Perfect for code review before merging.
+Opens **difftastic side-by-side diff** in a tmux popup showing all changes since the branch diverged from main.
 
-**What it shows:**
-1. First, a summary of changed files (--stat output)
-2. Then, the full colored diff
+**What you see:**
+- Stat summary first (files changed, insertions, deletions)
+- Then full diff with syntax-aware highlighting
+- Side-by-side comparison for easy review
 
-**Navigation (in less):**
-- `j/k` or arrow keys: Scroll line by line
-- `Space` / `b`: Page down / up
-- `g` / `G`: Go to start / end
-- `/pattern`: Search forward
-- `n` / `N`: Next / previous search result
+**Navigation (less):**
+- `j/k` or arrows: Scroll up/down
+- `←/→`: Horizontal scroll for wide diffs
 - `q`: Quit and return to az
 
-**Use cases:**
-- Review Claude's changes before merging
-- Check what files were modified
-- Verify the scope of changes matches the task
-
-**Note:** The diff shows `main...HEAD` which includes all commits on the branch since it diverged from main. This ensures you see the complete set of changes.
+**Use case:** Review Claude's changes before merging to main.
 
 ### Movement Actions
 
