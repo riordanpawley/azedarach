@@ -39,6 +39,10 @@ export interface SessionStateUpdate {
 	readonly sessionName: string
 	/** Unix timestamp when the tmux session was created */
 	readonly createdAt: number
+	/** Path to the worktree directory (from @az_worktree option) */
+	readonly worktreePath: string | null
+	/** Path to the main project directory (from @az_project option) */
+	readonly projectPath: string | null
 }
 
 /**
@@ -187,24 +191,29 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 			})
 
 		/**
-		 * Get the @az_status option for a tmux session
+		 * Get a tmux session option by name
 		 */
-		const getSessionOption = (sessionName: string): Effect.Effect<TmuxStatus | null, never> =>
+		const getTmuxOption = (
+			sessionName: string,
+			optionName: string,
+		): Effect.Effect<string | null, never> =>
 			Effect.gen(function* () {
-				const command = Command.make(
-					"tmux",
-					"show-option",
-					"-t",
-					sessionName,
-					"-v",
-					"@az_status",
-				)
+				const command = Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName)
 
 				const output = yield* Command.string(command).pipe(
 					Effect.catchAll(() => Effect.succeed("")),
 				)
 
-				const status = output.trim()
+				const value = output.trim()
+				return value || null
+			})
+
+		/**
+		 * Get the @az_status option for a tmux session
+		 */
+		const getSessionOption = (sessionName: string): Effect.Effect<TmuxStatus | null, never> =>
+			Effect.gen(function* () {
+				const status = yield* getTmuxOption(sessionName, "@az_status")
 				if (status === "busy" || status === "waiting" || status === "idle") {
 					return status
 				}
@@ -235,11 +244,17 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 
 					const status = yield* getSessionOption(session.name)
 					if (status) {
+						// Fetch worktree and project paths from tmux session options
+						const worktreePath = yield* getTmuxOption(session.name, "@az_worktree")
+						const projectPath = yield* getTmuxOption(session.name, "@az_project")
+
 						results.push({
 							beadId,
 							status,
 							sessionName: session.name,
 							createdAt: session.createdAt,
+							worktreePath,
+							projectPath,
 						})
 					}
 				}
@@ -320,13 +335,15 @@ export class HookReceiver extends Effect.Service<HookReceiver>()("HookReceiver",
 					for (const beadId of previousState.keys()) {
 						if (!newState.has(beadId)) {
 							// Session disappeared - treat as idle
-							// createdAt is 0 since we can't query a dead session
+							// createdAt is 0 and paths are null since we can't query a dead session
 							yield* Effect.log(`HookReceiver: ${beadId} session ended`)
 							yield* handler({
 								beadId,
 								status: "idle",
 								sessionName: `${CLAUDE_SESSION_PREFIX}${beadId}`,
 								createdAt: 0,
+								worktreePath: null,
+								projectPath: null,
 							})
 						}
 					}

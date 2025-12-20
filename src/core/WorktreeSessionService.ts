@@ -42,6 +42,8 @@ export interface CreateWorktreeSessionOptions {
 	readonly sessionName: string
 	/** Path to the worktree directory */
 	readonly worktreePath: string
+	/** Path to the main project directory (for crash recovery via tmux state) */
+	readonly projectPath?: string
 	/** Command to run in the session (e.g., "claude", "pnpm run dev") */
 	readonly command: string
 	/** Working directory for the command (defaults to worktreePath) */
@@ -130,6 +132,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						const {
 							sessionName,
 							worktreePath,
+							projectPath,
 							command,
 							cwd = worktreePath,
 							tmuxPrefix = sessionConfig.tmuxPrefix,
@@ -147,6 +150,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							cwd,
 							command: `${shell} -i`,
 							prefix: tmuxPrefix,
+							// Store worktree and project paths in tmux session options
+							// Enables crash recovery - HookReceiver can reconstruct state from tmux
+							azOptions: {
+								worktreePath,
+								projectPath,
+							},
 						})
 
 						// Give shell time to initialize
