@@ -85,8 +85,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					const projectPath = yield* helpers.getProjectPath()
 
 					yield* prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
-						Effect.tap(() => board.refresh()),
-						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
+						Effect.andThen(() => board.refresh()),
+						Effect.andThen(() => toast.show("success", `Merged ${beadId} to main`)),
 						Effect.catchAll(helpers.showErrorToast("Merge failed")),
 					)
 				}),
@@ -154,7 +154,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						const projectPath = yield* helpers.getProjectPath()
 
 						yield* prWorkflow.updateFromBase({ beadId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", `Updated from ${gitConfig.baseBranch}`)),
+							Effect.andThen(() => board.refresh()),
+							Effect.andThen(() => toast.show("success", `Updated from ${gitConfig.baseBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
 						)
 					}),
@@ -444,8 +445,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						// Get project path from helpers
 						const abortProjectPath = yield* helpers.getProjectPath()
 						yield* prWorkflow.abortMerge({ beadId: task.id, projectPath: abortProjectPath }).pipe(
-							Effect.tap(() => board.refresh()),
-							Effect.tap(() => toast.show("success", `Merge aborted for ${task.id}`)),
+							Effect.andThen(() => board.refresh()),
+							Effect.andThen(() => toast.show("success", `Merge aborted for ${task.id}`)),
 							Effect.catchAll((error: unknown) => {
 								const formatted = formatForToast(error)
 								return toast.show("error", `Abort failed: ${formatted}`)
