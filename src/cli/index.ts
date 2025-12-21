@@ -12,7 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import { CLAUDE_SESSION_PREFIX, parseSessionName } from "../core/paths.js"
+import { CLAUDE_SESSION_PREFIX } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -309,34 +309,21 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 /**
  * Find a Claude tmux session by beadId
  *
- * Searches through all tmux sessions to find one that matches the beadId.
- * Handles both new format (claude-{project}-{beadId}) and legacy (claude-{beadId}).
+ * Session names use format: claude-{beadId}
+ * Returns null if session doesn't exist.
  */
 const findClaudeSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
-		// List all tmux sessions
-		const command = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
-		const output = yield* PlatformCommand.string(command).pipe(
-			Effect.catchAll(() => Effect.succeed("")),
+		// Session name is simply claude-{beadId}
+		const expectedSessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
+
+		// Check if the session exists
+		const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
+		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
 		)
 
-		const sessions = output.split("\n").filter((s) => s.startsWith(CLAUDE_SESSION_PREFIX))
-
-		for (const sessionName of sessions) {
-			// Try new format first
-			const parsed = parseSessionName(sessionName)
-			if (parsed && parsed.type === "claude" && parsed.beadId === beadId) {
-				return sessionName
-			}
-
-			// Fallback: legacy format claude-{beadId}
-			const legacyBeadId = sessionName.slice(CLAUDE_SESSION_PREFIX.length)
-			if (legacyBeadId === beadId) {
-				return sessionName
-			}
-		}
-
-		return null
+		return exitCode === 0 ? expectedSessionName : null
 	})
 
 /**
