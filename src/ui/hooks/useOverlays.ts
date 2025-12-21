@@ -36,6 +36,7 @@ export type OverlayType =
 	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
+	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 
 /**
  * Hook for managing overlay stack
@@ -103,6 +104,10 @@ export function useOverlays() {
 				push({ _tag: "projectSelector" })
 			},
 
+			showDiffViewer: (worktreePath: string, baseBranch: string) => {
+				push({ _tag: "diffViewer", worktreePath, baseBranch })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -124,6 +129,7 @@ export function useOverlays() {
 			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
+			showingDiffViewer: currentOverlay?._tag === "diffViewer",
 		}),
 		[currentOverlay],
 	)
