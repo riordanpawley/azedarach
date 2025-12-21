@@ -14,28 +14,13 @@
 
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
-import { MergeConflictError, PRWorkflow } from "../../core/PRWorkflow.js"
+import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
-import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
 import { formatForToast } from "../ErrorFormatter.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
-
-/**
- * Diff command using difftastic side-by-side view.
- *
- * Shows changes since branch diverged from base:
- * - Stat summary first for quick overview
- * - Then difftastic side-by-side with syntax highlighting
- * - Excludes .beads/ to reduce noise
- */
-const createDiffCommand = (baseBranch: string) =>
-	`MERGE_BASE=$(git merge-base ${baseBranch} HEAD) && ` +
-	`git diff $MERGE_BASE --stat --color=always -- ':!.beads' && echo "" && ` +
-	`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
-	`git diff $MERGE_BASE -- ':!.beads' | less -RS`
 
 // ============================================================================
 // Service Definition
@@ -48,7 +33,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		BoardService.Default,
 		OverlayService.Default,
 		PRWorkflow.Default,
-		TmuxService.Default,
 		AppConfig.Default,
 	],
 
@@ -59,7 +43,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const board = yield* BoardService
 		const overlay = yield* OverlayService
 		const prWorkflow = yield* PRWorkflow
-		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
 		// Note: DON'T capture gitConfig here - it must be fetched fresh per handler
 		// to pick up config changes when switching projects with `gp`
@@ -458,8 +441,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Show diff action (Space+f)
 		 *
-		 * Opens difftastic side-by-side diff showing changes since branch diverged from main.
-		 * Shows stat summary first, then full diff with syntax highlighting.
+		 * Opens the DiffViewer overlay showing changes since branch diverged from main.
 		 *
 		 * Requires an active session with a worktree.
 		 */
@@ -482,16 +464,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
 
-				// Launch difftastic side-by-side diff
-				yield* tmux
-					.displayPopup({
-						command: createDiffCommand(gitConfig.baseBranch),
-						width: "95%",
-						height: "95%",
-						title: ` diff: ${task.id} vs ${gitConfig.baseBranch} `,
-						cwd: worktreePath,
-					})
-					.pipe(Effect.catchAll(helpers.showErrorToast("Failed to show diff")))
+				// Open DiffViewer overlay
+				yield* overlay.push({
+					_tag: "diffViewer",
+					worktreePath,
+					baseBranch: gitConfig.baseBranch,
+				})
 			})
 
 		// ================================================================
