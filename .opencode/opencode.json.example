@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/schema/opencode.json",
+  "comment": "Example opencode.json for use with Azedarach",
+  "plugins": [
+    "opencode-beads",
+    "./plugin/azedarach.js"
+  ],
+  "model": "anthropic/claude-sonnet-4-20250514",
+  "provider": {
+    "anthropic": {
+      "comment": "Set ANTHROPIC_API_KEY env var for authentication"
+    }
+  }
+}
