@@ -89,7 +89,7 @@ export const DEFAULT_CONFIG = {
 		baseBranch: "main",
 		pushEnabled: true,
 		fetchEnabled: true,
-		showLineChanges: false,
+		showLineChanges: true,
 	},
 	session: {
 		command: "claude",
