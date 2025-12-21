@@ -12,6 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
+import { getSessionName } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -329,7 +330,8 @@ const notifyHandler = (args: {
 		}
 
 		const status = mapEventToStatus(args.event)
-		const sessionName = `claude-${args.beadId}`
+		// Use consistent session naming (claude-<beadId>)
+		const sessionName = getSessionName(args.beadId)
 
 		if (args.verbose) {
 			yield* Console.log(`Hook: ${args.event} for ${args.beadId} → status: ${status}`)
