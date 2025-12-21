@@ -68,33 +68,27 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					// - Claude sessions: claude-{projectName}-{beadId}
 					// - Dev servers: dev-{projectName}-{beadId}
 					// Also supports legacy format: az-dev-{beadId} -> claude-{beadId}
-					const toggleScript = [
-						'current=$(tmux display-message -p "#S")',
+					// Note: Shell syntax requires no semicolon after 'then', 'else', or before 'fi'
+					const toggleScript =
+						'current=$(tmux display-message -p "#S"); ' +
 						// Check for new format: dev-{project}-{beadId}
-						'if [ "${current#dev-}" != "$current" ]; then',
-						'  rest="${current#dev-}"',
-						'  target="claude-$rest"',
-						'  msg="No Claude session"',
+						'if [ "${current#dev-}" != "$current" ]; then ' +
+						'rest="${current#dev-}"; target="claude-$rest"; msg="No Claude session"; ' +
 						// Check for new format: claude-{project}-{beadId}
-						'elif [ "${current#claude-}" != "$current" ]; then',
-						'  rest="${current#claude-}"',
-						'  target="dev-$rest"',
-						'  msg="No dev server (Space+r to start)"',
+						'elif [ "${current#claude-}" != "$current" ]; then ' +
+						'rest="${current#claude-}"; target="dev-$rest"; msg="No dev server (Space+r to start)"; ' +
 						// Check for legacy format: az-dev-{beadId}
-						'elif [ "${current#az-dev-}" != "$current" ]; then',
-						'  target="${current#az-dev-}"',
-						'  msg="No Claude session"',
+						'elif [ "${current#az-dev-}" != "$current" ]; then ' +
+						'target="${current#az-dev-}"; msg="No Claude session"; ' +
 						// Legacy Claude format: claude-{beadId} (no project name)
-						"else",
-						'  target="az-dev-$current"',
-						'  msg="No dev server (Space+r to start)"',
-						"fi",
-						'if tmux has-session -t "$target" 2>/dev/null; then',
-						'  tmux switch-client -t "$target"',
-						"else",
-						'  tmux display-message "$msg"',
-						"fi",
-					].join("; ")
+						"else " +
+						'target="az-dev-$current"; msg="No dev server (Space+r to start)"; ' +
+						"fi; " +
+						'if tmux has-session -t "$target" 2>/dev/null; then ' +
+						'tmux switch-client -t "$target"; ' +
+						"else " +
+						'tmux display-message "$msg"; ' +
+						"fi"
 					yield* runTmux(["bind-key", "-T", "prefix", "Tab", "run-shell", toggleScript])
 
 					// Set azedarach session options for state tracking
