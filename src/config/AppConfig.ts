@@ -52,6 +52,12 @@ export interface AppConfigService {
 	/** The reactive configuration - updates when current project changes */
 	readonly config: SubscriptionRef.SubscriptionRef<ResolvedConfig>
 
+	/** Get CLI tool to use for AI sessions */
+	readonly getCliTool: () => Effect.Effect<ResolvedConfig["cliTool"]>
+
+	/** Get model configuration */
+	readonly getModelConfig: () => Effect.Effect<ResolvedConfig["model"]>
+
 	/** Get worktree configuration section */
 	readonly getWorktreeConfig: () => Effect.Effect<ResolvedConfig["worktree"]>
 
@@ -377,6 +383,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		return {
 			config: configRef,
+			getCliTool: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.cliTool),
+			getModelConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.model),
 			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
 			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
 			getSessionConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.session),
