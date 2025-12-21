@@ -3,10 +3,24 @@
  */
 
 /**
+ * Prefix for Claude session names in tmux
+ *
+ * All Claude Code sessions managed by Azedarach use this prefix.
+ * This allows TmuxSessionMonitor to identify Claude sessions and
+ * enables hooks to set status on the correct session.
+ */
+export const CLAUDE_SESSION_PREFIX = "claude-"
+
+/**
  * Generate tmux session name for a bead
+ *
+ * Returns "claude-<beadId>" for consistent naming across:
+ * - Session creation (ClaudeSessionManager)
+ * - Session monitoring (TmuxSessionMonitor)
+ * - Hook notifications (az-notify.sh)
  */
 export function getSessionName(beadId: string): string {
-	return beadId // Use bead ID directly as session name
+	return `${CLAUDE_SESSION_PREFIX}${beadId}`
 }
 
 /**

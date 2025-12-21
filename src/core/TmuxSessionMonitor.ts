@@ -20,6 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import { CLAUDE_SESSION_PREFIX } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -65,11 +66,6 @@ export class TmuxSessionMonitorError extends Data.TaggedError("TmuxSessionMonito
 // ============================================================================
 // Constants
 // ============================================================================
-
-/**
- * Prefix for Claude session names
- */
-const CLAUDE_SESSION_PREFIX = "claude-"
 
 /**
  * Polling interval for watching tmux sessions
@@ -149,14 +145,6 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 
 		// Track previous state to detect changes
 		const previousStateRef = yield* Ref.make<Map<string, TmuxStatus>>(new Map())
-
-		/**
-		 * Session info from tmux list-sessions
-		 */
-		interface TmuxSessionInfo {
-			readonly name: string
-			readonly createdAt: number
-		}
 
 		/**
 		 * List all tmux sessions starting with "claude-"

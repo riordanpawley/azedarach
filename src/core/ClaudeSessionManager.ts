@@ -791,17 +791,25 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							worktrees.map((wt) => [wt.beadId, wt] as const),
 						)
 
-						// Find tmux sessions that look like bead IDs (az-xxx pattern) but aren't tracked in memory
-						// Our session names are just the bead ID (see getSessionName in paths.ts)
-						const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+						// Find Claude tmux sessions that aren't tracked in memory
+						// Session names use "claude-<beadId>" format (see getSessionName in paths.ts)
+						// We look for sessions starting with "claude-" and extract the beadId
 
 						for (const tmuxSession of tmuxSessions) {
-							// Check if this looks like a bead ID and isn't already tracked
-							if (
-								beadIdPattern.test(tmuxSession.name) &&
-								!HashMap.has(inMemorySessions, tmuxSession.name)
-							) {
-								const beadId = tmuxSession.name
+							// Check if this is a Claude session (has claude- prefix)
+							if (!tmuxSession.name.startsWith("claude-")) continue
+
+							// Extract beadId by removing the "claude-" prefix
+							const beadId = tmuxSession.name.slice("claude-".length)
+
+							// Skip if already tracked
+							if (HashMap.has(inMemorySessions, beadId)) continue
+
+							// Validate beadId looks right (az-xxx pattern)
+							const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+							if (!beadIdPattern.test(beadId)) continue
+
+							{
 								const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
 								const persistedOpt = HashMap.get(persistedSessions, beadId)
 
@@ -817,7 +825,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 												() => getWorktreePath(effectiveProjectPath, beadId),
 											),
 									),
-									tmuxSessionName: beadId,
+									tmuxSessionName: tmuxSession.name, // Full name with "claude-" prefix
 									state: Option.getOrElse(
 										Option.map(persistedOpt, (p) => p.state),
 										() => "busy",
