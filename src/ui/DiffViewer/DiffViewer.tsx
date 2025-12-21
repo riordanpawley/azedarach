@@ -85,41 +85,42 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 
 	// Keyboard handling
 	useKeyboard((event) => {
-		if (event.name === "escape") {
+		// Close on q or Escape
+		if (event.name === "escape" || event.name === "q") {
 			onClose()
 			return
 		}
 
-		// Navigation in picker
-		if (event.name === "j" && state.focus === "picker") {
+		// Navigation in picker (j/k or up/down arrows)
+		if ((event.name === "j" || event.name === "down") && state.focus === "picker") {
 			setState((s) => ({
 				...s,
 				selectedIndex: Math.min(s.selectedIndex + 1, s.files.length - 1),
 			}))
-		} else if (event.name === "k" && state.focus === "picker") {
+		} else if ((event.name === "k" || event.name === "up") && state.focus === "picker") {
 			setState((s) => ({
 				...s,
 				selectedIndex: Math.max(s.selectedIndex - 1, 0),
 			}))
 		}
 
-		// Scroll in diff view
-		if (event.name === "j" && state.focus === "diff") {
+		// Scroll in diff view (j/k or up/down arrows)
+		if ((event.name === "j" || event.name === "down") && state.focus === "diff") {
 			setState((s) => ({
 				...s,
 				scrollOffset: Math.min(s.scrollOffset + 1, s.diffContent.split("\n").length - 1),
 			}))
-		} else if (event.name === "k" && state.focus === "diff") {
+		} else if ((event.name === "k" || event.name === "up") && state.focus === "diff") {
 			setState((s) => ({
 				...s,
 				scrollOffset: Math.max(s.scrollOffset - 1, 0),
 			}))
 		}
 
-		// Toggle focus between panels
-		if (event.name === "h") {
+		// Toggle focus between panels (h/l or left/right arrows)
+		if (event.name === "h" || event.name === "left") {
 			setState((s) => ({ ...s, focus: "picker" }))
-		} else if (event.name === "l") {
+		} else if (event.name === "l" || event.name === "right") {
 			setState((s) => ({ ...s, focus: "diff" }))
 		}
 
@@ -165,11 +166,11 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 			right={0}
 			top={0}
 			bottom={0}
-			backgroundColor={`${theme.crust}EE`}
+			backgroundColor={`${theme.crust}CC`}
 			alignItems="center"
 			justifyContent="center"
 		>
-			<box flexDirection="column" width="95%" height="95%">
+			<box flexDirection="column" width="95%" height="95%" backgroundColor={theme.base}>
 				{/* Header */}
 				<box paddingLeft={1} paddingBottom={1}>
 					<text fg={theme.mauve}>
@@ -213,9 +214,9 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 				<text fg={theme.surface1}>{"─".repeat(80)}</text>
 				<box paddingLeft={1} paddingRight={1}>
 					<text fg={theme.overlay0}>
-						<span fg={theme.blue}>h/l</span>
+						<span fg={theme.blue}>←/→</span>
 						<span> focus </span>
-						<span fg={theme.blue}>j/k</span>
+						<span fg={theme.blue}>↑/↓</span>
 						<span> navigate </span>
 						<span fg={theme.blue}>Enter</span>
 						<span> select </span>
@@ -223,7 +224,7 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 						<span> all </span>
 						<span fg={theme.blue}>f</span>
 						<span> layout </span>
-						<span fg={theme.blue}>Esc</span>
+						<span fg={theme.blue}>q</span>
 						<span> close</span>
 					</text>
 				</box>
