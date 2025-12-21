@@ -61,7 +61,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const prWorkflow = yield* PRWorkflow
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
-		const gitConfig = yield* appConfig.getGitConfig()
+		// Note: DON'T capture gitConfig here - it must be fetched fresh per handler
+		// to pick up config changes when switching projects with `gp`
 
 		// ================================================================
 		// Internal Helpers
@@ -140,6 +141,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
+				// Fetch fresh gitConfig to pick up changes from project switching
+				const gitConfig = yield* appConfig.getGitConfig()
+
 				yield* helpers.withQueue(
 					task.id,
 					"update",
@@ -179,6 +183,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
+
+				// Fetch fresh gitConfig to pick up changes from project switching
+				const gitConfig = yield* appConfig.getGitConfig()
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
@@ -465,6 +472,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
+
+				// Fetch fresh gitConfig to pick up changes from project switching
+				const gitConfig = yield* appConfig.getGitConfig()
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()

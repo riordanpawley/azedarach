@@ -139,9 +139,13 @@ export const TaskCard = (props: TaskCardProps) => {
 		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
 		props.task.sessionStartedAt !== undefined
 
+	// Threshold for showing line changes - need enough width for "+XXX/-XXX" (~12 chars)
+	// At 25+ chars of content width, we have room for line changes
+	const LINE_CHANGES_MIN_WIDTH = 25
+
 	// Build git status string: "↓3 ● +42/-15"
-	// Shows behind count, dirty indicator, and line changes (if configured)
-	const getGitStatusString = (): string => {
+	// Shows behind count, dirty indicator, and line changes (responsive based on width)
+	const getGitStatusString = (availableWidth: number): string => {
 		const { gitBehindCount, hasUncommittedChanges, gitAdditions, gitDeletions } = props.task
 		const parts: string[] = []
 
@@ -155,19 +159,22 @@ export const TaskCard = (props: TaskCardProps) => {
 			parts.push("●")
 		}
 
-		// Line changes (+X/-Y) - only shown if configured and there are changes
-		if (gitAdditions !== undefined || gitDeletions !== undefined) {
-			const add = gitAdditions ?? 0
-			const del = gitDeletions ?? 0
-			if (add > 0 || del > 0) {
-				parts.push(`+${add}/-${del}`)
+		// Line changes (+X/-Y) - only shown if we have enough screen width
+		// This keeps the display clean on narrow terminals
+		if (availableWidth >= LINE_CHANGES_MIN_WIDTH) {
+			if (gitAdditions !== undefined || gitDeletions !== undefined) {
+				const add = gitAdditions ?? 0
+				const del = gitDeletions ?? 0
+				if (add > 0 || del > 0) {
+					parts.push(`+${add}/-${del}`)
+				}
 			}
 		}
 
 		return parts.join(" ")
 	}
 
-	const gitStatusString = getGitStatusString()
+	const gitStatusString = getGitStatusString(maxTitleWidth)
 
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
