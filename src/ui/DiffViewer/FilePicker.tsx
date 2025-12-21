@@ -42,7 +42,7 @@ const FileItem = ({
 				<span fg={color}>{symbol}</span>
 				<span fg={fg}> {file.path}</span>
 				{file.status === "renamed" && file.oldPath && (
-					<span fg={theme.overlay0}> ← {file.oldPath}</span>
+					<span fg={theme.subtext0}> ← {file.oldPath}</span>
 				)}
 			</text>
 		</box>
@@ -75,7 +75,7 @@ export const FilePicker = ({
 			{/* Header */}
 			<box paddingLeft={1} paddingRight={1}>
 				<text fg={theme.text}>
-					Changed Files <span fg={theme.overlay0}>({files.length})</span>
+					Changed Files <span fg={theme.subtext0}>({files.length})</span>
 				</text>
 			</box>
 			<text fg={theme.surface1}>{"─".repeat(30)}</text>
@@ -110,7 +110,7 @@ export const FilePicker = ({
 					})
 				) : (
 					<box paddingLeft={1} paddingTop={1}>
-						<text fg={theme.overlay0}>No files match filter</text>
+						<text fg={theme.subtext0}>No files match filter</text>
 					</box>
 				)}
 			</box>
@@ -118,9 +118,9 @@ export const FilePicker = ({
 			{/* Scroll indicator */}
 			{files.length > visibleHeight && (
 				<>
-					<text fg={theme.surface1}>{"─".repeat(30)}</text>
+					<text fg={theme.surface2}>{"─".repeat(30)}</text>
 					<box paddingLeft={1} paddingRight={1}>
-						<text fg={theme.overlay0}>
+						<text fg={theme.subtext0}>
 							{selectedIndex + 1}/{files.length}
 						</text>
 					</box>
