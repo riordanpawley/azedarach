@@ -168,11 +168,35 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		)
 
 		/**
+		 * Check if a path looks like a worktree of a project.
+		 * Worktrees are created as siblings: /path/to/project-branchname
+		 * Returns true if cwdPath is a worktree of projectPath.
+		 */
+		const isWorktreeOf = (cwdPath: string, projectPath: string): boolean => {
+			const cwdNorm = pathService.normalize(cwdPath)
+			const projNorm = pathService.normalize(projectPath)
+
+			// Must be in the same parent directory
+			if (pathService.dirname(cwdNorm) !== pathService.dirname(projNorm)) {
+				return false
+			}
+
+			const cwdBase = pathService.basename(cwdNorm)
+			const projBase = pathService.basename(projNorm)
+
+			// Worktree pattern: project-branchname (e.g., azedarach-az-4nge)
+			// cwd basename must start with project basename + hyphen
+			return cwdBase.startsWith(projBase + "-")
+		}
+
+		/**
 		 * Determine initial project based on:
 		 * 1. Check if cwd matches a registered project
-		 * 2. Fall back to default project
-		 * 3. Fall back to first project
-		 * 4. Return undefined if no projects
+		 * 2. Check if cwd is inside a registered project
+		 * 3. Check if cwd is a worktree of a registered project (sibling with project-branch pattern)
+		 * 4. Fall back to default project
+		 * 5. Fall back to first project
+		 * 6. Return undefined if no projects
 		 */
 		const determineInitialProject = (
 			projectList: ReadonlyArray<Project>,
@@ -191,6 +215,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 				cwd.startsWith(pathService.normalize(p.path) + pathService.sep),
 			)
 			if (parentProject) return parentProject
+
+			// Check if cwd is a worktree of a registered project (sibling directory)
+			// Worktrees are created as: /path/to/project-branchname
+			const worktreeProject = projectList.find((p) => isWorktreeOf(cwd, p.path))
+			if (worktreeProject) return worktreeProject
 
 			// Fall back to default project
 			if (defaultName) {

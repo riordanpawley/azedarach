@@ -597,15 +597,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		// ========================================================================
-		// Health Check Fiber - detects dead dev server sessions
+		// Health Check Fiber - detects dead sessions AND re-discovers missed ones
 		// ========================================================================
 
 		/**
-		 * Check all running dev servers and update state if session died
+		 * Check all running dev servers, detect dead ones, and re-discover any missed sessions.
+		 * This ensures we don't lose track of dev servers if startup discovery failed.
 		 */
 		const healthCheckAllServers = Effect.gen(function* () {
 			const servers = yield* SubscriptionRef.get(serversRef)
 
+			// Part 1: Check if existing sessions are still alive
 			for (const [beadId, state] of HashMap.entries(servers)) {
 				if (state.status === "running" && state.tmuxSession) {
 					const hasSession = yield* tmux.hasSession(state.tmuxSession)
@@ -625,6 +627,30 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					}
 				}
 			}
+
+			// Part 2: Re-discover sessions from tmux that we might have missed
+			// This handles cases where startup discovery failed (e.g., timing issues)
+			const projectPath = yield* getEffectiveProjectPath()
+			const discoveredServers = yield* discoverDevServersFromTmux(projectPath)
+
+			// Merge discovered servers into our state (only add, don't overwrite)
+			for (const [beadId, discoveredState] of HashMap.entries(discoveredServers)) {
+				const currentState = HashMap.get(servers, beadId)
+				if (Option.isNone(currentState) || currentState.value.status === "idle") {
+					// This is a new or idle server we didn't know about - add it
+					yield* Effect.log(`Re-discovered dev server for ${beadId} from tmux`)
+					yield* SubscriptionRef.update(serversRef, (s) => HashMap.set(s, beadId, discoveredState))
+
+					// Track the port as allocated
+					if (discoveredState.port) {
+						yield* Ref.update(allocatedPortsRef, (allocated) => {
+							const newAllocated = new Set(allocated)
+							newAllocated.add(discoveredState.port!)
+							return newAllocated
+						})
+					}
+				}
+			}
 		})
 
 		// Start the health check polling fiber
@@ -638,7 +664,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		yield* diagnostics.registerFiberIn(serviceScope, {
 			id: "dev-server-health-check",
 			name: "Dev Server Health",
-			description: "Monitors dev server sessions and detects when they die",
+			description:
+				"Monitors dev server sessions, detects dead ones, and re-discovers missed sessions",
 			fiber: healthCheckFiber,
 		})
 
