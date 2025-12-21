@@ -18,7 +18,7 @@ import type { Issue } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { getChatSessionName } from "../../core/paths.js"
+import { getChatSessionName, getSessionName } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -362,15 +362,17 @@ What would you like to discuss?`
 			 * Perform the actual attach action
 			 *
 			 * Internal helper that does the tmux switch.
+			 * Takes beadId and constructs the full tmux session name.
 			 */
-			const doAttach = (taskId: string) =>
-				attachment.attachExternal(taskId).pipe(
+			const doAttach = (beadId: string) => {
+				const sessionName = getSessionName(beadId)
+				return attachment.attachExternal(sessionName).pipe(
 					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
 								? error._tag === "SessionNotFoundError"
-									? `No session for ${taskId} - press Space+s to start`
+									? `No session for ${beadId} - press Space+s to start`
 									: String((error as { message?: string }).message || error)
 								: String(error)
 						return Effect.gen(function* () {
@@ -379,6 +381,7 @@ What would you like to discuss?`
 						})
 					}),
 				)
+			}
 
 			/**
 			 * Attach to session externally (Space+a)
