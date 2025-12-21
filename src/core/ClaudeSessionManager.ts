@@ -25,7 +25,13 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
-import { getSessionName, getWorktreePath } from "./paths.js"
+import {
+	CLAUDE_SESSION_PREFIX,
+	getProjectName,
+	getSessionName,
+	getWorktreePath,
+	parseSessionName,
+} from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -452,8 +458,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const sessionConfig = yield* appConfig.getSessionConfig()
 						const worktreeConfig = yield* appConfig.getWorktreeConfig()
 
-						// Generate tmux session name
-						const tmuxSessionName = getSessionName(beadId)
+						// Generate tmux session name (includes project name for uniqueness)
+						const tmuxSessionName = getSessionName(projectPath, beadId)
 
 						// Check if tmux session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
@@ -792,22 +798,40 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						)
 
 						// Find Claude tmux sessions that aren't tracked in memory
-						// Session names use "claude-<beadId>" format (see getSessionName in paths.ts)
-						// We look for sessions starting with "claude-" and extract the beadId
+						// Session names use "claude-{projectName}-{beadId}" format (see getSessionName in paths.ts)
+						// We use parseSessionName to extract components and filter by current project
+						const currentProjectName = getProjectName(effectiveProjectPath)
 
 						for (const tmuxSession of tmuxSessions) {
 							// Check if this is a Claude session (has claude- prefix)
-							if (!tmuxSession.name.startsWith("claude-")) continue
+							if (!tmuxSession.name.startsWith(CLAUDE_SESSION_PREFIX)) continue
 
-							// Extract beadId by removing the "claude-" prefix
-							const beadId = tmuxSession.name.slice("claude-".length)
+							// Parse session name to extract project and beadId
+							const parsed = parseSessionName(tmuxSession.name)
+
+							// Handle legacy format: claude-{beadId} (no project name)
+							// This supports migration from old sessions
+							let beadId: string
+							let sessionProjectName: string
+
+							if (parsed) {
+								// New format: claude-{project}-{beadId}
+								beadId = parsed.beadId
+								sessionProjectName = parsed.projectName
+							} else {
+								// Legacy format: claude-{beadId} - extract beadId directly
+								const legacyBeadId = tmuxSession.name.slice(CLAUDE_SESSION_PREFIX.length)
+								const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+								if (!beadIdPattern.test(legacyBeadId)) continue
+								beadId = legacyBeadId
+								sessionProjectName = currentProjectName // Assume current project for legacy
+							}
+
+							// Only recover sessions for the current project
+							if (sessionProjectName !== currentProjectName) continue
 
 							// Skip if already tracked
 							if (HashMap.has(inMemorySessions, beadId)) continue
-
-							// Validate beadId looks right (az-xxx pattern)
-							const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
-							if (!beadIdPattern.test(beadId)) continue
 
 							{
 								const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
@@ -825,7 +849,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 												() => getWorktreePath(effectiveProjectPath, beadId),
 											),
 									),
-									tmuxSessionName: tmuxSession.name, // Full name with "claude-" prefix
+									tmuxSessionName: tmuxSession.name, // Full session name
 									state: Option.getOrElse(
 										Option.map(persistedOpt, (p) => p.state),
 										() => "busy",

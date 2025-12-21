@@ -18,6 +18,7 @@ import type { Issue } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
+import { getChatSessionName } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -321,9 +322,11 @@ Note: You're running with Haiku for fast, cheap discussion. When ready to implem
 What would you like to discuss?`
 					const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
 
-					// Use chat-<beadId> naming to distinguish from work sessions
-					const chatSessionName = `chat-${task.id}`
+					// Get project path for session naming
 					const projectPath = yield* helpers.getProjectPath()
+
+					// Use chat-{project}-{beadId} naming to distinguish from work sessions
+					const chatSessionName = getChatSessionName(projectPath, task.id)
 
 					// Check if chat session already exists
 					const hasSession = yield* tmux.hasSession(chatSessionName)
