@@ -74,6 +74,7 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 | `:` | Enter Command mode (send commands to VC REPL) |
 | `Space` | Enter Action mode (then press action key) |
 | `?` | Show help overlay |
+| `Ctrl-l` | Force full screen redraw |
 | `q` | Quit application |
 | `Esc` | Return to Normal mode / dismiss overlay |
 
@@ -407,12 +408,13 @@ If you don't have tmux sessions running, you'll see errors in the console (not i
 
 ### "The TUI looks corrupted"
 
-**Cause:** OpenTUI rendering issues with certain terminal configurations
+**Cause:** OpenTUI rendering issues with certain terminal configurations, or terminal resize corruption
 
 **Solution:**
-1. Try resizing your terminal
-2. Restart the application
-3. Ensure your terminal supports true color
+1. Press `Ctrl-l` to force a full screen redraw (classic Unix refresh)
+2. Try resizing your terminal
+3. Restart the application
+4. Ensure your terminal supports true color
 
 ---
 
