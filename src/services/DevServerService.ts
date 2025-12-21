@@ -16,12 +16,7 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
-import {
-	DEV_SESSION_PREFIX,
-	getDevSessionName,
-	getProjectName,
-	parseSessionName,
-} from "../core/paths.js"
+import { DEV_SESSION_PREFIX, getDevSessionName, parseSessionName } from "../core/paths.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
@@ -277,16 +272,15 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		 * This enables recovery on startup - tmux holds the source of truth.
 		 *
 		 * Supports both formats:
-		 * - New: dev-{projectName}-{beadId}
+		 * - New: dev-{beadId}
 		 * - Legacy: az-dev-{beadId}
 		 */
 		const discoverDevServersFromTmux = (
-			currentProjectPath: string,
+			_currentProjectPath: string,
 		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				// Get all tmux sessions
 				const allSessions = yield* tmux.listSessions()
-				const currentProjectName = getProjectName(currentProjectPath)
 
 				// Filter to dev server sessions (dev-* or legacy az-dev-* prefix)
 				const devSessions = allSessions.filter(
@@ -298,30 +292,18 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				for (const session of devSessions) {
 					let beadId: string
-					let sessionProjectName: string
 
 					// Try parsing as new format first
 					const parsed = parseSessionName(session.name)
 					if (parsed && parsed.type === "dev") {
-						// New format: dev-{project}-{beadId}
+						// New format: dev-{beadId}
 						beadId = parsed.beadId
-						sessionProjectName = parsed.projectName
 					} else if (session.name.startsWith(LEGACY_DEV_SESSION_PREFIX)) {
 						// Legacy format: az-dev-{beadId}
 						beadId = session.name.slice(LEGACY_DEV_SESSION_PREFIX.length)
-						// For legacy, check project path from tmux option or assume current project
-						const projectPathOpt = yield* tmux.getUserOption(session.name, TMUX_OPT_PROJECT_PATH)
-						if (Option.isSome(projectPathOpt)) {
-							sessionProjectName = getProjectName(projectPathOpt.value)
-						} else {
-							sessionProjectName = currentProjectName // Assume current for legacy without metadata
-						}
 					} else {
 						continue // Unknown format
 					}
-
-					// Only recover sessions for the current project
-					if (sessionProjectName !== currentProjectName) continue
 
 					const metadataOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isSome(metadataOpt)) {
@@ -767,7 +749,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(projectPath, beadId)
+					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
 						devServerConfig.cwd === "."
 							? worktreePath
@@ -900,7 +882,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(projectPath, beadId)
+					const tmuxSession = getDevSessionName(beadId)
 					const cwd =
 						devServerConfig.cwd === "."
 							? worktreePath
