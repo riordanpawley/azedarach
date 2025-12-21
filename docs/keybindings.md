@@ -737,6 +737,55 @@ Opens **difftastic side-by-side diff** in a tmux popup showing all changes since
 |----------|--------|-------------|
 | `Space` `i` | Attach image | Open image attachment overlay (paste or file path) |
 
+### Epic Actions
+
+| Sequence | Action | Description |
+|----------|--------|-------------|
+| `Space` `b` | Break into epic | Use Claude AI to decompose task into parallelizable subtasks |
+
+#### Break into Epic (Space+b)
+
+Converts a task into an epic by using Claude AI to suggest parallelizable child tasks. This is useful when you realize a task is too complex for a single session and should be broken into smaller pieces that can be worked on independently (or in parallel by multiple Claude sessions).
+
+**How it works:**
+
+1. Select a task (must not already be an epic)
+2. Press `Space` `b` to open the Break into Epic overlay
+3. Claude analyzes the task and suggests 2-5 child subtasks
+4. Review the suggestions (navigate with `j`/`k`)
+5. Press `Enter` to confirm or `Esc` to cancel
+6. On confirm:
+   - Child tasks are created and linked to the parent via parent-child dependency
+   - The board refreshes and enters drill-down view for the new epic
+
+**Overlay keyboard:**
+
+| Key | Action |
+|-----|--------|
+| `j` / `↓` | Select next suggestion |
+| `k` / `↑` | Select previous suggestion |
+| `Enter` | Confirm and create subtasks |
+| `Esc` | Cancel and close |
+
+**Example workflow:**
+
+```
+1. Select "Add user authentication" task
+2. Press Space+b
+3. Claude suggests:
+   - "Create database schema for user credentials"
+   - "Implement authentication API endpoints"
+   - "Build login/signup UI components"
+   - "Add authentication E2E tests"
+4. Press Enter to confirm
+5. Now you can spawn parallel Claude sessions on each subtask
+```
+
+**Best for:**
+- Tasks that are too complex for a single session
+- Work that can be parallelized across multiple Claude sessions
+- Breaking down epics into actionable, independent pieces
+
 ### Other Actions
 
 | Sequence | Action | Description |

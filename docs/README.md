@@ -103,7 +103,10 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 | `Space` `h` | Move selected task(s) to previous column |
 | `Space` `l` | Move selected task(s) to next column |
 | `Space` `a` | Attach to session (offers merge if behind main) |
-| `Space` `A` | Attach to session inline (not yet implemented) |
+| `Space` `b` | Break into epic (AI-powered task decomposition) |
+| `Space` `i` | Attach image to task |
+
+See [Keybindings Reference](keybindings.md) for the full list of action mode commands.
 
 ---
 
@@ -183,9 +186,22 @@ Or via CLI:
 bd create --title="User Authentication System" --type=epic
 ```
 
-#### Adding Children to an Epic
+#### Breaking a Task into an Epic (Space+b)
 
-Children are tasks with a parent-child dependency to the epic. Create the dependency:
+The fastest way to create an epic with subtasks is to use **Space+b** on an existing task. Claude AI analyzes the task and suggests parallelizable child tasks:
+
+1. Select a task that's too complex for a single session
+2. Press `Space` `b` to open the Break into Epic overlay
+3. Claude suggests 2-5 child subtasks (review with `j`/`k`)
+4. Press `Enter` to confirm
+5. Child tasks are created and linked automatically
+6. The board enters drill-down view for the new epic
+
+This is ideal when you realize a task should be split up - Claude will suggest how to decompose it for parallel work.
+
+#### Adding Children to an Epic (Manual)
+
+You can also manually add children using the CLI:
 
 ```bash
 # Create a child task
