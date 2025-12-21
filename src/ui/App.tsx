@@ -6,7 +6,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import { useKeyboard } from "@opentui/react"
+import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
 import { killActivePopup } from "../core/BeadEditorService.js"
 import type { DependencyRef, Issue } from "../core/BeadsClient.js"
@@ -210,6 +210,9 @@ export const App = () => {
 	const isOnlineResult = useAtomValue(isOnlineAtom)
 	const isOnline = Result.isSuccess(isOnlineResult) ? isOnlineResult.value : true
 
+	// Renderer access for manual redraw
+	const renderer = useRenderer()
+
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Keyboard Handler - Delegates to KeyboardService
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -218,6 +221,16 @@ export const App = () => {
 		// Ctrl-C: Kill active editor popup (MUST be first - works in any state)
 		if (event.ctrl && event.name === "c") {
 			killActivePopup()
+			return
+		}
+
+		// Ctrl-L: Force redraw (classic Unix terminal refresh)
+		// Useful when terminal resize corrupts the display
+		if (event.ctrl && event.name === "l") {
+			// Clear screen and move cursor to home position
+			process.stdout.write("\x1b[2J\x1b[H")
+			// Request a full re-render
+			renderer.requestRender()
 			return
 		}
 
