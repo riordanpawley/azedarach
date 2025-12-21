@@ -61,29 +61,31 @@ export const showDiffPopupAtom = appRuntime.fn(
 			const tmux = yield* TmuxService
 			const diffService = yield* DiffService
 
-			// Get merge base for accurate comparison
+			// Get merge base for accurate comparison (where branch diverged from base)
 			const mergeBase = yield* diffService.getMergeBase(worktreePath, baseBranch)
 
 			// Build the diff command
-			let diffCommand: string
+			let command: string
 			let title: string
 
 			if (filePath) {
-				// Single file: use difftastic for syntax-aware diff
-				// GIT_EXTERNAL_DIFF makes git invoke difftastic for each file
-				diffCommand = `GIT_EXTERNAL_DIFF="difft --display=side-by-side" git diff ${mergeBase}...HEAD -- "${filePath}"`
+				// Single file: use difftastic for syntax-aware side-by-side diff
+				// DFT_COLOR=always: force colors even when piped
+				// GIT_EXTERNAL_DIFF: make git invoke difftastic for diff rendering
+				// Note: use merge-base directly (two-dot), not ...HEAD (three-dot)
+				command =
+					`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+					`git diff ${mergeBase} -- "${filePath}" | less -RS`
 				title = ` ${filePath} `
 			} else {
-				// All files: use regular git diff with colors (faster than difftastic on many files)
-				diffCommand = `git diff --color=always ${mergeBase}...HEAD -- ':!.beads'`
+				// All files: stat summary first, then difftastic side-by-side
+				// Shows quick overview of what changed before detailed diff
+				command =
+					`git diff ${mergeBase} --stat --color=always -- ':!.beads' && echo "" && ` +
+					`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+					`git diff ${mergeBase} -- ':!.beads' | less -RS`
 				title = " All Changes "
 			}
-
-			// Wrap in less for scrolling and search
-			// -R: interpret ANSI colors
-			// -S: don't wrap long lines (horizontal scroll instead)
-			// +Gg: start at top (less sometimes starts at bottom with piped input)
-			const command = `bash -c '${diffCommand} | less -RS +Gg'`
 
 			yield* tmux.displayPopup({
 				command,
