@@ -1,11 +1,10 @@
 import { useAtomSet } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { useCallback, useEffect, useState } from "react"
-import { changedFilesAtom, fileDiffAtom, fullDiffAtom } from "../atoms/diff.js"
+import { useEffect, useState } from "react"
+import { changedFilesAtom, showDiffPopupAtom } from "../atoms/diff.js"
 import { theme } from "../theme.js"
-import { DiffContent } from "./DiffContent.js"
 import { FilePicker } from "./FilePicker.js"
-import type { DiffViewerState } from "./types.js"
+import type { ChangedFile } from "./types.js"
 
 interface DiffViewerProps {
 	worktreePath: string
@@ -13,150 +12,78 @@ interface DiffViewerProps {
 	onClose: () => void
 }
 
-export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProps) => {
-	// Atom hooks for fetching data
-	const getChangedFiles = useAtomSet(changedFilesAtom, { mode: "promise" })
-	const getFileDiff = useAtomSet(fileDiffAtom, { mode: "promise" })
-	const getFullDiff = useAtomSet(fullDiffAtom, { mode: "promise" })
+interface DiffViewerState {
+	files: ChangedFile[]
+	selectedIndex: number
+	isLoading: boolean
+}
 
-	// Component state
+export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProps) => {
+	// Atom hooks
+	const getChangedFiles = useAtomSet(changedFilesAtom, { mode: "promise" })
+	const showDiffPopup = useAtomSet(showDiffPopupAtom, { mode: "promise" })
+
+	// Component state - simplified, no more diff content
 	const [state, setState] = useState<DiffViewerState>({
-		layout: "split",
-		pickerMode: "fzf",
 		files: [],
 		selectedIndex: 0,
-		filterText: "",
-		currentFile: null,
-		diffContent: "",
-		scrollOffset: 0,
-		focus: "picker",
 		isLoading: true,
 	})
 
-	// Load files and initial diff on mount
+	// Load file list on mount
 	useEffect(() => {
-		const loadInitialData = async () => {
+		const loadFiles = async () => {
 			setState((s) => ({ ...s, isLoading: true }))
-
-			// Load changed files
 			const files = await getChangedFiles({ worktreePath, baseBranch })
-
-			// Load full diff as initial view
-			const diffContent = await getFullDiff({ worktreePath, baseBranch })
-
-			setState((s) => ({
-				...s,
-				files,
-				diffContent,
-				currentFile: null,
-				isLoading: false,
-			}))
+			setState({ files, selectedIndex: 0, isLoading: false })
 		}
+		loadFiles()
+	}, [worktreePath, baseBranch, getChangedFiles])
 
-		loadInitialData()
-	}, [worktreePath, baseBranch, getChangedFiles, getFullDiff])
+	// Show diff for selected file in tmux popup
+	const showFileDiff = async (filePath: string) => {
+		await showDiffPopup({ worktreePath, baseBranch, filePath })
+	}
 
-	// Load diff for selected file
-	const loadFileDiff = useCallback(
-		async (filePath: string) => {
-			setState((s) => ({ ...s, isLoading: true, scrollOffset: 0 }))
-			const diffContent = await getFileDiff({ worktreePath, baseBranch, filePath })
-			setState((s) => ({
-				...s,
-				diffContent,
-				currentFile: filePath,
-				isLoading: false,
-			}))
-		},
-		[worktreePath, baseBranch, getFileDiff],
-	)
-
-	// Load full diff (all files)
-	const loadFullDiff = useCallback(async () => {
-		setState((s) => ({ ...s, isLoading: true, scrollOffset: 0 }))
-		const diffContent = await getFullDiff({ worktreePath, baseBranch })
-		setState((s) => ({
-			...s,
-			diffContent,
-			currentFile: null,
-			isLoading: false,
-		}))
-	}, [worktreePath, baseBranch, getFullDiff])
+	// Show diff for all files in tmux popup
+	const showAllDiff = async () => {
+		await showDiffPopup({ worktreePath, baseBranch })
+	}
 
 	// Keyboard handling
 	useKeyboard((event) => {
-		if (event.name === "escape") {
+		// Close on q or Escape
+		if (event.name === "escape" || event.name === "q") {
 			onClose()
 			return
 		}
 
-		// Navigation in picker
-		if (event.name === "j" && state.focus === "picker") {
+		// Navigation (j/k or up/down arrows)
+		if (event.name === "j" || event.name === "down") {
 			setState((s) => ({
 				...s,
 				selectedIndex: Math.min(s.selectedIndex + 1, s.files.length - 1),
 			}))
-		} else if (event.name === "k" && state.focus === "picker") {
+		} else if (event.name === "k" || event.name === "up") {
 			setState((s) => ({
 				...s,
 				selectedIndex: Math.max(s.selectedIndex - 1, 0),
 			}))
 		}
 
-		// Scroll in diff view
-		if (event.name === "j" && state.focus === "diff") {
-			setState((s) => ({
-				...s,
-				scrollOffset: Math.min(s.scrollOffset + 1, s.diffContent.split("\n").length - 1),
-			}))
-		} else if (event.name === "k" && state.focus === "diff") {
-			setState((s) => ({
-				...s,
-				scrollOffset: Math.max(s.scrollOffset - 1, 0),
-			}))
-		}
-
-		// Toggle focus between panels
-		if (event.name === "h") {
-			setState((s) => ({ ...s, focus: "picker" }))
-		} else if (event.name === "l") {
-			setState((s) => ({ ...s, focus: "diff" }))
-		}
-
-		// Toggle picker visibility (maximize diff)
-		if (event.name === "f") {
-			setState((s) => {
-				const layouts: DiffViewerState["layout"][] = ["split", "diff-only", "picker-only"]
-				const currentIndex = layouts.indexOf(s.layout)
-				const nextLayout = layouts[(currentIndex + 1) % layouts.length]
-				return { ...s, layout: nextLayout }
-			})
-		}
-
-		// Tab to toggle picker mode (fzf/tree)
-		if (event.name === "tab") {
-			setState((s) => ({
-				...s,
-				pickerMode: s.pickerMode === "fzf" ? "tree" : "fzf",
-			}))
-		}
-
-		// Enter to select file and load its diff
-		if (event.name === "return" && state.focus === "picker") {
+		// Enter to view selected file diff in tmux popup
+		if (event.name === "return") {
 			const selectedFile = state.files[state.selectedIndex]
 			if (selectedFile) {
-				loadFileDiff(selectedFile.path)
+				showFileDiff(selectedFile.path)
 			}
 		}
 
-		// 'a' to show all files diff
-		if (event.name === "a" && state.focus === "picker") {
-			loadFullDiff()
+		// 'a' to view all files diff in tmux popup
+		if (event.name === "a") {
+			showAllDiff()
 		}
 	})
-
-	const showPicker = state.layout === "split" || state.layout === "picker-only"
-	const showDiff = state.layout === "split" || state.layout === "diff-only"
 
 	return (
 		<box
@@ -165,65 +92,41 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 			right={0}
 			top={0}
 			bottom={0}
-			backgroundColor={`${theme.crust}EE`}
+			backgroundColor={`${theme.crust}CC`}
 			alignItems="center"
 			justifyContent="center"
 		>
-			<box flexDirection="column" width="95%" height="95%">
+			<box flexDirection="column" width="50%" height="80%" backgroundColor={theme.base}>
 				{/* Header */}
 				<box paddingLeft={1} paddingBottom={1}>
 					<text fg={theme.mauve}>
-						Diff: {baseBranch}...HEAD <span fg={theme.overlay0}>({worktreePath})</span>
+						Changed Files <span fg={theme.subtext0}>({baseBranch}...HEAD)</span>
 					</text>
 				</box>
 
-				{/* Main content area */}
-				<box flexGrow={1} flexDirection="row" gap={1}>
-					{/* File picker - 30% width when shown */}
-					{showPicker && (
-						<box width="30%">
-							<FilePicker
-								files={state.files}
-								selectedIndex={state.selectedIndex}
-								filterText={state.filterText}
-								mode={state.pickerMode}
-								focused={state.focus === "picker"}
-								height={100}
-							/>
-						</box>
-					)}
-
-					{/* Diff content - remaining width */}
-					{showDiff && (
-						<box flexGrow={1}>
-							<DiffContent
-								content={state.diffContent}
-								scrollOffset={state.scrollOffset}
-								height={100}
-								width={100}
-								focused={state.focus === "diff"}
-								currentFile={state.currentFile}
-								isLoading={state.isLoading}
-							/>
-						</box>
-					)}
+				{/* File picker - full width */}
+				<box flexGrow={1}>
+					<FilePicker
+						files={state.files}
+						selectedIndex={state.selectedIndex}
+						filterText=""
+						mode="fzf"
+						focused={true}
+						height={100}
+					/>
 				</box>
 
 				{/* Status bar with keybindings */}
-				<text fg={theme.surface1}>{"─".repeat(80)}</text>
+				<text fg={theme.surface2}>{"─".repeat(60)}</text>
 				<box paddingLeft={1} paddingRight={1}>
-					<text fg={theme.overlay0}>
-						<span fg={theme.blue}>h/l</span>
-						<span> focus </span>
-						<span fg={theme.blue}>j/k</span>
+					<text fg={theme.subtext0}>
+						<span fg={theme.blue}>↑/↓</span>
 						<span> navigate </span>
 						<span fg={theme.blue}>Enter</span>
-						<span> select </span>
+						<span> view file </span>
 						<span fg={theme.blue}>a</span>
-						<span> all </span>
-						<span fg={theme.blue}>f</span>
-						<span> layout </span>
-						<span fg={theme.blue}>Esc</span>
+						<span> all files </span>
+						<span fg={theme.blue}>q</span>
 						<span> close</span>
 					</text>
 				</box>
