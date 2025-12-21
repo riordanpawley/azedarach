@@ -66,21 +66,19 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					// Add Ctrl-a Tab keybinding to toggle between Claude and dev server sessions
 					// The script determines if we're in a dev session (az-dev-xxx) or Claude session (xxx)
 					// and switches to the counterpart if it exists, otherwise shows a message
-					const toggleScript = [
-						'current=$(tmux display-message -p "#S")',
-						'if [ "${current#az-dev-}" != "$current" ]; then',
-						'  target="${current#az-dev-}"',
-						'  msg="No Claude session"',
-						"else",
-						'  target="az-dev-$current"',
-						'  msg="No dev server (Space+r to start)"',
-						"fi",
-						'if tmux has-session -t "$target" 2>/dev/null; then',
-						'  tmux switch-client -t "$target"',
-						"else",
-						'  tmux display-message "$msg"',
-						"fi",
-					].join("; ")
+					// Note: Shell syntax requires no semicolon after 'then', 'else', or before 'fi'
+					const toggleScript =
+						'current=$(tmux display-message -p "#S"); ' +
+						'if [ "${current#az-dev-}" != "$current" ]; then ' +
+						'target="${current#az-dev-}"; msg="No Claude session"; ' +
+						"else " +
+						'target="az-dev-$current"; msg="No dev server (Space+r to start)"; ' +
+						"fi; " +
+						'if tmux has-session -t "$target" 2>/dev/null; then ' +
+						'tmux switch-client -t "$target"; ' +
+						"else " +
+						'tmux display-message "$msg"; ' +
+						"fi"
 					yield* runTmux(["bind-key", "-T", "prefix", "Tab", "run-shell", toggleScript])
 
 					// Set azedarach session options for state tracking
