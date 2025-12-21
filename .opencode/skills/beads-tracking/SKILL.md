@@ -1,6 +1,13 @@
 ---
 name: beads-tracking
-description: CLI-based patterns for multi-session task persistence with beads issue tracker
+description: CLI-based patterns for multi-session task persistence with beads issue tracker. Provides workflow guidance for creating, updating, and closing issues.
+license: MIT
+allowed-tools:
+  - read
+  - bash
+metadata:
+  version: "1.0"
+  source: ".claude/skills/workflow/beads-tracking.skill.md"
 ---
 
 <!-- This skill references the Claude Code skill for full content -->
