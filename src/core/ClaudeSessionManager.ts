@@ -32,6 +32,7 @@ import {
 	parseSessionName,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
+import { escapeForShellDoubleQuotes } from "./shell.js"
 import {
 	type TmuxError,
 	TmuxService,
@@ -465,8 +466,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Build Claude command configuration (shared between acquire and use phases)
 						const { command: claudeCommand, tmuxPrefix } = sessionConfig
-						const escapeForShell = (s: string) =>
-							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 						const modelFlag = model ? ` --model ${model}` : ""
 						const dangerousFlag = dangerouslySkipPermissions
 							? " --dangerously-skip-permissions"
@@ -481,7 +480,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								: ""
 
 						const claudeWithOptions = initialPrompt
-							? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShell(initialPrompt)}"`
+							? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShellDoubleQuotes(initialPrompt)}"`
 							: `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag}`
 
 						// Get initCommands from current project config
