@@ -14,6 +14,7 @@
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
+import type { Issue } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
@@ -21,6 +22,52 @@ import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Build the bead context section for prompt injection
+ *
+ * Constructs a formatted string containing all available bead information
+ * (description, design notes, acceptance criteria, dependencies) so Claude
+ * has full context without needing to run `bd show`.
+ */
+function buildBeadContext(task: Issue): string {
+	const sections: string[] = []
+
+	// Description section
+	if (task.description?.trim()) {
+		sections.push(`## Description\n${task.description.trim()}`)
+	}
+
+	// Design notes section
+	if (task.design?.trim()) {
+		sections.push(`## Design Notes\n${task.design.trim()}`)
+	}
+
+	// Acceptance criteria section
+	if (task.acceptance?.trim()) {
+		sections.push(`## Acceptance Criteria\n${task.acceptance.trim()}`)
+	}
+
+	// Notes section (if present and different from design)
+	if (task.notes?.trim()) {
+		sections.push(`## Notes\n${task.notes.trim()}`)
+	}
+
+	// Dependencies section (blockers)
+	const blockers = task.dependencies?.filter(
+		(d) => d.dependency_type === "blocks" && d.status !== "closed",
+	)
+	if (blockers && blockers.length > 0) {
+		const blockerList = blockers.map((b) => `- ${b.id}: ${b.title} (${b.status})`).join("\n")
+		sections.push(`## Blocked By\n${blockerList}`)
+	}
+
+	return sections.join("\n\n")
+}
 
 // ============================================================================
 // Service Definition
@@ -67,7 +114,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 */
 			const startSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -105,7 +152,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 */
 			const startSessionWithPrompt = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -121,19 +168,21 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Build a clear prompt that explicitly identifies this as a beads issue.
+					// The prompt injects full bead context (description, design, acceptance criteria)
+					// directly so Claude doesn't need to run `bd show`.
+					//
 					// The prompt encourages Claude to:
-					// 1. Read the full bead context via `bd show`
-					// 2. Ask clarifying questions if anything is unclear
-					// 3. Update the bead with design/acceptance criteria for future sessions
+					// 1. Ask clarifying questions if anything is unclear
+					// 2. Update the bead with design notes for future sessions
 					//
 					// This ensures beads become self-sufficient over time - any Claude session
 					// can pick them up without extra research or context from the user.
+					const beadContext = buildBeadContext(task)
 					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-
+${beadContext ? `\n${beadContext}\n` : ""}
 Before starting implementation:
-1. Run \`bd show ${task.id}\` to read the full description, design notes, and acceptance criteria
-2. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
-3. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
+1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
+2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
 
 Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
@@ -178,7 +227,7 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 */
 			const startSessionDangerous = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
@@ -194,16 +243,13 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Build prompt (same as startSessionWithPrompt)
-					// The prompt encourages Claude to:
-					// 1. Read the full bead context via `bd show`
-					// 2. Ask clarifying questions if anything is unclear
-					// 3. Update the bead with design/acceptance criteria for future sessions
+					// Injects full bead context directly so Claude doesn't need to run `bd show`.
+					const beadContext = buildBeadContext(task)
 					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-
+${beadContext ? `\n${beadContext}\n` : ""}
 Before starting implementation:
-1. Run \`bd show ${task.id}\` to read the full description, design notes, and acceptance criteria
-2. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
-3. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
+1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
+2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
 
 Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
@@ -250,7 +296,7 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 */
 			const chatAboutTask = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Build the Claude command with Haiku model and initial prompt
@@ -259,10 +305,10 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const escapeForShell = (s: string) =>
 						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
+					// Inject bead context directly for chat sessions too
+					const beadContext = buildBeadContext(task)
 					const prompt = `Let's chat about bead ${task.id}: ${task.title}
-
-Run \`bd show ${task.id}\` to see the current state.
-
+${beadContext ? `\n${beadContext}\n` : ""}
 Help me with one of:
 - Clarifying requirements or scope
 - Improving the description so any Claude session could pick it up
@@ -347,7 +393,7 @@ What would you like to discuss?`
 			 */
 			const attachExternal = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Get current project path
@@ -411,7 +457,7 @@ What would you like to discuss?`
 			 */
 			const attachInline = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					yield* attachment
@@ -426,7 +472,7 @@ What would you like to discuss?`
 			 */
 			const pauseSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					if (task.sessionState !== "busy") {
@@ -447,7 +493,7 @@ What would you like to discuss?`
 			 */
 			const resumeSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					if (task.sessionState !== "paused") {
@@ -470,7 +516,7 @@ What would you like to discuss?`
 			 */
 			const stopSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					// Check if task has an operation in progress
