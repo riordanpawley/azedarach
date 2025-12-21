@@ -64,13 +64,27 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
 					// Add Ctrl-a Tab keybinding to toggle between Claude and dev server sessions
-					// The script determines if we're in a dev session (az-dev-xxx) or Claude session (xxx)
-					// and switches to the counterpart if it exists, otherwise shows a message
+					// Session naming format: {type}-{projectName}-{beadId}
+					// - Claude sessions: claude-{projectName}-{beadId}
+					// - Dev servers: dev-{projectName}-{beadId}
+					// Also supports legacy format: az-dev-{beadId} -> claude-{beadId}
 					const toggleScript = [
 						'current=$(tmux display-message -p "#S")',
-						'if [ "${current#az-dev-}" != "$current" ]; then',
+						// Check for new format: dev-{project}-{beadId}
+						'if [ "${current#dev-}" != "$current" ]; then',
+						'  rest="${current#dev-}"',
+						'  target="claude-$rest"',
+						'  msg="No Claude session"',
+						// Check for new format: claude-{project}-{beadId}
+						'elif [ "${current#claude-}" != "$current" ]; then',
+						'  rest="${current#claude-}"',
+						'  target="dev-$rest"',
+						'  msg="No dev server (Space+r to start)"',
+						// Check for legacy format: az-dev-{beadId}
+						'elif [ "${current#az-dev-}" != "$current" ]; then',
 						'  target="${current#az-dev-}"',
 						'  msg="No Claude session"',
+						// Legacy Claude format: claude-{beadId} (no project name)
 						"else",
 						'  target="az-dev-$current"',
 						'  msg="No dev server (Space+r to start)"',

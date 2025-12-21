@@ -16,6 +16,12 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
+import {
+	DEV_SESSION_PREFIX,
+	getDevSessionName,
+	getProjectName,
+	parseSessionName,
+} from "../core/paths.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
@@ -28,8 +34,8 @@ import { ProjectService } from "./ProjectService.js"
 // Constants
 // ============================================================================
 
-/** tmux session name prefix for dev servers */
-const DEV_SESSION_PREFIX = "az-dev-"
+/** Legacy tmux session name prefix for dev servers (for migration support) */
+const LEGACY_DEV_SESSION_PREFIX = "az-dev-"
 
 /** How often to poll for port detection (ms) */
 const PORT_POLL_INTERVAL = 500
@@ -109,10 +115,7 @@ export class NoWorktreeError extends Data.TaggedError("NoWorktreeError")<{
 // Helper Functions
 // ============================================================================
 
-/**
- * Get tmux session name for a bead's dev server
- */
-const getDevSessionName = (beadId: string): string => `${DEV_SESSION_PREFIX}${beadId}`
+// Note: getDevSessionName is imported from paths.ts
 
 /**
  * Schema for parsing DevServerStatus from string
@@ -272,6 +275,10 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		 * Discover all running dev server sessions from tmux for the current project.
 		 * Filters by project path to support multiple projects running Azedarach.
 		 * This enables recovery on startup - tmux holds the source of truth.
+		 *
+		 * Supports both formats:
+		 * - New: dev-{projectName}-{beadId}
+		 * - Legacy: az-dev-{beadId}
 		 */
 		const discoverDevServersFromTmux = (
 			currentProjectPath: string,
@@ -279,24 +286,45 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			Effect.gen(function* () {
 				// Get all tmux sessions
 				const allSessions = yield* tmux.listSessions()
+				const currentProjectName = getProjectName(currentProjectPath)
 
-				// Filter to dev server sessions (az-dev-* prefix)
-				const devSessions = allSessions.filter((s) => s.name.startsWith(DEV_SESSION_PREFIX))
+				// Filter to dev server sessions (dev-* or legacy az-dev-* prefix)
+				const devSessions = allSessions.filter(
+					(s) =>
+						s.name.startsWith(DEV_SESSION_PREFIX) || s.name.startsWith(LEGACY_DEV_SESSION_PREFIX),
+				)
 
 				let result = HashMap.empty<string, DevServerState>()
 
 				for (const session of devSessions) {
-					// Check if this session belongs to current project
-					const projectPathOpt = yield* tmux.getUserOption(session.name, TMUX_OPT_PROJECT_PATH)
-					if (Option.isNone(projectPathOpt) || projectPathOpt.value !== currentProjectPath) {
-						// Skip sessions from other projects (or legacy sessions without project path)
-						continue
+					let beadId: string
+					let sessionProjectName: string
+
+					// Try parsing as new format first
+					const parsed = parseSessionName(session.name)
+					if (parsed && parsed.type === "dev") {
+						// New format: dev-{project}-{beadId}
+						beadId = parsed.beadId
+						sessionProjectName = parsed.projectName
+					} else if (session.name.startsWith(LEGACY_DEV_SESSION_PREFIX)) {
+						// Legacy format: az-dev-{beadId}
+						beadId = session.name.slice(LEGACY_DEV_SESSION_PREFIX.length)
+						// For legacy, check project path from tmux option or assume current project
+						const projectPathOpt = yield* tmux.getUserOption(session.name, TMUX_OPT_PROJECT_PATH)
+						if (Option.isSome(projectPathOpt)) {
+							sessionProjectName = getProjectName(projectPathOpt.value)
+						} else {
+							sessionProjectName = currentProjectName // Assume current for legacy without metadata
+						}
+					} else {
+						continue // Unknown format
 					}
+
+					// Only recover sessions for the current project
+					if (sessionProjectName !== currentProjectName) continue
 
 					const metadataOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isSome(metadataOpt)) {
-						// Extract beadId from session name (az-dev-xxx -> xxx)
-						const beadId = session.name.slice(DEV_SESSION_PREFIX.length)
 						result = HashMap.set(result, beadId, metadataOpt.value)
 					}
 				}
@@ -739,7 +767,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(beadId)
+					const tmuxSession = getDevSessionName(projectPath, beadId)
 					const cwd =
 						devServerConfig.cwd === "."
 							? worktreePath
@@ -872,7 +900,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(beadId)
+					const tmuxSession = getDevSessionName(projectPath, beadId)
 					const cwd =
 						devServerConfig.cwd === "."
 							? worktreePath
