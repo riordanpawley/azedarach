@@ -25,6 +25,42 @@ import * as Schema from "effect/Schema"
 export const CURRENT_CONFIG_VERSION = 2
 
 // ============================================================================
+// CLI Tool Configuration
+// ============================================================================
+
+/**
+ * Supported CLI tools for AI coding assistance
+ *
+ * - claude: Claude Code (Anthropic's official CLI)
+ * - opencode: OpenCode (SST's open-source alternative)
+ */
+export const CliToolSchema = Schema.Literal("claude", "opencode")
+export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
+
+/**
+ * Model configuration for AI sessions
+ *
+ * Allows configuring which models to use for different session types.
+ * Model format depends on the CLI tool:
+ * - Claude: Short names (haiku, sonnet, opus)
+ * - OpenCode: Provider/model format (anthropic/claude-sonnet, openai/gpt-4o)
+ */
+const ModelConfigSchema = Schema.Struct({
+	/**
+	 * Default model for regular sessions (Space+s, Space+S)
+	 * If not set, uses the CLI tool's default model.
+	 */
+	default: Schema.optional(Schema.String),
+
+	/**
+	 * Model for chat sessions (Space+c)
+	 * Typically a faster/cheaper model for quick interactions.
+	 * Default: "haiku" for Claude, "anthropic/claude-haiku" for OpenCode
+	 */
+	chat: Schema.optional(Schema.String),
+})
+
+// ============================================================================
 // Nested Config Schemas
 // ============================================================================
 
@@ -457,6 +493,8 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 	// Strip legacy fields to match CurrentConfig
 	return {
 		$schema: CURRENT_CONFIG_VERSION,
+		cliTool: current.cliTool,
+		model: current.model,
 		worktree: current.worktree,
 		git: current.git,
 		session: current.session,
@@ -493,6 +531,23 @@ const RawConfigSchema = Schema.Struct({
 	/** Config version - undefined/1 for legacy, 2+ for current */
 	$schema: Schema.optional(Schema.Number),
 
+	/**
+	 * CLI tool to use for AI sessions (default: "claude")
+	 *
+	 * Applies to NEW sessions only - existing sessions are not affected.
+	 * - "claude": Claude Code (Anthropic's official CLI)
+	 * - "opencode": OpenCode (SST's open-source alternative)
+	 */
+	cliTool: Schema.optional(CliToolSchema),
+
+	/**
+	 * Model configuration for AI sessions
+	 *
+	 * Allows setting default and chat models.
+	 * Model format depends on the CLI tool selected.
+	 */
+	model: Schema.optional(ModelConfigSchema),
+
 	worktree: Schema.optional(WorktreeConfigSchema),
 	git: Schema.optional(GitConfigSchema),
 	session: Schema.optional(SessionConfigSchema),
@@ -522,6 +577,8 @@ const RawConfigSchema = Schema.Struct({
  */
 const CurrentConfigSchema = Schema.Struct({
 	$schema: Schema.optional(Schema.Number),
+	cliTool: Schema.optional(CliToolSchema),
+	model: Schema.optional(ModelConfigSchema),
 	worktree: Schema.optional(WorktreeConfigSchema),
 	git: Schema.optional(GitConfigSchema),
 	session: Schema.optional(SessionConfigSchema),
@@ -599,3 +656,6 @@ export type PortConfig = Schema.Schema.Type<typeof PortConfigSchema>
 
 /** Dev server config section type */
 export type DevServerConfig = Schema.Schema.Type<typeof DevServerConfigSchema>
+
+/** Model config section type */
+export type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>

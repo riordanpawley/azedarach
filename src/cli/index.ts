@@ -12,7 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import { CLAUDE_SESSION_PREFIX } from "../core/paths.js"
+import { AI_SESSION_PREFIXES } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -307,23 +307,30 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 }
 
 /**
- * Find a Claude tmux session by beadId
+ * Find an AI tool tmux session by beadId
  *
- * Session names use format: claude-{beadId}
- * Returns null if session doesn't exist.
+ * Session names use format: {tool}-{beadId} (e.g., claude-az-123, opencode-az-123)
+ * Checks all AI tool prefixes and returns the first match.
+ * Returns null if no session exists.
  */
-const findClaudeSessionByBeadId = (beadId: string) =>
+const findAiSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
-		// Session name is simply claude-{beadId}
-		const expectedSessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
+		// Try each AI tool prefix to find an existing session
+		for (const prefix of AI_SESSION_PREFIXES) {
+			const expectedSessionName = `${prefix}${beadId}`
 
-		// Check if the session exists
-		const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
-		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
-			Effect.catchAll(() => Effect.succeed(1)),
-		)
+			// Check if the session exists
+			const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
+			const exitCode = yield* PlatformCommand.exitCode(command).pipe(
+				Effect.catchAll(() => Effect.succeed(1)),
+			)
 
-		return exitCode === 0 ? expectedSessionName : null
+			if (exitCode === 0) {
+				return expectedSessionName
+			}
+		}
+
+		return null
 	})
 
 /**
@@ -352,7 +359,7 @@ const notifyHandler = (args: {
 		const status = mapEventToStatus(args.event)
 
 		// Find the session by beadId (handles both new and legacy naming formats)
-		const sessionName = yield* findClaudeSessionByBeadId(args.beadId)
+		const sessionName = yield* findAiSessionByBeadId(args.beadId)
 		if (!sessionName) {
 			if (args.verbose) {
 				yield* Console.log(`No session found for ${args.beadId}`)

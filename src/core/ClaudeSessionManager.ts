@@ -25,10 +25,12 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
+import { type CliToolName, getToolDefinition } from "./CliToolRegistry.js"
 import {
-	CLAUDE_SESSION_PREFIX,
-	getSessionName,
+	AI_SESSION_PREFIXES,
+	getSessionNameForTool,
 	getWorktreePath,
+	isAiToolSession,
 	parseSessionName,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
@@ -453,39 +455,43 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
 						// No additional copying needed here.
 
-						// Get session and worktree config from current project
+						// Get session, worktree, CLI tool, and model config from current project
 						const sessionConfig = yield* appConfig.getSessionConfig()
 						const worktreeConfig = yield* appConfig.getWorktreeConfig()
+						const cliTool = yield* appConfig.getCliTool()
+						const modelConfig = yield* appConfig.getModelConfig()
 
-						// Generate tmux session name
-						const tmuxSessionName = getSessionName(beadId)
+						// Get the tool definition for command building
+						const toolDef = getToolDefinition(cliTool)
+
+						// Generate tmux session name using tool-specific prefix
+						const tmuxSessionName = getSessionNameForTool(beadId, cliTool)
 
 						// Check if tmux session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
-						// Build Claude command configuration (shared between acquire and use phases)
-						const { command: claudeCommand, tmuxPrefix } = sessionConfig
-						const escapeForShell = (s: string) =>
-							s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
-						const modelFlag = model ? ` --model ${model}` : ""
-						const dangerousFlag = dangerouslySkipPermissions
-							? " --dangerously-skip-permissions"
-							: ""
-
-						// Build settings object for --settings flag (consolidates all session settings)
+						// Build session settings object (for tools that support it, like Claude)
 						const sessionSettings: Record<string, unknown> = {}
 						if (autoCompact) sessionSettings.autoCompactEnabled = true
-						const settingsFlag =
-							Object.keys(sessionSettings).length > 0
-								? ` --settings '${JSON.stringify(sessionSettings)}'`
-								: ""
 
-						const claudeWithOptions = initialPrompt
-							? `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag} "${escapeForShell(initialPrompt)}"`
-							: `${claudeCommand}${modelFlag}${dangerousFlag}${settingsFlag}`
+						// Determine which model to use:
+						// 1. Explicitly passed model (from StartSessionOptions)
+						// 2. Config model.default
+						// 3. Tool's default (undefined = let tool decide)
+						const effectiveModel = model ?? modelConfig.default
 
-						// Get initCommands from current project config
-						const initCommands = worktreeConfig.initCommands
+						// Build command using the CLI tool registry
+						const commandWithOptions = toolDef.buildCommand({
+							initialPrompt,
+							model: effectiveModel,
+							dangerouslySkipPermissions,
+							sessionSettings,
+						})
+
+						// Get initCommands: merge worktree config + tool-specific init commands
+						const toolInitCommands = toolDef.getInitCommands()
+						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
+						const { tmuxPrefix } = sessionConfig
 
 						// Use acquireUseRelease to ensure atomicity:
 						// - acquire: Create tmux session + update bead status (both are "resources")
@@ -509,7 +515,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 										sessionName: tmuxSessionName,
 										worktreePath: worktree.path,
 										projectPath,
-										command: claudeWithOptions,
+										command: commandWithOptions,
 										tmuxPrefix,
 										initCommands,
 									})
@@ -796,15 +802,18 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							worktrees.map((wt) => [wt.beadId, wt] as const),
 						)
 
-						// Find Claude tmux sessions that aren't tracked in memory
-						// Session names use "claude-{beadId}" format (see getSessionName in paths.ts)
+						// Find AI tool tmux sessions (claude or opencode) that aren't tracked in memory
+						// Session names use "{tool}-{beadId}" format (see getSessionNameForTool in paths.ts)
 						for (const tmuxSession of tmuxSessions) {
-							// Check if this is a Claude session (has claude- prefix)
-							if (!tmuxSession.name.startsWith(CLAUDE_SESSION_PREFIX)) continue
+							// Check if this is an AI tool session (claude-* or opencode-*)
+							const isAiSession = AI_SESSION_PREFIXES.some((prefix) =>
+								tmuxSession.name.startsWith(prefix),
+							)
+							if (!isAiSession) continue
 
-							// Parse session name to extract beadId
+							// Parse session name to extract beadId and type
 							const parsed = parseSessionName(tmuxSession.name)
-							if (!parsed) continue
+							if (!parsed || !isAiToolSession(parsed.type)) continue
 
 							const beadId = parsed.beadId
 

@@ -20,7 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { CLAUDE_SESSION_PREFIX, parseSessionName } from "./paths.js"
+import { AI_SESSION_PREFIXES, isAiToolSession, parseSessionName } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -138,13 +138,21 @@ export interface TmuxSessionMonitorService {
  * }).pipe(Effect.provide(TmuxSessionMonitor.Default))
  * ```
  */
+/**
+ * Previous session state for change detection
+ */
+interface PreviousSessionState {
+	readonly status: TmuxStatus
+	readonly sessionName: string
+}
+
 export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("TmuxSessionMonitor", {
 	dependencies: [DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
 
-		// Track previous state to detect changes
-		const previousStateRef = yield* Ref.make<Map<string, TmuxStatus>>(new Map())
+		// Track previous state to detect changes (beadId → {status, sessionName})
+		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
 
 		/**
 		 * List all tmux sessions starting with "claude-"
@@ -168,7 +176,10 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				return output
 					.split("\n")
 					.map((line) => line.trim())
-					.filter((line) => line.startsWith(CLAUDE_SESSION_PREFIX))
+					.filter((line) =>
+						// Filter for any AI tool session (claude-* or opencode-*)
+						AI_SESSION_PREFIXES.some((prefix) => line.startsWith(prefix)),
+					)
 					.map((line) => {
 						const [name, createdStr] = line.split("|")
 						return {
@@ -208,25 +219,15 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * Extract bead ID from session name
 		 *
-		 * Handles both formats:
-		 * - New: claude-{projectName}-{beadId} → extracts beadId
-		 * - Legacy: claude-{beadId} → extracts beadId (when beadId has 2 parts like "az-123")
+		 * Handles session names for any AI tool (claude or opencode):
+		 * - claude-{beadId} → extracts beadId
+		 * - opencode-{beadId} → extracts beadId
 		 */
 		const extractBeadId = (sessionName: string): string | null => {
-			// Try new format first using parseSessionName
+			// Use parseSessionName which handles all AI tool prefixes
 			const parsed = parseSessionName(sessionName)
-			if (parsed && parsed.type === "claude") {
+			if (parsed && isAiToolSession(parsed.type)) {
 				return parsed.beadId
-			}
-
-			// Fallback: legacy format claude-{beadId} where beadId is like "az-123"
-			if (sessionName.startsWith(CLAUDE_SESSION_PREFIX)) {
-				const rest = sessionName.slice(CLAUDE_SESSION_PREFIX.length)
-				// Check if it looks like a bead ID (prefix-suffix pattern)
-				const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
-				if (beadIdPattern.test(rest)) {
-					return rest
-				}
 			}
 
 			return null
@@ -329,16 +330,19 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 			Effect.gen(function* () {
 				// Initial poll to populate state
 				const initialSessions = yield* listSessions()
-				const initialMap = new Map<string, TmuxStatus>()
+				const initialMap = new Map<string, PreviousSessionState>()
 				for (const session of initialSessions) {
-					initialMap.set(session.beadId, session.status)
+					initialMap.set(session.beadId, {
+						status: session.status,
+						sessionName: session.sessionName,
+					})
 				}
 				yield* Ref.set(previousStateRef, initialMap)
 
 				// Log initial state
 				if (initialSessions.length > 0) {
 					yield* Effect.log(
-						`TmuxSessionMonitor: Found ${initialSessions.length} active Claude sessions`,
+						`TmuxSessionMonitor: Found ${initialSessions.length} active AI sessions`,
 					)
 				}
 
@@ -346,31 +350,34 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				const pollerFiber = yield* Effect.gen(function* () {
 					const sessions = yield* listSessions()
 					const previousState = yield* Ref.get(previousStateRef)
-					const newState = new Map<string, TmuxStatus>()
+					const newState = new Map<string, PreviousSessionState>()
 
 					for (const session of sessions) {
-						newState.set(session.beadId, session.status)
+						newState.set(session.beadId, {
+							status: session.status,
+							sessionName: session.sessionName,
+						})
 
-						const prevStatus = previousState.get(session.beadId)
-						if (prevStatus !== session.status) {
+						const prevState = previousState.get(session.beadId)
+						if (prevState?.status !== session.status) {
 							// State changed - call handler
 							yield* Effect.log(
-								`TmuxSessionMonitor: ${session.beadId} status changed: ${prevStatus ?? "none"} → ${session.status}`,
+								`TmuxSessionMonitor: ${session.beadId} status changed: ${prevState?.status ?? "none"} → ${session.status}`,
 							)
 							yield* handler(session)
 						}
 					}
 
 					// Check for sessions that disappeared (session ended)
-					for (const beadId of previousState.keys()) {
+					for (const [beadId, prevState] of previousState.entries()) {
 						if (!newState.has(beadId)) {
 							// Session disappeared - treat as idle
-							// createdAt is 0 and paths are null since we can't query a dead session
+							// Use the sessionName we stored, createdAt is 0 and paths are null
 							yield* Effect.log(`TmuxSessionMonitor: ${beadId} session ended`)
 							yield* handler({
 								beadId,
 								status: "idle",
-								sessionName: `${CLAUDE_SESSION_PREFIX}${beadId}`,
+								sessionName: prevState.sessionName,
 								createdAt: 0,
 								worktreePath: null,
 								projectPath: null,
