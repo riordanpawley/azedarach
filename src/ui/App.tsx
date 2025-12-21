@@ -36,6 +36,7 @@ import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
+import { DiffViewer } from "./DiffViewer/index.js"
 import { EpicHeader } from "./EpicHeader.js"
 import { FilterMenu } from "./FilterMenu.js"
 import { HelpOverlay } from "./HelpOverlay.js"
@@ -82,6 +83,7 @@ export const App = () => {
 	const { toasts, dismissToast } = useToasts()
 	const {
 		dismiss: dismissOverlay,
+		currentOverlay,
 		showingHelp,
 		showingDetail,
 		showingCreate,
@@ -92,6 +94,7 @@ export const App = () => {
 		showingMergeChoice,
 		showingDiagnostics,
 		showingProjectSelector,
+		showingDiffViewer,
 	} = useOverlays()
 
 	const {
@@ -343,6 +346,15 @@ export const App = () => {
 
 			{/* Diagnostics overlay */}
 			{showingDiagnostics && <DiagnosticsOverlay />}
+
+			{/* Diff viewer overlay */}
+			{showingDiffViewer && currentOverlay?._tag === "diffViewer" && (
+				<DiffViewer
+					worktreePath={currentOverlay.worktreePath}
+					baseBranch={currentOverlay.baseBranch}
+					onClose={dismissOverlay}
+				/>
+			)}
 
 			{/* Action palette */}
 			{isAction && (
