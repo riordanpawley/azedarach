@@ -902,15 +902,18 @@ The UI uses the Catppuccin Mocha color palette:
 
 ## tmux Navigation
 
-Azedarach registers a global tmux keybinding for session navigation:
+Azedarach registers global tmux keybindings for session navigation:
 
 | Key | Action | Notes |
 |-----|--------|-------|
 | `Ctrl-a Ctrl-a` | Return to az | Double-tap prefix from any Claude session |
+| `Ctrl-a Tab` | Toggle Claude ↔ Dev Server | Quick switch between related sessions |
 
 **Navigation flow:**
 1. From az: `Space` `a` → attach to Claude session
 2. From Claude: `Ctrl-a Ctrl-a` → return to az TUI (double-tap prefix)
+3. From Claude: `Ctrl-a Tab` → jump to dev server session (same worktree)
+4. From dev server: `Ctrl-a Tab` → jump back to Claude session
 
 This makes az the central hub for all session navigation.
 

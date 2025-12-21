@@ -63,12 +63,21 @@ Azedarach uses tmux to manage Claude Code sessions. This guide provides a recomm
 
 | Keys | Action |
 |------|--------|
+| `Tab` | Toggle Claude ↔ Dev Server (auto-installed) |
 | `` ` `` | Popup terminal (floating shell) |
 | `r` | Reload config |
 | `Ctrl-s` | Save session (resurrect) |
 | `Ctrl-r` | Restore session (resurrect) |
 
 ## Workflow Tips
+
+### Claude ↔ Dev Server Toggle
+
+When working in a worktree, press `Ctrl-a Tab` to quickly switch between:
+- The Claude Code session (e.g., `az-ykth`)
+- The dev server session (e.g., `az-dev-az-ykth`)
+
+This keybinding is **auto-installed** by Azedarach when sessions are created. If the target session doesn't exist, you'll see a helpful message in the tmux status bar.
 
 ### Popup Terminal
 
