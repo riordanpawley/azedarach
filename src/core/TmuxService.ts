@@ -64,27 +64,26 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
 					// Add Ctrl-a Tab keybinding to toggle between Claude and dev server sessions
-					// Session naming format: {type}-{projectName}-{beadId}
-					// - Claude sessions: claude-{projectName}-{beadId}
-					// - Dev servers: dev-{projectName}-{beadId}
-					// Also supports legacy format: az-dev-{beadId} -> claude-{beadId}
+					// Session naming format: {type}-{beadId}
+					// - Claude sessions: claude-{beadId}
+					// - Dev servers: dev-{beadId}
+					// Also supports legacy format: az-dev-{beadId}
 					// Note: Shell syntax requires no semicolon after 'then', 'else', or before 'fi'
 					const toggleScript =
 						'current=$(tmux display-message -p "#S"); ' +
-						// Check for new format: dev-{project}-{beadId}
+						// dev-{beadId} → claude-{beadId}
 						'if [ "${current#dev-}" != "$current" ]; then ' +
-						'rest="${current#dev-}"; target="claude-$rest"; msg="No Claude session"; ' +
-						// Check for new format: claude-{project}-{beadId}
+						'beadId="${current#dev-}"; target="claude-$beadId"; msg="No Claude session"; ' +
+						// claude-{beadId} → dev-{beadId}
 						'elif [ "${current#claude-}" != "$current" ]; then ' +
-						'rest="${current#claude-}"; target="dev-$rest"; msg="No dev server (Space+r to start)"; ' +
-						// Check for legacy format: az-dev-{beadId}
+						'beadId="${current#claude-}"; target="dev-$beadId"; msg="No dev server (Space+r to start)"; ' +
+						// Legacy: az-dev-{beadId} → claude-{beadId}
 						'elif [ "${current#az-dev-}" != "$current" ]; then ' +
-						'target="${current#az-dev-}"; msg="No Claude session"; ' +
-						// Legacy Claude format: claude-{beadId} (no project name)
+						'beadId="${current#az-dev-}"; target="claude-$beadId"; msg="No Claude session"; ' +
 						"else " +
-						'target="az-dev-$current"; msg="No dev server (Space+r to start)"; ' +
+						'msg="Unknown session format"; ' +
 						"fi; " +
-						'if tmux has-session -t "$target" 2>/dev/null; then ' +
+						'if [ -n "$target" ] && tmux has-session -t "$target" 2>/dev/null; then ' +
 						'tmux switch-client -t "$target"; ' +
 						"else " +
 						'tmux display-message "$msg"; ' +
