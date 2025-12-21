@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["CLAUDE.md"],
-  "plugins": ["opencode-beads", "opencode-skills", "./.opencode/plugin/azedarach.js"],
+  "plugins": ["opencode-beads", "opencode-skills"],
   "theme": "tokyonight",
   "model": "anthropic/claude-sonnet-4-20250514",
   "permission": {
