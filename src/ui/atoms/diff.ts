@@ -1,10 +1,11 @@
 /**
  * Diff Atoms
  *
- * Atoms for fetching git diff data via DiffService.
+ * Atoms for diff viewer - file list fetching and tmux popup display.
  */
 
 import { Effect } from "effect"
+import { TmuxService } from "../../core/TmuxService.js"
 import { DiffService } from "../../services/DiffService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -17,8 +18,8 @@ export interface DiffParams {
 	readonly baseBranch: string
 }
 
-export interface FileDiffParams extends DiffParams {
-	readonly filePath: string
+export interface ShowDiffPopupParams extends DiffParams {
+	readonly filePath?: string // undefined = all files
 }
 
 // ============================================================================
@@ -29,7 +30,7 @@ export interface FileDiffParams extends DiffParams {
  * Fetch list of changed files between base branch and HEAD
  *
  * Usage:
- *   const [, getChangedFiles] = useAtom(changedFilesAtom, { mode: "promise" })
+ *   const getChangedFiles = useAtomSet(changedFilesAtom, { mode: "promise" })
  *   const files = await getChangedFiles({ worktreePath, baseBranch })
  */
 export const changedFilesAtom = appRuntime.fn(({ worktreePath, baseBranch }: DiffParams) =>
@@ -44,44 +45,58 @@ export const changedFilesAtom = appRuntime.fn(({ worktreePath, baseBranch }: Dif
 )
 
 /**
- * Fetch diff for a specific file
+ * Show diff in a tmux popup with native ANSI rendering
+ *
+ * Opens a fullscreen tmux popup running difftastic for single files
+ * or colored git diff for all files. Popup closes when user presses q.
  *
  * Usage:
- *   const [, getFileDiff] = useAtom(fileDiffAtom, { mode: "promise" })
- *   const diff = await getFileDiff({ worktreePath, baseBranch, filePath })
+ *   const showDiffPopup = useAtomSet(showDiffPopupAtom, { mode: "promise" })
+ *   await showDiffPopup({ worktreePath, baseBranch, filePath: "src/foo.ts" })
+ *   await showDiffPopup({ worktreePath, baseBranch }) // all files
  */
-export const fileDiffAtom = appRuntime.fn(
-	({ worktreePath, baseBranch, filePath }: FileDiffParams) =>
+export const showDiffPopupAtom = appRuntime.fn(
+	({ worktreePath, baseBranch, filePath }: ShowDiffPopupParams) =>
 		Effect.gen(function* () {
+			const tmux = yield* TmuxService
 			const diffService = yield* DiffService
-			return yield* diffService.getFileDiff(worktreePath, baseBranch, filePath)
+
+			// Get merge base for accurate comparison (where branch diverged from base)
+			const mergeBase = yield* diffService.getMergeBase(worktreePath, baseBranch)
+
+			// Build the diff command
+			let command: string
+			let title: string
+
+			if (filePath) {
+				// Single file: use difftastic for syntax-aware side-by-side diff
+				// DFT_COLOR=always: force colors even when piped
+				// GIT_EXTERNAL_DIFF: make git invoke difftastic for diff rendering
+				// Note: use merge-base directly (two-dot), not ...HEAD (three-dot)
+				command =
+					`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+					`git diff ${mergeBase} -- "${filePath}" | less -RS`
+				title = ` ${filePath} `
+			} else {
+				// All files: stat summary first, then difftastic side-by-side
+				// Shows quick overview of what changed before detailed diff
+				command =
+					`git diff ${mergeBase} --stat --color=always -- ':!.beads' && echo "" && ` +
+					`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
+					`git diff ${mergeBase} -- ':!.beads' | less -RS`
+				title = " All Changes "
+			}
+
+			yield* tmux.displayPopup({
+				command,
+				width: "95%",
+				height: "95%",
+				title,
+				cwd: worktreePath,
+			})
 		}).pipe(
 			Effect.catchAll((error) =>
-				Effect.zipRight(
-					Effect.logError("Failed to get file diff", error),
-					Effect.succeed("Error loading diff"),
-				),
+				Effect.zipRight(Effect.logError("Failed to show diff popup", error), Effect.void),
 			),
 		),
-)
-
-/**
- * Fetch full diff (all files)
- *
- * Usage:
- *   const [, getFullDiff] = useAtom(fullDiffAtom, { mode: "promise" })
- *   const diff = await getFullDiff({ worktreePath, baseBranch })
- */
-export const fullDiffAtom = appRuntime.fn(({ worktreePath, baseBranch }: DiffParams) =>
-	Effect.gen(function* () {
-		const diffService = yield* DiffService
-		return yield* diffService.getFullDiff(worktreePath, baseBranch)
-	}).pipe(
-		Effect.catchAll((error) =>
-			Effect.zipRight(
-				Effect.logError("Failed to get full diff", error),
-				Effect.succeed("Error loading diff"),
-			),
-		),
-	),
 )

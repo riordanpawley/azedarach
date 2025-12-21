@@ -39,15 +39,6 @@ export class GitError extends Data.TaggedError("GitError")<{
 	readonly stderr?: string
 }> {}
 
-/**
- * Difftastic execution error
- */
-export class DifftasticError extends Data.TaggedError("DifftasticError")<{
-	readonly message: string
-	readonly command: string
-	readonly stderr?: string
-}> {}
-
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -119,6 +110,7 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 		/**
 		 * Get list of changed files vs base branch
 		 *
+		 * Uses merge-base to show changes since branch diverged from base.
 		 * Excludes .beads/ directory from results.
 		 */
 		const getChangedFiles = (
@@ -128,11 +120,13 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 			Effect.gen(function* () {
 				const mergeBase = yield* getMergeBase(worktreePath, baseBranch)
 
+				// Use merge-base directly (two-dot comparison), not ...HEAD (three-dot)
+				// This shows changes on the current branch since it diverged from base
 				const command = Command.make(
 					"git",
 					"diff",
 					"--name-status",
-					`${mergeBase}...HEAD`,
+					mergeBase,
 					"--",
 					":!.beads",
 				).pipe(Command.workingDirectory(worktreePath))
@@ -142,7 +136,7 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 						const stderr = "stderr" in error ? String(error.stderr) : String(error)
 						return new GitError({
 							message: `Failed to get changed files: ${stderr}`,
-							command: `git diff --name-status ${mergeBase}...HEAD -- ':!.beads'`,
+							command: `git diff --name-status ${mergeBase} -- ':!.beads'`,
 							stderr,
 						})
 					}),
@@ -155,79 +149,9 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 				return parseNameStatus(output)
 			})
 
-		/**
-		 * Get difftastic output for a single file
-		 *
-		 * Returns raw ANSI output as string for display.
-		 */
-		const getFileDiff = (
-			worktreePath: string,
-			baseBranch: string,
-			filePath: string,
-		): Effect.Effect<string, GitError | DifftasticError, CommandExecutor.CommandExecutor> =>
-			Effect.gen(function* () {
-				const mergeBase = yield* getMergeBase(worktreePath, baseBranch)
-
-				const command = Command.make("git", "diff", `${mergeBase}...HEAD`, "--", filePath).pipe(
-					Command.workingDirectory(worktreePath),
-					Command.env({
-						DFT_COLOR: "always",
-						GIT_EXTERNAL_DIFF: "difft --display=side-by-side",
-					}),
-				)
-
-				const output = yield* Command.string(command).pipe(
-					Effect.mapError((error) => {
-						const stderr = "stderr" in error ? String(error.stderr) : String(error)
-						return new DifftasticError({
-							message: `Failed to get diff for file: ${stderr}`,
-							command: `git diff ${mergeBase}...HEAD -- ${filePath}`,
-							stderr,
-						})
-					}),
-				)
-
-				return output
-			})
-
-		/**
-		 * Get difftastic output for all files
-		 *
-		 * Excludes .beads/ directory. Returns raw ANSI output as string.
-		 */
-		const getFullDiff = (
-			worktreePath: string,
-			baseBranch: string,
-		): Effect.Effect<string, GitError | DifftasticError, CommandExecutor.CommandExecutor> =>
-			Effect.gen(function* () {
-				const mergeBase = yield* getMergeBase(worktreePath, baseBranch)
-
-				const command = Command.make("git", "diff", `${mergeBase}...HEAD`, "--", ":!.beads").pipe(
-					Command.workingDirectory(worktreePath),
-					Command.env({
-						DFT_COLOR: "always",
-						GIT_EXTERNAL_DIFF: "difft --display=side-by-side",
-					}),
-				)
-
-				const output = yield* Command.string(command).pipe(
-					Effect.mapError((error) => {
-						const stderr = "stderr" in error ? String(error.stderr) : String(error)
-						return new DifftasticError({
-							message: `Failed to get full diff: ${stderr}`,
-							command: `git diff ${mergeBase}...HEAD -- ':!.beads'`,
-							stderr,
-						})
-					}),
-				)
-
-				return output
-			})
-
 		return {
+			getMergeBase,
 			getChangedFiles,
-			getFileDiff,
-			getFullDiff,
 		}
 	}),
 }) {}

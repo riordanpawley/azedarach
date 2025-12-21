@@ -43,6 +43,7 @@ pnpm dev
 | Select | Press `v` | Status bar shows `SEL` |
 | Action | Press `Space` | Status bar shows `ACT` |
 | Escape | Press `Esc` from any mode | Returns to `NOR` |
+| Redraw | Press `Ctrl-l` | Screen clears and redraws fully |
 
 ### Jump Labels Testing
 
