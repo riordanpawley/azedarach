@@ -59,6 +59,7 @@ The default mode for navigation and basic actions.
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `?` | Show help | Press any key to dismiss |
 | `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
+| `Ctrl-l` | Redraw screen | Force full screen refresh |
 | `q` | Quit/Back | Exits drill-down; otherwise quits app |
 | `Esc` | Dismiss overlay | Or return from sub-mode |
 
