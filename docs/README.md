@@ -418,6 +418,84 @@ If you don't have tmux sessions running, you'll see errors in the console (not i
 
 ---
 
+## AI Tool Configuration
+
+Azedarach supports multiple AI coding assistants:
+
+| Tool | Status | Config Key |
+|------|--------|------------|
+| **Claude Code** | ✅ Default | `cliTool: "claude"` |
+| **OpenCode** | ✅ Supported | `cliTool: "opencode"` |
+
+### Using OpenCode
+
+To use OpenCode instead of Claude Code:
+
+1. **Configure Azedarach** - Set the CLI tool in `.azedarach.json`:
+   ```json
+   {
+     "cliTool": "opencode",
+     "model": "anthropic/claude-sonnet-4-20250514"
+   }
+   ```
+
+2. **Install opencode-beads** - The official beads plugin for OpenCode:
+   ```bash
+   # In your project's opencode.json
+   {
+     "plugins": ["opencode-beads"]
+   }
+   ```
+
+   This plugin provides:
+   - Automatic `bd prime` on session start
+   - All beads commands as `/bd-*` slash commands
+   - A task agent for autonomous issue work
+
+3. **Copy the Azedarach plugin** - For session status monitoring:
+   ```bash
+   # Copy the plugin to your project
+   cp .opencode/plugin/azedarach.js /your-project/.opencode/plugin/
+   ```
+
+   Or add it to your `opencode.json`:
+   ```json
+   {
+     "plugins": [
+       "opencode-beads",
+       "./plugin/azedarach.js"
+     ]
+   }
+   ```
+
+### How Session Monitoring Works
+
+Both Claude Code and OpenCode sessions communicate their status to Azedarach via tmux session options:
+
+```
+┌─────────────────┐      az notify       ┌──────────────────┐
+│  AI Tool        │ ─────────────────────►│  tmux session    │
+│  (Claude/OC)    │   sets @az_status     │  option          │
+└─────────────────┘                       └────────┬─────────┘
+                                                   │ polls
+                                           ┌───────▼─────────┐
+                                           │  Azedarach TUI  │
+                                           │  (TmuxMonitor)  │
+                                           └─────────────────┘
+```
+
+- **Claude Code**: Uses native hooks in `.claude/settings.local.json`
+- **OpenCode**: Uses plugin hooks via `.opencode/plugin/azedarach.js`
+
+Both call the same `az notify` command which sets a tmux session option that Azedarach polls.
+
+### Resources
+
+- [opencode-beads plugin](https://github.com/joshuadavidthomas/opencode-beads) - Official beads integration
+- [OpenCode Plugin Docs](https://opencode.ai/docs/plugins/) - How to create OpenCode plugins
+
+---
+
 ## Architecture Overview
 
 ```
