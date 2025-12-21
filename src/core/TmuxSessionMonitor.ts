@@ -20,6 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import { CLAUDE_SESSION_PREFIX, parseSessionName } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -65,11 +66,6 @@ export class TmuxSessionMonitorError extends Data.TaggedError("TmuxSessionMonito
 // ============================================================================
 // Constants
 // ============================================================================
-
-/**
- * Prefix for Claude session names
- */
-const CLAUDE_SESSION_PREFIX = "claude-"
 
 /**
  * Polling interval for watching tmux sessions
@@ -151,14 +147,6 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		const previousStateRef = yield* Ref.make<Map<string, TmuxStatus>>(new Map())
 
 		/**
-		 * Session info from tmux list-sessions
-		 */
-		interface TmuxSessionInfo {
-			readonly name: string
-			readonly createdAt: number
-		}
-
-		/**
 		 * List all tmux sessions starting with "claude-"
 		 * Returns session name and creation timestamp in one call.
 		 */
@@ -219,11 +207,28 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 
 		/**
 		 * Extract bead ID from session name
+		 *
+		 * Handles both formats:
+		 * - New: claude-{projectName}-{beadId} → extracts beadId
+		 * - Legacy: claude-{beadId} → extracts beadId (when beadId has 2 parts like "az-123")
 		 */
 		const extractBeadId = (sessionName: string): string | null => {
-			if (sessionName.startsWith(CLAUDE_SESSION_PREFIX)) {
-				return sessionName.slice(CLAUDE_SESSION_PREFIX.length)
+			// Try new format first using parseSessionName
+			const parsed = parseSessionName(sessionName)
+			if (parsed && parsed.type === "claude") {
+				return parsed.beadId
 			}
+
+			// Fallback: legacy format claude-{beadId} where beadId is like "az-123"
+			if (sessionName.startsWith(CLAUDE_SESSION_PREFIX)) {
+				const rest = sessionName.slice(CLAUDE_SESSION_PREFIX.length)
+				// Check if it looks like a bead ID (prefix-suffix pattern)
+				const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+				if (beadIdPattern.test(rest)) {
+					return rest
+				}
+			}
+
 			return null
 		}
 
@@ -260,18 +265,46 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 			})
 
 		/**
+		 * Find the tmux session name for a given beadId
+		 *
+		 * Searches through running sessions to find one that matches the beadId.
+		 * Handles both new format (claude-{project}-{beadId}) and legacy (claude-{beadId}).
+		 */
+		const findSessionByBeadId = (beadId: string) =>
+			Effect.gen(function* () {
+				const sessions = yield* listClaudeSessions()
+				for (const session of sessions) {
+					const sessionBeadId = extractBeadId(session.name)
+					if (sessionBeadId === beadId) {
+						return session.name
+					}
+				}
+				return null
+			})
+
+		/**
 		 * Get status for a specific session
+		 *
+		 * Searches for the session by beadId since we don't know the project name.
 		 */
 		const getSessionStatus = (beadId: string) =>
-			getSessionOption(`${CLAUDE_SESSION_PREFIX}${beadId}`)
+			Effect.gen(function* () {
+				const sessionName = yield* findSessionByBeadId(beadId)
+				if (!sessionName) return null
+				return yield* getSessionOption(sessionName)
+			})
 
 		/**
 		 * Get session creation time (Unix timestamp)
 		 * Uses tmux's built-in #{session_created} variable.
+		 *
+		 * Searches for the session by beadId since we don't know the project name.
 		 */
 		const getSessionCreatedAt = (beadId: string) =>
 			Effect.gen(function* () {
-				const sessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
+				const sessionName = yield* findSessionByBeadId(beadId)
+				if (!sessionName) return null
+
 				const command = Command.make(
 					"tmux",
 					"display",

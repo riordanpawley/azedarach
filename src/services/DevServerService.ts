@@ -16,6 +16,7 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
+import { DEV_SESSION_PREFIX, getDevSessionName, parseSessionName } from "../core/paths.js"
 import { type SessionNotFoundError, type TmuxError, TmuxService } from "../core/TmuxService.js"
 import {
 	type WorktreeSessionError,
@@ -28,8 +29,8 @@ import { ProjectService } from "./ProjectService.js"
 // Constants
 // ============================================================================
 
-/** tmux session name prefix for dev servers */
-const DEV_SESSION_PREFIX = "az-dev-"
+/** Legacy tmux session name prefix for dev servers (for migration support) */
+const LEGACY_DEV_SESSION_PREFIX = "az-dev-"
 
 /** How often to poll for port detection (ms) */
 const PORT_POLL_INTERVAL = 500
@@ -109,10 +110,7 @@ export class NoWorktreeError extends Data.TaggedError("NoWorktreeError")<{
 // Helper Functions
 // ============================================================================
 
-/**
- * Get tmux session name for a bead's dev server
- */
-const getDevSessionName = (beadId: string): string => `${DEV_SESSION_PREFIX}${beadId}`
+// Note: getDevSessionName is imported from paths.ts
 
 /**
  * Schema for parsing DevServerStatus from string
@@ -272,31 +270,43 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		 * Discover all running dev server sessions from tmux for the current project.
 		 * Filters by project path to support multiple projects running Azedarach.
 		 * This enables recovery on startup - tmux holds the source of truth.
+		 *
+		 * Supports both formats:
+		 * - New: dev-{beadId}
+		 * - Legacy: az-dev-{beadId}
 		 */
 		const discoverDevServersFromTmux = (
-			currentProjectPath: string,
+			_currentProjectPath: string,
 		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				// Get all tmux sessions
 				const allSessions = yield* tmux.listSessions()
 
-				// Filter to dev server sessions (az-dev-* prefix)
-				const devSessions = allSessions.filter((s) => s.name.startsWith(DEV_SESSION_PREFIX))
+				// Filter to dev server sessions (dev-* or legacy az-dev-* prefix)
+				const devSessions = allSessions.filter(
+					(s) =>
+						s.name.startsWith(DEV_SESSION_PREFIX) || s.name.startsWith(LEGACY_DEV_SESSION_PREFIX),
+				)
 
 				let result = HashMap.empty<string, DevServerState>()
 
 				for (const session of devSessions) {
-					// Check if this session belongs to current project
-					const projectPathOpt = yield* tmux.getUserOption(session.name, TMUX_OPT_PROJECT_PATH)
-					if (Option.isNone(projectPathOpt) || projectPathOpt.value !== currentProjectPath) {
-						// Skip sessions from other projects (or legacy sessions without project path)
-						continue
+					let beadId: string
+
+					// Try parsing as new format first
+					const parsed = parseSessionName(session.name)
+					if (parsed && parsed.type === "dev") {
+						// New format: dev-{beadId}
+						beadId = parsed.beadId
+					} else if (session.name.startsWith(LEGACY_DEV_SESSION_PREFIX)) {
+						// Legacy format: az-dev-{beadId}
+						beadId = session.name.slice(LEGACY_DEV_SESSION_PREFIX.length)
+					} else {
+						continue // Unknown format
 					}
 
 					const metadataOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isSome(metadataOpt)) {
-						// Extract beadId from session name (az-dev-xxx -> xxx)
-						const beadId = session.name.slice(DEV_SESSION_PREFIX.length)
 						result = HashMap.set(result, beadId, metadataOpt.value)
 					}
 				}
@@ -597,15 +607,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		// ========================================================================
-		// Health Check Fiber - detects dead dev server sessions
+		// Health Check Fiber - detects dead sessions AND re-discovers missed ones
 		// ========================================================================
 
 		/**
-		 * Check all running dev servers and update state if session died
+		 * Check all running dev servers, detect dead ones, and re-discover any missed sessions.
+		 * This ensures we don't lose track of dev servers if startup discovery failed.
 		 */
 		const healthCheckAllServers = Effect.gen(function* () {
 			const servers = yield* SubscriptionRef.get(serversRef)
 
+			// Part 1: Check if existing sessions are still alive
 			for (const [beadId, state] of HashMap.entries(servers)) {
 				if (state.status === "running" && state.tmuxSession) {
 					const hasSession = yield* tmux.hasSession(state.tmuxSession)
@@ -625,6 +637,30 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					}
 				}
 			}
+
+			// Part 2: Re-discover sessions from tmux that we might have missed
+			// This handles cases where startup discovery failed (e.g., timing issues)
+			const projectPath = yield* getEffectiveProjectPath()
+			const discoveredServers = yield* discoverDevServersFromTmux(projectPath)
+
+			// Merge discovered servers into our state (only add, don't overwrite)
+			for (const [beadId, discoveredState] of HashMap.entries(discoveredServers)) {
+				const currentState = HashMap.get(servers, beadId)
+				if (Option.isNone(currentState) || currentState.value.status === "idle") {
+					// This is a new or idle server we didn't know about - add it
+					yield* Effect.log(`Re-discovered dev server for ${beadId} from tmux`)
+					yield* SubscriptionRef.update(serversRef, (s) => HashMap.set(s, beadId, discoveredState))
+
+					// Track the port as allocated
+					if (discoveredState.port) {
+						yield* Ref.update(allocatedPortsRef, (allocated) => {
+							const newAllocated = new Set(allocated)
+							newAllocated.add(discoveredState.port!)
+							return newAllocated
+						})
+					}
+				}
+			}
 		})
 
 		// Start the health check polling fiber
@@ -638,7 +674,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		yield* diagnostics.registerFiberIn(serviceScope, {
 			id: "dev-server-health-check",
 			name: "Dev Server Health",
-			description: "Monitors dev server sessions and detects when they die",
+			description:
+				"Monitors dev server sessions, detects dead ones, and re-discovers missed sessions",
 			fiber: healthCheckFiber,
 		})
 

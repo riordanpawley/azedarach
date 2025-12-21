@@ -12,6 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
+import { CLAUDE_SESSION_PREFIX } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -306,6 +307,26 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 }
 
 /**
+ * Find a Claude tmux session by beadId
+ *
+ * Session names use format: claude-{beadId}
+ * Returns null if session doesn't exist.
+ */
+const findClaudeSessionByBeadId = (beadId: string) =>
+	Effect.gen(function* () {
+		// Session name is simply claude-{beadId}
+		const expectedSessionName = `${CLAUDE_SESSION_PREFIX}${beadId}`
+
+		// Check if the session exists
+		const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
+		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
+		)
+
+		return exitCode === 0 ? expectedSessionName : null
+	})
+
+/**
  * Handle hook notifications from Claude Code sessions
  *
  * This command is called by Claude Code hooks configured in worktree's
@@ -329,7 +350,15 @@ const notifyHandler = (args: {
 		}
 
 		const status = mapEventToStatus(args.event)
-		const sessionName = `claude-${args.beadId}`
+
+		// Find the session by beadId (handles both new and legacy naming formats)
+		const sessionName = yield* findClaudeSessionByBeadId(args.beadId)
+		if (!sessionName) {
+			if (args.verbose) {
+				yield* Console.log(`No session found for ${args.beadId}`)
+			}
+			return
+		}
 
 		if (args.verbose) {
 			yield* Console.log(`Hook: ${args.event} for ${args.beadId} → status: ${status}`)
