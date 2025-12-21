@@ -25,7 +25,12 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
-import { getSessionName, getWorktreePath } from "./paths.js"
+import {
+	CLAUDE_SESSION_PREFIX,
+	getSessionName,
+	getWorktreePath,
+	parseSessionName,
+} from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -791,17 +796,22 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							worktrees.map((wt) => [wt.beadId, wt] as const),
 						)
 
-						// Find tmux sessions that look like bead IDs (az-xxx pattern) but aren't tracked in memory
-						// Our session names are just the bead ID (see getSessionName in paths.ts)
-						const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
-
+						// Find Claude tmux sessions that aren't tracked in memory
+						// Session names use "claude-{beadId}" format (see getSessionName in paths.ts)
 						for (const tmuxSession of tmuxSessions) {
-							// Check if this looks like a bead ID and isn't already tracked
-							if (
-								beadIdPattern.test(tmuxSession.name) &&
-								!HashMap.has(inMemorySessions, tmuxSession.name)
-							) {
-								const beadId = tmuxSession.name
+							// Check if this is a Claude session (has claude- prefix)
+							if (!tmuxSession.name.startsWith(CLAUDE_SESSION_PREFIX)) continue
+
+							// Parse session name to extract beadId
+							const parsed = parseSessionName(tmuxSession.name)
+							if (!parsed) continue
+
+							const beadId = parsed.beadId
+
+							// Skip if already tracked
+							if (HashMap.has(inMemorySessions, beadId)) continue
+
+							{
 								const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
 								const persistedOpt = HashMap.get(persistedSessions, beadId)
 
@@ -817,7 +827,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 												() => getWorktreePath(effectiveProjectPath, beadId),
 											),
 									),
-									tmuxSessionName: beadId,
+									tmuxSessionName: tmuxSession.name, // Full session name
 									state: Option.getOrElse(
 										Option.map(persistedOpt, (p) => p.state),
 										() => "busy",
