@@ -322,11 +322,11 @@ Note: You're running with Haiku for fast, cheap discussion. When ready to implem
 What would you like to discuss?`
 					const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
 
-					// Get project path for session naming
+					// Get project path for session cwd
 					const projectPath = yield* helpers.getProjectPath()
 
-					// Use chat-{project}-{beadId} naming to distinguish from work sessions
-					const chatSessionName = getChatSessionName(projectPath, task.id)
+					// Use chat-{beadId} naming to distinguish from work sessions
+					const chatSessionName = getChatSessionName(task.id)
 
 					// Check if chat session already exists
 					const hasSession = yield* tmux.hasSession(chatSessionName)
