@@ -1,2 +1,2 @@
 export { DiffViewer } from "./DiffViewer.js"
-export type { ChangedFile, DiffViewerState, Focus, Layout, PickerMode } from "./types.js"
+export type { ChangedFile, PickerMode } from "./types.js"
