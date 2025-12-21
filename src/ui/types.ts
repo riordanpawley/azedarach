@@ -56,12 +56,29 @@ export interface SessionMetrics {
 }
 
 /**
+ * Git status information for a worktree
+ *
+ * These fields are populated for tasks with active sessions, providing
+ * at-a-glance visibility into the worktree's git state in the TaskCard header.
+ */
+export interface GitStatus {
+	/** Number of commits the worktree branch is behind the base branch */
+	gitBehindCount?: number
+	/** Whether the worktree has uncommitted changes (dirty) */
+	hasUncommittedChanges?: boolean
+	/** Lines added compared to base branch (only if showLineChanges enabled) */
+	gitAdditions?: number
+	/** Lines deleted compared to base branch (only if showLineChanges enabled) */
+	gitDeletions?: number
+}
+
+/**
  * Task with session state and optional metrics
  *
  * Extends Issue with session tracking. Metrics are only populated
  * when the session is active (not idle).
  */
-export interface TaskWithSession extends Issue, SessionMetrics {
+export interface TaskWithSession extends Issue, SessionMetrics, GitStatus {
 	sessionState: SessionState
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean

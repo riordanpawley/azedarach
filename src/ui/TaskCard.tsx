@@ -139,6 +139,45 @@ export const TaskCard = (props: TaskCardProps) => {
 		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
 		props.task.sessionStartedAt !== undefined
 
+	// Threshold for showing line changes - need enough width for "+XXX/-XXX" (~12 chars)
+	// At 25+ chars of content width, we have room for line changes
+	const LINE_CHANGES_MIN_WIDTH = 25
+
+	// Build git status parts for individual coloring
+	// Returns { statusPart, additions, deletions } so each can be colored separately
+	const getGitStatusParts = (availableWidth: number) => {
+		const { gitBehindCount, hasUncommittedChanges, gitAdditions, gitDeletions } = props.task
+		const statusParts: string[] = []
+
+		// Behind count (↓N)
+		if (gitBehindCount !== undefined && gitBehindCount > 0) {
+			statusParts.push(`↓${gitBehindCount}`)
+		}
+
+		// Dirty indicator (●)
+		if (hasUncommittedChanges) {
+			statusParts.push("●")
+		}
+
+		const statusString = statusParts.join(" ")
+
+		// Line changes - only compute if we have enough screen width
+		let additions: number | undefined
+		let deletions: number | undefined
+		if (availableWidth >= LINE_CHANGES_MIN_WIDTH) {
+			const add = gitAdditions ?? 0
+			const del = gitDeletions ?? 0
+			if (add > 0) additions = add
+			if (del > 0) deletions = del
+		}
+
+		return { statusString, additions, deletions }
+	}
+
+	const gitStatus = getGitStatusParts(maxTitleWidth)
+	const hasGitStatus =
+		gitStatus.statusString || gitStatus.additions !== undefined || gitStatus.deletions !== undefined
+
 	// Build the header line: "az-xxx [type]" or "aa az-xxx [type]" in jump mode
 	const getHeaderLine = () => {
 		let line = ""
@@ -175,6 +214,15 @@ export const TaskCard = (props: TaskCardProps) => {
 		return line
 	}
 
+	// Color for status indicators (↓N behind, ● dirty)
+	// Behind: yellow (needs attention), Dirty: red (uncommitted work), Both: red
+	const getStatusColor = (): string => {
+		const { gitBehindCount, hasUncommittedChanges } = props.task
+		if (hasUncommittedChanges) return theme.red
+		if (gitBehindCount !== undefined && gitBehindCount > 0) return theme.yellow
+		return theme.overlay0
+	}
+
 	return (
 		<box
 			borderStyle={getBorderStyle()}
@@ -189,6 +237,20 @@ export const TaskCard = (props: TaskCardProps) => {
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
+				{hasGitStatus && (
+					<box flexDirection="row">
+						{gitStatus.statusString && <text fg={getStatusColor()}>{gitStatus.statusString} </text>}
+						{gitStatus.additions !== undefined && (
+							<text fg={theme.green}>+{gitStatus.additions}</text>
+						)}
+						{gitStatus.additions !== undefined && gitStatus.deletions !== undefined && (
+							<text fg={theme.overlay0}>/</text>
+						)}
+						{gitStatus.deletions !== undefined && (
+							<text fg={theme.red}>-{gitStatus.deletions}</text>
+						)}
+					</box>
+				)}
 				{showTimer && props.task.sessionStartedAt && (
 					<ElapsedTimer startedAt={props.task.sessionStartedAt} />
 				)}

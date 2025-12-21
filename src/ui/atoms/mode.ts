@@ -12,6 +12,7 @@ import {
 	type OrchestrationTask,
 	type SortField,
 } from "../../services/EditorService.js"
+import { NavigationService } from "../../services/NavigationService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -169,7 +170,10 @@ export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
 )
 
 /**
- * Enter action mode
+ * Enter action mode with task ID captured at entry time
+ *
+ * Captures the currently focused task ID to prevent race conditions
+ * where cursor moves between Space and action key press.
  *
  * Usage: const [, enterAction] = useAtom(enterActionAtom, { mode: "promise" })
  *        await enterAction()
@@ -177,7 +181,9 @@ export const setPendingJumpKeyAtom = appRuntime.fn((key: string) =>
 export const enterActionAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* EditorService
-		yield* editor.enterAction()
+		const nav = yield* NavigationService
+		const taskId = yield* nav.getFocusedTaskId()
+		yield* editor.enterAction(taskId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

@@ -39,7 +39,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			 */
 			const toggleDevServer = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) {
 						yield* toast.show("error", "No task selected")
 						return
@@ -91,7 +91,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			 */
 			const restartDevServer = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) {
 						yield* toast.show("error", "No task selected")
 						return
@@ -145,7 +145,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			 */
 			const attachDevServer = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) {
 						yield* toast.show("error", "No task selected")
 						return

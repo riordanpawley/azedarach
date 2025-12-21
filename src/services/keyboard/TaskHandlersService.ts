@@ -107,7 +107,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			 */
 			const editBead = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					yield* beadEditor.editBead(task).pipe(
@@ -195,7 +195,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			 */
 			const deleteBead = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
 					const hasSession = task.sessionState !== "idle"
@@ -238,7 +238,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					// Get selected IDs or current task
 					const mode = yield* editor.getMode()
 					const selectedIds = mode._tag === "select" ? mode.selectedIds : []
-					const task = yield* helpers.getSelectedTask()
+					const task = yield* helpers.getActionTargetTask()
 
 					const taskIdsToMove = selectedIds.length > 0 ? [...selectedIds] : task ? [task.id] : []
 					const firstTaskId = taskIdsToMove[0]

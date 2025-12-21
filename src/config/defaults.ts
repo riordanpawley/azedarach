@@ -89,6 +89,7 @@ export const DEFAULT_CONFIG = {
 		baseBranch: "main",
 		pushEnabled: true,
 		fetchEnabled: true,
+		showLineChanges: true,
 	},
 	session: {
 		command: "claude",
@@ -171,6 +172,7 @@ export interface ResolvedConfig {
 		baseBranch: string
 		pushEnabled: boolean
 		fetchEnabled: boolean
+		showLineChanges: boolean
 	}
 	session: {
 		command: string
@@ -260,6 +262,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
 			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
 			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
+			showLineChanges: config.git?.showLineChanges ?? DEFAULT_CONFIG.git.showLineChanges,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
