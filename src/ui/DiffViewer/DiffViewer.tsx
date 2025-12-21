@@ -474,7 +474,9 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 							<span fg={theme.blue}>Tab</span>
 							<span> list </span>
 							<span fg={theme.blue}>h/l</span>
-							<span> collapse/expand </span>
+							<span> ±node </span>
+							<span fg={theme.blue}>-/+</span>
+							<span> ±all </span>
 							<span fg={theme.blue}>gw</span>
 							<span> jump </span>
 							<span fg={theme.blue}>q</span>
