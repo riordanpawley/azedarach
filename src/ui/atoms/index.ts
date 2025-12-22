@@ -7,14 +7,18 @@
 
 // Board state atoms
 export {
+	activeSessionsCountAtom,
+	allTasksAtom,
 	boardIsLoadingAtom,
 	boardTasksAtom,
 	boardTasksByColumnAtom,
 	drillDownFilteredTasksAtom,
 	errorAtom,
 	filteredTasksByColumnAtom,
+	maxVisibleTasksAtom,
 	refreshBoardAtom,
 	selectedTaskIdAtom,
+	totalTasksCountAtom,
 	viewModeAtom,
 } from "./board.js"
 // Clock atoms
@@ -34,6 +38,8 @@ export {
 	beadDevServersAtom,
 	devServerStateAtom,
 	devServersAtom,
+	focusedBeadDevServersAtom,
+	focusedBeadPrimaryDevServerAtom,
 	stopDevServerAtom,
 	syncDevServerStateAtom,
 	toggleDevServerAtom,
