@@ -164,6 +164,17 @@ export const DEFAULT_CONFIG = {
 		},
 		portPattern: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
 		cwd: ".",
+		servers: undefined as
+			| Record<
+					string,
+					{
+						command: string
+						cwd?: string
+						ports?: Record<string, { default: number; aliases: string[] }>
+						label?: string
+					}
+			  >
+			| undefined,
 	},
 	projects: [],
 	defaultProject: undefined,
@@ -258,6 +269,21 @@ export interface ResolvedConfig {
 		ports: Readonly<Record<string, { default: number; aliases: readonly string[] }>>
 		portPattern: string
 		cwd: string
+		servers:
+			| Readonly<
+					Record<
+						string,
+						{
+							readonly command: string
+							readonly cwd?: string
+							readonly ports?: Readonly<
+								Record<string, { default: number; aliases: readonly string[] }>
+							>
+							readonly label?: string
+						}
+					>
+			  >
+			| undefined
 	}
 	projects: ReadonlyArray<{
 		name: string
@@ -361,6 +387,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			ports: config.devServer?.ports ?? DEFAULT_CONFIG.devServer.ports,
 			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
 			cwd: config.devServer?.cwd ?? DEFAULT_CONFIG.devServer.cwd,
+			servers: config.devServer?.servers ?? DEFAULT_CONFIG.devServer.servers,
 		},
 	}
 }

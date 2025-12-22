@@ -37,6 +37,7 @@ export type OverlayType =
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
+	| { readonly _tag: "devServerMenu"; readonly beadId: string }
 
 /**
  * Hook for managing overlay stack
@@ -108,6 +109,10 @@ export function useOverlays() {
 				push({ _tag: "diffViewer", worktreePath, baseBranch })
 			},
 
+			showDevServerMenu: (beadId: string) => {
+				push({ _tag: "devServerMenu", beadId })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -130,6 +135,7 @@ export function useOverlays() {
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
 			showingDiffViewer: currentOverlay?._tag === "diffViewer",
+			showingDevServerMenu: currentOverlay?._tag === "devServerMenu",
 		}),
 		[currentOverlay],
 	)
