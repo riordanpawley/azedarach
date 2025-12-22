@@ -267,11 +267,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))
 
 					// Determine if we should update state
-					// PTY can transition: idle → busy, busy → error, busy → done
 					const shouldUpdate =
 						(currentState === "idle" && detectedState === "busy") ||
-						(currentState === "busy" && detectedState === "error") ||
-						(currentState === "busy" && detectedState === "done")
+						(currentState === "initializing" &&
+							(detectedState === "error" || detectedState === "done")) ||
+						(currentState === "busy" && (detectedState === "error" || detectedState === "done"))
 
 					if (shouldUpdate) {
 						yield* sessionManager.updateState(beadId, detectedState)

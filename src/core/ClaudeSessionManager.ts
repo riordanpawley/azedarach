@@ -67,6 +67,7 @@ export interface Session {
  */
 const SessionStateSchema = Schema.Literal(
 	"idle",
+	"initializing",
 	"busy",
 	"waiting",
 	"done",
@@ -545,9 +546,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// USE: Register session in memory and publish event
 							() =>
 								Effect.gen(function* () {
-									// Session starts as "busy" - init commands and Claude are now chained
+									// Session starts as "initializing" - init commands and Claude are now chained
 									// in the tmux session, so if init fails, Claude won't start
-									const initialState: SessionState = "busy"
+									const initialState: SessionState = "initializing"
 
 									// Create session object
 									const sessionObj: Session = {

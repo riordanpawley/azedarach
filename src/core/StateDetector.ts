@@ -20,7 +20,7 @@ import { Data, Effect } from "effect"
 /**
  * Session state types
  */
-export type SessionState = "idle" | "busy" | "waiting" | "done" | "error"
+export type SessionState = "idle" | "initializing" | "busy" | "waiting" | "done" | "error"
 
 /**
  * Agent workflow phase types
