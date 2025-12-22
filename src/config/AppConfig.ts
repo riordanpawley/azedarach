@@ -328,7 +328,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				)
 
 				if (jsonConfig) {
-					return mergeWithDefaults(jsonConfig)
+					const resolved = mergeWithDefaults(jsonConfig)
+					yield* Effect.log(
+						`[DEBUG] After mergeWithDefaults: cliTool=${resolved.cliTool} (input was: ${jsonConfig.cliTool})`,
+					)
+					return resolved
 				}
 
 				// Try package.json "azedarach" key
@@ -354,9 +358,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		const effectiveProjectPath = initialProjectPath ?? process.cwd()
 
 		// Load initial config
+		yield* Effect.log(`[DEBUG] Loading initial config from: ${effectiveProjectPath}`)
 		const initialConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
-			Effect.catchAll(() => Effect.succeed(mergeWithDefaults({}))),
+			Effect.tap((c) => Effect.log(`[DEBUG] Initial config loaded: cliTool=${c.cliTool}`)),
+			Effect.catchAll((e) => {
+				return Effect.log(`[DEBUG] Initial config load failed: ${e}`).pipe(
+					Effect.map(() => mergeWithDefaults({})),
+				)
+			}),
 		)
+		yield* Effect.log(`[DEBUG] Creating configRef with cliTool=${initialConfig.cliTool}`)
 
 		// Create reactive config ref
 		const configRef = yield* SubscriptionRef.make<ResolvedConfig>(initialConfig)
@@ -367,9 +378,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				Stream.runForEach((project) =>
 					Effect.gen(function* () {
 						const newProjectPath = project?.path ?? process.cwd()
+						yield* Effect.log(`[DEBUG] Project watcher triggered: path=${newProjectPath}`)
 						const newConfig = yield* loadConfigForPath(newProjectPath).pipe(
-							Effect.catchAll(() => Effect.succeed(mergeWithDefaults({}))),
+							Effect.tap((c) => Effect.log(`[DEBUG] Watcher loaded config: cliTool=${c.cliTool}`)),
+							Effect.catchAll((e) => {
+								return Effect.log(`[DEBUG] Watcher config load failed: ${e}`).pipe(
+									Effect.map(() => mergeWithDefaults({})),
+								)
+							}),
 						)
+						yield* Effect.log(`[DEBUG] Watcher setting configRef: cliTool=${newConfig.cliTool}`)
 						yield* SubscriptionRef.set(configRef, newConfig)
 					}),
 				),
@@ -378,7 +396,12 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		return {
 			config: configRef,
-			getCliTool: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.cliTool),
+			getCliTool: () =>
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(configRef)
+					yield* Effect.log(`[DEBUG] getCliTool: config.cliTool=${config.cliTool}`)
+					return config.cliTool
+				}),
 			getModelConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.model),
 			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
 			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
