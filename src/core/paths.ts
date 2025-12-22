@@ -56,20 +56,6 @@ export function getSessionNameForTool(beadId: string, cliTool: CliToolName): str
 }
 
 /**
- * Generate tmux session name for a Claude session
- *
- * Returns "claude-{beadId}" for consistent naming across:
- * - Session creation (ClaudeSessionManager)
- * - Session monitoring (TmuxSessionMonitor)
- * - Hook notifications (az-notify.sh)
- *
- * @deprecated Use getSessionNameForTool for new code
- */
-export function getSessionName(beadId: string): string {
-	return `${CLAUDE_SESSION_PREFIX}${beadId}`
-}
-
-/**
  * Generate tmux session name for a dev server
  *
  * Returns "dev-{beadId}" for consistent naming.
