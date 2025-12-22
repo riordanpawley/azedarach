@@ -40,10 +40,7 @@ export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
 /**
  * Model configuration for AI sessions
  *
- * Allows configuring which models to use for different session types.
- * Model format depends on the CLI tool:
- * - Claude: Short names (haiku, sonnet, opus)
- * - OpenCode: Provider/model format (anthropic/claude-sonnet, openai/gpt-4o)
+ * Allows configuring which models to use for different session types and tools.
  */
 const ModelConfigSchema = Schema.Struct({
 	/**
@@ -55,9 +52,26 @@ const ModelConfigSchema = Schema.Struct({
 	/**
 	 * Model for chat sessions (Space+c)
 	 * Typically a faster/cheaper model for quick interactions.
-	 * Default: "haiku" for Claude, "anthropic/claude-haiku" for OpenCode
 	 */
 	chat: Schema.optional(Schema.String),
+
+	/**
+	 * Tool-specific model configuration overrides.
+	 * Allows having different defaults for Claude and OpenCode at the same time.
+	 */
+	claude: Schema.optional(
+		Schema.Struct({
+			default: Schema.optional(Schema.String),
+			chat: Schema.optional(Schema.String),
+		}),
+	),
+
+	opencode: Schema.optional(
+		Schema.Struct({
+			default: Schema.optional(Schema.String),
+			chat: Schema.optional(Schema.String),
+		}),
+	),
 })
 
 // ============================================================================
