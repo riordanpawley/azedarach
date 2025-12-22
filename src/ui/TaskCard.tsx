@@ -134,9 +134,11 @@ export const TaskCard = (props: TaskCardProps) => {
 			? PHASE_INDICATORS[props.task.agentPhase]
 			: ""
 
-	// Show elapsed timer when session is active (busy or waiting) and we have a start time
+	// Show elapsed timer when session is active (initializing, busy or waiting) and we have a start time
 	const showTimer =
-		(props.task.sessionState === "busy" || props.task.sessionState === "waiting") &&
+		(props.task.sessionState === "initializing" ||
+			props.task.sessionState === "busy" ||
+			props.task.sessionState === "waiting") &&
 		props.task.sessionStartedAt !== undefined
 
 	// Threshold for showing line changes - need enough width for "+XXX/-XXX" (~12 chars)

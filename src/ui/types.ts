@@ -9,6 +9,7 @@ import type { Issue } from "../core/BeadsClient.js"
  */
 export type SessionState =
 	| "idle" // No session running
+	| "initializing" // Running initCommands
 	| "busy" // Claude is working
 	| "waiting" // Claude is waiting for input
 	| "done" // Task completed successfully
@@ -102,6 +103,7 @@ export type ColumnStatus = (typeof COLUMNS)[number]["status"]
  */
 export const SESSION_INDICATORS: Record<SessionState, string> = {
 	idle: "",
+	initializing: "⚪",
 	busy: "🔵",
 	waiting: "🟡",
 	done: "✅",
