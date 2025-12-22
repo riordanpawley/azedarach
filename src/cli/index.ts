@@ -732,6 +732,186 @@ const hooksCommand = Command.make("hooks", {}, () =>
 	Command.withSubcommands([hooksInstallCommand]),
 )
 
+// ============================================================================
+// OpenCode Commands
+// ============================================================================
+
+/**
+ * Default opencode.json configuration
+ */
+const DEFAULT_OPENCODE_CONFIG = {
+	$schema: "https://opencode.ai/config.json",
+	instructions: ["CLAUDE.md"],
+	plugins: ["opencode-beads", "opencode-skills"],
+	theme: "tokyonight",
+	permission: {
+		bash: {
+			"rg *": "allow",
+			"fd *": "allow",
+			"ls *": "allow",
+			"git status": "allow",
+			"git diff *": "allow",
+			"git log *": "allow",
+			"git branch *": "allow",
+			"git add *": "allow",
+			"git commit *": "allow",
+			"bd *": "allow",
+			"tmux *": "allow",
+		},
+	},
+	mcp: {
+		"effect-docs": {
+			type: "local",
+			command: ["npx", "-y", "effect-mcp@latest"],
+			enabled: true,
+		},
+	},
+}
+
+/**
+ * Initialize OpenCode support in a project
+ *
+ * - Creates/updates opencode.json with recommended plugins
+ * - Generates SKILL.md wrappers from .claude/skills if present
+ * - Installs azedarach plugin globally if not present
+ */
+const opencodeInitHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly skipSkills: boolean
+}) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const opencodeJsonPath = pathService.join(cwd, "opencode.json")
+		const claudeSkillsDir = pathService.join(cwd, ".claude", "skills")
+		const globalPluginDir = pathService.join(
+			process.env.HOME ?? "~",
+			".config",
+			"opencode",
+			"plugin",
+		)
+		const globalPluginPath = pathService.join(globalPluginDir, "azedarach.js")
+
+		yield* Console.log("🚀 Initializing OpenCode support...")
+		yield* Console.log("")
+
+		// Step 1: Create/update opencode.json
+		let config = { ...DEFAULT_OPENCODE_CONFIG }
+		const configExists = yield* fs.exists(opencodeJsonPath)
+		if (configExists) {
+			const existingContent = yield* fs.readFileString(opencodeJsonPath)
+			const existingConfig = yield* Effect.try({
+				try: () => JSON.parse(existingContent),
+				catch: () => ({}),
+			})
+
+			// Merge plugins - existingConfig.plugins could be undefined or an array
+			const existingPlugins = Array.isArray(existingConfig.plugins)
+				? (existingConfig.plugins as string[])
+				: []
+			const newPlugins = [...new Set([...existingPlugins, "opencode-beads", "opencode-skills"])]
+			config = { ...existingConfig, ...config, plugins: newPlugins }
+
+			yield* Console.log("✓ Updated existing opencode.json")
+		} else {
+			yield* Console.log("✓ Created opencode.json")
+		}
+
+		yield* fs.writeFileString(opencodeJsonPath, JSON.stringify(config, null, 2))
+
+		if (args.verbose) {
+			yield* Console.log(`  Plugins: ${config.plugins.join(", ")}`)
+		}
+
+		// Step 2: Check/install global azedarach plugin
+		const globalPluginExists = yield* fs.exists(globalPluginPath)
+		if (!globalPluginExists) {
+			yield* Console.log("")
+			yield* Console.log("⚠ Global azedarach plugin not found")
+			yield* Console.log(`  Install with: mkdir -p ${globalPluginDir}`)
+			yield* Console.log(`  Then copy azedarach.js from an existing project's .opencode/plugin/`)
+		} else {
+			yield* Console.log("✓ Global azedarach plugin found")
+		}
+
+		// Step 3: Generate skill wrappers if .claude/skills exists
+		if (!args.skipSkills) {
+			const claudeSkillsExist = yield* fs.exists(claudeSkillsDir)
+			if (claudeSkillsExist) {
+				yield* Console.log("")
+				yield* Console.log("📚 Generating skill wrappers...")
+
+				// Find the generator script
+				const scriptPath = pathService.join(
+					pathService.dirname(pathService.dirname(import.meta.dirname ?? "")),
+					"scripts",
+					"generate-opencode-skills.sh",
+				)
+
+				const scriptExists = yield* fs.exists(scriptPath)
+				if (scriptExists) {
+					// Run the generator script
+					const command = PlatformCommand.make("bash", scriptPath, cwd)
+					const output = yield* PlatformCommand.string(command).pipe(
+						Effect.catchAll((e) => Effect.succeed(`Error: ${e}`)),
+					)
+
+					// Count generated skills
+					const generatedCount = (output.match(/Generated:/g) ?? []).length
+					yield* Console.log(`✓ Generated ${generatedCount} skill wrappers`)
+
+					if (args.verbose) {
+						yield* Console.log(output)
+					}
+				} else {
+					yield* Console.log("⚠ Skill generator script not found")
+					yield* Console.log(`  Expected at: ${scriptPath}`)
+					yield* Console.log("  Run manually: generate-opencode-skills.sh <project-dir>")
+				}
+			} else if (args.verbose) {
+				yield* Console.log("")
+				yield* Console.log("ℹ No .claude/skills directory found, skipping skill generation")
+			}
+		}
+
+		// Summary
+		yield* Console.log("")
+		yield* Console.log("✅ OpenCode setup complete!")
+		yield* Console.log("")
+		yield* Console.log("Next steps:")
+		yield* Console.log("  1. Install opencode-beads: npm install -g opencode-beads")
+		yield* Console.log("  2. Install opencode-skills: npm install -g opencode-skills")
+		yield* Console.log("  3. Run: opencode")
+	})
+
+/**
+ * az opencode init - Initialize OpenCode support
+ */
+const opencodeInitCommand = Command.make(
+	"init",
+	{
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		skipSkills: Options.boolean("skip-skills").pipe(
+			Options.withDescription("Skip generating skill wrappers"),
+		),
+	},
+	opencodeInitHandler,
+).pipe(Command.withDescription("Initialize OpenCode support in a project"))
+
+/**
+ * az opencode - Parent command for OpenCode integration
+ */
+const opencodeCommand = Command.make("opencode", {}, () =>
+	Console.log("Usage: az opencode init [project-dir]"),
+).pipe(
+	Command.withDescription("OpenCode integration commands"),
+	Command.withSubcommands([opencodeInitCommand]),
+)
+
 /**
  * Project path argument for project add command
  */
@@ -887,6 +1067,7 @@ const cli = az.pipe(
 		notifyCommand,
 		hooksCommand,
 		projectCommand,
+		opencodeCommand,
 	]),
 )
 
