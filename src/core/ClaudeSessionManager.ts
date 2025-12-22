@@ -25,7 +25,7 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
-import { type CliToolName, getToolDefinition } from "./CliToolRegistry.js"
+import { getToolDefinition } from "./CliToolRegistry.js"
 import {
 	AI_SESSION_PREFIXES,
 	getSessionNameForTool,
@@ -34,7 +34,6 @@ import {
 	parseSessionName,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
-import { escapeForShellDoubleQuotes } from "./shell.js"
 import {
 	type TmuxError,
 	TmuxService,
