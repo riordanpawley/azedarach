@@ -164,6 +164,9 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
+					Effect.tap((config) =>
+						Effect.log(`[DEBUG] Loaded .azedarach.json: cliTool=${config.cliTool}`),
+					),
 					Effect.mapError(
 						(e) =>
 							new ConfigParseError({
@@ -292,7 +295,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			Effect.gen(function* () {
 				// If explicit config path provided, use only that
 				if (configPath) {
-					const content = yield* fs.readFileString(configPath).pipe(
+					const json = yield* fs.readFileString(configPath).pipe(
 						Effect.mapError(
 							() =>
 								new ConfigParseError({
@@ -302,18 +305,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						),
 					)
 
-					const json = yield* Effect.try({
-						try: () => JSON.parse(content),
-						catch: (e) =>
-							new ConfigParseError({
-								message: "Invalid JSON in config file",
-								path: configPath,
-								details: String(e),
-							}),
-					})
-
 					// Schema.transform in AzedarachConfigSchema handles migration automatically
-					const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
+					const validated = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
+						json,
+					).pipe(
 						Effect.mapError(
 							(e) =>
 								new ConfigParseError({

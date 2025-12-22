@@ -461,6 +461,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const cliTool = yield* appConfig.getCliTool()
 						const modelConfig = yield* appConfig.getModelConfig()
 
+						// DEBUG: Log which CLI tool is being used
+						yield* Effect.log(`[DEBUG] cliTool from config: ${cliTool}`)
+
 						// Get the tool definition for command building
 						const toolDef = getToolDefinition(cliTool)
 
