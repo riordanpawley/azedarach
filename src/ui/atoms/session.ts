@@ -9,79 +9,12 @@ import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { type SessionStateUpdate, TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
-import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { ProjectService } from "../../services/ProjectService.js"
-import type { SessionState } from "../types.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
 // TmuxSessionMonitor (Claude Code native hooks integration)
 // ============================================================================
-
-/**
- * Map TmuxStatus to SessionState
- * TmuxStatus values map directly to SessionState values.
- */
-const mapStatusToSessionState = (status: SessionStateUpdate["status"]): SessionState => status
-
-/**
- * Session monitor starter atom - starts the tmux session monitor on mount
- *
- * Polls tmux sessions for state changes set by Claude Code hooks and updates
- * session state in ClaudeSessionManager. Also notifies PTYMonitor of state
- * signals so it can respect the hook priority window.
- *
- * The monitor is automatically stopped when the atom unmounts.
- *
- * Usage: Simply subscribe to this atom in the app root to start the monitor.
- *        useAtomValue(sessionMonitorStarterAtom)
- */
-export const sessionMonitorStarterAtom = appRuntime.atom(
-	Effect.gen(function* () {
-		const monitor = yield* TmuxSessionMonitor
-		const manager = yield* ClaudeSessionManager
-		const ptyMonitor = yield* PTYMonitor
-		const diagnostics = yield* DiagnosticsService
-
-		// Handler that maps tmux status to session state changes
-		const handler = (update: SessionStateUpdate) =>
-			Effect.gen(function* () {
-				const newState = mapStatusToSessionState(update.status)
-
-				// Notify PTYMonitor of state signal (for priority handling)
-				yield* ptyMonitor.recordHookSignal(update.beadId, newState)
-
-				yield* manager
-					.updateState(update.beadId, newState)
-					.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to update session state: ${e}`)))
-
-				// Record activity for diagnostics
-				yield* diagnostics.recordActivity(
-					"TmuxSessionMonitor",
-					`${update.status} for ${update.beadId}`,
-				)
-			})
-
-		// Register TmuxSessionMonitor as a service
-		yield* diagnostics.updateServiceHealth({
-			name: "TmuxSessionMonitor",
-			status: "healthy",
-			details: "Polling tmux sessions every 500ms",
-		})
-
-		// Start the monitor (fiber tracking happens inside TmuxSessionMonitor service)
-		const fiber = yield* monitor.start(handler)
-
-		yield* Effect.log("TmuxSessionMonitor started - watching for Claude Code session state")
-
-		return fiber
-	}),
-	{ initialValue: undefined },
-)
-
-// Keep the old name as an alias for backwards compatibility
-export const hookReceiverStarterAtom = sessionMonitorStarterAtom
 
 // ============================================================================
 // PTY Monitor (session metrics via PTY output pattern matching)
