@@ -162,10 +162,7 @@ const openCodeToolDefinition: CliToolDefinition = {
 		return parts.join(" ")
 	},
 
-	// OpenCode needs init commands to replicate Claude's SessionStart hook
-	// The .opencode/plugin/azedarach.js handles session.created event,
-	// but we also inject bd prime as a belt-and-suspenders approach
-	getInitCommands: () => ["bd prime"],
+	getInitCommands: () => [],
 }
 
 // ============================================================================
