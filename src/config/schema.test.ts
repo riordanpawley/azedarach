@@ -106,13 +106,13 @@ describe("AzedarachConfigSchema", () => {
 		it("preserves session config", () => {
 			const result = decodeConfig({
 				session: {
-					command: "claude --model opus",
+					command: "claude --model haiku",
 					shell: "/bin/zsh",
 					tmuxPrefix: "C-b",
 				},
 			})
 
-			expect(result.session?.command).toBe("claude --model opus")
+			expect(result.session?.command).toBe("claude --model haiku")
 			expect(result.session?.shell).toBe("/bin/zsh")
 			expect(result.session?.tmuxPrefix).toBe("C-b")
 		})

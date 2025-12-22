@@ -427,17 +427,43 @@ Azedarach supports multiple AI coding assistants:
 | **Claude Code** | ✅ Default | `cliTool: "claude"` |
 | **OpenCode** | ✅ Supported | `cliTool: "opencode"` |
 
-### Using OpenCode
+### AI Tool & Model Configuration
 
-To use OpenCode instead of Claude Code:
+Azedarach supports multiple AI coding assistants and allows fine-grained model selection:
 
-1. **Configure Azedarach** - Set the CLI tool in `.azedarach.json`:
-   ```json
-   {
-     "cliTool": "opencode",
-     "model": "anthropic/claude-sonnet-4-20250514"
-   }
-   ```
+| Tool | Status | Config Key |
+|------|--------|------------|
+| **Claude Code** | ✅ Default | `cliTool: "claude"` |
+| **OpenCode** | ✅ Supported | `cliTool: "opencode"` |
+
+#### Model Selection
+
+You can configure models globally or specifically for each tool in `.azedarach.json`:
+
+```json
+{
+  "cliTool": "opencode",
+  "model": {
+    "default": "anthropic/claude-3-5-sonnet-20241022",
+    "chat": "anthropic/claude-3-5-haiku-20241022",
+    "claude": {
+      "default": "sonnet",
+      "chat": "haiku"
+    },
+    "opencode": {
+      "default": "anthropic/claude-3-5-sonnet-20241022",
+      "chat": "anthropic/claude-3-5-haiku-20241022"
+    }
+  }
+}
+```
+
+**Resolution Order:**
+1. Tool-specific model (e.g., `model.opencode.chat`)
+2. Global model (e.g., `model.chat`)
+3. Tool's hardcoded fallback (e.g., "haiku")
+
+#### Using OpenCode
 
 2. **Install opencode-beads** - The official beads plugin for OpenCode:
    ```bash

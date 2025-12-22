@@ -27,6 +27,8 @@ export {
 	getQueueInfoAtom,
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
+// Config atoms
+export { appConfigAtom } from "./config.js"
 // Dev server atoms
 export {
 	devServerStateAtom,
@@ -36,11 +38,9 @@ export {
 	toggleDevServerAtom,
 } from "./devServer.js"
 export type { DiagnosticsState } from "./diagnostics.js"
-
 // Diagnostics atoms
 export { diagnosticsAtom } from "./diagnostics.js"
 export type { ImageAttachment } from "./image.js"
-
 // Image attachment atoms
 export {
 	attachImageClipboardAtom,
@@ -140,7 +140,6 @@ export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "
 export { currentProjectAtom, projectsAtom, switchProjectAtom } from "./project.js"
 // Runtime (foundation for all other atoms)
 export { appRuntime } from "./runtime.js"
-
 // Session management atoms
 export {
 	attachExternalAtom,
@@ -152,7 +151,6 @@ export {
 	startSessionAtom,
 	stopSessionAtom,
 } from "./session.js"
-
 // Task CRUD atoms
 export {
 	claudeCreateSessionAtom,
@@ -164,7 +162,6 @@ export {
 	moveTaskAtom,
 	moveTasksAtom,
 } from "./task.js"
-
 // VC status atoms
 export {
 	sendVCCommandAtom,

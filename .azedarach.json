@@ -1,5 +1,11 @@
 {
 	"cliTool": "opencode",
+	"model": {
+		"opencode": {
+			"default": "github-copilot/gemini-3-flash-preview",
+			"chat": "github-copilot/gemini-3-flash-preview"
+		}
+	},
 	"worktree": {
 		"initCommands": ["direnv allow", "bun install", "bd sync"],
 		"continueOnFailure": true,

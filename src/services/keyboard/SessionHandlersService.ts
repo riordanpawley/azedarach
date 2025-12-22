@@ -301,9 +301,14 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					// Build the Claude command with Haiku model and initial prompt
+					// Build the Claude command with specified chat model and initial prompt
 					const sessionConfig = yield* appConfig.getSessionConfig()
-					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
+					const cliTool = yield* appConfig.getCliTool()
+					const modelConfig = yield* appConfig.getModelConfig()
+					const { command: cliCommand, shell, tmuxPrefix } = sessionConfig
+
+					const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+					const chatModel = modelConfig.chat ?? toolModelConfig.chat ?? "haiku"
 
 					// Inject bead context directly for chat sessions too
 					const beadContext = buildBeadContext(task)
@@ -316,10 +321,10 @@ Help me with one of:
 - Adding acceptance criteria
 - Just chatting about the task or exploring ideas
 
-Note: You're running with Haiku for fast, cheap discussion. When ready to implement, use \`/model sonnet\` to switch.
+Note: You're running with ${chatModel} for fast, cheap discussion. When ready to implement, use \`/model <model>\` to switch models.
 
 What would you like to discuss?`
-					const fullCommand = `${claudeCommand} --model haiku "${escapeForShellDoubleQuotes(prompt)}"`
+					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 
 					// Get project path for session cwd
 					const projectPath = yield* helpers.getProjectPath()
