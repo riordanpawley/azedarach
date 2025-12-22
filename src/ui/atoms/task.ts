@@ -6,6 +6,7 @@
 
 import { Command } from "@effect/platform"
 import { Effect, Schema } from "effect"
+import { AppConfig } from "../../config/index.js"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { BoardService } from "../../services/BoardService.js"
@@ -149,8 +150,10 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const overlay = yield* OverlayService
 		const beadsClient = yield* BeadsClient
 		const projectService = yield* ProjectService
+		const appConfig = yield* AppConfig
 
 		// Dismiss overlay first
+
 		yield* overlay.pop()
 		yield* toast.show("info", "Creating task with Claude...")
 
@@ -174,9 +177,14 @@ Example output:
 
 Return ONLY the JSON object, no explanation or markdown.`
 
-		const args = ["-p", prompt, "--model", "haiku", "--output-format", "text"]
+		const cliTool = yield* appConfig.getCliTool()
+		const modelConfig = yield* appConfig.getModelConfig()
+		const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+		const chatModel = modelConfig.chat ?? toolModelConfig.chat ?? "haiku"
 
-		const claudeCmd = Command.make("claude", ...args).pipe(Command.workingDirectory(projectPath))
+		const args = ["-p", prompt, "--model", chatModel, "--output-format", "text"]
+
+		const claudeCmd = Command.make(cliTool, ...args).pipe(Command.workingDirectory(projectPath))
 
 		const rawOutput = yield* Command.string(claudeCmd).pipe(
 			Effect.timeout("15 seconds"),
