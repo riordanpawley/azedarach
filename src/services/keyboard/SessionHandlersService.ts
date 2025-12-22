@@ -18,7 +18,7 @@ import type { Issue } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { getChatSessionName, getSessionName } from "../../core/paths.js"
+import { AI_SESSION_PREFIXES, getChatSessionName } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -358,21 +358,40 @@ What would you like to discuss?`
 				})
 
 			/**
+			 * Find AI session by beadId (checks both claude- and opencode- prefixes)
+			 */
+			const findAiSession = (beadId: string) =>
+				Effect.gen(function* () {
+					for (const prefix of AI_SESSION_PREFIXES) {
+						const sessionName = `${prefix}${beadId}`
+						const hasSession = yield* tmux.hasSession(sessionName)
+						if (hasSession) {
+							return sessionName
+						}
+					}
+					return null
+				})
+
+			/**
 			 * Perform the actual attach action
 			 *
 			 * Internal helper that does the tmux switch.
-			 * Takes beadId and constructs the full tmux session name.
+			 * Takes beadId and searches for the session with either prefix.
 			 */
-			const doAttach = (beadId: string) => {
-				const sessionName = getSessionName(beadId)
-				return attachment.attachExternal(sessionName).pipe(
-					Effect.tap(() => toast.show("info", "Switched! Ctrl-a Ctrl-a to return")),
+			const doAttach = (beadId: string) =>
+				Effect.gen(function* () {
+					const sessionName = yield* findAiSession(beadId)
+					if (!sessionName) {
+						yield* toast.show("error", `No session for ${beadId} - press Space+s to start`)
+						return
+					}
+					yield* attachment.attachExternal(sessionName)
+					yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
+				}).pipe(
 					Effect.catchAll((error) => {
 						const msg =
 							error && typeof error === "object" && "_tag" in error
-								? error._tag === "SessionNotFoundError"
-									? `No session for ${beadId} - press Space+s to start`
-									: String((error as { message?: string }).message || error)
+								? String((error as { message?: string }).message || error)
 								: String(error)
 						return Effect.gen(function* () {
 							yield* Effect.logError(`Attach external: ${msg}`, { error })
@@ -380,7 +399,6 @@ What would you like to discuss?`
 						})
 					}),
 				)
-			}
 
 			/**
 			 * Attach to session externally (Space+a)
