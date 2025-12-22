@@ -111,7 +111,7 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 		 * Get list of changed files vs base branch
 		 *
 		 * Uses merge-base to show changes since branch diverged from base.
-		 * Excludes .beads/ directory from results.
+		 * Includes all files (including .beads/) for file picker display.
 		 */
 		const getChangedFiles = (
 			worktreePath: string,
@@ -120,23 +120,19 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 			Effect.gen(function* () {
 				const mergeBase = yield* getMergeBase(worktreePath, baseBranch)
 
-				// Use merge-base directly (two-dot comparison), not ...HEAD (three-dot)
-				// This shows changes on the current branch since it diverged from base
-				const command = Command.make(
-					"git",
-					"diff",
-					"--name-status",
-					mergeBase,
-					"--",
-					":!.beads",
-				).pipe(Command.workingDirectory(worktreePath))
+				// Compare merge-base to HEAD (all commits since branch diverged)
+				// Without HEAD, git diff compares to working tree which may be empty
+				// Includes .beads/ - file picker shows all changes, "all diff" view filters
+				const command = Command.make("git", "diff", "--name-status", mergeBase, "HEAD").pipe(
+					Command.workingDirectory(worktreePath),
+				)
 
 				const output = yield* Command.string(command).pipe(
 					Effect.mapError((error) => {
 						const stderr = "stderr" in error ? String(error.stderr) : String(error)
 						return new GitError({
 							message: `Failed to get changed files: ${stderr}`,
-							command: `git diff --name-status ${mergeBase} -- ':!.beads'`,
+							command: `git diff --name-status ${mergeBase} HEAD`,
 							stderr,
 						})
 					}),

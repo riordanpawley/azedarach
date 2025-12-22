@@ -19,6 +19,7 @@ import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { getChatSessionName, getSessionName } from "../../core/paths.js"
+import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -303,8 +304,6 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					// Build the Claude command with Haiku model and initial prompt
 					const sessionConfig = yield* appConfig.getSessionConfig()
 					const { command: claudeCommand, shell, tmuxPrefix } = sessionConfig
-					const escapeForShell = (s: string) =>
-						s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
 
 					// Inject bead context directly for chat sessions too
 					const beadContext = buildBeadContext(task)
@@ -320,7 +319,7 @@ Help me with one of:
 Note: You're running with Haiku for fast, cheap discussion. When ready to implement, use \`/model sonnet\` to switch.
 
 What would you like to discuss?`
-					const fullCommand = `${claudeCommand} --model haiku "${escapeForShell(prompt)}"`
+					const fullCommand = `${claudeCommand} --model haiku "${escapeForShellDoubleQuotes(prompt)}"`
 
 					// Get project path for session cwd
 					const projectPath = yield* helpers.getProjectPath()
