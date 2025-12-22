@@ -7,33 +7,23 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { HashMap, Option } from "effect"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/BeadEditorService.js"
-import type { DependencyRef, Issue } from "../core/BeadsClient.js"
-import type { DevServerState } from "../services/DevServerService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
 	activeSessionsCountAtom,
-	allTasksAtom,
-	beadDevServersAtom,
 	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	currentProjectAtom,
-	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
-	getEpicChildrenAtom,
-	getEpicInfoAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
 	isOnlineAtom,
 	maxVisibleTasksAtom,
-	refreshBoardAtom,
 	totalTasksCountAtom,
-	vcStatusAtom,
 	viewModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
@@ -45,7 +35,6 @@ import { DetailPanel } from "./DetailPanel.js"
 import { DevServerMenu } from "./DevServerMenu.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { DiffViewer } from "./DiffViewer/index.js"
-import { EpicHeader } from "./EpicHeader.js"
 import { FilterMenu } from "./FilterMenu.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
@@ -57,27 +46,8 @@ import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
-import { TASK_CARD_HEIGHT } from "./TaskCard.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
-
-// ============================================================================
-// Constants
-// ============================================================================
-
-// UI chrome heights - these sum to CHROME_HEIGHT for maxVisibleTasks calculation
-const STATUS_BAR_HEIGHT = 3 // border-top + content + border-bottom
-const COLUMN_HEADER_HEIGHT = 1
-const COLUMN_UNDERLINE_HEIGHT = 0 // underline now rendered as text attribute
-const SCROLL_INDICATORS_HEIGHT = 2 // top "↑ N more" + bottom "↓ M more"
-const TMUX_STATUS_BAR_HEIGHT = process.env.TMUX ? 1 : 0
-
-const CHROME_HEIGHT =
-	STATUS_BAR_HEIGHT +
-	COLUMN_HEADER_HEIGHT +
-	COLUMN_UNDERLINE_HEIGHT +
-	SCROLL_INDICATORS_HEIGHT +
-	TMUX_STATUS_BAR_HEIGHT
 
 // ============================================================================
 // App Component
@@ -130,61 +100,13 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
-	const tasksByColumnResult = useAtomValue(drillDownFilteredTasksAtom)
-	const tasksByColumn = (
-		Result.isSuccess(tasksByColumnResult as any)
-			? (tasksByColumnResult as any).value
-			: [[], [], [], []]
-	) as any[][]
+	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
 
-	const vcStatusResult = useAtomValue(vcStatusAtom)
-	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
-
-	// Board loading state for status bar indicator
-	const boardIsLoadingResult = useAtomValue(boardIsLoadingAtom)
-	const isLoading = Result.isSuccess(boardIsLoadingResult as any)
-		? (boardIsLoadingResult as any).value
-		: false
-
-	// Current project for status bar display
-	const currentProjectResult = useAtomValue(currentProjectAtom)
-	const projectName = Result.isSuccess(currentProjectResult as any)
-		? (currentProjectResult as any).value?.name
-		: undefined
-
-	const fetchEpicInfo = useAtomSet(getEpicInfoAtom, { mode: "promise" })
-	const fetchEpicChildren = useAtomSet(getEpicChildrenAtom, { mode: "promise" })
-
-	const [epicInfo, setEpicInfo] = useState<Issue | null>(null)
-	const [epicChildren, setEpicChildren] = useState<DependencyRef[]>([])
-
-	const drillDownEpicResult = useAtomValue(drillDownEpicAtom)
-	const drillDownEpicId = Result.isSuccess(drillDownEpicResult as any)
-		? (drillDownEpicResult as any).value
-		: null
-
-	useEffect(() => {
-		const epicId = drillDownEpicId
-		if (epicId) {
-			Promise.all([fetchEpicInfo(epicId), fetchEpicChildren(epicId)]).then(([info, children]) => {
-				setEpicInfo(info)
-				setEpicChildren(children)
-			})
-		} else {
-			setEpicInfo(null)
-			setEpicChildren([])
-		}
-	}, [drillDownEpicId, fetchEpicInfo, fetchEpicChildren])
+	const projectName = useAtomValue(currentProjectAtom, Result.getOrThrow)?.name
 
 	// Start the hook receiver for Claude Code native hook integration
 	// This watches for notification files and updates session state
 	useAtomValue(hookReceiverStarterAtom)
-
-	// Initialize BoardService data on mount
-	// This is required for NavigationService to work (ID-based cursor needs task data)
-	useEffect(() => {
-		refreshBoard()
-	}, [refreshBoard])
 
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
@@ -194,31 +116,22 @@ export const App = () => {
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
 
-	const viewModeResult = useAtomValue(viewModeAtom)
-	const viewMode = Result.isSuccess(viewModeResult as any)
-		? (viewModeResult as any).value
-		: "kanban"
+	const viewMode = useAtomValue(viewModeAtom, Result.getOrThrow)
 
-	const displayDevServerResult = useAtomValue(focusedBeadPrimaryDevServerAtom)
-	const displayDevServer = (
-		Result.isSuccess(displayDevServerResult as any)
-			? (displayDevServerResult as any).value
-			: { status: "idle", port: undefined }
-	) as any
+	const displayDevServer = useAtomValue(focusedBeadPrimaryDevServerAtom)
 
-	const runningOperationResult = useAtomValue(focusedTaskRunningOperationAtom)
-	const runningOperation = Result.isSuccess(runningOperationResult as any)
-		? (runningOperationResult as any).value
-		: null
+	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
 
-	const isOnlineResult = useAtomValue(isOnlineAtom)
-	const isOnline = Result.isSuccess(isOnlineResult as any) ? (isOnlineResult as any).value : true
+	const isOnline = useAtomValue(isOnlineAtom, Result.getOrThrow)
+
+	// Board loading state for status bar indicator
+	const isLoading = useAtomValue(boardIsLoadingAtom, Result.getOrThrow)
 
 	// Terminal size
 	const maxVisibleTasks = useAtomValue(maxVisibleTasksAtom)
 
 	// Navigation hook (needs tasksByColumn)
-	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn as any)
+	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
@@ -322,17 +235,18 @@ export const App = () => {
 		return (
 			<box flexGrow={1} flexDirection="column">
 				{/* Epic header when in drill-down mode */}
-				{drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} />}
+				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
 
 				<Board
-					tasks={tasksByColumn.flat() as any}
+					tasks={tasksByColumn.flat()}
 					selectedTaskId={selectedTask?.id}
 					activeColumnIndex={columnIndex}
 					activeTaskIndex={taskIndex}
 					selectedIds={new Set(selectedIds)}
 					jumpLabels={isJump ? jumpLabels : null}
 					pendingJumpKey={pendingJumpKey ?? null}
-					terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
+					// terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
+					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
 					isActionMode={isAction}
 				/>
@@ -351,7 +265,8 @@ export const App = () => {
 				mode={mode._tag}
 				modeDisplay={modeDisplay}
 				selectedCount={selectedIds.length}
-				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
+				// TODO: re-enable
+				// vcStatus={vcStatus}
 				viewMode={viewMode}
 				isLoading={isLoading}
 				devServerStatus={displayDevServer.status}
