@@ -14,6 +14,8 @@ import type { DependencyRef, Issue } from "../core/BeadsClient.js"
 import type { DevServerState } from "../services/DevServerService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
+	activeSessionsCountAtom,
+	allTasksAtom,
 	beadDevServersAtom,
 	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
@@ -21,13 +23,16 @@ import {
 	currentProjectAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
+	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	getEpicChildrenAtom,
 	getEpicInfoAtom,
 	handleKeyAtom,
 	hookReceiverStarterAtom,
 	isOnlineAtom,
+	maxVisibleTasksAtom,
 	refreshBoardAtom,
+	totalTasksCountAtom,
 	vcStatusAtom,
 	viewModeAtom,
 } from "./atoms.js"
@@ -123,52 +128,49 @@ export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Data Atoms
 	// ═══════════════════════════════════════════════════════════════════════════
-
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
-	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+	const tasksByColumnResult = useAtomValue(drillDownFilteredTasksAtom)
+	const tasksByColumn = (
+		Result.isSuccess(tasksByColumnResult as any)
+			? (tasksByColumnResult as any).value
+			: [[], [], [], []]
+	) as any[][]
 
 	const vcStatusResult = useAtomValue(vcStatusAtom)
 	const refreshBoard = useAtomSet(refreshBoardAtom, { mode: "promise" })
 
 	// Board loading state for status bar indicator
 	const boardIsLoadingResult = useAtomValue(boardIsLoadingAtom)
-	const isLoading = Result.isSuccess(boardIsLoadingResult) ? boardIsLoadingResult.value : false
+	const isLoading = Result.isSuccess(boardIsLoadingResult as any)
+		? (boardIsLoadingResult as any).value
+		: false
 
 	// Current project for status bar display
 	const currentProjectResult = useAtomValue(currentProjectAtom)
-	const projectName = Result.isSuccess(currentProjectResult)
-		? currentProjectResult.value?.name
+	const projectName = Result.isSuccess(currentProjectResult as any)
+		? (currentProjectResult as any).value?.name
 		: undefined
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// Epic Drill-Down State
-	// ═══════════════════════════════════════════════════════════════════════════
-
-	// Subscribe to drill-down state for header rendering
-	const drillDownEpicResult = useAtomValue(drillDownEpicAtom)
-	const drillDownEpicId = Result.isSuccess(drillDownEpicResult) ? drillDownEpicResult.value : null
-
-	// Actions for fetching epic info (for header display only)
 	const fetchEpicInfo = useAtomSet(getEpicInfoAtom, { mode: "promise" })
 	const fetchEpicChildren = useAtomSet(getEpicChildrenAtom, { mode: "promise" })
 
-	// Local state for epic header display
 	const [epicInfo, setEpicInfo] = useState<Issue | null>(null)
 	const [epicChildren, setEpicChildren] = useState<DependencyRef[]>([])
 
-	// Fetch epic info for header when drill-down mode activates
+	const drillDownEpicResult = useAtomValue(drillDownEpicAtom)
+	const drillDownEpicId = Result.isSuccess(drillDownEpicResult as any)
+		? (drillDownEpicResult as any).value
+		: null
+
 	useEffect(() => {
-		if (drillDownEpicId) {
-			// Fetch epic info and children for header display
-			Promise.all([fetchEpicInfo(drillDownEpicId), fetchEpicChildren(drillDownEpicId)]).then(
-				([info, children]) => {
-					setEpicInfo(info)
-					setEpicChildren(children)
-				},
-			)
+		const epicId = drillDownEpicId
+		if (epicId) {
+			Promise.all([fetchEpicInfo(epicId), fetchEpicChildren(epicId)]).then(([info, children]) => {
+				setEpicInfo(info)
+				setEpicChildren(children)
+			})
 		} else {
-			// Clear epic data when exiting drill-down
 			setEpicInfo(null)
 			setEpicChildren([])
 		}
@@ -192,47 +194,44 @@ export const App = () => {
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
 
-	// View mode state via ViewService
 	const viewModeResult = useAtomValue(viewModeAtom)
-	const viewMode = Result.isSuccess(viewModeResult) ? viewModeResult.value : "kanban"
+	const viewMode = Result.isSuccess(viewModeResult as any)
+		? (viewModeResult as any).value
+		: "kanban"
+
+	const displayDevServerResult = useAtomValue(focusedBeadPrimaryDevServerAtom)
+	const displayDevServer = (
+		Result.isSuccess(displayDevServerResult as any)
+			? (displayDevServerResult as any).value
+			: { status: "idle", port: undefined }
+	) as any
+
+	const runningOperationResult = useAtomValue(focusedTaskRunningOperationAtom)
+	const runningOperation = Result.isSuccess(runningOperationResult as any)
+		? (runningOperationResult as any).value
+		: null
+
+	const isOnlineResult = useAtomValue(isOnlineAtom)
+	const isOnline = Result.isSuccess(isOnlineResult as any) ? (isOnlineResult as any).value : true
 
 	// Terminal size
-	const maxVisibleTasks = useMemo(() => {
-		const rows = process.stdout.rows || 24
-		return Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
-	}, [])
+	const maxVisibleTasks = useAtomValue(maxVisibleTasksAtom)
 
 	// Navigation hook (needs tasksByColumn)
-	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
-
-	// Dev server state for selected task (for StatusBar display)
-	// Returns idle state if no task selected or no dev server running
-	const beadServers = useAtomValue(beadDevServersAtom(selectedTask?.id ?? ""))
-
-	// For status bar, we show the first running server, or default if none running
-	const displayDevServer = useMemo(() => {
-		const running = HashMap.filter(beadServers, (s) => s.status === "running")
-		if (HashMap.size(running) > 0) {
-			return HashMap.values(running).next().value as DevServerState
-		}
-		return HashMap.get(beadServers, "default").pipe(
-			Option.getOrElse(() => ({
-				status: "idle" as const,
-				port: undefined,
-			})),
-		) as DevServerState
-	}, [beadServers])
-
-	// Running operation for focused task (for ActionPalette busy state)
-	// Derives from NavigationService + CommandQueueService - no props needed
-	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
-
-	// Network status for offline mode indicators
-	const isOnlineResult = useAtomValue(isOnlineAtom)
-	const isOnline = Result.isSuccess(isOnlineResult) ? isOnlineResult.value : true
+	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn as any)
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
+
+	useEffect(() => {
+		const handleResize = () => {
+			renderer.requestRender()
+		}
+		process.stdout.on("resize", handleResize)
+		return () => {
+			process.stdout.off("resize", handleResize)
+		}
+	}, [renderer])
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Keyboard Handler - Delegates to KeyboardService
@@ -282,17 +281,8 @@ export const App = () => {
 		handleKey(keySeq)
 	})
 
-	// ═══════════════════════════════════════════════════════════════════════════
-	// Computed Values
-	// ═══════════════════════════════════════════════════════════════════════════
-
-	// Flatten tasksByColumn to get all tasks for computing totals
-	const allTasks = useMemo(() => tasksByColumn.flat(), [tasksByColumn])
-	const totalTasks = allTasks.length
-
-	const activeSessions = useMemo(() => {
-		return allTasks.filter((t) => t.sessionState === "busy" || t.sessionState === "waiting").length
-	}, [allTasks])
+	const totalTasks = useAtomValue(totalTasksCountAtom)
+	const activeSessions = useAtomValue(activeSessionsCountAtom)
 
 	// Mode display text
 	const modeDisplay = useMemo(() => {
@@ -335,7 +325,7 @@ export const App = () => {
 				{drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} />}
 
 				<Board
-					tasks={tasksByColumn.flat()}
+					tasks={tasksByColumn.flat() as any}
 					selectedTaskId={selectedTask?.id}
 					activeColumnIndex={columnIndex}
 					activeTaskIndex={taskIndex}

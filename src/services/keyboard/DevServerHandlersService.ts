@@ -7,7 +7,7 @@
  * - Attach to dev server (Space+v)
  */
 
-import { Effect, HashMap, Option } from "effect"
+import { Effect, HashMap } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { DevServerService, type NoWorktreeError } from "../DevServerService.js"
