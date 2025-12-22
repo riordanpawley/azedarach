@@ -51,6 +51,9 @@ const TMUX_OPT_PORT = "@az-devserver-port"
 /** tmux option key for dev server status */
 const TMUX_OPT_STATUS = "@az-devserver-status"
 
+/** tmux option key for dev server name (for multi-server support) */
+const TMUX_OPT_SERVER_NAME = "@az-devserver-name"
+
 /** tmux option key for bead ID this dev server belongs to */
 const TMUX_OPT_BEAD_ID = "@az-devserver-bead-id"
 
@@ -76,9 +79,10 @@ const TMUX_OPT_PROJECT_PATH = "@az-devserver-project-path"
 export type DevServerStatus = "idle" | "starting" | "running" | "error"
 
 /**
- * Dev server state for a single worktree
+ * Dev server state for a single server in a worktree
  */
 export interface DevServerState {
+	readonly name: string // Name of the server (e.g., "web", "server")
 	readonly status: DevServerStatus
 	readonly port: number | undefined
 	readonly tmuxSession: string | undefined
@@ -88,9 +92,14 @@ export interface DevServerState {
 }
 
 /**
- * All dev servers state (map from beadId to state)
+ * All dev servers state for a bead (map from server name to state)
  */
-export type DevServersState = HashMap.HashMap<string, DevServerState>
+export type BeadDevServersState = HashMap.HashMap<string, DevServerState>
+
+/**
+ * All dev servers state (map from beadId to BeadDevServersState)
+ */
+export type DevServersState = HashMap.HashMap<string, BeadDevServersState>
 
 // ============================================================================
 // Error Types
@@ -121,14 +130,20 @@ const DevServerStatusSchema = Schema.Literal("idle", "starting", "running", "err
 /**
  * Create empty/idle state
  */
-const idleState: DevServerState = {
+const makeIdleState = (name: string): DevServerState => ({
+	name,
 	status: "idle",
 	port: undefined,
 	tmuxSession: undefined,
 	worktreePath: undefined,
 	startedAt: undefined,
 	error: undefined,
-}
+})
+
+/**
+ * Default server name when not specified
+ */
+const DEFAULT_SERVER_NAME = "default"
 
 // ============================================================================
 // Service Implementation
@@ -179,6 +194,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const storeTmuxMetadata = (
 			sessionName: string,
 			beadId: string,
+			serverName: string,
 			port: number,
 			worktreePath: string,
 			projectPath: string,
@@ -186,6 +202,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		): Effect.Effect<void, SessionNotFoundError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_BEAD_ID, beadId)
+				yield* tmux.setUserOption(sessionName, TMUX_OPT_SERVER_NAME, serverName)
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_PORT, String(port))
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_WORKTREE_PATH, worktreePath)
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_PROJECT_PATH, projectPath)
@@ -217,6 +234,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				// Read all options
 				const beadIdOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_BEAD_ID)
+				const serverNameOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_SERVER_NAME)
 				const portOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_PORT)
 				const worktreePathOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_WORKTREE_PATH)
 				const statusOpt = yield* tmux.getUserOption(sessionName, TMUX_OPT_STATUS)
@@ -238,6 +256,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				}
 				const status = statusResult.value
 
+				// Server name defaults to "default" if not stored (for migration)
+				const name = Option.getOrElse(serverNameOpt, () => DEFAULT_SERVER_NAME)
+
 				// Parse port (may be undefined)
 				const port = Option.match(portOpt, {
 					onNone: () => undefined,
@@ -257,6 +278,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				})
 
 				return Option.some({
+					name,
 					status,
 					port,
 					tmuxSession: sessionName,
@@ -288,7 +310,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						s.name.startsWith(DEV_SESSION_PREFIX) || s.name.startsWith(LEGACY_DEV_SESSION_PREFIX),
 				)
 
-				let result = HashMap.empty<string, DevServerState>()
+				let result: DevServersState = HashMap.empty()
 
 				for (const session of devSessions) {
 					let beadId: string
@@ -307,7 +329,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					const metadataOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isSome(metadataOpt)) {
-						result = HashMap.set(result, beadId, metadataOpt.value)
+						const state = metadataOpt.value
+						const beadServers = HashMap.get(result, beadId).pipe(
+							Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+						)
+						const updatedBeadServers = HashMap.set(beadServers, state.name, state)
+						result = HashMap.set(result, beadId, updatedBeadServers)
 					}
 				}
 
@@ -322,9 +349,11 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 		// Populate allocated ports from recovered state
 		const initialPorts = new Set<number>()
-		for (const state of HashMap.values(synced)) {
-			if (state.port) {
-				initialPorts.add(state.port)
+		for (const beadServers of HashMap.values(synced)) {
+			for (const state of HashMap.values(beadServers)) {
+				if (state.port) {
+					initialPorts.add(state.port)
+				}
 			}
 		}
 
@@ -540,14 +569,20 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		 */
 		const updateServerState = (
 			beadId: string,
+			serverName: string,
 			update: Partial<DevServerState>,
 		): Effect.Effect<DevServerState, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const newState = yield* SubscriptionRef.modify(serversRef, (servers) => {
-					const current = HashMap.get(servers, beadId)
-					const currentState = Option.getOrElse(current, () => idleState)
+					const beadServers = HashMap.get(servers, beadId).pipe(
+						Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+					)
+					const currentState = HashMap.get(beadServers, serverName).pipe(
+						Option.getOrElse(() => makeIdleState(serverName)),
+					)
 					const newState: DevServerState = { ...currentState, ...update }
-					const newServers = HashMap.set(servers, beadId, newState)
+					const newBeadServers = HashMap.set(beadServers, serverName, newState)
+					const newServers = HashMap.set(servers, beadId, newBeadServers)
 					return [newState, newServers]
 				})
 
@@ -568,13 +603,27 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			})
 
 		/**
-		 * Get server state for a bead
+		 * Get server state for a bead and server name
 		 */
-		const getServerState = (beadId: string): Effect.Effect<DevServerState> =>
+		const getServerState = (
+			beadId: string,
+			serverName: string = DEFAULT_SERVER_NAME,
+		): Effect.Effect<DevServerState> =>
 			Effect.gen(function* () {
 				const servers = yield* SubscriptionRef.get(serversRef)
-				const state = HashMap.get(servers, beadId)
-				return Option.getOrElse(state, () => idleState)
+				return HashMap.get(servers, beadId).pipe(
+					Option.flatMap(HashMap.get(serverName)),
+					Option.getOrElse(() => makeIdleState(serverName)),
+				)
+			})
+
+		/**
+		 * Get all servers for a bead
+		 */
+		const getBeadServers = (beadId: string): Effect.Effect<BeadDevServersState> =>
+			Effect.gen(function* () {
+				const servers = yield* SubscriptionRef.get(serversRef)
+				return HashMap.get(servers, beadId).pipe(Option.getOrElse(() => HashMap.empty()))
 			})
 
 		/**
@@ -618,22 +667,26 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			const servers = yield* SubscriptionRef.get(serversRef)
 
 			// Part 1: Check if existing sessions are still alive
-			for (const [beadId, state] of HashMap.entries(servers)) {
-				if (state.status === "running" && state.tmuxSession) {
-					const hasSession = yield* tmux.hasSession(state.tmuxSession)
-					if (!hasSession) {
-						yield* Effect.log(`Dev server session ${state.tmuxSession} died, marking as stopped`)
+			for (const [beadId, beadServers] of HashMap.entries(servers)) {
+				for (const [serverName, state] of HashMap.entries(beadServers)) {
+					if (state.status === "running" && state.tmuxSession) {
+						const hasSession = yield* tmux.hasSession(state.tmuxSession)
+						if (!hasSession) {
+							yield* Effect.log(
+								`Dev server session ${state.tmuxSession} (${serverName}) died, marking as stopped`,
+							)
 
-						// Release the port
-						if (state.port) {
-							yield* releasePort(state.port)
+							// Release the port
+							if (state.port) {
+								yield* releasePort(state.port)
+							}
+
+							// Update state to indicate server stopped unexpectedly
+							yield* updateServerState(beadId, serverName, {
+								...makeIdleState(serverName),
+								error: "Server stopped unexpectedly",
+							})
 						}
-
-						// Update state to indicate server stopped unexpectedly
-						yield* updateServerState(beadId, {
-							...idleState,
-							error: "Server stopped unexpectedly",
-						})
 					}
 				}
 			}
@@ -644,20 +697,28 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			const discoveredServers = yield* discoverDevServersFromTmux(projectPath)
 
 			// Merge discovered servers into our state (only add, don't overwrite)
-			for (const [beadId, discoveredState] of HashMap.entries(discoveredServers)) {
-				const currentState = HashMap.get(servers, beadId)
-				if (Option.isNone(currentState) || currentState.value.status === "idle") {
-					// This is a new or idle server we didn't know about - add it
-					yield* Effect.log(`Re-discovered dev server for ${beadId} from tmux`)
-					yield* SubscriptionRef.update(serversRef, (s) => HashMap.set(s, beadId, discoveredState))
-
-					// Track the port as allocated
-					if (discoveredState.port) {
-						yield* Ref.update(allocatedPortsRef, (allocated) => {
-							const newAllocated = new Set(allocated)
-							newAllocated.add(discoveredState.port!)
-							return newAllocated
+			for (const [beadId, discoveredBeadServers] of HashMap.entries(discoveredServers)) {
+				for (const [serverName, discoveredState] of HashMap.entries(discoveredBeadServers)) {
+					const currentState = yield* getServerState(beadId, serverName)
+					if (currentState.status === "idle") {
+						// This is a new or idle server we didn't know about - add it
+						yield* Effect.log(`Re-discovered dev server for ${beadId} (${serverName}) from tmux`)
+						yield* SubscriptionRef.update(serversRef, (s) => {
+							const beadServers = HashMap.get(s, beadId).pipe(
+								Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+							)
+							const updatedBeadServers = HashMap.set(beadServers, serverName, discoveredState)
+							return HashMap.set(s, beadId, updatedBeadServers)
 						})
+
+						// Track the port as allocated
+						if (discoveredState.port) {
+							yield* Ref.update(allocatedPortsRef, (allocated) => {
+								const newAllocated = new Set(allocated)
+								newAllocated.add(discoveredState.port!)
+								return newAllocated
+							})
+						}
 					}
 				}
 			}
@@ -683,10 +744,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		yield* Effect.addFinalizer(() =>
 			Effect.gen(function* () {
 				const servers = yield* SubscriptionRef.get(serversRef)
-				for (const [beadId, state] of HashMap.entries(servers)) {
-					if (state.tmuxSession) {
-						yield* tmux.killSession(state.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
-						yield* Effect.log(`Cleaned up dev server for ${beadId}`)
+				for (const beadServers of HashMap.values(servers)) {
+					for (const state of HashMap.values(beadServers)) {
+						if (state.tmuxSession) {
+							yield* tmux.killSession(state.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
+							yield* Effect.log(`Cleaned up dev server ${state.name} for ${state.tmuxSession}`)
+						}
 					}
 				}
 			}),
@@ -699,7 +762,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			/**
 			 * Get the state of a specific dev server
 			 */
-			getStatus: (beadId: string) => getServerState(beadId),
+			getStatus: (beadId: string, serverName?: string) => getServerState(beadId, serverName),
+
+			/**
+			 * Get all dev servers for a bead
+			 */
+			getBeadServers: (beadId: string) => getBeadServers(beadId),
 
 			/**
 			 * Start a dev server for a bead's worktree
@@ -707,6 +775,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			start: (
 				beadId: string,
 				projectPath: string,
+				serverName: string = DEFAULT_SERVER_NAME,
 			): Effect.Effect<
 				DevServerState,
 				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError | SessionNotFoundError,
@@ -714,7 +783,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			> =>
 				Effect.gen(function* () {
 					// Check current state
-					const current = yield* getServerState(beadId)
+					const current = yield* getServerState(beadId, serverName)
 					if (current.status === "running" || current.status === "starting") {
 						return current
 					}
@@ -723,18 +792,27 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const worktreePath = yield* checkWorktreeExists(beadId, projectPath)
 
 					// Update to starting
-					yield* updateServerState(beadId, {
+					yield* updateServerState(beadId, serverName, {
 						status: "starting",
 						worktreePath,
 						error: undefined,
 					})
 
+					const devServerConfig = yield* appConfig.getDevServerConfig()
+
+					// Get specific server config if it exists
+					const serverConfig = devServerConfig.servers?.[serverName]
+
 					// Detect command and build env
-					const command = yield* detectDevCommand(worktreePath)
+					const command = serverConfig?.command ?? (yield* detectDevCommand(worktreePath))
 
 					// Calculate port offset based on number of running servers
 					const servers = yield* SubscriptionRef.get(serversRef)
-					const runningCount = HashMap.size(HashMap.filter(servers, (s) => s.status === "running"))
+					const runningCount = HashMap.size(
+						HashMap.flatMap(servers, (beadServers) =>
+							HashMap.filter(beadServers, (s) => s.status === "running"),
+						),
+					)
 					const { env, primaryPort } = yield* buildPortEnv(runningCount)
 
 					// Build the full command with env vars
@@ -745,15 +823,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Get initCommands and devServer config from current project
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
-					const devServerConfig = yield* appConfig.getDevServerConfig()
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(beadId)
-					const cwd =
-						devServerConfig.cwd === "."
-							? worktreePath
-							: pathService.join(worktreePath, devServerConfig.cwd)
+					// Use server name in session name if not default
+					const tmuxSession =
+						serverName === DEFAULT_SERVER_NAME
+							? getDevSessionName(beadId)
+							: `${getDevSessionName(beadId)}-${serverName}`
+
+					const serverCwd = serverConfig?.cwd ?? devServerConfig.cwd
+					const cwd = serverCwd === "." ? worktreePath : pathService.join(worktreePath, serverCwd)
 
 					yield* worktreeSession.create({
 						sessionName: tmuxSession,
@@ -767,6 +847,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					yield* storeTmuxMetadata(
 						tmuxSession,
 						beadId,
+						serverName,
 						primaryPort,
 						worktreePath,
 						projectPath,
@@ -774,7 +855,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					)
 
 					// Update in-memory state (for reactive UI)
-					yield* updateServerState(beadId, {
+					yield* updateServerState(beadId, serverName, {
 						status: "running",
 						tmuxSession,
 						port: primaryPort,
@@ -786,7 +867,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const pollerFiber = yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
-								? updateServerState(beadId, { port: detectedPort })
+								? updateServerState(beadId, serverName, { port: detectedPort })
 								: Effect.void,
 						),
 						Effect.catchAll(() => Effect.void),
@@ -795,21 +876,24 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Register fiber with diagnostics for visibility
 					yield* diagnostics.registerFiberIn(serviceScope, {
-						id: `dev-server-port-poller-${beadId}`,
-						name: `Port Poller (${beadId})`,
-						description: `Detecting port for ${beadId} dev server`,
+						id: `dev-server-port-poller-${beadId}-${serverName}`,
+						name: `Port Poller (${beadId}-${serverName})`,
+						description: `Detecting port for ${beadId} ${serverName} dev server`,
 						fiber: pollerFiber,
 					})
 
-					return yield* getServerState(beadId)
+					return yield* getServerState(beadId, serverName)
 				}),
 
 			/**
 			 * Stop a dev server
 			 */
-			stop: (beadId: string): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+			stop: (
+				beadId: string,
+				serverName: string = DEFAULT_SERVER_NAME,
+			): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					const current = yield* getServerState(beadId)
+					const current = yield* getServerState(beadId, serverName)
 
 					if (current.tmuxSession) {
 						yield* tmux.killSession(current.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
@@ -820,7 +904,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						yield* releasePort(current.port)
 					}
 
-					yield* updateServerState(beadId, idleState)
+					yield* updateServerState(beadId, serverName, makeIdleState(serverName))
 				}),
 
 			/**
@@ -829,16 +913,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			toggle: (
 				beadId: string,
 				projectPath: string,
+				serverName: string = DEFAULT_SERVER_NAME,
 			): Effect.Effect<
 				DevServerState,
 				DevServerError | NoWorktreeError | TmuxError | WorktreeSessionError | SessionNotFoundError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
-					const current = yield* getServerState(beadId)
+					const current = yield* getServerState(beadId, serverName)
 
 					if (current.status === "running" || current.status === "starting") {
-						yield* Effect.log(`Stopping dev server for ${beadId}`)
+						yield* Effect.log(`Stopping dev server ${serverName} for ${beadId}`)
 
 						if (current.tmuxSession) {
 							yield* tmux.killSession(current.tmuxSession).pipe(Effect.catchAll(() => Effect.void))
@@ -847,27 +932,34 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 							yield* releasePort(current.port)
 						}
 
-						return yield* updateServerState(beadId, idleState)
+						return yield* updateServerState(beadId, serverName, makeIdleState(serverName))
 					}
 
-					yield* Effect.log(`Starting dev server for ${beadId}`)
+					yield* Effect.log(`Starting dev server ${serverName} for ${beadId}`)
 
 					// Verify worktree exists
 					const worktreePath = yield* checkWorktreeExists(beadId, projectPath)
 
 					// Update to starting
-					yield* updateServerState(beadId, {
+					yield* updateServerState(beadId, serverName, {
 						status: "starting",
 						worktreePath,
 						error: undefined,
 					})
 
+					const devServerConfig = yield* appConfig.getDevServerConfig()
+					const serverConfig = devServerConfig.servers?.[serverName]
+
 					// Detect command
-					const command = yield* detectDevCommand(worktreePath)
+					const command = serverConfig?.command ?? (yield* detectDevCommand(worktreePath))
 
 					// Calculate port offset
 					const servers = yield* SubscriptionRef.get(serversRef)
-					const runningCount = HashMap.size(HashMap.filter(servers, (s) => s.status === "running"))
+					const runningCount = HashMap.size(
+						HashMap.flatMap(servers, (beadServers) =>
+							HashMap.filter(beadServers, (s) => s.status === "running"),
+						),
+					)
 					const { env, primaryPort } = yield* buildPortEnv(runningCount)
 
 					// Build command with env
@@ -878,15 +970,16 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Get initCommands and devServer config from current project
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
-					const devServerConfig = yield* appConfig.getDevServerConfig()
 					const initCommands = worktreeConfig.initCommands
 
 					// Create tmux session - initCommands are chained with dev command in same shell
-					const tmuxSession = getDevSessionName(beadId)
-					const cwd =
-						devServerConfig.cwd === "."
-							? worktreePath
-							: pathService.join(worktreePath, devServerConfig.cwd)
+					const tmuxSession =
+						serverName === DEFAULT_SERVER_NAME
+							? getDevSessionName(beadId)
+							: `${getDevSessionName(beadId)}-${serverName}`
+
+					const serverCwd = serverConfig?.cwd ?? devServerConfig.cwd
+					const cwd = serverCwd === "." ? worktreePath : pathService.join(worktreePath, serverCwd)
 
 					yield* worktreeSession.create({
 						sessionName: tmuxSession,
@@ -900,6 +993,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					yield* storeTmuxMetadata(
 						tmuxSession,
 						beadId,
+						serverName,
 						primaryPort,
 						worktreePath,
 						projectPath,
@@ -907,7 +1001,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					)
 
 					// Update in-memory state (for reactive UI)
-					yield* updateServerState(beadId, {
+					yield* updateServerState(beadId, serverName, {
 						status: "running",
 						tmuxSession,
 						port: primaryPort,
@@ -919,7 +1013,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const pollerFiber = yield* pollForPort(beadId, tmuxSession).pipe(
 						Effect.tap((detectedPort) =>
 							detectedPort !== undefined
-								? updateServerState(beadId, { port: detectedPort })
+								? updateServerState(beadId, serverName, { port: detectedPort })
 								: Effect.void,
 						),
 						Effect.catchAll(() => Effect.void),
@@ -928,13 +1022,13 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 					// Register fiber with diagnostics for visibility
 					yield* diagnostics.registerFiberIn(serviceScope, {
-						id: `dev-server-port-poller-${beadId}`,
-						name: `Port Poller (${beadId})`,
-						description: `Detecting port for ${beadId} dev server`,
+						id: `dev-server-port-poller-${beadId}-${serverName}`,
+						name: `Port Poller (${beadId}-${serverName})`,
+						description: `Detecting port for ${beadId} ${serverName} dev server`,
 						fiber: pollerFiber,
 					})
 
-					return yield* getServerState(beadId)
+					return yield* getServerState(beadId, serverName)
 				}),
 
 			/**
@@ -942,9 +1036,10 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			 */
 			syncState: (
 				beadId: string,
+				serverName: string = DEFAULT_SERVER_NAME,
 			): Effect.Effect<DevServerState, never, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
-					const current = yield* getServerState(beadId)
+					const current = yield* getServerState(beadId, serverName)
 
 					if (current.tmuxSession) {
 						const hasSession = yield* tmux.hasSession(current.tmuxSession)
@@ -953,8 +1048,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 							if (current.port) {
 								yield* releasePort(current.port)
 							}
-							return yield* updateServerState(beadId, {
-								...idleState,
+							return yield* updateServerState(beadId, serverName, {
+								...makeIdleState(serverName),
 								error: "Server stopped unexpectedly",
 							})
 						}

@@ -8,7 +8,7 @@ import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
 import { BoardService } from "../../services/BoardService.js"
 import { ViewService } from "../../services/ViewService.js"
-import { drillDownChildIdsAtom } from "./navigation.js"
+import { drillDownChildIdsAtom, drillDownEpicAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -161,4 +161,28 @@ export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 
 	// Filter each column to only include children
 	return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+})
+
+export const allTasksAtom = Atom.readable((get) => {
+	const tasksByColumn = get(drillDownFilteredTasksAtom)
+	return tasksByColumn.flat()
+})
+
+export const activeSessionsCountAtom = Atom.readable((get) => {
+	const allTasks = get(allTasksAtom)
+	return allTasks.filter((t) => t.sessionState === "busy" || t.sessionState === "waiting").length
+})
+
+export const totalTasksCountAtom = Atom.readable((get) => {
+	const allTasks = get(allTasksAtom)
+	return allTasks.length
+})
+
+export const maxVisibleTasksAtom = Atom.readable((get) => {
+	const drillDownEpicId = get(drillDownEpicAtom)
+	const CHROME_HEIGHT = 9
+	const TASK_CARD_HEIGHT = 4
+	const rows = process.stdout.rows || 24
+	const baseMax = Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
+	return Result.isSuccess(drillDownEpicId) && drillDownEpicId.value ? baseMax - 1 : baseMax
 })
