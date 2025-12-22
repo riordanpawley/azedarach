@@ -57,6 +57,11 @@ export interface CreateWorktreeSessionOptions {
 	 * If undefined, no init commands are run.
 	 */
 	readonly initCommands?: readonly string[]
+	/**
+	 * Background tasks to run in separate tmux windows.
+	 * These run initCommands followed by the task command.
+	 */
+	readonly backgroundTasks?: readonly string[]
 }
 
 /**
@@ -137,6 +142,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							cwd = worktreePath,
 							tmuxPrefix = sessionConfig.tmuxPrefix,
 							initCommands = [],
+							backgroundTasks = [],
 						} = options
 
 						// Get shell from config (for interactive mode)
@@ -172,6 +178,30 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						// Send the main command last
 						yield* Effect.log(`Queuing main command: ${command}`)
 						yield* tmux.sendKeys(sessionName, command)
+
+						// Spawn background tasks in separate windows
+						for (let i = 0; i < backgroundTasks.length; i++) {
+							const task = backgroundTasks[i]
+							const windowName = `task-${i + 1}`
+							yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+
+							// Create a new window for the background task
+							yield* tmux.newWindow(sessionName, windowName, {
+								cwd,
+								command: `${shell} -i`,
+							})
+
+							// Give shell time to initialize in the new window
+							yield* Effect.sleep("300 millis")
+
+							// Run initCommands in the background window
+							for (const initCmd of initCommands) {
+								yield* tmux.sendKeys(`${sessionName}:${windowName}`, initCmd)
+							}
+
+							// Run the background task command followed by exec $SHELL to keep it open
+							yield* tmux.sendKeys(`${sessionName}:${windowName}`, `${task}; exec ${shell}`)
+						}
 
 						return {
 							sessionName,

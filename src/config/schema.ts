@@ -114,6 +114,9 @@ const SessionConfigSchema = Schema.Struct({
 
 	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
 	dangerouslySkipPermissions: Schema.optional(Schema.Boolean),
+
+	/** Commands to run in background tmux windows when a session starts */
+	backgroundTasks: Schema.optional(Schema.Array(Schema.String)),
 })
 
 /**
