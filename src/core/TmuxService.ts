@@ -155,6 +155,29 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 				),
 
 			/**
+			 * Create a new window in an existing session
+			 *
+			 * @param session - tmux session name
+			 * @param windowName - name for the new window
+			 * @param opts.cwd - Working directory for the new window
+			 * @param opts.command - Command to run in the new window
+			 */
+			newWindow: (
+				session: string,
+				windowName: string,
+				opts?: {
+					cwd?: string
+					command?: string
+				},
+			) =>
+				Effect.gen(function* () {
+					const args = ["new-window", "-t", session, "-n", windowName]
+					if (opts?.cwd) args.push("-c", opts.cwd)
+					if (opts?.command) args.push(opts.command)
+					yield* runTmux(args)
+				}),
+
+			/**
 			 * Display a popup window with a command
 			 *
 			 * Opens a centered popup window that runs the specified command.
