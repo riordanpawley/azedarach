@@ -198,8 +198,9 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/implementing/i,
 			/adding/i,
 			/updating/i,
-			/fixing/i,
+			/ Fixing/i,
 			/refactoring/i,
+			/⏺/u,
 			// Command execution
 			/running command/i,
 			/executing/i,
@@ -234,8 +235,11 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/strategy/i,
 			/to understand/i,
 			/to figure out/i,
+			/✶/u,
+			/·/u,
 		],
 	},
+
 	// "idle" is the default when no phase patterns match
 ]
 
