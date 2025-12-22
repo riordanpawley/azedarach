@@ -5,8 +5,10 @@
  * in non-interactive mode to create the bead, then exits.
  */
 
+import { useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
+import { appConfigAtom } from "./atoms/index.js"
 import { theme } from "./theme.js"
 
 export interface ClaudeCreatePromptProps {
@@ -25,6 +27,13 @@ const ATTR_BOLD = 1
  */
 export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 	const [description, setDescription] = useState("")
+	const appConfigResult = useAtomValue(appConfigAtom)
+
+	const appConfig = appConfigResult._tag === "Success" ? appConfigResult.value : null
+	const cliTool = appConfig?.cliTool ?? "claude"
+	const modelConfig = appConfig?.model
+	const toolModelConfig = cliTool === "claude" ? modelConfig?.claude : modelConfig?.opencode
+	const activeModel = modelConfig?.chat ?? toolModelConfig?.chat ?? "haiku"
 
 	useKeyboard((event) => {
 		// Escape to cancel
@@ -114,7 +123,8 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				{/* Title */}
 				<box>
 					<text fg={theme.lavender} attributes={ATTR_BOLD}>
-						Create Task with Claude{"\n"}
+						Create Task with {cliTool === "claude" ? "Claude" : "OpenCode"}
+						{"\n"}
 					</text>
 				</box>
 
@@ -122,7 +132,7 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				<box marginTop={1}>
 					<text fg={theme.subtext0}>
 						Describe what you want to do in natural language.{"\n"}
-						Claude will create a bead with appropriate title/type/priority.
+						The AI ({activeModel}) will create a bead with appropriate title/type/priority.
 					</text>
 				</box>
 

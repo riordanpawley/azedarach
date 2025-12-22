@@ -90,8 +90,12 @@ const SessionSchema = Schema.Struct({
 
 /**
  * Claude model to use for session
+ *
+ * Supports short names for Claude (haiku, sonnet, opus) or
+ * provider/model format for OpenCode (anthropic/claude-sonnet-20241022,
+ * google/gemini-flash-1.5, etc.)
  */
-export type ClaudeModel = "haiku" | "sonnet" | "opus"
+export type ClaudeModel = string
 
 /**
  * Options for starting a session
@@ -479,9 +483,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Determine which model to use:
 						// 1. Explicitly passed model (from StartSessionOptions)
-						// 2. Config model.default
-						// 3. Tool's default (undefined = let tool decide)
-						const effectiveModel = model ?? modelConfig.default
+						// 2. Config model.[cliTool].default
+						// 3. Config model.default
+						// 4. Tool's default (undefined = let tool decide)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = model ?? toolModelConfig.default ?? modelConfig.default
 
 						// Build command using the CLI tool registry
 						const commandWithOptions = toolDef.buildCommand({

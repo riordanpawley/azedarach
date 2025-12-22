@@ -86,6 +86,16 @@ export const DEFAULT_CONFIG = {
 		default: undefined as string | undefined,
 		/** Chat model - defaults based on CLI tool */
 		chat: undefined as string | undefined,
+		/** Claude-specific overrides */
+		claude: {
+			default: undefined as string | undefined,
+			chat: "haiku" as string | undefined,
+		},
+		/** OpenCode-specific overrides */
+		opencode: {
+			default: undefined as string | undefined,
+			chat: "anthropic/claude-3-5-haiku-20241022" as string | undefined,
+		},
 	},
 
 	worktree: {
@@ -179,6 +189,14 @@ export interface ResolvedConfig {
 	model: {
 		default: string | undefined
 		chat: string | undefined
+		claude: {
+			default: string | undefined
+			chat: string | undefined
+		}
+		opencode: {
+			default: string | undefined
+			chat: string | undefined
+		}
 	}
 
 	worktree: {
@@ -266,6 +284,14 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		model: {
 			default: config.model?.default ?? DEFAULT_CONFIG.model.default,
 			chat: config.model?.chat ?? DEFAULT_CONFIG.model.chat,
+			claude: {
+				default: config.model?.claude?.default ?? DEFAULT_CONFIG.model.claude.default,
+				chat: config.model?.claude?.chat ?? DEFAULT_CONFIG.model.claude.chat,
+			},
+			opencode: {
+				default: config.model?.opencode?.default ?? DEFAULT_CONFIG.model.opencode.default,
+				chat: config.model?.opencode?.chat ?? DEFAULT_CONFIG.model.opencode.chat,
+			},
 		},
 		worktree: {
 			initCommands: config.worktree?.initCommands ?? DEFAULT_CONFIG.worktree.initCommands,
