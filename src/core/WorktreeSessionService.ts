@@ -28,7 +28,7 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect } from "effect"
 import { AppConfig } from "../config/index.js"
-import { type SessionNotFoundError, type TmuxError, TmuxService } from "./TmuxService.js"
+import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
 // Types
@@ -171,12 +171,17 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						// Zsh queues them and executes in order, with prompt appearing
 						// after each - this triggers direnv hooks between commands
 						for (const initCmd of initCommands) {
-							yield* Effect.log(`Queuing init command: ${initCmd}`)
+							yield* Effect.log(`Queuing init command: ${sessionName}:${initCmd}`)
 							yield* tmux.sendKeys(sessionName, initCmd)
 						}
 
+						// Signal init completion
+						// We send this to the shell so it runs AFTER initCommands complete
+						const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+						yield* tmux.sendKeys(sessionName, marker)
+
 						// Send the main command last
-						yield* Effect.log(`Queuing main command: ${command}`)
+						yield* Effect.log(`Queuing main command: ${sessionName}:${command}`)
 						yield* tmux.sendKeys(sessionName, command)
 
 						// Spawn background tasks in separate windows
@@ -194,7 +199,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							// Give shell time to initialize in the new window
 							yield* Effect.sleep("300 millis")
 
-							// Run initCommands in the background window
+							// Background tasks MUST wait for main session init to complete.
+							// We use a shell loop to wait for the @az_init_done option to be set.
+							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+							yield* tmux.sendKeys(`${sessionName}:${windowName}`, waitCmd)
+
+							// Run initCommands in the background window (environment only)
 							for (const initCmd of initCommands) {
 								yield* tmux.sendKeys(`${sessionName}:${windowName}`, initCmd)
 							}
@@ -207,7 +217,22 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							sessionName,
 							worktreePath,
 						}
-					}),
+					}).pipe(
+						Effect.mapError((e) => {
+							if (
+								e instanceof WorktreeSessionError ||
+								e instanceof TmuxError ||
+								e instanceof SessionNotFoundError
+							) {
+								return e
+							}
+							return new WorktreeSessionError({
+								message: String(e),
+								sessionName: options.sessionName,
+								worktreePath: options.worktreePath,
+							})
+						}),
+					),
 
 				/**
 				 * Check if a tmux session exists
