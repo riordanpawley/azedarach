@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+  "claude_code": {
+    "mcp": false,
+    "commands": false,
+    "skills": false,
+    "agents": false,
+    "hooks": false
+  },
+  "disabled_hooks": [
+    "directory-readme-injector"
+  ],
+  "disabled_mcps": []
+}
