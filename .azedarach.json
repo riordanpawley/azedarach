@@ -1,4 +1,5 @@
 {
+	"cliTool": "opencode",
 	"worktree": {
 		"initCommands": ["direnv allow", "bun install", "bd sync"],
 		"continueOnFailure": true,
@@ -10,7 +11,12 @@
 		"branchPrefix": "az-"
 	},
 	"session": {
+<<<<<<< HEAD
+||||||| 64be275
+		"command": "claude",
+=======
 		"command": "opencode",
+>>>>>>> main
 		"shell": "zsh",
 		"tmuxPrefix": "C-a"
 	},
