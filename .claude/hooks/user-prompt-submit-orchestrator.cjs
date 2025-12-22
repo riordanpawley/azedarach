@@ -312,7 +312,7 @@ async function aiMatchSkills(prompt, editedFiles, skillRules) {
 
     // Call Claude Haiku for intent analysis
     const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: process.env.CLAUDE_CHAT_MODEL || "claude-3-5-haiku-latest",
       max_tokens: 500,
       messages: [
         {

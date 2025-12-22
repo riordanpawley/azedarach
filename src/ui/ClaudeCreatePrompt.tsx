@@ -33,7 +33,12 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 	const cliTool = appConfig?.cliTool ?? "claude"
 	const modelConfig = appConfig?.model
 	const toolModelConfig = cliTool === "claude" ? modelConfig?.claude : modelConfig?.opencode
-	const activeModel = modelConfig?.chat ?? toolModelConfig?.chat ?? "haiku"
+	const activeModel =
+		modelConfig?.chat ??
+		toolModelConfig?.chat ??
+		modelConfig?.default ??
+		toolModelConfig?.default ??
+		"haiku"
 
 	useKeyboard((event) => {
 		// Escape to cancel
