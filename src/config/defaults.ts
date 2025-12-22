@@ -89,12 +89,12 @@ export const DEFAULT_CONFIG = {
 		/** Claude-specific overrides */
 		claude: {
 			default: undefined as string | undefined,
-			chat: "haiku" as string | undefined,
+			chat: undefined as string | undefined,
 		},
 		/** OpenCode-specific overrides */
 		opencode: {
 			default: undefined as string | undefined,
-			chat: "anthropic/claude-3-5-haiku-20241022" as string | undefined,
+			chat: undefined as string | undefined,
 		},
 	},
 

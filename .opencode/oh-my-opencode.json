@@ -1,14 +1,17 @@
 {
-  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
-  "claude_code": {
-    "mcp": true,
-    "commands": false,
-    "skills": true,
-    "agents": false,
-    "hooks": false
-  },
-  "disabled_hooks": [
-    "directory-readme-injector"
-  ],
-  "disabled_mcps": []
+	"$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+	"claude_code": {
+		"mcp": true,
+		"commands": false,
+		"skills": true,
+		"agents": false,
+		"hooks": false
+	},
+	"disabled_hooks": ["directory-readme-injector"],
+	"agents": {
+		"default": {
+			"model": "github-copilot/gemini-3-flash-preview"
+		}
+	},
+	"disabled_mcps": []
 }

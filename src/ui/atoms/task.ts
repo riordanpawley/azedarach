@@ -180,7 +180,12 @@ Return ONLY the JSON object, no explanation or markdown.`
 		const cliTool = yield* appConfig.getCliTool()
 		const modelConfig = yield* appConfig.getModelConfig()
 		const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
-		const chatModel = modelConfig.chat ?? toolModelConfig.chat ?? "haiku"
+		const chatModel =
+			modelConfig.chat ??
+			toolModelConfig.chat ??
+			modelConfig.default ??
+			toolModelConfig.default ??
+			"haiku"
 
 		const args = ["-p", prompt, "--model", chatModel, "--output-format", "text"]
 

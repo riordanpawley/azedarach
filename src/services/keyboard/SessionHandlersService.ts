@@ -308,7 +308,12 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const { command: cliCommand, shell, tmuxPrefix } = sessionConfig
 
 					const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
-					const chatModel = modelConfig.chat ?? toolModelConfig.chat ?? "haiku"
+					const chatModel =
+						modelConfig.chat ??
+						toolModelConfig.chat ??
+						modelConfig.default ??
+						toolModelConfig.default ??
+						"haiku"
 
 					// Inject bead context directly for chat sessions too
 					const beadContext = buildBeadContext(task)
