@@ -31,6 +31,7 @@ export {
 export { appConfigAtom } from "./config.js"
 // Dev server atoms
 export {
+	beadDevServersAtom,
 	devServerStateAtom,
 	devServersAtom,
 	stopDevServerAtom,

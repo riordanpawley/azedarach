@@ -7,9 +7,11 @@
  * - Attach to dev server (Space+v)
  */
 
-import { Effect } from "effect"
+import { Effect, HashMap, Option } from "effect"
+import { AppConfig } from "../../config/AppConfig.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { DevServerService, type NoWorktreeError } from "../DevServerService.js"
+import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
@@ -23,6 +25,8 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			ToastService.Default,
 			KeyboardHelpersService.Default,
 			TmuxService.Default,
+			OverlayService.Default,
+			AppConfig.Default,
 		],
 		effect: Effect.gen(function* () {
 			const devServer = yield* DevServerService
@@ -30,12 +34,14 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			const toast = yield* ToastService
 			const helpers = yield* KeyboardHelpersService
 			const tmux = yield* TmuxService
+			const overlay = yield* OverlayService
+			const appConfig = yield* AppConfig
 
 			/**
 			 * Toggle dev server for the currently selected bead
 			 *
-			 * Starts the server if stopped, stops if running.
-			 * Shows toast notifications for success/error.
+			 * If multiple servers are defined, shows a menu.
+			 * Otherwise toggles the default server.
 			 */
 			const toggleDevServer = () =>
 				Effect.gen(function* () {
@@ -55,39 +61,46 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					)
 					if (!project) return
 
-					const currentState = yield* devServer.getStatus(task.id)
+					const config = yield* appConfig.getDevServerConfig()
+					const serverNames = config?.servers ? Object.keys(config.servers) : ["default"]
 
-					if (currentState.status === "running" || currentState.status === "starting") {
-						// Stop the server
-						yield* devServer.stop(task.id)
-						yield* toast.show("success", `Stopped dev server for ${task.id}`)
+					if (serverNames.length > 1) {
+						// Show menu for multiple servers
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
 					} else {
-						// Start the server
-						yield* devServer.toggle(task.id, project.path).pipe(
-							Effect.tap((state) =>
-								toast.show(
-									"success",
-									state.port
-										? `Dev server running at localhost:${state.port}`
-										: `Dev server starting for ${task.id}...`,
+						// Toggle the single/default server
+						const serverName = serverNames[0]
+						const currentState = yield* devServer.getStatus(task.id, serverName)
+
+						if (currentState.status === "running" || currentState.status === "starting") {
+							// Stop the server
+							yield* devServer.stop(task.id, serverName)
+							yield* toast.show("success", `Stopped dev server '${serverName}' for ${task.id}`)
+						} else {
+							// Start the server
+							yield* devServer.toggle(task.id, project.path, serverName).pipe(
+								Effect.tap((state) =>
+									toast.show(
+										"success",
+										state.port
+											? `Dev server '${serverName}' running at localhost:${state.port}`
+											: `Dev server '${serverName}' starting for ${task.id}...`,
+									),
 								),
-							),
-							Effect.catchTag("NoWorktreeError", (err: NoWorktreeError) =>
-								toast.show("error", err.message),
-							),
-							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
-							Effect.catchTag("TmuxError", (err) =>
-								toast.show("error", `tmux error: ${err.message}`),
-							),
-						)
+								Effect.catchTag("NoWorktreeError", (err: NoWorktreeError) =>
+									toast.show("error", err.message),
+								),
+								Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
+								Effect.catchTag("TmuxError", (err) =>
+									toast.show("error", `tmux error: ${err.message}`),
+								),
+							)
+						}
 					}
 				})
 
 			/**
 			 * Restart dev server for the currently selected bead
-			 *
-			 * Stops the server if running, then starts it again.
-			 * Only works if a dev server is currently running.
 			 */
 			const restartDevServer = () =>
 				Effect.gen(function* () {
@@ -107,41 +120,47 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					)
 					if (!project) return
 
-					const currentState = yield* devServer.getStatus(task.id)
+					const config = yield* appConfig.getDevServerConfig()
+					const serverNames = config?.servers ? Object.keys(config.servers) : ["default"]
 
-					if (currentState.status !== "running" && currentState.status !== "starting") {
-						yield* toast.show("error", "No dev server running to restart")
-						return
-					}
+					if (serverNames.length > 1) {
+						// For now, if multiple servers, just show the menu (Space+r is better for picking)
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+					} else {
+						const serverName = serverNames[0]
+						const currentState = yield* devServer.getStatus(task.id, serverName)
 
-					// Stop then start
-					yield* toast.show("info", `Restarting dev server for ${task.id}...`)
-					yield* devServer.stop(task.id)
+						if (currentState.status !== "running" && currentState.status !== "starting") {
+							yield* toast.show("error", `Dev server '${serverName}' not running to restart`)
+							return
+						}
 
-					yield* devServer.toggle(task.id, project.path).pipe(
-						Effect.tap((state) =>
-							toast.show(
-								"success",
-								state.port
-									? `Dev server restarted at localhost:${state.port}`
-									: `Dev server restarting for ${task.id}...`,
+						// Stop then start
+						yield* toast.show("info", `Restarting dev server '${serverName}' for ${task.id}...`)
+						yield* devServer.stop(task.id, serverName)
+
+						yield* devServer.toggle(task.id, project.path, serverName).pipe(
+							Effect.tap((state) =>
+								toast.show(
+									"success",
+									state.port
+										? `Dev server '${serverName}' restarted at localhost:${state.port}`
+										: `Dev server '${serverName}' restarting for ${task.id}...`,
+								),
 							),
-						),
-						Effect.catchTag("NoWorktreeError", (err: NoWorktreeError) =>
-							toast.show("error", err.message),
-						),
-						Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
-						Effect.catchTag("TmuxError", (err) =>
-							toast.show("error", `tmux error: ${err.message}`),
-						),
-					)
+							Effect.catchTag("NoWorktreeError", (err: NoWorktreeError) =>
+								toast.show("error", err.message),
+							),
+							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
+							Effect.catchTag("TmuxError", (err) =>
+								toast.show("error", `tmux error: ${err.message}`),
+							),
+						)
+					}
 				})
 
 			/**
-			 * Attach to the dev server tmux session for the currently selected bead
-			 *
-			 * Switches the tmux client to the dev server session, allowing the user
-			 * to view the dev server output. User can return with Ctrl-a Ctrl-a.
+			 * Attach to a dev server tmux session
 			 */
 			const attachDevServer = () =>
 				Effect.gen(function* () {
@@ -151,29 +170,39 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 						return
 					}
 
-					const currentState = yield* devServer.getStatus(task.id)
+					const beadServers = yield* devServer.getBeadServers(task.id)
+					const runningServers = HashMap.filter(
+						beadServers,
+						(s) => s.status === "running" || s.status === "starting",
+					)
 
-					if (currentState.status !== "running" && currentState.status !== "starting") {
+					if (HashMap.size(runningServers) === 0) {
 						yield* toast.show("error", "No dev server running. Start one with Space+r")
 						return
 					}
 
-					if (!currentState.tmuxSession) {
-						yield* toast.show("error", "Dev server session not found")
-						return
-					}
+					if (HashMap.size(runningServers) > 1) {
+						// Multiple running, show menu to pick which one to attach to
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+					} else {
+						// Only one running, attach to it
+						const server = HashMap.values(runningServers).next().value
+						if (!server?.tmuxSession) {
+							yield* toast.show("error", "Dev server session not found")
+							return
+						}
 
-					// Switch to the dev server session
-					yield* tmux
-						.switchClient(currentState.tmuxSession)
-						.pipe(
-							Effect.catchAll((err) =>
-								toast.show(
-									"error",
-									`Failed to attach: ${err instanceof Error ? err.message : String(err)}`,
+						yield* tmux
+							.switchClient(server.tmuxSession)
+							.pipe(
+								Effect.catchAll((err) =>
+									toast.show(
+										"error",
+										`Failed to attach: ${err instanceof Error ? err.message : String(err)}`,
+									),
 								),
-							),
-						)
+							)
+					}
 				})
 
 			return {

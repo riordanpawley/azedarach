@@ -7,16 +7,18 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard, useRenderer } from "@opentui/react"
+import { HashMap, Option } from "effect"
 import { useEffect, useMemo, useState } from "react"
 import { killActivePopup } from "../core/BeadEditorService.js"
 import type { DependencyRef, Issue } from "../core/BeadsClient.js"
+import type { DevServerState } from "../services/DevServerService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
+	beadDevServersAtom,
 	boardIsLoadingAtom,
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	currentProjectAtom,
-	devServerStateAtom,
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	focusedTaskRunningOperationAtom,
@@ -35,6 +37,7 @@ import { CommandInput } from "./CommandInput.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
+import { DevServerMenu } from "./DevServerMenu.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { DiffViewer } from "./DiffViewer/index.js"
 import { EpicHeader } from "./EpicHeader.js"
@@ -95,6 +98,7 @@ export const App = () => {
 		showingDiagnostics,
 		showingProjectSelector,
 		showingDiffViewer,
+		showingDevServerMenu,
 	} = useOverlays()
 
 	const {
@@ -203,7 +207,21 @@ export const App = () => {
 
 	// Dev server state for selected task (for StatusBar display)
 	// Returns idle state if no task selected or no dev server running
-	const devServerState = useAtomValue(devServerStateAtom(selectedTask?.id ?? ""))
+	const beadServers = useAtomValue(beadDevServersAtom(selectedTask?.id ?? ""))
+
+	// For status bar, we show the first running server, or default if none running
+	const displayDevServer = useMemo(() => {
+		const running = HashMap.filter(beadServers, (s) => s.status === "running")
+		if (HashMap.size(running) > 0) {
+			return HashMap.values(running).next().value as DevServerState
+		}
+		return HashMap.get(beadServers, "default").pipe(
+			Option.getOrElse(() => ({
+				status: "idle" as const,
+				port: undefined,
+			})),
+		) as DevServerState
+	}, [beadServers])
 
 	// Running operation for focused task (for ActionPalette busy state)
 	// Derives from NavigationService + CommandQueueService - no props needed
@@ -346,16 +364,19 @@ export const App = () => {
 				vcStatus={Result.isSuccess(vcStatusResult) ? vcStatusResult.value.status : undefined}
 				viewMode={viewMode}
 				isLoading={isLoading}
-				devServerStatus={devServerState.status}
-				devServerPort={devServerState.port}
+				devServerStatus={displayDevServer.status}
+				devServerPort={displayDevServer.port}
 				projectName={projectName}
 			/>
 
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
 
-			{/* Project selector overlay */}
 			{showingProjectSelector && <ProjectSelector />}
+
+			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
+				<DevServerMenu beadId={currentOverlay.beadId} />
+			)}
 
 			{/* Diagnostics overlay */}
 			{showingDiagnostics && <DiagnosticsOverlay />}
@@ -375,8 +396,8 @@ export const App = () => {
 					task={selectedTask}
 					runningOperation={runningOperation}
 					isOnline={isOnline}
-					devServerStatus={devServerState.status}
-					devServerPort={devServerState.port}
+					devServerStatus={displayDevServer.status}
+					devServerPort={displayDevServer.port}
 				/>
 			)}
 

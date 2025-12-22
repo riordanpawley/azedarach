@@ -319,6 +319,26 @@ const DevServerConfigSchema = Schema.Struct({
 	 * Working directory relative to worktree root (default: ".")
 	 */
 	cwd: Schema.optional(Schema.String),
+
+	/**
+	 * Multiple dev server configurations
+	 * If defined, these take precedence over the top-level command.
+	 */
+	servers: Schema.optional(
+		Schema.Record({
+			key: Schema.String,
+			value: Schema.Struct({
+				/** Command to run this specific dev server */
+				command: Schema.String,
+				/** Optional working directory for this server */
+				cwd: Schema.optional(Schema.String),
+				/** Optional port overrides for this server */
+				ports: Schema.optional(Schema.Record({ key: Schema.String, value: PortConfigSchema })),
+				/** Nice label for formatting in UI (default: the record key) */
+				label: Schema.optional(Schema.String),
+			}),
+		}),
+	),
 })
 
 /**
