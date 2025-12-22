@@ -10,6 +10,8 @@
  * - Future extensibility for new tools
  */
 
+import { escapeForShellDoubleQuotes } from "./shell.js"
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -78,16 +80,6 @@ export interface CliToolDefinition {
 }
 
 // ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Escape a string for safe shell interpolation
- */
-const escapeForShell = (s: string): string =>
-	s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$")
-
-// ============================================================================
 // Tool Definitions
 // ============================================================================
 
@@ -124,7 +116,7 @@ const claudeToolDefinition: CliToolDefinition = {
 		}
 
 		if (options.initialPrompt) {
-			parts.push(`"${escapeForShell(options.initialPrompt)}"`)
+			parts.push(`"${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
 		}
 
 		return parts.join(" ")
@@ -164,7 +156,7 @@ const openCodeToolDefinition: CliToolDefinition = {
 		// Configuration is done via opencode.json
 
 		if (options.initialPrompt) {
-			parts.push(`--prompt "${escapeForShell(options.initialPrompt)}"`)
+			parts.push(`--prompt "${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
 		}
 
 		return parts.join(" ")
