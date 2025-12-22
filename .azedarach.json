@@ -10,7 +10,7 @@
 		"branchPrefix": "az-"
 	},
 	"session": {
-		"command": "claude",
+		"command": "opencode",
 		"shell": "zsh",
 		"tmuxPrefix": "C-a"
 	},
