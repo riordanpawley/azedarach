@@ -315,9 +315,13 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
  */
 const findAiSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
+		yield* Console.log(`[DEBUG] findAiSessionByBeadId: beadId=${beadId}`)
+		yield* Console.log(`[DEBUG] AI_SESSION_PREFIXES: ${AI_SESSION_PREFIXES.join(", ")}`)
+
 		// Try each AI tool prefix to find an existing session
 		for (const prefix of AI_SESSION_PREFIXES) {
 			const expectedSessionName = `${prefix}${beadId}`
+			yield* Console.log(`[DEBUG] Checking for session: ${expectedSessionName}`)
 
 			// Check if the session exists
 			const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
@@ -325,11 +329,15 @@ const findAiSessionByBeadId = (beadId: string) =>
 				Effect.catchAll(() => Effect.succeed(1)),
 			)
 
+			yield* Console.log(`[DEBUG] Session ${expectedSessionName}: exitCode=${exitCode}`)
+
 			if (exitCode === 0) {
+				yield* Console.log(`[DEBUG] Found session: ${expectedSessionName}`)
 				return expectedSessionName
 			}
 		}
 
+		yield* Console.log(`[DEBUG] No session found for beadId=${beadId}`)
 		return null
 	})
 
