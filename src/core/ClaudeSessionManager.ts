@@ -34,6 +34,7 @@ import {
 	parseSessionName,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
+import { escapeForShellDoubleQuotes } from "./shell.js"
 import {
 	type TmuxError,
 	TmuxService,
