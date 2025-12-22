@@ -1,0 +1,59 @@
+{
+	"$schema": "https://opencode.ai/config.json",
+	"instructions": ["CLAUDE.md"],
+	"plugin": ["opencode-beads", "oh-my-opencode"],
+	"theme": "tokyonight",
+	"model": "anthropic/claude-sonnet-4-20250514",
+	"permission": {
+		"bash": {
+			"rg * | head *": "allow",
+			"rg * | tail *": "allow",
+			"rg * | *": "allow",
+			"rg *": "allow",
+			"fd * | head *": "allow",
+			"fd * | tail *": "allow",
+			"fd * | *": "allow",
+			"fd *": "allow",
+			"ls * | head *": "allow",
+			"ls * | tail *": "allow",
+			"ls * | *": "allow",
+			"ls *": "allow",
+			"git log * | head *": "allow",
+			"git log * | tail *": "allow",
+			"git log * | *": "allow",
+			"git log": "allow",
+			"git status | *": "allow",
+			"git status": "allow",
+			"git diff | *": "allow",
+			"git diff *": "allow",
+			"git diff": "allow",
+			"git branch | *": "allow",
+			"git branch *": "allow",
+			"git branch": "allow",
+			"git add *": "allow",
+			"git commit *": "allow",
+			"git push *": "allow",
+			"git push": "allow",
+			"bun run type-check *": "allow",
+			"bun run type-check": "allow",
+			"bun run dev *": "allow",
+			"bun run build *": "allow",
+			"bun run build": "allow",
+			"bun *": "allow",
+			"bd *": "allow",
+			"tmux *": "allow"
+		}
+	},
+	"mcp": {
+		"effect-docs": {
+			"type": "local",
+			"command": ["npx", "-y", "effect-mcp@latest"],
+			"enabled": true
+		}
+	},
+	"keybinds": {
+		"messages_half_page_up": "ctrl+u",
+		"messages_half_page_down": "ctrl+d",
+		"messages_last": "ctrl+shift+g"
+	}
+}

@@ -7,7 +7,7 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import { type AzedarachConfig, CURRENT_CONFIG_VERSION } from "./schema.js"
+import { type AzedarachConfig, type CliTool, CURRENT_CONFIG_VERSION } from "./schema.js"
 
 // ============================================================================
 // Login Shell Detection
@@ -76,6 +76,18 @@ const getLoginShellSync = (): string => process.env.SHELL || "bash"
 export const DEFAULT_CONFIG = {
 	/** Current config version - used for automatic migrations */
 	$schema: CURRENT_CONFIG_VERSION,
+
+	/** CLI tool to use for AI sessions */
+	cliTool: "claude" as const,
+
+	/** Model configuration for AI sessions */
+	model: {
+		/** Default model - undefined means use CLI tool's default */
+		default: undefined as string | undefined,
+		/** Chat model - defaults based on CLI tool */
+		chat: undefined as string | undefined,
+	},
+
 	worktree: {
 		initCommands: [] satisfies string[],
 		env: {} satisfies Record<string, string>,
@@ -159,6 +171,16 @@ export const DEFAULT_CONFIG = {
 export interface ResolvedConfig {
 	/** Config schema version */
 	$schema: number
+
+	/** CLI tool to use for AI sessions */
+	cliTool: CliTool
+
+	/** Model configuration */
+	model: {
+		default: string | undefined
+		chat: string | undefined
+	}
+
 	worktree: {
 		initCommands: readonly string[]
 		env: Readonly<Record<string, string>>
@@ -240,6 +262,11 @@ export interface ResolvedConfig {
 export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 	return {
 		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
+		cliTool: config.cliTool ?? DEFAULT_CONFIG.cliTool,
+		model: {
+			default: config.model?.default ?? DEFAULT_CONFIG.model.default,
+			chat: config.model?.chat ?? DEFAULT_CONFIG.model.chat,
+		},
 		worktree: {
 			initCommands: config.worktree?.initCommands ?? DEFAULT_CONFIG.worktree.initCommands,
 			env: config.worktree?.env ?? DEFAULT_CONFIG.worktree.env,
