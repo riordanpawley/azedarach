@@ -92,6 +92,7 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/choose.*option/i, // "Choose an option"
 			/enter.*number/i, // "Enter a number"
 			/type.*number.*select/i, // "Type a number to select"
+			/·/u,
 		],
 	},
 	{
@@ -201,6 +202,7 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/ Fixing/i,
 			/refactoring/i,
 			/⏺/u,
+			/✶/u,
 			// Command execution
 			/running command/i,
 			/executing/i,
@@ -235,8 +237,6 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/strategy/i,
 			/to understand/i,
 			/to figure out/i,
-			/✶/u,
-			/·/u,
 		],
 	},
 

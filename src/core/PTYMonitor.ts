@@ -256,29 +256,47 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				// Update metrics SubscriptionRef
 				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.set(m, beadId, metrics))
 
-				// State aggregation: respect hook priority window
-				const hookRecency = Date.now() - monitor.lastHookTime
-				const hookHasPriority = hookRecency < HOOK_PRIORITY_WINDOW_MS
-
-				if (detectedState && !hookHasPriority) {
+				if (detectedState) {
 					// Get current state from ClaudeSessionManager
 					const currentState = yield* sessionManager
 						.getState(beadId)
 						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))
 
+					// State aggregation: respect hook priority window
+					const hookRecency = Date.now() - monitor.lastHookTime
+					const hookHasPriority = hookRecency < HOOK_PRIORITY_WINDOW_MS
+
 					// Determine if we should update state
-					const shouldUpdate =
-						(currentState === "idle" && detectedState === "busy") ||
-						(currentState === "initializing" &&
-							(detectedState === "error" ||
-								detectedState === "done" ||
-								detectedState === "busy")) ||
-						(currentState === "busy" && (detectedState === "error" || detectedState === "done"))
+					// Rules:
+					// 1. If hooks HAVE priority, only allow certain PTY overrides
+					// 2. If hooks DON'T have priority, allow any PTY-detected state
+
+					let shouldUpdate = false
+					if (hookHasPriority) {
+						// PTY Override: if we are stuck in initializing, and PTY sees activity,
+						// move to busy even if we haven't seen a hook yet.
+						if (currentState === "initializing" && detectedState === "busy") {
+							shouldUpdate = true
+						}
+					} else {
+						// Standard PTY transitions when hooks aren't active
+						shouldUpdate =
+							(currentState === "idle" && detectedState === "busy") ||
+							(currentState === "initializing" &&
+								(detectedState === "error" ||
+									detectedState === "done" ||
+									detectedState === "busy")) ||
+							(currentState === "busy" &&
+								(detectedState === "error" ||
+									detectedState === "done" ||
+									detectedState === "waiting")) ||
+							(currentState === "waiting" && detectedState === "busy")
+					}
 
 					if (shouldUpdate) {
 						yield* sessionManager.updateState(beadId, detectedState)
 						yield* Effect.log(
-							`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY detected)`,
+							`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY detected${hookHasPriority ? " override" : ""})`,
 						)
 					}
 				}
