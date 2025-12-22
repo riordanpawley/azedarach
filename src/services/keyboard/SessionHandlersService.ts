@@ -20,7 +20,9 @@ import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { AI_SESSION_PREFIXES, getChatSessionName } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
+import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
@@ -41,6 +43,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			AppConfig.Default,
 			PRWorkflow.Default,
 			OverlayService.Default,
+			BoardService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -54,6 +57,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
+			const boardService = yield* BoardService
 			const gitConfig = yield* appConfig.getGitConfig()
 
 			// ================================================================
@@ -409,6 +413,7 @@ What would you like to discuss?`
 						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
 						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
+							Effect.tap(() => boardService.refresh()),
 							Effect.tap(() => doAttach(task.id)),
 							Effect.catchAll((error) => {
 								// MergeConflictError means Claude was started to resolve
