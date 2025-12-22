@@ -39,20 +39,24 @@ import { ProjectService } from "./ProjectService.js"
  */
 const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => {
 	switch (state) {
-		case "busy":
+		case "initializing":
 			return 0
+		case "busy":
+			return 1
 		case "warning":
-			return 1 // Warning state: session started but with issues
+			return 2 // Warning state: session started but with issues
 		case "waiting":
-			return 2
-		case "paused":
 			return 3
-		case "done":
+		case "paused":
 			return 4
-		case "error":
+		case "done":
 			return 5
-		case "idle":
+		case "error":
 			return 6
+		case "idle":
+			return 7
+		default:
+			return 99
 	}
 }
 
@@ -219,6 +223,7 @@ const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): Task
 			const sessionState = task.sessionState === "warning" ? "idle" : task.sessionState
 			if (
 				sessionState !== "idle" &&
+				sessionState !== "initializing" &&
 				sessionState !== "busy" &&
 				sessionState !== "waiting" &&
 				sessionState !== "done" &&

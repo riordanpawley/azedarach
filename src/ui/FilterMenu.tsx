@@ -75,6 +75,8 @@ const getSessionName = (state: FilterSessionState): string => {
 	switch (state) {
 		case "idle":
 			return "Idle"
+		case "initializing":
+			return "Init"
 		case "busy":
 			return "Busy"
 		case "waiting":
@@ -240,6 +242,11 @@ export const FilterMenu = (props: FilterMenuProps) => {
 							keyName="I"
 							label={getSessionName("idle")}
 							isSelected={config.session.has("idle")}
+						/>
+						<ToggleLine
+							keyName="N"
+							label={getSessionName("initializing")}
+							isSelected={config.session.has("initializing")}
 						/>
 						<ToggleLine
 							keyName="U"

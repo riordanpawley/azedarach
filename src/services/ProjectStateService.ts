@@ -29,7 +29,15 @@ import type { ViewMode } from "./ViewService.js"
  */
 const IssueStatusLiteral = Schema.Literal("open", "in_progress", "blocked", "closed")
 const IssueTypeLiteral = Schema.Literal("bug", "feature", "task", "epic", "chore")
-const SessionStateLiteral = Schema.Literal("idle", "busy", "waiting", "done", "error", "paused")
+const SessionStateLiteral = Schema.Literal(
+	"idle",
+	"initializing",
+	"busy",
+	"waiting",
+	"done",
+	"error",
+	"paused",
+)
 const SortFieldLiteral = Schema.Literal("session", "priority", "updated")
 const SortDirectionLiteral = Schema.Literal("asc", "desc")
 const ViewModeLiteral = Schema.Literal("kanban", "compact")

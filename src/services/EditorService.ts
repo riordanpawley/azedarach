@@ -59,7 +59,14 @@ export type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
 /**
  * Session state for filtering
  */
-export type FilterSessionState = "idle" | "busy" | "waiting" | "done" | "error" | "paused"
+export type FilterSessionState =
+	| "idle"
+	| "initializing"
+	| "busy"
+	| "waiting"
+	| "done"
+	| "error"
+	| "paused"
 
 /**
  * Filter field categories
