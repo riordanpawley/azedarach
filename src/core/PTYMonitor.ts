@@ -270,7 +270,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					const shouldUpdate =
 						(currentState === "idle" && detectedState === "busy") ||
 						(currentState === "initializing" &&
-							(detectedState === "error" || detectedState === "done")) ||
+							(detectedState === "error" ||
+								detectedState === "done" ||
+								detectedState === "busy")) ||
 						(currentState === "busy" && (detectedState === "error" || detectedState === "done"))
 
 					if (shouldUpdate) {
