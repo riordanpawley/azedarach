@@ -174,6 +174,26 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 							const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
 							yield* tmux.sendKeys(sessionName, marker)
+
+							// Wait for init commands to complete before allowing window creation
+							yield* Effect.retry(
+								Effect.gen(function* () {
+									const initDone = yield* tmux.getUserOption(sessionName, "@az_init_done")
+									if (Option.isNone(initDone) || Option.getOrThrow(initDone) !== "1") {
+										return yield* Effect.fail(
+											new ShellNotReadyError({
+												message: `Init commands not complete for session ${sessionName}`,
+												target: sessionName,
+												markerKey: "@az_init_done",
+											}),
+										)
+									}
+								}),
+								{
+									times: 300, // Wait up to 60 seconds (300 * 200ms)
+									schedule: Schedule.spaced("200 millis"),
+								},
+							)
 						}
 
 						return sessionName
