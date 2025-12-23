@@ -63,28 +63,23 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					// Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
-					// Add Ctrl-a Tab keybinding to toggle between Claude and dev server sessions
-					// Session naming format: {type}-{beadId}
-					// - Claude sessions: claude-{beadId}
-					// - Dev servers: dev-{beadId}
-					// Also supports legacy format: az-dev-{beadId}
+					// Add Ctrl-a Tab keybinding to toggle between code and dev windows in the current session
+					// Session naming format: {beadId}
+					// Windows: code, dev, chat, background
 					// Note: Shell syntax requires no semicolon after 'then', 'else', or before 'fi'
 					const toggleScript =
-						'current=$(tmux display-message -p "#S"); ' +
-						// dev-{beadId} → claude-{beadId}
-						'if [ "${current#dev-}" != "$current" ]; then ' +
-						'beadId="${current#dev-}"; target="claude-$beadId"; msg="No Claude session"; ' +
-						// claude-{beadId} → dev-{beadId}
-						'elif [ "${current#claude-}" != "$current" ]; then ' +
-						'beadId="${current#claude-}"; target="dev-$beadId"; msg="No dev server (Space+r to start)"; ' +
-						// Legacy: az-dev-{beadId} → claude-{beadId}
-						'elif [ "${current#az-dev-}" != "$current" ]; then ' +
-						'beadId="${current#az-dev-}"; target="claude-$beadId"; msg="No Claude session"; ' +
+						'current_window=$(tmux display-message -p "#W"); ' +
+						// code → dev
+						'if [ "$current_window" = "code" ]; then ' +
+						'target="dev"; msg="No dev server window (Space+r to start)"; ' +
+						// dev → code
+						'elif [ "$current_window" = "dev" ]; then ' +
+						'target="code"; msg="No code window"; ' +
 						"else " +
-						'msg="Unknown session format"; ' +
+						'target="code"; msg="No code window"; ' +
 						"fi; " +
-						'if [ -n "$target" ] && tmux has-session -t "$target" 2>/dev/null; then ' +
-						'tmux switch-client -t "$target"; ' +
+						'if [ -n "$target" ] && tmux list-windows -F "#W" | grep -q "^$target$"; then ' +
+						'tmux select-window -t "$target"; ' +
 						"else " +
 						'tmux display-message "$msg"; ' +
 						"fi"
@@ -215,27 +210,34 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					yield* runTmux(args)
 				}),
 
-			/**
-			 * Capture pane content for state detection
-			 *
-			 * Captures the visible content of a tmux pane. Used by PTYMonitor
-			 * to detect session state from output patterns.
-			 *
-			 * @param session - tmux session name
-			 * @param lines - number of lines to capture from history (negative = from end)
-			 * @returns captured pane content as string
-			 */
+			listWindows: (session: string) =>
+				Effect.gen(function* () {
+					const output = yield* runTmux(["list-windows", "-t", session, "-F", "#{window_name}"])
+					return output.trim().split("\n").filter(Boolean)
+				}).pipe(Effect.catchAll(() => Effect.succeed([]))),
+
+			hasWindow: (session: string, windowName: string) =>
+				Effect.gen(function* () {
+					const windows = yield* runTmux(["list-windows", "-t", session, "-F", "#{window_name}"])
+					return windows.split("\n").filter(Boolean).includes(windowName)
+				}).pipe(Effect.catchAll(() => Effect.succeed(false))),
+
+			selectWindow: (session: string, windowName: string) =>
+				runTmux(["select-window", "-t", `${session}:${windowName}`]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() =>
+						Effect.fail(new SessionNotFoundError({ session: `${session}:${windowName}` })),
+					),
+				),
+
 			capturePane: (session: string, lines?: number) =>
 				Effect.gen(function* () {
 					const args = ["capture-pane", "-t", session, "-p"]
 					if (lines !== undefined) {
-						// -S sets the start line (negative = from history end)
 						args.push("-S", String(-Math.abs(lines)))
 					}
 					return yield* runTmux(args)
-				}).pipe(
-					Effect.catchAll(() => Effect.succeed("")), // Return empty on error (session may be dead)
-				),
+				}).pipe(Effect.catchAll(() => Effect.succeed(""))),
 
 			/**
 			 * Set a user-defined option on a tmux session

@@ -1,17 +1,25 @@
 /**
  * Pure path utility functions that don't require Path service
  *
- * Session naming convention: [type]-[beadId]
- * - Claude sessions: claude-{beadId}
- * - OpenCode sessions: opencode-{beadId}
- * - Dev servers: dev-{beadId}
- * - Chat sessions: chat-{beadId}
+ * Session naming convention: [beadId]
+ * - Each bead has exactly one tmux session
+ * - Windows within the session handle different concerns (code, dev, etc.)
  */
 
 import type { CliToolName } from "./CliToolRegistry.js"
 
 /**
- * Prefix for Claude session names in tmux
+ * Standard window names for bead sessions
+ */
+export const WINDOW_NAMES = {
+	CODE: "code",
+	DEV: "dev",
+	CHAT: "chat",
+	BACKGROUND: "background",
+} as const
+
+/**
+ * Prefix for Claude session names in tmux (Legacy - will be phased out)
  *
  * All Claude Code sessions managed by Azedarach use this prefix.
  * This allows TmuxSessionMonitor to identify Claude sessions and
@@ -20,32 +28,36 @@ import type { CliToolName } from "./CliToolRegistry.js"
 export const CLAUDE_SESSION_PREFIX = "claude-"
 
 /**
- * Prefix for OpenCode session names in tmux
+ * Prefix for OpenCode session names in tmux (Legacy - will be phased out)
  */
 export const OPENCODE_SESSION_PREFIX = "opencode-"
 
 /**
- * Prefix for dev server session names in tmux
+ * Prefix for dev server session names in tmux (Legacy - will be phased out)
  */
 export const DEV_SESSION_PREFIX = "dev-"
 
 /**
- * Prefix for chat session names in tmux
+ * Prefix for chat session names in tmux (Legacy - will be phased out)
  */
 export const CHAT_SESSION_PREFIX = "chat-"
 
 /**
- * All AI tool session prefixes for TmuxSessionMonitor to scan
- */
-export const AI_SESSION_PREFIXES = [CLAUDE_SESSION_PREFIX, OPENCODE_SESSION_PREFIX] as const
-
-/**
- * Generate tmux session name for a CLI tool session
+ * Generate tmux session name for a bead
  *
- * Returns "{tool}-{beadId}" for consistent naming across:
- * - Session creation (ClaudeSessionManager)
+ * Returns exactly the beadId for consistent naming across:
+ * - Session creation (WorktreeSessionService)
  * - Session monitoring (TmuxSessionMonitor)
  * - Hook notifications
+ *
+ * @param beadId - The bead ID
+ */
+export function getBeadSessionName(beadId: string): string {
+	return beadId
+}
+
+/**
+ * Generate tmux session name for a CLI tool session (Legacy)
  *
  * @param beadId - The bead ID
  * @param cliTool - The CLI tool being used ("claude" or "opencode")
@@ -56,18 +68,14 @@ export function getSessionNameForTool(beadId: string, cliTool: CliToolName): str
 }
 
 /**
- * Generate tmux session name for a dev server
- *
- * Returns "dev-{beadId}" for consistent naming.
+ * Generate tmux session name for a dev server (Legacy)
  */
 export function getDevSessionName(beadId: string): string {
 	return `${DEV_SESSION_PREFIX}${beadId}`
 }
 
 /**
- * Generate tmux session name for a chat session
- *
- * Returns "chat-{beadId}" for consistent naming.
+ * Generate tmux session name for a chat session (Legacy)
  */
 export function getChatSessionName(beadId: string): string {
 	return `${CHAT_SESSION_PREFIX}${beadId}`
@@ -76,7 +84,7 @@ export function getChatSessionName(beadId: string): string {
 /**
  * Session types that can be parsed from tmux session names
  */
-export type SessionType = "claude" | "opencode" | "dev" | "chat"
+export type SessionType = "claude" | "opencode" | "dev" | "chat" | "bead"
 
 /**
  * Parse a session name to extract type and beadId
@@ -86,7 +94,15 @@ export type SessionType = "claude" | "opencode" | "dev" | "chat"
 export function parseSessionName(
 	sessionName: string,
 ): { type: SessionType; beadId: string } | undefined {
-	// Try each prefix
+	// Validate beadId pattern (prefix-suffix pattern like "az-bqzy")
+	const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+
+	// First try if it's a direct beadId session
+	if (beadIdPattern.test(sessionName)) {
+		return { type: "bead", beadId: sessionName }
+	}
+
+	// Try each legacy prefix
 	for (const [prefix, type] of [
 		[CLAUDE_SESSION_PREFIX, "claude"],
 		[OPENCODE_SESSION_PREFIX, "opencode"],
@@ -95,8 +111,6 @@ export function parseSessionName(
 	] as const) {
 		if (sessionName.startsWith(prefix)) {
 			const beadId = sessionName.slice(prefix.length)
-			// Validate beadId looks right (prefix-suffix pattern like "az-bqzy")
-			const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
 			if (beadIdPattern.test(beadId)) {
 				return { type, beadId }
 			}
