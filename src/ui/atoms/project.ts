@@ -59,8 +59,8 @@ export const projectsAtom = appRuntime.subscriptionRef(
  * Saves the current project's UI state before switching, then restores
  * the new project's saved state after loading.
  *
- * The refresh is forked (non-blocking) so the UI stays responsive.
- * A "Loading..." indicator shows in the status bar during refresh.
+ * Uses BoardService.switchToProject() which spawns a scoped fiber for the
+ * background refresh, properly tied to the service's lifetime.
  *
  * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
  *        await switchProject("project-name")
@@ -78,7 +78,6 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		// Get current project to save its state
 		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		// Save current project's UI state before switching
 		if (currentProject) {
 			const focusedTaskId = yield* SubscriptionRef.get(navigation.focusedTaskId)
 			const filterConfig = yield* SubscriptionRef.get(editor.filterConfig)
@@ -87,46 +86,44 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 
 			const state = buildProjectUIState(focusedTaskId, filterConfig, sortConfig, viewMode)
 			yield* projectState.saveState(currentProject.path, state)
+			yield* board.saveToCache(currentProject.path)
 		}
 
-		// Switch project (fast - just updates SubscriptionRef)
 		yield* projectService.switchProject(projectName)
 
-		// Show toast immediately (user sees feedback right away)
-		yield* toast.show("success", `Switching to: ${projectName}`)
-
-		// Get the new project's path and load its saved state
 		const newProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		// Fork the refresh + state restoration as daemon so it survives parent completion
-		// (Effect.fork would be interrupted when the atom effect returns)
-		// The loading indicator in StatusBar shows progress
-		yield* Effect.gen(function* () {
-			// Refresh board first to get the task list
-			yield* board.refresh()
+		if (!newProject) {
+			yield* board.clearBoard()
+			return
+		}
 
-			// Load and restore saved UI state for the new project
-			if (newProject) {
-				const savedState = yield* projectState.loadState(newProject.path)
+		// Create the state restoration effect to run after refresh completes
+		const restoreState = Effect.gen(function* () {
+			const savedState = yield* projectState.loadState(newProject.path)
 
-				// Restore editor state (filters and sort)
-				yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
+			// Restore editor state (filters and sort)
+			yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
 
-				// Restore view mode
-				yield* view.setViewMode(extractViewMode(savedState))
+			// Restore view mode
+			yield* view.setViewMode(extractViewMode(savedState))
 
-				// Restore cursor position (navigation will validate if task still exists)
-				const savedFocusId = extractFocusedTaskId(savedState)
-				if (savedFocusId) {
-					yield* navigation.setFocusedTask(savedFocusId)
-				}
-				// NavigationService.ensureValidFocus() will handle invalid task IDs automatically
+			// Restore cursor position (navigation will validate if task still exists)
+			const savedFocusId = extractFocusedTaskId(savedState)
+			if (savedFocusId) {
+				yield* navigation.setFocusedTask(savedFocusId)
 			}
 
 			yield* toast.show("success", `Loaded: ${projectName}`)
-		}).pipe(
-			Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)),
-			Effect.forkDaemon,
-		)
+		}).pipe(Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)))
+
+		// Use BoardService.switchToProject which spawns a properly scoped fiber
+		const { cacheHit } = yield* board.switchToProject(newProject.path, restoreState)
+
+		if (cacheHit) {
+			yield* toast.show("success", `Loaded: ${projectName}`)
+		} else {
+			yield* toast.show("info", `Loading: ${projectName}...`)
+		}
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

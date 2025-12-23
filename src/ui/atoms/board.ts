@@ -47,7 +47,7 @@ export const boardTasksByColumnAtom = appRuntime.subscriptionRef(
  * Filtered and sorted tasks by column - single source of truth for UI rendering
  *
  * This atom subscribes to BoardService's filteredTasksByColumn which:
- * - Automatically updates when tasks change (every 2 seconds)
+ * - Event-driven updates (PTY changes, editor changes, explicit refresh)
  * - Automatically updates when sortConfig changes
  * - Automatically updates when search query changes
  *
@@ -64,9 +64,9 @@ export const filteredTasksByColumnAtom = appRuntime.subscriptionRef(
  * Board loading state atom - debounced to prevent flashing during quick refreshes
  *
  * Only shows "Loading..." if refresh takes longer than 500ms. This prevents
- * the loading indicator from flashing every 2 seconds during background polling.
+ * the loading indicator from flashing during rapid updates.
  *
- * Uses Subscribable.make to wrap the SubscriptionRef with a debounced changes stream.
+ * Uses Subscribable.make to wrap SubscriptionRef with a debounced changes stream.
  *
  * Usage: const isLoading = useAtomValue(boardIsLoadingAtom)
  */

@@ -1,10 +1,22 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
+import {
+	Data,
+	Effect,
+	HashMap,
+	Option,
+	Record,
+	Ref,
+	Schedule,
+	Schema,
+	SubscriptionRef,
+} from "effect"
 import { AppConfig } from "../config/index.js"
 import { parseSessionName, WINDOW_NAMES } from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
+import { NavigationService } from "./NavigationService.js"
+import { OverlayService } from "./OverlayService.js"
 import { ProjectService } from "./ProjectService.js"
 
 const TMUX_OPT_METADATA = "@az-devserver-meta"
@@ -72,14 +84,18 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		AppConfig.Default,
 		ProjectService.Default,
 		DiagnosticsService.Default,
+		OverlayService.Default,
 		WorktreeSessionService.Default,
+		NavigationService.Default,
 	],
 	scoped: Effect.gen(function* () {
+		const navigationService = yield* NavigationService
 		const tmux = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
 		const appConfig = yield* AppConfig
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
+		const overlayService = yield* OverlayService
 		const projectService = yield* ProjectService
 		const diagnostics = yield* DiagnosticsService
 		const serviceScope = yield* Effect.scope
@@ -334,6 +350,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			)
 		}
 
+		function getBeadServers(beadId: string) {
+			return SubscriptionRef.get(serversRef).pipe(
+				Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
+			)
+		}
+
 		function start(beadId: string, projectPath: string, name: string) {
 			return Effect.gen(function* () {
 				const current = yield* getServerState(beadId, name)
@@ -482,6 +504,82 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			start: (beadId: string, projectPath: string, name = DEFAULT_SERVER_NAME) =>
 				start(beadId, projectPath, name),
 			stop: (beadId: string, name = DEFAULT_SERVER_NAME) => stop(beadId, name),
+			getServersForOverlay: Effect.gen(function* () {
+				const overlayBeadId = yield* overlayService
+					.current()
+					.pipe(Effect.map((o) => (o?._tag === "devServerMenu" ? o.beadId : null)))
+				if (!overlayBeadId) {
+					return yield* Effect.fail("Not in dev server overlay context")
+				}
+				const devServerConfig = yield* appConfig.getDevServerConfig()
+				const servers = yield* getBeadServers(overlayBeadId)
+				yield* Effect.log({ overlay: servers, devServerConfig })
+
+				// TODO: remove non servers record as config option
+				return Record.toEntries(devServerConfig.servers ?? {}).map(
+					([key, value]): DevServerState => {
+						const portValues = Object.values(value.ports ?? {})
+						const defaultPort = portValues.length > 0 ? portValues[0] : 3000
+						return HashMap.get(servers, key).pipe(
+							Option.match({
+								onNone: (): DevServerState => ({
+									name: key,
+									status: "idle",
+									port: defaultPort,
+									paneId: undefined,
+									startedAt: undefined,
+									error: undefined,
+									tmuxSession: undefined,
+									worktreePath: "",
+								}),
+								onSome: (s): DevServerState => ({
+									name: key,
+									port: s.port ?? defaultPort,
+									status: s.status,
+									paneId: s.paneId,
+									startedAt: s.startedAt,
+									error: s.error,
+									tmuxSession: s.tmuxSession,
+									worktreePath: s.worktreePath,
+								}),
+							}),
+						)
+					},
+				)
+			}),
+			getServersForTaskCard: Effect.gen(function* () {
+				const beadId = yield* navigationService.focusedTaskId.pipe(SubscriptionRef.get)
+				if (!beadId) {
+					const empty: BeadDevServersState = HashMap.empty()
+					return empty
+				}
+				const devServerConfig = yield* appConfig.getDevServerConfig()
+				const servers = yield* getBeadServers(beadId)
+				return Record.toEntries(devServerConfig.servers ?? {}).map(
+					([key, _value]): {
+						name: string
+						status: "running" | "started" | "stopped"
+						port: string
+					} => {
+						return {
+							name: key,
+							status: HashMap.get(servers, key).pipe(
+								Option.match({
+									onNone: () => "stopped" as const,
+									onSome: (s) =>
+										s.status === "running" ? ("running" as const) : ("started" as const),
+								}),
+							),
+							port: HashMap.get(servers, key).pipe(
+								Option.match({
+									onNone: () => "N/A",
+									onSome: (s) => (s.port ? String(s.port) : "Detecting..."),
+								}),
+							),
+						}
+					},
+				)
+			}),
 			toggle: (beadId: string, projectPath: string, name = DEFAULT_SERVER_NAME) =>
 				Effect.gen(function* () {
 					const s = yield* getServerState(beadId, name)

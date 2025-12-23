@@ -36,6 +36,11 @@ export function getBeadSessionName(beadId: string): string {
 export type SessionType = "bead"
 
 /**
+ * AI session prefixes used for tmux sessions
+ */
+export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
+
+/**
  * Parse a session name to extract type and beadId
  *
  * Returns undefined if the session name doesn't match the expected format.

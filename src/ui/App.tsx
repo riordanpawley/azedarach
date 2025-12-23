@@ -110,6 +110,8 @@ export const App = () => {
 		Result.getOrElse(() => undefined),
 	)?.name
 
+	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
+
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
 		startSessionMonitor()
@@ -119,9 +121,6 @@ export const App = () => {
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
-
-	// Keyboard handling via KeyboardService
-	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
 
 	const viewMode = useAtomValue(
 		viewModeAtom,

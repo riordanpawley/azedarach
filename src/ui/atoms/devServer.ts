@@ -29,6 +29,19 @@ export const devServersAtom = appRuntime.subscriptionRef(
 	}),
 )
 
+export const devServersForOverlayAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const svc = yield* DevServerService
+		return yield* svc.getServersForOverlay
+	}),
+)
+export const devServersForTaskCardAtom = appRuntime.atom(
+	Effect.gen(function* () {
+		const svc = yield* DevServerService
+		return yield* svc.getServersForTaskCard
+	}),
+)
+
 export const focusedTaskIdAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const nav = yield* NavigationService
