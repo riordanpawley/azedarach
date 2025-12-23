@@ -9,7 +9,7 @@ export interface SettingDefinition {
 	readonly key: string
 	readonly label: string
 	readonly toggle: (config: AzedarachConfig) => AzedarachConfig
-	readonly getValue: (config: AzedarachConfig) => unknown
+	readonly getValue: (config: AzedarachConfig) => boolean | string
 }
 
 export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
