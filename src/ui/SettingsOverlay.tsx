@@ -3,7 +3,7 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import { EDITABLE_SETTINGS, type SettingDefinition } from "../services/SettingsService.js"
+import { EDITABLE_SETTINGS } from "../services/SettingsService.js"
 import { appConfigAtom, settingsStateAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
