@@ -113,11 +113,6 @@ const ProjectUIStateJsonSchema = Schema.parseJson(ProjectUIStateSchema)
  */
 export type ProjectUIState = Schema.Schema.Type<typeof ProjectUIStateSchema>
 
-/**
- * Encoded form for JSON serialization
- */
-type ProjectUIStateEncoded = Schema.Schema.Encoded<typeof ProjectUIStateSchema>
-
 // ============================================================================
 // Helpers
 // ============================================================================
