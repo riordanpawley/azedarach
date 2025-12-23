@@ -546,6 +546,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
+								// Save current project state before switching
 								const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 								if (currentProject) {
 									const focusedTaskId = yield* SubscriptionRef.get(nav.focusedTaskId)
@@ -564,21 +565,10 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 								}
 
 								yield* projectService.switchProject(project.name)
-
 								yield* overlay.pop()
 
-								const cacheHit = yield* board.loadFromCache(project.path)
-								if (cacheHit) {
-									yield* toast.show("success", `Loaded: ${project.name}`)
-								} else {
-									yield* board.clearBoard()
-									yield* toast.show("info", `Loading: ${project.name}...`)
-								}
-
-								yield* Effect.gen(function* () {
-									yield* board.refresh()
-
-									// Load and restore saved UI state for the new project
+								// Create the state restoration effect to run after refresh completes
+								const restoreState = Effect.gen(function* () {
 									const savedState = yield* projectState.loadState(project.path)
 
 									// Restore editor state (filters and sort)
@@ -604,8 +594,16 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 											yield* toast.show("error", "Failed to load project data")
 										}),
 									),
-									Effect.forkDaemon,
 								)
+
+								// Use BoardService.switchToProject which spawns a properly scoped fiber
+								const { cacheHit } = yield* board.switchToProject(project.path, restoreState)
+
+								if (cacheHit) {
+									yield* toast.show("success", `Loaded: ${project.name}`)
+								} else {
+									yield* toast.show("info", `Loading: ${project.name}...`)
+								}
 							}
 						} else {
 							yield* toast.show("error", `No project at position ${num}`)

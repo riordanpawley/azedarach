@@ -1,9 +1,25 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Cause, Effect, Ref } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
-import type { ColumnStatus, TaskWithSession } from "../ui/types.js"
+import type { ColumnStatus } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ToastService } from "./ToastService.js"
+
+/**
+ * Fields that can be updated on a bead - matches BeadsClient.update signature
+ */
+export interface BeadUpdateFields {
+	readonly status?: string
+	readonly notes?: string
+	readonly priority?: number
+	readonly title?: string
+	readonly description?: string
+	readonly design?: string
+	readonly acceptance?: string
+	readonly assignee?: string
+	readonly estimate?: number
+	readonly labels?: readonly string[]
+}
 
 export type Mutation =
 	| {
@@ -20,7 +36,7 @@ export type Mutation =
 	| {
 			_tag: "Update"
 			id: string
-			fields: Partial<TaskWithSession>
+			fields: BeadUpdateFields
 			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 
@@ -61,7 +77,19 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 		const executeMutation = (mutation: Mutation) => {
 			switch (mutation._tag) {
 				case "Update":
-					return beadsClient.update(mutation.id, mutation.fields as Record<string, unknown>)
+					// BeadUpdateFields is structurally compatible with BeadsClient.update's fields parameter
+					return beadsClient.update(mutation.id, {
+						status: mutation.fields.status,
+						notes: mutation.fields.notes,
+						priority: mutation.fields.priority,
+						title: mutation.fields.title,
+						description: mutation.fields.description,
+						design: mutation.fields.design,
+						acceptance: mutation.fields.acceptance,
+						assignee: mutation.fields.assignee,
+						estimate: mutation.fields.estimate,
+						labels: mutation.fields.labels ? [...mutation.fields.labels] : undefined,
+					})
 				case "Delete":
 					return beadsClient.delete(mutation.id)
 				case "Move":

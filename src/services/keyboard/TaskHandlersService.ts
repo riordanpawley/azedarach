@@ -78,8 +78,10 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						rollback: board.requestRefresh(),
 					}
 					yield* mutationQueue.add(deleteMutation)
-					yield* mutationQueue.process(taskId).pipe(Effect.forkDaemon)
 					yield* toast.show("success", `Deleted ${taskId}`)
+					// Await mutation processing - bd commands are fast (~50ms)
+					// MutationQueue handles rollback and error toasts on failure
+					yield* mutationQueue.process(taskId)
 					yield* board.requestRefresh()
 					yield* nav.initialize()
 				})
@@ -195,6 +197,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const firstTaskId = taskIdsToMove[0]
 
 					if (taskIdsToMove.length > 0) {
+						// Add all mutations first (optimistic UI update)
 						for (const id of taskIdsToMove) {
 							const task = yield* board.findTaskById(id)
 							if (!task) continue
@@ -208,7 +211,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								}),
 							}
 							yield* mutationQueue.add(moveMutation)
-							yield* mutationQueue.process(id).pipe(Effect.forkDaemon)
+						}
+
+						// Process all mutations sequentially - bd commands are fast (~50ms each)
+						// MutationQueue handles rollback and error toasts on failure
+						for (const id of taskIdsToMove) {
+							yield* mutationQueue.process(id)
 						}
 
 						yield* board.requestRefresh()
