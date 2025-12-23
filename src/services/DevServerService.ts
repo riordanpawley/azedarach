@@ -232,27 +232,24 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					Effect.repeat(
 						Schedule.spaced(`${PORT_POLL_INTERVAL} millis`).pipe(
 							Schedule.upTo(`${PORT_DETECTION_TIMEOUT} millis`),
-							Schedule.untilInput((o: any) => Option.isSome(o)),
+							Schedule.untilInput((o: unknown): o is Option.Some<number> =>
+								Option.isSome(o as Option.Option<number>),
+							),
 						),
 					),
 				)
-				return Option.getOrUndefined(result as any)
+				return Option.isOption(result) ? Option.getOrUndefined(result) : undefined
 			})
 
-		const getPortEnv = (offset: number) =>
+		const getPortEnv = (ports: Record<string, number>, offset: number) =>
 			Effect.gen(function* () {
-				const config = yield* appConfig.getDevServerConfig()
 				const env: Record<string, string> = {}
 				let primary: number | undefined
 
-				const portsEntries = Object.entries(config.ports) as [
-					string,
-					{ default: number; aliases: string[] },
-				][]
-				for (const [_, p] of portsEntries) {
-					const port = yield* allocatePort(p.default + offset)
+				for (const [envVar, basePort] of Object.entries(ports)) {
+					const port = yield* allocatePort(basePort + offset)
 					if (primary === undefined) primary = port
-					for (const alias of p.aliases) env[alias] = String(port)
+					env[envVar] = String(port)
 				}
 				return { env, primary: primary ?? 3000 }
 			})
@@ -331,15 +328,26 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				yield* updateState(beadId, name, { status: "starting", worktreePath })
 				const config = yield* appConfig.getDevServerConfig()
-				const srvConfig = (config as any).servers?.[name]
-				const command = srvConfig?.command ?? (yield* detectCommand(worktreePath))
+				const srvConfig = config.servers?.[name]
 
-				const running = HashMap.size(
-					HashMap.flatMap(yield* SubscriptionRef.get(serversRef), (m) =>
-						HashMap.filter(m, (s) => s.status === "running"),
-					),
+				if (!srvConfig) {
+					return yield* Effect.fail(
+						new DevServerError({
+							beadId,
+							message: `No server configuration found for '${name}'. Define it in devServer.servers.`,
+						}),
+					)
+				}
+
+				const command = srvConfig.command
+				const ports = srvConfig.ports ?? { PORT: 3000 }
+
+				const beadServers = yield* SubscriptionRef.get(serversRef).pipe(
+					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
 				)
-				const { env, primary } = yield* getPortEnv(running)
+				const beadRunning = HashMap.size(HashMap.filter(beadServers, (s) => s.status === "running"))
+
+				const { env, primary } = yield* getPortEnv(ports, beadRunning)
 				const envStr = Object.entries(env)
 					.map(([k, v]) => `${k}=${v}`)
 					.join(" ")
