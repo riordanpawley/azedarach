@@ -18,6 +18,8 @@ export interface StatusBarProps {
 	vcStatus?: VCStatus
 	viewMode?: ViewMode
 	isLoading?: boolean
+	/** True when refreshing git stats via 'r' keybind */
+	isRefreshingGitStats?: boolean
 	/** Dev server status for currently selected bead */
 	devServerStatus?: DevServerStatus
 	/** Dev server port (if detected) for currently selected bead */
@@ -47,6 +49,7 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "Enter", action: "Details" },
 		{ key: "c", action: "Create" },
 		{ key: "Tab", action: "View" },
+		{ key: "r", action: "Refresh" },
 		{ key: "a", action: "VC" },
 		{ key: ":", action: "Cmd" },
 		{ key: "C-d/u", action: "Page" },
@@ -282,6 +285,15 @@ export const StatusBar = (props: StatusBarProps) => {
 					<box backgroundColor={theme.yellow} paddingLeft={1} paddingRight={1}>
 						<text fg={theme.base} attributes={ATTR_BOLD}>
 							Loading...
+						</text>
+					</box>
+				)}
+
+				{/* Git stats refresh indicator */}
+				{props.isRefreshingGitStats && (
+					<box backgroundColor={theme.teal} paddingLeft={1} paddingRight={1}>
+						<text fg={theme.base} attributes={ATTR_BOLD}>
+							Refreshing git...
 						</text>
 					</box>
 				)}

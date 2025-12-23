@@ -54,6 +54,7 @@ The default mode for navigation and basic actions.
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
 | `Tab` | Toggle view mode | Switch between Kanban and Compact views |
+| `r` | Refresh git stats | Update git stats for all active sessions |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
