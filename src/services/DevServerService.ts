@@ -241,22 +241,15 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return Option.isOption(result) ? Option.getOrUndefined(result) : undefined
 			})
 
-		const getPortEnv = (
-			ports: Record<string, { default: number; aliases: readonly string[] }>,
-			offset: number,
-		) =>
+		const getPortEnv = (ports: Record<string, number>, offset: number) =>
 			Effect.gen(function* () {
 				const env: Record<string, string> = {}
 				let primary: number | undefined
 
-				const portsEntries = Object.entries(ports) as [
-					string,
-					{ default: number; aliases: readonly string[] },
-				][]
-				for (const [_, p] of portsEntries) {
-					const port = yield* allocatePort(p.default + offset)
+				for (const [envVar, basePort] of Object.entries(ports)) {
+					const port = yield* allocatePort(basePort + offset)
 					if (primary === undefined) primary = port
-					for (const alias of p.aliases) env[alias] = String(port)
+					env[envVar] = String(port)
 				}
 				return { env, primary: primary ?? 3000 }
 			})
@@ -336,9 +329,18 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				yield* updateState(beadId, name, { status: "starting", worktreePath })
 				const config = yield* appConfig.getDevServerConfig()
 				const srvConfig = config.servers?.[name]
-				const command = srvConfig?.command ?? (yield* detectCommand(worktreePath))
 
-				const ports = srvConfig?.ports ?? config.ports
+				if (!srvConfig) {
+					return yield* Effect.fail(
+						new DevServerError({
+							beadId,
+							message: `No server configuration found for '${name}'. Define it in devServer.servers.`,
+						}),
+					)
+				}
+
+				const command = srvConfig.command
+				const ports = srvConfig.ports ?? { PORT: 3000 }
 
 				const beadServers = yield* SubscriptionRef.get(serversRef).pipe(
 					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),

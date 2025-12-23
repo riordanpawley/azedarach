@@ -84,8 +84,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 									err._tag === "NoWorktreeError" ||
 									err._tag === "WorktreeSessionError" ||
 									err._tag === "TmuxError" ||
-									err._tag === "SessionNotFoundError" ||
-									err._tag === "SystemError"
+									err._tag === "SessionNotFoundError"
 										? err.message
 										: String(err)
 								return toast.show("error", message)
@@ -145,8 +144,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 									err._tag === "NoWorktreeError" ||
 									err._tag === "WorktreeSessionError" ||
 									err._tag === "TmuxError" ||
-									err._tag === "SessionNotFoundError" ||
-									err._tag === "SystemError"
+									err._tag === "SessionNotFoundError"
 										? err.message
 										: String(err)
 								return toast.show("error", message)
