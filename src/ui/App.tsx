@@ -101,7 +101,10 @@ export const App = () => {
 	// All computation happens in atoms - React just renders
 	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
 
-	const projectName = useAtomValue(currentProjectAtom, Result.getOrThrow)?.name
+	const projectName = useAtomValue(
+		currentProjectAtom,
+		Result.getOrElse(() => undefined),
+	)?.name
 
 	// Start the hook receiver for Claude Code native hook integration
 	// This watches for notification files and updates session state
@@ -116,16 +119,25 @@ export const App = () => {
 	// Keyboard handling via KeyboardService
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
 
-	const viewMode = useAtomValue(viewModeAtom, Result.getOrThrow)
+	const viewMode = useAtomValue(
+		viewModeAtom,
+		Result.getOrElse(() => "kanban" as const),
+	)
 
 	const displayDevServer = useAtomValue(focusedBeadPrimaryDevServerAtom)
 
 	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
 
-	const isOnline = useAtomValue(isOnlineAtom, Result.getOrThrow)
+	const isOnline = useAtomValue(
+		isOnlineAtom,
+		Result.getOrElse(() => true),
+	)
 
 	// Board loading state for status bar indicator
-	const isLoading = useAtomValue(boardIsLoadingAtom, Result.getOrThrow)
+	const isLoading = useAtomValue(
+		boardIsLoadingAtom,
+		Result.getOrElse(() => false),
+	)
 
 	// Terminal size
 	const maxVisibleTasks = useAtomValue(maxVisibleTasksAtom)
