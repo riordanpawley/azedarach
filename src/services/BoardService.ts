@@ -25,7 +25,7 @@ import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
 import { emptyRecord } from "../lib/empty.js"
-import type { GitStatus, TaskWithSession } from "../ui/types.js"
+import type { ColumnStatus, GitStatus, TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
@@ -531,8 +531,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const cache = yield* Ref.get(boardCache)
 				const cached = cache.get(projectPath)
 				if (cached && cached.length > 0) {
-					yield* SubscriptionRef.set(tasks, cached)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(cached))
+					// Clear git stats from cached tasks - they're stale and project-specific
+					const tasksWithClearedGitStats = cached.map((task) => ({
+						...task,
+						gitBehindCount: undefined,
+						hasUncommittedChanges: undefined,
+						gitAdditions: undefined,
+						gitDeletions: undefined,
+					}))
+					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
 					yield* updateFilteredTasks()
 					return true
 				}
@@ -547,6 +555,28 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					filteredTasksByColumn,
 					COLUMNS.map(() => []),
 				)
+			})
+
+		/**
+		 * Apply an optimistic move directly to in-memory state.
+		 * This provides instant UI feedback without waiting for refresh.
+		 */
+		const applyOptimisticMove = (taskId: string, newStatus: ColumnStatus) =>
+			Effect.gen(function* () {
+				// Update tasks
+				yield* SubscriptionRef.update(tasks, (currentTasks) =>
+					currentTasks.map((task) => (task.id === taskId ? { ...task, status: newStatus } : task)),
+				)
+				// Update tasksByColumn
+				yield* SubscriptionRef.update(tasksByColumn, (current) => {
+					const allTasks: TaskWithSession[] = Object.values(current).flat()
+					const updatedTasks = allTasks.map((task) =>
+						task.id === taskId ? { ...task, status: newStatus } : task,
+					)
+					return groupTasksByColumn(updatedTasks)
+				})
+				// Update filtered view
+				yield* updateFilteredTasks()
 			})
 
 		/**
@@ -643,6 +673,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			saveToCache,
 			loadFromCache,
 			switchToProject,
+			applyOptimisticMove,
 			initialize: refresh,
 			getFilteredTasksByColumn: (
 				searchQuery: string,
