@@ -26,7 +26,7 @@ const OPERATION_INDICATORS: Record<string, string> = {
 	"create-pr": "⏳",
 	cleanup: "🧹",
 	start: "⚡",
-	stop: "⏹️",
+	stop: "⏹",
 }
 
 /** Height of each task card in terminal rows */
@@ -84,7 +84,6 @@ export const TaskCard = (props: TaskCardProps) => {
 		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
 		: ""
 
-	// Subscribe to dev server state for this task
 	const devServers = useAtomValue(beadDevServerViewsAtom(props.task.id)) as DevServerView[]
 	const hasDevServer = devServers.some((s) => s.status === "running" || s.status === "starting")
 

@@ -19,14 +19,11 @@ import { VCService } from "../../core/VCService.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
+import { type Mutation, MutationQueue } from "../MutationQueue.js"
 import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
-
-// ============================================================================
-// Service Definition
-// ============================================================================
 
 export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 	"TaskHandlersService",
@@ -42,10 +39,10 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			BeadEditorService.Default,
 			PRWorkflow.Default,
 			VCService.Default,
+			MutationQueue.Default,
 		],
 
 		effect: Effect.gen(function* () {
-			// Inject services at construction time
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
 			const board = yield* BoardService
@@ -56,55 +53,39 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const beadEditor = yield* BeadEditorService
 			const prWorkflow = yield* PRWorkflow
 			const vc = yield* VCService
+			const mutationQueue = yield* MutationQueue
 
-			// ================================================================
-			// Internal Helpers
-			// ================================================================
-
-			/**
-			 * Execute the actual delete bead operation (called via confirm dialog)
-			 *
-			 * Internal helper used by deleteBead.
-			 */
 			const doDeleteBead = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
-					// If there's an active session, clean up the worktree first
-					// (like space+d does, but without closing the bead since we're deleting it)
 					if (hasSession) {
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
 						yield* prWorkflow
 							.cleanup({
 								beadId: taskId,
 								projectPath: process.cwd(),
-								closeBead: false, // Don't close - we're deleting it entirely
+								closeBead: false,
 							})
 							.pipe(
 								Effect.catchAll((error) => {
-									// Log but continue with deletion - worktree cleanup is best-effort
 									return Effect.logWarning(`Worktree cleanup failed for ${taskId}: ${error}`)
 								}),
 							)
 					}
 
-					yield* beadsClient.delete(taskId).pipe(
-						Effect.tap(() => toast.show("success", `Deleted ${taskId}`)),
-						Effect.tap(() => board.refresh()),
-						// Move cursor to a valid task after deletion
-						Effect.tap(() => nav.initialize()),
-						Effect.catchAll(helpers.showErrorToast("Failed to delete")),
-					)
+					const deleteMutation: Mutation = {
+						_tag: "Delete",
+						id: taskId,
+						rollback: board.requestRefresh(),
+					}
+					yield* mutationQueue.add(deleteMutation)
+					yield* toast.show("success", `Deleted ${taskId}`)
+					// Await mutation processing - bd commands are fast (~50ms)
+					// MutationQueue handles rollback and error toasts on failure
+					yield* mutationQueue.process(taskId)
+					yield* board.requestRefresh()
+					yield* nav.initialize()
 				})
 
-			// ================================================================
-			// Task Handler Methods
-			// ================================================================
-
-			/**
-			 * Edit bead action (Space+e)
-			 *
-			 * Opens the task in $EDITOR for editing.
-			 * Refreshes the board after successful edit.
-			 */
 			const editBead = () =>
 				Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
@@ -112,7 +93,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					yield* beadEditor.editBead(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
-						Effect.tap(() => board.refresh()),
+						Effect.tap(() => board.requestRefresh()),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -130,28 +111,18 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-			/**
-			 * Create bead via $EDITOR action (c key)
-			 *
-			 * Opens $EDITOR with a template for a new bead.
-			 * After creation, jumps to the new task.
-			 * If in epic drill-down mode, automatically adds the new task as a child of the epic.
-			 */
 			const createBead = () =>
 				Effect.gen(function* () {
 					yield* beadEditor.createBead().pipe(
 						Effect.tap((result) =>
 							Effect.gen(function* () {
-								// Check if we're in epic drill-down mode
 								const epicId = yield* nav.getDrillDownEpic()
 
 								if (epicId) {
-									// Add parent-child dependency to link task to epic
 									yield* beadsClient.addDependency(result.id, epicId, "parent-child").pipe(
 										Effect.tap(() => toast.show("success", `Created ${result.id} (added to epic)`)),
 										Effect.catchAll((error) =>
 											Effect.gen(function* () {
-												// Log warning but don't fail - the task was still created
 												yield* Effect.logWarning(
 													`Failed to link ${result.id} to epic ${epicId}: ${error}`,
 												)
@@ -167,7 +138,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								}
 							}),
 						),
-						Effect.tap(() => board.refresh()),
+						Effect.tap(() => board.requestRefresh()),
 						Effect.tap((result) => nav.jumpToTask(result.id)),
 						Effect.catchAll((error) => {
 							const msg =
@@ -186,13 +157,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-			/**
-			 * Delete bead action (Space+D)
-			 *
-			 * Shows confirmation dialog, then permanently deletes the selected bead.
-			 * If the task has an active session/worktree, cleans it up first.
-			 * Reinitializes cursor position after deletion.
-			 */
 			const deleteBead = () =>
 				Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
@@ -203,7 +167,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						? "\n\nThis will also remove the worktree and session."
 						: ""
 
-					// Show confirmation dialog before deletion
 					yield* overlay.push({
 						_tag: "confirm",
 						message: `Permanently delete bead ${task.id}?${sessionWarning}`,
@@ -211,21 +174,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					})
 				})
 
-			/**
-			 * Move task(s) to adjacent column
-			 *
-			 * Moves the selected task(s) left or right between kanban columns.
-			 * If in select mode, moves all selected tasks.
-			 * Otherwise, moves just the current task.
-			 *
-			 * @param direction - "left" or "right"
-			 */
 			const moveTasksToColumn = (direction: "left" | "right") =>
 				Effect.gen(function* () {
 					const columnIndex = yield* helpers.getColumnIndex()
 					const targetColIdx = direction === "left" ? columnIndex - 1 : columnIndex + 1
 
-					// Bounds check
 					if (targetColIdx < 0 || targetColIdx >= COLUMNS.length) {
 						return
 					}
@@ -235,32 +188,45 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						return
 					}
 
-					// Get selected IDs or current task
 					const mode = yield* editor.getMode()
 					const selectedIds = mode._tag === "select" ? mode.selectedIds : []
-					const task = yield* helpers.getActionTargetTask()
+					const currentTask = yield* helpers.getActionTargetTask()
 
-					const taskIdsToMove = selectedIds.length > 0 ? [...selectedIds] : task ? [task.id] : []
+					const taskIdsToMove =
+						selectedIds.length > 0 ? [...selectedIds] : currentTask ? [currentTask.id] : []
 					const firstTaskId = taskIdsToMove[0]
 
 					if (taskIdsToMove.length > 0) {
-						yield* Effect.all(
-							taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
-						)
-						// Refresh board to reflect the move
-						yield* board.refresh()
-						// Follow the first task
+						// Add all mutations first (optimistic UI update)
+						for (const id of taskIdsToMove) {
+							const task = yield* board.findTaskById(id)
+							if (!task) continue
+
+							const moveMutation: Mutation = {
+								_tag: "Move",
+								id,
+								status: targetStatus,
+								rollback: Effect.gen(function* () {
+									yield* board.requestRefresh()
+								}),
+							}
+							yield* mutationQueue.add(moveMutation)
+						}
+
+						// Process all mutations sequentially - bd commands are fast (~50ms each)
+						// MutationQueue handles rollback and error toasts on failure
+						for (const id of taskIdsToMove) {
+							yield* mutationQueue.process(id)
+						}
+
+						yield* board.requestRefresh()
+
 						if (firstTaskId) {
 							yield* nav.setFollow(firstTaskId)
 						}
 					}
 				})
 
-			/**
-			 * Toggle VC auto-pilot action (a key in normal mode)
-			 *
-			 * Starts or stops the VC (Virtual Coworker) auto-pilot.
-			 */
 			const toggleVC = () =>
 				vc.toggleAutoPilot().pipe(
 					Effect.tap((status) => {
@@ -270,10 +236,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}),
 					Effect.catchAll(helpers.showErrorToast("Failed to toggle VC")),
 				)
-
-			// ================================================================
-			// Public API
-			// ================================================================
 
 			return {
 				editBead,

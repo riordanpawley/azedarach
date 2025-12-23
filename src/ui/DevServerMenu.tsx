@@ -79,6 +79,7 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 			<text fg={theme.mauve}>
 				{mode === "attach" ? "Attach to Dev Server" : "Toggle Dev Server"}
 			</text>
+			<text fg={theme.mauve}>{JSON.stringify(serverList)}</text>
 			<box flexDirection="column" marginTop={1}>
 				{serverList.map((server: DevServerView, i: number) => (
 					<box key={server.name} flexDirection="row" gap={1}>

@@ -29,6 +29,7 @@ import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { DiffService } from "../../services/DiffService.js"
 import { EditorService } from "../../services/EditorService.js"
 import { KeyboardService } from "../../services/KeyboardService.js"
+import { MutationQueue } from "../../services/MutationQueue.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { NetworkService } from "../../services/NetworkService.js"
 import { OfflineService } from "../../services/OfflineService.js"
@@ -44,8 +45,10 @@ const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
 const appLayer = Layer.mergeAll(
+	MutationQueue.Default,
 	SessionService.Default,
 	AttachmentService.Default,
+	OverlayService.Default,
 	ImageAttachmentService.Default,
 	BoardService.Default,
 	ClockService.Default,
@@ -55,7 +58,6 @@ const appLayer = Layer.mergeAll(
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default,
-	OverlayService.Default,
 	ToastService.Default,
 	NavigationService.Default,
 	ClaudeSessionManager.Default,
@@ -85,4 +87,5 @@ const appLayer = Layer.mergeAll(
  *
  * This creates a runtime that all other async atoms can use.
  */
+
 export const appRuntime = Atom.runtime(appLayer)
