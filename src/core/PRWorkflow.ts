@@ -677,9 +677,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
-		const mergeConfig = yield* appConfig.getMergeConfig()
-		const gitConfig = yield* appConfig.getGitConfig()
-		const baseBranch = gitConfig.baseBranch
+		const getMergeConfig = () => appConfig.getMergeConfig()
+		const getGitConfig = () => appConfig.getGitConfig()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -706,7 +705,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		return {
 			createPR: (options: CreatePROptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, draft = true, baseBranch = "main" } = options
+					const gitConfig = yield* getGitConfig()
+					const { beadId, projectPath, draft = true, baseBranch = gitConfig.baseBranch } = options
 
 					// Check if PR creation is enabled (config + network)
 					const prStatus = yield* offlineService.isPREnabled()
@@ -794,6 +794,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			getPR: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
+					const gitConfig = yield* getGitConfig()
+					const baseBranch = gitConfig.baseBranch
 
 					// Try to get PR info for the branch
 					const result = yield* runGH(
@@ -861,13 +863,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 			mergeToMain: (options: MergeToMainOptions) =>
 				Effect.gen(function* () {
+					const gitConfig = yield* getGitConfig()
 					const {
 						beadId,
 						projectPath,
-						pushToOrigin = true,
+						pushToOrigin = gitConfig.pushEnabled,
 						closeBead = false,
 						keepWorktree = true,
 					} = options
+					const baseBranch = gitConfig.baseBranch
 
 					// Get bead info for merge commit message
 					const bead = yield* beadsClient.show(beadId)
@@ -1065,6 +1069,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// 7.5. Run post-merge validation (configurable via .azedarach.json)
 					// Only runs if merge.validateCommands is configured
+					const mergeConfig = yield* getMergeConfig()
 					if (mergeConfig.validateCommands.length > 0) {
 						yield* Effect.gen(function* () {
 							const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
@@ -1218,6 +1223,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
+					const gitConfig = yield* getGitConfig()
+					const baseBranch = gitConfig.baseBranch
 
 					// Use git merge-tree to perform an actual 3-way merge in memory
 					// This detects real line-level conflicts, not just file overlap
@@ -1372,7 +1379,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 			updateFromBase: (options: UpdateFromBaseOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath, baseBranch = "main" } = options
+					const gitConfig = yield* getGitConfig()
+					const { beadId, projectPath, baseBranch = gitConfig.baseBranch } = options
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -1386,18 +1394,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// === Step 1: Update local base branch to match origin ===
-					// Fetch latest from origin
-					yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
-						Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
-					)
+					if (gitConfig.fetchEnabled) {
+						// Fetch latest from origin
+						yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+							Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
+						)
 
-					// Fast-forward local base branch to origin (done in main project, not worktree)
-					// This updates the local branch without checking it out
-					yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
-						),
-					)
+						// Fast-forward local base branch to origin (done in main project, not worktree)
+						// This updates the local branch without checking it out
+						yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
+							),
+						)
+					}
 
 					// === Step 2: Check for conflicts using git merge-tree (in-memory, safe) ===
 					const mergeTreeResult = yield* Effect.gen(function* () {
@@ -1575,6 +1585,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			checkBranchBehindMain: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
+					const gitConfig = yield* getGitConfig()
+					const baseBranch = gitConfig.baseBranch
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -1617,6 +1629,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			mergeMainIntoBranch: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
+					const gitConfig = yield* getGitConfig()
+					const baseBranch = gitConfig.baseBranch
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -1629,7 +1643,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 1. Check for uncommitted changes and stash them
+					if (gitConfig.fetchEnabled) {
+						yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+							Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
+						)
+						yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to update local ${baseBranch}: ${e.message}`),
+							),
+						)
+					}
+
 					const statusOutput = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
 						Effect.catchAll(() => Effect.succeed("")),
 					)

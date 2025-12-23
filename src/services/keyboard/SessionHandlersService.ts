@@ -14,62 +14,17 @@
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import type { Issue } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { AI_SESSION_PREFIXES, getChatSessionName } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
+import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/**
- * Build the bead context section for prompt injection
- *
- * Constructs a formatted string containing all available bead information
- * (description, design notes, acceptance criteria, dependencies) so Claude
- * has full context without needing to run `bd show`.
- */
-function buildBeadContext(task: Issue): string {
-	const sections: string[] = []
-
-	// Description section
-	if (task.description?.trim()) {
-		sections.push(`## Description\n${task.description.trim()}`)
-	}
-
-	// Design notes section
-	if (task.design?.trim()) {
-		sections.push(`## Design Notes\n${task.design.trim()}`)
-	}
-
-	// Acceptance criteria section
-	if (task.acceptance?.trim()) {
-		sections.push(`## Acceptance Criteria\n${task.acceptance.trim()}`)
-	}
-
-	// Notes section (if present and different from design)
-	if (task.notes?.trim()) {
-		sections.push(`## Notes\n${task.notes.trim()}`)
-	}
-
-	// Dependencies section (blockers)
-	const blockers = task.dependencies?.filter(
-		(d) => d.dependency_type === "blocks" && d.status !== "closed",
-	)
-	if (blockers && blockers.length > 0) {
-		const blockerList = blockers.map((b) => `- ${b.id}: ${b.title} (${b.status})`).join("\n")
-		sections.push(`## Blocked By\n${blockerList}`)
-	}
-
-	return sections.join("\n\n")
-}
 
 // ============================================================================
 // Service Definition
@@ -88,6 +43,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			AppConfig.Default,
 			PRWorkflow.Default,
 			OverlayService.Default,
+			BoardService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -101,6 +57,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
+			const boardService = yield* BoardService
 			const gitConfig = yield* appConfig.getGitConfig()
 
 			// ================================================================
@@ -170,8 +127,8 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Build a clear prompt that explicitly identifies this as a beads issue.
-					// The prompt injects full bead context (description, design, acceptance criteria)
-					// directly so Claude doesn't need to run `bd show`.
+					// We only provide the ID and title, and tell Claude to run `bd show`
+					// to get the full context.
 					//
 					// The prompt encourages Claude to:
 					// 1. Ask clarifying questions if anything is unclear
@@ -179,9 +136,10 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					//
 					// This ensures beads become self-sufficient over time - any Claude session
 					// can pick them up without extra research or context from the user.
-					const beadContext = buildBeadContext(task)
 					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-${beadContext ? `\n${beadContext}\n` : ""}
+
+Run \`bd show ${task.id}\` to see full description and context.
+
 Before starting implementation:
 1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
 2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
@@ -245,10 +203,12 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Build prompt (same as startSessionWithPrompt)
-					// Injects full bead context directly so Claude doesn't need to run `bd show`.
-					const beadContext = buildBeadContext(task)
+					// We only provide the ID and title, and tell Claude to run `bd show`
+					// to get the full context.
 					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-${beadContext ? `\n${beadContext}\n` : ""}
+
+Run \`bd show ${task.id}\` to see full description and context.
+
 Before starting implementation:
 1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
 2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
@@ -316,9 +276,10 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 						"haiku"
 
 					// Inject bead context directly for chat sessions too
-					const beadContext = buildBeadContext(task)
 					const prompt = `Let's chat about bead ${task.id}: ${task.title}
-${beadContext ? `\n${beadContext}\n` : ""}
+
+Run \`bd show ${task.id}\` to see full description and context.
+
 Help me with one of:
 - Clarifying requirements or scope
 - Improving the description so any Claude session could pick it up
@@ -452,6 +413,7 @@ What would you like to discuss?`
 						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
 						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
+							Effect.tap(() => boardService.refresh()),
 							Effect.tap(() => doAttach(task.id)),
 							Effect.catchAll((error) => {
 								// MergeConflictError means Claude was started to resolve

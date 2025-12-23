@@ -1,100 +1,106 @@
-/**
- * Dev Server Atoms
- *
- * Bridges DevServerService state to React components via effect-atom.
- */
-
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap, Option } from "effect"
-import { DevServerService, type DevServerState } from "../../services/DevServerService.js"
+import {
+	type BeadDevServersState,
+	DevServerService,
+	type DevServerState,
+} from "../../services/DevServerService.js"
+import { NavigationService } from "../../services/NavigationService.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
 
-// ============================================================================
-// State Atoms
-// ============================================================================
-
-/**
- * Subscribe to all dev servers state
- */
 export const devServersAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
-		const devServer = yield* DevServerService
-		return devServer.servers
+		const svc = yield* DevServerService
+		return svc.servers
 	}),
 )
 
-// ============================================================================
-// Derived Atoms
-// ============================================================================
+export const focusedTaskIdAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const nav = yield* NavigationService
+		return nav.focusedTaskId
+	}),
+)
 
-/**
- * Get dev server state for a specific bead
- *
- * Returns idle state if no server exists for the bead.
- */
-export const devServerStateAtom = (beadId: string) =>
+export const focusedBeadDevServersAtom = Atom.readable((get) => {
+	const serversResult = get(devServersAtom)
+	if (!Result.isSuccess(serversResult)) return HashMap.empty<string, DevServerState>()
+
+	const focusedIdResult = get(focusedTaskIdAtom)
+	if (!Result.isSuccess(focusedIdResult) || !focusedIdResult.value)
+		return HashMap.empty<string, DevServerState>()
+
+	const beadId = focusedIdResult.value
+	return HashMap.get(serversResult.value, beadId).pipe(
+		Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+	)
+})
+
+const IDLE_SERVER: DevServerState = {
+	status: "idle" as const,
+	port: undefined,
+	name: "default",
+	tmuxSession: undefined,
+	worktreePath: undefined,
+	startedAt: undefined,
+	error: undefined,
+}
+
+export const focusedBeadPrimaryDevServerAtom = Atom.readable((get) => {
+	const beadServers = get(focusedBeadDevServersAtom)
+
+	const running = HashMap.filter(beadServers, (s) => s.status === "running")
+	const runningValues = Array.from(HashMap.values(running))
+	if (runningValues.length > 0) {
+		return runningValues[0]
+	}
+
+	return HashMap.get(beadServers, "default").pipe(Option.getOrElse(() => IDLE_SERVER))
+})
+
+export const beadDevServersAtom = (beadId: string) =>
 	Atom.readable((get) => {
 		const serversResult = get(devServersAtom)
 		if (!Result.isSuccess(serversResult)) {
-			return {
-				status: "idle",
-				port: undefined,
-				tmuxSession: undefined,
-				worktreePath: undefined,
-				startedAt: undefined,
-				error: undefined,
-			} satisfies DevServerState
+			return HashMap.empty<string, DevServerState>()
 		}
 
-		const servers = serversResult.value
-		const state = HashMap.get(servers, beadId)
-		return Option.getOrElse(state, () => ({
-			status: "idle",
-			port: undefined,
-			tmuxSession: undefined,
-			worktreePath: undefined,
-			startedAt: undefined,
-			error: undefined,
-		})) satisfies DevServerState
+		return HashMap.get(serversResult.value, beadId).pipe(
+			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+		)
 	})
 
-// ============================================================================
-// Action Atoms
-// ============================================================================
-
-/**
- * Toggle dev server for a bead
- *
- * Starts the server if stopped, stops if running.
- * Requires project path to locate the worktree.
- */
-export const toggleDevServerAtom = appRuntime.fn((beadId: string) =>
+export const toggleDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
 	Effect.gen(function* () {
-		const devServer = yield* DevServerService
+		const svc = yield* DevServerService
 		const projectService = yield* ProjectService
 		const project = yield* projectService.requireCurrentProject()
+		const path = project.path
 
-		return yield* devServer.toggle(beadId, project.path)
+		return yield* svc.toggle(args.beadId, path, args.serverName)
 	}),
 )
 
-/**
- * Stop a dev server
- */
-export const stopDevServerAtom = appRuntime.fn((beadId: string) =>
+export const stopDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
 	Effect.gen(function* () {
-		const devServer = yield* DevServerService
-		yield* devServer.stop(beadId)
+		const svc = yield* DevServerService
+		return yield* svc.stop(args.beadId, args.serverName)
 	}),
 )
 
-/**
- * Sync dev server state (check if tmux session is still alive)
- */
 export const syncDevServerStateAtom = appRuntime.fn((beadId: string) =>
 	Effect.gen(function* () {
-		const devServer = yield* DevServerService
-		return yield* devServer.syncState(beadId)
+		const svc = yield* DevServerService
+		const servers = yield* svc.getBeadServers(beadId)
+		for (const [name] of HashMap.entries(servers)) {
+			yield* svc.syncState(beadId, name)
+		}
 	}),
 )
+
+export const devServerStateAtom = (beadId: string, serverName: string) =>
+	Atom.readable((get) => {
+		const beadServers = get(beadDevServersAtom(beadId))
+		return HashMap.get(beadServers, serverName).pipe(Option.getOrElse(() => IDLE_SERVER))
+	})
