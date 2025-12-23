@@ -32,7 +32,7 @@ export {
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
 // Config atoms
-export { appConfigAtom } from "./config.js"
+export { appConfigAtom, devServerConfigAtom } from "./config.js"
 // Dev server atoms
 export {
 	beadDevServersAtom,

@@ -37,7 +37,7 @@ export type OverlayType =
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
-	| { readonly _tag: "devServerMenu"; readonly beadId: string }
+	| { readonly _tag: "devServerMenu"; readonly beadId: string; readonly mode: "toggle" | "attach" }
 
 /**
  * Hook for managing overlay stack
