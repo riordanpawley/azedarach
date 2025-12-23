@@ -8,6 +8,7 @@ import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ProjectService } from "./ProjectService.js"
 
 const TMUX_OPT_METADATA = "@az-devserver-meta"
+const TMUX_OPT_PANE_ID = "@az-devserver-pane"
 const PORT_POLL_INTERVAL = 500
 const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
@@ -21,6 +22,7 @@ const DevServerMetadata = Schema.Struct({
 	serverName: Schema.String,
 	status: DevServerStatusSchema,
 	port: Schema.optional(Schema.Number),
+	paneId: Schema.optional(Schema.String),
 	worktreePath: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
 	startedAt: Schema.optional(Schema.String),
@@ -32,6 +34,7 @@ export interface DevServerState {
 	readonly name: string
 	readonly status: DevServerStatus
 	readonly port: number | undefined
+	readonly paneId: string | undefined
 	readonly tmuxSession: string | undefined
 	readonly worktreePath: string | undefined
 	readonly startedAt: Date | undefined
@@ -57,6 +60,7 @@ const makeIdleState = (name: string): DevServerState => ({
 	name,
 	status: "idle",
 	port: undefined,
+	paneId: undefined,
 	tmuxSession: undefined,
 	worktreePath: undefined,
 	startedAt: undefined,
@@ -115,6 +119,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					name: m.serverName,
 					status: m.status,
 					port: m.port,
+					paneId: m.paneId,
 					tmuxSession: sessionName,
 					worktreePath: m.worktreePath,
 					startedAt: m.startedAt ? new Date(m.startedAt) : undefined,
@@ -207,6 +212,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						serverName,
 						status: newState.status,
 						port: newState.port,
+						paneId: newState.paneId,
 						worktreePath: newState.worktreePath,
 						projectPath: currentProjectPath,
 						startedAt: newState.startedAt?.toISOString(),
@@ -277,7 +283,15 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				for (const [beadId, beadServers] of HashMap.entries(servers)) {
 					for (const [name, state] of HashMap.entries(beadServers)) {
 						if (state.status === "running" && state.tmuxSession) {
-							if (!(yield* tmux.hasSession(state.tmuxSession))) {
+							// Check if session and pane still exist
+							const hasSession = yield* tmux.hasSession(state.tmuxSession.split(":")[0])
+							let hasPane = false
+							if (hasSession && state.paneId) {
+								const panes = yield* tmux.listPanes(state.tmuxSession)
+								hasPane = panes.some((p) => p.id === state.paneId)
+							}
+
+							if (!hasSession || (state.paneId && !hasPane)) {
 								if (state.port) yield* releasePort(state.port)
 								yield* updateState(beadId, name, {
 									...makeIdleState(name),
@@ -352,9 +366,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					.map(([k, v]) => `${k}=${v}`)
 					.join(" ")
 
-				const session = beadId
+				const tmuxSessionName = beadId
+				const targetWindow = `${tmuxSessionName}:${WINDOW_NAMES.DEV}`
 				const cwd = srvConfig?.cwd ? pathService.join(worktreePath, srvConfig.cwd) : worktreePath
-				const tmuxSessionName = session
 
 				yield* worktreeSession.getOrCreateSession(beadId, {
 					worktreePath,
@@ -362,20 +376,58 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					initCommands: (yield* appConfig.getWorktreeConfig()).initCommands,
 				})
 
-				yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.DEV, {
-					command: `${envStr} ${command}`,
-					cwd,
-				})
+				// If there are already running servers for this bead, we should split the window
+				const runningServers = HashMap.filter(beadServers, (s) => s.status === "running")
+				let paneId: string | undefined
+
+				if (HashMap.size(runningServers) > 0) {
+					// Use the last running server's pane to split from, or just the window
+					const lastRunning = Array.from(HashMap.values(runningServers)).pop()
+					const splitTarget = lastRunning?.paneId ?? targetWindow
+
+					paneId = yield* tmux.splitWindow(splitTarget, {
+						cwd,
+						command: `exec ${yield* appConfig.getSessionConfig().pipe(Effect.map((c) => c.shell))} -i`,
+					})
+
+					// Wait for the new pane's shell to be ready
+					yield* Effect.sleep("500 millis")
+					const marker = `tmux set-option -t ${tmuxSessionName} @az_pane_ready_${paneId.replace("%", "")} 1`
+					yield* tmux.sendKeys(paneId, marker)
+
+					yield* Effect.retry(
+						Effect.gen(function* () {
+							const ready = yield* tmux.getUserOption(
+								tmuxSessionName,
+								`@az_pane_ready_${paneId?.replace("%", "")}`,
+							)
+							if (Option.isNone(ready)) yield* Effect.fail("Not ready")
+						}),
+						{ times: 20, schedule: Schedule.spaced("100 millis") },
+					)
+
+					yield* tmux.sendKeys(paneId, `${envStr} ${command}`)
+				} else {
+					yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.DEV, {
+						command: `${envStr} ${command}`,
+						cwd,
+					})
+					// For the first pane, we don't have a specific pane ID easily from ensureWindow,
+					// but we can list panes to find it.
+					const panes = yield* tmux.listPanes(targetWindow)
+					paneId = panes[0]?.id
+				}
 
 				const newState = yield* updateState(beadId, name, {
 					status: "running",
-					tmuxSession: `${tmuxSessionName}:${WINDOW_NAMES.DEV}`,
+					tmuxSession: targetWindow,
+					paneId,
 					port: primary,
 					startedAt: new Date(),
 				})
 
 				yield* pollForPort(
-					`${tmuxSessionName}:${WINDOW_NAMES.DEV}`,
+					paneId ?? targetWindow,
 					new RegExp(config.portPattern ?? "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"),
 				).pipe(
 					Effect.flatMap((p) =>
@@ -391,7 +443,11 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		function stop(beadId: string, name: string) {
 			return Effect.gen(function* () {
 				const s = yield* getServerState(beadId, name)
-				if (s.tmuxSession) yield* tmux.killSession(s.tmuxSession).pipe(Effect.ignore)
+				if (s.paneId) {
+					yield* tmux.killPane(s.paneId).pipe(Effect.ignore)
+				} else if (s.tmuxSession) {
+					yield* tmux.killSession(s.tmuxSession).pipe(Effect.ignore)
+				}
 				if (s.port) yield* releasePort(s.port)
 				yield* updateState(beadId, name, makeIdleState(name))
 			})
@@ -419,12 +475,21 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			syncState: (beadId: string, name = DEFAULT_SERVER_NAME) =>
 				Effect.gen(function* () {
 					const s = yield* getServerState(beadId, name)
-					if (s.tmuxSession && !(yield* tmux.hasSession(s.tmuxSession)) && s.status === "running") {
-						if (s.port) yield* releasePort(s.port)
-						return yield* updateState(beadId, name, {
-							...makeIdleState(name),
-							error: "Stopped unexpectedly",
-						})
+					if (s.status === "running") {
+						const hasSession = yield* tmux.hasSession(s.tmuxSession?.split(":")[0] ?? "")
+						let hasPane = false
+						if (hasSession && s.paneId) {
+							const panes = yield* tmux.listPanes(s.tmuxSession ?? "")
+							hasPane = panes.some((p) => p.id === s.paneId)
+						}
+
+						if (!hasSession || (s.paneId && !hasPane)) {
+							if (s.port) yield* releasePort(s.port)
+							return yield* updateState(beadId, name, {
+								...makeIdleState(name),
+								error: "Stopped unexpectedly",
+							})
+						}
 					}
 					return s
 				}),
