@@ -20,7 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { AI_SESSION_PREFIXES, isAiToolSession, parseSessionName } from "./paths.js"
+import { parseSessionName } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -154,11 +154,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		// Track previous state to detect changes (beadId → {status, sessionName})
 		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
 
-		/**
-		 * List all tmux sessions starting with "claude-"
-		 * Returns session name and creation timestamp in one call.
-		 */
-		const listClaudeSessions = () =>
+		const listBeadSessions = () =>
 			Effect.gen(function* () {
 				const command = Command.make(
 					"tmux",
@@ -183,11 +179,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 							parsed,
 						}
 					})
-					.filter(
-						(s) =>
-							s.parsed !== undefined &&
-							(s.parsed.type === "bead" || isAiToolSession(s.parsed.type)),
-					)
+					.filter((s) => s.parsed !== undefined && s.parsed.type === "bead")
 			})
 
 		/**
@@ -221,7 +213,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 
 		const extractBeadId = (sessionName: string): string | null => {
 			const parsed = parseSessionName(sessionName)
-			if (parsed && (parsed.type === "bead" || isAiToolSession(parsed.type))) {
+			if (parsed && parsed.type === "bead") {
 				return parsed.beadId
 			}
 
@@ -233,7 +225,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 */
 		const listSessions = () =>
 			Effect.gen(function* () {
-				const sessions = yield* listClaudeSessions()
+				const sessions = yield* listBeadSessions()
 				const results: SessionStateUpdate[] = []
 
 				for (const session of sessions) {
@@ -268,7 +260,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 */
 		const findSessionByBeadId = (beadId: string) =>
 			Effect.gen(function* () {
-				const sessions = yield* listClaudeSessions()
+				const sessions = yield* listBeadSessions()
 				for (const session of sessions) {
 					const sessionBeadId = extractBeadId(session.name)
 					if (sessionBeadId === beadId) {

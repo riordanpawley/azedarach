@@ -188,6 +188,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					Effect.gen(function* () {
 						const sessionConfig = yield* appConfig.getSessionConfig()
 						const shell = sessionConfig.shell
+						const target = `${sessionName}:${windowName}`
 
 						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
 
@@ -197,7 +198,6 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								command: `${shell} -i`,
 							})
 
-							const target = `${sessionName}:${windowName}`
 							yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
 							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
@@ -210,9 +210,14 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							}
 
 							yield* tmux.sendKeys(target, options.command)
+						} else {
+							// Session recovered but tool isn't running - send command to existing window
+							yield* Effect.log(`[ensureWindow] Window ${target} exists, sending command`)
+							yield* tmux.selectWindow(sessionName, windowName)
+							yield* tmux.sendKeys(target, options.command)
 						}
 
-						return `${sessionName}:${windowName}`
+						return target
 					}),
 
 				create: (

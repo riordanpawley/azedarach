@@ -147,7 +147,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				for (const session of sessions) {
 					const parsed = parseSessionName(session.name)
-					if (!parsed || (parsed.type !== "dev" && parsed.type !== "bead")) continue
+					if (!parsed || parsed.type !== "bead") continue
 
 					const stateOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isNone(stateOpt)) continue
@@ -270,7 +270,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return { env, primary: primary ?? 3000 }
 			})
 
-		const detectCommand = (worktreePath: string) =>
+		const _detectCommand = (worktreePath: string) =>
 			Effect.gen(function* () {
 				const pkgPath = pathService.join(worktreePath, "package.json")
 				if (!(yield* fs.exists(pkgPath).pipe(Effect.catchAll(() => Effect.succeed(false))))) {
