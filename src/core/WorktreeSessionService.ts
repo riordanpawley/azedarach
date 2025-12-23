@@ -87,6 +87,15 @@ export class WorktreeSessionError extends Data.TaggedError("WorktreeSessionError
 	readonly worktreePath?: string
 }> {}
 
+/**
+ * Error when shell initialization times out
+ */
+export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
+	readonly message: string
+	readonly target: string
+	readonly markerKey: string
+}> {}
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -108,7 +117,13 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						Effect.gen(function* () {
 							const marker = yield* tmux.getUserOption(target.split(":")[0], markerKey)
 							if (Option.isNone(marker) || Option.getOrThrow(marker) !== "1") {
-								return yield* Effect.fail("Shell not ready")
+								return yield* Effect.fail(
+									new ShellNotReadyError({
+										message: `Shell not ready for ${target} (marker: ${markerKey})`,
+										target,
+										markerKey,
+									}),
+								)
 							}
 						}),
 						{
