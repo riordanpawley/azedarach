@@ -32,7 +32,7 @@ export {
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
 // Config atoms
-export * from "./config.js"
+export { appConfigAtom, workflowModeAtom } from "./config.js"
 export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {

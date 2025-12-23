@@ -161,6 +161,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
+				const workflowMode = yield* appConfig.getWorkflowMode()
+				if (workflowMode === "local") {
+					yield* toast.show(
+						"info",
+						"PR creation disabled in local workflow mode (use Space+m to merge)",
+					)
+					return
+				}
+
 				// Check if task has an operation in progress
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
@@ -254,6 +263,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			Effect.gen(function* () {
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
+
+				const workflowMode = yield* appConfig.getWorkflowMode()
+				if (workflowMode === "origin") {
+					yield* toast.show(
+						"info",
+						"Direct merge disabled in origin workflow mode (use Space+P to create PR)",
+					)
+					return
+				}
 
 				// Check if task has an operation in progress
 				const isBusy = yield* helpers.checkBusy(task.id)
@@ -469,8 +487,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-				// Fetch fresh gitConfig to pick up changes from project switching
-				const gitConfig = yield* appConfig.getGitConfig()
+				const effectiveBaseBranch = yield* appConfig.getEffectiveBaseBranch()
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
@@ -482,7 +499,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				yield* overlay.push({
 					_tag: "diffViewer",
 					worktreePath,
-					baseBranch: gitConfig.baseBranch,
+					baseBranch: effectiveBaseBranch,
 				})
 			})
 
