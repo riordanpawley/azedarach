@@ -1,3 +1,4 @@
+import type { CommandExecutor } from "@effect/platform"
 import { Cause, Effect, Ref } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
 import type { ColumnStatus, TaskWithSession } from "../ui/types.js"
@@ -5,13 +6,22 @@ import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ToastService } from "./ToastService.js"
 
 export type Mutation =
-	| { _tag: "Move"; id: string; status: ColumnStatus; rollback: Effect.Effect<void, any, any> }
-	| { _tag: "Delete"; id: string; rollback: Effect.Effect<void, any, any> }
+	| {
+			_tag: "Move"
+			id: string
+			status: ColumnStatus
+			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
+	  }
+	| {
+			_tag: "Delete"
+			id: string
+			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
+	  }
 	| {
 			_tag: "Update"
 			id: string
 			fields: Partial<TaskWithSession>
-			rollback: Effect.Effect<void, any, any>
+			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 
 export interface QueuedMutation {
