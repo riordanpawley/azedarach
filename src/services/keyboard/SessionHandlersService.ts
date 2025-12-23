@@ -22,7 +22,6 @@ import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
-import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 
