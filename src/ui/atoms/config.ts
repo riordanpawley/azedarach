@@ -4,7 +4,7 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { AppConfig, type ResolvedConfig } from "../../config/index.js"
+import { AppConfig } from "../../config/index.js"
 import { appRuntime } from "./runtime.js"
 
 export const appConfigAtom = appRuntime.subscriptionRef(
