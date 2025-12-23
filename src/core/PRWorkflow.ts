@@ -887,15 +887,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// === STRATEGY: Exclude JSONL from git merge, handle beads separately ===
-					// The .beads/issues.jsonl file causes most merge conflicts because:
-					// 1. It's line-delimited JSON where line order can change
-					// 2. Different beads on same line numbers = text conflict
-					// 3. The bd merge driver (if configured) has known bugs with 3-way merge
-					//
-					// Solution: Use git merge with -X ours for .beads/ paths, then reconcile
-					// beads separately using bd sync which handles JSONL semantically.
-
 					// 1. Stop any running session first (only if doing full cleanup)
 					// When keepWorktree=true, we want to keep iterating in the same session
 					if (!keepWorktree) {
@@ -974,24 +965,23 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-						const sessionStarted = yield* sessionManager
-							.start({
-								beadId,
-								projectPath,
-								initialPrompt: resolvePrompt,
-							})
-							.pipe(
-								Effect.map(() => true),
-								Effect.catchAll((e) =>
-									Effect.logError(
-										`Failed to start Claude session for conflict resolution: ${e}`,
-									).pipe(Effect.map(() => false)),
-								),
-							)
+						// Start Claude session in a new "merge" window within the same session
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+						const windowName = "merge"
 
-						const message = sessionStarted
-							? `Code conflicts detected in: ${fileList}. Started Claude session to resolve. Retry merge after resolution.`
-							: `Code conflicts detected in: ${fileList}. Failed to start Claude - resolve manually in worktree, then retry merge.`
+						yield* tmuxService
+							.newWindow(beadId, windowName, {
+								cwd: worktree.path,
+								command: `${shell} -i`,
+							})
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						const target = `${beadId}:${windowName}`
+						const claudeCmd = `claude -p "${resolvePrompt}"`
+						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+
+						const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({
@@ -1467,24 +1457,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
-						const sessionStarted = yield* sessionManager
-							.start({
-								beadId,
-								projectPath,
-								initialPrompt: resolvePrompt,
-							})
-							.pipe(
-								Effect.map(() => true),
-								Effect.catchAll((e) =>
-									Effect.logError(
-										`Failed to start Claude session for conflict resolution: ${e}`,
-									).pipe(Effect.map(() => false)),
-								),
-							)
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+						const windowName = "merge"
 
-						const message = sessionStarted
-							? `Conflicts detected in: ${fileList}. Started Claude session to resolve.`
-							: `Conflicts detected in: ${fileList}. Failed to start Claude - resolve manually.`
+						yield* tmuxService
+							.newWindow(beadId, windowName, {
+								cwd: worktree.path,
+								command: `${shell} -i`,
+							})
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						const target = `${beadId}:${windowName}`
+						const claudeCmd = `claude -p "${resolvePrompt}"`
+						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+
+						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({
@@ -1733,24 +1721,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-						const sessionStarted = yield* sessionManager
-							.start({
-								beadId,
-								projectPath,
-								initialPrompt: resolvePrompt,
-							})
-							.pipe(
-								Effect.map(() => true),
-								Effect.catchAll((e) =>
-									Effect.logError(
-										`Failed to start Claude session for conflict resolution: ${e}`,
-									).pipe(Effect.map(() => false)),
-								),
-							)
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+						const windowName = "merge"
 
-						const message = sessionStarted
-							? `Merge conflicts detected in: ${fileList}. Started Claude session to resolve. Retry attach after resolution.`
-							: `Merge conflicts detected in: ${fileList}. Failed to start Claude - resolve manually, then retry.`
+						yield* tmuxService
+							.newWindow(beadId, windowName, {
+								cwd: worktree.path,
+								command: `${shell} -i`,
+							})
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						const target = `${beadId}:${windowName}`
+						const claudeCmd = `claude -p "${resolvePrompt}"`
+						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+
+						const message = `Merge conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry attach after resolution.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({

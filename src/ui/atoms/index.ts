@@ -154,6 +154,7 @@ export {
 	pauseSessionAtom,
 	resumeSessionAtom,
 	sessionMetricsAtom,
+	sessionMigrationAtom,
 	sessionMonitorStarterAtom,
 	startSessionAtom,
 	stopSessionAtom,
