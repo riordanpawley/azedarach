@@ -1,5 +1,23 @@
 /**
  * SettingsOverlay component - interactive configuration menu
+ *
+ * Provides a keyboard-navigable interface for viewing and modifying Azedarach configuration.
+ * Displays all EDITABLE_SETTINGS with their current values and allows real-time toggling.
+ *
+ * Navigation:
+ * - j/k: Move up/down through settings
+ * - Space/Enter: Toggle boolean settings or cycle enum values
+ * - e: Open .azedarach.json in external editor for advanced changes
+ * - Escape: Close overlay and return to normal mode
+ *
+ * Architecture:
+ * - Uses appConfigAtom to display current config values
+ * - Uses settingsStateAtom to track overlay state (open/closed, focus position)
+ * - Calls SettingsService.toggleCurrent() to modify values
+ * - Automatically reloads config after changes via AppConfig.reload()
+ *
+ * @see EDITABLE_SETTINGS for the list of configurable options
+ * @see SettingsService for the backend logic
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
@@ -26,13 +44,10 @@ const formatSettingValue = (value: boolean | string): string => {
 }
 
 /**
- * SettingsOverlay component
+ * SettingsOverlay component implementation
  *
- * Interactive modal for viewing and editing configuration.
- * - j/k: Move focus up/down
- * - Enter/Space: Toggle current setting (for booleans and enums)
- * - e: Open config in external editor
- * - Escape: Close overlay
+ * Renders the settings overlay when settingsState.isOpen is true.
+ * Only displays when both the overlay stack contains "settings" and the settings service is in open state.
  */
 export const SettingsOverlay = () => {
 	const config = useAtomValue(
