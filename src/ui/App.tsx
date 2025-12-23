@@ -22,6 +22,7 @@ import {
 	handleKeyAtom,
 	isOnlineAtom,
 	maxVisibleTasksAtom,
+	sessionMigrationAtom,
 	sessionMonitorStarterAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
@@ -107,8 +108,11 @@ export const App = () => {
 		Result.getOrElse(() => undefined),
 	)?.name
 
-	// Start the hook receiver for Claude Code native hook integration
-	// This watches for notification files and updates session state
+	const runSessionMigration = useAtomSet(sessionMigrationAtom, { mode: "promise" })
+	useEffect(() => {
+		runSessionMigration()
+	}, [runSessionMigration])
+
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
 		startSessionMonitor()

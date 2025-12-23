@@ -1,4 +1,4 @@
-import { Command, type CommandExecutor } from "@effect/platform"
+import { Command } from "@effect/platform"
 import { Data, Effect, Option } from "effect"
 
 // Errors
@@ -18,9 +18,7 @@ export interface TmuxSession {
 }
 
 // Helper to run tmux commands
-const runTmux = (
-	args: string[],
-): Effect.Effect<string, TmuxError, CommandExecutor.CommandExecutor> =>
+const runTmux = (args: string[]) =>
 	Effect.gen(function* () {
 		const command = Command.make("tmux", ...args)
 		return yield* Command.string(command)
@@ -63,30 +61,7 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					// Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
-					// Add Ctrl-a Tab keybinding to toggle between code and dev windows in the current session
-					// Session naming format: {beadId}
-					// Windows: code, dev, chat, background
-					// Note: Shell syntax requires no semicolon after 'then', 'else', or before 'fi'
-					const toggleScript =
-						'current_window=$(tmux display-message -p "#W"); ' +
-						// code → dev
-						'if [ "$current_window" = "code" ]; then ' +
-						'target="dev"; msg="No dev server window (Space+r to start)"; ' +
-						// dev → code
-						'elif [ "$current_window" = "dev" ]; then ' +
-						'target="code"; msg="No code window"; ' +
-						"else " +
-						'target="code"; msg="No code window"; ' +
-						"fi; " +
-						'if [ -n "$target" ] && tmux list-windows -F "#W" | grep -q "^$target$"; then ' +
-						'tmux select-window -t "$target"; ' +
-						"else " +
-						'tmux display-message "$msg"; ' +
-						"fi"
-					yield* runTmux(["bind-key", "-T", "prefix", "Tab", "run-shell", toggleScript])
-
 					// Set azedarach session options for state tracking
-					// These enable crash recovery - TmuxSessionMonitor can reconstruct state from tmux
 					if (opts?.azOptions?.worktreePath) {
 						yield* runTmux(["set-option", "-t", name, "@az_worktree", opts.azOptions.worktreePath])
 					}
@@ -209,6 +184,28 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					args.push(opts.command)
 					yield* runTmux(args)
 				}),
+
+			renameSession: (oldName: string, newName: string) =>
+				runTmux(["rename-session", "-t", oldName, newName]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: oldName }))),
+				),
+
+			renameWindow: (session: string, oldName: string, newName: string) =>
+				runTmux(["rename-window", "-t", `${session}:${oldName}`, newName]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() =>
+						Effect.fail(new SessionNotFoundError({ session: `${session}:${oldName}` })),
+					),
+				),
+
+			linkWindow: (source: string, target: string) =>
+				runTmux(["link-window", "-s", source, "-t", target]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() =>
+						Effect.fail(new TmuxError({ message: `Failed to link ${source} to ${target}` })),
+					),
+				),
 
 			listWindows: (session: string) =>
 				Effect.gen(function* () {
