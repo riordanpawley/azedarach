@@ -1,6 +1,6 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap, Option } from "effect"
-import { SessionNotFoundError, TmuxError, TmuxService } from "../../core/TmuxService.js"
+import { TmuxService } from "../../core/TmuxService.js"
 import {
 	DevServerService,
 	type DevServerState,
