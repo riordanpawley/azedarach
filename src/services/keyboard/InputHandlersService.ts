@@ -32,6 +32,7 @@ import {
 	extractViewMode,
 	ProjectStateService,
 } from "../ProjectStateService.js"
+import { SettingsService } from "../SettingsService.js"
 import { ToastService } from "../ToastService.js"
 import { ViewService } from "../ViewService.js"
 import type { KeyMode } from "./types.js"
@@ -54,6 +55,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			ProjectService.Default,
 			ProjectStateService.Default,
 			ViewService.Default,
+			SettingsService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -68,6 +70,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const projectService = yield* ProjectService
 			const projectState = yield* ProjectStateService
 			const view = yield* ViewService
+			const settings = yield* SettingsService
 
 			// ================================================================
 			// Input Handler Methods
@@ -706,6 +709,55 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
+			 * Handle settings overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled
+			 *
+			 * Keys:
+			 * - j/down: Move focus down
+			 * - k/up: Move focus up
+			 * - space/return: Toggle setting
+			 * - e: Edit in external editor
+			 * - escape: Close settings
+			 */
+			const handleSettingsInput = (key: string) =>
+				Effect.gen(function* () {
+					if (key === "escape") {
+						yield* settings.close()
+						yield* overlay.pop()
+						return true
+					}
+
+					if (key === "j" || key === "down") {
+						yield* settings.moveDown()
+						return true
+					}
+
+					if (key === "k" || key === "up") {
+						yield* settings.moveUp()
+						return true
+					}
+
+					if (key === "space" || key === "return") {
+						yield* settings.toggleCurrent()
+						return true
+					}
+
+					if (key === "e") {
+						const { configPath, backupContent } = yield* settings.openInEditor()
+						// Use EditorService to open the file
+						yield* editor.openFile(configPath)
+
+						// After editor closes, validate the new config
+						yield* settings.validateAfterEdit(configPath, backupContent)
+						return true
+					}
+
+					return true // Consume all other keys in overlay
+				})
+
+			/**
 			 * Compute jump labels for all visible tasks
 			 *
 			 * Generates 2-character labels (aa, ab, ac, ...) for each task on the board.
@@ -814,6 +866,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleImageAttachInput,
 				handleProjectSelectorInput,
 				handleImagePreviewInput,
+				handleSettingsInput,
 				computeJumpLabels,
 				getEffectiveMode,
 			}

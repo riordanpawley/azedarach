@@ -157,6 +157,15 @@ const StateDetectionConfigSchema = Schema.Struct({
 })
 
 /**
+ * Workflow mode for git operations
+ *
+ * - 'local': Work via Space+m to merge directly to main. PRs hidden.
+ * - 'origin': Work via Space+P to create pull requests. Direct merge hidden.
+ */
+export const WorkflowModeSchema = Schema.Literal("local", "origin")
+export type WorkflowMode = Schema.Schema.Type<typeof WorkflowModeSchema>
+
+/**
  * Git configuration
  *
  * Controls git behavior for worktrees and branches.
@@ -207,6 +216,12 @@ const GitConfigSchema = Schema.Struct({
 	 * Adds a small amount of overhead from running `git diff --stat`.
 	 */
 	showLineChanges: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Workflow mode: 'local' for direct merge (Space+m), 'origin' for PRs (Space+P)
+	 * Default: 'origin'
+	 */
+	workflowMode: Schema.optional(WorkflowModeSchema),
 })
 
 /**

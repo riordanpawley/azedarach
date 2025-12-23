@@ -1,6 +1,7 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
+import type { WorkflowMode } from "../config/schema.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -15,6 +16,8 @@ export interface ActionPaletteProps {
 	devServerStatus?: DevServerStatus
 	/** Dev server port (if running) */
 	devServerPort?: number
+	/** Workflow mode: 'local' hides PR action, 'origin' hides merge action */
+	workflowMode?: WorkflowMode
 }
 
 const _ATTR_BOLD = 1
@@ -44,6 +47,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const isOnline = props.isOnline ?? true
 	const devServerStatus = props.devServerStatus ?? "idle"
 	const devServerPort = props.devServerPort
+	const workflowMode = props.workflowMode ?? "origin"
 
 	// Helper to check if an action is available based on session state
 	const isAvailableByState = (action: string): boolean => {
@@ -102,8 +106,11 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		}
 	}
 
-	// Full availability check: state + queue busyness + network
+	// Full availability check: state + queue busyness + network + workflow mode
 	const isAvailable = (action: string): boolean => {
+		if (action === "m" && workflowMode === "origin") return false
+		if (action === "P" && workflowMode === "local") return false
+
 		// If task is busy with a queued operation, block queued actions
 		if (runningOperation !== null && QUEUED_ACTIONS.has(action)) {
 			return false

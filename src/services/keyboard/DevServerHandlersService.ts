@@ -52,9 +52,9 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					}
 
 					const project = yield* projectService.requireCurrentProject().pipe(
-						Effect.catchAll(() =>
+						Effect.catchTag("NoProjectsError", (err) =>
 							Effect.gen(function* () {
-								yield* toast.show("error", "No project selected")
+								yield* toast.show("error", err.message)
 								return undefined
 							}),
 						),
@@ -79,17 +79,15 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 											: `Dev server '${serverName}' stopped`,
 								),
 							),
-							Effect.catchAll((err) => {
-								const message =
-									err._tag === "NoWorktreeError" ||
-									err._tag === "DevServerError" ||
-									err._tag === "TmuxError" ||
-									err._tag === "SessionNotFoundError" ||
-									err._tag === "ShellNotReadyError"
-										? err.message
-										: String(err)
-								return toast.show("error", message)
-							}),
+							Effect.catchTag("NoWorktreeError", (err) => toast.show("error", err.message)),
+							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
+							Effect.catchTag("TmuxError", (err) =>
+								toast.show("error", `tmux error: ${err.message}`),
+							),
+							Effect.catchTag("SessionNotFoundError", (err) =>
+								toast.show("error", `Session not found: ${err.session}`),
+							),
+							Effect.catchTag("ShellNotReadyError", (err) => toast.show("error", err.message)),
 						)
 					}
 				})
@@ -106,9 +104,9 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					}
 
 					const project = yield* projectService.requireCurrentProject().pipe(
-						Effect.catchAll(() =>
+						Effect.catchTag("NoProjectsError", (err) =>
 							Effect.gen(function* () {
-								yield* toast.show("error", "No project selected")
+								yield* toast.show("error", err.message)
 								return undefined
 							}),
 						),
@@ -140,17 +138,15 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 										: `Dev server '${serverName}' restarting...`,
 								),
 							),
-							Effect.catchAll((err) => {
-								const message =
-									err._tag === "NoWorktreeError" ||
-									err._tag === "DevServerError" ||
-									err._tag === "TmuxError" ||
-									err._tag === "SessionNotFoundError" ||
-									err._tag === "ShellNotReadyError"
-										? err.message
-										: String(err)
-								return toast.show("error", message)
-							}),
+							Effect.catchTag("NoWorktreeError", (err) => toast.show("error", err.message)),
+							Effect.catchTag("DevServerError", (err) => toast.show("error", err.message)),
+							Effect.catchTag("TmuxError", (err) =>
+								toast.show("error", `tmux error: ${err.message}`),
+							),
+							Effect.catchTag("SessionNotFoundError", (err) =>
+								toast.show("error", `Session not found: ${err.session}`),
+							),
+							Effect.catchTag("ShellNotReadyError", (err) => toast.show("error", err.message)),
 						)
 					}
 				})
@@ -191,10 +187,9 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 							.switchClient(server.tmuxSession)
 							.pipe(
 								Effect.catchAll((err) =>
-									toast.show(
-										"error",
-										`Failed to attach: ${err instanceof Error ? err.message : String(err)}`,
-									),
+									err._tag === "SessionNotFoundError"
+										? toast.show("error", `Session not found: ${err.session}`)
+										: toast.show("error", `tmux error: ${err.message}`),
 								),
 							)
 					}

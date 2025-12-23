@@ -682,6 +682,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const offlineService = yield* OfflineService
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
+		const getEffectiveBaseBranch = () => appConfig.getEffectiveBaseBranch()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -1208,8 +1209,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
-					const gitConfig = yield* getGitConfig()
-					const baseBranch = gitConfig.baseBranch
+					const effectiveBaseBranch = yield* getEffectiveBaseBranch()
 
 					// Use git merge-tree to perform an actual 3-way merge in memory
 					// This detects real line-level conflicts, not just file overlap
@@ -1218,7 +1218,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						"git",
 						"merge-tree",
 						"--write-tree",
-						baseBranch,
+						effectiveBaseBranch,
 						beadId,
 					).pipe(Command.workingDirectory(projectPath))
 
@@ -1235,7 +1235,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Run merge-tree again to get the conflicted file list
 						// Use --no-messages to suppress "Auto-merging" messages and get clean file list
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
+							[
+								"merge-tree",
+								"--write-tree",
+								"--name-only",
+								"--no-messages",
+								effectiveBaseBranch,
+								beadId,
+							],
 							projectPath,
 						).pipe(Effect.catchAll(() => Effect.succeed("")))
 
@@ -1246,7 +1253,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// Get file change counts for informational purposes
-					const mergeBase = yield* runGit(["merge-base", baseBranch, beadId], projectPath).pipe(
+					const mergeBase = yield* runGit(
+						["merge-base", effectiveBaseBranch, beadId],
+						projectPath,
+					).pipe(
 						Effect.map((output) => output.trim()),
 						Effect.catchAll(() => Effect.succeed("")),
 					)
@@ -1271,7 +1281,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						branchChangedFiles = branchOutput
 
 						const baseOutput = yield* runGit(
-							["diff", "--name-only", `${mergeBase}..${baseBranch}`],
+							["diff", "--name-only", `${mergeBase}..${effectiveBaseBranch}`],
 							projectPath,
 						).pipe(
 							Effect.map(
@@ -1366,6 +1376,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				Effect.gen(function* () {
 					const gitConfig = yield* getGitConfig()
 					const { beadId, projectPath, baseBranch = gitConfig.baseBranch } = options
+					const effectiveBaseBranch = yield* getEffectiveBaseBranch()
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -1401,7 +1412,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							baseBranch,
+							effectiveBaseBranch,
 							beadId,
 						).pipe(Command.workingDirectory(worktree.path))
 
@@ -1417,7 +1428,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
+							[
+								"merge-tree",
+								"--write-tree",
+								"--name-only",
+								"--no-messages",
+								effectiveBaseBranch,
+								beadId,
+							],
 							worktree.path,
 						).pipe(
 							Effect.catchAll((e) =>

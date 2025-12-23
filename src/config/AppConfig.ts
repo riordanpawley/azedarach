@@ -52,6 +52,9 @@ export interface AppConfigService {
 	/** The reactive configuration - updates when current project changes */
 	readonly config: SubscriptionRef.SubscriptionRef<ResolvedConfig>
 
+	/** Reload config from disk for current project */
+	readonly reload: () => Effect.Effect<void, ConfigParseError>
+
 	/** Get CLI tool to use for AI sessions */
 	readonly getCliTool: () => Effect.Effect<ResolvedConfig["cliTool"]>
 
@@ -87,6 +90,12 @@ export interface AppConfigService {
 
 	/** Get devServer configuration section */
 	readonly getDevServerConfig: () => Effect.Effect<ResolvedConfig["devServer"]>
+
+	/** Get workflow mode ('local' or 'origin') */
+	readonly getWorkflowMode: () => Effect.Effect<ResolvedConfig["git"]["workflowMode"]>
+
+	/** Get effective base branch for diffs/conflicts (adds origin/ prefix in origin mode) */
+	readonly getEffectiveBaseBranch: () => Effect.Effect<string>
 }
 
 export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfig", {
@@ -396,6 +405,27 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		return {
 			config: configRef,
+			/**
+			 * Reload config from disk for current project
+			 *
+			 * Used by SettingsService after saving config changes to ensure
+			 * the reactive config atoms update immediately in the UI.
+			 *
+			 * Falls back to default config if loading fails, with error logging.
+			 */
+			reload: () =>
+				Effect.gen(function* () {
+					const currentProjectPath = yield* projectService.getCurrentPath()
+					const effectiveProjectPath = currentProjectPath ?? process.cwd()
+					const newConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
+						Effect.catchAll((e) => {
+							return Effect.log(`[DEBUG] Config reload failed: ${e}`).pipe(
+								Effect.map(() => mergeWithDefaults({})),
+							)
+						}),
+					)
+					yield* SubscriptionRef.set(configRef, newConfig)
+				}),
 			getCliTool: () =>
 				Effect.gen(function* () {
 					const config = yield* SubscriptionRef.get(configRef)
@@ -414,6 +444,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getBeadsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.beads),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
+			getWorkflowMode: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git.workflowMode),
+			getEffectiveBaseBranch: () =>
+				Effect.map(SubscriptionRef.get(configRef), (c) =>
+					c.git.workflowMode === "origin" ? `origin/${c.git.baseBranch}` : c.git.baseBranch,
+				),
 		}
 	}),
 }) {}

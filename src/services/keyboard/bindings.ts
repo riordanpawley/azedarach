@@ -11,6 +11,7 @@ import type { TmuxService } from "../../core/TmuxService.js"
 import type { EditorService } from "../EditorService.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
+import type { SettingsService } from "../SettingsService.js"
 import type { ToastService } from "../ToastService.js"
 import type { ViewService } from "../ViewService.js"
 import type { DevServerHandlersService } from "./DevServerHandlersService.js"
@@ -46,6 +47,7 @@ export interface BindingContext {
 	nav: NavigationService
 	editor: EditorService
 	overlay: OverlayService
+	settings: SettingsService
 	toast: ToastService
 	viewService: ViewService
 	tmux: TmuxService
@@ -226,6 +228,15 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "normal",
 		description: "Show diagnostics",
 		action: bc.overlay.push({ _tag: "diagnostics" }),
+	},
+	{
+		key: "s",
+		mode: "normal",
+		description: "Show settings",
+		action: Effect.gen(function* () {
+			yield* bc.overlay.push({ _tag: "settings" })
+			yield* bc.settings.open()
+		}),
 	},
 	{
 		key: "return",

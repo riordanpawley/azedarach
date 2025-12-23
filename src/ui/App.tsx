@@ -25,6 +25,7 @@ import {
 	sessionMonitorStarterAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
+	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
@@ -44,6 +45,7 @@ import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
+import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
 import { ToastContainer } from "./Toast.js"
@@ -66,6 +68,7 @@ export const App = () => {
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
+		showingSettings,
 		showingImageAttach,
 		showingImagePreview,
 		showingConfirm,
@@ -132,6 +135,8 @@ export const App = () => {
 		isOnlineAtom,
 		Result.getOrElse(() => true),
 	)
+
+	const workflowMode = useAtomValue(workflowModeAtom)
 
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
@@ -289,6 +294,9 @@ export const App = () => {
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
 
+			{/* Settings overlay */}
+			{showingSettings && <SettingsOverlay />}
+
 			{showingProjectSelector && <ProjectSelector />}
 
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
@@ -315,6 +323,7 @@ export const App = () => {
 					isOnline={isOnline}
 					devServerStatus={displayDevServer.status}
 					devServerPort={displayDevServer.port}
+					workflowMode={workflowMode}
 				/>
 			)}
 

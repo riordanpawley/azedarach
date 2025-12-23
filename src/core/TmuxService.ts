@@ -227,6 +227,68 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					),
 				),
 
+			/**
+			 * Split a tmux window/pane
+			 *
+			 * @param target - tmux target (session:window.pane or just session:window)
+			 * @param opts.horizontal - If true, split horizontally (-h), otherwise vertically (-v)
+			 * @param opts.cwd - Working directory for the new pane
+			 * @param opts.command - Command to run in the new pane
+			 * @returns The ID of the new pane
+			 */
+			splitWindow: (
+				target: string,
+				opts?: {
+					horizontal?: boolean
+					cwd?: string
+					command?: string
+				},
+			) =>
+				Effect.gen(function* () {
+					const args = ["split-window", "-t", target, "-P", "-F", "#{pane_id}"]
+					if (opts?.horizontal) args.push("-h")
+					else args.push("-v")
+					if (opts?.cwd) args.push("-c", opts.cwd)
+					if (opts?.command) args.push(opts.command)
+					return yield* runTmux(args).pipe(Effect.map((s) => s.trim()))
+				}),
+
+			/**
+			 * Kill a tmux pane
+			 *
+			 * @param target - tmux target (session:window.pane)
+			 */
+			killPane: (target: string) =>
+				runTmux(["kill-pane", "-t", target]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+				),
+
+			/**
+			 * List panes in a window
+			 *
+			 * @param target - tmux target (session:window)
+			 * @returns List of pane IDs and their names (if any)
+			 */
+			listPanes: (target: string) =>
+				Effect.gen(function* () {
+					const output = yield* runTmux([
+						"list-panes",
+						"-t",
+						target,
+						"-F",
+						"#{pane_id}:#{pane_index}",
+					])
+					return output
+						.trim()
+						.split("\n")
+						.filter(Boolean)
+						.map((line) => {
+							const [id, index] = line.split(":")
+							return { id, index: parseInt(index, 10) }
+						})
+				}).pipe(Effect.catchAll(() => Effect.succeed([]))),
+
 			capturePane: (session: string, lines?: number) =>
 				Effect.gen(function* () {
 					const args = ["capture-pane", "-t", session, "-p"]

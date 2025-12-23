@@ -32,10 +32,11 @@ export {
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
 // Config atoms
-export * from "./config.js"
+export { appConfigAtom, workflowModeAtom } from "./config.js"
 export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
+	attachDevServerAtom,
 	beadDevServerViewsAtom,
 	devServersAtom,
 	focusedBeadDevServerViewsAtom,
@@ -132,14 +133,22 @@ export {
 export { isOnlineAtom } from "./network.js"
 // Overlay and toast atoms
 export {
+	closeSettingsAtom,
 	currentOverlayAtom,
 	detailScrollAtom,
 	dismissToastAtom,
+	moveDownSettingsAtom,
+	moveUpSettingsAtom,
+	openSettingsAtom,
+	openSettingsEditorAtom,
 	overlaysAtom,
 	popOverlayAtom,
 	pushOverlayAtom,
+	settingsStateAtom,
 	showToastAtom,
 	toastsAtom,
+	toggleCurrentSettingAtom,
+	validateSettingsAfterEditAtom,
 } from "./overlay.js"
 // PR workflow atoms
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
