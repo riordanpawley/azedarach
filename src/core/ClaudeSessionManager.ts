@@ -506,7 +506,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get initCommands: merge worktree config + tool-specific init commands
 						const toolInitCommands = toolDef.getInitCommands()
 						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
-						const { tmuxPrefix } = sessionConfig
+						const { tmuxPrefix, backgroundTasks } = sessionConfig
 
 						// Use acquireUseRelease to ensure atomicity:
 						// - acquire: Create tmux session + update bead status (both are "resources")
@@ -528,6 +528,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 										projectPath,
 										initCommands,
 										tmuxPrefix,
+										backgroundTasks,
 									})
 									createdNewSession = true
 								}
