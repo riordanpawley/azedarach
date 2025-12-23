@@ -795,7 +795,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 					const gitConfig = yield* getGitConfig()
-					const baseBranch = gitConfig.baseBranch
+					const _baseBranch = gitConfig.baseBranch
 
 					// Try to get PR info for the branch
 					const result = yield* runGH(

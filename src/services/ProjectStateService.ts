@@ -13,9 +13,6 @@ import {
 	DEFAULT_FILTER_CONFIG,
 	DEFAULT_SORT_CONFIG,
 	type FilterConfig,
-	type FilterSessionState,
-	type IssueStatus,
-	type IssueType,
 	type SortConfig,
 } from "./EditorService.js"
 import type { ViewMode } from "./ViewService.js"
