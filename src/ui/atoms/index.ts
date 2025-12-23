@@ -36,6 +36,7 @@ export { appConfigAtom, workflowModeAtom } from "./config.js"
 export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
+	attachDevServerAtom,
 	beadDevServerViewsAtom,
 	devServersAtom,
 	focusedBeadDevServerViewsAtom,
