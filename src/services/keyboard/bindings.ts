@@ -406,10 +406,10 @@ done
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(
 				Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
-				Effect.catchAll((e: any) =>
+				Effect.catchAll((e) =>
 					Effect.gen(function* () {
 						yield* Effect.logError("Dev server toggle failed", e)
-						yield* bc.toast.show("error", `Dev server error: ${e.message || String(e)}`)
+						yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
 					}),
 				),
 			),
@@ -422,10 +422,10 @@ done
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(
 				Effect.tap(() => bc.devServerHandlers.restartDevServer()),
-				Effect.catchAll((e: any) =>
+				Effect.catchAll((e) =>
 					Effect.gen(function* () {
 						yield* Effect.logError("Dev server restart failed", e)
-						yield* bc.toast.show("error", `Dev server error: ${e.message || String(e)}`)
+						yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
 					}),
 				),
 			),

@@ -158,23 +158,13 @@ export const DEFAULT_CONFIG = {
 		checkHost: "github.com",
 	},
 	devServer: {
-		command: undefined,
-		ports: {
-			web: { default: 3000, aliases: ["PORT"] },
-		},
 		portPattern: "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
-		cwd: ".",
-		servers: undefined as
-			| Record<
-					string,
-					{
-						command: string
-						cwd?: string
-						ports?: Record<string, { default: number; aliases: string[] }>
-						label?: string
-					}
-			  >
-			| undefined,
+		servers: {
+			default: {
+				command: "npm run dev",
+				ports: { PORT: 3000 },
+			},
+		},
 	},
 	projects: [],
 	defaultProject: undefined,
@@ -265,10 +255,7 @@ export interface ResolvedConfig {
 		checkHost: string
 	}
 	devServer: {
-		command: string | undefined
-		ports: Readonly<Record<string, { default: number; aliases: readonly string[] }>>
 		portPattern: string
-		cwd: string
 		servers:
 			| Readonly<
 					Record<
@@ -276,10 +263,7 @@ export interface ResolvedConfig {
 						{
 							readonly command: string
 							readonly cwd?: string
-							readonly ports?: Readonly<
-								Record<string, { default: number; aliases: readonly string[] }>
-							>
-							readonly label?: string
+							readonly ports?: Readonly<Record<string, number>>
 						}
 					>
 			  >
@@ -383,10 +367,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			checkHost: config.network?.checkHost ?? DEFAULT_CONFIG.network.checkHost,
 		},
 		devServer: {
-			command: config.devServer?.command ?? DEFAULT_CONFIG.devServer.command,
-			ports: config.devServer?.ports ?? DEFAULT_CONFIG.devServer.ports,
 			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
-			cwd: config.devServer?.cwd ?? DEFAULT_CONFIG.devServer.cwd,
 			servers: config.devServer?.servers ?? DEFAULT_CONFIG.devServer.servers,
 		},
 	}
