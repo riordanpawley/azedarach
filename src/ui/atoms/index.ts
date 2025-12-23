@@ -151,7 +151,7 @@ export { appRuntime } from "./runtime.js"
 export {
 	attachExternalAtom,
 	attachInlineAtom,
-	hookReceiverStarterAtom,
+	// hookReceiverStarterAtom,
 	pauseSessionAtom,
 	resumeSessionAtom,
 	sessionMetricsAtom,

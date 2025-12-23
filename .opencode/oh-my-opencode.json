@@ -8,10 +8,5 @@
 		"hooks": false
 	},
 	"disabled_hooks": ["directory-readme-injector"],
-	"agents": {
-		"default": {
-			"model": "github-copilot/gemini-3-flash-preview"
-		}
-	},
 	"disabled_mcps": []
 }
