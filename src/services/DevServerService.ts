@@ -8,7 +8,7 @@ import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ProjectService } from "./ProjectService.js"
 
 const TMUX_OPT_METADATA = "@az-devserver-meta"
-const TMUX_OPT_PANE_ID = "@az-devserver-pane"
+const _TMUX_OPT_PANE_ID = "@az-devserver-pane"
 const PORT_POLL_INTERVAL = 500
 const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
