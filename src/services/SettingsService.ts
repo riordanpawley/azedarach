@@ -228,6 +228,9 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					const newConfig = setting.toggle(config)
 
 					yield* saveConfig(newConfig)
+					// Reload the config in AppConfig service so the UI updates
+					const appConfig = yield* AppConfig
+					yield* appConfig.reload()
 					yield* toast.show("success", `${setting.label}: ${String(setting.getValue(newConfig))}`)
 				}).pipe(
 					Effect.catchAllDefect((e) =>
