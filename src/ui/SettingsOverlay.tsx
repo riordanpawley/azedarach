@@ -12,15 +12,14 @@ const ATTR_BOLD = 1
 /**
  * Format a boolean for display
  */
-const formatBool = (value: unknown): string => {
-	if (typeof value === "boolean") return value ? "yes" : "no"
-	return "unknown"
+const formatBool = (value: boolean): string => {
+	return value ? "yes" : "no"
 }
 
 /**
  * Format a setting value for display based on value type
  */
-const formatSettingValue = (value: unknown): string => {
+const formatSettingValue = (value: boolean | string): string => {
 	if (typeof value === "boolean") return formatBool(value)
 	if (typeof value === "string") return value
 	return String(value)
@@ -97,7 +96,7 @@ export const SettingsOverlay = () => {
 								{setting.label}
 							</text>
 							<text fg={theme.overlay0}>{".".repeat(Math.max(1, 35 - setting.label.length))}</text>
-							<text fg={isFocused ? theme.green : theme.green}>{formatSettingValue(value)}</text>
+							<text fg={theme.green}>{formatSettingValue(value)}</text>
 						</box>
 					)
 				})}
