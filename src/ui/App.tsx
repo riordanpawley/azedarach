@@ -25,6 +25,7 @@ import {
 	sessionMonitorStarterAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
+	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
@@ -133,6 +134,8 @@ export const App = () => {
 		isOnlineAtom,
 		Result.getOrElse(() => true),
 	)
+
+	const workflowMode = useAtomValue(workflowModeAtom)
 
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
@@ -316,6 +319,7 @@ export const App = () => {
 					isOnline={isOnline}
 					devServerStatus={displayDevServer.status}
 					devServerPort={displayDevServer.port}
+					workflowMode={workflowMode}
 				/>
 			)}
 
