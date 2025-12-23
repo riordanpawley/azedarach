@@ -162,7 +162,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						if (handledAsProjectSelector) return
 					}
 
-					// Check for imagePreview overlay (handles image navigation)
+					// Check for settings overlay
+					if (currentOverlay?._tag === "settings") {
+						const handledAsSettings = yield* inputHandlers.handleSettingsInput(key)
+						if (handledAsSettings) return
+					}
+
+					// Check for imagePreview overlay
 					if (currentOverlay?._tag === "imagePreview") {
 						const handledAsImagePreview = yield* inputHandlers.handleImagePreviewInput(key)
 						if (handledAsImagePreview) return
