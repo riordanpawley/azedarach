@@ -16,7 +16,6 @@ import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionMigration } from "../../core/SessionMigration.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
@@ -74,7 +73,6 @@ const appLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-	SessionMigration.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
