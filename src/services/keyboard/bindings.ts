@@ -228,6 +228,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.overlay.push({ _tag: "diagnostics" }),
 	},
 	{
+		key: "s",
+		mode: "normal",
+		description: "Show settings",
+		action: bc.overlay.push({ _tag: "settings" }),
+	},
+	{
 		key: "return",
 		mode: "normal",
 		description: "View detail (or enter epic)",

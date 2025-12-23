@@ -45,6 +45,7 @@ import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
+import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
 import { ToastContainer } from "./Toast.js"
@@ -67,6 +68,7 @@ export const App = () => {
 		showingDetail,
 		showingCreate,
 		showingClaudeCreate,
+		showingSettings,
 		showingImageAttach,
 		showingImagePreview,
 		showingConfirm,
@@ -292,6 +294,9 @@ export const App = () => {
 
 			{/* Help overlay */}
 			{showingHelp && <HelpOverlay />}
+
+			{/* Settings overlay */}
+			{showingSettings && <SettingsOverlay />}
 
 			{showingProjectSelector && <ProjectSelector />}
 

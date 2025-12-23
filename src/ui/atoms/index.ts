@@ -133,14 +133,22 @@ export {
 export { isOnlineAtom } from "./network.js"
 // Overlay and toast atoms
 export {
+	closeSettingsAtom,
 	currentOverlayAtom,
 	detailScrollAtom,
 	dismissToastAtom,
+	moveDownSettingsAtom,
+	moveUpSettingsAtom,
+	openSettingsAtom,
+	openSettingsEditorAtom,
 	overlaysAtom,
 	popOverlayAtom,
 	pushOverlayAtom,
+	settingsStateAtom,
 	showToastAtom,
 	toastsAtom,
+	toggleCurrentSettingAtom,
+	validateSettingsAfterEditAtom,
 } from "./overlay.js"
 // PR workflow atoms
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
