@@ -57,6 +57,7 @@ The default mode for navigation and basic actions.
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
+| `s` | Show settings | Opens interactive settings overlay |
 | `?` | Show help | Press any key to dismiss |
 | `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
 | `Ctrl-l` | Redraw screen | Force full screen refresh |
@@ -110,6 +111,107 @@ When you exit drill-down mode:
 - **Epic children** are tasks with a parent-child dependency to the epic
 - All normal actions (Space menu, search, sort) work in drill-down
 - The progress bar fills based on closed/total children ratio
+
+## Settings Overlay
+
+Press `s` to open the interactive settings overlay. This allows you to view and modify Azedarach configuration values in real-time.
+
+### Navigation
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `j` | Move down | Select next setting |
+| `k` | Move up | Select previous setting |
+| `Space` or `Enter` | Toggle value | Changes boolean settings; cycles enum values |
+| `e` | Edit in editor | Opens .azedarach.json in $EDITOR for advanced changes |
+| `Esc` | Close overlay | Returns to normal mode |
+
+### Available Settings
+
+The settings overlay shows all editable configuration options:
+
+#### Session Settings
+- **CLI Tool**: Choose between "claude" (default) or "opencode" for AI sessions
+- **Skip Permissions**: When enabled, Claude can execute commands without asking for permission (dangerous mode)
+
+#### Git Settings
+- **Push on Create**: Whether to push branches to remote when worktrees are created
+- **Git Push**: Enable/disable automatic pushing to remote
+- **Git Fetch**: Enable/disable automatic fetching from remote
+- **Line Changes**: Show line-by-line changes in diffs instead of file-level summaries
+
+#### PR Settings
+- **PR Enabled**: Enable/disable PR workflow automation
+- **Auto Draft PR**: Create PRs as drafts by default
+- **Auto Merge PR**: Automatically merge approved PRs
+
+#### Notification Settings
+- **Bell Notify**: Enable/disable terminal bell for notifications
+- **System Notify**: Enable/disable system notifications
+
+#### Network Settings
+- **Auto Detect Network**: Enable/disable automatic network connectivity detection
+
+#### Beads Settings
+- **Beads Sync**: Enable/disable automatic synchronization with beads backend
+
+#### State Detection Settings
+- **Pattern Matching**: Enable/disable AI pattern-based state detection for sessions
+
+### How Settings Work
+
+- **Real-time updates**: Changes are applied immediately and saved to `.azedarach.json`
+- **Type safety**: Only valid values are accepted for each setting type
+- **Reload on change**: The TUI automatically reloads configuration when you toggle settings
+- **Advanced editing**: Press `e` to open the raw JSON file in your $EDITOR for complex changes
+
+### Example Workflow
+
+```
+1. Press `s` to open settings overlay
+2. Use `j`/`k` to navigate to "CLI Tool" setting
+3. Press `Space` to toggle between "claude" and "opencode"
+4. Press `j` to move to "Skip Permissions" setting
+5. Press `Space` to toggle the boolean value
+6. Press `Esc` to close and return to normal mode
+```
+
+### Configuration File
+
+Settings are stored in `.azedarach.json` in your project root:
+
+```json
+{
+  "cliTool": "claude",
+  "session": {
+    "dangerouslySkipPermissions": false
+  },
+  "git": {
+    "pushBranchOnCreate": true,
+    "pushEnabled": true,
+    "fetchEnabled": true,
+    "showLineChanges": false
+  },
+  "pr": {
+    "enabled": true,
+    "autoDraft": true,
+    "autoMerge": false
+  },
+  "notifications": {
+    "bell": true,
+    "system": false
+  },
+  "network": {
+    "autoDetect": true
+  },
+  "beads": {
+    "syncEnabled": true
+  },
+  "stateDetection": {
+    "patternMatching": false
+  }
+}
+```
 
 ## View Modes
 
