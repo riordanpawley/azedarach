@@ -8,7 +8,6 @@ import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ProjectService } from "./ProjectService.js"
 
 const TMUX_OPT_METADATA = "@az-devserver-meta"
-const _TMUX_OPT_PANE_ID = "@az-devserver-pane"
 const PORT_POLL_INTERVAL = 500
 const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
@@ -277,7 +276,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return scripts.dev ? `${pm} run dev` : scripts.start ? `${pm} run start` : `${pm} run dev`
 			})
 
-		yield* Effect.scheduleForked(Schedule.spaced(`${HEALTH_CHECK_INTERVAL} millis`))(
+		const healthCheckFiber = yield* Effect.scheduleForked(
+			Schedule.spaced(`${HEALTH_CHECK_INTERVAL} millis`),
+		)(
 			Effect.gen(function* () {
 				const servers = yield* SubscriptionRef.get(serversRef)
 				for (const [beadId, beadServers] of HashMap.entries(servers)) {
@@ -302,7 +303,14 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					}
 				}
 			}),
-		).pipe(Effect.forkIn(serviceScope))
+		)
+
+		yield* diagnostics.registerFiber({
+			id: "devserver-health-check",
+			name: "Dev Server Health Check",
+			description: "Monitors dev server tmux sessions and panes",
+			fiber: healthCheckFiber,
+		})
 
 		yield* Effect.addFinalizer(() =>
 			Effect.gen(function* () {
@@ -426,15 +434,26 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					startedAt: new Date(),
 				})
 
-				yield* pollForPort(
+				const pollFiber = yield* pollForPort(
 					paneId ?? targetWindow,
 					new RegExp(config.portPattern ?? "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"),
 				).pipe(
 					Effect.flatMap((p) =>
 						p ? updateState(beadId, name, { port: p as number }) : Effect.void,
 					),
+					Effect.annotateLogs({
+						beadId,
+						serverName: name,
+					}),
 					Effect.forkIn(serviceScope),
 				)
+
+				yield* diagnostics.registerFiberIn(serviceScope, {
+					id: `devserver-poll-${beadId}-${name}`,
+					name: `Dev Server Poll (${name})`,
+					description: `Polling for port on bead ${beadId}`,
+					fiber: pollFiber,
+				})
 
 				return newState
 			})
