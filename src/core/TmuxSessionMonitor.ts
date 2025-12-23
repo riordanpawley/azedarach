@@ -160,8 +160,6 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 */
 		const listClaudeSessions = () =>
 			Effect.gen(function* () {
-				// Get both session name and creation time in one tmux call
-				// Format: "session_name|unix_timestamp"
 				const command = Command.make(
 					"tmux",
 					"list-sessions",
@@ -176,17 +174,20 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				return output
 					.split("\n")
 					.map((line) => line.trim())
-					.filter((line) =>
-						// Filter for any AI tool session (claude-* or opencode-*)
-						AI_SESSION_PREFIXES.some((prefix) => line.startsWith(prefix)),
-					)
 					.map((line) => {
 						const [name, createdStr] = line.split("|")
+						const parsed = parseSessionName(name ?? "")
 						return {
-							name,
-							createdAt: parseInt(createdStr, 10) || 0,
+							name: name ?? "",
+							createdAt: parseInt(createdStr ?? "0", 10) || 0,
+							parsed,
 						}
 					})
+					.filter(
+						(s) =>
+							s.parsed !== undefined &&
+							(s.parsed.type === "bead" || isAiToolSession(s.parsed.type)),
+					)
 			})
 
 		/**
@@ -213,20 +214,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				if (status === "busy" || status === "waiting" || status === "idle") {
 					return status
 				}
-				return null
+				// Default to busy for new AI sessions that haven't notified yet
+				// This handles the gap between session creation and the first az notify
+				return "busy" as const
 			})
 
-		/**
-		 * Extract bead ID from session name
-		 *
-		 * Handles session names for any AI tool (claude or opencode):
-		 * - claude-{beadId} → extracts beadId
-		 * - opencode-{beadId} → extracts beadId
-		 */
 		const extractBeadId = (sessionName: string): string | null => {
-			// Use parseSessionName which handles all AI tool prefixes
 			const parsed = parseSessionName(sessionName)
-			if (parsed && isAiToolSession(parsed.type)) {
+			if (parsed && (parsed.type === "bead" || isAiToolSession(parsed.type))) {
 				return parsed.beadId
 			}
 
@@ -359,7 +354,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 						})
 
 						const prevState = previousState.get(session.beadId)
-						if (prevState?.status !== session.status) {
+						if (prevState === undefined || prevState.status !== session.status) {
 							// State changed - call handler
 							yield* Effect.log(
 								`TmuxSessionMonitor: ${session.beadId} status changed: ${prevState?.status ?? "none"} → ${session.status}`,

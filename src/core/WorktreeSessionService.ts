@@ -26,7 +26,7 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Data, Effect } from "effect"
+import { Data, Effect, Option, Schedule } from "effect"
 import { AppConfig } from "../config/index.js"
 import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
@@ -87,6 +87,15 @@ export class WorktreeSessionError extends Data.TaggedError("WorktreeSessionError
 	readonly worktreePath?: string
 }> {}
 
+/**
+ * Error when shell initialization times out
+ */
+export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
+	readonly message: string
+	readonly target: string
+	readonly markerKey: string
+}> {}
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -99,30 +108,113 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
 
+			const waitForShellReady = (target: string, markerKey: string) =>
+				Effect.gen(function* () {
+					const readyMarker = `tmux set-option -t ${target.split(":")[0]} ${markerKey} 1`
+					yield* tmux.sendKeys(target, readyMarker)
+
+					yield* Effect.retry(
+						Effect.gen(function* () {
+							const marker = yield* tmux.getUserOption(target.split(":")[0], markerKey)
+							if (Option.isNone(marker) || Option.getOrThrow(marker) !== "1") {
+								return yield* Effect.fail(
+									new ShellNotReadyError({
+										message: `Shell not ready for ${target} (marker: ${markerKey})`,
+										target,
+										markerKey,
+									}),
+								)
+							}
+						}),
+						{
+							times: 30,
+							schedule: Schedule.spaced("100 millis"),
+						},
+					)
+				})
+
 			return {
-				/**
-				 * Create a new tmux session in a worktree
-				 *
-				 * Runs initCommands first (if enabled), then creates a tmux session
-				 * with an interactive shell running the specified command.
-				 *
-				 * @example
-				 * ```ts
-				 * // For Claude
-				 * yield* worktreeSession.create({
-				 *   sessionName: "az-123",
-				 *   worktreePath: "/path/to/worktree",
-				 *   command: 'claude "work on bead az-123"',
-				 * })
-				 *
-				 * // For dev server
-				 * yield* worktreeSession.create({
-				 *   sessionName: "az-dev-123",
-				 *   worktreePath: "/path/to/worktree",
-				 *   command: "PORT=3000 pnpm run dev",
-				 * })
-				 * ```
-				 */
+				getOrCreateSession: (
+					beadId: string,
+					options: {
+						worktreePath: string
+						projectPath?: string
+						initCommands?: readonly string[]
+						tmuxPrefix?: string
+					},
+				) =>
+					Effect.gen(function* () {
+						const sessionName = beadId
+						const exists = yield* tmux.hasSession(sessionName)
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+
+						if (!exists) {
+							yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
+							yield* tmux.newSession(sessionName, {
+								cwd: options.worktreePath,
+								command: `${shell} -i`,
+								prefix: options.tmuxPrefix ?? sessionConfig.tmuxPrefix,
+								azOptions: {
+									worktreePath: options.worktreePath,
+									projectPath: options.projectPath,
+								},
+							})
+
+							yield* waitForShellReady(sessionName, "@az_shell_ready")
+
+							if (options.initCommands && options.initCommands.length > 0) {
+								for (const cmd of options.initCommands) {
+									yield* tmux.sendKeys(sessionName, cmd)
+								}
+							}
+
+							const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+							yield* tmux.sendKeys(sessionName, marker)
+						}
+
+						return sessionName
+					}),
+
+				ensureWindow: (
+					sessionName: string,
+					windowName: string,
+					options: {
+						command: string
+						cwd?: string
+						initCommands?: readonly string[]
+					},
+				) =>
+					Effect.gen(function* () {
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+
+						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
+
+						if (!windowExists) {
+							yield* tmux.newWindow(sessionName, windowName, {
+								cwd: options.cwd,
+								command: `${shell} -i`,
+							})
+
+							const target = `${sessionName}:${windowName}`
+							yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
+
+							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+							yield* tmux.sendKeys(target, waitCmd)
+
+							if (options.initCommands && options.initCommands.length > 0) {
+								for (const cmd of options.initCommands) {
+									yield* tmux.sendKeys(target, cmd)
+								}
+							}
+
+							yield* tmux.sendKeys(target, options.command)
+						}
+
+						return `${sessionName}:${windowName}`
+					}),
+
 				create: (
 					options: CreateWorktreeSessionOptions,
 				): Effect.Effect<

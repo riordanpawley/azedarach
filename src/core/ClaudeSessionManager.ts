@@ -26,13 +26,7 @@ import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
-import {
-	AI_SESSION_PREFIXES,
-	getSessionNameForTool,
-	getWorktreePath,
-	isAiToolSession,
-	parseSessionName,
-} from "./paths.js"
+import { getBeadSessionName, getWorktreePath, parseSessionName, WINDOW_NAMES } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -277,6 +271,17 @@ export interface ClaudeSessionManagerService {
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
 	/**
+	 * Update session state from tmux status
+	 *
+	 * Handles mapping TmuxStatus to SessionState and handles
+	 * secondary transitions like "done" detection.
+	 */
+	readonly updateStateFromTmux: (
+		beadId: string,
+		status: "busy" | "waiting" | "idle",
+	) => Effect.Effect<void, SessionNotFoundError, never>
+
+	/**
 	 * Subscribe to state change events
 	 *
 	 * Returns a stream of SessionStateChange events.
@@ -472,10 +477,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get the tool definition for command building
 						const toolDef = getToolDefinition(cliTool)
 
-						// Generate tmux session name using tool-specific prefix
-						const tmuxSessionName = getSessionNameForTool(beadId, cliTool)
+						// Generate tmux session name (just the beadId)
+						const tmuxSessionName = getBeadSessionName(beadId)
 
-						// Check if tmux session already exists
+						// Check if bead session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
 						// Build session settings object (for tools that support it, like Claude)
@@ -501,7 +506,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get initCommands: merge worktree config + tool-specific init commands
 						const toolInitCommands = toolDef.getInitCommands()
 						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
-						const backgroundTasksFromConfig = sessionConfig.backgroundTasks
 						const { tmuxPrefix } = sessionConfig
 
 						// Use acquireUseRelease to ensure atomicity:
@@ -518,21 +522,20 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								let createdNewSession = false
 								let updatedBeadStatus = false
 
-								// Step 1: Create tmux session if needed
-								// WorktreeSessionService.create() chains initCommands with main command
-								// in the same shell, so environment from direnv/envdev persists
 								if (!hasSession) {
-									yield* worktreeSession.create({
-										sessionName: tmuxSessionName,
+									yield* worktreeSession.getOrCreateSession(beadId, {
 										worktreePath: worktree.path,
 										projectPath,
-										command: commandWithOptions,
-										tmuxPrefix,
 										initCommands,
-										backgroundTasks: backgroundTasksFromConfig,
+										tmuxPrefix,
 									})
 									createdNewSession = true
 								}
+
+								yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.CODE, {
+									command: commandWithOptions,
+									cwd: worktree.path,
+								})
 
 								// Step 2: Update bead status to in_progress
 								// Done AFTER session creation to ensure we don't leave beads
@@ -814,30 +817,18 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							worktrees.map((wt) => [wt.beadId, wt] as const),
 						)
 
-						// Find AI tool tmux sessions (claude or opencode) that aren't tracked in memory
-						// Session names use "{tool}-{beadId}" format (see getSessionNameForTool in paths.ts)
 						for (const tmuxSession of tmuxSessions) {
-							// Check if this is an AI tool session (claude-* or opencode-*)
-							const isAiSession = AI_SESSION_PREFIXES.some((prefix) =>
-								tmuxSession.name.startsWith(prefix),
-							)
-							if (!isAiSession) continue
-
-							// Parse session name to extract beadId and type
 							const parsed = parseSessionName(tmuxSession.name)
-							if (!parsed || !isAiToolSession(parsed.type)) continue
+							if (!parsed || parsed.type !== "bead") continue
 
 							const beadId = parsed.beadId
 
-							// Skip if already tracked
 							if (HashMap.has(inMemorySessions, beadId)) continue
 
 							{
 								const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
 								const persistedOpt = HashMap.get(persistedSessions, beadId)
 
-								// Recover session: use persisted data if available
-								// Schema.Literal validates state, so persistedOpt.state is already typed correctly
 								const orphanedSession: Session = {
 									beadId,
 									worktreePath: Option.getOrElse(
@@ -848,7 +839,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 												() => getWorktreePath(effectiveProjectPath, beadId),
 											),
 									),
-									tmuxSessionName: tmuxSession.name, // Full session name
+									tmuxSessionName: tmuxSession.name,
 									state: Option.getOrElse(
 										Option.map(persistedOpt, (p) => p.state),
 										() => "busy",
@@ -884,6 +875,49 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						const session = sessionOpt.value
 						const oldState = session.state
+
+						const updatedSession: Session = {
+							...session,
+							state: newState,
+						}
+
+						yield* Ref.update(sessionsRef, (sessions) =>
+							HashMap.set(sessions, beadId, updatedSession),
+						)
+
+						// Persist to disk
+						const allSessions = yield* Ref.get(sessionsRef)
+						yield* persistSessions(allSessions)
+
+						// Publish state change
+						yield* publishStateChange(beadId, oldState, newState)
+					}),
+
+				updateStateFromTmux: (beadId: string, status: "busy" | "waiting" | "idle") =>
+					Effect.gen(function* () {
+						const sessions = yield* Ref.get(sessionsRef)
+						const sessionOpt = HashMap.get(sessions, beadId)
+
+						if (sessionOpt._tag === "None") {
+							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+						}
+
+						const session = sessionOpt.value
+						const oldState = session.state
+
+						// Map TmuxStatus to SessionState
+						let newState: SessionState = session.state
+						if (status === "busy") newState = "busy"
+						if (status === "waiting") newState = "waiting"
+						if (status === "idle") {
+							// If we were busy or waiting and session disappeared, it might be "done"
+							// but for now we'll just map to idle. Transition to "done"
+							// is usually handled by output pattern matching in PTYMonitor
+							// or explicit az notify done.
+							newState = "idle"
+						}
+
+						if (oldState === newState) return
 
 						const updatedSession: Session = {
 							...session,
