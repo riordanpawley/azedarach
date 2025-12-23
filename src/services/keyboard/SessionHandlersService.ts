@@ -328,10 +328,19 @@ What would you like to discuss?`
 				})
 
 			/**
-			 * Find AI session by beadId (checks both claude- and opencode- prefixes)
+			 * Find AI session by beadId
+			 *
+			 * Checks in priority order:
+			 * 1. Unified session (just beadId, e.g., "az-123")
+			 * 2. Legacy prefixed sessions (claude-az-123, opencode-az-123)
 			 */
 			const findAiSession = (beadId: string) =>
 				Effect.gen(function* () {
+					const unifiedSession = yield* tmux.hasSession(beadId)
+					if (unifiedSession) {
+						return beadId
+					}
+
 					for (const prefix of AI_SESSION_PREFIXES) {
 						const sessionName = `${prefix}${beadId}`
 						const hasSession = yield* tmux.hasSession(sessionName)
