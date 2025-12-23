@@ -17,5 +17,6 @@ export const appConfigAtom = appRuntime.subscriptionRef(
 export const workflowModeAtom = Atom.readable((get) => {
 	const configResult = get(appConfigAtom)
 	if (!Result.isSuccess(configResult)) return "origin" as const
-	return (configResult.value as ResolvedConfig).git.workflowMode
+	const config = configResult.value
+	return config.git.workflowMode
 })
