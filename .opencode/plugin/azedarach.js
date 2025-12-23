@@ -100,7 +100,6 @@ const notify = (event, beadId, azNotifyPath) => {
  *
  * @type {import("@opencode/plugin").Plugin}
  */
-// biome-ignore lint/suspicious/useAwait: OpenCode plugin API requires async
 export const Azedarach = async ({ $: _$, project: _project, directory: _directory }) => {
 	const beadId = getBeadIdFromTmuxSession()
 	if (!beadId) {
@@ -121,7 +120,6 @@ export const Azedarach = async ({ $: _$, project: _project, directory: _director
 	notify("user_prompt", beadId, azNotifyPath)
 
 	return {
-		// biome-ignore lint/suspicious/useAwait: OpenCode plugin API requires async
 		event: async (event) => {
 			switch (event.type) {
 				case "session.created":
@@ -139,12 +137,10 @@ export const Azedarach = async ({ $: _$, project: _project, directory: _director
 			}
 		},
 
-		// biome-ignore lint/suspicious/useAwait: OpenCode plugin API requires async
 		"tool.execute.before": async () => {
 			notify("pretooluse", beadId, azNotifyPath)
 		},
 
-		// biome-ignore lint/suspicious/useAwait: OpenCode plugin API requires async
 		"chat.message": async () => {
 			notify("user_prompt", beadId, azNotifyPath)
 		},
