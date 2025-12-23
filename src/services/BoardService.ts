@@ -16,6 +16,7 @@ import {
 	Order,
 	Record,
 	Ref,
+	Schedule,
 	Stream,
 	SubscriptionRef,
 } from "effect"
@@ -545,7 +546,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		yield* Effect.forkScoped(
+		// Background polling fallback (every 5 seconds) to keep git stats fresh
+		// This ensures data stays current even if event-driven refresh misses something
+		const backgroundPollingFiber = yield* Effect.forkScoped(
+			Effect.repeat(Schedule.spaced("5 seconds"))(
+				refresh().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logError("BoardService background refresh failed", Cause.pretty(cause)).pipe(
+							Effect.asVoid,
+						),
+					),
+				),
+			),
+		)
+		yield* diagnostics.registerFiber({
+			id: "board-background-polling",
+			name: "Board Background Polling",
+			description: "Refreshes board every 5 seconds to keep git stats fresh",
+			fiber: backgroundPollingFiber,
+		})
+
+		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
 				requestRefresh().pipe(
 					Effect.catchAllCause((cause) =>
@@ -556,13 +577,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			),
 		)
+		yield* diagnostics.registerFiber({
+			id: "board-pty-refresh",
+			name: "Board PTY Refresh",
+			description: "Triggers board refresh when PTY metrics change",
+			fiber: ptyRefreshFiber,
+		})
 
 		const editorChanges = Stream.merge(
 			Stream.merge(editorService.mode.changes, editorService.sortConfig.changes),
 			editorService.filterConfig.changes,
 		)
 
-		yield* Effect.forkScoped(
+		const editorChangesFiber = yield* Effect.forkScoped(
 			Stream.runForEach(editorChanges, () =>
 				updateFilteredTasks().pipe(
 					Effect.catchAllCause((cause) =>
@@ -571,6 +598,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			),
 		)
+		yield* diagnostics.registerFiber({
+			id: "board-editor-changes",
+			name: "Board Editor Changes",
+			description: "Updates filtered tasks when mode/sort/filter changes",
+			fiber: editorChangesFiber,
+		})
 
 		const saveToCache = (projectPath: string) =>
 			Effect.gen(function* () {
