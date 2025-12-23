@@ -20,7 +20,6 @@ import {
 	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	handleKeyAtom,
-	// hookReceiverStarterAtom,
 	isOnlineAtom,
 	maxVisibleTasksAtom,
 	totalTasksCountAtom,
@@ -109,6 +108,7 @@ export const App = () => {
 
 	// Start the hook receiver for Claude Code native hook integration
 	// This watches for notification files and updates session state
+	// TODO: re-enable when TmuxSessionMonitor is restored
 	// useAtomValue(hookReceiverStarterAtom)
 
 	// Actions for prompts (these bypass keyboard handling)
@@ -292,7 +292,7 @@ export const App = () => {
 			{showingProjectSelector && <ProjectSelector />}
 
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
-				<DevServerMenu beadId={currentOverlay.beadId} />
+				<DevServerMenu beadId={currentOverlay.beadId} mode={currentOverlay.mode} />
 			)}
 
 			{/* Diagnostics overlay */}

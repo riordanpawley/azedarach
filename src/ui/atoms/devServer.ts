@@ -1,13 +1,23 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap, Option } from "effect"
 import {
-	type BeadDevServersState,
 	DevServerService,
 	type DevServerState,
+	type DevServerStatus,
 } from "../../services/DevServerService.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import { appConfigAtom } from "./config.js"
 import { appRuntime } from "./runtime.js"
+
+export interface DevServerView {
+	readonly name: string
+	readonly status: DevServerStatus
+	readonly port?: number
+	readonly isConfigured: boolean
+	readonly tmuxSession?: string
+	readonly error?: string
+}
 
 export const devServersAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
@@ -23,53 +33,86 @@ export const focusedTaskIdAtom = appRuntime.subscriptionRef(
 	}),
 )
 
-export const focusedBeadDevServersAtom = Atom.readable((get) => {
-	const serversResult = get(devServersAtom)
-	if (!Result.isSuccess(serversResult)) return HashMap.empty<string, DevServerState>()
+export const beadDevServerViewsAtom = (beadId: string) =>
+	Atom.readable((get) => {
+		const serversResult = get(devServersAtom)
+		const configResult = get(appConfigAtom)
 
+		if (!Result.isSuccess(serversResult) || !Result.isSuccess(configResult)) {
+			return [] as DevServerView[]
+		}
+
+		const runningServers = HashMap.get(serversResult.value, beadId).pipe(
+			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+		)
+
+		const config = configResult.value
+		const devServerConfig = config.devServer
+		const configuredServers = devServerConfig?.servers ?? {}
+
+		const views: DevServerView[] = []
+		const processedNames = new Set<string>()
+
+		for (const [name, _cfg] of Object.entries(configuredServers)) {
+			const running = HashMap.get(runningServers, name)
+			processedNames.add(name)
+
+			if (Option.isSome(running)) {
+				views.push({
+					name,
+					status: running.value.status,
+					port: running.value.port,
+					isConfigured: true,
+					tmuxSession: running.value.tmuxSession,
+					error: running.value.error,
+				})
+			} else {
+				views.push({
+					name,
+					status: "idle",
+					isConfigured: true,
+				})
+			}
+		}
+
+		for (const [name, state] of HashMap.entries(runningServers)) {
+			if (!processedNames.has(name)) {
+				views.push({
+					name,
+					status: state.status,
+					port: state.port,
+					isConfigured: false,
+					tmuxSession: state.tmuxSession,
+					error: state.error,
+				})
+			}
+		}
+
+		return views
+	})
+
+export const focusedBeadDevServerViewsAtom = Atom.readable((get) => {
 	const focusedIdResult = get(focusedTaskIdAtom)
-	if (!Result.isSuccess(focusedIdResult) || !focusedIdResult.value)
-		return HashMap.empty<string, DevServerState>()
-
-	const beadId = focusedIdResult.value
-	return HashMap.get(serversResult.value, beadId).pipe(
-		Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
-	)
+	if (!Result.isSuccess(focusedIdResult) || !focusedIdResult.value) {
+		return [] as DevServerView[]
+	}
+	return get(beadDevServerViewsAtom(focusedIdResult.value))
 })
 
-const IDLE_SERVER: DevServerState = {
-	status: "idle" as const,
-	port: undefined,
+const IDLE_VIEW: DevServerView = {
 	name: "default",
-	tmuxSession: undefined,
-	worktreePath: undefined,
-	startedAt: undefined,
-	error: undefined,
+	status: "idle",
+	isConfigured: false,
 }
 
 export const focusedBeadPrimaryDevServerAtom = Atom.readable((get) => {
-	const beadServers = get(focusedBeadDevServersAtom)
+	const views = get(focusedBeadDevServerViewsAtom)
+	const running = views.find((v) => v.status === "running" || v.status === "starting")
+	if (running) return running
 
-	const running = HashMap.filter(beadServers, (s) => s.status === "running")
-	const runningValues = Array.from(HashMap.values(running))
-	if (runningValues.length > 0) {
-		return runningValues[0]
-	}
-
-	return HashMap.get(beadServers, "default").pipe(Option.getOrElse(() => IDLE_SERVER))
+	const defaultSrv = views.find((v) => v.name === "default")
+	return defaultSrv ?? views[0] ?? IDLE_VIEW
 })
-
-export const beadDevServersAtom = (beadId: string) =>
-	Atom.readable((get) => {
-		const serversResult = get(devServersAtom)
-		if (!Result.isSuccess(serversResult)) {
-			return HashMap.empty<string, DevServerState>()
-		}
-
-		return HashMap.get(serversResult.value, beadId).pipe(
-			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
-		)
-	})
 
 export const toggleDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
 	Effect.gen(function* () {
@@ -98,9 +141,3 @@ export const syncDevServerStateAtom = appRuntime.fn((beadId: string) =>
 		}
 	}),
 )
-
-export const devServerStateAtom = (beadId: string, serverName: string) =>
-	Atom.readable((get) => {
-		const beadServers = get(beadDevServersAtom(beadId))
-		return HashMap.get(beadServers, serverName).pipe(Option.getOrElse(() => IDLE_SERVER))
-	})

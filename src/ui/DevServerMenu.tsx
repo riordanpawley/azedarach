@@ -4,28 +4,28 @@
 
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import { HashMap } from "effect"
 import React, { useState } from "react"
-import { beadDevServersAtom, toggleDevServerAtom } from "./atoms.js"
+import type { DevServerView } from "./atoms.js"
+import { beadDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
 import { useOverlays } from "./hooks/index.js"
 import { theme } from "./theme.js"
 
 interface Props {
 	beadId: string
+	mode: "toggle" | "attach"
 }
 
-export const DevServerMenu = ({ beadId }: Props) => {
+export const DevServerMenu = ({ beadId, mode }: Props) => {
 	const { dismiss } = useOverlays()
 	const toggleDevServer = useAtomSet(toggleDevServerAtom, { mode: "promise" })
-	const servers = useAtomValue(beadDevServersAtom(beadId))
 
-	// Convert HashMap to array for rendering
-	const serverList = Array.from(HashMap.entries(servers)).map(([name, state]) => ({
-		...state,
-		name,
-	}))
+	const allViews = useAtomValue(beadDevServerViewsAtom(beadId))
 
-	// Basic selection state
+	const serverList =
+		mode === "attach"
+			? allViews.filter((v: DevServerView) => v.status === "running" || v.status === "starting")
+			: allViews
+
 	const [selectedIndex, setSelectedIndex] = useState(0)
 
 	useKeyboard((event) => {
@@ -68,9 +68,11 @@ export const DevServerMenu = ({ beadId }: Props) => {
 			top="25%"
 			width="50%"
 		>
-			<text fg={theme.mauve}>Select Dev Server</text>
+			<text fg={theme.mauve}>
+				{mode === "attach" ? "Attach to Dev Server" : "Toggle Dev Server"}
+			</text>
 			<box flexDirection="column" marginTop={1}>
-				{serverList.map((server, i) => (
+				{serverList.map((server: DevServerView, i: number) => (
 					<box key={server.name} flexDirection="row" gap={1}>
 						<text fg={i === selectedIndex ? theme.lavender : theme.overlay0}>
 							{i === selectedIndex ? "→" : " "}
@@ -83,7 +85,9 @@ export const DevServerMenu = ({ beadId }: Props) => {
 									? theme.green
 									: server.status === "starting"
 										? theme.yellow
-										: theme.overlay0
+										: server.status === "error"
+											? theme.red
+											: theme.overlay0
 							}
 						>
 							{server.status}
@@ -91,9 +95,10 @@ export const DevServerMenu = ({ beadId }: Props) => {
 						{server.port && <text fg={theme.overlay0}>:{server.port}</text>}
 					</box>
 				))}
+				{serverList.length === 0 && <text fg={theme.overlay0}>No servers available</text>}
 			</box>
 			<box marginTop={1}>
-				<text fg={theme.overlay0}>[j/k] Navigate, [Enter/Space] Toggle, [Esc] Cancel</text>
+				<text fg={theme.overlay0}>[j/k] Navigate, [Enter/Space] Select, [Esc] Cancel</text>
 			</box>
 		</box>
 	)
