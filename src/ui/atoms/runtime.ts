@@ -46,6 +46,7 @@ const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { fl
 const appLayer = Layer.mergeAll(
 	SessionService.Default,
 	AttachmentService.Default,
+	OverlayService.Default,
 	ImageAttachmentService.Default,
 	BoardService.Default,
 	ClockService.Default,
@@ -55,7 +56,6 @@ const appLayer = Layer.mergeAll(
 	TerminalService.Default,
 	EditorService.Default,
 	KeyboardService.Default,
-	OverlayService.Default,
 	ToastService.Default,
 	NavigationService.Default,
 	ClaudeSessionManager.Default,

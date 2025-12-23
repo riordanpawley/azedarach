@@ -91,7 +91,7 @@ export const createTaskAtom = appRuntime.fn(
 
 			const issue = yield* client.create(params)
 
-			yield* board.refresh()
+			yield* board.requestRefresh()
 			yield* navigation.jumpToTask(issue.id)
 			yield* toast.show("success", `Created task: ${issue.id}`)
 
@@ -233,10 +233,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 			description: parsed.description,
 		})
 
-		// Refresh the board to show the new task
-		yield* board.refresh()
-
-		// Navigate to the new task and show success
+		yield* board.requestRefresh()
 		yield* navigation.jumpToTask(createdIssue.id)
 		yield* toast.show("success", `Created ${taskType}: ${createdIssue.id}`)
 

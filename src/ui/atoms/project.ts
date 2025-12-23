@@ -78,7 +78,6 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		// Get current project to save its state
 		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		// Save current project's UI state before switching
 		if (currentProject) {
 			const focusedTaskId = yield* SubscriptionRef.get(navigation.focusedTaskId)
 			const filterConfig = yield* SubscriptionRef.get(editor.filterConfig)
@@ -87,22 +86,26 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 
 			const state = buildProjectUIState(focusedTaskId, filterConfig, sortConfig, viewMode)
 			yield* projectState.saveState(currentProject.path, state)
+			yield* board.saveToCache(currentProject.path)
 		}
 
-		// Switch project (fast - just updates SubscriptionRef)
 		yield* projectService.switchProject(projectName)
 
-		// Show toast immediately (user sees feedback right away)
-		yield* toast.show("success", `Switching to: ${projectName}`)
-
-		// Get the new project's path and load its saved state
 		const newProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		// Fork the refresh + state restoration as daemon so it survives parent completion
-		// (Effect.fork would be interrupted when the atom effect returns)
-		// The loading indicator in StatusBar shows progress
+		if (newProject) {
+			const cacheHit = yield* board.loadFromCache(newProject.path)
+			if (cacheHit) {
+				yield* toast.show("success", `Loaded: ${projectName}`)
+			} else {
+				yield* board.clearBoard()
+				yield* toast.show("info", `Loading: ${projectName}...`)
+			}
+		} else {
+			yield* board.clearBoard()
+		}
+
 		yield* Effect.gen(function* () {
-			// Refresh board first to get the task list
 			yield* board.refresh()
 
 			// Load and restore saved UI state for the new project

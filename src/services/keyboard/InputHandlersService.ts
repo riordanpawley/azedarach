@@ -543,7 +543,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
-								// Save current project's UI state before switching
 								const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 								if (currentProject) {
 									const focusedTaskId = yield* SubscriptionRef.get(nav.focusedTaskId)
@@ -558,22 +557,22 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 										viewMode,
 									)
 									yield* projectState.saveState(currentProject.path, state)
+									yield* board.saveToCache(currentProject.path)
 								}
 
-								// Switch project (fast - just updates SubscriptionRef)
 								yield* projectService.switchProject(project.name)
 
-								// Close overlay immediately for responsive UI
 								yield* overlay.pop()
 
-								// Show toast immediately (user sees feedback right away)
-								yield* toast.show("success", `Switching to: ${project.name}`)
+								const cacheHit = yield* board.loadFromCache(project.path)
+								if (cacheHit) {
+									yield* toast.show("success", `Loaded: ${project.name}`)
+								} else {
+									yield* board.clearBoard()
+									yield* toast.show("info", `Loading: ${project.name}...`)
+								}
 
-								// Fork refresh + state restoration as daemon so it survives parent completion
-								// (Effect.fork would be interrupted when handler returns)
-								// The loading indicator in StatusBar shows progress
 								yield* Effect.gen(function* () {
-									// Refresh board first to get the task list
 									yield* board.refresh()
 
 									// Load and restore saved UI state for the new project
