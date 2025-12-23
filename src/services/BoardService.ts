@@ -452,7 +452,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const refresh = () =>
 			Effect.gen(function* () {
 				yield* SubscriptionRef.set(isLoading, true)
+
+				// Capture project path at refresh START
+				const startProjectPath = yield* projectService.getCurrentPath()
+
 				const loadedTasks = yield* loadTasks()
+
+				// Verify project hasn't changed during refresh (race condition guard)
+				// If project changed, discard results to avoid showing wrong project's data
+				const currentProjectPath = yield* projectService.getCurrentPath()
+				if (startProjectPath !== currentProjectPath) {
+					yield* Effect.log(
+						`Refresh discarded: project changed from ${startProjectPath} to ${currentProjectPath}`,
+					)
+					return
+				}
+
 				yield* SubscriptionRef.set(tasks, loadedTasks)
 				const grouped = groupTasksByColumn(loadedTasks)
 				yield* SubscriptionRef.set(tasksByColumn, grouped)
