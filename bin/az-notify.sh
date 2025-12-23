@@ -64,4 +64,7 @@ else
     log "WARN: Could not set status (session may not exist yet). Exit code: $EXIT_CODE"
 fi
 
+# Output valid JSON for hook systems that parse command output
+echo "{}"
+
 exit 0
