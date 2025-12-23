@@ -2,9 +2,9 @@
  * Config atoms
  */
 
-import { Atom, Result } from "@effect-rx/rx-react"
+import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { AppConfig } from "../../config/index.js"
+import { AppConfig, type ResolvedConfig } from "../../config/index.js"
 import { appRuntime } from "./runtime.js"
 
 export const appConfigAtom = appRuntime.subscriptionRef(
@@ -17,5 +17,5 @@ export const appConfigAtom = appRuntime.subscriptionRef(
 export const workflowModeAtom = Atom.readable((get) => {
 	const configResult = get(appConfigAtom)
 	if (!Result.isSuccess(configResult)) return "origin" as const
-	return configResult.value.git.workflowMode
+	return (configResult.value as ResolvedConfig).git.workflowMode
 })
