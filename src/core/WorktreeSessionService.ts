@@ -108,6 +108,26 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 			const tmux = yield* TmuxService
 			const appConfig = yield* AppConfig
 
+			const waitForTmuxOption = (sessionName: string, optionKey: string, errorMessage: string) =>
+				Effect.retry(
+					Effect.gen(function* () {
+						const option = yield* tmux.getUserOption(sessionName, optionKey)
+						if (Option.isNone(option) || Option.getOrThrow(option) !== "1") {
+							return yield* Effect.fail(
+								new ShellNotReadyError({
+									message: errorMessage,
+									target: sessionName,
+									markerKey: optionKey,
+								}),
+							)
+						}
+					}),
+					{
+						times: 300,
+						schedule: Schedule.spaced("200 millis"),
+					},
+				)
+
 			const waitForShellReady = (target: string, markerKey: string) =>
 				Effect.gen(function* () {
 					// Give shell time to initialize before sending marker
@@ -116,23 +136,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					const readyMarker = `tmux set-option -t ${target.split(":")[0]} ${markerKey} 1`
 					yield* tmux.sendKeys(target, readyMarker)
 
-					yield* Effect.retry(
-						Effect.gen(function* () {
-							const marker = yield* tmux.getUserOption(target.split(":")[0], markerKey)
-							if (Option.isNone(marker) || Option.getOrThrow(marker) !== "1") {
-								return yield* Effect.fail(
-									new ShellNotReadyError({
-										message: `Shell not ready for ${target} (marker: ${markerKey})`,
-										target,
-										markerKey,
-									}),
-								)
-							}
-						}),
-						{
-							times: 300,
-							schedule: Schedule.spaced("200 millis"),
-						},
+					yield* waitForTmuxOption(
+						target.split(":")[0],
+						markerKey,
+						`Shell not ready for ${target} (marker: ${markerKey})`,
 					)
 				})
 
@@ -174,6 +181,14 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 							const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
 							yield* tmux.sendKeys(sessionName, marker)
+
+							// Wait for init commands to complete before allowing window creation
+							// Wait up to 60 seconds (300 * 200ms)
+							yield* waitForTmuxOption(
+								sessionName,
+								"@az_init_done",
+								`Init commands not complete for session ${sessionName}`,
+							)
 						}
 
 						return sessionName
