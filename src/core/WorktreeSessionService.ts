@@ -192,31 +192,36 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							)
 
 							// Spawn background tasks in separate windows after init completes
+							// Run in parallel since each window is independent
 							const backgroundTasks = options.backgroundTasks ?? []
-							for (let i = 0; i < backgroundTasks.length; i++) {
-								const task = backgroundTasks[i]
-								const windowName = `task-${i + 1}`
-								yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+							yield* Effect.forEach(
+								backgroundTasks,
+								(task, i) =>
+									Effect.gen(function* () {
+										const windowName = `task-${i + 1}`
+										yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
 
-								// Create a new window for the background task
-								yield* tmux.newWindow(sessionName, windowName, {
-									cwd: options.worktreePath,
-									command: `${shell} -i`,
-								})
+										// Create a new window for the background task
+										yield* tmux.newWindow(sessionName, windowName, {
+											cwd: options.worktreePath,
+											command: `${shell} -i`,
+										})
 
-								const target = `${sessionName}:${windowName}`
-								yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+										const target = `${sessionName}:${windowName}`
+										yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
 
-								// Run initCommands in the background window (environment setup)
-								if (options.initCommands && options.initCommands.length > 0) {
-									for (const initCmd of options.initCommands) {
-										yield* tmux.sendKeys(target, initCmd)
-									}
-								}
+										// Run initCommands in the background window (environment setup)
+										if (options.initCommands && options.initCommands.length > 0) {
+											for (const initCmd of options.initCommands) {
+												yield* tmux.sendKeys(target, initCmd)
+											}
+										}
 
-								// Run the background task command followed by exec $SHELL to keep it open
-								yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
-							}
+										// Run the background task command followed by exec $SHELL to keep it open
+										yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+									}),
+								{ concurrency: "unbounded" },
+							)
 						}
 
 						return sessionName
@@ -332,33 +337,40 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						yield* tmux.sendKeys(sessionName, command)
 
 						// Spawn background tasks in separate windows
-						for (let i = 0; i < backgroundTasks.length; i++) {
-							const task = backgroundTasks[i]
-							const windowName = `task-${i + 1}`
-							yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+						// Run in parallel since each window is independent
+						yield* Effect.forEach(
+							backgroundTasks,
+							(task, i) =>
+								Effect.gen(function* () {
+									const windowName = `task-${i + 1}`
+									yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
 
-							// Create a new window for the background task
-							yield* tmux.newWindow(sessionName, windowName, {
-								cwd,
-								command: `${shell} -i`,
-							})
+									// Create a new window for the background task
+									yield* tmux.newWindow(sessionName, windowName, {
+										cwd,
+										command: `${shell} -i`,
+									})
 
-							// Give shell time to initialize in the new window
-							yield* Effect.sleep("300 millis")
+									// Give shell time to initialize in the new window
+									yield* Effect.sleep("300 millis")
 
-							// Background tasks MUST wait for main session init to complete.
-							// We use a shell loop to wait for the @az_init_done option to be set.
-							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
-							yield* tmux.sendKeys(`${sessionName}:${windowName}`, waitCmd)
+									const target = `${sessionName}:${windowName}`
 
-							// Run initCommands in the background window (environment only)
-							for (const initCmd of initCommands) {
-								yield* tmux.sendKeys(`${sessionName}:${windowName}`, initCmd)
-							}
+									// Background tasks MUST wait for main session init to complete.
+									// We use a shell loop to wait for the @az_init_done option to be set.
+									const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+									yield* tmux.sendKeys(target, waitCmd)
 
-							// Run the background task command followed by exec $SHELL to keep it open
-							yield* tmux.sendKeys(`${sessionName}:${windowName}`, `${task}; exec ${shell}`)
-						}
+									// Run initCommands in the background window (environment only)
+									for (const initCmd of initCommands) {
+										yield* tmux.sendKeys(target, initCmd)
+									}
+
+									// Run the background task command followed by exec $SHELL to keep it open
+									yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+								}),
+							{ concurrency: "unbounded" },
+						)
 
 						return {
 							sessionName,
