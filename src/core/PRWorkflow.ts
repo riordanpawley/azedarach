@@ -24,6 +24,7 @@ import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.
 import { FileLockManager } from "./FileLockManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
+import { WorktreeSessionService } from "./WorktreeSessionService.js"
 
 // ============================================================================
 // Beads Sync Locking
@@ -665,6 +666,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		BeadsClient.Default,
 		ClaudeSessionManager.Default,
 		TmuxService.Default,
+		WorktreeSessionService.Default,
 		FileLockManager.Default,
 		AppConfig.Default,
 		OfflineService.Default,
@@ -674,6 +676,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const beadsClient = yield* BeadsClient
 		const sessionManager = yield* ClaudeSessionManager
 		const tmuxService = yield* TmuxService
+		const worktreeSession = yield* WorktreeSessionService
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
@@ -966,20 +969,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						// Start Claude session in a new "merge" window within the same session
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
 						const windowName = "merge"
 
-						yield* tmuxService
-							.newWindow(beadId, windowName, {
-								cwd: worktree.path,
-								command: `${shell} -i`,
-							})
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						const target = `${beadId}:${windowName}`
-						const claudeCmd = `claude -p "${resolvePrompt}"`
-						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+						yield* worktreeSession.ensureWindow(beadId, windowName, {
+							cwd: worktree.path,
+							command: `claude -p "${resolvePrompt}"`,
+						})
 
 						const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
 
@@ -1457,20 +1452,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
 						const windowName = "merge"
 
-						yield* tmuxService
-							.newWindow(beadId, windowName, {
-								cwd: worktree.path,
-								command: `${shell} -i`,
-							})
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						const target = `${beadId}:${windowName}`
-						const claudeCmd = `claude -p "${resolvePrompt}"`
-						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+						yield* worktreeSession.ensureWindow(beadId, windowName, {
+							cwd: worktree.path,
+							command: `claude -p "${resolvePrompt}"`,
+						})
 
 						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
 
@@ -1721,20 +1708,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
 						const windowName = "merge"
 
-						yield* tmuxService
-							.newWindow(beadId, windowName, {
-								cwd: worktree.path,
-								command: `${shell} -i`,
-							})
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						const target = `${beadId}:${windowName}`
-						const claudeCmd = `claude -p "${resolvePrompt}"`
-						yield* tmuxService.sendKeys(target, claudeCmd).pipe(Effect.catchAll(() => Effect.void))
+						yield* worktreeSession.ensureWindow(beadId, windowName, {
+							cwd: worktree.path,
+							command: `claude -p "${resolvePrompt}"`,
+						})
 
 						const message = `Merge conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry attach after resolution.`
 
