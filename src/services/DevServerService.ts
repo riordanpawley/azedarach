@@ -1,7 +1,7 @@
 import { type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, HashMap, Option, Ref, Schedule, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/index.js"
-import { getDevSessionName, parseSessionName } from "../core/paths.js"
+import { parseSessionName, WINDOW_NAMES } from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
@@ -131,7 +131,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				for (const session of sessions) {
 					const parsed = parseSessionName(session.name)
-					if (!parsed || parsed.type !== "dev") continue
+					if (!parsed || (parsed.type !== "dev" && parsed.type !== "bead")) continue
 
 					const stateOpt = yield* readTmuxMetadata(session.name)
 					if (Option.isNone(stateOpt)) continue
@@ -352,29 +352,30 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					.map(([k, v]) => `${k}=${v}`)
 					.join(" ")
 
-				const session =
-					name === DEFAULT_SERVER_NAME
-						? getDevSessionName(beadId)
-						: `${getDevSessionName(beadId)}-${name}`
+				const session = beadId
 				const cwd = srvConfig?.cwd ? pathService.join(worktreePath, srvConfig.cwd) : worktreePath
+				const tmuxSessionName = session
 
-				yield* worktreeSession.create({
-					sessionName: session,
+				yield* worktreeSession.getOrCreateSession(beadId, {
 					worktreePath,
+					projectPath: currentProjectPath,
+					initCommands: (yield* appConfig.getWorktreeConfig()).initCommands,
+				})
+
+				yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.DEV, {
 					command: `${envStr} ${command}`,
 					cwd,
-					initCommands: (yield* appConfig.getWorktreeConfig()).initCommands,
 				})
 
 				const newState = yield* updateState(beadId, name, {
 					status: "running",
-					tmuxSession: session,
+					tmuxSession: `${tmuxSessionName}:${WINDOW_NAMES.DEV}`,
 					port: primary,
 					startedAt: new Date(),
 				})
 
 				yield* pollForPort(
-					session,
+					`${tmuxSessionName}:${WINDOW_NAMES.DEV}`,
 					new RegExp(config.portPattern ?? "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"),
 				).pipe(
 					Effect.flatMap((p) =>
