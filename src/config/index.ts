@@ -24,7 +24,6 @@ export {
 	type DevServerConfig,
 	type NotificationsConfig,
 	type PatternsConfig,
-	type PortConfig,
 	type PRConfig,
 	type SessionConfig,
 	type WorktreeConfig,
