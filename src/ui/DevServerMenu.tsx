@@ -6,18 +6,44 @@ import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { HashMap } from "effect"
 import React, { useState } from "react"
-import { beadDevServersAtom, toggleDevServerAtom } from "./atoms.js"
+import { beadDevServersAtom, devServerConfigAtom, toggleDevServerAtom } from "./atoms.js"
 import { useOverlays } from "./hooks/index.js"
 import { theme } from "./theme.js"
 
 interface Props {
 	beadId: string
+	mode: "toggle" | "attach"
 }
 
-export const DevServerMenu = ({ beadId }: Props) => {
+export const DevServerMenu = ({ beadId, mode }: Props) => {
 	const { dismiss } = useOverlays()
 	const toggleDevServer = useAtomSet(toggleDevServerAtom, { mode: "promise" })
-	const servers = useAtomValue(beadDevServersAtom(beadId))
+
+	// Get data based on mode
+	const runningServers = useAtomValue(beadDevServersAtom(beadId))
+	const devServerConfig = useAtomValue(devServerConfigAtom)
+
+	// For toggle mode, show configured servers
+	// For attach mode, show running servers
+	const servers =
+		mode === "toggle"
+			? devServerConfig?.servers
+				? HashMap.fromIterable(
+						Object.entries(devServerConfig.servers).map(([name, config]) => [
+							name,
+							{
+								name,
+								status: "idle" as const,
+								port: undefined,
+								tmuxSession: undefined,
+								worktreePath: undefined,
+								startedAt: undefined,
+								error: undefined,
+							},
+						]),
+					)
+				: HashMap.empty()
+			: runningServers
 
 	// Convert HashMap to array for rendering
 	const serverList = Array.from(HashMap.entries(servers)).map(([name, state]) => ({

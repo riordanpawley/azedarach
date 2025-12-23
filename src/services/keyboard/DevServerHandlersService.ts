@@ -66,7 +66,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 					if (serverNames.length > 1) {
 						// Show menu for multiple servers
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "toggle" })
 					} else {
 						// Toggle the single/default server
 						const serverName = serverNames[0]
@@ -125,7 +125,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 					if (serverNames.length > 1) {
 						// For now, if multiple servers, just show the menu (Space+r is better for picking)
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "toggle" })
 					} else {
 						const serverName = serverNames[0]
 						const currentState = yield* devServer.getStatus(task.id, serverName)
@@ -183,7 +183,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 					if (HashMap.size(runningServers) > 1) {
 						// Multiple running, show menu to pick which one to attach to
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "toggle" })
 					} else {
 						// Only one running, attach to it
 						const server = HashMap.values(runningServers).next().value
