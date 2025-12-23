@@ -18,23 +18,11 @@ const formatBool = (value: unknown): string => {
 }
 
 /**
- * Helper to get nested value from config by path
+ * Format a setting value for display based on value type
  */
-const getNestedValue = (obj: unknown, path: readonly string[]): unknown => {
-	let current: unknown = obj
-	for (const key of path) {
-		if (current === null || current === undefined || typeof current !== "object") return undefined
-		current = (current as Record<string, unknown>)[key]
-	}
-	return current
-}
-
-/**
- * Format a setting value for display based on type
- */
-const formatSettingValue = (setting: SettingDefinition, value: unknown): string => {
-	if (setting.type === "boolean") return formatBool(value)
-	if (setting.type === "enum" && typeof value === "string") return value
+const formatSettingValue = (value: unknown): string => {
+	if (typeof value === "boolean") return formatBool(value)
+	if (typeof value === "string") return value
 	return String(value)
 }
 
@@ -95,7 +83,7 @@ export const SettingsOverlay = () => {
 				<text> </text>
 
 				{EDITABLE_SETTINGS.map((setting, index) => {
-					const value = getNestedValue(config, setting.path)
+					const value = setting.getValue(config)
 					const isFocused = index === settingsState.focusIndex
 					const fg = isFocused ? theme.mauve : theme.subtext0
 					const prefix = isFocused ? "▶ " : "  "
@@ -109,9 +97,7 @@ export const SettingsOverlay = () => {
 								{setting.label}
 							</text>
 							<text fg={theme.overlay0}>{".".repeat(Math.max(1, 35 - setting.label.length))}</text>
-							<text fg={isFocused ? theme.green : theme.green}>
-								{formatSettingValue(setting, value)}
-							</text>
+							<text fg={isFocused ? theme.green : theme.green}>{formatSettingValue(value)}</text>
 						</box>
 					)
 				})}
