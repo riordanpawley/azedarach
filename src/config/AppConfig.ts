@@ -53,7 +53,7 @@ export interface AppConfigService {
 	readonly config: SubscriptionRef.SubscriptionRef<ResolvedConfig>
 
 	/** Reload config from disk for current project */
-	readonly reload: () => Effect.Effect<void>
+	readonly reload: () => Effect.Effect<void, ConfigParseError>
 
 	/** Get CLI tool to use for AI sessions */
 	readonly getCliTool: () => Effect.Effect<ResolvedConfig["cliTool"]>
@@ -405,6 +405,14 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		return {
 			config: configRef,
+			/**
+			 * Reload config from disk for current project
+			 *
+			 * Used by SettingsService after saving config changes to ensure
+			 * the reactive config atoms update immediately in the UI.
+			 *
+			 * Falls back to default config if loading fails, with error logging.
+			 */
 			reload: () =>
 				Effect.gen(function* () {
 					const currentProjectPath = yield* projectService.getCurrentPath()
