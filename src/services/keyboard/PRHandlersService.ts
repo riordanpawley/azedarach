@@ -16,6 +16,7 @@ import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
+import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
 import { formatForToast } from "../ErrorFormatter.js"
 import { OverlayService } from "../OverlayService.js"
@@ -33,6 +34,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		BoardService.Default,
 		OverlayService.Default,
 		PRWorkflow.Default,
+		TmuxService.Default,
 		AppConfig.Default,
 	],
 
@@ -43,6 +45,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const board = yield* BoardService
 		const overlay = yield* OverlayService
 		const prWorkflow = yield* PRWorkflow
+		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
 		// Note: DON'T capture gitConfig here - it must be fetched fresh per handler
 		// to pick up config changes when switching projects with `gp`
@@ -385,13 +388,24 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
 
+				const windows = yield* tmux.listWindows(task.id)
+
 				// DIAGNOSTIC: Log before pushing confirm overlay (az-f3iw)
 				yield* Effect.log(`[cleanup:confirm] Showing confirm dialog for task.id=${task.id}`)
+
+				let message = `Delete worktree and branch for ${task.id}?`
+				if (windows.length > 0) {
+					message += `\n\nThis will terminate the tmux session with ${windows.length} window(s):`
+					for (const window of windows) {
+						message += `\n  • ${window}`
+					}
+				}
+				message += "\n\nAll uncommitted changes will be lost."
 
 				// Show confirmation dialog before cleanup
 				yield* overlay.push({
 					_tag: "confirm",
-					message: `Delete worktree and branch for ${task.id}?\n\nThis will remove the session and all uncommitted changes.`,
+					message,
 					onConfirm: doCleanup(task.id, projectPath),
 				})
 			})
