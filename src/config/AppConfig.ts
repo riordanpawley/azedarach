@@ -87,6 +87,12 @@ export interface AppConfigService {
 
 	/** Get devServer configuration section */
 	readonly getDevServerConfig: () => Effect.Effect<ResolvedConfig["devServer"]>
+
+	/** Get workflow mode ('local' or 'origin') */
+	readonly getWorkflowMode: () => Effect.Effect<ResolvedConfig["git"]["workflowMode"]>
+
+	/** Get effective base branch for diffs/conflicts (adds origin/ prefix in origin mode) */
+	readonly getEffectiveBaseBranch: () => Effect.Effect<string>
 }
 
 export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfig", {
@@ -414,6 +420,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getBeadsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.beads),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
+			getWorkflowMode: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git.workflowMode),
+			getEffectiveBaseBranch: () =>
+				Effect.map(SubscriptionRef.get(configRef), (c) =>
+					c.git.workflowMode === "origin" ? `origin/${c.git.baseBranch}` : c.git.baseBranch,
+				),
 		}
 	}),
 }) {}

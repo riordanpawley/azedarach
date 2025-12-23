@@ -7,7 +7,12 @@
 
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
-import { type AzedarachConfig, type CliTool, CURRENT_CONFIG_VERSION } from "./schema.js"
+import {
+	type AzedarachConfig,
+	type CliTool,
+	CURRENT_CONFIG_VERSION,
+	type WorkflowMode,
+} from "./schema.js"
 
 // ============================================================================
 // Login Shell Detection
@@ -112,6 +117,7 @@ export const DEFAULT_CONFIG = {
 		pushEnabled: true,
 		fetchEnabled: true,
 		showLineChanges: true,
+		workflowMode: "origin" as WorkflowMode,
 	},
 	session: {
 		command: "claude",
@@ -215,6 +221,7 @@ export interface ResolvedConfig {
 		pushEnabled: boolean
 		fetchEnabled: boolean
 		showLineChanges: boolean
+		workflowMode: WorkflowMode
 	}
 	session: {
 		command: string
@@ -329,6 +336,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
 			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
 			showLineChanges: config.git?.showLineChanges ?? DEFAULT_CONFIG.git.showLineChanges,
+			workflowMode: config.git?.workflowMode ?? DEFAULT_CONFIG.git.workflowMode,
 		},
 		patterns: {
 			waiting: config.patterns?.waiting ?? DEFAULT_CONFIG.patterns.waiting,
