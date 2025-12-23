@@ -151,6 +151,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						projectPath?: string
 						initCommands?: readonly string[]
 						tmuxPrefix?: string
+						backgroundTasks?: readonly string[]
 					},
 				) =>
 					Effect.gen(function* () {
@@ -189,6 +190,33 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								"@az_init_done",
 								`Init commands not complete for session ${sessionName}`,
 							)
+
+							// Spawn background tasks in separate windows after init completes
+							const backgroundTasks = options.backgroundTasks ?? []
+							for (let i = 0; i < backgroundTasks.length; i++) {
+								const task = backgroundTasks[i]
+								const windowName = `task-${i + 1}`
+								yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+
+								// Create a new window for the background task
+								yield* tmux.newWindow(sessionName, windowName, {
+									cwd: options.worktreePath,
+									command: `${shell} -i`,
+								})
+
+								const target = `${sessionName}:${windowName}`
+								yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+								// Run initCommands in the background window (environment setup)
+								if (options.initCommands && options.initCommands.length > 0) {
+									for (const initCmd of options.initCommands) {
+										yield* tmux.sendKeys(target, initCmd)
+									}
+								}
+
+								// Run the background task command followed by exec $SHELL to keep it open
+								yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+							}
 						}
 
 						return sessionName
