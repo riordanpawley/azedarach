@@ -10,7 +10,7 @@
 import { Effect, HashMap } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { TmuxService } from "../../core/TmuxService.js"
-import { DevServerService, type NoWorktreeError } from "../DevServerService.js"
+import { DevServerService } from "../DevServerService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
 import { ToastService } from "../ToastService.js"

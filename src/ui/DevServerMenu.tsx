@@ -4,7 +4,7 @@
 
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
-import React, { useState } from "react"
+import { useState } from "react"
 import type { DevServerView } from "./atoms.js"
 import { beadDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
 import { useOverlays } from "./hooks/index.js"
