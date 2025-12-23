@@ -79,7 +79,16 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 											: `Dev server '${serverName}' stopped`,
 								),
 							),
-							Effect.catchAll((err: any) => toast.show("error", err.message || String(err))),
+							Effect.catchAll((err) => {
+								const message =
+									err._tag === "NoWorktreeError" ||
+									err._tag === "WorktreeSessionError" ||
+									err._tag === "TmuxError" ||
+									err._tag === "SessionNotFoundError"
+										? err.message
+										: String(err)
+								return toast.show("error", message)
+							}),
 						)
 					}
 				})
@@ -130,7 +139,16 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 										: `Dev server '${serverName}' restarting...`,
 								),
 							),
-							Effect.catchAll((err: any) => toast.show("error", err.message || String(err))),
+							Effect.catchAll((err) => {
+								const message =
+									err._tag === "NoWorktreeError" ||
+									err._tag === "WorktreeSessionError" ||
+									err._tag === "TmuxError" ||
+									err._tag === "SessionNotFoundError"
+										? err.message
+										: String(err)
+								return toast.show("error", message)
+							}),
 						)
 					}
 				})
