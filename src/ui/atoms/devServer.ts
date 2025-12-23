@@ -1,5 +1,6 @@
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap, Option } from "effect"
+import { TmuxService } from "../../core/TmuxService.js"
 import {
 	DevServerService,
 	type DevServerState,
@@ -7,6 +8,7 @@ import {
 } from "../../services/DevServerService.js"
 import { NavigationService } from "../../services/NavigationService.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import { ToastService } from "../../services/ToastService.js"
 import { appConfigAtom } from "./config.js"
 import { appRuntime } from "./runtime.js"
 
@@ -14,6 +16,7 @@ export interface DevServerView {
 	readonly name: string
 	readonly status: DevServerStatus
 	readonly port?: number
+	readonly paneId?: string
 	readonly isConfigured: boolean
 	readonly tmuxSession?: string
 	readonly error?: string
@@ -75,6 +78,7 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 					name,
 					status: running.value.status,
 					port: running.value.port,
+					paneId: running.value.paneId,
 					isConfigured: true,
 					tmuxSession: running.value.tmuxSession,
 					error: running.value.error,
@@ -94,6 +98,7 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 					name,
 					status: state.status,
 					port: state.port,
+					paneId: state.paneId,
 					isConfigured: false,
 					tmuxSession: state.tmuxSession,
 					error: state.error,
@@ -135,6 +140,40 @@ export const toggleDevServerAtom = appRuntime.fn((args: { beadId: string; server
 		const path = project.path
 
 		return yield* svc.toggle(args.beadId, path, args.serverName)
+	}),
+)
+
+export const attachDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
+	Effect.gen(function* () {
+		const devServer = yield* DevServerService
+		const tmux = yield* TmuxService
+		const toast = yield* ToastService
+
+		// Get the server state for the specific server
+		const serverState = yield* devServer.getStatus(args.beadId, args.serverName)
+
+		if (serverState.status !== "running" && serverState.status !== "starting") {
+			yield* toast.show("error", `Dev server ${args.serverName} is not running`)
+			return
+		}
+
+		if (!serverState.tmuxSession) {
+			yield* toast.show("error", `Dev server session not found for ${args.serverName}`)
+			return
+		}
+
+		// Attach to the tmux session
+		yield* tmux.switchClient(serverState.tmuxSession).pipe(
+			Effect.catchAll((err) => {
+				if (err._tag === "SessionNotFoundError") {
+					return toast.show("error", `Session not found: ${err.session}`)
+				}
+				if (err._tag === "TmuxError") {
+					return toast.show("error", `tmux error: ${err.message}`)
+				}
+				return toast.show("error", "Failed to attach to dev server session")
+			}),
+		)
 	}),
 )
 

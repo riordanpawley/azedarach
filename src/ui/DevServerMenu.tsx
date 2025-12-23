@@ -6,7 +6,7 @@ import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
 import type { DevServerView } from "./atoms.js"
-import { beadDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
+import { attachDevServerAtom, beadDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
 import { useOverlays } from "./hooks/index.js"
 import { theme } from "./theme.js"
 
@@ -18,6 +18,7 @@ interface Props {
 export const DevServerMenu = ({ beadId, mode }: Props) => {
 	const { dismiss } = useOverlays()
 	const toggleDevServer = useAtomSet(toggleDevServerAtom, { mode: "promise" })
+	const attachDevServer = useAtomSet(attachDevServerAtom, { mode: "promise" })
 
 	const allViews = useAtomValue(beadDevServerViewsAtom(beadId))
 
@@ -44,7 +45,11 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 			case "space": {
 				const selected = serverList[selectedIndex]
 				if (selected) {
-					toggleDevServer({ beadId, serverName: selected.name })
+					if (mode === "attach") {
+						attachDevServer({ beadId, serverName: selected.name })
+					} else {
+						toggleDevServer({ beadId, serverName: selected.name })
+					}
 				}
 				break
 			}

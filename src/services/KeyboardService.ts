@@ -24,6 +24,7 @@ import { TaskHandlersService } from "./keyboard/TaskHandlersService.js"
 import type { Keybinding, KeyMode } from "./keyboard/types.js"
 import { NavigationService } from "./NavigationService.js"
 import { OverlayService } from "./OverlayService.js"
+import { SettingsService } from "./SettingsService.js"
 import { ToastService } from "./ToastService.js"
 import { ViewService } from "./ViewService.js"
 
@@ -48,6 +49,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		// Core services for direct binding access
 		ToastService.Default,
 		OverlayService.Default,
+		SettingsService.Default,
 		NavigationService.Default,
 		EditorService.Default,
 		ViewService.Default,
@@ -72,6 +74,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		// ====================================================================
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
+		const settings = yield* SettingsService
 		const nav = yield* NavigationService
 		const editor = yield* EditorService
 		const viewService = yield* ViewService
@@ -94,6 +97,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			nav,
 			editor,
 			overlay,
+			settings,
 			toast,
 			viewService,
 			tmux,
@@ -162,7 +166,13 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						if (handledAsProjectSelector) return
 					}
 
-					// Check for imagePreview overlay (handles image navigation)
+					// Check for settings overlay
+					if (currentOverlay?._tag === "settings") {
+						const handledAsSettings = yield* inputHandlers.handleSettingsInput(key)
+						if (handledAsSettings) return
+					}
+
+					// Check for imagePreview overlay
 					if (currentOverlay?._tag === "imagePreview") {
 						const handledAsImagePreview = yield* inputHandlers.handleImagePreviewInput(key)
 						if (handledAsImagePreview) return
