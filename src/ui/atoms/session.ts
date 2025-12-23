@@ -5,16 +5,39 @@
  * Also includes tmux session monitoring and PTY metrics.
  */
 
-import { Effect } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
+import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
 // TmuxSessionMonitor (Claude Code native hooks integration)
 // ============================================================================
+
+/**
+ * Session monitor starter atom
+ *
+ * Initializes the TmuxSessionMonitor polling process.
+ * This atom should be consumed at the app root to ensure state updates
+ * from Claude Code hooks are processed.
+ *
+ * Usage: useAtomValue(sessionMonitorStarterAtom)
+ */
+export const sessionMonitorStarterAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const monitor = yield* TmuxSessionMonitor
+		const manager = yield* ClaudeSessionManager
+
+		yield* monitor.start((update) =>
+			Effect.gen(function* () {
+				yield* manager.updateStateFromTmux(update.beadId, update.status)
+			}).pipe(Effect.catchAll(() => Effect.void)),
+		)
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
 
 // ============================================================================
 // PTY Monitor (session metrics via PTY output pattern matching)

@@ -17,7 +17,7 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { AI_SESSION_PREFIXES, getChatSessionName } from "../../core/paths.js"
+import { AI_SESSION_PREFIXES } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
@@ -295,7 +295,7 @@ What would you like to discuss?`
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Use chat-{beadId} naming to distinguish from work sessions
-					const chatSessionName = getChatSessionName(task.id)
+					const chatSessionName = `chat-${task.id}`
 
 					// Check if chat session already exists
 					const hasSession = yield* tmux.hasSession(chatSessionName)

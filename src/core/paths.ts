@@ -18,29 +18,7 @@ export const WINDOW_NAMES = {
 	BACKGROUND: "background",
 } as const
 
-/**
- * Prefix for Claude session names in tmux (Legacy - will be phased out)
- *
- * All Claude Code sessions managed by Azedarach use this prefix.
- * This allows TmuxSessionMonitor to identify Claude sessions and
- * enables hooks to set status on the correct session.
- */
-export const CLAUDE_SESSION_PREFIX = "claude-"
-
-/**
- * Prefix for OpenCode session names in tmux (Legacy - will be phased out)
- */
-export const OPENCODE_SESSION_PREFIX = "opencode-"
-
-/**
- * Prefix for dev server session names in tmux (Legacy - will be phased out)
- */
-export const DEV_SESSION_PREFIX = "dev-"
-
-/**
- * Prefix for chat session names in tmux (Legacy - will be phased out)
- */
-export const CHAT_SESSION_PREFIX = "chat-"
+export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
 
 /**
  * Generate tmux session name for a bead
@@ -54,31 +32,6 @@ export const CHAT_SESSION_PREFIX = "chat-"
  */
 export function getBeadSessionName(beadId: string): string {
 	return beadId
-}
-
-/**
- * Generate tmux session name for a CLI tool session (Legacy)
- *
- * @param beadId - The bead ID
- * @param cliTool - The CLI tool being used ("claude" or "opencode")
- */
-export function getSessionNameForTool(beadId: string, cliTool: CliToolName): string {
-	const prefix = cliTool === "opencode" ? OPENCODE_SESSION_PREFIX : CLAUDE_SESSION_PREFIX
-	return `${prefix}${beadId}`
-}
-
-/**
- * Generate tmux session name for a dev server (Legacy)
- */
-export function getDevSessionName(beadId: string): string {
-	return `${DEV_SESSION_PREFIX}${beadId}`
-}
-
-/**
- * Generate tmux session name for a chat session (Legacy)
- */
-export function getChatSessionName(beadId: string): string {
-	return `${CHAT_SESSION_PREFIX}${beadId}`
 }
 
 /**
@@ -104,10 +57,10 @@ export function parseSessionName(
 
 	// Try each legacy prefix
 	for (const [prefix, type] of [
-		[CLAUDE_SESSION_PREFIX, "claude"],
-		[OPENCODE_SESSION_PREFIX, "opencode"],
-		[DEV_SESSION_PREFIX, "dev"],
-		[CHAT_SESSION_PREFIX, "chat"],
+		["claude-", "claude"],
+		["opencode-", "opencode"],
+		["dev-", "dev"],
+		["chat-", "chat"],
 	] as const) {
 		if (sessionName.startsWith(prefix)) {
 			const beadId = sessionName.slice(prefix.length)
