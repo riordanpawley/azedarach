@@ -3,7 +3,6 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
-import { HashMap } from "effect"
 import type { DevServerView } from "./atoms.js"
 import { beadDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"

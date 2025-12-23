@@ -186,7 +186,7 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 
 			// Worktree pattern: project-branchname (e.g., azedarach-az-4nge)
 			// cwd basename must start with project basename + hyphen
-			return cwdBase.startsWith(projBase + "-")
+			return cwdBase.startsWith(`${projBase}-`)
 		}
 
 		/**
