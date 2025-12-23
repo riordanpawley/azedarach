@@ -8,6 +8,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
 import { OverlayService } from "../../services/OverlayService.js"
+import { SettingsService } from "../../services/SettingsService.js"
 import { ToastService } from "../../services/ToastService.js"
 import { appRuntime } from "./runtime.js"
 
@@ -145,7 +146,7 @@ export const popOverlayAtom = appRuntime.fn(() =>
 // ============================================================================
 
 /**
- * Detail scroll command atom - subscribes to scroll commands for the detail panel
+ * Detail scroll command atom - subscribes to scroll commands for detail panel
  *
  * Each emission triggers a scroll action in the DetailPanel component.
  * The timestamp ensures each command is unique and triggers useEffect.
@@ -157,4 +158,124 @@ export const detailScrollAtom = appRuntime.subscriptionRef(
 		const overlay = yield* OverlayService
 		return overlay.scrollCommand
 	}),
+)
+
+// ============================================================================
+// Settings Overlay Atoms
+// ============================================================================
+
+/**
+ * Settings state atom - subscribes to SettingsService state
+ *
+ * Provides focus index and isOpen state for the settings overlay.
+ *
+ * Usage: const settingsState = useAtomValue(settingsStateAtom)
+ */
+export const settingsStateAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		return settings.state
+	}),
+)
+
+/**
+ * Open settings atom - open the settings overlay
+ *
+ * Usage: const [, openSettings] = useAtom(openSettingsAtom, { mode: "promise" })
+ *        await openSettings()
+ */
+export const openSettingsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		yield* settings.open()
+	}),
+)
+
+/**
+ * Close settings atom - close the settings overlay
+ *
+ * Usage: const [, closeSettings] = useAtom(closeSettingsAtom, { mode: "promise" })
+ *        await closeSettings()
+ */
+export const closeSettingsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		yield* settings.close()
+	}),
+)
+
+/**
+ * Move up in settings atom - move focus to previous setting
+ *
+ * Usage: const [, moveUpSettings] = useAtom(moveUpSettingsAtom, { mode: "promise" })
+ *        await moveUpSettings()
+ */
+export const moveUpSettingsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		yield* settings.moveUp()
+	}),
+)
+
+/**
+ * Move down in settings atom - move focus to next setting
+ *
+ * Usage: const [, moveDownSettings] = useAtom(moveDownSettingsAtom, { mode: "promise" })
+ *        await moveDownSettings()
+ */
+export const moveDownSettingsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		yield* settings.moveDown()
+	}),
+)
+
+/**
+ * Toggle current setting atom - toggle the value of the currently focused setting
+ *
+ * Usage: const [, toggleCurrentSetting] = useAtom(toggleCurrentSettingAtom, { mode: "promise" })
+ *        await toggleCurrentSetting()
+ */
+export const toggleCurrentSettingAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		yield* settings.toggleCurrent()
+	}),
+)
+
+/**
+ * Open settings in editor atom - open .azedarach.json in $EDITOR
+ *
+ * Returns configPath and backupContent for post-edit validation.
+ *
+ * Usage: const [, openEditor] = useAtom(openSettingsEditorAtom, { mode: "promise" })
+ *        const result = await openEditor()
+ */
+export const openSettingsEditorAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const settings = yield* SettingsService
+		return yield* settings.openInEditor()
+	}),
+)
+
+/**
+ * Validate settings after edit atom - validate config after external editor closes
+ *
+ * Rolls back to backup if validation fails.
+ *
+ * Usage: const [, validateAfterEdit] = useAtom(validateSettingsAfterEditAtom, { mode: "promise" })
+ *        const result = await validateAfterEdit({ configPath, backupContent })
+ */
+export const validateSettingsAfterEditAtom = appRuntime.fn(
+	({
+		configPath,
+		backupContent,
+	}: {
+		readonly configPath: string
+		readonly backupContent: string
+	}) =>
+		Effect.gen(function* () {
+			const settings = yield* SettingsService
+			return yield* settings.validateAfterEdit(configPath, backupContent)
+		}),
 )

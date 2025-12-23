@@ -1,5 +1,6 @@
 // src/services/EditorService.ts
 
+import { Command, CommandExecutor } from "@effect/platform"
 import { Data, Effect, type Record, SubscriptionRef } from "effect"
 
 /**
@@ -192,6 +193,19 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				Effect.gen(function* () {
 					const m = yield* SubscriptionRef.get(mode)
 					return m._tag === "command" ? m.input : ""
+				}),
+
+			openFile: (filePath: string) =>
+				Effect.gen(function* () {
+					const editorCmd = process.env.EDITOR || "vi"
+					const executor = yield* CommandExecutor.CommandExecutor
+					yield* Command.make(editorCmd, filePath).pipe(
+						Command.stdin("inherit"),
+						Command.stdout("inherit"),
+						Command.stderr("inherit"),
+						executor.exitCode,
+						Effect.orDie,
+					)
 				}),
 
 			// ========================================================================
