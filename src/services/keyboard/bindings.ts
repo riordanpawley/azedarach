@@ -8,6 +8,7 @@
 import { Effect } from "effect"
 import type { BeadsClient } from "../../core/BeadsClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
+import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
@@ -52,6 +53,7 @@ export interface BindingContext {
 	viewService: ViewService
 	tmux: TmuxService
 	beadsClient: BeadsClient
+	board: BoardService
 }
 
 // ============================================================================
@@ -282,6 +284,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "normal",
 		description: "Toggle view mode (kanban/compact)",
 		action: bc.viewService.toggleViewMode(),
+	},
+	{
+		key: "r",
+		mode: "normal",
+		description: "Refresh git stats",
+		action: bc.board.refreshGitStats(),
 	},
 	{
 		key: "S-l",

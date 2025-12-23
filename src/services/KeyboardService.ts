@@ -12,6 +12,7 @@
 import { Effect, Ref } from "effect"
 import { BeadsClient } from "../core/BeadsClient.js"
 import { TmuxService } from "../core/TmuxService.js"
+import { BoardService } from "./BoardService.js"
 import { EditorService } from "./EditorService.js"
 import { createDefaultBindings } from "./keyboard/bindings.js"
 import { DevServerHandlersService } from "./keyboard/DevServerHandlersService.js"
@@ -55,6 +56,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		ViewService.Default,
 		TmuxService.Default,
 		BeadsClient.Default,
+		BoardService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -80,6 +82,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
 		const beadsClient = yield* BeadsClient
+		const board = yield* BoardService
 
 		// ====================================================================
 		// Create default keybindings
@@ -102,6 +105,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			viewService,
 			tmux,
 			beadsClient,
+			board,
 		})
 
 		const keybindings = yield* Ref.make<ReadonlyArray<Keybinding>>(defaultBindings)

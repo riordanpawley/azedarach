@@ -21,6 +21,7 @@ import {
 	focusedTaskRunningOperationAtom,
 	handleKeyAtom,
 	isOnlineAtom,
+	isRefreshingGitStatsAtom,
 	maxVisibleTasksAtom,
 	sessionMonitorStarterAtom,
 	totalTasksCountAtom,
@@ -141,6 +142,12 @@ export const App = () => {
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
 		boardIsLoadingAtom,
+		Result.getOrElse(() => false),
+	)
+
+	// Git stats refresh loading state
+	const isRefreshingGitStats = useAtomValue(
+		isRefreshingGitStatsAtom,
 		Result.getOrElse(() => false),
 	)
 
@@ -286,6 +293,7 @@ export const App = () => {
 				// vcStatus={vcStatus}
 				viewMode={viewMode}
 				isLoading={isLoading}
+				isRefreshingGitStats={isRefreshingGitStats}
 				devServerStatus={displayDevServer.status}
 				devServerPort={displayDevServer.port}
 				projectName={projectName}
