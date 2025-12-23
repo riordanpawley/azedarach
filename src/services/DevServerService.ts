@@ -232,22 +232,26 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					Effect.repeat(
 						Schedule.spaced(`${PORT_POLL_INTERVAL} millis`).pipe(
 							Schedule.upTo(`${PORT_DETECTION_TIMEOUT} millis`),
-							Schedule.untilInput((o: any) => Option.isSome(o)),
+							Schedule.untilInput((o: unknown): o is Option.Some<number> =>
+								Option.isSome(o as Option.Option<number>),
+							),
 						),
 					),
 				)
-				return Option.getOrUndefined(result as any)
+				return Option.isOption(result) ? Option.getOrUndefined(result) : undefined
 			})
 
-		const getPortEnv = (offset: number) =>
+		const getPortEnv = (
+			ports: Record<string, { default: number; aliases: readonly string[] }>,
+			offset: number,
+		) =>
 			Effect.gen(function* () {
-				const config = yield* appConfig.getDevServerConfig()
 				const env: Record<string, string> = {}
 				let primary: number | undefined
 
-				const portsEntries = Object.entries(config.ports) as [
+				const portsEntries = Object.entries(ports) as [
 					string,
-					{ default: number; aliases: string[] },
+					{ default: number; aliases: readonly string[] },
 				][]
 				for (const [_, p] of portsEntries) {
 					const port = yield* allocatePort(p.default + offset)
@@ -331,15 +335,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				yield* updateState(beadId, name, { status: "starting", worktreePath })
 				const config = yield* appConfig.getDevServerConfig()
-				const srvConfig = (config as any).servers?.[name]
+				const srvConfig = config.servers?.[name]
 				const command = srvConfig?.command ?? (yield* detectCommand(worktreePath))
 
-				const running = HashMap.size(
-					HashMap.flatMap(yield* SubscriptionRef.get(serversRef), (m) =>
-						HashMap.filter(m, (s) => s.status === "running"),
-					),
+				const ports = srvConfig?.ports ?? config.ports
+
+				const beadServers = yield* SubscriptionRef.get(serversRef).pipe(
+					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
 				)
-				const { env, primary } = yield* getPortEnv(running)
+				const beadRunning = HashMap.size(HashMap.filter(beadServers, (s) => s.status === "running"))
+
+				const { env, primary } = yield* getPortEnv(ports, beadRunning)
 				const envStr = Object.entries(env)
 					.map(([k, v]) => `${k}=${v}`)
 					.join(" ")
