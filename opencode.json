@@ -3,7 +3,6 @@
 	"instructions": ["CLAUDE.md"],
 	"plugin": ["opencode-beads", "oh-my-opencode"],
 	"theme": "tokyonight",
-	"model": "github-copilot/gemini-3-flash-preview",
 	"permission": {
 		"bash": {
 			"rg * | head *": "allow",
