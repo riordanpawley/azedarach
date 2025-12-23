@@ -5,16 +5,24 @@
  * Also includes tmux session monitoring and PTY metrics.
  */
 
-import { Effect } from "effect"
+import { Effect, SubscriptionRef } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
+import { SessionService } from "../../services/SessionService.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
 // TmuxSessionMonitor (Claude Code native hooks integration)
 // ============================================================================
+
+export const hookReceiverStarterAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		yield* SessionService
+		return yield* SubscriptionRef.make<void>(undefined)
+	}),
+)
 
 // ============================================================================
 // PTY Monitor (session metrics via PTY output pattern matching)

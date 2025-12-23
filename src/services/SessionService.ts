@@ -7,6 +7,10 @@
  */
 
 import { Effect } from "effect"
+import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
+import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
+import type { SessionState } from "../ui/types.js"
 import { NavigationService } from "./NavigationService.js"
 import { ToastService } from "./ToastService.js"
 
@@ -15,11 +19,26 @@ import { ToastService } from "./ToastService.js"
 // ============================================================================
 
 export class SessionService extends Effect.Service<SessionService>()("SessionService", {
-	dependencies: [ToastService.Default, NavigationService.Default],
+	dependencies: [
+		ToastService.Default,
+		NavigationService.Default,
+		TmuxSessionMonitor.Default,
+		PTYMonitor.Default,
+		ClaudeSessionManager.Default,
+	],
 
-	effect: Effect.gen(function* () {
+	scoped: Effect.gen(function* () {
 		const toast = yield* ToastService
 		const navigation = yield* NavigationService
+		const tmuxMonitor = yield* TmuxSessionMonitor
+		const ptyMonitor = yield* PTYMonitor
+
+		yield* tmuxMonitor.start((update) =>
+			Effect.gen(function* () {
+				const state: SessionState = update.status === "idle" ? "idle" : update.status
+				yield* ptyMonitor.recordHookSignal(update.beadId, state)
+			}),
+		)
 
 		return {
 			/**

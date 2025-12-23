@@ -93,6 +93,7 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/enter.*number/i, // "Enter a number"
 			/type.*number.*select/i, // "Type a number to select"
 			/·/u,
+			/esc to interrupt/i,
 		],
 	},
 	{
