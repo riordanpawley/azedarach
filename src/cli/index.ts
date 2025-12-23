@@ -12,7 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import { AI_SESSION_PREFIXES, getBeadSessionName } from "../core/paths.js"
+import { getBeadSessionName } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -306,44 +306,20 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 	}
 }
 
-/**
- * Find an AI tool tmux session by beadId
- *
- * Session names use format: {tool}-{beadId} (e.g., claude-az-123, opencode-az-123)
- * Checks all AI tool prefixes and returns the first match.
- * Returns null if no session exists.
- */
 const findAiSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
 		yield* Console.log(`[DEBUG] findAiSessionByBeadId: beadId=${beadId}`)
 
-		const unifiedName = getBeadSessionName(beadId)
-		yield* Console.log(`[DEBUG] Checking for unified session: ${unifiedName}`)
-		const unifiedCommand = PlatformCommand.make("tmux", "has-session", "-t", unifiedName)
-		const unifiedExitCode = yield* PlatformCommand.exitCode(unifiedCommand).pipe(
+		const sessionName = getBeadSessionName(beadId)
+		yield* Console.log(`[DEBUG] Checking for session: ${sessionName}`)
+		const command = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
+		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
 			Effect.catchAll(() => Effect.succeed(1)),
 		)
-		if (unifiedExitCode === 0) {
-			yield* Console.log(`[DEBUG] Found unified session: ${unifiedName}`)
-			return unifiedName
-		}
 
-		for (const prefix of AI_SESSION_PREFIXES) {
-			const expectedSessionName = `${prefix}${beadId}`
-			yield* Console.log(`[DEBUG] Checking for session: ${expectedSessionName}`)
-
-			// Check if the session exists
-			const command = PlatformCommand.make("tmux", "has-session", "-t", expectedSessionName)
-			const exitCode = yield* PlatformCommand.exitCode(command).pipe(
-				Effect.catchAll(() => Effect.succeed(1)),
-			)
-
-			yield* Console.log(`[DEBUG] Session ${expectedSessionName}: exitCode=${exitCode}`)
-
-			if (exitCode === 0) {
-				yield* Console.log(`[DEBUG] Found session: ${expectedSessionName}`)
-				return expectedSessionName
-			}
+		if (exitCode === 0) {
+			yield* Console.log(`[DEBUG] Found session: ${sessionName}`)
+			return sessionName
 		}
 
 		yield* Console.log(`[DEBUG] No session found for beadId=${beadId}`)
