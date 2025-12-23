@@ -143,5 +143,5 @@ export function getParentPath(path: string): string | null {
  * Check if a path is a descendant of another path
  */
 export function isDescendantOf(childPath: string, parentPath: string): boolean {
-	return childPath.startsWith(parentPath + "/")
+	return childPath.startsWith(`${parentPath}/`)
 }
