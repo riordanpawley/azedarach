@@ -137,6 +137,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="Tab" description="Toggle view (Kanban / Compact)" />
 				<KeyLine keys="a" description="Toggle VC auto-pilot" />
 				<KeyLine keys="d" description="Show diagnostics" />
+				<KeyLine keys="s" description="Show settings" />
 				<KeyLine keys="L" description="View logs" />
 				<KeyLine keys="?" description="Toggle this help screen" />
 				<KeyLine keys="q" description="Quit (or exit drill-down)" />

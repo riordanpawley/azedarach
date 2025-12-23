@@ -36,6 +36,7 @@ import { OverlayService } from "../../services/OverlayService.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { ProjectStateService } from "../../services/ProjectStateService.js"
 import { SessionService } from "../../services/SessionService.js"
+import { SettingsService } from "../../services/SettingsService.js"
 import { ToastService } from "../../services/ToastService.js"
 import { ViewService } from "../../services/ViewService.js"
 
@@ -68,6 +69,7 @@ const appLayer = Layer.mergeAll(
 	DiagnosticsService.Default,
 	ProjectService.Default,
 	ProjectStateService.Default,
+	SettingsService.Default,
 	TemplateService.Default,
 	NetworkService.Default,
 	OfflineService.Default,
