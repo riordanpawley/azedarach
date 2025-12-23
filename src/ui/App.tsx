@@ -20,7 +20,6 @@ import {
 	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	handleKeyAtom,
-	hookReceiverStarterAtom,
 	isOnlineAtom,
 	maxVisibleTasksAtom,
 	totalTasksCountAtom,
@@ -106,7 +105,8 @@ export const App = () => {
 
 	// Start the hook receiver for Claude Code native hook integration
 	// This watches for notification files and updates session state
-	useAtomValue(hookReceiverStarterAtom)
+	// TODO: re-enable when TmuxSessionMonitor is restored
+	// useAtomValue(hookReceiverStarterAtom)
 
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms

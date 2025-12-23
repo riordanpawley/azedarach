@@ -32,13 +32,13 @@ export {
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
 // Config atoms
-export { appConfigAtom, devServerConfigAtom } from "./config.js"
+export * from "./config.js"
+export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
-	beadDevServersAtom,
-	devServerStateAtom,
+	beadDevServerViewsAtom,
 	devServersAtom,
-	focusedBeadDevServersAtom,
+	focusedBeadDevServerViewsAtom,
 	focusedBeadPrimaryDevServerAtom,
 	stopDevServerAtom,
 	syncDevServerStateAtom,
@@ -151,7 +151,6 @@ export { appRuntime } from "./runtime.js"
 export {
 	attachExternalAtom,
 	attachInlineAtom,
-	hookReceiverStarterAtom,
 	pauseSessionAtom,
 	resumeSessionAtom,
 	sessionMetricsAtom,
