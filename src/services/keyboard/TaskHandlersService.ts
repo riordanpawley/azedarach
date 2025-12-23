@@ -197,7 +197,18 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const firstTaskId = taskIdsToMove[0]
 
 					if (taskIdsToMove.length > 0) {
-						// Add all mutations first (optimistic UI update)
+						// Apply optimistic updates IMMEDIATELY to in-memory state
+						// This gives instant visual feedback before any async work
+						for (const id of taskIdsToMove) {
+							yield* board.applyOptimisticMove(id, targetStatus)
+						}
+
+						// Follow the task to its new column
+						if (firstTaskId) {
+							yield* nav.setFollow(firstTaskId)
+						}
+
+						// Add mutations to queue and process
 						for (const id of taskIdsToMove) {
 							const task = yield* board.findTaskById(id)
 							if (!task) continue
@@ -211,19 +222,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								}),
 							}
 							yield* mutationQueue.add(moveMutation)
-						}
-
-						// Process all mutations sequentially - bd commands are fast (~50ms each)
-						// MutationQueue handles rollback and error toasts on failure
-						for (const id of taskIdsToMove) {
 							yield* mutationQueue.process(id)
 						}
 
+						// Refresh to sync with backend after mutations complete
 						yield* board.requestRefresh()
-
-						if (firstTaskId) {
-							yield* nav.setFollow(firstTaskId)
-						}
 					}
 				})
 
