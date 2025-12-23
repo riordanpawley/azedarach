@@ -5,95 +5,151 @@ import { type AzedarachConfig, AzedarachConfigSchema } from "../config/schema.js
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
-type SettingType = "boolean" | "enum"
-
 export interface SettingDefinition {
 	readonly key: string
 	readonly label: string
-	readonly path: readonly string[]
-	readonly type: SettingType
-	readonly options?: readonly string[]
+	readonly toggle: (config: AzedarachConfig) => AzedarachConfig
+	readonly getValue: (config: AzedarachConfig) => unknown
 }
 
 export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	{
 		key: "cliTool",
 		label: "CLI Tool",
-		path: ["cliTool"],
-		type: "enum",
-		options: ["claude", "opencode"],
+		getValue: (c) => c.cliTool ?? "claude",
+		toggle: (c) => ({
+			...c,
+			cliTool: (c.cliTool ?? "claude") === "claude" ? "opencode" : "claude",
+		}),
 	},
 	{
 		key: "dangerouslySkipPermissions",
 		label: "Skip Permissions",
-		path: ["session", "dangerouslySkipPermissions"],
-		type: "boolean",
+		getValue: (c) => c.session?.dangerouslySkipPermissions ?? false,
+		toggle: (c) => ({
+			...c,
+			session: {
+				...c.session,
+				dangerouslySkipPermissions: !(c.session?.dangerouslySkipPermissions ?? false),
+			},
+		}),
 	},
 	{
 		key: "pushBranchOnCreate",
 		label: "Push on Create",
-		path: ["git", "pushBranchOnCreate"],
-		type: "boolean",
+		getValue: (c) => c.git?.pushBranchOnCreate ?? true,
+		toggle: (c) => ({
+			...c,
+			git: { ...c.git, pushBranchOnCreate: !(c.git?.pushBranchOnCreate ?? true) },
+		}),
 	},
-	{ key: "pushEnabled", label: "Git Push", path: ["git", "pushEnabled"], type: "boolean" },
-	{ key: "fetchEnabled", label: "Git Fetch", path: ["git", "fetchEnabled"], type: "boolean" },
+	{
+		key: "pushEnabled",
+		label: "Git Push",
+		getValue: (c) => c.git?.pushEnabled ?? true,
+		toggle: (c) => ({
+			...c,
+			git: { ...c.git, pushEnabled: !(c.git?.pushEnabled ?? true) },
+		}),
+	},
+	{
+		key: "fetchEnabled",
+		label: "Git Fetch",
+		getValue: (c) => c.git?.fetchEnabled ?? true,
+		toggle: (c) => ({
+			...c,
+			git: { ...c.git, fetchEnabled: !(c.git?.fetchEnabled ?? true) },
+		}),
+	},
 	{
 		key: "showLineChanges",
 		label: "Line Changes",
-		path: ["git", "showLineChanges"],
-		type: "boolean",
+		getValue: (c) => c.git?.showLineChanges ?? false,
+		toggle: (c) => ({
+			...c,
+			git: { ...c.git, showLineChanges: !(c.git?.showLineChanges ?? false) },
+		}),
 	},
-	{ key: "prEnabled", label: "PR Enabled", path: ["pr", "enabled"], type: "boolean" },
-	{ key: "autoDraft", label: "Auto Draft PR", path: ["pr", "autoDraft"], type: "boolean" },
-	{ key: "autoMerge", label: "Auto Merge PR", path: ["pr", "autoMerge"], type: "boolean" },
-	{ key: "bell", label: "Bell Notify", path: ["notifications", "bell"], type: "boolean" },
+	{
+		key: "prEnabled",
+		label: "PR Enabled",
+		getValue: (c) => c.pr?.enabled ?? true,
+		toggle: (c) => ({
+			...c,
+			pr: { ...c.pr, enabled: !(c.pr?.enabled ?? true) },
+		}),
+	},
+	{
+		key: "autoDraft",
+		label: "Auto Draft PR",
+		getValue: (c) => c.pr?.autoDraft ?? true,
+		toggle: (c) => ({
+			...c,
+			pr: { ...c.pr, autoDraft: !(c.pr?.autoDraft ?? true) },
+		}),
+	},
+	{
+		key: "autoMerge",
+		label: "Auto Merge PR",
+		getValue: (c) => c.pr?.autoMerge ?? false,
+		toggle: (c) => ({
+			...c,
+			pr: { ...c.pr, autoMerge: !(c.pr?.autoMerge ?? false) },
+		}),
+	},
+	{
+		key: "bell",
+		label: "Bell Notify",
+		getValue: (c) => c.notifications?.bell ?? true,
+		toggle: (c) => ({
+			...c,
+			notifications: { ...c.notifications, bell: !(c.notifications?.bell ?? true) },
+		}),
+	},
 	{
 		key: "systemNotify",
 		label: "System Notify",
-		path: ["notifications", "system"],
-		type: "boolean",
+		getValue: (c) => c.notifications?.system ?? false,
+		toggle: (c) => ({
+			...c,
+			notifications: { ...c.notifications, system: !(c.notifications?.system ?? false) },
+		}),
 	},
 	{
 		key: "networkAutoDetect",
 		label: "Auto Detect Network",
-		path: ["network", "autoDetect"],
-		type: "boolean",
+		getValue: (c) => c.network?.autoDetect ?? true,
+		toggle: (c) => ({
+			...c,
+			network: { ...c.network, autoDetect: !(c.network?.autoDetect ?? true) },
+		}),
 	},
-	{ key: "beadsSyncEnabled", label: "Beads Sync", path: ["beads", "syncEnabled"], type: "boolean" },
+	{
+		key: "beadsSyncEnabled",
+		label: "Beads Sync",
+		getValue: (c) => c.beads?.syncEnabled ?? true,
+		toggle: (c) => ({
+			...c,
+			beads: { ...c.beads, syncEnabled: !(c.beads?.syncEnabled ?? true) },
+		}),
+	},
 	{
 		key: "patternMatching",
 		label: "Pattern Matching",
-		path: ["stateDetection", "patternMatching"],
-		type: "boolean",
+		getValue: (c) => c.stateDetection?.patternMatching ?? false,
+		toggle: (c) => ({
+			...c,
+			stateDetection: {
+				...c.stateDetection,
+				patternMatching: !(c.stateDetection?.patternMatching ?? false),
+			},
+		}),
 	},
 ]
 
 export interface SettingsState {
 	readonly focusIndex: number
 	readonly isOpen: boolean
-}
-
-const getNestedValue = (obj: Record<string, unknown>, path: readonly string[]): unknown => {
-	let current: unknown = obj
-	for (const key of path) {
-		if (current === null || current === undefined || typeof current !== "object") return undefined
-		current = (current as Record<string, unknown>)[key]
-	}
-	return current
-}
-
-const setNestedValue = <T extends Record<string, unknown>>(
-	obj: T,
-	path: readonly string[],
-	value: unknown,
-): T => {
-	if (path.length === 0) return obj
-	if (path.length === 1) {
-		return { ...obj, [path[0]]: value }
-	}
-	const [head, ...tail] = path
-	const nested = (obj[head] as Record<string, unknown>) ?? {}
-	return { ...obj, [head]: setNestedValue(nested, tail, value) }
 }
 
 export class SettingsService extends Effect.Service<SettingsService>()("SettingsService", {
@@ -120,14 +176,14 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
 				const exists = yield* fs.exists(configPath).pipe(Effect.orElseSucceed(() => false))
-				if (!exists) return {} as AzedarachConfig
+				if (!exists) return yield* Schema.decodeUnknown(AzedarachConfigSchema)({})
 
 				const content = yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => "{}"))
 				const parsed = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
-					Effect.orElseSucceed(() => ({}) as AzedarachConfig),
+					Effect.catchAll(() => Schema.decodeUnknown(AzedarachConfigSchema)({})),
 				)
 				return parsed
-			}).pipe(Effect.orElseSucceed(() => ({}) as AzedarachConfig))
+			}).pipe(Effect.catchAll(() => Schema.decodeUnknown(AzedarachConfigSchema)({})))
 
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
@@ -135,9 +191,6 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 				const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config)
 				yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
 			})
-
-		const validateConfig = (config: unknown) =>
-			Schema.decodeUnknown(AzedarachConfigSchema)(config).pipe(Effect.orDie)
 
 		return {
 			state,
@@ -162,7 +215,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 			getCurrentValue: (setting: SettingDefinition): Effect.Effect<unknown> =>
 				Effect.gen(function* () {
 					const config = yield* SubscriptionRef.get(appConfig.config)
-					return getNestedValue(config as unknown as Record<string, unknown>, setting.path)
+					return setting.getValue(config)
 				}),
 
 			toggleCurrent: () =>
@@ -171,32 +224,11 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					const setting = EDITABLE_SETTINGS[focusIndex]
 					if (!setting) return
 
-					const rawConfig = yield* loadRawConfig()
-					const currentValue = getNestedValue(
-						rawConfig as unknown as Record<string, unknown>,
-						setting.path,
-					)
+					const config = yield* loadRawConfig()
+					const newConfig = setting.toggle(config)
 
-					let newValue: unknown
-					if (setting.type === "boolean") {
-						newValue = !currentValue
-					} else if (setting.type === "enum" && setting.options) {
-						const currentIdx = setting.options.indexOf(String(currentValue ?? setting.options[0]))
-						const nextIdx = (currentIdx + 1) % setting.options.length
-						newValue = setting.options[nextIdx]
-					} else {
-						return
-					}
-
-					const newConfig = setNestedValue(
-						rawConfig as unknown as Record<string, unknown>,
-						setting.path,
-						newValue,
-					) as AzedarachConfig
-
-					yield* validateConfig(newConfig)
 					yield* saveConfig(newConfig)
-					yield* toast.show("success", `${setting.label}: ${String(newValue)}`)
+					yield* toast.show("success", `${setting.label}: ${String(setting.getValue(newConfig))}`)
 				}).pipe(
 					Effect.catchAllDefect((e) =>
 						toast.show("error", `Failed to update: ${e instanceof Error ? e.message : String(e)}`),
