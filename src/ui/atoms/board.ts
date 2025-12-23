@@ -100,6 +100,37 @@ export const refreshBoardAtom = appRuntime.fn(() =>
 )
 
 /**
+ * Git stats refresh loading state - true when refreshing git stats
+ *
+ * Uses appRuntime.subscriptionRef() for automatic reactive updates.
+ *
+ * Usage: const isRefreshing = useAtomValue(isRefreshingGitStatsAtom)
+ */
+export const isRefreshingGitStatsAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		return board.isRefreshingGitStats
+	}),
+)
+
+/**
+ * Refresh git stats for all beads with active sessions
+ *
+ * This is a lightweight refresh that only updates git-related fields
+ * (behind count, uncommitted changes, line additions/deletions),
+ * avoiding a full board reload.
+ *
+ * Usage: const refreshGitStats = useAtomSet(refreshGitStatsAtom, { mode: "promise" })
+ *        refreshGitStats()
+ */
+export const refreshGitStatsAtom = appRuntime.fn(() =>
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		yield* board.refreshGitStats()
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
  * Atom for currently selected task ID
  */
 export const selectedTaskIdAtom = Atom.make<string | undefined>(undefined)

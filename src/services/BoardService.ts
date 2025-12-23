@@ -243,6 +243,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
 		>(emptyRecord())
 		const isLoading = yield* SubscriptionRef.make<boolean>(false)
+		const isRefreshingGitStats = yield* SubscriptionRef.make<boolean>(false)
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
@@ -494,6 +495,48 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* Ref.set(debounceFiberRef, fiber)
 			})
 
+		/**
+		 * Refresh git stats (behind count, uncommitted changes, line additions/deletions)
+		 * for all tasks with active sessions.
+		 *
+		 * This is a lightweight refresh that only updates git-related fields,
+		 * avoiding a full board reload. Respects the `git.showLineChanges` config
+		 * for line stat computation.
+		 */
+		const refreshGitStats = () =>
+			Effect.gen(function* () {
+				yield* SubscriptionRef.set(isRefreshingGitStats, true)
+
+				const projectPath = yield* projectService.getCurrentPath()
+				if (!projectPath) {
+					return
+				}
+
+				const gitConfig = yield* appConfig.getGitConfig()
+				const { baseBranch, showLineChanges } = gitConfig
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+
+				// Update git stats for all tasks with active sessions
+				const updatedTasks = yield* Effect.all(
+					currentTasks.map((task) =>
+						Effect.gen(function* () {
+							// Only refresh for tasks with active sessions (they have worktrees)
+							if (task.sessionState === "idle") {
+								return task
+							}
+							const worktreePath = getWorktreePath(projectPath, task.id)
+							const gitStatus = yield* checkGitStatus(worktreePath, baseBranch, showLineChanges)
+							return { ...task, ...gitStatus }
+						}),
+					),
+					{ concurrency: "unbounded" },
+				)
+
+				yield* SubscriptionRef.set(tasks, updatedTasks)
+				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(updatedTasks))
+				yield* updateFilteredTasks()
+			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
+
 		yield* refresh().pipe(
 			Effect.catchAllCause((cause) =>
 				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
@@ -637,6 +680,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			tasksByColumn,
 			filteredTasksByColumn,
 			isLoading,
+			isRefreshingGitStats,
 			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => SubscriptionRef.get(tasks),
 			getTasksByColumn: (): Effect.Effect<
 				Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
@@ -684,6 +728,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			getColumnCount: (): Effect.Effect<number> => Effect.succeed(COLUMNS.length),
 			refresh,
 			requestRefresh,
+			refreshGitStats,
 			clearBoard,
 			saveToCache,
 			loadFromCache,
