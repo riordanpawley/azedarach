@@ -233,6 +233,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const appConfig = yield* AppConfig
 		const mutationQueue = yield* MutationQueue
 
+		// Capture the service's scope for use in methods that spawn background fibers
+		const serviceScope = yield* Effect.scope
+
 		yield* diagnostics.trackService("BoardService", "Event-driven refresh with per-project cache")
 
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
@@ -462,6 +465,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				if (existingFiber) {
 					yield* Fiber.interrupt(existingFiber)
 				}
+				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
 				const fiber = yield* Effect.gen(function* () {
 					yield* Effect.sleep("500 millis")
 					yield* refresh().pipe(
@@ -471,7 +475,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							),
 						),
 					)
-				}).pipe(Effect.forkDaemon)
+				}).pipe(Effect.forkIn(serviceScope))
 				yield* Ref.set(debounceFiberRef, fiber)
 			})
 
@@ -545,6 +549,44 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 			})
 
+		/**
+		 * Switch to a new project with proper fiber management.
+		 *
+		 * This method:
+		 * 1. Immediately loads cached data or clears the board (fast UI feedback)
+		 * 2. Spawns a scoped refresh fiber that lives for BoardService's lifetime
+		 * 3. Calls the onRefreshComplete callback after refresh (for state restoration)
+		 *
+		 * @param projectPath - Path to the new project
+		 * @param onRefreshComplete - Callback effect to run after refresh completes (errors are caught and logged)
+		 * @returns Whether cached data was loaded (for toast messaging)
+		 */
+		const switchToProject = <E>(
+			projectPath: string,
+			onRefreshComplete: Effect.Effect<void, E, never>,
+		) =>
+			Effect.gen(function* () {
+				const cacheHit = yield* loadFromCache(projectPath)
+				if (!cacheHit) {
+					yield* clearBoard()
+				}
+
+				// Fork the refresh into the service's scope - not a daemon fiber
+				yield* Effect.gen(function* () {
+					yield* refresh()
+					yield* onRefreshComplete
+				}).pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logError("Project switch refresh failed", Cause.pretty(cause)).pipe(
+							Effect.asVoid,
+						),
+					),
+					Effect.forkIn(serviceScope),
+				)
+
+				return { cacheHit }
+			})
+
 		return {
 			tasks,
 			tasksByColumn,
@@ -600,6 +642,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			clearBoard,
 			saveToCache,
 			loadFromCache,
+			switchToProject,
 			initialize: refresh,
 			getFilteredTasksByColumn: (
 				searchQuery: string,

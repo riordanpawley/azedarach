@@ -59,8 +59,8 @@ export const projectsAtom = appRuntime.subscriptionRef(
  * Saves the current project's UI state before switching, then restores
  * the new project's saved state after loading.
  *
- * The refresh is forked (non-blocking) so the UI stays responsive.
- * A "Loading..." indicator shows in the status bar during refresh.
+ * Uses BoardService.switchToProject() which spawns a scoped fiber for the
+ * background refresh, properly tied to the service's lifetime.
  *
  * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
  *        await switchProject("project-name")
@@ -93,43 +93,37 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 
 		const newProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		if (newProject) {
-			const cacheHit = yield* board.loadFromCache(newProject.path)
-			if (cacheHit) {
-				yield* toast.show("success", `Loaded: ${projectName}`)
-			} else {
-				yield* board.clearBoard()
-				yield* toast.show("info", `Loading: ${projectName}...`)
-			}
-		} else {
+		if (!newProject) {
 			yield* board.clearBoard()
+			return
 		}
 
-		yield* Effect.gen(function* () {
-			yield* board.refresh()
+		// Create the state restoration effect to run after refresh completes
+		const restoreState = Effect.gen(function* () {
+			const savedState = yield* projectState.loadState(newProject.path)
 
-			// Load and restore saved UI state for the new project
-			if (newProject) {
-				const savedState = yield* projectState.loadState(newProject.path)
+			// Restore editor state (filters and sort)
+			yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
 
-				// Restore editor state (filters and sort)
-				yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
+			// Restore view mode
+			yield* view.setViewMode(extractViewMode(savedState))
 
-				// Restore view mode
-				yield* view.setViewMode(extractViewMode(savedState))
-
-				// Restore cursor position (navigation will validate if task still exists)
-				const savedFocusId = extractFocusedTaskId(savedState)
-				if (savedFocusId) {
-					yield* navigation.setFocusedTask(savedFocusId)
-				}
-				// NavigationService.ensureValidFocus() will handle invalid task IDs automatically
+			// Restore cursor position (navigation will validate if task still exists)
+			const savedFocusId = extractFocusedTaskId(savedState)
+			if (savedFocusId) {
+				yield* navigation.setFocusedTask(savedFocusId)
 			}
 
 			yield* toast.show("success", `Loaded: ${projectName}`)
-		}).pipe(
-			Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)),
-			Effect.forkDaemon,
-		)
+		}).pipe(Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)))
+
+		// Use BoardService.switchToProject which spawns a properly scoped fiber
+		const { cacheHit } = yield* board.switchToProject(newProject.path, restoreState)
+
+		if (cacheHit) {
+			yield* toast.show("success", `Loaded: ${projectName}`)
+		} else {
+			yield* toast.show("info", `Loading: ${projectName}...`)
+		}
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
