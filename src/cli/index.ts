@@ -12,7 +12,7 @@ import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
 import { AppConfigConfig } from "../config/AppConfig.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
-import { AI_SESSION_PREFIXES } from "../core/paths.js"
+import { AI_SESSION_PREFIXES, getBeadSessionName } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
@@ -316,9 +316,18 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 const findAiSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
 		yield* Console.log(`[DEBUG] findAiSessionByBeadId: beadId=${beadId}`)
-		yield* Console.log(`[DEBUG] AI_SESSION_PREFIXES: ${AI_SESSION_PREFIXES.join(", ")}`)
 
-		// Try each AI tool prefix to find an existing session
+		const unifiedName = getBeadSessionName(beadId)
+		yield* Console.log(`[DEBUG] Checking for unified session: ${unifiedName}`)
+		const unifiedCommand = PlatformCommand.make("tmux", "has-session", "-t", unifiedName)
+		const unifiedExitCode = yield* PlatformCommand.exitCode(unifiedCommand).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
+		)
+		if (unifiedExitCode === 0) {
+			yield* Console.log(`[DEBUG] Found unified session: ${unifiedName}`)
+			return unifiedName
+		}
+
 		for (const prefix of AI_SESSION_PREFIXES) {
 			const expectedSessionName = `${prefix}${beadId}`
 			yield* Console.log(`[DEBUG] Checking for session: ${expectedSessionName}`)

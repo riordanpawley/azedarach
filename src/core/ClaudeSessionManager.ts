@@ -271,6 +271,17 @@ export interface ClaudeSessionManagerService {
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
 	/**
+	 * Update session state from tmux status
+	 *
+	 * Handles mapping TmuxStatus to SessionState and handles
+	 * secondary transitions like "done" detection.
+	 */
+	readonly updateStateFromTmux: (
+		beadId: string,
+		status: "busy" | "waiting" | "idle",
+	) => Effect.Effect<void, SessionNotFoundError, never>
+
+	/**
 	 * Subscribe to state change events
 	 *
 	 * Returns a stream of SessionStateChange events.
@@ -495,7 +506,6 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get initCommands: merge worktree config + tool-specific init commands
 						const toolInitCommands = toolDef.getInitCommands()
 						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
-						const backgroundTasksFromConfig = sessionConfig.backgroundTasks
 						const { tmuxPrefix } = sessionConfig
 
 						// Use acquireUseRelease to ensure atomicity:
@@ -865,6 +875,49 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						const session = sessionOpt.value
 						const oldState = session.state
+
+						const updatedSession: Session = {
+							...session,
+							state: newState,
+						}
+
+						yield* Ref.update(sessionsRef, (sessions) =>
+							HashMap.set(sessions, beadId, updatedSession),
+						)
+
+						// Persist to disk
+						const allSessions = yield* Ref.get(sessionsRef)
+						yield* persistSessions(allSessions)
+
+						// Publish state change
+						yield* publishStateChange(beadId, oldState, newState)
+					}),
+
+				updateStateFromTmux: (beadId: string, status: "busy" | "waiting" | "idle") =>
+					Effect.gen(function* () {
+						const sessions = yield* Ref.get(sessionsRef)
+						const sessionOpt = HashMap.get(sessions, beadId)
+
+						if (sessionOpt._tag === "None") {
+							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+						}
+
+						const session = sessionOpt.value
+						const oldState = session.state
+
+						// Map TmuxStatus to SessionState
+						let newState: SessionState = session.state
+						if (status === "busy") newState = "busy"
+						if (status === "waiting") newState = "waiting"
+						if (status === "idle") {
+							// If we were busy or waiting and session disappeared, it might be "done"
+							// but for now we'll just map to idle. Transition to "done"
+							// is usually handled by output pattern matching in PTYMonitor
+							// or explicit az notify done.
+							newState = "idle"
+						}
+
+						if (oldState === newState) return
 
 						const updatedSession: Session = {
 							...session,

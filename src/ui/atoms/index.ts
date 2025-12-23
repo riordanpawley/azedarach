@@ -154,6 +154,7 @@ export {
 	pauseSessionAtom,
 	resumeSessionAtom,
 	sessionMetricsAtom,
+	sessionMonitorStarterAtom,
 	startSessionAtom,
 	stopSessionAtom,
 } from "./session.js"
