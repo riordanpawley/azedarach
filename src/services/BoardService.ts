@@ -11,10 +11,11 @@ import {
 	Cause,
 	DateTime,
 	Effect,
+	Fiber,
 	HashMap,
 	Order,
 	Record,
-	Schedule,
+	Ref,
 	Stream,
 	SubscriptionRef,
 } from "effect"
@@ -306,22 +307,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
 
-		// Register with diagnostics
-		yield* diagnostics.trackService("BoardService", "2s beads polling + session state merge")
+		yield* diagnostics.trackService("BoardService", "Event-driven refresh with per-project cache")
 
-		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
 		const tasksByColumn = yield* SubscriptionRef.make<
 			Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
 		>(emptyRecord())
 
-		// Loading state for non-blocking refresh feedback
 		const isLoading = yield* SubscriptionRef.make<boolean>(false)
 
-		// Filtered and sorted tasks by column - single source of truth for UI
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
+
+		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 
 		/**
 		 * Check if a worktree has an active merge conflict
@@ -577,7 +576,32 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
-		// Initial data load - run immediately since Schedule.spaced waits before first execution
+		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
+
+		/**
+		 * Request a debounced refresh (500ms). Coalesces rapid mutations into single refresh.
+		 */
+		const requestRefresh = () =>
+			Effect.gen(function* () {
+				const existingFiber = yield* Ref.get(debounceFiberRef)
+				if (existingFiber) {
+					yield* Fiber.interrupt(existingFiber)
+				}
+
+				const fiber = yield* Effect.gen(function* () {
+					yield* Effect.sleep("500 millis")
+					yield* refresh().pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logError("BoardService debounced refresh failed", Cause.pretty(cause)).pipe(
+								Effect.asVoid,
+							),
+						),
+					)
+				}).pipe(Effect.forkDaemon)
+
+				yield* Ref.set(debounceFiberRef, fiber)
+			})
+
 		yield* refresh().pipe(
 			Effect.catchAllCause((cause) =>
 				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
@@ -586,11 +610,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		// Background task refresh (every 2 seconds)
-		yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(
-			refresh().pipe(
-				Effect.catchAllCause((cause) =>
-					Effect.logError("BoardService refresh failed", Cause.pretty(cause)).pipe(Effect.asVoid),
+		yield* Effect.forkScoped(
+			Stream.runForEach(ptyMonitor.metrics.changes, () =>
+				requestRefresh().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logError("PTY-triggered refresh failed", Cause.pretty(cause)).pipe(
+							Effect.asVoid,
+						),
+					),
 				),
 			),
 		)
@@ -614,16 +641,47 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			),
 		)
+		const saveToCache = (projectPath: string) =>
+			Effect.gen(function* () {
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				if (currentTasks.length > 0) {
+					yield* Ref.update(boardCache, (cache) => {
+						const newCache = new Map(cache)
+						newCache.set(projectPath, currentTasks)
+						return newCache
+					})
+				}
+			})
+
+		const loadFromCache = (projectPath: string) =>
+			Effect.gen(function* () {
+				const cache = yield* Ref.get(boardCache)
+				const cached = cache.get(projectPath)
+				if (cached && cached.length > 0) {
+					yield* SubscriptionRef.set(tasks, cached)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(cached))
+					yield* updateFilteredTasks()
+					return true
+				}
+				return false
+			})
+
+		const clearBoard = () =>
+			Effect.gen(function* () {
+				yield* SubscriptionRef.set(tasks, [])
+				yield* SubscriptionRef.set(tasksByColumn, emptyRecord())
+				yield* SubscriptionRef.set(
+					filteredTasksByColumn,
+					COLUMNS.map(() => []),
+				)
+			})
+
 		return {
-			// State refs (fine-grained for external subscription)
 			tasks,
 			tasksByColumn,
 			filteredTasksByColumn,
 			isLoading,
 
-			/**
-			 * Get all tasks
-			 */
 			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => SubscriptionRef.get(tasks),
 
 			/**
@@ -723,14 +781,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			 */
 			getColumnCount: (): Effect.Effect<number> => Effect.succeed(COLUMNS.length),
 
-			/**
-			 * Refresh board data from BeadsClient
-			 */
 			refresh,
-
-			/**
-			 * Load initial board data
-			 */
+			requestRefresh,
+			clearBoard,
+			saveToCache,
+			loadFromCache,
 			initialize: refresh,
 
 			/**

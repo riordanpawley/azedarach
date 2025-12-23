@@ -487,7 +487,7 @@ You can configure models globally or specifically for each tool in `.azedarach.j
    Or add it to your `opencode.json`:
    ```json
    {
-     "plugins": [
+     "plugin": [
        "opencode-beads",
        "./plugin/azedarach.js"
      ]

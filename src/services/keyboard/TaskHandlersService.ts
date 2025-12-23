@@ -88,8 +88,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					yield* beadsClient.delete(taskId).pipe(
 						Effect.tap(() => toast.show("success", `Deleted ${taskId}`)),
-						Effect.tap(() => board.refresh()),
-						// Move cursor to a valid task after deletion
+						Effect.tap(() => board.requestRefresh()),
 						Effect.tap(() => nav.initialize()),
 						Effect.catchAll(helpers.showErrorToast("Failed to delete")),
 					)
@@ -112,7 +111,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					yield* beadEditor.editBead(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
-						Effect.tap(() => board.refresh()),
+						Effect.tap(() => board.requestRefresh()),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -167,7 +166,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								}
 							}),
 						),
-						Effect.tap(() => board.refresh()),
+						Effect.tap(() => board.requestRefresh()),
 						Effect.tap((result) => nav.jumpToTask(result.id)),
 						Effect.catchAll((error) => {
 							const msg =
@@ -247,9 +246,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						yield* Effect.all(
 							taskIdsToMove.map((id) => beadsClient.update(id, { status: targetStatus })),
 						)
-						// Refresh board to reflect the move
-						yield* board.refresh()
-						// Follow the first task
+						yield* board.requestRefresh()
 						if (firstTaskId) {
 							yield* nav.setFollow(firstTaskId)
 						}
