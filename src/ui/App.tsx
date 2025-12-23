@@ -22,7 +22,6 @@ import {
 	handleKeyAtom,
 	isOnlineAtom,
 	maxVisibleTasksAtom,
-	sessionMigrationAtom,
 	sessionMonitorStarterAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
@@ -107,11 +106,6 @@ export const App = () => {
 		currentProjectAtom,
 		Result.getOrElse(() => undefined),
 	)?.name
-
-	const runSessionMigration = useAtomSet(sessionMigrationAtom, { mode: "promise" })
-	useEffect(() => {
-		runSessionMigration()
-	}, [runSessionMigration])
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
