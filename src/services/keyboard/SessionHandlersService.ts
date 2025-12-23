@@ -17,9 +17,10 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { AI_SESSION_PREFIXES } from "../../core/paths.js"
+import { WINDOW_NAMES } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
@@ -39,6 +40,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			AttachmentService.Default,
 			ImageAttachmentService.Default,
 			TmuxService.Default,
+			WorktreeSessionService.Default,
 			AppConfig.Default,
 			PRWorkflow.Default,
 			OverlayService.Default,
@@ -46,13 +48,13 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		],
 
 		effect: Effect.gen(function* () {
-			// Inject services at construction time
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
 			const sessionManager = yield* ClaudeSessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
+			const worktreeSession = yield* WorktreeSessionService
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
@@ -264,7 +266,7 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 					const sessionConfig = yield* appConfig.getSessionConfig()
 					const cliTool = yield* appConfig.getCliTool()
 					const modelConfig = yield* appConfig.getModelConfig()
-					const { command: cliCommand, shell, tmuxPrefix } = sessionConfig
+					const { command: cliCommand, shell } = sessionConfig
 
 					const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
 					const chatModel =
@@ -291,72 +293,36 @@ Note: You're running with ${chatModel} for fast, cheap discussion. When ready to
 What would you like to discuss?`
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 
-					// Get project path for session cwd
-					const projectPath = yield* helpers.getProjectPath()
+					const sessionName = task.id
+					const hasSession = yield* tmux.hasSession(sessionName)
 
-					// Use chat-{beadId} naming to distinguish from work sessions
-					const chatSessionName = `chat-${task.id}`
-
-					// Check if chat session already exists
-					const hasSession = yield* tmux.hasSession(chatSessionName)
-
-					if (hasSession) {
-						// Session already exists - inform user they can attach
+					if (!hasSession) {
 						yield* toast.show(
-							"info",
-							`Chat session already exists for ${task.id} - press Space+a to attach`,
+							"error",
+							`No session for ${task.id} - press Space+s to start a session first`,
 						)
-					} else {
-						// Create new chat session in background
-						// Use interactive shell so we can resume if Claude exits
-						yield* tmux
-							.newSession(chatSessionName, {
-								cwd: projectPath,
-								command: `${shell} -i -c '${fullCommand}; exec ${shell}'`,
-								prefix: tmuxPrefix,
-							})
-							.pipe(
-								Effect.tap(() =>
-									toast.show(
-										"success",
-										`Chat session started for ${task.id} - press Space+a to attach`,
-									),
-								),
-								Effect.catchAll(helpers.showErrorToast("Failed to start chat session")),
-							)
+						return
 					}
+
+					yield* worktreeSession
+						.ensureWindow(sessionName, WINDOW_NAMES.CHAT, {
+							command: `${shell} -i -c '${fullCommand}; exec ${shell}'`,
+							initCommands: [],
+						})
+						.pipe(
+							Effect.tap(() =>
+								toast.show("success", `Chat window ready for ${task.id} - press Space+a to attach`),
+							),
+							Effect.catchAll(helpers.showErrorToast("Failed to create chat window")),
+						)
 				})
 
-			/**
-			 * Find AI session by beadId
-			 *
-			 * Checks in priority order:
-			 * 1. Unified session (just beadId, e.g., "az-123")
-			 * 2. Legacy prefixed sessions (claude-az-123, opencode-az-123)
-			 */
 			const findAiSession = (beadId: string) =>
 				Effect.gen(function* () {
-					const unifiedSession = yield* tmux.hasSession(beadId)
-					if (unifiedSession) {
-						return beadId
-					}
-
-					for (const prefix of AI_SESSION_PREFIXES) {
-						const sessionName = `${prefix}${beadId}`
-						const hasSession = yield* tmux.hasSession(sessionName)
-						if (hasSession) {
-							return sessionName
-						}
-					}
-					return null
+					const hasSession = yield* tmux.hasSession(beadId)
+					return hasSession ? beadId : null
 				})
 
-			/**
-			 * Perform the actual attach action
-			 *
-			 * Internal helper that does the tmux switch.
-			 * Takes beadId and searches for the session with either prefix.
-			 */
 			const doAttach = (beadId: string) =>
 				Effect.gen(function* () {
 					const sessionName = yield* findAiSession(beadId)

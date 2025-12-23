@@ -9,7 +9,6 @@ import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
-import { SessionMigration } from "../../core/SessionMigration.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
@@ -37,26 +36,6 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 				yield* manager.updateStateFromTmux(update.beadId, update.status)
 			}).pipe(Effect.catchAll(() => Effect.void)),
 		)
-	}).pipe(Effect.catchAll(Effect.logError)),
-)
-
-export const sessionMigrationAtom = appRuntime.fn(() =>
-	Effect.gen(function* () {
-		const migration = yield* SessionMigration
-
-		const needsMigration = yield* migration.needsMigration
-		if (needsMigration) {
-			yield* Effect.log("Legacy tmux sessions detected - running migration...")
-			const result = yield* migration.migrate
-			if (result.migratedBeads.length > 0) {
-				yield* Effect.log(
-					`✓ Migrated ${result.migratedBeads.length} beads to unified session format`,
-				)
-			}
-			if (result.errors.length > 0) {
-				yield* Effect.logError(`Migration errors: ${result.errors.map((e) => e.beadId).join(", ")}`)
-			}
-		}
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
