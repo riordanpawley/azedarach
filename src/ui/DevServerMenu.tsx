@@ -32,10 +32,12 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 		switch (event.name) {
 			case "j":
 			case "down":
+			case "right":
 				setSelectedIndex((i) => (i + 1) % serverList.length)
 				break
 			case "k":
 			case "up":
+			case "left":
 				setSelectedIndex((i) => (i - 1 + serverList.length) % serverList.length)
 				break
 			case "return":
@@ -43,11 +45,11 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 				const selected = serverList[selectedIndex]
 				if (selected) {
 					toggleDevServer({ beadId, serverName: selected.name })
-					dismiss()
 				}
 				break
 			}
 			case "escape":
+			case "q":
 				dismiss()
 				break
 		}
@@ -99,7 +101,7 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 				{serverList.length === 0 && <text fg={theme.overlay0}>No servers available</text>}
 			</box>
 			<box marginTop={1}>
-				<text fg={theme.overlay0}>[j/k] Navigate, [Enter/Space] Select, [Esc] Cancel</text>
+				<text fg={theme.overlay0}>[←/→/j/k] Navigate, [Enter/Space] Toggle, [Esc/q] Close</text>
 			</box>
 		</box>
 	)
