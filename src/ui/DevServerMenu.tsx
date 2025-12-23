@@ -58,6 +58,7 @@ export const DevServerMenu = ({ beadId, mode }: Props) => {
 			borderStyle="single"
 			border={true}
 			borderColor={theme.mauve}
+			backgroundColor={theme.base}
 			paddingLeft={1}
 			paddingRight={1}
 			paddingTop={1}
