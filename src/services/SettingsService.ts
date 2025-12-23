@@ -12,6 +12,23 @@ export interface SettingDefinition {
 	readonly getValue: (config: AzedarachConfig) => boolean | string
 }
 
+/**
+ * EDITABLE_SETTINGS - Configuration options available in the settings overlay
+ *
+ * These settings can be toggled interactively in the TUI settings overlay (press 's').
+ * Each setting defines how to display, toggle, and retrieve its value from the config.
+ *
+ * Display logic:
+ * - Boolean values: Show "yes" or "no"
+ * - String values: Show the string value directly
+ *
+ * Toggle logic:
+ * - Booleans: Toggle true/false
+ * - Strings: Cycle through predefined values (e.g., "claude" ↔ "opencode")
+ *
+ * All changes are immediately saved to .azedarach.json and the config is reloaded
+ * so the UI reflects changes instantly.
+ */
 export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	{
 		key: "cliTool",
@@ -228,7 +245,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					const newConfig = setting.toggle(config)
 
 					yield* saveConfig(newConfig)
-					// Reload the config in AppConfig service so the UI updates
+					// Reload the config in AppConfig service so the UI updates immediately
 					const appConfig = yield* AppConfig
 					yield* appConfig.reload()
 					yield* toast.show("success", `${setting.label}: ${String(setting.getValue(newConfig))}`)
