@@ -16,6 +16,7 @@ import {
 	Order,
 	Record,
 	Ref,
+	Schedule,
 	Stream,
 	SubscriptionRef,
 } from "effect"
@@ -498,6 +499,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.catchAllCause((cause) =>
 				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
 					Effect.asVoid,
+				),
+			),
+		)
+
+		// Background polling fallback (every 5 seconds) to keep git stats fresh
+		// This ensures data stays current even if event-driven refresh misses something
+		yield* Effect.forkScoped(
+			Effect.repeat(Schedule.spaced("5 seconds"))(
+				refresh().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logError("BoardService background refresh failed", Cause.pretty(cause)).pipe(
+							Effect.asVoid,
+						),
+					),
 				),
 			),
 		)
