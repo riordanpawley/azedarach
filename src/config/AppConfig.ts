@@ -52,6 +52,9 @@ export interface AppConfigService {
 	/** The reactive configuration - updates when current project changes */
 	readonly config: SubscriptionRef.SubscriptionRef<ResolvedConfig>
 
+	/** Reload config from disk for current project */
+	readonly reload: () => Effect.Effect<void>
+
 	/** Get CLI tool to use for AI sessions */
 	readonly getCliTool: () => Effect.Effect<ResolvedConfig["cliTool"]>
 
@@ -402,6 +405,19 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		return {
 			config: configRef,
+			reload: () =>
+				Effect.gen(function* () {
+					const currentProjectPath = yield* projectService.getCurrentPath()
+					const effectiveProjectPath = currentProjectPath ?? process.cwd()
+					const newConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
+						Effect.catchAll((e) => {
+							return Effect.log(`[DEBUG] Config reload failed: ${e}`).pipe(
+								Effect.map(() => mergeWithDefaults({})),
+							)
+						}),
+					)
+					yield* SubscriptionRef.set(configRef, newConfig)
+				}),
 			getCliTool: () =>
 				Effect.gen(function* () {
 					const config = yield* SubscriptionRef.get(configRef)
