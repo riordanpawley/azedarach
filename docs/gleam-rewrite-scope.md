@@ -1,8 +1,8 @@
 # Azedarach Gleam Rewrite Scope Document
 
-**Version:** 3.0.0
+**Version:** 4.0.0
 **Date:** 2025-12-24
-**Status:** Draft (Complete)
+**Status:** Draft (Revised)
 
 ---
 
@@ -18,13 +18,15 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 - Gleam + OTP provides simpler concurrency and fault tolerance
 - TEA (The Elm Architecture) naturally enforces simpler state
 
+**Location:** `azedarach/gleam/` subdirectory, will replace TypeScript version eventually.
+
 ---
 
 ## 1. Project Goals
 
 ### Primary Goals
 
-1. **Simpler architecture** - 5 actors instead of 43 services
+1. **Simpler architecture** - ~6 actors instead of 43 services
 2. **Better performance** - OTP lightweight processes, no React reconciliation overhead
 3. **Less jank** - Focus on polish and quality of life
 4. **Single source of truth** - TEA model replaces three-layer state management
@@ -34,24 +36,27 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 
 | Feature | Description |
 |---------|-------------|
-| **Kanban board** | Overview of beads tasks by status |
+| **Kanban board** | Overview of beads tasks by status (4 columns) |
+| **Multi-project** | Project switcher within single instance |
 | **Bead CRUD** | Create/edit beads with image attachment support |
-| **Git integration** | Worktrees, status, diffs, PR creation |
+| **Git integration** | Worktrees, status, diffs, PR creation, merge to main |
 | **Session management** | 1 worktree + 1 tmux session per bead |
 | **Dev servers** | Managed dev server processes with port allocation |
-| **Init commands** | Setup commands run on worktree creation |
+| **Init commands** | Setup commands run once at tmux session creation |
 | **Background tasks** | Long-running processes in separate tmux windows |
+| **Cleanup** | Delete worktree, branch, session |
 
-### Deferred to v2
+### Out of Scope (v1.0)
 
-- Epic orchestration / swarm pattern
-- Auto PR creation (v1 has manual keybind)
-
-### Non-Goals
-
-- Direct port of TypeScript code
-- Hybrid architecture
-- Feature bloat
+| Feature | Reason |
+|---------|--------|
+| Epic orchestration / swarm | Deferred to v2 |
+| VC integration | Not yet used |
+| Command mode (`:`) | Tied to VC |
+| Compact view | Nice-to-have |
+| Keybind customization | Stretch goal |
+| Attach inline | Deprecated |
+| Chat about task | Not needed |
 
 ---
 
@@ -68,6 +73,10 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 | Worktree location | **Template string**: `"{project}-{bead-id}"` (configurable) |
 | Polling intervals | **Configurable** with current values as defaults |
 | Beads dependency | **Required** - beads is the task persistence layer |
+| Dev server ports | **Trust the port we set** (no output polling for port) |
+| Repo location | **Subdirectory** `azedarach/gleam/`, replace eventually |
+| Shore customization | **Fork first**, contribute upstream later |
+| Multi-project | **Switcher within single instance** |
 
 ### 2.2 Configuration Schema
 
@@ -84,7 +93,6 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
     "backgroundTasks": ["npm run watch", "npm run test:watch"]
   },
   "devServer": {
-    "portPattern": "localhost:(\\d+)",
     "servers": {
       "default": {
         "command": "npm run dev",
@@ -104,7 +112,7 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 
 ## 3. Architecture
 
-### 3.1 The Five Actors
+### 3.1 Actor Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -118,39 +126,25 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 │                    Coordinator Actor                         │
 │  - Task cache (from beads)                                   │
 │  - Session registry (optimistic state)                       │
+│  - Dev server registry                                       │
 │  - Routes commands to services                               │
-│  - Aggregates state updates for UI                           │
 └─────────────────────────────────────────────────────────────┘
-        │           │           │           │           │
-        ▼           ▼           ▼           ▼           ▼
-  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-  │ Sessions │ │ Worktree │ │  Beads   │ │   Git    │ │   Dev    │
-  │Supervisor│ │ (module) │ │ (module) │ │ (module) │ │ Servers  │
-  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
-        │                                                   │
-        ▼ (dynamic)                                         ▼ (dynamic)
-  ┌──────────┐                                        ┌──────────┐
-  │ Session  │ ←── one per active Claude session      │  Server  │
-  │ Monitor  │     polls tmux, detects state          │ Monitor  │
-  └──────────┘                                        └──────────┘
+          │                    │
+          ▼                    ▼
+    ┌──────────┐         ┌──────────┐
+    │ Sessions │         │  Dev     │
+    │Supervisor│         │ Servers  │
+    └──────────┘         │Supervisor│
+          │              └──────────┘
+          ▼ (dynamic)          │
+    ┌──────────┐               ▼ (dynamic)
+    │ Session  │         ┌──────────┐
+    │ Monitor  │         │  Server  │
+    └──────────┘         │ Monitor  │
+                         └──────────┘
+
+Stateless Modules: Worktree, Beads, Git, Tmux, Clipboard
 ```
-
-**Actor Responsibilities:**
-
-| Actor | State | Purpose |
-|-------|-------|---------|
-| Shore App | TEA Model | All UI state, rendering |
-| Coordinator | Task cache, session registry | Central orchestration |
-| Sessions Supervisor | Child monitors | Supervises session monitors |
-| Session Monitor | Output buffer, detected state | Polls tmux for Claude state |
-| Server Monitor | Port, status | Polls dev server output for port detection |
-
-**Stateless Modules:**
-- Worktree: `create/2`, `remove/1`, `status/1`
-- Beads: `list/0`, `show/1`, `create/1`, `update/2`
-- Git: `status/1`, `diff/1`, `pr_create/2`
-- Tmux: `new_session/2`, `capture_pane/2`, `send_keys/3`
-- Clipboard: `read_image/0`, `has_image/0`
 
 ### 3.2 State Hierarchy
 
@@ -161,17 +155,21 @@ Source of Truth Priority:
 3. Files (only for persistent config, image attachments)
 ```
 
-**Why Tmux first:** If the app crashes and restarts, tmux sessions are still there. We reconstruct state by querying tmux.
+**On restart:** Reconstruct state by querying tmux for existing sessions.
 
 ### 3.3 TEA Model
 
 ```gleam
 pub type Model {
   Model(
-    // Core data (from beads + tmux)
+    // Core data
     tasks: List(Task),
     sessions: Dict(String, SessionState),
     dev_servers: Dict(String, DevServerState),
+
+    // Multi-project
+    projects: List(Project),
+    current_project: Option(String),
 
     // Navigation
     cursor: Cursor,
@@ -187,7 +185,7 @@ pub type Model {
     sort_by: SortField,
     search_query: String,
 
-    // Config (loaded once)
+    // Config
     config: Config,
 
     // Meta
@@ -211,8 +209,7 @@ pub type Mode {
 ```gleam
 pub type InputState {
   Search(query: String)
-  Command(text: String)
-  BeadTitle(text: String)      // Creating/editing bead
+  BeadTitle(text: String)
   BeadNotes(text: String)
 }
 ```
@@ -224,10 +221,16 @@ pub type Overlay {
   SortMenu
   FilterMenu
   HelpOverlay
+  SettingsOverlay
+  DiagnosticsOverlay
+  LogsViewer
+  ProjectSelector
   DetailPanel(bead_id: String)
   ImageAttach(bead_id: String)
   ImagePreview(path: String)
   DevServerMenu(bead_id: String)
+  DiffViewer(bead_id: String)
+  MergeChoice(bead_id: String)
   ConfirmDialog(action: PendingAction)
 }
 ```
@@ -235,205 +238,291 @@ pub type Overlay {
 ### 3.5 OTP Supervision Strategy
 
 ```
-Session Monitor crashes:
+Monitor crashes:
   → Supervisor auto-restarts
   → Monitor polls tmux for current state
   → UI shows "refreshing..." briefly
   → Normal operation resumes
 
 If 3 crashes in 60 seconds:
-  → Mark session "unknown"
+  → Mark session/server "unknown"
   → Surface toast warning
-
-Dev Server Monitor crashes:
-  → Same pattern
-  → Re-detect port from output
 ```
 
 ---
 
-## 4. Core Features Detail
+## 4. Tmux Session Model
 
-### 4.1 Session Lifecycle
+### 4.1 Session Creation Triggers
 
-```
-User triggers "Start Session" (Space+s)
-    │
-    ▼
-Coordinator receives SpawnSession(bead_id)
-    │
-    ├─→ Worktree.create(bead_id, config.pathTemplate)
-    │     └─→ git worktree add ../project-bead-id
-    │
-    ├─→ Tmux.new_session("{bead_id}-az", worktree_path)
-    │     └─→ tmux new-session -d -s {bead_id}-az -c {path}
-    │
-    ├─→ Run init commands sequentially:
-    │     for cmd in config.initCommands:
-    │       Tmux.send_keys(session, cmd)
-    │       wait_for_prompt()
-    │
-    ├─→ Tmux.send_keys(session, "claude")
-    │
-    ├─→ Spawn background tasks (parallel):
-    │     for task in config.backgroundTasks:
-    │       Tmux.new_window(session, "task-N")
-    │       wait_for_init_marker()
-    │       run init commands
-    │       Tmux.send_keys(window, task)
-    │
-    └─→ Start SessionMonitor under supervisor
-          └─→ Polls every 500ms, detects state
-```
+A tmux session (`{bead-id}-az`) can be created by any of:
 
-### 4.2 Dev Servers
+1. **Starting Claude session** (Space+s, Space+S, Space+!)
+2. **Starting dev server** (Space+r)
+3. **Opening editor in worktree** (if implemented)
+4. **Pre-spinning up for later use** (if implemented)
+
+### 4.2 Init Commands (Once Per Session)
+
+Init commands run **only once** when the tmux session is first created:
 
 ```
-User triggers "Start Dev Server" (Space+d)
+Session Creation:
     │
-    ▼
-Coordinator receives StartDevServer(bead_id, server_name)
+    ├─→ Create tmux session
     │
-    ├─→ Get/create worktree for bead
+    ├─→ Run init commands ONCE (sequentially):
+    │     1. direnv allow  → wait for prompt
+    │     2. bun install   → wait for prompt
+    │     3. bd sync       → wait for prompt
+    │     4. Set marker @az_init_done = 1
     │
-    ├─→ Allocate port (base + offset for running servers)
-    │
-    ├─→ Create tmux window "dev" or split pane
-    │
-    ├─→ Set PORT env var, run command
-    │
-    └─→ Start ServerMonitor
-          └─→ Polls output for port pattern
-          └─→ Updates state when port detected
+    └─→ Ready for windows (main, dev, background tasks)
 ```
 
-**Port allocation:** Each server config has a base port. If that port is in use, increment until free.
+If session already exists, skip init and just create the requested window.
 
-### 4.3 Image Attachments
-
-```
-User in detail panel, triggers "Attach Image" (i)
-    │
-    ▼
-ImageAttach overlay opens
-    │
-    ├─→ "p" = Paste from clipboard
-    │     └─→ Platform-specific: pbpaste (mac), wl-paste (wayland), xclip (x11)
-    │     └─→ Save to .beads/images/{bead-id}/{id}.png
-    │     └─→ Append markdown link to bead notes
-    │
-    └─→ Path input = Attach from filesystem
-          └─→ Copy file to .beads/images/{bead-id}/
-          └─→ Append markdown link to bead notes
-
-Storage: .beads/images/
-├── index.json              # Metadata
-└── {bead-id}/
-    └── {attachment-id}.png
-```
-
-### 4.4 Init Commands
-
-Run sequentially via tmux send-keys (not `&&` chained):
-- Allows direnv to load between commands
-- Each command waits for shell prompt
-- Proper error detection per command
+### 4.3 Window Structure
 
 ```
-1. direnv allow     → wait for prompt (direnv now active)
-2. bun install      → wait for prompt (deps installed with direnv env)
-3. bd sync          → wait for prompt (beads synced)
-4. [set marker]     → @az_init_done = 1
-5. [main command]   → claude or dev server
+Session: {bead-id}-az
+├── Window: main      → Claude or empty shell
+├── Window: dev-web   → Dev server "web" (named for lookup)
+├── Window: dev-api   → Dev server "api" (if multiple)
+├── Window: task-1    → Background task (closes on success)
+└── Window: task-2    → Background task (closes on success)
 ```
 
-### 4.5 Background Tasks
+**Dev servers:** One window per server, named `dev-{server-name}` for lookup.
 
-Separate tmux windows in same session:
-- Each window runs init commands first
-- Then runs the background task
-- Window stays open after task exits (`; exec $SHELL`)
+**Background tasks:** Windows close on success, stay open only on failure for debugging.
+
+### 4.4 Session Lifecycle
 
 ```
-Session: task-123-az
-├── Window 0 (main): claude running
-├── Window task-1: npm run watch
-└── Window task-2: npm run test:watch
+Start Session (Space+s):
+  IF session exists:
+    → Attach to existing session
+  ELSE:
+    → Create worktree (if needed)
+    → Create tmux session
+    → Run init commands (once)
+    → Create main window with "claude"
+    → Create background task windows (parallel)
+    → Start session monitor
+
+Start Dev Server (Space+r):
+  IF session exists:
+    → Create window "dev-{name}" with command
+  ELSE:
+    → Create worktree (if needed)
+    → Create tmux session
+    → Run init commands (once)
+    → Create window "dev-{name}" with command
+    → Start server monitor (tracks port)
+
+Stop Session (Space+x):
+  → Kill tmux session
+  → Cleanup monitors
+
+Delete/Cleanup (Space+d):
+  → Stop session (if running)
+  → Delete worktree
+  → Delete remote branch
+  → Delete local branch
+  → Optionally close bead
 ```
 
 ---
 
-## 5. Module Structure
+## 5. Complete Feature List
 
-```
-src/
-├── azedarach.gleam              # Entry point, supervisor setup
-├── cli.gleam                    # CLI argument parsing
-├── config.gleam                 # JSON config loading
-│
-├── ui/
-│   ├── app.gleam                # Shore application
-│   ├── model.gleam              # Model type definitions
-│   ├── update.gleam             # Message handling
-│   ├── view.gleam               # Main view
-│   ├── view/
-│   │   ├── board.gleam          # Kanban columns
-│   │   ├── card.gleam           # Task cards
-│   │   ├── status_bar.gleam     # Bottom bar
-│   │   └── overlays.gleam       # All overlays
-│   ├── keys.gleam               # Keybinding definitions
-│   └── theme.gleam              # Catppuccin + custom themes
-│
-├── actors/
-│   ├── coordinator.gleam        # Central orchestration
-│   ├── sessions_sup.gleam       # Session monitor supervisor
-│   ├── session_monitor.gleam    # Claude state detection
-│   ├── servers_sup.gleam        # Dev server supervisor
-│   └── server_monitor.gleam     # Port detection
-│
-├── services/
-│   ├── beads.gleam              # bd CLI wrapper
-│   ├── tmux.gleam               # tmux commands
-│   ├── worktree.gleam           # git worktree ops
-│   ├── git.gleam                # git status/diff/PR
-│   ├── clipboard.gleam          # Platform clipboard
-│   ├── state_detector.gleam     # Output pattern matching
-│   └── port_allocator.gleam     # Dev server port management
-│
-├── domain/
-│   ├── task.gleam               # Task types
-│   ├── session.gleam            # Session state
-│   ├── bead.gleam               # Bead schema
-│   └── attachment.gleam         # Image attachment types
-│
-└── util/
-    ├── shell.gleam              # Command execution
-    ├── time.gleam               # Formatting
-    └── platform.gleam           # OS detection
-```
+### 5.1 Navigation
 
-**Estimated: ~7,000-8,000 lines** (accounting for new features)
+| Key | Action |
+|-----|--------|
+| h/j/k/l or arrows | Move cursor |
+| Ctrl+Shift+d | Half-page down |
+| Ctrl+Shift+u | Half-page up |
+| Enter | View detail / enter epic |
+| q | Quit (or exit drill-down) |
+| Esc | Exit mode / close overlay |
+| Tab | Toggle view mode (future: kanban ↔ compact) |
+| Ctrl+l | Force redraw |
+
+### 5.2 Goto Mode (g + key)
+
+| Key | Action |
+|-----|--------|
+| g | First task in column |
+| e | Last task in column |
+| h | First column |
+| l | Last column |
+| w | Jump labels mode |
+| p | Project selector |
+
+### 5.3 Select Mode (v)
+
+| Key | Action |
+|-----|--------|
+| Space | Toggle selection |
+| h/j/k/l | Navigate with selections |
+| Esc | Exit and clear |
+
+### 5.4 Search Mode (/)
+
+| Key | Action |
+|-----|--------|
+| typing | Filter by title/ID |
+| Enter | Confirm filter |
+| Esc | Clear and exit |
+
+### 5.5 Sort Mode (,)
+
+| Key | Action |
+|-----|--------|
+| s | Sort by session status |
+| p | Sort by priority |
+| u | Sort by updated_at |
+| Esc | Cancel |
+
+### 5.6 Filter Mode (f)
+
+| Key | Action |
+|-----|--------|
+| s | Status sub-menu |
+| p | Priority sub-menu |
+| t | Type sub-menu |
+| S | Session state sub-menu |
+| e | Toggle hide epic children |
+| c | Clear all filters |
+| Esc | Cancel |
+
+### 5.7 Action Menu (Space)
+
+**Session Actions:**
+| Key | Action |
+|-----|--------|
+| s | Start session |
+| S | Start+work (with bead context prompt) |
+| ! | Start yolo (skip permissions) |
+| a | Attach to session |
+| p | Pause session |
+| S+r | Resume session |
+| x | Stop session |
+
+**Dev Server Actions:**
+| Key | Action |
+|-----|--------|
+| r | Toggle dev server |
+| v | View dev server (attach to window) |
+| C+r | Restart dev server |
+
+**Git/PR Actions:**
+| Key | Action |
+|-----|--------|
+| u | Update from main (merge main into branch) |
+| f | Show diff |
+| S+p | Create PR |
+| m | Merge to main |
+| d | Delete worktree / cleanup |
+
+**Task Actions:**
+| Key | Action |
+|-----|--------|
+| h | Move task left |
+| l | Move task right |
+
+### 5.8 Detail Panel (Enter)
+
+| Key | Action |
+|-----|--------|
+| Ctrl+u/d | Scroll |
+| j/k | Select attachment |
+| v | Preview image |
+| o | Open in viewer |
+| x | Delete attachment |
+| i | Add image |
+| e | Edit bead |
+
+### 5.9 Top-Level Keys
+
+| Key | Action |
+|-----|--------|
+| ? | Help overlay |
+| s | Settings overlay |
+| d | Diagnostics overlay |
+| c | Create bead ($EDITOR) |
+| S+c | Create bead (Claude prompt) |
+| S+l | View logs |
+| R | Refresh |
+
+### 5.10 Image Attachment
+
+| Key | Action |
+|-----|--------|
+| p/v | Paste from clipboard |
+| f | Enter file path mode |
+| Esc | Close |
 
 ---
 
-## 6. Dependencies
+## 6. Module Structure
 
-```toml
-[dependencies]
-gleam_stdlib = "~> 0.40"
-gleam_erlang = "~> 0.27"
-gleam_otp = "~> 0.12"
-gleam_json = "~> 2.0"
-shore = "~> 1.3"
-simplifile = "~> 2.0"
-shellout = "~> 1.6"
-argv = "~> 1.0"
-
-[dev-dependencies]
-gleeunit = "~> 1.0"
 ```
-
-**External CLI tools:** tmux, git, bd, gh, platform clipboard tools
+gleam/
+├── src/
+│   ├── azedarach.gleam           # Entry point
+│   ├── cli.gleam                 # CLI parsing
+│   ├── config.gleam              # JSON config
+│   │
+│   ├── ui/
+│   │   ├── app.gleam             # Shore application
+│   │   ├── model.gleam           # Model types
+│   │   ├── update.gleam          # Message handling
+│   │   ├── view.gleam            # Main view
+│   │   ├── view/
+│   │   │   ├── board.gleam       # Kanban columns
+│   │   │   ├── card.gleam        # Task cards
+│   │   │   ├── status_bar.gleam  # Bottom bar
+│   │   │   └── overlays.gleam    # All overlays
+│   │   ├── keys.gleam            # Keybindings
+│   │   └── theme.gleam           # Catppuccin + custom
+│   │
+│   ├── actors/
+│   │   ├── coordinator.gleam     # Central orchestration
+│   │   ├── sessions_sup.gleam    # Session supervisor
+│   │   ├── session_monitor.gleam # Claude state detection
+│   │   ├── servers_sup.gleam     # Dev server supervisor
+│   │   └── server_monitor.gleam  # Server state tracking
+│   │
+│   ├── services/
+│   │   ├── beads.gleam           # bd CLI wrapper
+│   │   ├── tmux.gleam            # tmux commands
+│   │   ├── worktree.gleam        # git worktree ops
+│   │   ├── git.gleam             # git commands
+│   │   ├── pr.gleam              # GitHub PR via gh
+│   │   ├── clipboard.gleam       # Platform clipboard
+│   │   ├── state_detector.gleam  # Output pattern matching
+│   │   └── image.gleam           # Image attachments
+│   │
+│   ├── domain/
+│   │   ├── task.gleam            # Task types
+│   │   ├── session.gleam         # Session state
+│   │   ├── bead.gleam            # Bead schema
+│   │   ├── project.gleam         # Project types
+│   │   └── attachment.gleam      # Image types
+│   │
+│   └── util/
+│       ├── shell.gleam           # Command execution
+│       ├── time.gleam            # Formatting
+│       └── platform.gleam        # OS detection
+│
+├── test/
+│   └── ...
+│
+└── gleam.toml
+```
 
 ---
 
@@ -441,70 +530,73 @@ gleeunit = "~> 1.0"
 
 ### Phase 1: Foundation (Week 1-2)
 
-- [ ] Project scaffolding
+- [ ] Project scaffolding in `gleam/`
 - [ ] Shore integration, TEA skeleton
-- [ ] Catppuccin theme implementation
+- [ ] Catppuccin Macchiato theme
 - [ ] Empty kanban board (4 columns)
-- [ ] Basic navigation (hjkl)
+- [ ] Navigation (hjkl, arrows)
 - [ ] Status bar
-- [ ] Config loading (JSON)
+- [ ] JSON config loading
 
-**Milestone:** App starts, shows empty themed board, cursor moves
+**Milestone:** App starts, themed board, cursor moves
 
-### Phase 2: Beads Integration (Week 3-4)
+### Phase 2: Beads & Projects (Week 3-4)
 
 - [ ] Beads module (`bd list/show/create/update`)
-- [ ] Coordinator actor with task cache
+- [ ] Coordinator actor
 - [ ] Task card rendering
-- [ ] Periodic refresh (configurable interval)
-- [ ] Bead creation (n key)
-- [ ] Bead editing in detail panel
+- [ ] Periodic refresh
+- [ ] Bead creation/editing
+- [ ] Project switcher (multi-project)
 
-**Milestone:** Board shows real beads, can create/edit
+**Milestone:** Board shows beads, can switch projects
 
-### Phase 3: Worktrees & Sessions (Week 5-6)
+### Phase 3: Sessions & Worktrees (Week 5-6)
 
-- [ ] Worktree module with template paths
-- [ ] Tmux module (sessions, windows, panes)
-- [ ] Init commands (sequential execution)
-- [ ] Session spawning (Space+s)
-- [ ] Sessions supervisor + monitors
-- [ ] State detector (pattern matching)
+- [ ] Worktree module
+- [ ] Tmux module (sessions, windows)
+- [ ] Init commands (once per session)
+- [ ] Session spawning (s, S, !)
+- [ ] Session monitor + state detection
+- [ ] Attach, pause, resume, stop
 - [ ] Session state on cards
 
-**Milestone:** Can spawn Claude session, see state updates
+**Milestone:** Full session lifecycle works
 
-### Phase 4: Dev Servers & Background (Week 7-8)
+### Phase 4: Dev Servers & Git (Week 7-8)
 
-- [ ] Dev server config and port allocation
-- [ ] Server supervisor + monitors
-- [ ] Port detection from output
-- [ ] Dev server menu overlay
-- [ ] Background tasks in separate windows
-- [ ] Toggle dev server (Space+d)
+- [ ] Dev server windows (one per server)
+- [ ] Port allocation (trust the port)
+- [ ] Server monitor
+- [ ] Background task windows (close on success)
+- [ ] Update from main
+- [ ] Merge to main
+- [ ] Show diff
+- [ ] Create PR
+- [ ] Delete/cleanup
 
-**Milestone:** Can start dev servers, see ports, run background tasks
+**Milestone:** Full git workflow, dev servers work
 
 ### Phase 5: Full Interaction (Week 9-10)
 
-- [ ] All overlays (action, filter, sort, help)
-- [ ] Search input
+- [ ] All overlays (action, filter, sort, help, settings, diagnostics)
+- [ ] Search
 - [ ] Select mode
-- [ ] Goto navigation
-- [ ] Detail panel with full info
+- [ ] Goto mode + jump labels
+- [ ] Detail panel
 - [ ] Image attachment (clipboard + file)
-- [ ] Session attach/pause/resume/stop
-- [ ] PR creation keybind
+- [ ] Logs viewer
+- [ ] Confirm dialogs
 - [ ] Toast notifications
 
-**Milestone:** Full keyboard interaction, image attachments work
+**Milestone:** Feature complete
 
 ### Phase 6: Polish (Week 11-12)
 
 - [ ] Custom theme support
-- [ ] Error handling and recovery
+- [ ] Error handling
 - [ ] Performance optimization
-- [ ] Edge cases and resilience
+- [ ] Edge cases
 - [ ] Documentation
 - [ ] Distribution (escript + standalone)
 
@@ -512,64 +604,21 @@ gleeunit = "~> 1.0"
 
 ---
 
-## 8. Keybindings
-
-### Navigation
-| Key | Action |
-|-----|--------|
-| h/j/k/l | Move cursor |
-| g + key | Jump (gb=backlog, gi=in_progress, ir=review, id=done) |
-| / | Search |
-| Enter | Detail panel |
-| Esc | Back to normal / close overlay |
-
-### Actions (Space menu)
-| Key | Action |
-|-----|--------|
-| s | Start Claude session |
-| a | Attach to session |
-| p | Pause session |
-| r | Resume session |
-| x | Stop session |
-| d | Toggle dev server |
-| c | Create PR |
-| i | Attach image |
-
-### Bead Operations
-| Key | Action |
-|-----|--------|
-| n | New bead |
-| e | Edit bead (in detail) |
-| D | Delete bead (confirm) |
-
-### Selection
-| Key | Action |
-|-----|--------|
-| v | Enter select mode |
-| Space | Toggle selection |
-| Esc | Exit select mode |
-
-### View
-| Key | Action |
-|-----|--------|
-| f | Filter menu |
-| , | Sort menu |
-| ? | Help |
-| R | Refresh |
-
----
-
-## 9. Success Criteria
+## 8. Success Criteria
 
 ### Must Have
 - [ ] Kanban board with beads
+- [ ] Multi-project switcher
 - [ ] Bead CRUD with image attachments
-- [ ] Worktree creation with configurable path
-- [ ] Claude session spawn/attach/stop
-- [ ] Dev servers with port detection
-- [ ] Init commands and background tasks
-- [ ] PR creation via keybind
-- [ ] Filter and sort
+- [ ] Session spawn/attach/pause/resume/stop
+- [ ] Start+work and yolo variants
+- [ ] Dev servers (one window per server)
+- [ ] Init commands (once per session)
+- [ ] Background tasks (close on success)
+- [ ] Update from main, merge to main
+- [ ] Create PR, show diff
+- [ ] Delete/cleanup worktree+branch
+- [ ] Filter, sort, search
 - [ ] Catppuccin theme
 
 ### Performance
@@ -580,39 +629,38 @@ gleeunit = "~> 1.0"
 ### Quality
 - [ ] No UI freezes
 - [ ] Graceful error handling
-- [ ] Auto-recovery from crashes
 - [ ] State reconstruction from tmux on restart
 
 ---
 
-## 10. Risks and Mitigations
+## 9. Risks and Mitigations
 
-### Shore Maturity
-**Risk:** Young library, may have limitations
-**Mitigation:** Fork early, contribute upstream, abstract rendering
+| Risk | Mitigation |
+|------|------------|
+| Shore immaturity | Fork early, contribute later |
+| Tmux flickering | Test in Phase 1, custom buffering if needed |
+| Clipboard cross-platform | Platform detection, graceful fallback |
+| Image rendering | Use external viewer if terminal support lacking |
 
-### Tmux Flickering
-**Risk:** Documented Shore + tmux issues
-**Mitigation:** Test in Phase 1, investigate sync output, custom buffering if needed
+---
 
-### Clipboard Cross-Platform
-**Risk:** Different tools per platform (pbpaste, wl-paste, xclip)
-**Mitigation:** Platform detection module, graceful fallback with clear errors
+## 10. Open Questions
 
-### Image Rendering
-**Risk:** Terminal image support varies (iTerm2, sixel, unicode blocks)
-**Mitigation:** Defer image preview to v1.1 if complex, or use external viewer
+1. **Testing strategy** - Unit tests? Integration with tmux? Property-based?
+2. **Start+work prompt format** - What context to include?
+3. **Merge conflict UX** - How to handle in TUI?
 
 ---
 
 ## 11. Next Steps
 
-1. **Create repo:** `azedarach-gleam` (or within existing as `gleam/`)
-2. **Spike:** Shore + tmux rendering
-3. **Spike:** OTP actor communication pattern
-4. **Spike:** Clipboard access on target platforms
-5. **Begin Phase 1**
+1. Continue iterating on plan
+2. Create architecture diagram (separate doc)
+3. Create session lifecycle diagram
+4. Create feature matrix (in/out of scope)
+5. Resolve open questions
+6. Begin Phase 1 spikes
 
 ---
 
-*Document version: 3.0.0 - Complete scope with all features*
+*Document version: 4.0.0 - Revised with corrections and complete feature list*
