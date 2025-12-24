@@ -90,40 +90,6 @@ pub fn update_status(
   }
 }
 
-// Paste image from clipboard
-pub fn paste_image(id: String, config: Config) -> Result(String, BeadsError) {
-  // Platform-specific clipboard handling
-  let paste_cmd = detect_paste_command()
-  case paste_cmd {
-    Some(cmd) -> {
-      // Generate filename
-      let filename = id <> "-" <> random_id() <> ".png"
-      let path = ".beads/images/" <> id <> "/" <> filename
-
-      // Create directory
-      shell.run("mkdir", ["-p", ".beads/images/" <> id], ".")
-
-      // Paste image
-      case shell.run_with_output(cmd.0, cmd.1, path) {
-        Ok(_) -> Ok(path)
-        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
-      }
-    }
-    None -> Error(CommandFailed(1, "No clipboard command found"))
-  }
-}
-
-// Delete image
-pub fn delete_image(
-  id: String,
-  path: String,
-  config: Config,
-) -> Result(Nil, BeadsError) {
-  case shell.run("rm", [path], ".") {
-    Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
-  }
-}
 
 // Sync beads (for worktrees)
 pub fn sync(config: Config) -> Result(Nil, BeadsError) {
@@ -211,27 +177,4 @@ fn map_option(
   }
 }
 
-fn detect_paste_command() -> Option(#(String, List(String))) {
-  // Try different clipboard commands
-  case shell.command_exists("pbpaste") {
-    True -> Some(#("pbpaste", []))
-    False -> {
-      case shell.command_exists("wl-paste") {
-        True -> Some(#("wl-paste", ["--type", "image/png"]))
-        False -> {
-          case shell.command_exists("xclip") {
-            True -> Some(#("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]))
-            False -> None
-          }
-        }
-      }
-    }
-  }
-}
-
-fn random_id() -> String {
-  int.to_string(erlang.unique_integer([positive]))
-}
-
-import gleam/erlang
 import gleam/int

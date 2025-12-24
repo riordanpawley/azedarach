@@ -483,17 +483,26 @@ fn handle_message(msg: Msg, state: State) -> actor.Next(Msg, State) {
     }
 
     PasteImage(id) -> {
-      case beads.paste_image(id, state.config) {
-        Ok(path) -> notify_ui(state, Toast("Image attached: " <> path, Success))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+      case image.attach_from_clipboard(id) {
+        Ok(attachment) -> {
+          // Update bead notes with link to image
+          let link = image.build_notes_link(id, attachment)
+          append_to_bead_notes(id, link, state.config)
+          notify_ui(state, Toast("Image attached: " <> attachment.filename, Success))
+        }
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
       }
       actor.continue(state)
     }
 
-    DeleteImage(id, path) -> {
-      case beads.delete_image(id, path, state.config) {
-        Ok(_) -> notify_ui(state, Toast("Image deleted", Success))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+    DeleteImage(id, attachment_id) -> {
+      case image.remove(id, attachment_id) {
+        Ok(attachment) -> {
+          // Remove link from bead notes
+          remove_from_bead_notes(id, attachment.filename, state.config)
+          notify_ui(state, Toast("Image deleted", Success))
+        }
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
       }
       actor.continue(state)
     }
@@ -708,8 +717,59 @@ fn now_iso() -> String {
   "2025-01-01T00:00:00Z"
 }
 
+/// Append a line to bead notes (for image attachment links)
+fn append_to_bead_notes(issue_id: String, line: String, config: Config) -> Nil {
+  // Get current bead to read existing notes
+  case beads.show(issue_id, config) {
+    Ok(task) -> {
+      let existing_notes = option.unwrap(task.design_notes, "")
+      let separator = case existing_notes {
+        "" -> ""
+        _ -> "\n"
+      }
+      let new_notes = existing_notes <> separator <> line
+
+      // Update bead with new notes
+      shell.run("bd", ["update", issue_id, "--notes=" <> new_notes], ".")
+      |> result.unwrap(Nil)
+    }
+    Error(_) -> Nil
+  }
+}
+
+/// Remove attachment link from bead notes
+fn remove_from_bead_notes(issue_id: String, filename: String, config: Config) -> Nil {
+  case beads.show(issue_id, config) {
+    Ok(task) -> {
+      case task.design_notes {
+        Some(notes) -> {
+          // Remove lines starting with the attachment link pattern
+          let prefix = "📎 [" <> filename <> "]"
+          let lines = string.split(notes, "\n")
+          let filtered = list.filter(lines, fn(line) {
+            !string.starts_with(line, prefix)
+          })
+
+          case list.length(filtered) == list.length(lines) {
+            True -> Nil  // Nothing to remove
+            False -> {
+              let new_notes = string.join(filtered, "\n") |> string.trim
+              shell.run("bd", ["update", issue_id, "--notes=" <> new_notes], ".")
+              |> result.unwrap(Nil)
+            }
+          }
+        }
+        None -> Nil
+      }
+    }
+    Error(_) -> Nil
+  }
+}
+
 import gleam/erlang
 import gleam/int
 import gleam/result
 import gleam/string
 import azedarach/domain/session
+import azedarach/services/image
+import azedarach/util/shell
