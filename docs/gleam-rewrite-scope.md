@@ -1,14 +1,22 @@
 # Azedarach Gleam Rewrite Scope Document
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 **Date:** 2025-12-24
-**Status:** Draft
+**Status:** Draft (Refined)
 
 ---
 
 ## Executive Summary
 
-Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam using the Shore TUI framework. The goal is to leverage Gleam's type safety, functional purity, and the Erlang VM's concurrency model for a more robust orchestration system.
+Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam using the Shore TUI framework. This is a **reimagining**, not a port—same features, better architecture.
+
+**Core Mission:** Task tracking and worktree management with consideration for CLI AI agents.
+
+**Why Rewrite:**
+- Current state management is painful and performance is poor
+- 43 services is excessive for what the app actually does
+- Gleam + OTP provides simpler concurrency and fault tolerance
+- TEA (The Elm Architecture) naturally enforces simpler state
 
 ---
 
@@ -16,162 +24,306 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 
 ### Primary Goals
 
-1. **Full Gleam implementation** - No TypeScript/JavaScript in the final product
-2. **Shore TUI framework** - Use TEA (The Elm Architecture) for UI
-3. **Erlang VM benefits** - Leverage OTP supervision, fault tolerance, lightweight processes
-4. **Feature parity** - All existing Azedarach functionality preserved
-5. **Improved reliability** - Erlang's "let it crash" philosophy for session management
+1. **Simpler architecture** - 5 actors instead of 43 services
+2. **Better performance** - OTP lightweight processes, no React reconciliation overhead
+3. **Less jank** - Focus on polish and quality of life
+4. **Single source of truth** - TEA model replaces three-layer state management
+5. **Fault tolerance** - OTP supervision with sensible auto-recovery
+
+### What We're Building
+
+A TUI kanban board that:
+- Shows tasks from beads
+- Spawns Claude Code sessions in git worktrees
+- Monitors session state (busy/waiting/done/error)
+- Provides keyboard-driven navigation and actions
+
+### Deferred to v2
+
+- Epic orchestration / swarm pattern
+- Auto PR creation (v1 has manual keybind)
+- Image attachments
 
 ### Non-Goals
 
-- Hybrid architecture (Gleam backend + React frontend)
-- Incremental migration (will be a clean rewrite)
-- Supporting non-Erlang compile targets (JavaScript target not used)
+- Direct port of TypeScript code
+- Hybrid architecture
+- Feature bloat
 
 ---
 
 ## 2. Technical Architecture
 
-### 2.1 Runtime Target
+### 2.1 The Five Actors
 
-**Erlang VM (BEAM)** - Not JavaScript target
-
-Rationale:
-- OTP supervision trees for session management
-- Lightweight processes for concurrent tmux monitoring
-- Built-in fault tolerance
-- Hot code reloading potential
-
-### 2.2 Core Architecture Pattern
-
-Replace Effect services with **OTP-style architecture**:
+Replace 43 Effect services with **5 OTP actors**:
 
 ```
-Current (TypeScript/Effect)          Gleam/OTP Equivalent
-─────────────────────────────        ────────────────────
-Effect.Service                   →   Gleam OTP Actor (gleam_otp)
-SubscriptionRef                  →   Actor state + message passing
-Layer (dependency injection)     →   Supervisor children / process registry
-PubSub                          →   gleam_erlang process messaging
-Effect.fork / forkScoped        →   OTP supervised processes
-Schedule.spaced                 →   erlang:send_after / timer
+┌─────────────────────────────────────────────────────────────┐
+│                    Shore Application                         │
+│         (TEA: Model + Update + View = all UI state)         │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                    messages│(Gleam process messaging)
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Coordinator Actor                         │
+│  - Owns task list cache                                      │
+│  - Routes commands to services                               │
+│  - Aggregates state updates for UI                           │
+│  - Single point of coordination                              │
+└─────────────────────────────────────────────────────────────┘
+          │              │              │              │
+          ▼              ▼              ▼              ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐
+    │ Sessions │  │ Worktree │  │  Beads   │  │   Git    │
+    │Supervisor│  │ (module) │  │ (module) │  │ (module) │
+    └──────────┘  └──────────┘  └──────────┘  └──────────┘
+          │
+          ▼ (dynamic children)
+    ┌──────────┐
+    │ Monitor  │ ←── one per active Claude session
+    │ (actor)  │     polls tmux, detects state
+    └──────────┘
 ```
 
-### 2.3 UI Framework
+**Actor Responsibilities:**
 
-**Shore** (https://github.com/bgwdotdev/shore)
+| Actor | State | Purpose |
+|-------|-------|---------|
+| Shore App | TEA Model | All UI state, rendering |
+| Coordinator | Task cache, session registry | Central orchestration |
+| Sessions Supervisor | Child monitors | Supervises per-session monitors |
+| Session Monitor | Output buffer, detected state | Polls tmux, pattern matching |
 
-- TEA architecture (Model, Update, View)
-- Terminal rendering with synchronized output
-- Keybinding system for modal editing
+**Stateless Modules** (not actors, just functions):
+- Worktree: `create/1`, `remove/1`, `status/1`
+- Beads: `list/0`, `show/1`, `update/2`
+- Git: `status/1`, `diff/1`, `pr_create/2`
+- Tmux: `new_session/2`, `capture_pane/2`, `send_keys/2`
 
-### 2.4 State Management
+### 2.2 State Architecture
 
-Replace three-layer architecture with TEA:
+**Single TEA Model replaces three-layer architecture:**
+
+```gleam
+pub type Model {
+  Model(
+    // Core data
+    tasks: List(Task),
+    sessions: Dict(String, SessionState),
+
+    // Navigation
+    cursor: Cursor,
+    mode: Mode,
+
+    // UI state
+    input: Option(InputState),
+    overlay: Option(Overlay),
+    pending_key: Option(String),
+
+    // Filters
+    status_filter: Set(Status),
+    sort_by: SortField,
+    search_query: String,
+
+    // Meta
+    loading: Bool,
+    last_error: Option(String),
+  )
+}
+```
+
+**No more:**
+- SubscriptionRef scattered across 43 services
+- Atoms bridging Effect to React
+- Three-layer reactive updates
+
+### 2.3 Modes, Inputs, and Overlays
+
+Current "8 modes" are actually:
+
+| Current Name | Actually Is | Gleam Representation |
+|--------------|-------------|---------------------|
+| normal | Mode | `Mode::Normal` |
+| select | Mode | `Mode::Select(Set(String))` |
+| goto | Pending chord | `pending_key: Some("g")` |
+| action | Overlay | `overlay: Some(ActionMenu)` |
+| search | Input state | `input: Some(Search(query))` |
+| command | Input state | `input: Some(Command(text))` |
+| sort | Overlay | `overlay: Some(SortMenu)` |
+| filter | Overlay | `overlay: Some(FilterMenu)` |
+
+**Simplified model:**
+
+```gleam
+pub type Mode {
+  Normal
+  Select(selected: Set(String))
+}
+
+pub type InputState {
+  Search(query: String)
+  Command(text: String)
+}
+
+pub type Overlay {
+  ActionMenu
+  SortMenu
+  FilterMenu
+  HelpOverlay
+  DetailPanel(task_id: String)
+  ConfirmDialog(action: PendingAction)
+}
+```
+
+**Rules:**
+- One overlay at a time (no stacking)
+- Escape always returns to Normal mode, clears input/overlay
+- Overlays are full-screen or side panels (not floating)
+
+### 2.4 OTP Supervision Strategy
+
+**Session Monitor crashes:**
 
 ```
-Current                              Gleam/Shore
-───────                              ──────────
-React Components (render)        →   Shore view function
-Atoms (derived state)            →   Model derivations in view
-Effect Services (state + logic)  →   OTP Actors + Shore Model
+Crash detected
+    │
+    ▼
+Supervisor auto-restarts monitor
+    │
+    ▼
+Monitor re-initializes, polls tmux for current state
+    │
+    ▼
+UI shows "refreshing..." for 2 seconds
+    │
+    ▼
+Normal operation resumes
+
+If 3 crashes in 60 seconds:
+    │
+    ▼
+Mark session as "unknown" state
+    │
+    ▼
+Surface warning to user via toast
 ```
 
-### 2.5 Process Architecture
+Rationale: Session monitors are stateless observers. Tmux holds the real state. Crashing and restarting loses nothing.
+
+### 2.5 Message Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Application Supervisor                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Shore App    │  │ Session      │  │ Beads        │          │
-│  │ (UI Process) │  │ Supervisor   │  │ Client       │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
-│         │                 │                 │                    │
-│         │          ┌──────┴──────┐          │                    │
-│         │          │             │          │                    │
-│         │    ┌─────┴────┐ ┌─────┴────┐     │                    │
-│         │    │ Session  │ │ Session  │     │                    │
-│         │    │ Monitor  │ │ Monitor  │     │                    │
-│         │    │ (task-1) │ │ (task-2) │     │                    │
-│         │    └──────────┘ └──────────┘     │                    │
-│         │                                   │                    │
-│  ┌──────┴───────────────────────────────────┴──────┐            │
-│  │              Message Bus (process registry)      │            │
-│  └──────────────────────────────────────────────────┘            │
-│                                                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ Tmux         │  │ Git          │  │ PR           │          │
-│  │ Service      │  │ Service      │  │ Workflow     │          │
-│  └──────────────┘  └──────────────┘  └──────────────┘          │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+User presses Space (action menu)
+    │
+    ▼
+Shore captures key → Msg::KeyPressed(Space)
+    │
+    ▼
+update(model, KeyPressed(Space))
+    │
+    ▼
+Pattern match: mode is Normal, no pending_key
+    │
+    ▼
+Return Model { overlay: Some(ActionMenu), ..model }
+    │
+    ▼
+view(model) renders ActionMenu overlay
+```
+
+```
+User selects "Start Session" from action menu
+    │
+    ▼
+Msg::ActionSelected(StartSession)
+    │
+    ▼
+update sends message to Coordinator: SpawnSession(task_id)
+    │
+    ▼
+Coordinator:
+  1. Calls Worktree.create(task)
+  2. Calls Tmux.new_session(name, cwd)
+  3. Starts new Monitor under Sessions Supervisor
+  4. Sends SessionStarted(task_id) back to Shore app
+    │
+    ▼
+Model updates, view re-renders with session indicator
 ```
 
 ---
 
-## 3. Module Breakdown
+## 3. Module Structure
 
-### 3.1 Core Modules
+### 3.1 Core Application
 
-| Module | Purpose | Lines Est. | Priority |
-|--------|---------|------------|----------|
-| `azedarach` | Application entry, supervisor setup | 200 | P0 |
-| `azedarach/config` | Configuration loading, schema | 400 | P0 |
-| `azedarach/cli` | CLI argument parsing | 200 | P0 |
+```
+src/
+├── azedarach.gleam              # Entry point, supervisor setup
+├── cli.gleam                    # CLI argument parsing
+└── config.gleam                 # Configuration loading
+```
 
-### 3.2 Service Modules (OTP Actors)
+### 3.2 UI (Shore/TEA)
 
-| Module | Purpose | Lines Est. | Priority |
-|--------|---------|------------|----------|
-| `azedarach/services/session_manager` | Claude session lifecycle | 600 | P0 |
-| `azedarach/services/session_monitor` | PTY output polling per session | 500 | P0 |
-| `azedarach/services/beads_client` | bd CLI wrapper | 400 | P0 |
-| `azedarach/services/tmux` | tmux command execution | 500 | P0 |
-| `azedarach/services/worktree` | Git worktree management | 600 | P1 |
-| `azedarach/services/pr_workflow` | GitHub PR automation | 400 | P1 |
-| `azedarach/services/state_detector` | Output pattern matching | 300 | P0 |
+```
+src/ui/
+├── app.gleam                    # Shore application setup
+├── model.gleam                  # Model type definitions
+├── update.gleam                 # Update function (message handling)
+├── view.gleam                   # Main view function
+├── view/
+│   ├── board.gleam              # Kanban board rendering
+│   ├── card.gleam               # Task card rendering
+│   ├── status_bar.gleam         # Bottom status bar
+│   └── overlays.gleam           # All overlay views
+└── keys.gleam                   # Keybinding definitions
+```
 
-### 3.3 UI Modules (Shore)
+### 3.3 Actors
 
-| Module | Purpose | Lines Est. | Priority |
-|--------|---------|------------|----------|
-| `azedarach/ui/app` | Root Shore application | 400 | P0 |
-| `azedarach/ui/model` | Application state (Model) | 500 | P0 |
-| `azedarach/ui/update` | Message handlers (Update) | 800 | P0 |
-| `azedarach/ui/view` | Render functions (View) | 600 | P0 |
-| `azedarach/ui/board` | Kanban board view | 400 | P0 |
-| `azedarach/ui/task_card` | Task card component | 200 | P0 |
-| `azedarach/ui/status_bar` | Bottom status bar | 150 | P1 |
-| `azedarach/ui/overlays/*` | Modal overlays | 800 | P1 |
-| `azedarach/ui/keyboard` | Keybinding definitions | 300 | P0 |
+```
+src/actors/
+├── coordinator.gleam            # Central orchestration actor
+├── sessions_supervisor.gleam    # Dynamic supervisor for monitors
+└── session_monitor.gleam        # Per-session PTY monitor
+```
 
-### 3.4 Domain Modules
+### 3.4 Services (Stateless Modules)
 
-| Module | Purpose | Lines Est. | Priority |
-|--------|---------|------------|----------|
-| `azedarach/domain/task` | Task types and operations | 300 | P0 |
-| `azedarach/domain/session` | Session types and states | 250 | P0 |
-| `azedarach/domain/bead` | Bead schema types | 200 | P0 |
-| `azedarach/domain/filter` | Filter/sort logic | 300 | P1 |
+```
+src/services/
+├── beads.gleam                  # bd CLI wrapper
+├── tmux.gleam                   # tmux command execution
+├── worktree.gleam               # Git worktree operations
+├── git.gleam                    # Git commands (status, diff, PR)
+└── state_detector.gleam         # Output pattern matching
+```
 
-### 3.5 Utility Modules
+### 3.5 Domain Types
 
-| Module | Purpose | Lines Est. | Priority |
-|--------|---------|------------|----------|
-| `azedarach/util/shell` | Shell command execution | 200 | P0 |
-| `azedarach/util/json` | JSON encoding/decoding | 150 | P0 |
-| `azedarach/util/regex` | Pattern matching utilities | 200 | P0 |
-| `azedarach/util/time` | Time formatting | 100 | P1 |
+```
+src/domain/
+├── task.gleam                   # Task type, operations
+├── session.gleam                # Session state types
+└── bead.gleam                   # Bead schema (from bd)
+```
 
-**Total Estimated Lines:** ~8,500 (vs 33K TypeScript - reduction due to Gleam's conciseness and no React boilerplate)
+### 3.6 Utilities
+
+```
+src/util/
+├── shell.gleam                  # Shell command execution wrapper
+└── time.gleam                   # Time formatting
+```
+
+**Estimated total: ~5,000-6,000 lines** (down from 33K TypeScript)
 
 ---
 
 ## 4. Dependencies
-
-### 4.1 Required Gleam Packages
 
 ```toml
 # gleam.toml
@@ -180,385 +332,259 @@ gleam_stdlib = "~> 0.40"
 gleam_erlang = "~> 0.27"
 gleam_otp = "~> 0.12"
 gleam_json = "~> 2.0"
-gleam_http = "~> 3.6"
 shore = "~> 1.3"
-simplifile = "~> 2.0"       # File system operations
-shellout = "~> 1.6"         # Shell command execution
-tom = "~> 1.0"              # TOML parsing (for config)
-argv = "~> 1.0"             # CLI argument parsing
-glint = "~> 1.0"            # CLI framework (alternative)
+simplifile = "~> 2.0"
+shellout = "~> 1.6"
+tom = "~> 1.0"
+argv = "~> 1.0"
 
 [dev-dependencies]
 gleeunit = "~> 1.0"
-startest = "~> 0.3"         # Property-based testing
 ```
 
-### 4.2 External CLI Dependencies (unchanged)
-
-- `tmux` - Session persistence
-- `git` - Worktree management
-- `bd` - Beads CLI
-- `gh` - GitHub CLI
+**External CLI tools:** tmux, git, bd, gh
 
 ---
 
-## 5. Key Technical Decisions
+## 5. Distribution
 
-### 5.1 Actor vs Module Pattern
+**Goal:** Works both ways
 
-**Decision:** Use OTP Actors (via `gleam_otp`) for stateful services
+1. **With Erlang runtime** - `gleam run` or escript
+2. **Single binary** - Burrito or similar for self-contained executable
 
-```gleam
-// Session monitor as an OTP actor
-pub type Message {
-  Poll
-  GetState(reply_to: process.Subject(SessionState))
-  UpdateState(SessionState)
-  Stop
-}
-
-pub fn start(session_id: String) -> Result(Subject(Message), StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() { init(session_id) },
-    loop: handle_message,
-    init_timeout: 5000,
-  ))
-}
-```
-
-### 5.2 State Pattern Matching
-
-**Decision:** Leverage Gleam's exhaustive pattern matching for session states
-
-```gleam
-pub type SessionState {
-  Idle
-  Initializing
-  Busy(output: String, phase: AgentPhase)
-  Waiting(prompt: String)
-  Done(summary: String)
-  Error(message: String)
-  Paused
-}
-
-pub type AgentPhase {
-  Planning
-  Action
-  Verification
-  PlanMode
-  PhaseIdle
-}
-```
-
-### 5.3 Modal Keyboard Handling
-
-**Decision:** TEA messages for mode transitions
-
-```gleam
-pub type Mode {
-  Normal
-  Select(selected: Set(String))
-  Goto(pending: Option(String))
-  Action
-  Search(query: String)
-  Command(input: String)
-  Sort
-  Filter
-  Orchestrate(epic_id: String)
-}
-
-pub type Msg {
-  KeyPressed(key: Key)
-  ModeChanged(Mode)
-  // ... other messages
-}
-```
-
-### 5.4 Tmux Integration
-
-**Decision:** Direct shell execution via `shellout`
-
-```gleam
-pub fn capture_pane(session: String, lines: Int) -> Result(String, Error) {
-  shellout.command(
-    run: "tmux",
-    with: ["capture-pane", "-t", session, "-p", "-S", int.to_string(-lines)],
-    in: ".",
-    opt: [],
-  )
-}
-```
-
-### 5.5 Configuration
-
-**Decision:** TOML config with Gleam types
-
-```gleam
-pub type Config {
-  Config(
-    session: SessionConfig,
-    pr: PRConfig,
-    hooks: HooksConfig,
-  )
-}
-
-pub fn load(path: String) -> Result(Config, ConfigError) {
-  use content <- result.try(simplifile.read(path))
-  use toml <- result.try(tom.parse(content))
-  decode_config(toml)
-}
-```
+Package both:
+- `az` - requires Erlang/OTP installed
+- `az-standalone` - bundled runtime (~50MB)
 
 ---
 
-## 6. Migration Strategy
+## 6. Implementation Phases
 
 ### Phase 1: Foundation (Week 1-2)
 
-**Goal:** Minimal running application
+**Goal:** Shore app renders empty board
 
-- [ ] Project scaffolding (`gleam new azedarach_gleam`)
-- [ ] Shore integration and basic window
-- [ ] Configuration loading
-- [ ] CLI argument parsing
-- [ ] Basic Model/Update/View structure
-- [ ] Empty kanban board rendering
+- [ ] `gleam new azedarach`
+- [ ] Shore integration, basic window
+- [ ] TEA skeleton (Model/Update/View)
+- [ ] Empty kanban board with 4 columns
+- [ ] Status bar
+- [ ] Basic keyboard navigation (hjkl)
 
-**Milestone:** App starts, shows empty board
+**Milestone:** App starts, shows hardcoded empty columns, can move cursor
 
-### Phase 2: Core Services (Week 3-4)
+### Phase 2: Data Flow (Week 3-4)
 
-**Goal:** Session management working
+**Goal:** Real tasks from beads displayed
 
-- [ ] Tmux service (commands, capture)
-- [ ] Beads client (bd CLI wrapper)
-- [ ] State detector (pattern matching)
-- [ ] Session monitor actor
-- [ ] Session manager supervisor
-- [ ] Task loading and display
+- [ ] Beads module (`bd list --json` parsing)
+- [ ] Coordinator actor (owns task cache)
+- [ ] Task card rendering
+- [ ] Periodic refresh (poll beads every 30s)
+- [ ] Loading states
 
-**Milestone:** Board shows tasks from beads
+**Milestone:** Board shows real tasks from beads
 
-### Phase 3: Session Lifecycle (Week 5-6)
+### Phase 3: Session Management (Week 5-6)
 
 **Goal:** Can spawn and monitor Claude sessions
 
-- [ ] Worktree manager
-- [ ] Session spawning (Space+s)
-- [ ] PTY output monitoring
-- [ ] State detection (busy/waiting/done/error)
-- [ ] Status updates in UI
+- [ ] Tmux module (new_session, capture_pane, send_keys)
+- [ ] Worktree module (create, status)
+- [ ] Sessions supervisor
+- [ ] Session monitor actor (polling, state detection)
+- [ ] State detector (pattern matching on output)
+- [ ] Session state display on cards
 
-**Milestone:** Can spawn Claude session, see state changes
+**Milestone:** Press keybind → worktree created → Claude spawns → state updates in UI
 
-### Phase 4: Keyboard & Navigation (Week 7-8)
+### Phase 4: Interaction (Week 7-8)
 
-**Goal:** Full keyboard navigation
+**Goal:** Full keyboard interaction
 
-- [ ] Modal editing state machine
-- [ ] Normal mode (hjkl navigation)
-- [ ] Action mode (space menu)
-- [ ] Goto mode (jump labels)
-- [ ] Search mode (filtering)
-- [ ] Select mode (multi-select)
+- [ ] Action menu overlay (Space)
+- [ ] Search input (/)
+- [ ] Filter overlay (f)
+- [ ] Sort overlay (,)
+- [ ] Select mode (v)
+- [ ] Goto navigation (g)
+- [ ] Help overlay (?)
+- [ ] Detail panel (Enter)
 
-**Milestone:** Full keyboard navigation working
+**Milestone:** All keyboard interactions working
 
-### Phase 5: Advanced Features (Week 9-10)
+### Phase 5: Operations (Week 9-10)
 
-**Goal:** PR workflow, overlays
+**Goal:** Full workflow support
 
-- [ ] PR workflow service
-- [ ] Help overlay
-- [ ] Settings overlay
-- [ ] Filter/sort menus
+- [ ] Session attach (a)
+- [ ] Session pause/resume
+- [ ] Session stop
+- [ ] PR creation (manual keybind)
+- [ ] Worktree cleanup
 - [ ] Toast notifications
-- [ ] Detail panel
+- [ ] Confirm dialogs for destructive actions
 
-**Milestone:** Feature parity with TypeScript version
+**Milestone:** Complete workflow: spawn → monitor → create PR → cleanup
 
-### Phase 6: Polish & Testing (Week 11-12)
+### Phase 6: Polish (Week 11-12)
 
 **Goal:** Production ready
 
 - [ ] Error handling and recovery
-- [ ] Comprehensive tests
-- [ ] Performance tuning
+- [ ] Performance optimization
+- [ ] Edge cases
 - [ ] Documentation
-- [ ] Migration guide
+- [ ] Distribution packaging (escript + Burrito)
 
-**Milestone:** Ready for production use
+**Milestone:** Ready for daily use
 
 ---
 
-## 7. Risk Mitigation
+## 7. Keybinding Design
 
-### Risk 1: Shore Immaturity
+Organize keybindings into logical groups:
 
-**Concern:** Shore is relatively new, may have bugs/limitations
+### Navigation
+| Key | Action |
+|-----|--------|
+| h/j/k/l | Move cursor |
+| g + column | Jump to column (gb, gi, ip, id) |
+| / | Search |
+| Enter | Open detail panel |
+| Esc | Back to normal |
 
-**Mitigation:**
-- Fork Shore early, prepare to contribute fixes upstream
-- Build abstraction layer for rendering primitives
-- Have fallback plan: raw termbox bindings via FFI
+### Actions (Space menu)
+| Key | Action |
+|-----|--------|
+| s | Start session |
+| a | Attach to session |
+| p | Pause session |
+| r | Resume session |
+| x | Stop session |
+| c | Create PR |
 
-### Risk 2: Tmux Flickering
+### Selection
+| Key | Action |
+|-----|--------|
+| v | Enter select mode |
+| Space | Toggle selection |
+| a | Select all in column |
+| A | Select all |
+| Esc | Clear selection |
 
-**Concern:** Documented Shore + tmux flickering
-
-**Mitigation:**
-- Investigate synchronized output settings
-- Implement custom double-buffering if needed
-- Test early in Phase 1
-
-### Risk 3: Missing Gleam Libraries
-
-**Concern:** May need functionality not available in Gleam ecosystem
-
-**Mitigation:**
-- Erlang FFI is straightforward in Gleam
-- Can call any Erlang/OTP library directly
-- Maintain list of required FFI bindings
-
-### Risk 4: Regex Performance
-
-**Concern:** 40+ patterns for state detection
-
-**Mitigation:**
-- Pre-compile patterns at startup
-- Use Erlang `:re` module directly if needed
-- Consider alternative parsing approaches
-
-### Risk 5: Learning Curve
-
-**Concern:** Team familiarity with Gleam/OTP
-
-**Mitigation:**
-- Document patterns as we go
-- Pair programming on complex sections
-- Weekly architecture reviews
+### View
+| Key | Action |
+|-----|--------|
+| f | Filter menu |
+| , | Sort menu |
+| ? | Help |
+| R | Refresh |
 
 ---
 
 ## 8. Success Criteria
 
-### Functional Requirements
-
-- [ ] Display kanban board with tasks from beads
-- [ ] Spawn Claude sessions in worktrees
-- [ ] Monitor session state (busy/waiting/done/error)
-- [ ] Full keyboard navigation (all 8 modes)
-- [ ] Create GitHub PRs on completion
+### Must Have (v1.0)
+- [ ] Display tasks from beads in kanban columns
+- [ ] Spawn Claude session in worktree
+- [ ] Monitor session state
+- [ ] Attach to running session
+- [ ] Create PR via keybind
 - [ ] Filter and sort tasks
-- [ ] Epic drill-down view
-- [ ] Multi-select operations
+- [ ] Keyboard-only navigation
 
-### Non-Functional Requirements
+### Performance
+- [ ] Startup < 300ms
+- [ ] Key response < 16ms (60fps feel)
+- [ ] Memory < 50MB typical usage
 
-- [ ] Startup time < 500ms
-- [ ] UI refresh rate 60fps equivalent
-- [ ] Memory usage < 100MB
-- [ ] Graceful degradation on errors
-- [ ] No UI freezes during operations
-
-### Quality Requirements
-
-- [ ] > 80% test coverage on services
-- [ ] Zero runtime crashes in normal operation
-- [ ] All keyboard shortcuts documented
+### Quality
+- [ ] No UI freezes
+- [ ] Graceful error handling
+- [ ] Auto-recovery from transient failures
 
 ---
 
 ## 9. Open Questions
 
-1. **Shore customization** - How much can we customize Shore's rendering? May need fork.
+1. **Config format** - Keep TOML? Switch to JSON for bd compatibility?
 
-2. **Image support** - Current version has terminal image support. Shore capability?
+2. **Keybind customization** - Allow user keybind overrides in config?
 
-3. **Hot reload** - Can we leverage Erlang hot code reloading for development?
+3. **Theme support** - Hardcode colors or allow customization?
 
-4. **Distribution** - Single binary via escriptize? Or require Erlang runtime?
+4. **Multi-project** - Support switching between projects, or one instance per project?
 
-5. **Windows support** - Shore appears Linux/macOS focused. Acceptable?
-
----
-
-## 10. Next Steps
-
-1. **Spike: Shore hello world** - Verify Shore works in our environment
-2. **Spike: tmux flickering** - Test Shore + tmux rendering
-3. **Spike: OTP actor pattern** - Prototype session monitor actor
-4. **Decision: Config format** - TOML vs JSON vs custom
-5. **Begin Phase 1** - Project scaffolding
+5. **Session hooks** - Do we need the complex hook system from TS version, or simpler approach?
 
 ---
 
-## Appendix A: Module Dependency Graph
+## 10. Risks and Mitigations
 
-```
-azedarach (entry)
-├── cli
-├── config
-└── app
-    ├── ui/app (Shore)
-    │   ├── ui/model
-    │   ├── ui/update
-    │   ├── ui/view
-    │   │   ├── ui/board
-    │   │   ├── ui/task_card
-    │   │   └── ui/status_bar
-    │   └── ui/keyboard
-    │
-    └── services (OTP Supervisor)
-        ├── session_manager
-        │   └── session_monitor (per session)
-        ├── beads_client
-        ├── tmux
-        ├── worktree
-        ├── pr_workflow
-        └── state_detector
-```
+### Shore Maturity
+**Risk:** Shore is young, may have limitations
+**Mitigation:** Fork early, contribute fixes upstream. Abstract rendering primitives.
 
-## Appendix B: Message Flow Example
+### Tmux Flickering
+**Risk:** Documented Shore + tmux issues
+**Mitigation:** Test in Phase 1. Investigate synchronized output. Custom buffering if needed.
 
-```
-User presses 'j' (move down)
-    │
-    ▼
-Shore key event → Msg::KeyPressed(Key::Char('j'))
-    │
-    ▼
-update(model, msg) pattern match
-    │
-    ▼
-case Mode::Normal → handle_normal_key('j')
-    │
-    ▼
-Model { cursor: Cursor { task_index: model.cursor.task_index + 1, ..} }
-    │
-    ▼
-Shore re-renders view(model)
-    │
-    ▼
-Board displays new cursor position
-```
-
-## Appendix C: TypeScript → Gleam Patterns
-
-| TypeScript/Effect | Gleam Equivalent |
-|-------------------|------------------|
-| `Effect.gen(function* () { ... })` | `use x <- result.try(...)` |
-| `yield* SomeService` | Actor message or direct call |
-| `SubscriptionRef.make(x)` | Actor state |
-| `SubscriptionRef.update(ref, f)` | `actor.send(self, Update(f))` |
-| `Effect.fork` | `process.start` |
-| `Effect.forkScoped` | Supervised child process |
-| `Layer.mergeAll(...)` | Supervisor children |
-| `Schema.decode` | Custom decoder function |
-| `pipe(x, f, g, h)` | `x \|> f \|> g \|> h` |
-| `Option.some(x)` | `option.Some(x)` |
-| `Result.ok(x)` | `Ok(x)` |
+### Gleam Ecosystem Gaps
+**Risk:** Missing libraries
+**Mitigation:** Erlang FFI is straightforward. Can call any OTP library directly.
 
 ---
 
-*Document maintained in: `docs/gleam-rewrite-scope.md`*
+## 11. Next Steps
+
+1. **Create new repo:** `azedarach-gleam` (clean slate)
+2. **Spike:** Shore hello world + tmux rendering test
+3. **Spike:** Coordinator + Monitor actor communication
+4. **Begin Phase 1**
+
+---
+
+## Appendix: Why This Architecture
+
+### 43 Services → 5 Actors
+
+The TypeScript version evolved organically, adding services for each concern. This created:
+- Complex dependency graphs
+- State scattered across SubscriptionRefs
+- Difficult-to-trace data flow
+- Performance overhead from reactive updates
+
+The Gleam version inverts this:
+- **Coordinator** is the single source of truth for app state coordination
+- **TEA Model** is the single source of truth for UI state
+- Services are stateless functions, not actors
+- Only session monitors need actor state (and they're supervised)
+
+### TEA vs Effect Three-Layer
+
+| Effect/React | TEA |
+|--------------|-----|
+| State in services → atoms → React | State in Model |
+| Updates via SubscriptionRef.set | Updates via messages |
+| Derived state in atoms | Derived state in view functions |
+| Side effects via Effect.gen | Side effects via Cmd |
+| Complex reactive graph | Linear message flow |
+
+TEA is simpler because there's one update function, one model, one view. No bridging layers.
+
+### OTP vs Effect Concurrency
+
+| Effect | OTP |
+|--------|-----|
+| Fibers (cooperative) | Processes (preemptive) |
+| Manual scoping | Supervision trees |
+| Layer composition | Process registry |
+| Schedule.spaced | send_after / timer |
+
+OTP's preemptive scheduling means one slow operation can't block the UI. Supervision trees mean automatic recovery from failures.
+
+---
+
+*Document version: 2.0.0 - Refined after requirements discussion*
