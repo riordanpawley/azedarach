@@ -38,6 +38,8 @@ const DevServerMetadata = Schema.Struct({
 	projectPath: Schema.optional(Schema.String),
 	startedAt: Schema.optional(Schema.String),
 	error: Schema.optional(Schema.String),
+	// All bead ports - shared across all servers for this bead
+	beadPorts: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Number })),
 })
 type DevServerMetadata = Schema.Schema.Type<typeof DevServerMetadata>
 
@@ -116,9 +118,14 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_METADATA, json).pipe(Effect.ignore)
 			})
 
+		interface DiscoveredMetadata {
+			state: DevServerState
+			beadPorts?: Record<string, number>
+		}
+
 		const readTmuxMetadata = (
 			sessionName: string,
-		): Effect.Effect<Option.Option<DevServerState>, never, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<Option.Option<DiscoveredMetadata>, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const hasSession = yield* tmux.hasSession(sessionName)
 				if (!hasSession) return Option.none()
@@ -131,52 +138,78 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				).pipe(Effect.option)
 
 				return Option.map(metadata, (m) => ({
-					name: m.serverName,
-					status: m.status,
-					port: m.port,
-					paneId: m.paneId,
-					tmuxSession: sessionName,
-					worktreePath: m.worktreePath,
-					startedAt: m.startedAt ? new Date(m.startedAt) : undefined,
-					error: m.error,
+					state: {
+						name: m.serverName,
+						status: m.status,
+						port: m.port,
+						paneId: m.paneId,
+						tmuxSession: sessionName,
+						worktreePath: m.worktreePath,
+						startedAt: m.startedAt ? new Date(m.startedAt) : undefined,
+						error: m.error,
+					},
+					beadPorts: m.beadPorts,
 				}))
 			})
 
+		interface DiscoveryResult {
+			servers: DevServersState
+			beadPorts: Map<string, Record<string, number>>
+		}
+
 		const discoverDevServers = (
 			_currentProjectPath: string,
-		): Effect.Effect<DevServersState, never, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<DiscoveryResult, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const sessions = yield* tmux.listSessions()
-				let result: DevServersState = HashMap.empty()
+				let servers: DevServersState = HashMap.empty()
+				const beadPorts = new Map<string, Record<string, number>>()
 
 				for (const session of sessions) {
 					const parsed = parseSessionName(session.name)
 					if (!parsed || parsed.type !== "bead") continue
 
-					const stateOpt = yield* readTmuxMetadata(session.name)
-					if (Option.isNone(stateOpt)) continue
+					const metadataOpt = yield* readTmuxMetadata(session.name)
+					if (Option.isNone(metadataOpt)) continue
 
-					const state = stateOpt.value
-					const beadServers = HashMap.get(result, parsed.beadId).pipe(
+					const { state, beadPorts: discoveredPorts } = metadataOpt.value
+					const beadServers = HashMap.get(servers, parsed.beadId).pipe(
 						Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
 					)
-					result = HashMap.set(result, parsed.beadId, HashMap.set(beadServers, state.name, state))
+					servers = HashMap.set(servers, parsed.beadId, HashMap.set(beadServers, state.name, state))
+
+					// Restore beadPorts from first discovered server with ports
+					if (discoveredPorts && !beadPorts.has(parsed.beadId)) {
+						beadPorts.set(parsed.beadId, discoveredPorts)
+					}
 				}
-				return result
+				return { servers, beadPorts }
 			})
 
 		const currentProjectPath = yield* getEffectiveProjectPath()
-		const initialServers = yield* discoverDevServers(currentProjectPath)
-		const serversRef = yield* SubscriptionRef.make<DevServersState>(initialServers)
+		const discovery = yield* discoverDevServers(currentProjectPath)
+		const serversRef = yield* SubscriptionRef.make<DevServersState>(discovery.servers)
 
-		const allocatedPortsRef = yield* Ref.make<Set<number>>(
-			new Set(
-				Array.from(HashMap.values(initialServers))
-					.flatMap((m) => Array.from(HashMap.values(m)))
-					.map((s) => s.port)
-					.filter((p): p is number => p !== undefined),
-			),
-		)
+		// Collect all allocated ports from discovery (both individual server ports and bead ports)
+		const allDiscoveredPorts = new Set<number>()
+		// Add individual server ports
+		for (const beadServers of HashMap.values(discovery.servers)) {
+			for (const server of HashMap.values(beadServers)) {
+				if (server.port !== undefined) allDiscoveredPorts.add(server.port)
+			}
+		}
+		// Add all ports from beadPorts mappings
+		for (const ports of discovery.beadPorts.values()) {
+			for (const port of Object.values(ports)) {
+				allDiscoveredPorts.add(port)
+			}
+		}
+		const allocatedPortsRef = yield* Ref.make<Set<number>>(allDiscoveredPorts)
+
+		// Track per-bead port allocations so all servers for a bead share the same ports
+		// Map from beadId -> { envVar -> allocatedPort }
+		// Initialize from discovered metadata for persistence across restarts
+		const beadPortsRef = yield* Ref.make<Map<string, Record<string, number>>>(discovery.beadPorts)
 
 		const allocatePort = (basePort: number): Effect.Effect<number> =>
 			Ref.modify(allocatedPortsRef, (allocated) => {
@@ -222,6 +255,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				})
 
 				if (newState.tmuxSession && newState.status !== "idle") {
+					// Include beadPorts in metadata for persistence across restarts
+					const currentBeadPorts = yield* Ref.get(beadPortsRef)
 					yield* storeTmuxMetadata(newState.tmuxSession, {
 						beadId,
 						serverName,
@@ -232,6 +267,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						projectPath: currentProjectPath,
 						startedAt: newState.startedAt?.toISOString(),
 						error: newState.error,
+						beadPorts: currentBeadPorts.get(beadId),
 					})
 				}
 				return newState
@@ -262,17 +298,56 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				return Option.isOption(result) ? Option.getOrUndefined(result) : undefined
 			})
 
-		const getPortEnv = (ports: Record<string, number>, offset: number) =>
+		/**
+		 * Get or allocate ports for a bead. All servers for the same bead share the same port allocations.
+		 * First server to start for a bead allocates ALL ports from ALL configured servers.
+		 * Subsequent servers reuse the same allocations.
+		 */
+		const getOrAllocateBeadPorts = (
+			beadId: string,
+			allServers: Record<string, { command: string; cwd?: string; ports?: Record<string, number> }>,
+		) =>
 			Effect.gen(function* () {
-				const env: Record<string, string> = {}
-				let primary: number | undefined
-
-				for (const [envVar, basePort] of Object.entries(ports)) {
-					const port = yield* allocatePort(basePort + offset)
-					if (primary === undefined) primary = port
-					env[envVar] = String(port)
+				const existing = yield* Ref.get(beadPortsRef)
+				if (existing.has(beadId)) {
+					return existing.get(beadId)!
 				}
-				return { env, primary: primary ?? 3000 }
+
+				// First server for this bead - allocate ALL ports from ALL configured servers
+				const ports: Record<string, number> = {}
+				const beadServers = yield* getBeadServers(beadId)
+				const offset = HashMap.size(HashMap.filter(beadServers, (s) => s.status === "running"))
+
+				for (const serverConfig of Object.values(allServers)) {
+					for (const [envVar, basePort] of Object.entries(serverConfig.ports ?? {})) {
+						// Skip if already allocated (handles duplicate env vars across servers)
+						if (ports[envVar] === undefined) {
+							ports[envVar] = yield* allocatePort(basePort + offset)
+						}
+					}
+				}
+
+				yield* Ref.update(beadPortsRef, (m) => new Map(m).set(beadId, ports))
+				return ports
+			})
+
+		/**
+		 * Release all ports for a bead and clear its port allocation tracking.
+		 */
+		const releaseBeadPorts = (beadId: string) =>
+			Effect.gen(function* () {
+				const beadPorts = yield* Ref.get(beadPortsRef)
+				const ports = beadPorts.get(beadId)
+				if (ports) {
+					for (const port of Object.values(ports)) {
+						yield* releasePort(port)
+					}
+					yield* Ref.update(beadPortsRef, (m) => {
+						const next = new Map(m)
+						next.delete(beadId)
+						return next
+					})
+				}
 			})
 
 		const _detectCommand = (worktreePath: string) =>
@@ -384,17 +459,26 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				}
 
 				const command = srvConfig.command
-				const ports = srvConfig.ports ?? { PORT: 3000 }
+				const thisPorts = srvConfig.ports ?? { PORT: 3000 }
+
+				// Get or allocate ALL ports for this bead (shared across all servers)
+				const allServerConfigs = config.servers ?? {}
+				const beadPorts = yield* getOrAllocateBeadPorts(beadId, allServerConfigs)
+
+				// Build env string with ALL bead ports
+				const envStr = Object.entries(beadPorts)
+					.map(([k, v]) => `${k}=${v}`)
+					.join(" ")
+
+				// Primary port is this server's first configured port
+				const primaryEnvVar = Object.keys(thisPorts)[0]
+				const primary = primaryEnvVar
+					? beadPorts[primaryEnvVar]
+					: (Object.values(beadPorts)[0] ?? 3000)
 
 				const beadServers = yield* SubscriptionRef.get(serversRef).pipe(
 					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
 				)
-				const beadRunning = HashMap.size(HashMap.filter(beadServers, (s) => s.status === "running"))
-
-				const { env, primary } = yield* getPortEnv(ports, beadRunning)
-				const envStr = Object.entries(env)
-					.map(([k, v]) => `${k}=${v}`)
-					.join(" ")
 
 				const tmuxSessionName = beadId
 				const targetWindow = `${tmuxSessionName}:${WINDOW_NAMES.DEV}`
@@ -489,7 +573,19 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				} else if (s.tmuxSession) {
 					yield* tmux.killSession(s.tmuxSession).pipe(Effect.ignore)
 				}
-				if (s.port) yield* releasePort(s.port)
+
+				// Check if this is the last running server for this bead
+				const beadServers = yield* getBeadServers(beadId)
+				const remainingRunning = HashMap.filter(
+					beadServers,
+					(srv) => srv.name !== name && (srv.status === "running" || srv.status === "starting"),
+				)
+
+				if (HashMap.size(remainingRunning) === 0) {
+					// Last server stopping - release all bead ports
+					yield* releaseBeadPorts(beadId)
+				}
+
 				yield* updateState(beadId, name, makeIdleState(name))
 			})
 		}
