@@ -58,7 +58,7 @@ interface SessionMonitor {
 // ============================================================================
 
 /** Polling interval for PTY capture (matches TmuxSessionMonitor) */
-const POLL_INTERVAL_MS = 500
+const POLL_INTERVAL_MS = 1000
 
 /** Number of lines to capture from tmux pane */
 const CAPTURE_LINES = 50
@@ -161,7 +161,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		const diagnostics = yield* DiagnosticsService
 
 		// Register with diagnostics - will mark unhealthy when scope closes
-		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 2s")
+		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 1s")
 
 		// Per-session monitoring state
 		const monitors = yield* Ref.make<HashMap.HashMap<string, SessionMonitor>>(HashMap.empty())
@@ -306,7 +306,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					Array.from(HashMap.entries(allMonitors)).map(([beadId, monitor]) =>
 						pollSession(beadId, monitor),
 					),
-					{ concurrency: "unbounded" },
+					{ concurrency: 4 },
 				)
 			})
 
