@@ -100,6 +100,23 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
       }
     }
   },
+  "git": {
+    "workflowMode": "origin",
+    "pushBranchOnCreate": true,
+    "pushEnabled": true,
+    "fetchEnabled": true,
+    "baseBranch": "main",
+    "remote": "origin",
+    "branchPrefix": "az-"
+  },
+  "pr": {
+    "enabled": true,
+    "autoDraft": true,
+    "autoMerge": false
+  },
+  "beads": {
+    "syncEnabled": true
+  },
   "polling": {
     "beadsRefresh": 30000,
     "sessionMonitor": 500
@@ -107,6 +124,28 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
   "theme": "catppuccin-macchiato"
 }
 ```
+
+### 2.3 Git Workflow Modes
+
+**Local Mode (`workflowMode: "local"`):**
+- Direct merge to main branch
+- No remote push required
+- Ideal for solo development
+
+**Origin Mode (`workflowMode: "origin"`):**
+- PR-based workflow
+- Auto-push branch on worktree creation
+- PR creation via `gh pr create`
+
+**Kill Switches:**
+- `pushEnabled: false` - Disables all git push operations
+- `fetchEnabled: false` - Disables all git fetch operations
+- Useful for offline work or restricted environments
+
+**Settings Overlay:**
+- Live toggle of push/fetch enabled
+- Switch between workflow modes
+- Changes persist to config file
 
 ---
 
@@ -644,23 +683,42 @@ gleam/
 
 ---
 
-## 10. Open Questions
+## 10. Resolved Questions
 
-1. **Testing strategy** - Unit tests? Integration with tmux? Property-based?
-2. **Start+work prompt format** - What context to include?
-3. **Merge conflict UX** - How to handle in TUI?
+All open questions have been addressed in companion documents:
 
----
-
-## 11. Next Steps
-
-1. Continue iterating on plan
-2. Create architecture diagram (separate doc)
-3. Create session lifecycle diagram
-4. Create feature matrix (in/out of scope)
-5. Resolve open questions
-6. Begin Phase 1 spikes
+| Question | Resolution | Document |
+|----------|------------|----------|
+| Testing strategy | Unit (<5s), integration with real tmux/bd (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
+| Start+work prompt format | Bead ID, type, title, `bd show` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
+| Merge conflict UX | MergeChoice overlay, git merge-tree detection, Claude spawn for resolution | `docs/gleam/merge-conflict-ux.md` |
 
 ---
 
-*Document version: 4.0.0 - Revised with corrections and complete feature list*
+## 11. Companion Documents
+
+| Document | Purpose |
+|----------|---------|
+| `docs/gleam/architecture.md` | Actor diagram, message flow, OTP supervision tree |
+| `docs/gleam/session-lifecycle.md` | State machine, creation triggers, init commands |
+| `docs/gleam/feature-matrix.md` | Complete in/out of scope table |
+| `docs/gleam/user-flows.md` | 10 detailed user interaction flows |
+| `docs/gleam/testing-strategy.md` | Test pyramid, examples, CI setup |
+| `docs/gleam/start-work-prompt.md` | Exact prompt format for Space+S |
+| `docs/gleam/merge-conflict-ux.md` | Conflict detection and resolution flow |
+
+---
+
+## 12. Next Steps
+
+1. ~~Create architecture diagram~~ ✓
+2. ~~Create session lifecycle diagram~~ ✓
+3. ~~Create feature matrix~~ ✓
+4. ~~Create user flows~~ ✓
+5. ~~Resolve open questions~~ ✓
+6. Shore spike - verify flickering, test basic TEA
+7. Begin Phase 1 implementation
+
+---
+
+*Document version: 4.1.0 - Added git workflow configuration, resolved open questions*
