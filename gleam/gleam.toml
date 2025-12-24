@@ -1,0 +1,17 @@
+name = "azedarach"
+version = "1.0.0"
+target = "erlang"
+description = "TUI Kanban board for orchestrating parallel Claude Code sessions"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+gleam_erlang = ">= 0.29.0 and < 1.0.0"
+gleam_otp = ">= 0.14.0 and < 1.0.0"
+gleam_json = ">= 2.0.0 and < 3.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
+shellout = ">= 1.6.0 and < 2.0.0"
+shore = { git = "https://github.com/bgwdotdev/shore", ref = "main" }
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
