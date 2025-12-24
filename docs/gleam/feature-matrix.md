@@ -144,6 +144,20 @@
 | Toast Messages | Success/error/info/warning | P0 |
 | Auto-Dismiss | Configurable timeout | P1 |
 
+### Git Workflow Configuration
+
+| Feature | Description | Priority |
+|---------|-------------|----------|
+| Workflow Mode | `"local"` (direct merge) vs `"origin"` (PR-based) | P0 |
+| Push on Create | Auto-push branch after worktree creation | P0 |
+| Push Enabled | Global kill-switch for all git push operations | P0 |
+| Fetch Enabled | Global kill-switch for all git fetch operations | P0 |
+| Base Branch | Configurable main branch (main, master, develop) | P0 |
+| Remote Name | Configurable remote (default: origin) | P1 |
+| Branch Prefix | Prefix for auto-generated branches (default: az-) | P1 |
+| Offline Mode | Graceful degradation when network unavailable | P0 |
+| Settings Toggle | Live toggle in settings overlay | P0 |
+
 ### Configuration
 
 | Feature | Description | Priority |
@@ -154,6 +168,9 @@
 | Dev Server Config | servers, ports | P0 |
 | Polling Config | beadsRefresh, sessionMonitor | P0 |
 | Theme Config | theme name | P0 |
+| Git Config | workflowMode, pushEnabled, fetchEnabled, baseBranch | P0 |
+| PR Config | enabled, autoDraft, autoMerge | P0 |
+| Beads Config | syncEnabled | P0 |
 
 ---
 
