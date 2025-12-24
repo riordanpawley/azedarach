@@ -14,6 +14,7 @@ import {
 	HashMap,
 	Order,
 	Record,
+	Ref,
 	Schedule,
 	Stream,
 	SubscriptionRef,
@@ -262,6 +263,26 @@ const filterTasks = (
 }
 
 // ============================================================================
+// Cache Types
+// ============================================================================
+
+/** TTL for git status cache in milliseconds (2 seconds) */
+const GIT_STATUS_CACHE_TTL_MS = 2000
+
+/**
+ * Cached git status entry with timestamp
+ */
+interface CachedGitStatus {
+	readonly status: GitStatus & { hasMergeConflict: boolean }
+	readonly timestamp: number
+}
+
+/**
+ * Git status cache keyed by worktree path
+ */
+type GitStatusCache = Map<string, CachedGitStatus>
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -307,7 +328,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const appConfig = yield* AppConfig
 
 		// Register with diagnostics
-		yield* diagnostics.trackService("BoardService", "2s beads polling + session state merge")
+		yield* diagnostics.trackService("BoardService", "5s beads polling + session state merge")
 
 		// Fine-grained state refs with SubscriptionRef for reactive updates
 		const tasks = yield* SubscriptionRef.make<ReadonlyArray<TaskWithSession>>([])
@@ -322,6 +343,44 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
+
+		// Git status cache to avoid redundant git commands
+		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
+
+		/**
+		 * Get git status with caching
+		 *
+		 * Returns cached result if within TTL, otherwise fetches fresh status
+		 * and updates the cache.
+		 */
+		const getCachedGitStatus = (worktreePath: string, baseBranch: string, showLineChanges: boolean) =>
+			Effect.gen(function* () {
+				const now = Date.now()
+				const cache = yield* Ref.get(gitStatusCache)
+				const cached = cache.get(worktreePath)
+
+				// Return cached value if still valid
+				if (cached && now - cached.timestamp < GIT_STATUS_CACHE_TTL_MS) {
+					return cached.status
+				}
+
+				// Fetch fresh status
+				const [mergeConflict, status] = yield* Effect.all([
+					checkMergeConflict(worktreePath),
+					checkGitStatus(worktreePath, baseBranch, showLineChanges),
+				])
+
+				const result = { ...status, hasMergeConflict: mergeConflict }
+
+				// Update cache
+				yield* Ref.update(gitStatusCache, (c) => {
+					const newCache = new Map(c)
+					newCache.set(worktreePath, { status: result, timestamp: now })
+					return newCache
+				})
+
+				return result
+			})
 
 		/**
 		 * Check if a worktree has an active merge conflict
@@ -462,13 +521,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							let gitStatus: GitStatus = {}
 							if (sessionState !== "idle" && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
-								// Run merge conflict check and git status check in parallel
-								const [mergeConflict, status] = yield* Effect.all([
-									checkMergeConflict(worktreePath),
-									checkGitStatus(worktreePath, baseBranch, showLineChanges),
-								])
-								hasMergeConflict = mergeConflict
-								gitStatus = status
+								// Use cached git status to avoid redundant git commands
+								const cachedStatus = yield* getCachedGitStatus(
+									worktreePath,
+									baseBranch,
+									showLineChanges,
+								)
+								hasMergeConflict = cachedStatus.hasMergeConflict
+								gitStatus = {
+									gitBehindCount: cachedStatus.gitBehindCount,
+									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+									gitAdditions: cachedStatus.gitAdditions,
+									gitDeletions: cachedStatus.gitDeletions,
+								}
 							}
 
 							return {
@@ -488,7 +553,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							}
 						}),
 					),
-					{ concurrency: "unbounded" },
+					{ concurrency: 4 },
 				)
 
 				// Log task counts for debugging (helps diagnose az-vn0 disappearing beads bug)
@@ -586,8 +651,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		// Background task refresh (every 2 seconds)
-		yield* Effect.scheduleForked(Schedule.spaced("2 seconds"))(
+		// Background task refresh (every 5 seconds)
+		yield* Effect.scheduleForked(Schedule.spaced("5 seconds"))(
 			refresh().pipe(
 				Effect.catchAllCause((cause) =>
 					Effect.logError("BoardService refresh failed", Cause.pretty(cause)).pipe(Effect.asVoid),
