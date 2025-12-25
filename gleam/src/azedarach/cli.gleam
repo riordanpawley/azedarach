@@ -101,9 +101,14 @@ pub fn parse(args: List(String)) -> Result(Command, String) {
     ["project"] -> Ok(Help)
     ["project", "--help"] -> Ok(Help)
 
-    // TUI with path
-    [path] if !string.starts_with(path, "-") -> Ok(Run(Some(path)))
+    // TUI with path - handle single argument that's not a flag
     [path, "--help"] | [path, "-h"] -> Ok(Help)
+    [path] -> {
+      case string.starts_with(path, "-") {
+        True -> Error("Unknown flag: " <> path)
+        False -> Ok(Run(Some(path)))
+      }
+    }
 
     _ -> Error("Unknown arguments: " <> string.join(args, " "))
   }

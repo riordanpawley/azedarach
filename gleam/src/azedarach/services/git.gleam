@@ -91,13 +91,12 @@ pub fn merge_main(worktree: String, config: Config) -> Result(Nil, GitError) {
         Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
       }
     }
-    Ok(files) if list.length(files) > 0 -> {
+    Ok(files) -> {
       // Conflicts detected - start merge anyway (creates conflict markers)
       let base = config.git.base_branch
       shell.run("git", ["merge", base, "-m", "Merge " <> base], worktree)
       Error(MergeConflict(files))
     }
-    Ok(_) -> Ok(Nil)
     Error(e) -> Error(e)
   }
 }

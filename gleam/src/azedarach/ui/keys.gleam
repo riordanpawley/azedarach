@@ -48,8 +48,12 @@ fn handle_input_key(event: KeyEvent) -> Option(Msg) {
     "escape" -> Some(model.InputCancel)
     "enter" | "return" -> Some(model.InputSubmit)
     "backspace" -> Some(model.InputBackspace)
-    key if is_printable(key) -> Some(model.InputChar(key))
-    _ -> None
+    key -> {
+      case is_printable(key) {
+        True -> Some(model.InputChar(key))
+        False -> None
+      }
+    }
   }
 }
 
@@ -91,9 +95,13 @@ fn handle_action_menu_key(event: KeyEvent) -> Option(Msg) {
     "a", _ -> Some(model.AttachSession)
     "p", False -> Some(model.PauseSession)
     "p", True -> Some(model.CreatePR)
-    "r", False -> Some(model.ResumeSession)
+    "r", False -> {
+      case has_modifier(event, Ctrl) {
+        True -> Some(model.RestartDevServer)
+        False -> Some(model.ResumeSession)
+      }
+    }
     "x", _ -> Some(model.StopSession)
-    "r", _ if has_modifier(event, Ctrl) -> Some(model.RestartDevServer)
     "v", _ -> Some(model.ViewDevServer)
     "u", _ -> Some(model.UpdateFromMain)
     "m", _ -> Some(model.MergeToMain)

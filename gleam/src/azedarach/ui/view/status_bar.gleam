@@ -11,7 +11,7 @@ import shore/style
 import azedarach/domain/session
 import azedarach/ui/model.{type Model, type Mode, Normal, Select}
 import azedarach/ui/theme
-import azedarach/ui/view.{
+import azedarach/ui/view/utils.{
   type Node, empty, hbox, pad_left, pad_right, styled_text, text,
 }
 
