@@ -15,6 +15,7 @@ import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/domain/project.{type Project}
+import azedarach/actors/session_monitor
 import azedarach/services/beads
 import azedarach/services/bead_editor
 import azedarach/services/image
@@ -39,6 +40,8 @@ pub type CoordinatorState {
     available_projects: List(Project),
     // Self reference for periodic refresh
     self_subject: Option(Subject(Msg)),
+    // Session monitor for polling tmux session states
+    session_monitor: Option(Subject(session_monitor.Msg)),
   )
 }
 
@@ -134,6 +137,7 @@ pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
           current_project: None,
           available_projects: [],
           self_subject: None,
+          session_monitor: None,
         )
       actor.Ready(state, process.new_selector())
     },
@@ -174,7 +178,14 @@ fn handle_message(
       // Schedule first periodic tick
       schedule_tick(self)
 
-      actor.continue(CoordinatorState(..state, self_subject: Some(self)))
+      // Start session monitor for polling tmux session states
+      let monitor_subject = start_session_monitor(self)
+
+      actor.continue(CoordinatorState(
+        ..state,
+        self_subject: Some(self),
+        session_monitor: monitor_subject,
+      ))
     }
 
     PeriodicTick -> {
@@ -830,6 +841,25 @@ fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
     True,
   )
   Nil
+}
+
+/// Start session monitor and wire up state update callback
+fn start_session_monitor(
+  coordinator: Subject(Msg),
+) -> Option(Subject(session_monitor.Msg)) {
+  case session_monitor.start() {
+    Ok(monitor) -> {
+      // Set up callback that sends SessionMonitorUpdate to coordinator
+      session_monitor.set_callback(monitor, fn(update) {
+        let session_monitor.StateUpdate(bead_id, state) = update
+        process.send(coordinator, SessionMonitorUpdate(bead_id, state))
+      })
+      // Start polling
+      session_monitor.initialize(monitor)
+      Some(monitor)
+    }
+    Error(_) -> None
+  }
 }
 
 fn next_status(current: task.Status, direction: Int) -> task.Status {
