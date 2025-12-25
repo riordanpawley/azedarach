@@ -1,8 +1,10 @@
 // Shore TUI Application
 // Main application setup and lifecycle
+//
+// All side effects go through Shore's effect system.
+// See effects.gleam for effect helpers.
 
 import gleam/erlang/process.{type Subject}
-import gleam/list
 import gleam/result
 import shore
 import azedarach/config.{type Config}
@@ -10,23 +12,9 @@ import azedarach/ui/model.{type Model, type Msg}
 import azedarach/ui/update
 import azedarach/ui/view
 import azedarach/ui/theme
+import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
-
-/// Effect type for Shore - a list of functions that return messages
-pub type Effect(msg) =
-  List(fn() -> msg)
-
-/// No effects
-pub fn none() -> Effect(msg) {
-  []
-}
-
-/// Batch multiple effects
-pub fn batch(effects: List(Effect(msg))) -> Effect(msg) {
-  effects
-  |> list.flatten
-}
 
 /// Start with existing supervision context (preferred method)
 pub fn start_with_context(context: AppContext) -> Result(Nil, shore.StartError) {
@@ -88,15 +76,8 @@ fn init_with_context(
 ) -> #(Model, Effect(Msg)) {
   let initial_model = model.init_with_context(config, colors, context)
 
-  // Request initial beads load
-  let effects = [
-    fn() {
-      coordinator.send(context.coordinator, coordinator.RefreshBeads)
-      model.Tick
-    },
-  ]
-
-  #(initial_model, effects)
+  // Request initial beads load via Shore effects
+  #(initial_model, effects.refresh_beads(context.coordinator))
 }
 
 /// Initialize the model and trigger initial effects (legacy)
@@ -107,13 +88,6 @@ fn init(
 ) -> #(Model, Effect(Msg)) {
   let initial_model = model.init(config, colors)
 
-  // Request initial beads load
-  let effects = [
-    fn() {
-      coordinator.send(coord, coordinator.RefreshBeads)
-      model.Tick
-    },
-  ]
-
-  #(initial_model, effects)
+  // Request initial beads load via Shore effects
+  #(initial_model, effects.refresh_beads(coord))
 }
