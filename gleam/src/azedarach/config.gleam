@@ -1,6 +1,6 @@
 // Configuration loading and schema
 
-import gleam/decode.{type Decoder}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/string

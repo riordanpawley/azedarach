@@ -13,7 +13,7 @@ import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
-import azedarach/ui/view.{
+import azedarach/ui/view/utils.{
   type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
 }
 

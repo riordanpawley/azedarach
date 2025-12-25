@@ -11,7 +11,7 @@ import azedarach/domain/task.{type Task}
 import azedarach/domain/session
 import azedarach/ui/model.{type Model, Cursor}
 import azedarach/ui/theme
-import azedarach/ui/view.{
+import azedarach/ui/view/utils.{
   type Node, center, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
 }
 
