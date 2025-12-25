@@ -15,6 +15,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
+import azedarach/core/hooks
 import azedarach/domain/session.{type SessionState, type State, SessionState}
 import azedarach/services/tmux
 import azedarach/services/worktree
@@ -66,14 +67,25 @@ pub const window_dev = "dev"
 // ============================================================================
 
 /// Get tmux session name for a bead
+///
+/// Returns exactly the beadId for consistent naming across:
+/// - Session creation
+/// - Session monitoring
+/// - Hook notifications
+///
+/// Note: The bead ID already includes the "az-" prefix (e.g., "az-05y")
 pub fn session_name(bead_id: String) -> String {
-  "az-" <> bead_id
+  bead_id
 }
 
 /// Parse bead ID from session name
+///
+/// Since the session name is the bead ID, this validates the format
+/// matches the expected pattern: [a-z]+-[a-z0-9]+
 pub fn parse_session_name(name: String) -> Option(String) {
-  case string.starts_with(name, "az-") {
-    True -> Some(string.drop_start(name, 3))
+  // Bead IDs follow the pattern: prefix-suffix (e.g., "az-05y")
+  case string.contains(name, "-") {
+    True -> Some(name)
     False -> None
   }
 }
@@ -304,6 +316,10 @@ fn escape_quotes(s: String) -> String {
 // ============================================================================
 
 /// Install Claude Code hooks for session state detection
+///
+/// Creates .claude/settings.local.json with hook configuration that calls
+/// az-notify.sh for each Claude Code event. This enables authoritative
+/// state detection from Claude's native hook system.
 fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
   let claude_dir = worktree_path <> "/.claude"
   let settings_path = claude_dir <> "/settings.local.json"
@@ -311,58 +327,51 @@ fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
   // Create .claude directory
   let _ = shell.mkdir_p(claude_dir)
 
-  // Generate hooks configuration
-  let hooks_json = generate_hooks_json(bead_id)
+  // Generate hooks configuration using the hooks module
+  case hooks.generate_hook_config_auto(bead_id) {
+    Ok(hooks_json) -> {
+      // Write settings file
+      case shell.write_file(settings_path, hooks_json) {
+        Ok(_) -> Ok(Nil)
+        Error(_) -> Error(Nil)
+      }
+    }
+    Error(_) -> {
+      // Fallback: try to find notify script in common locations
+      let fallback_paths = [
+        worktree_path <> "/bin/az-notify.sh",
+        shell.home_dir() <> "/.local/bin/az-notify.sh",
+        "/usr/local/bin/az-notify.sh",
+      ]
 
-  // Write settings file
-  case shell.write_file(settings_path, hooks_json) {
-    Ok(_) -> Ok(Nil)
-    Error(_) -> Error(Nil)
+      case find_existing_path(fallback_paths) {
+        Some(path) -> {
+          let hooks_json = hooks.generate_hook_config(bead_id, path)
+          case shell.write_file(settings_path, hooks_json) {
+            Ok(_) -> Ok(Nil)
+            Error(_) -> Error(Nil)
+          }
+        }
+        None -> {
+          // No notify script found - hooks won't work but session can still run
+          Error(Nil)
+        }
+      }
+    }
   }
 }
 
-fn generate_hooks_json(bead_id: String) -> String {
-  let notify_cmd = "az notify"
-
-  "{
-  \"hooks\": {
-    \"pretooluse\": [
-      {
-        \"matcher\": \".*\",
-        \"hooks\": [
-          {
-            \"type\": \"command\",
-            \"command\": \"" <> notify_cmd <> " pretooluse " <> bead_id <> "\"
-          }
-        ]
+/// Find the first path that exists from a list
+fn find_existing_path(paths: List(String)) -> Option(String) {
+  case paths {
+    [] -> None
+    [path, ..rest] -> {
+      case shell.path_exists(path) {
+        True -> Some(path)
+        False -> find_existing_path(rest)
       }
-    ],
-    \"idle_prompt\": [
-      {
-        \"type\": \"command\",
-        \"command\": \"" <> notify_cmd <> " idle_prompt " <> bead_id <> "\"
-      }
-    ],
-    \"permission_request\": [
-      {
-        \"type\": \"command\",
-        \"command\": \"" <> notify_cmd <> " permission_request " <> bead_id <> "\"
-      }
-    ],
-    \"stop\": [
-      {
-        \"type\": \"command\",
-        \"command\": \"" <> notify_cmd <> " stop " <> bead_id <> "\"
-      }
-    ],
-    \"session_end\": [
-      {
-        \"type\": \"command\",
-        \"command\": \"" <> notify_cmd <> " session_end " <> bead_id <> "\"
-      }
-    ]
+    }
   }
-}"
 }
 
 // ============================================================================
