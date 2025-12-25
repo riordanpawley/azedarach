@@ -2,14 +2,20 @@
 //
 // All side effects go through Shore's effect system via the effects module.
 // The update function is pure - it returns effects, not executes them.
+//
+// Optimistic Updates:
+// For task moves, we apply the status change immediately (optimistic) and
+// send the bd command async. On success, we confirm; on failure, we rollback.
 
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
+import optimist
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -193,22 +199,16 @@ pub fn update(
       }
     }
 
-    // Task actions - side effects go through Shore effects
+    // Task actions - optimistic updates with async bd command
     model.MoveTaskLeft -> {
       case current_task_id(model) {
-        Some(id) -> #(
-          Model(..model, overlay: None),
-          effects.move_task(coord, id, -1),
-        )
+        Some(id) -> apply_optimistic_move(model, coord, id, -1)
         None -> #(model, effects.none())
       }
     }
     model.MoveTaskRight -> {
       case current_task_id(model) {
-        Some(id) -> #(
-          Model(..model, overlay: None),
-          effects.move_task(coord, id, 1),
-        )
+        Some(id) -> apply_optimistic_move(model, coord, id, 1)
         None -> #(model, effects.none())
       }
     }
@@ -312,10 +312,14 @@ pub fn update(
     model.CancelAction -> #(Model(..model, overlay: None), effects.none())
 
     // Data updates - pure state updates (from coordinator async messages)
-    model.BeadsLoaded(tasks) -> #(
-      Model(..model, tasks: tasks, loading: False),
-      effects.none(),
-    )
+    model.BeadsLoaded(tasks) -> {
+      // Reconcile optimistic updates with actual task statuses
+      let reconciled = reconcile_optimistic_updates(model.optimistic_statuses, tasks)
+      #(
+        Model(..model, tasks: tasks, optimistic_statuses: reconciled, loading: False),
+        effects.none(),
+      )
+    }
     model.SessionStateChanged(id, state) -> #(
       Model(..model, sessions: dict.insert(model.sessions, id, state)),
       effects.none(),
@@ -328,6 +332,37 @@ pub fn update(
       Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
       effects.none(),
     )
+
+    // Optimistic update responses
+    model.TaskMoveSucceeded(id, _new_status) -> {
+      // Confirm the optimistic update - remove from pending
+      let new_optimistic = dict.delete(model.optimistic_statuses, id)
+      #(Model(..model, optimistic_statuses: new_optimistic), effects.none())
+    }
+    model.TaskMoveFailed(id, error) -> {
+      // Rollback the optimistic update and show error
+      let new_optimistic = case dict.get(model.optimistic_statuses, id) {
+        Ok(opt) -> {
+          // Revert to original state, then remove from pending
+          let _reverted = optimist.revert(opt)
+          dict.delete(model.optimistic_statuses, id)
+        }
+        Error(_) -> model.optimistic_statuses
+      }
+      let toast = model.Toast(
+        message: "Move failed: " <> error,
+        level: model.Error,
+        expires_at: 0,  // Will be set by toast system
+      )
+      #(
+        Model(
+          ..model,
+          optimistic_statuses: new_optimistic,
+          toasts: [toast, ..model.toasts],
+        ),
+        effects.none(),
+      )
+    }
 
     // System messages - pure state updates
     model.TerminalResized(w, h) -> #(
@@ -535,4 +570,84 @@ fn handle_confirm(
     }
     _ -> #(model, effects.none())
   }
+}
+
+// =============================================================================
+// Optimistic Update Helpers
+// =============================================================================
+
+/// Apply an optimistic move - update UI immediately, send async command
+fn apply_optimistic_move(
+  model: Model,
+  coord: Subject(coordinator.Msg),
+  id: String,
+  direction: Int,
+) -> #(Model, Effect(Msg)) {
+  // Find the current task to get its current status
+  case find_task(model, id) {
+    Some(found_task) -> {
+      let current_status = model.get_effective_status(found_task, model.optimistic_statuses)
+      let new_status = next_status(current_status, direction)
+
+      // Create or update optimistic state
+      let opt = case dict.get(model.optimistic_statuses, id) {
+        Ok(existing) -> optimist.push(existing, new_status)
+        Error(_) -> optimist.from(current_status) |> optimist.push(new_status)
+      }
+
+      let new_optimistic = dict.insert(model.optimistic_statuses, id, opt)
+      let new_model = Model(..model, optimistic_statuses: new_optimistic, overlay: None)
+
+      // Send the async command to coordinator
+      #(new_model, effects.move_task(coord, id, direction))
+    }
+    None -> #(model, effects.none())
+  }
+}
+
+/// Find a task by ID in the model
+fn find_task(model: Model, id: String) -> Option(task.Task) {
+  list.find(model.tasks, fn(t) { t.id == id })
+  |> result.map(fn(t) { Some(t) })
+  |> result.unwrap(None)
+}
+
+/// Calculate next status based on direction
+fn next_status(current: task.Status, direction: Int) -> task.Status {
+  let statuses = [task.Open, task.InProgress, task.Review, task.Done]
+  let current_idx =
+    list.index_map(statuses, fn(s, i) { #(s, i) })
+    |> list.find(fn(pair) { pair.0 == current })
+    |> result.map(fn(pair) { pair.1 })
+    |> result.unwrap(0)
+
+  let new_idx = int.clamp(current_idx + direction, 0, 3)
+  case list.at(statuses, new_idx) {
+    Ok(s) -> s
+    Error(_) -> current
+  }
+}
+
+/// Reconcile optimistic updates with actual task statuses
+/// If actual status matches optimistic status, the update was applied - remove from pending
+/// Otherwise, keep the optimistic update (command might still be in progress or failed)
+fn reconcile_optimistic_updates(
+  optimistic: dict.Dict(String, optimist.Optimistic(task.Status)),
+  tasks: List(task.Task),
+) -> dict.Dict(String, optimist.Optimistic(task.Status)) {
+  dict.fold(optimistic, dict.new(), fn(acc, id, opt) {
+    case list.find(tasks, fn(t) { t.id == id }) {
+      Ok(found_task) -> {
+        let optimistic_status = optimist.unwrap(opt)
+        case found_task.status == optimistic_status {
+          // Actual status matches optimistic - update was applied, remove from pending
+          True -> acc
+          // Status doesn't match - keep optimistic (command in flight or will be handled by failure message)
+          False -> dict.insert(acc, id, opt)
+        }
+      }
+      // Task not found - remove the optimistic update
+      Error(_) -> acc
+    }
+  })
 }

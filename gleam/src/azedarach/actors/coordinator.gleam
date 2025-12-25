@@ -113,6 +113,9 @@ pub type UiMsg {
   // Project updates
   ProjectChanged(Project)
   ProjectsUpdated(List(Project))
+  // Optimistic update responses
+  TaskMoveSucceeded(id: String, new_status: task.Status)
+  TaskMoveFailed(id: String, error: String)
 }
 
 pub type ToastLevel {
@@ -352,15 +355,16 @@ fn handle_message(
     }
 
     MoveTask(id, direction) -> {
+      // Async task move with success/failure callback
+      // UI has already applied optimistic update
       case list.find(state.tasks, fn(t) { t.id == id }) {
         Ok(found_task) -> {
           let new_status = next_status(found_task.status, direction)
-          case beads.update_status(id, new_status, state.config) {
-            Ok(_) -> spawn_beads_load(process.new_subject(), state.config)
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
-          }
+          spawn_move_task(state, id, new_status)
         }
-        Error(_) -> Nil
+        Error(_) -> {
+          notify_ui(state, TaskMoveFailed(id, "Task not found"))
+        }
       }
       actor.continue(state)
     }
@@ -774,6 +778,35 @@ fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
     fn() {
       let result = beads.list_all(config)
       process.send(reply_to, BeadsLoaded(result))
+    },
+    True,
+  )
+  Nil
+}
+
+/// Async task move - executes bd update and sends success/failure to UI
+fn spawn_move_task(
+  state: CoordinatorState,
+  id: String,
+  new_status: task.Status,
+) -> Nil {
+  process.start(
+    fn() {
+      case beads.update_status(id, new_status, state.config) {
+        Ok(_) -> {
+          // Success - notify UI to confirm optimistic update
+          notify_ui(state, TaskMoveSucceeded(id, new_status))
+          // Refresh beads list in background
+          case state.self_subject {
+            Some(self) -> spawn_beads_load(self, state.config)
+            None -> Nil
+          }
+        }
+        Error(e) -> {
+          // Failure - notify UI to rollback optimistic update
+          notify_ui(state, TaskMoveFailed(id, beads.error_to_string(e)))
+        }
+      }
     },
     True,
   )

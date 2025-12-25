@@ -1,17 +1,20 @@
 // TEA Model - All application state
 
 import gleam/dict.{type Dict}
+import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/set.{type Set}
 import gleam/string
+import optimist.{type Optimistic}
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
 import azedarach/actors/app_supervisor.{type AppContext}
+import azedarach/actors/coordinator
 
 // Main model holding all application state
 pub type Model {
@@ -20,6 +23,9 @@ pub type Model {
     tasks: List(Task),
     sessions: Dict(String, SessionState),
     dev_servers: Dict(String, DevServerState),
+    // Optimistic updates - tracks pending status changes
+    // Key: task id, Value: optimistic status wrapper
+    optimistic_statuses: Dict(String, Optimistic(task.Status)),
     // Multi-project
     projects: List(Project),
     current_project: Option(String),
@@ -47,6 +53,8 @@ pub type Model {
     terminal_size: #(Int, Int),
     // OTP supervision context (optional for backwards compatibility)
     app_context: Option(AppContext),
+    // Subscription to receive coordinator messages (for optimistic updates)
+    ui_subscription: Option(Subject(coordinator.UiMsg)),
   )
 }
 
@@ -199,6 +207,9 @@ pub type Msg {
   SessionStateChanged(String, SessionState)
   DevServerStateChanged(String, DevServerState)
   ToastExpired(Int)
+  // Optimistic update responses
+  TaskMoveSucceeded(id: String, new_status: task.Status)
+  TaskMoveFailed(id: String, error: String)
   // System
   TerminalResized(Int, Int)
   Tick
@@ -220,6 +231,7 @@ pub fn init(config: Config, colors: Colors) -> Model {
     tasks: [],
     sessions: dict.new(),
     dev_servers: dict.new(),
+    optimistic_statuses: dict.new(),
     projects: [],
     current_project: None,
     cursor: Cursor(column_index: 0, task_index: 0),
@@ -240,10 +252,47 @@ pub fn init(config: Config, colors: Colors) -> Model {
     toasts: [],
     terminal_size: #(80, 24),
     app_context: None,
+    ui_subscription: None,
+  )
+}
+
+// Initialize model with config, theme, and subscription subject
+pub fn init_with_subscription(
+  config: Config,
+  colors: Colors,
+  subscription: Subject(coordinator.UiMsg),
+) -> Model {
+  Model(
+    tasks: [],
+    sessions: dict.new(),
+    dev_servers: dict.new(),
+    optimistic_statuses: dict.new(),
+    projects: [],
+    current_project: None,
+    cursor: Cursor(column_index: 0, task_index: 0),
+    mode: Normal,
+    input: None,
+    overlay: None,
+    pending_key: None,
+    status_filter: set.new(),
+    priority_filter: set.new(),
+    type_filter: set.new(),
+    session_filter: set.new(),
+    hide_epic_children: False,
+    sort_by: SortBySession,
+    search_query: "",
+    config: config,
+    colors: colors,
+    loading: True,
+    toasts: [],
+    terminal_size: #(80, 24),
+    app_context: None,
+    ui_subscription: Some(subscription),
   )
 }
 
 // Initialize model with supervision context (preferred)
+// The subscription subject should be set separately via init_with_context_and_subscription
 pub fn init_with_context(
   config: Config,
   colors: Colors,
@@ -253,6 +302,7 @@ pub fn init_with_context(
     tasks: [],
     sessions: dict.new(),
     dev_servers: dict.new(),
+    optimistic_statuses: dict.new(),
     projects: [],
     current_project: None,
     cursor: Cursor(column_index: 0, task_index: 0),
@@ -273,17 +323,71 @@ pub fn init_with_context(
     toasts: [],
     terminal_size: #(80, 24),
     app_context: Some(context),
+    ui_subscription: None,
+  )
+}
+
+// Initialize model with supervision context and subscription (best)
+pub fn init_with_context_and_subscription(
+  config: Config,
+  colors: Colors,
+  context: AppContext,
+  subscription: Subject(coordinator.UiMsg),
+) -> Model {
+  Model(
+    tasks: [],
+    sessions: dict.new(),
+    dev_servers: dict.new(),
+    optimistic_statuses: dict.new(),
+    projects: [],
+    current_project: None,
+    cursor: Cursor(column_index: 0, task_index: 0),
+    mode: Normal,
+    input: None,
+    overlay: None,
+    pending_key: None,
+    status_filter: set.new(),
+    priority_filter: set.new(),
+    type_filter: set.new(),
+    session_filter: set.new(),
+    hide_epic_children: False,
+    sort_by: SortBySession,
+    search_query: "",
+    config: config,
+    colors: colors,
+    loading: True,
+    toasts: [],
+    terminal_size: #(80, 24),
+    app_context: Some(context),
+    ui_subscription: Some(subscription),
   )
 }
 
 // Get tasks for a specific column
+// Uses optimistic status when available for immediate UI feedback
 pub fn tasks_in_column(model: Model, column: Int) -> List(Task) {
   let status = column_to_status(column)
   model.tasks
   |> apply_filters(model)
   |> apply_search(model.search_query)
   |> apply_sort(model.sort_by, model.sessions)
-  |> list.filter(fn(t) { t.status == status })
+  |> list.filter(fn(t) { get_effective_status(t, model.optimistic_statuses) == status })
+}
+
+/// Get the effective status of a task, checking optimistic updates first
+pub fn get_effective_status(
+  t: Task,
+  optimistic_statuses: Dict(String, Optimistic(task.Status)),
+) -> task.Status {
+  case dict.get(optimistic_statuses, t.id) {
+    Ok(opt) -> optimist.unwrap(opt)
+    Error(_) -> t.status
+  }
+}
+
+/// Check if a task has a pending optimistic update
+pub fn has_pending_update(model: Model, task_id: String) -> Bool {
+  dict.has_key(model.optimistic_statuses, task_id)
 }
 
 fn column_to_status(column: Int) -> task.Status {

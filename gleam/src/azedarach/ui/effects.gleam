@@ -9,9 +9,15 @@
 // - Side effects are properly sequenced by Shore
 // - The update function remains pure (returns effects, doesn't execute them)
 // - Better testability (effects can be inspected without execution)
+//
+// Optimistic Updates:
+// For task moves, the UI applies changes immediately. The coordinator sends
+// success/failure messages which are received via the subscription subject
+// and translated to model.Msg through poll_coordinator_messages.
 
 import gleam/erlang/process.{type Subject}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import azedarach/ui/model.{type Msg}
 import azedarach/actors/coordinator
 import azedarach/domain/task
@@ -278,4 +284,64 @@ pub fn delete_image(
     coordinator.send(coord, coordinator.DeleteImage(id, attachment_id))
     model.Tick
   })
+}
+
+// =============================================================================
+// Coordinator Message Subscription
+// =============================================================================
+// These functions support the optimistic update pattern by receiving async
+// messages from the coordinator and translating them to model.Msg.
+
+/// Poll the coordinator subscription for any pending messages
+/// Returns the translated message or Tick if no messages pending
+pub fn poll_coordinator_messages(
+  subscription: Option(Subject(coordinator.UiMsg)),
+) -> Effect(Msg) {
+  case subscription {
+    Some(subject) ->
+      from(fn() {
+        // Try to receive with 0 timeout (non-blocking)
+        case process.receive(subject, 0) {
+          Ok(ui_msg) -> translate_ui_msg(ui_msg)
+          Error(_) -> model.Tick
+        }
+      })
+    None -> none()
+  }
+}
+
+/// Translate coordinator.UiMsg to model.Msg
+fn translate_ui_msg(ui_msg: coordinator.UiMsg) -> Msg {
+  case ui_msg {
+    coordinator.TasksUpdated(tasks) -> model.BeadsLoaded(tasks)
+    coordinator.SearchResults(_) -> model.Tick
+    // Not currently used in this context
+    coordinator.SessionStateChanged(id, state) ->
+      model.SessionStateChanged(id, state)
+    coordinator.DevServerStateChanged(_id, _state) -> model.Tick
+    // Dev server updates handled via coordinator
+    coordinator.Toast(message, level) -> {
+      let model_level = case level {
+        coordinator.Info -> model.Info
+        coordinator.Success -> model.Success
+        coordinator.Warning -> model.Warning
+        coordinator.Error -> model.Error
+      }
+      // Create a toast with a placeholder expiration (will be set by UI)
+      model.BeadsLoaded([])
+      // Can't create Toast directly, so use Tick and let periodic refresh handle
+      // TODO: Add proper toast message support
+      let _ = message
+      let _ = model_level
+      model.Tick
+    }
+    coordinator.RequestMergeChoice(_id, _count) -> model.Tick
+    // Handled via overlay
+    coordinator.ProjectChanged(_) -> model.Tick
+    coordinator.ProjectsUpdated(_) -> model.Tick
+    // Optimistic update responses - the key messages for this feature
+    coordinator.TaskMoveSucceeded(id, new_status) ->
+      model.TaskMoveSucceeded(id, new_status)
+    coordinator.TaskMoveFailed(id, error) -> model.TaskMoveFailed(id, error)
+  }
 }
