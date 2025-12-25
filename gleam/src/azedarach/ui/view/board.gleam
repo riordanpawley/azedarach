@@ -5,18 +5,19 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import shore/ui
+import shore/style
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session
 import azedarach/ui/model.{type Model, Cursor}
 import azedarach/ui/theme
 import azedarach/ui/view.{
-  type Element, Box, BoxProps, Column, Empty, Row, Text, TextProps,
-  bordered_box, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
+  type Node, center, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
 }
 
 const column_names = ["Backlog", "In Progress", "Review", "Done"]
 
-pub fn render(model: Model) -> Element {
+pub fn render(model: Model) -> Node {
   let #(width, height) = model.terminal_size
   let column_width = width / 4
   let board_height = height - 1
@@ -36,7 +37,7 @@ fn render_column(
   name: String,
   width: Int,
   height: Int,
-) -> Element {
+) -> Node {
   let colors = model.colors
   let sem = theme.semantic(colors)
   let is_selected = model.cursor.column_index == index
@@ -58,27 +59,17 @@ fn render_column(
 
   // Empty state
   let content = case list.is_empty(cards) {
-    True -> [dim_text(view.center("(empty)", width - 2))]
+    True -> [dim_text(center("(empty)", width - 2))]
     False -> cards
   }
 
-  Box(
-    [header, ..content],
-    BoxProps(
-      direction: Column,
-      width: Some(width),
-      height: Some(height),
-      padding: 0,
-      border: True,
-      bg: Some(colors.base),
-      fg: Some(
-        case is_selected {
-          True -> sem.border_focused
-          False -> sem.border
-        },
-      ),
-    ),
-  )
+  // Use box_styled for the bordered column
+  let border_color = case is_selected {
+    True -> sem.border_focused
+    False -> sem.border
+  }
+
+  ui.box_styled([header, ..content], Some(name), Some(style.hex(border_color)))
 }
 
 fn render_header(
@@ -87,7 +78,7 @@ fn render_header(
   color: String,
   is_selected: Bool,
   sem: theme.SemanticColors,
-) -> Element {
+) -> Node {
   let indicator = case is_selected {
     True -> "▶ "
     False -> "  "
@@ -95,10 +86,7 @@ fn render_header(
   let header_text = indicator <> name
   let padded = pad_right(header_text, width - 2)
 
-  Text(
-    padded,
-    TextProps(fg: Some(color), bg: None, bold: is_selected, dim: False),
-  )
+  styled_text(padded, color)
 }
 
 fn render_card(
@@ -107,7 +95,7 @@ fn render_card(
   width: Int,
   is_cursor: Bool,
   model: Model,
-) -> Element {
+) -> Node {
   let colors = model.colors
   let sem = theme.semantic(colors)
 
@@ -150,24 +138,13 @@ fn render_card(
 
   let line2 = hbox([text("  "), styled_text(title, colors.text)])
 
-  // Card background
-  let bg = case is_cursor {
-    True -> Some(colors.surface0)
-    False -> None
+  // Card with optional background highlight for cursor
+  case is_cursor {
+    True ->
+      // Use bar2 for background color
+      ui.bar2(style.hex(colors.surface0), vbox([line1, line2]))
+    False -> vbox([line1, line2])
   }
-
-  Box(
-    [line1, line2],
-    BoxProps(
-      direction: Column,
-      width: Some(width),
-      height: None,
-      padding: 0,
-      border: False,
-      bg: bg,
-      fg: None,
-    ),
-  )
 }
 
 fn session_color(
