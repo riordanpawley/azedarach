@@ -110,7 +110,12 @@ pub fn default_update_options() -> UpdateOptions {
 
 /// List all beads (filters out tombstones)
 pub fn list_all(config: Config) -> Result(List(Task), BeadsError) {
-  case shell.run("bd", ["list", "--json"], ".") {
+  list_all_in_dir(".", config)
+}
+
+/// List all beads in a specific directory
+pub fn list_all_in_dir(dir: String, config: Config) -> Result(List(Task), BeadsError) {
+  case shell.run("bd", ["list", "--json"], dir) {
     Ok(output) -> {
       case parse_beads_list(output) {
         Ok(tasks) -> Ok(filter_tombstones(tasks))

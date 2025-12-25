@@ -1,5 +1,6 @@
 // Coordinator Actor - central orchestration
 // Manages task cache, session registry, routes commands
+// Handles project switching and periodic refresh
 
 import gleam/dict.{type Dict}
 import gleam/erlang
@@ -13,12 +14,17 @@ import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
+import azedarach/domain/project.{type Project}
 import azedarach/services/beads
 import azedarach/services/bead_editor
 import azedarach/services/image
 import azedarach/services/tmux
 import azedarach/services/worktree
 import azedarach/services/git
+import azedarach/services/project_service
+
+// Refresh interval in milliseconds (2 seconds)
+const refresh_interval_ms = 2000
 
 // Actor state
 pub type CoordinatorState {
@@ -28,6 +34,11 @@ pub type CoordinatorState {
     sessions: Dict(String, SessionState),
     dev_servers: Dict(String, DevServerState),
     ui_subject: Option(Subject(UiMsg)),
+    // Project management
+    current_project: Option(Project),
+    available_projects: List(Project),
+    // Self reference for periodic refresh
+    self_subject: Option(Subject(Msg)),
   )
 }
 
@@ -44,6 +55,13 @@ pub type DevServerState {
 pub type Msg {
   // Subscription
   Subscribe(Subject(UiMsg))
+  // Lifecycle
+  Initialize
+  PeriodicTick
+  // Project management
+  SwitchProject(path: String)
+  RefreshProjects
+  InitBeadsInProject
   // Beads
   RefreshBeads
   CreateBead(title: Option(String), issue_type: task.IssueType)
@@ -77,6 +95,8 @@ pub type Msg {
   RemoveDependency(id: String, depends_on: String)
   // Internal
   BeadsLoaded(Result(List(Task), beads.BeadsError))
+  ProjectsDiscovered(List(Project))
+  InitialProjectSelected(Result(Project, project_service.ProjectError))
   SessionMonitorUpdate(id: String, state: session.State)
 }
 
@@ -88,6 +108,9 @@ pub type UiMsg {
   DevServerStateChanged(String, DevServerState)
   Toast(message: String, level: ToastLevel)
   RequestMergeChoice(bead_id: String, behind_count: Int)
+  // Project updates
+  ProjectChanged(Project)
+  ProjectsUpdated(List(Project))
 }
 
 pub type ToastLevel {
@@ -108,12 +131,21 @@ pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
           sessions: dict.new(),
           dev_servers: dict.new(),
           ui_subject: None,
+          current_project: None,
+          available_projects: [],
+          self_subject: None,
         )
       actor.Ready(state, process.new_selector())
     },
     init_timeout: 5000,
     loop: handle_message,
   ))
+}
+
+/// Initialize the coordinator after creation
+/// Call this after start() to begin periodic refresh and project discovery
+pub fn initialize(subject: Subject(Msg)) -> Nil {
+  process.send(subject, Initialize)
 }
 
 // Send message to coordinator
@@ -129,6 +161,103 @@ fn handle_message(
   case msg {
     Subscribe(ui) -> {
       actor.continue(CoordinatorState(..state, ui_subject: Some(ui)))
+    }
+
+    Initialize -> {
+      // Store self reference for periodic refresh
+      let self = process.new_subject()
+
+      // Start project discovery
+      spawn_project_discovery(self)
+      spawn_initial_project(self)
+
+      // Schedule first periodic tick
+      schedule_tick(self)
+
+      actor.continue(CoordinatorState(..state, self_subject: Some(self)))
+    }
+
+    PeriodicTick -> {
+      // Refresh beads for current project
+      case state.current_project {
+        Some(proj) -> spawn_beads_load_for_project(state, proj)
+        None -> Nil
+      }
+
+      // Schedule next tick
+      case state.self_subject {
+        Some(self) -> schedule_tick(self)
+        None -> Nil
+      }
+
+      actor.continue(state)
+    }
+
+    ProjectsDiscovered(projects) -> {
+      notify_ui(state, ProjectsUpdated(projects))
+      actor.continue(CoordinatorState(..state, available_projects: projects))
+    }
+
+    InitialProjectSelected(result) -> {
+      case result {
+        Ok(proj) -> {
+          notify_ui(state, ProjectChanged(proj))
+          notify_ui(state, Toast("Project: " <> project.display_name(proj), Info))
+          // Load beads for this project
+          spawn_beads_load_for_project(state, proj)
+          actor.continue(CoordinatorState(..state, current_project: Some(proj)))
+        }
+        Error(e) -> {
+          notify_ui(state, Toast(project_service.error_to_string(e), Warning))
+          actor.continue(state)
+        }
+      }
+    }
+
+    SwitchProject(path) -> {
+      case project_service.switch_to(path) {
+        Ok(proj) -> {
+          notify_ui(state, ProjectChanged(proj))
+          notify_ui(state, Toast("Switched to " <> project.display_name(proj), Success))
+          // Clear tasks and reload for new project
+          spawn_beads_load_for_project(state, proj)
+          actor.continue(CoordinatorState(
+            ..state,
+            current_project: Some(proj),
+            tasks: [],
+          ))
+        }
+        Error(e) -> {
+          notify_ui(state, Toast(project_service.error_to_string(e), Error))
+          actor.continue(state)
+        }
+      }
+    }
+
+    RefreshProjects -> {
+      case state.self_subject {
+        Some(self) -> spawn_project_discovery(self)
+        None -> Nil
+      }
+      actor.continue(state)
+    }
+
+    InitBeadsInProject -> {
+      case state.current_project {
+        Some(proj) -> {
+          case project_service.init_beads(proj) {
+            Ok(_) -> {
+              notify_ui(state, Toast("Beads initialized", Success))
+              spawn_beads_load_for_project(state, proj)
+            }
+            Error(e) -> {
+              notify_ui(state, Toast(project_service.error_to_string(e), Error))
+            }
+          }
+        }
+        None -> notify_ui(state, Toast("No project selected", Warning))
+      }
+      actor.continue(state)
     }
 
     RefreshBeads -> {
@@ -643,6 +772,60 @@ fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
     fn() {
       let result = beads.list_all(config)
       process.send(reply_to, BeadsLoaded(result))
+    },
+    True,
+  )
+  Nil
+}
+
+/// Load beads for a specific project (runs in project directory)
+fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
+  case state.self_subject {
+    Some(reply_to) -> {
+      process.start(
+        fn() {
+          // Run bd list in project directory
+          let result = beads.list_all_in_dir(proj.path, state.config)
+          process.send(reply_to, BeadsLoaded(result))
+        },
+        True,
+      )
+      Nil
+    }
+    None -> Nil
+  }
+}
+
+/// Discover projects async
+fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
+  process.start(
+    fn() {
+      let projects = project_service.discover_all()
+      process.send(reply_to, ProjectsDiscovered(projects))
+    },
+    True,
+  )
+  Nil
+}
+
+/// Select initial project async
+fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
+  process.start(
+    fn() {
+      let result = project_service.select_initial()
+      process.send(reply_to, InitialProjectSelected(result))
+    },
+    True,
+  )
+  Nil
+}
+
+/// Schedule periodic refresh tick
+fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
+  process.start(
+    fn() {
+      process.sleep(refresh_interval_ms)
+      process.send(reply_to, PeriodicTick)
     },
     True,
   )

@@ -1,8 +1,11 @@
 // TEA Model - All application state
 
 import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/set.{type Set}
+import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
@@ -248,7 +251,7 @@ pub fn tasks_in_column(model: Model, column: Int) -> List(Task) {
 
 fn column_to_status(column: Int) -> task.Status {
   case column {
-    0 -> task.Backlog
+    0 -> task.Open
     1 -> task.InProgress
     2 -> task.Review
     _ -> task.Done
@@ -337,8 +340,3 @@ fn compare_session_state(
     None, None -> order.Eq
   }
 }
-
-// Missing imports for the functions above
-import gleam/list
-import gleam/order
-import gleam/string
