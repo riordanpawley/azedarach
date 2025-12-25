@@ -62,7 +62,7 @@ fn handle_overlay_key(
     model.SortMenu -> handle_sort_menu_key(event)
     model.FilterMenu -> handle_filter_menu_key(event)
     model.HelpOverlay -> handle_simple_close(event)
-    model.SettingsOverlay -> handle_simple_close(event)
+    model.SettingsOverlay(_) -> handle_settings_key(event)
     model.DiagnosticsOverlay -> handle_simple_close(event)
     model.LogsViewer -> handle_simple_close(event)
     model.ProjectSelector -> handle_project_selector_key(event)
@@ -115,6 +115,16 @@ fn handle_filter_menu_key(event: KeyEvent) -> Option(Msg) {
     "c" -> Some(model.ClearFilters)
     "e" -> Some(model.ToggleHideEpicChildren)
     // Sub-menus would need additional state
+    _ -> None
+  }
+}
+
+fn handle_settings_key(event: KeyEvent) -> Option(Msg) {
+  case event.key {
+    "escape" | "q" -> Some(model.CloseOverlay)
+    "j" | "down" -> Some(model.SettingsNavigateDown)
+    "k" | "up" -> Some(model.SettingsNavigateUp)
+    " " | "enter" | "return" -> Some(model.SettingsToggleCurrent)
     _ -> None
   }
 }

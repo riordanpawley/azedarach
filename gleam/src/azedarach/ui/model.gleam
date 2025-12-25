@@ -6,7 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/set.{type Set}
 import gleam/string
-import azedarach/config.{type Config}
+import azedarach/config.{type Config, type ConfigError}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
@@ -71,7 +71,7 @@ pub type Overlay {
   SortMenu
   FilterMenu
   HelpOverlay
-  SettingsOverlay
+  SettingsOverlay(focus_index: Int)
   DiagnosticsOverlay
   LogsViewer
   ProjectSelector
@@ -194,6 +194,11 @@ pub type Msg {
   // Confirm
   ConfirmAction
   CancelAction
+  // Settings
+  SettingsNavigateUp
+  SettingsNavigateDown
+  SettingsToggleCurrent
+  SettingsSaved(Result(Nil, config.ConfigError))
   // Data updates
   BeadsLoaded(List(Task))
   SessionStateChanged(String, SessionState)
