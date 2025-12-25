@@ -13,139 +13,139 @@ import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
   Cursor, Normal, Select,
 }
-import azedarach/ui/app.{type Cmd}
+import azedarach/ui/app.{type Effect}
 import azedarach/actors/coordinator
 
 pub fn update(
   model: Model,
   msg: Msg,
   coord: Subject(coordinator.Msg),
-) -> #(Model, Cmd) {
+) -> #(Model, Effect(Msg)) {
   case msg {
     // Navigation
-    model.MoveUp -> #(move_cursor(model, 0, -1), app.None)
-    model.MoveDown -> #(move_cursor(model, 0, 1), app.None)
-    model.MoveLeft -> #(move_cursor(model, -1, 0), app.None)
-    model.MoveRight -> #(move_cursor(model, 1, 0), app.None)
-    model.PageUp -> #(move_cursor(model, 0, -10), app.None)
-    model.PageDown -> #(move_cursor(model, 0, 10), app.None)
-    model.GotoFirst -> #(goto_first(model), app.None)
-    model.GotoLast -> #(goto_last(model), app.None)
-    model.GotoColumn(col) -> #(goto_column(model, col), app.None)
+    model.MoveUp -> #(move_cursor(model, 0, -1), [])
+    model.MoveDown -> #(move_cursor(model, 0, 1), [])
+    model.MoveLeft -> #(move_cursor(model, -1, 0), [])
+    model.MoveRight -> #(move_cursor(model, 1, 0), [])
+    model.PageUp -> #(move_cursor(model, 0, -10), [])
+    model.PageDown -> #(move_cursor(model, 0, 10), [])
+    model.GotoFirst -> #(goto_first(model), [])
+    model.GotoLast -> #(goto_last(model), [])
+    model.GotoColumn(col) -> #(goto_column(model, col), [])
 
     // Mode changes
-    model.EnterSelect -> #(enter_select(model), app.None)
-    model.ExitSelect -> #(Model(..model, mode: Normal), app.None)
-    model.ToggleSelection -> #(toggle_selection(model), app.None)
-    model.EnterGoto -> #(Model(..model, pending_key: Some("g")), app.None)
-    model.ExitGoto -> #(Model(..model, pending_key: None), app.None)
+    model.EnterSelect -> #(enter_select(model), [])
+    model.ExitSelect -> #(Model(..model, mode: Normal), [])
+    model.ToggleSelection -> #(toggle_selection(model), [])
+    model.EnterGoto -> #(Model(..model, pending_key: Some("g")), [])
+    model.ExitGoto -> #(Model(..model, pending_key: None), [])
     model.EnterSearch -> #(
       Model(..model, input: Some(model.SearchInput(""))),
-      app.None,
+      [],
     )
     model.ExitSearch -> #(
       Model(..model, input: None, search_query: ""),
-      app.None,
+      [],
     )
 
     // Overlays
     model.OpenActionMenu -> #(
       Model(..model, overlay: Some(model.ActionMenu)),
-      app.None,
+      [],
     )
     model.OpenFilterMenu -> #(
       Model(..model, overlay: Some(model.FilterMenu)),
-      app.None,
+      [],
     )
     model.OpenSortMenu -> #(
       Model(..model, overlay: Some(model.SortMenu)),
-      app.None,
+      [],
     )
     model.OpenHelp -> #(
       Model(..model, overlay: Some(model.HelpOverlay)),
-      app.None,
+      [],
     )
     model.OpenSettings -> #(
       Model(..model, overlay: Some(model.SettingsOverlay)),
-      app.None,
+      [],
     )
     model.OpenDiagnostics -> #(
       Model(..model, overlay: Some(model.DiagnosticsOverlay)),
-      app.None,
+      [],
     )
     model.OpenLogs -> #(
       Model(..model, overlay: Some(model.LogsViewer)),
-      app.None,
+      [],
     )
     model.OpenProjectSelector -> #(
       Model(..model, overlay: Some(model.ProjectSelector)),
-      app.None,
+      [],
     )
-    model.OpenDetailPanel -> #(open_detail_panel(model), app.None)
-    model.CloseOverlay -> #(Model(..model, overlay: None), app.None)
+    model.OpenDetailPanel -> #(open_detail_panel(model), [])
+    model.CloseOverlay -> #(Model(..model, overlay: None), [])
 
     // Session actions
     model.StartSession -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.StartSession(id, False, False))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.StartSessionWithWork -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.StartSession(id, True, False))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.StartSessionYolo -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.StartSession(id, True, True))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.AttachSession -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.AttachSession(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.PauseSession -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.PauseSession(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.ResumeSession -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.ResumeSession(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.StopSession -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.StopSession(id)))),
-          app.None,
+          [],
         )
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
@@ -154,27 +154,27 @@ pub fn update(
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.ToggleDevServer(id, "default"))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.ViewDevServer -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.ViewDevServer(id, "default"))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.RestartDevServer -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.RestartDevServer(id, "default"))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
@@ -183,45 +183,45 @@ pub fn update(
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.UpdateFromMain(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.MergeToMain -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.MergeToMain(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.ShowDiff -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.DiffViewer(id))),
-          app.None,
+          [],
         )
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.CreatePR -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.CreatePR(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.DeleteCleanup -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteWorktree(id)))),
-          app.None,
+          [],
         )
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
@@ -230,46 +230,46 @@ pub fn update(
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.MoveTask(id, -1))
-          #(Model(..model, overlay: None), app.None)
+          #(Model(..model, overlay: None), [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.MoveTaskRight -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.MoveTask(id, 1))
-          #(Model(..model, overlay: None), app.None)
+          #(Model(..model, overlay: None), [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
     // Bead CRUD
     model.CreateBead -> {
       coordinator.send(coord, coordinator.CreateBead(None))
-      #(model, app.None)
+      #(model, [])
     }
     model.CreateBeadWithClaude -> {
       coordinator.send(coord, coordinator.CreateBeadWithClaude)
-      #(model, app.None)
+      #(model, [])
     }
     model.EditBead -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.EditBead(id))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.DeleteBead -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteBead(id)))),
-          app.None,
+          [],
         )
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
@@ -278,57 +278,57 @@ pub fn update(
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ImageAttach(id))),
-          app.None,
+          [],
         )
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.PasteFromClipboard -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.PasteImage(id))
-          #(Model(..model, overlay: None), app.None)
+          #(Model(..model, overlay: None), [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
     model.SelectFile -> #(
       Model(..model, input: Some(model.PathInput(""))),
-      app.None,
+      [],
     )
     model.PreviewImage(path) -> #(
       Model(..model, overlay: Some(model.ImagePreview(path))),
-      app.None,
+      [],
     )
     model.DeleteImage(path) -> {
       case current_task_id(model) {
         Some(id) -> {
           coordinator.send(coord, coordinator.DeleteImage(id, path))
-          #(model, app.None)
+          #(model, [])
         }
-        None -> #(model, app.None)
+        None -> #(model, [])
       }
     }
 
     // Input handling
-    model.InputChar(c) -> #(handle_input_char(model, c), app.None)
-    model.InputBackspace -> #(handle_input_backspace(model), app.None)
-    model.InputSubmit -> #(handle_input_submit(model), app.None)
-    model.InputCancel -> #(Model(..model, input: None), app.None)
+    model.InputChar(c) -> #(handle_input_char(model, c), [])
+    model.InputBackspace -> #(handle_input_backspace(model), [])
+    model.InputSubmit -> #(handle_input_submit(model), [])
+    model.InputCancel -> #(Model(..model, input: None), [])
 
     // Filter/sort
-    model.ToggleStatusFilter(status) -> #(toggle_status_filter(model, status), app.None)
-    model.TogglePriorityFilter(priority) -> #(toggle_priority_filter(model, priority), app.None)
-    model.ToggleTypeFilter(t) -> #(toggle_type_filter(model, t), app.None)
-    model.ToggleSessionFilter(state) -> #(toggle_session_filter(model, state), app.None)
+    model.ToggleStatusFilter(status) -> #(toggle_status_filter(model, status), [])
+    model.TogglePriorityFilter(priority) -> #(toggle_priority_filter(model, priority), [])
+    model.ToggleTypeFilter(t) -> #(toggle_type_filter(model, t), [])
+    model.ToggleSessionFilter(state) -> #(toggle_session_filter(model, state), [])
     model.ToggleHideEpicChildren -> #(
       Model(..model, hide_epic_children: !model.hide_epic_children),
-      app.None,
+      [],
     )
-    model.ClearFilters -> #(clear_filters(model), app.None)
+    model.ClearFilters -> #(clear_filters(model), [])
     model.SetSort(field) -> #(
       Model(..model, sort_by: field, overlay: None),
-      app.None,
+      [],
     )
 
     // MergeChoice
@@ -336,53 +336,53 @@ pub fn update(
       case model.overlay {
         Some(model.MergeChoice(id, _)) -> {
           coordinator.send(coord, coordinator.MergeAndAttach(id))
-          #(Model(..model, overlay: None), app.None)
+          #(Model(..model, overlay: None), [])
         }
-        _ -> #(model, app.None)
+        _ -> #(model, [])
       }
     }
     model.SkipAndAttach -> {
       case model.overlay {
         Some(model.MergeChoice(id, _)) -> {
           coordinator.send(coord, coordinator.AttachSession(id))
-          #(Model(..model, overlay: None), app.None)
+          #(Model(..model, overlay: None), [])
         }
-        _ -> #(model, app.None)
+        _ -> #(model, [])
       }
     }
 
     // Confirm dialog
-    model.ConfirmAction -> #(handle_confirm(model, coord), app.None)
-    model.CancelAction -> #(Model(..model, overlay: None), app.None)
+    model.ConfirmAction -> #(handle_confirm(model, coord), [])
+    model.CancelAction -> #(Model(..model, overlay: None), [])
 
     // Data updates
     model.BeadsLoaded(tasks) -> #(
       Model(..model, tasks: tasks, loading: False),
-      app.None,
+      [],
     )
     model.SessionStateChanged(id, state) -> #(
       Model(..model, sessions: dict.insert(model.sessions, id, state)),
-      app.None,
+      [],
     )
     model.DevServerStateChanged(id, state) -> #(
       Model(..model, dev_servers: dict.insert(model.dev_servers, id, state)),
-      app.None,
+      [],
     )
     model.ToastExpired(id) -> #(
       Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
-      app.None,
+      [],
     )
 
     // System
     model.TerminalResized(w, h) -> #(
       Model(..model, terminal_size: #(w, h)),
-      app.None,
+      [],
     )
-    model.Tick -> #(model, app.None)
-    model.Quit -> #(model, app.None)
+    model.Tick -> #(model, [])
+    model.Quit -> #(model, [])
     // Will be handled by Shore
-    model.ForceRedraw -> #(model, app.None)
-    model.KeyPressed(_, _) -> #(model, app.None)
+    model.ForceRedraw -> #(model, [])
+    model.KeyPressed(_, _) -> #(model, [])
     // Handled by keys module
   }
 }
