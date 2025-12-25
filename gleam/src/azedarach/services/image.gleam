@@ -8,7 +8,6 @@
 
 import gleam/decode.{type Decoder}
 import gleam/dict.{type Dict}
-import gleam/dynamic
 import gleam/int
 import gleam/json
 import gleam/list
@@ -384,26 +383,27 @@ fn attachment_decoder() -> Decoder(ImageAttachment) {
   decode.success(ImageAttachment(id:, filename:, original_path:, mime_type:, size:, created_at:))
 }
 
+/// Encode the attachment index to JSON string
 fn encode_index(index: AttachmentIndex) -> String {
-  // Simple JSON encoding
-  let entries =
-    dict.to_list(index)
-    |> list.map(fn(pair) {
-      let #(id, attachments) = pair
-      "\"" <> id <> "\": [" <> string.join(list.map(attachments, encode_attachment), ", ") <> "]"
-    })
-  "{" <> string.join(entries, ", ") <> "}"
+  dict.to_list(index)
+  |> list.map(fn(pair) {
+    let #(id, attachments) = pair
+    #(id, json.array(attachments, encode_attachment))
+  })
+  |> json.object
+  |> json.to_string
 }
 
-fn encode_attachment(a: ImageAttachment) -> String {
-  "{"
-  <> "\"id\": \"" <> a.id <> "\", "
-  <> "\"filename\": \"" <> a.filename <> "\", "
-  <> "\"originalPath\": \"" <> a.original_path <> "\", "
-  <> "\"mimeType\": \"" <> a.mime_type <> "\", "
-  <> "\"size\": " <> int.to_string(a.size) <> ", "
-  <> "\"createdAt\": \"" <> a.created_at <> "\""
-  <> "}"
+/// Encode a single attachment to JSON
+fn encode_attachment(a: ImageAttachment) -> json.Json {
+  json.object([
+    #("id", json.string(a.id)),
+    #("filename", json.string(a.filename)),
+    #("originalPath", json.string(a.original_path)),
+    #("mimeType", json.string(a.mime_type)),
+    #("size", json.int(a.size)),
+    #("createdAt", json.string(a.created_at)),
+  ])
 }
 
 fn detect_clipboard_tool() -> Option(String) {
