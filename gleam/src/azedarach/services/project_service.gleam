@@ -1,16 +1,15 @@
 // Project Service - manages multi-project support
 //
-// Handles project discovery, switching, and state persistence.
+// Handles project registry, switching, and state persistence.
+// Projects are stored globally in ~/.config/azedarach/projects.json
 // Each project has its own beads database at .beads/
 
 import gleam/decode.{type Decoder}
-import gleam/dict.{type Dict}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
 import azedarach/domain/project.{type Project, Project}
 import azedarach/util/shell
 import simplifile
@@ -21,6 +20,8 @@ import simplifile
 
 pub type ProjectError {
   NotFound(path: String)
+  AlreadyExists(name: String)
+  NoBeadsDir(path: String)
   ConfigError(message: String)
   StorageError(message: String)
 }
@@ -28,24 +29,319 @@ pub type ProjectError {
 pub fn error_to_string(err: ProjectError) -> String {
   case err {
     NotFound(path) -> "Project not found: " <> path
+    AlreadyExists(name) -> "Project with name '" <> name <> "' already exists"
+    NoBeadsDir(path) ->
+      "No .beads directory found in " <> path <> ". Run 'bd init' to initialize beads tracking."
     ConfigError(msg) -> "Config error: " <> msg
     StorageError(msg) -> "Storage error: " <> msg
   }
 }
 
-/// State file for remembering last project
-const state_file = ".azedarach-state.json"
+/// Project entry in the registry
+pub type ProjectEntry {
+  ProjectEntry(name: String, path: String, beads_path: Option(String))
+}
 
-/// Project state stored in home directory
-pub type ProjectState {
-  ProjectState(
-    last_project: Option(String),
-    recent_projects: List(String),
-  )
+/// Projects registry stored in ~/.config/azedarach/projects.json
+pub type ProjectsConfig {
+  ProjectsConfig(projects: List(ProjectEntry), default_project: Option(String))
 }
 
 // ============================================================================
-// Project Discovery
+// Config Paths
+// ============================================================================
+
+const config_dir = ".config/azedarach"
+
+const projects_file = "projects.json"
+
+fn config_path() -> String {
+  shell.home_dir() <> "/" <> config_dir
+}
+
+fn projects_path() -> String {
+  config_path() <> "/" <> projects_file
+}
+
+// ============================================================================
+// Registry Operations
+// ============================================================================
+
+/// Load projects registry from global config file
+pub fn load_registry() -> Result(ProjectsConfig, ProjectError) {
+  case simplifile.read(projects_path()) {
+    Ok(content) -> parse_registry(content)
+    Error(_) -> Ok(ProjectsConfig(projects: [], default_project: None))
+  }
+}
+
+/// Save projects registry to global config file
+pub fn save_registry(config: ProjectsConfig) -> Result(Nil, ProjectError) {
+  // Ensure config directory exists
+  let _ = simplifile.create_directory_all(config_path())
+
+  let content = encode_registry(config)
+  case simplifile.write(projects_path(), content) {
+    Ok(_) -> Ok(Nil)
+    Error(_) -> Error(StorageError("Failed to save projects config"))
+  }
+}
+
+fn parse_registry(content: String) -> Result(ProjectsConfig, ProjectError) {
+  case json.parse(content, registry_decoder()) {
+    Ok(config) -> Ok(config)
+    Error(_) -> Ok(ProjectsConfig(projects: [], default_project: None))
+  }
+}
+
+fn registry_decoder() -> Decoder(ProjectsConfig) {
+  use projects <- decode.optional_field(
+    "projects",
+    decode.list(project_entry_decoder()),
+    [],
+  )
+  use default_project <- decode.optional_field(
+    "defaultProject",
+    decode.optional(decode.string),
+    None,
+  )
+  decode.success(ProjectsConfig(projects:, default_project:))
+}
+
+fn project_entry_decoder() -> Decoder(ProjectEntry) {
+  use name <- decode.field("name", decode.string)
+  use path <- decode.field("path", decode.string)
+  use beads_path <- decode.optional_field(
+    "beadsPath",
+    decode.optional(decode.string),
+    None,
+  )
+  decode.success(ProjectEntry(name:, path:, beads_path:))
+}
+
+fn encode_registry(config: ProjectsConfig) -> String {
+  json.object([
+    #("projects", json.array(config.projects, encode_project_entry)),
+    #(
+      "defaultProject",
+      case config.default_project {
+        Some(name) -> json.string(name)
+        None -> json.null()
+      },
+    ),
+  ])
+  |> json.to_string
+}
+
+fn encode_project_entry(entry: ProjectEntry) -> json.Json {
+  json.object([
+    #("name", json.string(entry.name)),
+    #("path", json.string(entry.path)),
+    #(
+      "beadsPath",
+      case entry.beads_path {
+        Some(p) -> json.string(p)
+        None -> json.null()
+      },
+    ),
+  ])
+}
+
+// ============================================================================
+// Project Management
+// ============================================================================
+
+/// Add a new project to the registry
+pub fn add_project(
+  path: String,
+  name: Option(String),
+) -> Result(ProjectEntry, ProjectError) {
+  // Resolve absolute path
+  let abs_path = case shell.realpath(path) {
+    Ok(p) -> p
+    Error(_) -> path
+  }
+
+  // Validate path exists
+  case shell.is_directory(abs_path) {
+    False -> Error(NotFound(abs_path))
+    True -> {
+      // Validate .beads directory exists
+      let beads_dir = abs_path <> "/.beads"
+      case shell.is_directory(beads_dir) {
+        False -> Error(NoBeadsDir(abs_path))
+        True -> {
+          // Derive name from directory if not provided
+          let project_name = case name {
+            Some(n) -> n
+            None -> shell.basename(abs_path)
+          }
+
+          // Load current registry
+          case load_registry() {
+            Ok(config) -> {
+              // Check for duplicate name
+              case list.find(config.projects, fn(p) { p.name == project_name }) {
+                Ok(_) -> Error(AlreadyExists(project_name))
+                Error(_) -> {
+                  // Check for duplicate path
+                  case list.find(config.projects, fn(p) { p.path == abs_path }) {
+                    Ok(existing) -> Error(AlreadyExists(existing.name))
+                    Error(_) -> {
+                      // Create new entry
+                      let entry =
+                        ProjectEntry(
+                          name: project_name,
+                          path: abs_path,
+                          beads_path: Some(beads_dir),
+                        )
+
+                      // Add to registry
+                      let new_config =
+                        ProjectsConfig(
+                          ..config,
+                          projects: list.append(config.projects, [entry]),
+                        )
+
+                      case save_registry(new_config) {
+                        Ok(_) -> Ok(entry)
+                        Error(e) -> Error(e)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            Error(e) -> Error(e)
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Remove a project from the registry by name
+pub fn remove_project(name: String) -> Result(Nil, ProjectError) {
+  case load_registry() {
+    Ok(config) -> {
+      case list.find(config.projects, fn(p) { p.name == name }) {
+        Ok(_) -> {
+          let new_projects = list.filter(config.projects, fn(p) { p.name != name })
+          let new_default = case config.default_project {
+            Some(d) if d == name -> None
+            other -> other
+          }
+          let new_config =
+            ProjectsConfig(projects: new_projects, default_project: new_default)
+          save_registry(new_config)
+        }
+        Error(_) -> Error(NotFound(name))
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+/// List all registered projects
+pub fn list_projects() -> Result(List(ProjectEntry), ProjectError) {
+  case load_registry() {
+    Ok(config) -> Ok(config.projects)
+    Error(e) -> Error(e)
+  }
+}
+
+/// Switch to a project by name and set it as default
+pub fn switch_project(name: String) -> Result(ProjectEntry, ProjectError) {
+  case load_registry() {
+    Ok(config) -> {
+      case list.find(config.projects, fn(p) { p.name == name }) {
+        Ok(project) -> {
+          let new_config = ProjectsConfig(..config, default_project: Some(name))
+          case save_registry(new_config) {
+            Ok(_) -> Ok(project)
+            Error(e) -> Error(e)
+          }
+        }
+        Error(_) -> Error(NotFound(name))
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+/// Get current project based on CWD or default
+pub fn get_current() -> Result(ProjectEntry, ProjectError) {
+  case load_registry() {
+    Ok(config) -> {
+      let cwd = case shell.cwd() {
+        Ok(c) -> c
+        Error(_) -> "."
+      }
+
+      // Check if CWD matches a registered project
+      case list.find(config.projects, fn(p) { p.path == cwd }) {
+        Ok(project) -> Ok(project)
+        Error(_) -> {
+          // Check if CWD is inside a registered project
+          case
+            list.find(config.projects, fn(p) {
+              string.starts_with(cwd, p.path <> "/")
+            })
+          {
+            Ok(project) -> Ok(project)
+            Error(_) -> {
+              // Check if CWD is a worktree of a registered project
+              // Worktrees are siblings: /path/project-branchname
+              let cwd_parent = shell.dirname(cwd)
+              let cwd_base = shell.basename(cwd)
+              case
+                list.find(config.projects, fn(p) {
+                  shell.dirname(p.path) == cwd_parent
+                  && string.starts_with(cwd_base, shell.basename(p.path) <> "-")
+                })
+              {
+                Ok(project) -> Ok(project)
+                Error(_) -> {
+                  // Fall back to default project
+                  case config.default_project {
+                    Some(name) -> {
+                      case list.find(config.projects, fn(p) { p.name == name }) {
+                        Ok(project) -> Ok(project)
+                        Error(_) -> {
+                          // Fall back to first project
+                          case config.projects {
+                            [first, ..] -> Ok(first)
+                            [] -> Error(NotFound("No projects registered"))
+                          }
+                        }
+                      }
+                    }
+                    None -> {
+                      // Fall back to first project
+                      case config.projects {
+                        [first, ..] -> Ok(first)
+                        [] -> Error(NotFound("No projects registered"))
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+/// Get the config file path (for display/debugging)
+pub fn get_config_path() -> String {
+  projects_path()
+}
+
+// ============================================================================
+// Project Discovery (auto-discover from common locations)
 // ============================================================================
 
 /// Discover all projects with .azedarach.json
@@ -69,149 +365,30 @@ pub fn from_path(path: String) -> Result(Project, ProjectError) {
   }
 }
 
-// ============================================================================
-// Project Selection
-// ============================================================================
-
 /// Select the best project based on context
-/// 1. If CWD has .azedarach.json, use it
-/// 2. If we have a saved last project, use it
-/// 3. Otherwise, use the first discovered project
 pub fn select_initial() -> Result(Project, ProjectError) {
-  // Try CWD first
-  case from_cwd() {
-    Ok(p) if p.has_config -> {
-      // Save as last project
-      let _ = save_last_project(p.path)
-      Ok(p)
-    }
-    _ -> {
-      // Try last saved project
-      case load_last_project() {
-        Ok(Some(path)) -> {
-          case from_path(path) {
-            Ok(p) -> Ok(p)
-            Error(_) -> select_from_discovered()
+  // First try the registry
+  case get_current() {
+    Ok(entry) -> from_path(entry.path)
+    Error(_) -> {
+      // Fall back to CWD
+      case from_cwd() {
+        Ok(p) -> Ok(p)
+        Error(_) -> {
+          // Fall back to discovery
+          case discover_all() {
+            [first, ..] -> Ok(first)
+            [] -> Error(NotFound("No projects found"))
           }
         }
-        _ -> select_from_discovered()
       }
     }
   }
 }
 
-fn select_from_discovered() -> Result(Project, ProjectError) {
-  case discover_all() {
-    [first, ..] -> {
-      let _ = save_last_project(first.path)
-      Ok(first)
-    }
-    [] -> Error(NotFound("No projects found"))
-  }
-}
-
 /// Switch to a different project by path
 pub fn switch_to(path: String) -> Result(Project, ProjectError) {
-  case from_path(path) {
-    Ok(p) -> {
-      let _ = save_last_project(path)
-      let _ = add_to_recent(path)
-      Ok(p)
-    }
-    Error(e) -> Error(e)
-  }
-}
-
-// ============================================================================
-// State Persistence
-// ============================================================================
-
-fn state_path() -> String {
-  shell.home_dir() <> "/" <> state_file
-}
-
-fn load_state() -> Result(ProjectState, ProjectError) {
-  case simplifile.read(state_path()) {
-    Ok(content) -> parse_state(content)
-    Error(_) -> Ok(ProjectState(last_project: None, recent_projects: []))
-  }
-}
-
-fn save_state(state: ProjectState) -> Result(Nil, ProjectError) {
-  let content = encode_state(state)
-  case simplifile.write(state_path(), content) {
-    Ok(_) -> Ok(Nil)
-    Error(_) -> Error(StorageError("Failed to save project state"))
-  }
-}
-
-fn parse_state(content: String) -> Result(ProjectState, ProjectError) {
-  case json.parse(content, state_decoder()) {
-    Ok(state) -> Ok(state)
-    Error(_) -> Ok(ProjectState(last_project: None, recent_projects: []))
-  }
-}
-
-fn state_decoder() -> Decoder(ProjectState) {
-  use last_project <- decode.optional_field(
-    "lastProject",
-    decode.optional(decode.string),
-    None,
-  )
-  use recent_projects <- decode.optional_field(
-    "recentProjects",
-    decode.list(decode.string),
-    [],
-  )
-  decode.success(ProjectState(last_project:, recent_projects:))
-}
-
-fn encode_state(state: ProjectState) -> String {
-  json.object([
-    #("lastProject", case state.last_project {
-      Some(p) -> json.string(p)
-      None -> json.null()
-    }),
-    #("recentProjects", json.array(state.recent_projects, json.string)),
-  ])
-  |> json.to_string
-}
-
-fn load_last_project() -> Result(Option(String), ProjectError) {
-  case load_state() {
-    Ok(state) -> Ok(state.last_project)
-    Error(e) -> Error(e)
-  }
-}
-
-fn save_last_project(path: String) -> Result(Nil, ProjectError) {
-  case load_state() {
-    Ok(state) -> save_state(ProjectState(..state, last_project: Some(path)))
-    Error(_) ->
-      save_state(ProjectState(last_project: Some(path), recent_projects: [path]))
-  }
-}
-
-fn add_to_recent(path: String) -> Result(Nil, ProjectError) {
-  case load_state() {
-    Ok(state) -> {
-      let recent =
-        [path, ..state.recent_projects]
-        |> list.unique
-        |> list.take(10)
-      save_state(ProjectState(..state, recent_projects: recent))
-    }
-    Error(_) ->
-      save_state(ProjectState(last_project: Some(path), recent_projects: [path]))
-  }
-}
-
-/// Get recent projects
-pub fn get_recent() -> List(String) {
-  case load_state() {
-    Ok(state) -> state.recent_projects
-    Error(_) -> []
-  }
+  from_path(path)
 }
 
 // ============================================================================
@@ -232,7 +409,7 @@ pub fn has_beads(proj: Project) -> Bool {
 }
 
 /// Get project config path
-pub fn config_path(proj: Project) -> String {
+pub fn config_path_for(proj: Project) -> String {
   proj.path <> "/.azedarach.json"
 }
 
@@ -264,4 +441,21 @@ pub fn display_path(proj: Project) -> String {
 pub fn format_project_list(projects: List(Project)) -> List(#(String, String)) {
   projects
   |> list.map(fn(p) { #(p.path, display(p)) })
+}
+
+/// Format entry for display
+pub fn format_entry(entry: ProjectEntry, is_current: Bool) -> String {
+  let marker = case is_current {
+    True -> "* "
+    False -> "  "
+  }
+  marker <> entry.name <> " (" <> short_path(entry.path) <> ")"
+}
+
+fn short_path(path: String) -> String {
+  let home = shell.home_dir()
+  case string.starts_with(path, home) {
+    True -> "~" <> string.drop_start(path, string.length(home))
+    False -> path
+  }
 }
