@@ -1,9 +1,12 @@
 // Overlay views - action menu, filter, help, etc.
 
+import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import azedarach/config
+import azedarach/domain/task
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
 import azedarach/ui/view.{
@@ -386,7 +389,3 @@ fn bool_to_string(b: Bool) -> String {
     False -> "no"
   }
 }
-
-import gleam/dict
-import azedarach/config
-import azedarach/domain/task
