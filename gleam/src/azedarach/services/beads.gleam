@@ -1,6 +1,7 @@
 // Beads service - bd CLI wrapper
 // Full implementation matching TypeScript BeadsClient
 
+import gleam/decode.{type Decoder}
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/json
@@ -514,179 +515,103 @@ fn build_update_args(id: String, options: UpdateOptions) -> List(String) {
 // ============================================================================
 
 fn parse_beads_list(output: String) -> Result(List(Task), BeadsError) {
-  case json.decode(output, dynamic.list(bead_decoder())) {
+  case decode.run(dynamic.from(output), json_string_decoder(decode.list(task_decoder()))) {
     Ok(tasks) -> Ok(tasks)
     Error(e) -> Error(ParseError(string.inspect(e)))
   }
 }
 
 fn parse_single_bead(output: String, id: String) -> Result(Task, BeadsError) {
-  case json.decode(output, bead_decoder()) {
+  case decode.run(dynamic.from(output), json_string_decoder(task_decoder())) {
     Ok(t) -> Ok(t)
     Error(_) -> Error(NotFound(id))
   }
 }
 
-fn bead_decoder() -> fn(Dynamic) -> Result(Task, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    // Decode required fields
-    let id_result = dynamic.field("id", dynamic.string)(dyn)
-    let title_result = dynamic.field("title", dynamic.string)(dyn)
-    let status_result = dynamic.field("status", status_decoder())(dyn)
-    let created_result = dynamic.field("created_at", dynamic.string)(dyn)
-    let updated_result = dynamic.field("updated_at", dynamic.string)(dyn)
-
-    // Decode optional fields
-    let description =
-      dynamic.optional_field("description", dynamic.string)(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap("")
-
-    let priority =
-      dynamic.optional_field("priority", priority_decoder())(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap(task.P2)
-
-    let issue_type =
-      dynamic.optional_field("type", type_decoder())(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap(task.Task)
-
-    let parent_id =
-      dynamic.optional_field("parent_id", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let design =
-      dynamic.optional_field("design", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let notes =
-      dynamic.optional_field("notes", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let acceptance =
-      dynamic.optional_field("acceptance", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let assignee =
-      dynamic.optional_field("assignee", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let labels =
-      dynamic.optional_field("labels", dynamic.list(dynamic.string))(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap([])
-
-    let estimate =
-      dynamic.optional_field("estimate", dynamic.string)(dyn)
-      |> result.unwrap(None)
-
-    let dependents =
-      dynamic.optional_field("dependents", dynamic.list(dependent_decoder()))(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap([])
-
-    let blockers =
-      dynamic.optional_field("blockers", dynamic.list(dynamic.string))(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap([])
-
-    let attachments =
-      dynamic.optional_field("attachments", dynamic.list(dynamic.string))(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap([])
-
-    let is_tombstone =
-      dynamic.optional_field("tombstone", dynamic.bool)(dyn)
-      |> result.unwrap(None)
-      |> option.unwrap(False)
-
-    // Build result
-    case id_result, title_result, status_result, created_result, updated_result {
-      Ok(id), Ok(title), Ok(status), Ok(created), Ok(updated) ->
-        Ok(Task(
-          id: id,
-          title: title,
-          description: description,
-          status: status,
-          priority: priority,
-          issue_type: issue_type,
-          parent_id: parent_id,
-          created_at: created,
-          updated_at: updated,
-          design: design,
-          notes: notes,
-          acceptance: acceptance,
-          assignee: assignee,
-          labels: labels,
-          estimate: estimate,
-          dependents: dependents,
-          blockers: blockers,
-          attachments: attachments,
-          is_tombstone: is_tombstone,
-        ))
-      Error(e), _, _, _, _ -> Error(e)
-      _, Error(e), _, _, _ -> Error(e)
-      _, _, Error(e), _, _ -> Error(e)
-      _, _, _, Error(e), _ -> Error(e)
-      _, _, _, _, Error(e) -> Error(e)
-    }
+/// Decode a JSON string into a value
+fn json_string_decoder(inner: Decoder(a)) -> Decoder(a) {
+  use json_string <- decode.then(decode.string)
+  case json.parse(json_string, inner) {
+    Ok(value) -> decode.success(value)
+    Error(_) -> decode.failure(json_string, "valid JSON")
   }
 }
 
-fn dependent_decoder() -> fn(Dynamic) -> Result(Dependent, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    let id_result = dynamic.field("id", dynamic.string)(dyn)
-    let type_result = dynamic.field("type", dependent_type_decoder())(dyn)
+/// Decoder for Task/Bead
+fn task_decoder() -> Decoder(Task) {
+  use id <- decode.field("id", decode.string)
+  use title <- decode.field("title", decode.string)
+  use status <- decode.field("status", status_decoder())
+  use created_at <- decode.field("created_at", decode.string)
+  use updated_at <- decode.field("updated_at", decode.string)
+  use description <- decode.optional_field("description", decode.string, "")
+  use priority <- decode.optional_field("priority", priority_decoder(), task.P2)
+  use issue_type <- decode.optional_field("type", issue_type_decoder(), task.Task)
+  use parent_id <- decode.optional_field("parent_id", decode.optional(decode.string), None)
+  use design <- decode.optional_field("design", decode.optional(decode.string), None)
+  use notes <- decode.optional_field("notes", decode.optional(decode.string), None)
+  use acceptance <- decode.optional_field("acceptance", decode.optional(decode.string), None)
+  use assignee <- decode.optional_field("assignee", decode.optional(decode.string), None)
+  use labels <- decode.optional_field("labels", decode.list(decode.string), [])
+  use estimate <- decode.optional_field("estimate", decode.optional(decode.string), None)
+  use dependents <- decode.optional_field("dependents", decode.list(dependent_decoder()), [])
+  use blockers <- decode.optional_field("blockers", decode.list(decode.string), [])
+  use attachments <- decode.optional_field("attachments", decode.list(decode.string), [])
+  use is_tombstone <- decode.optional_field("tombstone", decode.bool, False)
 
-    case id_result, type_result {
-      Ok(id), Ok(dep_type) -> Ok(Dependent(id: id, dep_type: dep_type))
-      Error(e), _ -> Error(e)
-      _, Error(e) -> Error(e)
-    }
-  }
+  decode.success(Task(
+    id:,
+    title:,
+    description:,
+    status:,
+    priority:,
+    issue_type:,
+    parent_id:,
+    created_at:,
+    updated_at:,
+    design:,
+    notes:,
+    acceptance:,
+    assignee:,
+    labels:,
+    estimate:,
+    dependents:,
+    blockers:,
+    attachments:,
+    is_tombstone:,
+  ))
 }
 
-fn status_decoder() -> fn(Dynamic) -> Result(Status, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case dynamic.string(dyn) {
-      Ok(s) -> Ok(task.status_from_string(s))
-      Error(e) -> Error(e)
-    }
-  }
+/// Decoder for Dependent
+fn dependent_decoder() -> Decoder(Dependent) {
+  use id <- decode.field("id", decode.string)
+  use dep_type <- decode.field("type", dependent_type_decoder())
+  decode.success(Dependent(id:, dep_type:))
 }
 
-fn priority_decoder() -> fn(Dynamic) -> Result(Priority, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case dynamic.int(dyn) {
-      Ok(n) -> Ok(task.priority_from_int(n))
-      Error(_) -> {
-        // Try string format like "P1"
-        case dynamic.string(dyn) {
-          Ok(s) -> Ok(task.priority_from_string(s))
-          Error(e) -> Error(e)
-        }
-      }
-    }
-  }
+/// Decoder for Status
+fn status_decoder() -> Decoder(Status) {
+  use s <- decode.then(decode.string)
+  decode.success(task.status_from_string(s))
 }
 
-fn type_decoder() -> fn(Dynamic) -> Result(IssueType, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case dynamic.string(dyn) {
-      Ok(s) -> Ok(task.issue_type_from_string(s))
-      Error(e) -> Error(e)
-    }
-  }
+/// Decoder for Priority (handles both int and string formats)
+fn priority_decoder() -> Decoder(Priority) {
+  decode.one_of(decode.int |> decode.map(task.priority_from_int), [
+    decode.string |> decode.map(task.priority_from_string),
+  ])
 }
 
-fn dependent_type_decoder() -> fn(Dynamic) -> Result(DependentType, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case dynamic.string(dyn) {
-      Ok(s) -> Ok(task.dependent_type_from_string(s))
-      Error(e) -> Error(e)
-    }
-  }
+/// Decoder for IssueType
+fn issue_type_decoder() -> Decoder(IssueType) {
+  use s <- decode.then(decode.string)
+  decode.success(task.issue_type_from_string(s))
+}
+
+/// Decoder for DependentType
+fn dependent_type_decoder() -> Decoder(DependentType) {
+  use s <- decode.then(decode.string)
+  decode.success(task.dependent_type_from_string(s))
 }
 
 // ============================================================================

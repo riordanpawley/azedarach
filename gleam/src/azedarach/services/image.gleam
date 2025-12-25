@@ -6,8 +6,9 @@
 //
 // When attaching, we also update the bead's notes with a markdown link.
 
+import gleam/decode.{type Decoder}
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
+import gleam/dynamic
 import gleam/int
 import gleam/json
 import gleam/list
@@ -361,29 +362,26 @@ fn update_index(
 }
 
 fn parse_index(content: String) -> Result(AttachmentIndex, ImageError) {
-  case json.decode(content, index_decoder()) {
+  case json.parse(content, index_decoder()) {
     Ok(index) -> Ok(index)
     Error(_) -> Ok(dict.new())
-    // Return empty on parse error
   }
 }
 
-fn index_decoder() -> fn(Dynamic) ->
-  Result(AttachmentIndex, List(dynamic.DecodeError)) {
-  dynamic.dict(dynamic.string, dynamic.list(attachment_decoder()))
+/// Decoder for the attachment index (Dict of issue_id -> List(ImageAttachment))
+fn index_decoder() -> Decoder(AttachmentIndex) {
+  decode.dict(decode.string, decode.list(attachment_decoder()))
 }
 
-fn attachment_decoder() -> fn(Dynamic) ->
-  Result(ImageAttachment, List(dynamic.DecodeError)) {
-  dynamic.decode6(
-    ImageAttachment,
-    dynamic.field("id", dynamic.string),
-    dynamic.field("filename", dynamic.string),
-    dynamic.field("originalPath", dynamic.string),
-    dynamic.field("mimeType", dynamic.string),
-    dynamic.field("size", dynamic.int),
-    dynamic.field("createdAt", dynamic.string),
-  )
+/// Decoder for ImageAttachment using clean use syntax
+fn attachment_decoder() -> Decoder(ImageAttachment) {
+  use id <- decode.field("id", decode.string)
+  use filename <- decode.field("filename", decode.string)
+  use original_path <- decode.field("originalPath", decode.string)
+  use mime_type <- decode.field("mimeType", decode.string)
+  use size <- decode.field("size", decode.int)
+  use created_at <- decode.field("createdAt", decode.string)
+  decode.success(ImageAttachment(id:, filename:, original_path:, mime_type:, size:, created_at:))
 }
 
 fn encode_index(index: AttachmentIndex) -> String {
