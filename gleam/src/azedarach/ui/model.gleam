@@ -11,6 +11,7 @@ import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
+import azedarach/actors/app_supervisor.{type AppContext}
 
 // Main model holding all application state
 pub type Model {
@@ -44,6 +45,8 @@ pub type Model {
     loading: Bool,
     toasts: List(Toast),
     terminal_size: #(Int, Int),
+    // OTP supervision context (optional for backwards compatibility)
+    app_context: Option(AppContext),
   )
 }
 
@@ -211,7 +214,7 @@ pub type Modifier {
   Alt
 }
 
-// Initialize model with config and theme
+// Initialize model with config and theme (legacy, no supervision)
 pub fn init(config: Config, colors: Colors) -> Model {
   Model(
     tasks: [],
@@ -236,6 +239,40 @@ pub fn init(config: Config, colors: Colors) -> Model {
     loading: True,
     toasts: [],
     terminal_size: #(80, 24),
+    app_context: None,
+  )
+}
+
+// Initialize model with supervision context (preferred)
+pub fn init_with_context(
+  config: Config,
+  colors: Colors,
+  context: AppContext,
+) -> Model {
+  Model(
+    tasks: [],
+    sessions: dict.new(),
+    dev_servers: dict.new(),
+    projects: [],
+    current_project: None,
+    cursor: Cursor(column_index: 0, task_index: 0),
+    mode: Normal,
+    input: None,
+    overlay: None,
+    pending_key: None,
+    status_filter: set.new(),
+    priority_filter: set.new(),
+    type_filter: set.new(),
+    session_filter: set.new(),
+    hide_epic_children: False,
+    sort_by: SortBySession,
+    search_query: "",
+    config: config,
+    colors: colors,
+    loading: True,
+    toasts: [],
+    terminal_size: #(80, 24),
+    app_context: Some(context),
   )
 }
 

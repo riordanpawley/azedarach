@@ -18,6 +18,7 @@ import azedarach/ui/model.{
 }
 import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
+import azedarach/actors/app_supervisor.{type AppContext}
 
 pub fn update(
   model: Model,
@@ -339,6 +340,41 @@ pub fn update(
     model.ForceRedraw -> #(model, effects.none())
     model.KeyPressed(_, _) -> #(model, effects.none())
     // Handled by keys module
+  }
+}
+
+/// Update with supervision context (preferred method)
+/// This version can start/stop session monitors through the supervision tree
+pub fn update_with_context(
+  model: Model,
+  msg: Msg,
+  context: AppContext,
+) -> #(Model, Effect(Msg)) {
+  // Use the context's coordinator
+  let #(new_model, effects) = update(model, msg, context.coordinator)
+
+  // Handle supervision-related side effects
+  case msg {
+    // When a session is started, start the session monitor
+    model.SessionStateChanged(id, state) -> {
+      case state.tmux_session, state.state {
+        Some(tmux_name), session.Busy -> {
+          app_supervisor.start_session_monitor(context, id, tmux_name)
+          #(new_model, effects)
+        }
+        _, session.Idle -> {
+          app_supervisor.stop_session_monitor(context, id)
+          #(new_model, effects)
+        }
+        _, _ -> #(new_model, effects)
+      }
+    }
+    // When a dev server is started/stopped, manage server monitor
+    model.DevServerStateChanged(_key, _state) -> {
+      // Server monitors are managed by the servers supervisor
+      #(new_model, effects)
+    }
+    _ -> #(new_model, effects)
   }
 }
 
