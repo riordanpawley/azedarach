@@ -18,6 +18,7 @@ import gleam/string
 import azedarach/config.{type Config}
 import azedarach/util/shell
 import simplifile
+import tempo
 
 // ============================================================================
 // Types
@@ -446,8 +447,7 @@ fn generate_id() -> String {
 }
 
 fn now_iso() -> String {
-  // Simplified - real impl would use datetime library
-  "2025-01-01T00:00:00Z"
+  tempo.format_utc(tempo.ISO8601Seconds)
 }
 
 // ============================================================================
