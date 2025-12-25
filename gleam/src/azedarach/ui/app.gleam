@@ -11,6 +11,7 @@ import azedarach/ui/update
 import azedarach/ui/view
 import azedarach/ui/theme
 import azedarach/actors/coordinator
+import azedarach/actors/app_supervisor.{type AppContext}
 
 /// Effect type for Shore - a list of functions that return messages
 pub type Effect(msg) =
@@ -27,12 +28,37 @@ pub fn batch(effects: List(Effect(msg))) -> Effect(msg) {
   |> list.flatten
 }
 
-/// Start the TUI application
+/// Start with existing supervision context (preferred method)
+pub fn start_with_context(context: AppContext) -> Result(Nil, shore.StartError) {
+  // Initialize theme
+  let colors = theme.load(context.config.theme)
+
+  // Create exit subject for graceful shutdown
+  let exit = process.new_subject()
+
+  // Configure and start Shore with supervision context
+  let spec =
+    shore.spec(
+      init: fn() { init_with_context(context.config, colors, context) },
+      view: view.render,
+      update: fn(model, msg) { update.update_with_context(model, msg, context) },
+      exit: exit,
+      keybinds: shore.default_keybinds(),
+      redraw: shore.on_timer(16),
+    )
+
+  // Start the application
+  shore.start(spec)
+  |> result.map(fn(_subject) { Nil })
+}
+
+/// Legacy start function (starts its own coordinator)
+/// Deprecated: Use start_with_context instead
 pub fn start(config: Config) -> Result(Nil, shore.StartError) {
   // Initialize theme
   let colors = theme.load(config.theme)
 
-  // Start coordinator actor
+  // Start coordinator actor (legacy - not supervised)
   let assert Ok(coord) = coordinator.start(config)
 
   // Create exit subject for graceful shutdown
@@ -54,7 +80,26 @@ pub fn start(config: Config) -> Result(Nil, shore.StartError) {
   |> result.map(fn(_subject) { Nil })
 }
 
-/// Initialize the model and trigger initial effects
+/// Initialize the model with supervision context
+fn init_with_context(
+  config: Config,
+  colors: theme.Colors,
+  context: AppContext,
+) -> #(Model, Effect(Msg)) {
+  let initial_model = model.init_with_context(config, colors, context)
+
+  // Request initial beads load
+  let effects = [
+    fn() {
+      coordinator.send(context.coordinator, coordinator.RefreshBeads)
+      model.Tick
+    },
+  ]
+
+  #(initial_model, effects)
+}
+
+/// Initialize the model and trigger initial effects (legacy)
 fn init(
   config: Config,
   colors: theme.Colors,
