@@ -1,5 +1,6 @@
 // Tmux service - tmux command wrapper
 
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -188,5 +189,3 @@ fn is_inside_tmux() -> Bool {
     Error(_) -> False
   }
 }
-
-import gleam/int

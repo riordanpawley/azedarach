@@ -13,7 +13,7 @@ import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
-import azedarach/domain/session.{type SessionState}
+import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/services/beads
 import azedarach/services/bead_editor
@@ -1036,5 +1036,3 @@ fn remove_image_from_notes(
     Error(e) -> Error(e)
   }
 }
-
-import azedarach/domain/session
