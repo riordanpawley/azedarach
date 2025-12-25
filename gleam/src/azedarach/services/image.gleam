@@ -8,6 +8,7 @@
 
 import gleam/decode.{type Decoder}
 import gleam/dict.{type Dict}
+import gleam/erlang
 import gleam/int
 import gleam/json
 import gleam/list
@@ -84,30 +85,15 @@ pub fn attach_file(
   file_path: String,
 ) -> Result(ImageAttachment, ImageError) {
   // Verify file exists
-  case simplifile.is_file(file_path) {
-    Ok(True) -> Nil
-    _ -> return Error(FileNotFound(file_path))
-  }
+  use _ <- guard_file_exists(file_path)
 
   // Check if it's an image
   let filename = get_basename(file_path)
-  case is_image_file(filename) {
-    False ->
-      return Error(StorageError(
-        "Not a supported image format: "
-        <> filename
-        <> ". Supported: "
-        <> string.join(image_extensions, ", "),
-      ))
-    True -> Nil
-  }
+  use _ <- guard_is_image(filename)
 
   // Create issue directory
   let issue_dir = images_dir <> "/" <> issue_id
-  case simplifile.create_directory_all(issue_dir) {
-    Ok(_) -> Nil
-    Error(_) -> return Error(StorageError("Failed to create directory: " <> issue_dir))
-  }
+  use _ <- guard_mkdir(issue_dir)
 
   // Generate unique ID and destination
   let id = generate_id()
@@ -116,10 +102,7 @@ pub fn attach_file(
   let dest_path = issue_dir <> "/" <> dest_filename
 
   // Copy file
-  case simplifile.copy_file(file_path, dest_path) {
-    Ok(_) -> Nil
-    Error(_) -> return Error(StorageError("Failed to copy file"))
-  }
+  use _ <- guard_copy(file_path, dest_path)
 
   // Get file size
   let size = case simplifile.file_info(dest_path) {
@@ -139,84 +122,53 @@ pub fn attach_file(
     )
 
   // Update index
-  case update_index(issue_id, attachment) {
-    Ok(_) -> Ok(attachment)
-    Error(e) -> Error(e)
-  }
+  update_index(issue_id, attachment)
+  |> result.map(fn(_) { attachment })
 }
 
 /// Attach image from clipboard
 pub fn attach_from_clipboard(issue_id: String) -> Result(ImageAttachment, ImageError) {
   // Detect clipboard tool
-  let tool = detect_clipboard_tool()
+  use tool <- guard_clipboard_tool()
 
-  case tool {
-    None ->
-      return Error(ClipboardError(
-        "No clipboard tool available. Install xclip (X11) or wl-clipboard (Wayland).",
-        None,
-      ))
-    Some(t) -> {
-      // Create issue directory
-      let issue_dir = images_dir <> "/" <> issue_id
-      case simplifile.create_directory_all(issue_dir) {
-        Ok(_) -> Nil
-        Error(_) -> return Error(StorageError("Failed to create directory"))
-      }
+  // Create issue directory
+  let issue_dir = images_dir <> "/" <> issue_id
+  use _ <- guard_mkdir(issue_dir)
 
-      // Generate unique ID
-      let id = generate_id()
-      let dest_filename = id <> ".png"
-      let dest_path = issue_dir <> "/" <> dest_filename
+  // Generate unique ID
+  let id = generate_id()
+  let dest_filename = id <> ".png"
+  let dest_path = issue_dir <> "/" <> dest_filename
 
-      // Build clipboard command
-      let cmd = build_clipboard_command(t, dest_path)
+  // Build and execute clipboard command
+  let cmd = build_clipboard_command(tool, dest_path)
+  use _ <- guard_clipboard_paste(cmd, tool)
 
-      // Execute
-      case shell.run("sh", ["-c", cmd], ".") {
-        Ok(_) -> Nil
-        Error(_) ->
-          return Error(ClipboardError("Failed to get image from clipboard", Some(t)))
-      }
+  // Verify file was created
+  use _ <- guard_clipboard_file(dest_path, tool)
 
-      // Verify file was created
-      case simplifile.is_file(dest_path) {
-        Ok(True) -> Nil
-        _ -> return Error(ClipboardError("No image data in clipboard", Some(t)))
-      }
-
-      // Get file size and verify not empty
-      let size = case simplifile.file_info(dest_path) {
-        Ok(info) -> info.size
-        Error(_) -> 0
-      }
-
-      case size {
-        0 -> {
-          simplifile.delete(dest_path)
-          return Error(ClipboardError("Clipboard does not contain image data", Some(t)))
-        }
-        _ -> Nil
-      }
-
-      // Create attachment
-      let attachment =
-        ImageAttachment(
-          id: id,
-          filename: dest_filename,
-          original_path: "clipboard",
-          mime_type: "image/png",
-          size: size,
-          created_at: now_iso(),
-        )
-
-      // Update index
-      case update_index(issue_id, attachment) {
-        Ok(_) -> Ok(attachment)
-        Error(e) -> Error(e)
-      }
-    }
+  // Get file size and verify not empty
+  let size = case simplifile.file_info(dest_path) {
+    Ok(info) -> info.size
+    Error(_) -> 0
   }
+
+  use _ <- guard_clipboard_size(size, dest_path, tool)
+
+  // Create attachment
+  let attachment =
+    ImageAttachment(
+      id: id,
+      filename: dest_filename,
+      original_path: "clipboard",
+      mime_type: "image/png",
+      size: size,
+      created_at: now_iso(),
+    )
+
+  // Update index
+  update_index(issue_id, attachment)
+  |> result.map(fn(_) { attachment })
 }
 
 /// Remove an attachment
@@ -498,4 +450,111 @@ fn now_iso() -> String {
   "2025-01-01T00:00:00Z"
 }
 
-import gleam/erlang
+// ============================================================================
+// Guard Functions (for early returns using `use`)
+// ============================================================================
+
+/// Guard: file must exist
+fn guard_file_exists(
+  path: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case simplifile.is_file(path) {
+    Ok(True) -> next(Nil)
+    _ -> Error(FileNotFound(path))
+  }
+}
+
+/// Guard: file must be a supported image format
+fn guard_is_image(
+  filename: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case is_image_file(filename) {
+    True -> next(Nil)
+    False ->
+      Error(StorageError(
+        "Not a supported image format: "
+        <> filename
+        <> ". Supported: "
+        <> string.join(image_extensions, ", "),
+      ))
+  }
+}
+
+/// Guard: directory creation must succeed
+fn guard_mkdir(
+  dir: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case simplifile.create_directory_all(dir) {
+    Ok(_) -> next(Nil)
+    Error(_) -> Error(StorageError("Failed to create directory: " <> dir))
+  }
+}
+
+/// Guard: file copy must succeed
+fn guard_copy(
+  src: String,
+  dest: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case simplifile.copy_file(src, dest) {
+    Ok(_) -> next(Nil)
+    Error(_) -> Error(StorageError("Failed to copy file"))
+  }
+}
+
+/// Guard: clipboard tool must be available
+fn guard_clipboard_tool(
+  next: fn(String) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case detect_clipboard_tool() {
+    Some(tool) -> next(tool)
+    None ->
+      Error(ClipboardError(
+        "No clipboard tool available. Install xclip (X11) or wl-clipboard (Wayland).",
+        None,
+      ))
+  }
+}
+
+/// Guard: clipboard paste command must succeed
+fn guard_clipboard_paste(
+  cmd: String,
+  tool: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case shell.run("sh", ["-c", cmd], ".") {
+    Ok(_) -> next(Nil)
+    Error(_) -> Error(ClipboardError("Failed to get image from clipboard", Some(tool)))
+  }
+}
+
+/// Guard: clipboard file must exist after paste
+fn guard_clipboard_file(
+  path: String,
+  tool: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case simplifile.is_file(path) {
+    Ok(True) -> next(Nil)
+    _ -> Error(ClipboardError("No image data in clipboard", Some(tool)))
+  }
+}
+
+/// Guard: clipboard file must have content
+fn guard_clipboard_size(
+  size: Int,
+  path: String,
+  tool: String,
+  next: fn(Nil) -> Result(ImageAttachment, ImageError),
+) -> Result(ImageAttachment, ImageError) {
+  case size {
+    0 -> {
+      let _ = simplifile.delete(path)
+      Error(ClipboardError("Clipboard does not contain image data", Some(tool)))
+    }
+    _ -> next(Nil)
+  }
+}
