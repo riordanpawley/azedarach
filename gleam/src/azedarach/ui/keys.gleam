@@ -2,6 +2,7 @@
 
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
   Normal, Select,
@@ -264,5 +265,3 @@ fn is_printable(key: String) -> Bool {
     _ -> False
   }
 }
-
-import gleam/string

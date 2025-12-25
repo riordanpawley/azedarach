@@ -4,6 +4,7 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set
 import gleam/string
 import azedarach/domain/session
 import azedarach/ui/model.{type Model, type Mode, Normal, Select}
@@ -166,5 +167,3 @@ fn element_length(el: Element) -> Int {
     view.Empty -> 0
   }
 }
-
-import gleam/set

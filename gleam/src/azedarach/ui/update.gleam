@@ -5,7 +5,10 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
+import gleam/string
 import gleam/erlang/process.{type Subject}
+import azedarach/domain/session
+import azedarach/domain/task
 import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
   Cursor, Normal, Select,
@@ -542,7 +545,3 @@ fn handle_confirm(model: Model, coord: Subject(coordinator.Msg)) -> Model {
     _ -> model
   }
 }
-
-import gleam/string
-import azedarach/domain/task
-import azedarach/domain/session
