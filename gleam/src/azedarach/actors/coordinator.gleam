@@ -23,6 +23,7 @@ import azedarach/services/tmux
 import azedarach/services/worktree
 import azedarach/services/git
 import azedarach/services/project_service
+import tempo
 
 // Refresh interval in milliseconds (2 seconds)
 const refresh_interval_ms = 2000
@@ -1004,8 +1005,7 @@ fn build_start_work_command(
 }
 
 fn now_iso() -> String {
-  // Simplified - real impl would use datetime library
-  "2025-01-01T00:00:00Z"
+  tempo.format_utc(tempo.ISO8601Seconds)
 }
 
 /// Remove image link from bead notes

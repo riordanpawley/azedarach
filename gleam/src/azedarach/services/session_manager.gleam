@@ -22,6 +22,7 @@ import azedarach/services/worktree
 import azedarach/services/state_detector
 import azedarach/services/git
 import azedarach/util/shell
+import tempo
 
 // ============================================================================
 // Types
@@ -379,6 +380,5 @@ fn find_existing_path(paths: List(String)) -> Option(String) {
 // ============================================================================
 
 fn now_iso() -> String {
-  // Simplified - real impl would use datetime library
-  "2025-01-01T00:00:00Z"
+  tempo.format_utc(tempo.ISO8601Seconds)
 }
