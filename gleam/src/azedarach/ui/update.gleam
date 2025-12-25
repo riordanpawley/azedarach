@@ -1,4 +1,7 @@
 // TEA Update - message handling and state transitions
+//
+// All side effects go through Shore's effect system via the effects module.
+// The update function is pure - it returns effects, not executes them.
 
 import gleam/dict
 import gleam/int
@@ -13,7 +16,7 @@ import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
   Cursor, Normal, Select,
 }
-import azedarach/ui/app.{type Effect}
+import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
 
@@ -23,367 +26,319 @@ pub fn update(
   coord: Subject(coordinator.Msg),
 ) -> #(Model, Effect(Msg)) {
   case msg {
-    // Navigation
-    model.MoveUp -> #(move_cursor(model, 0, -1), [])
-    model.MoveDown -> #(move_cursor(model, 0, 1), [])
-    model.MoveLeft -> #(move_cursor(model, -1, 0), [])
-    model.MoveRight -> #(move_cursor(model, 1, 0), [])
-    model.PageUp -> #(move_cursor(model, 0, -10), [])
-    model.PageDown -> #(move_cursor(model, 0, 10), [])
-    model.GotoFirst -> #(goto_first(model), [])
-    model.GotoLast -> #(goto_last(model), [])
-    model.GotoColumn(col) -> #(goto_column(model, col), [])
+    // Navigation - pure state updates, no effects
+    model.MoveUp -> #(move_cursor(model, 0, -1), effects.none())
+    model.MoveDown -> #(move_cursor(model, 0, 1), effects.none())
+    model.MoveLeft -> #(move_cursor(model, -1, 0), effects.none())
+    model.MoveRight -> #(move_cursor(model, 1, 0), effects.none())
+    model.PageUp -> #(move_cursor(model, 0, -10), effects.none())
+    model.PageDown -> #(move_cursor(model, 0, 10), effects.none())
+    model.GotoFirst -> #(goto_first(model), effects.none())
+    model.GotoLast -> #(goto_last(model), effects.none())
+    model.GotoColumn(col) -> #(goto_column(model, col), effects.none())
 
-    // Mode changes
-    model.EnterSelect -> #(enter_select(model), [])
-    model.ExitSelect -> #(Model(..model, mode: Normal), [])
-    model.ToggleSelection -> #(toggle_selection(model), [])
-    model.EnterGoto -> #(Model(..model, pending_key: Some("g")), [])
-    model.ExitGoto -> #(Model(..model, pending_key: None), [])
+    // Mode changes - pure state updates
+    model.EnterSelect -> #(enter_select(model), effects.none())
+    model.ExitSelect -> #(Model(..model, mode: Normal), effects.none())
+    model.ToggleSelection -> #(toggle_selection(model), effects.none())
+    model.EnterGoto -> #(Model(..model, pending_key: Some("g")), effects.none())
+    model.ExitGoto -> #(Model(..model, pending_key: None), effects.none())
     model.EnterSearch -> #(
       Model(..model, input: Some(model.SearchInput(""))),
-      [],
+      effects.none(),
     )
     model.ExitSearch -> #(
       Model(..model, input: None, search_query: ""),
-      [],
+      effects.none(),
     )
 
-    // Overlays
+    // Overlays - pure state updates
     model.OpenActionMenu -> #(
       Model(..model, overlay: Some(model.ActionMenu)),
-      [],
+      effects.none(),
     )
     model.OpenFilterMenu -> #(
       Model(..model, overlay: Some(model.FilterMenu)),
-      [],
+      effects.none(),
     )
     model.OpenSortMenu -> #(
       Model(..model, overlay: Some(model.SortMenu)),
-      [],
+      effects.none(),
     )
     model.OpenHelp -> #(
       Model(..model, overlay: Some(model.HelpOverlay)),
-      [],
+      effects.none(),
     )
     model.OpenSettings -> #(
       Model(..model, overlay: Some(model.SettingsOverlay)),
-      [],
+      effects.none(),
     )
     model.OpenDiagnostics -> #(
       Model(..model, overlay: Some(model.DiagnosticsOverlay)),
-      [],
+      effects.none(),
     )
     model.OpenLogs -> #(
       Model(..model, overlay: Some(model.LogsViewer)),
-      [],
+      effects.none(),
     )
     model.OpenProjectSelector -> #(
       Model(..model, overlay: Some(model.ProjectSelector)),
-      [],
+      effects.none(),
     )
-    model.OpenDetailPanel -> #(open_detail_panel(model), [])
-    model.CloseOverlay -> #(Model(..model, overlay: None), [])
+    model.OpenDetailPanel -> #(open_detail_panel(model), effects.none())
+    model.CloseOverlay -> #(Model(..model, overlay: None), effects.none())
 
-    // Session actions
+    // Session actions - side effects go through Shore effects
     model.StartSession -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.StartSession(id, False, False))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.start_session(coord, id, False, False))
+        None -> #(model, effects.none())
       }
     }
     model.StartSessionWithWork -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.StartSession(id, True, False))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.start_session(coord, id, True, False))
+        None -> #(model, effects.none())
       }
     }
     model.StartSessionYolo -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.StartSession(id, True, True))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.start_session(coord, id, True, True))
+        None -> #(model, effects.none())
       }
     }
     model.AttachSession -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.AttachSession(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.attach_session(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.PauseSession -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.PauseSession(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.pause_session(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.ResumeSession -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.ResumeSession(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.resume_session(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.StopSession -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.StopSession(id)))),
-          [],
+          effects.none(),
         )
-        None -> #(model, [])
+        None -> #(model, effects.none())
       }
     }
 
-    // Dev server actions
+    // Dev server actions - side effects go through Shore effects
     model.ToggleDevServer -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.ToggleDevServer(id, "default"))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.toggle_dev_server(coord, id, "default"))
+        None -> #(model, effects.none())
       }
     }
     model.ViewDevServer -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.ViewDevServer(id, "default"))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.view_dev_server(coord, id, "default"))
+        None -> #(model, effects.none())
       }
     }
     model.RestartDevServer -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.RestartDevServer(id, "default"))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.restart_dev_server(coord, id, "default"))
+        None -> #(model, effects.none())
       }
     }
 
-    // Git actions
+    // Git actions - side effects go through Shore effects
     model.UpdateFromMain -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.UpdateFromMain(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.update_from_main(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.MergeToMain -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.MergeToMain(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.merge_to_main(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.ShowDiff -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.DiffViewer(id))),
-          [],
+          effects.none(),
         )
-        None -> #(model, [])
+        None -> #(model, effects.none())
       }
     }
     model.CreatePR -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.CreatePR(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.create_pr(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.DeleteCleanup -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteWorktree(id)))),
-          [],
+          effects.none(),
         )
-        None -> #(model, [])
+        None -> #(model, effects.none())
       }
     }
 
-    // Task actions
+    // Task actions - side effects go through Shore effects
     model.MoveTaskLeft -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.MoveTask(id, -1))
-          #(Model(..model, overlay: None), [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(
+          Model(..model, overlay: None),
+          effects.move_task(coord, id, -1),
+        )
+        None -> #(model, effects.none())
       }
     }
     model.MoveTaskRight -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.MoveTask(id, 1))
-          #(Model(..model, overlay: None), [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(
+          Model(..model, overlay: None),
+          effects.move_task(coord, id, 1),
+        )
+        None -> #(model, effects.none())
       }
     }
 
-    // Bead CRUD
-    model.CreateBead -> {
-      coordinator.send(coord, coordinator.CreateBead(None))
-      #(model, [])
-    }
-    model.CreateBeadWithClaude -> {
-      coordinator.send(coord, coordinator.CreateBeadWithClaude)
-      #(model, [])
-    }
+    // Bead CRUD - side effects go through Shore effects
+    model.CreateBead -> #(model, effects.create_bead(coord))
+    model.CreateBeadWithClaude -> #(model, effects.create_bead_with_claude(coord))
     model.EditBead -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.EditBead(id))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.edit_bead(coord, id))
+        None -> #(model, effects.none())
       }
     }
     model.DeleteBead -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteBead(id)))),
-          [],
+          effects.none(),
         )
-        None -> #(model, [])
+        None -> #(model, effects.none())
       }
     }
 
-    // Image actions
+    // Image actions - side effects go through Shore effects
     model.AttachImage -> {
       case current_task_id(model) {
         Some(id) -> #(
           Model(..model, overlay: Some(model.ImageAttach(id))),
-          [],
+          effects.none(),
         )
-        None -> #(model, [])
+        None -> #(model, effects.none())
       }
     }
     model.PasteFromClipboard -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.PasteImage(id))
-          #(Model(..model, overlay: None), [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(
+          Model(..model, overlay: None),
+          effects.paste_image(coord, id),
+        )
+        None -> #(model, effects.none())
       }
     }
     model.SelectFile -> #(
       Model(..model, input: Some(model.PathInput(""))),
-      [],
+      effects.none(),
     )
     model.PreviewImage(path) -> #(
       Model(..model, overlay: Some(model.ImagePreview(path))),
-      [],
+      effects.none(),
     )
     model.DeleteImage(path) -> {
       case current_task_id(model) {
-        Some(id) -> {
-          coordinator.send(coord, coordinator.DeleteImage(id, path))
-          #(model, [])
-        }
-        None -> #(model, [])
+        Some(id) -> #(model, effects.delete_image(coord, id, path))
+        None -> #(model, effects.none())
       }
     }
 
-    // Input handling
-    model.InputChar(c) -> #(handle_input_char(model, c), [])
-    model.InputBackspace -> #(handle_input_backspace(model), [])
-    model.InputSubmit -> #(handle_input_submit(model), [])
-    model.InputCancel -> #(Model(..model, input: None), [])
+    // Input handling - pure state updates
+    model.InputChar(c) -> #(handle_input_char(model, c), effects.none())
+    model.InputBackspace -> #(handle_input_backspace(model), effects.none())
+    model.InputSubmit -> #(handle_input_submit(model), effects.none())
+    model.InputCancel -> #(Model(..model, input: None), effects.none())
 
-    // Filter/sort
-    model.ToggleStatusFilter(status) -> #(toggle_status_filter(model, status), [])
-    model.TogglePriorityFilter(priority) -> #(toggle_priority_filter(model, priority), [])
-    model.ToggleTypeFilter(t) -> #(toggle_type_filter(model, t), [])
-    model.ToggleSessionFilter(state) -> #(toggle_session_filter(model, state), [])
+    // Filter/sort - pure state updates
+    model.ToggleStatusFilter(status) -> #(toggle_status_filter(model, status), effects.none())
+    model.TogglePriorityFilter(priority) -> #(toggle_priority_filter(model, priority), effects.none())
+    model.ToggleTypeFilter(t) -> #(toggle_type_filter(model, t), effects.none())
+    model.ToggleSessionFilter(state) -> #(toggle_session_filter(model, state), effects.none())
     model.ToggleHideEpicChildren -> #(
       Model(..model, hide_epic_children: !model.hide_epic_children),
-      [],
+      effects.none(),
     )
-    model.ClearFilters -> #(clear_filters(model), [])
+    model.ClearFilters -> #(clear_filters(model), effects.none())
     model.SetSort(field) -> #(
       Model(..model, sort_by: field, overlay: None),
-      [],
+      effects.none(),
     )
 
-    // MergeChoice
+    // MergeChoice - side effects go through Shore effects
     model.MergeAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> {
-          coordinator.send(coord, coordinator.MergeAndAttach(id))
-          #(Model(..model, overlay: None), [])
-        }
-        _ -> #(model, [])
+        Some(model.MergeChoice(id, _)) -> #(
+          Model(..model, overlay: None),
+          effects.merge_and_attach(coord, id),
+        )
+        _ -> #(model, effects.none())
       }
     }
     model.SkipAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> {
-          coordinator.send(coord, coordinator.AttachSession(id))
-          #(Model(..model, overlay: None), [])
-        }
-        _ -> #(model, [])
+        Some(model.MergeChoice(id, _)) -> #(
+          Model(..model, overlay: None),
+          effects.attach_session(coord, id),
+        )
+        _ -> #(model, effects.none())
       }
     }
 
-    // Confirm dialog
-    model.ConfirmAction -> #(handle_confirm(model, coord), [])
-    model.CancelAction -> #(Model(..model, overlay: None), [])
+    // Confirm dialog - uses handle_confirm which returns effects
+    model.ConfirmAction -> handle_confirm(model, coord)
+    model.CancelAction -> #(Model(..model, overlay: None), effects.none())
 
-    // Data updates
+    // Data updates - pure state updates (from coordinator async messages)
     model.BeadsLoaded(tasks) -> #(
       Model(..model, tasks: tasks, loading: False),
-      [],
+      effects.none(),
     )
     model.SessionStateChanged(id, state) -> #(
       Model(..model, sessions: dict.insert(model.sessions, id, state)),
-      [],
+      effects.none(),
     )
     model.DevServerStateChanged(id, state) -> #(
       Model(..model, dev_servers: dict.insert(model.dev_servers, id, state)),
-      [],
+      effects.none(),
     )
     model.ToastExpired(id) -> #(
       Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
-      [],
+      effects.none(),
     )
 
-    // System
+    // System messages - pure state updates
     model.TerminalResized(w, h) -> #(
       Model(..model, terminal_size: #(w, h)),
-      [],
+      effects.none(),
     )
-    model.Tick -> #(model, [])
-    model.Quit -> #(model, [])
+    model.Tick -> #(model, effects.none())
+    model.Quit -> #(model, effects.none())
     // Will be handled by Shore
-    model.ForceRedraw -> #(model, [])
-    model.KeyPressed(_, _) -> #(model, [])
+    model.ForceRedraw -> #(model, effects.none())
+    model.KeyPressed(_, _) -> #(model, effects.none())
     // Handled by keys module
   }
 }
@@ -565,19 +520,19 @@ fn clear_filters(model: Model) -> Model {
   )
 }
 
-fn handle_confirm(model: Model, coord: Subject(coordinator.Msg)) -> Model {
+fn handle_confirm(
+  model: Model,
+  coord: Subject(coordinator.Msg),
+) -> #(Model, Effect(Msg)) {
   case model.overlay {
     Some(model.ConfirmDialog(action)) -> {
-      case action {
-        model.DeleteWorktree(id) ->
-          coordinator.send(coord, coordinator.DeleteCleanup(id))
-        model.DeleteBead(id) ->
-          coordinator.send(coord, coordinator.DeleteBead(id))
-        model.StopSession(id) ->
-          coordinator.send(coord, coordinator.StopSession(id))
+      let effect = case action {
+        model.DeleteWorktree(id) -> effects.delete_cleanup(coord, id)
+        model.DeleteBead(id) -> effects.delete_bead(coord, id)
+        model.StopSession(id) -> effects.stop_session(coord, id)
       }
-      Model(..model, overlay: None)
+      #(Model(..model, overlay: None), effect)
     }
-    _ -> model
+    _ -> #(model, effects.none())
   }
 }
