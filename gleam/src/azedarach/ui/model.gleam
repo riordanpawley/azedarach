@@ -51,7 +51,12 @@ pub type Model {
 }
 
 pub type Cursor {
-  Cursor(column_index: Int, task_index: Int)
+  Cursor(
+    column_index: Int,
+    // ID-based navigation: stores the focused task's ID instead of index
+    // This prevents desync when filters/sorts change the task order
+    focused_task_id: Option(String),
+  )
 }
 
 pub type Mode {
@@ -222,7 +227,7 @@ pub fn init(config: Config, colors: Colors) -> Model {
     dev_servers: dict.new(),
     projects: [],
     current_project: None,
-    cursor: Cursor(column_index: 0, task_index: 0),
+    cursor: Cursor(column_index: 0, focused_task_id: None),
     mode: Normal,
     input: None,
     overlay: None,
@@ -255,7 +260,7 @@ pub fn init_with_context(
     dev_servers: dict.new(),
     projects: [],
     current_project: None,
-    cursor: Cursor(column_index: 0, task_index: 0),
+    cursor: Cursor(column_index: 0, focused_task_id: None),
     mode: Normal,
     input: None,
     overlay: None,

@@ -48,7 +48,8 @@ pub fn update(
       effects.none(),
     )
     model.ExitSearch -> #(
-      Model(..model, input: None, search_query: ""),
+      // Validate cursor when clearing search - more tasks may become visible
+      Model(..model, input: None, search_query: "") |> validate_cursor,
       effects.none(),
     )
 
@@ -272,16 +273,29 @@ pub fn update(
     model.InputSubmit -> #(handle_input_submit(model), effects.none())
     model.InputCancel -> #(Model(..model, input: None), effects.none())
 
-    // Filter/sort - pure state updates
-    model.ToggleStatusFilter(status) -> #(toggle_status_filter(model, status), effects.none())
-    model.TogglePriorityFilter(priority) -> #(toggle_priority_filter(model, priority), effects.none())
-    model.ToggleTypeFilter(t) -> #(toggle_type_filter(model, t), effects.none())
-    model.ToggleSessionFilter(state) -> #(toggle_session_filter(model, state), effects.none())
-    model.ToggleHideEpicChildren -> #(
-      Model(..model, hide_epic_children: !model.hide_epic_children),
+    // Filter/sort - pure state updates with cursor validation
+    // ID-based navigation: validate cursor after changes to ensure focus remains valid
+    model.ToggleStatusFilter(status) -> #(
+      toggle_status_filter(model, status) |> validate_cursor,
       effects.none(),
     )
-    model.ClearFilters -> #(clear_filters(model), effects.none())
+    model.TogglePriorityFilter(priority) -> #(
+      toggle_priority_filter(model, priority) |> validate_cursor,
+      effects.none(),
+    )
+    model.ToggleTypeFilter(t) -> #(
+      toggle_type_filter(model, t) |> validate_cursor,
+      effects.none(),
+    )
+    model.ToggleSessionFilter(state) -> #(
+      toggle_session_filter(model, state) |> validate_cursor,
+      effects.none(),
+    )
+    model.ToggleHideEpicChildren -> #(
+      Model(..model, hide_epic_children: !model.hide_epic_children) |> validate_cursor,
+      effects.none(),
+    )
+    model.ClearFilters -> #(clear_filters(model) |> validate_cursor, effects.none())
     model.SetSort(field) -> #(
       Model(..model, sort_by: field, overlay: None),
       effects.none(),
@@ -313,7 +327,8 @@ pub fn update(
 
     // Data updates - pure state updates (from coordinator async messages)
     model.BeadsLoaded(tasks) -> #(
-      Model(..model, tasks: tasks, loading: False),
+      // Validate cursor after tasks change (some may be deleted/added)
+      Model(..model, tasks: tasks, loading: False) |> validate_cursor,
       effects.none(),
     )
     model.SessionStateChanged(id, state) -> #(
@@ -380,28 +395,94 @@ pub fn update_with_context(
 
 // Helper functions
 
+/// ID-based cursor movement
+/// Instead of tracking indices that can desync, we track the focused task's ID
+/// and compute movement relative to the current filtered/sorted list
 fn move_cursor(model: Model, dx: Int, dy: Int) -> Model {
-  let new_col = int.clamp(model.cursor.column_index + dx, 0, 3)
-  let tasks_in_col = model.tasks_in_column(model, new_col)
-  let max_idx = int.max(0, list.length(tasks_in_col) - 1)
-  let new_idx = int.clamp(model.cursor.task_index + dy, 0, max_idx)
+  let col = model.cursor.column_index
+  let new_col = int.clamp(col + dx, 0, 3)
 
-  Model(..model, cursor: Cursor(column_index: new_col, task_index: new_idx))
+  case dx != 0 {
+    // Horizontal movement: change column, focus first task in new column
+    True -> {
+      let tasks_in_new_col = model.tasks_in_column(model, new_col)
+      let new_focus = case list.first(tasks_in_new_col) {
+        Ok(task) -> Some(task.id)
+        Error(_) -> None
+      }
+      Model(..model, cursor: Cursor(column_index: new_col, focused_task_id: new_focus))
+    }
+    // Vertical movement: move within current column by ID
+    False -> {
+      let tasks = model.tasks_in_column(model, col)
+      let new_focus = move_focus_in_list(tasks, model.cursor.focused_task_id, dy)
+      Model(..model, cursor: Cursor(..model.cursor, focused_task_id: new_focus))
+    }
+  }
+}
+
+/// Move focus up/down within a list of tasks by the given delta
+/// Returns the new focused task ID (or None if list is empty)
+fn move_focus_in_list(
+  tasks: List(Task),
+  current_focus: Option(String),
+  delta: Int,
+) -> Option(String) {
+  case list.is_empty(tasks) {
+    True -> None
+    False -> {
+      // Find current position in filtered list
+      let current_idx = case current_focus {
+        None -> 0
+        Some(id) -> find_task_index(tasks, id) |> option.unwrap(0)
+      }
+      // Calculate new position with clamping
+      let max_idx = list.length(tasks) - 1
+      let new_idx = int.clamp(current_idx + delta, 0, max_idx)
+      // Get task at new position
+      case list.at(tasks, new_idx) {
+        Ok(task) -> Some(task.id)
+        Error(_) -> None
+      }
+    }
+  }
+}
+
+/// Find the index of a task by ID in a list
+fn find_task_index(tasks: List(Task), id: String) -> Option(Int) {
+  tasks
+  |> list.index_map(fn(task, idx) { #(task.id, idx) })
+  |> list.find(fn(pair) { pair.0 == id })
+  |> option.from_result
+  |> option.map(fn(pair) { pair.1 })
 }
 
 fn goto_first(model: Model) -> Model {
-  Model(..model, cursor: Cursor(..model.cursor, task_index: 0))
+  let tasks = model.tasks_in_column(model, model.cursor.column_index)
+  let new_focus = case list.first(tasks) {
+    Ok(task) -> Some(task.id)
+    Error(_) -> None
+  }
+  Model(..model, cursor: Cursor(..model.cursor, focused_task_id: new_focus))
 }
 
 fn goto_last(model: Model) -> Model {
   let tasks = model.tasks_in_column(model, model.cursor.column_index)
-  let last_idx = int.max(0, list.length(tasks) - 1)
-  Model(..model, cursor: Cursor(..model.cursor, task_index: last_idx))
+  let new_focus = case list.last(tasks) {
+    Ok(task) -> Some(task.id)
+    Error(_) -> None
+  }
+  Model(..model, cursor: Cursor(..model.cursor, focused_task_id: new_focus))
 }
 
 fn goto_column(model: Model, col: Int) -> Model {
   let clamped = int.clamp(col, 0, 3)
-  Model(..model, cursor: Cursor(column_index: clamped, task_index: 0))
+  let tasks = model.tasks_in_column(model, clamped)
+  let new_focus = case list.first(tasks) {
+    Ok(task) -> Some(task.id)
+    Error(_) -> None
+  }
+  Model(..model, cursor: Cursor(column_index: clamped, focused_task_id: new_focus))
 }
 
 fn enter_select(model: Model) -> Model {
@@ -431,11 +512,35 @@ fn open_detail_panel(model: Model) -> Model {
   }
 }
 
+/// Get the currently focused task ID
+/// With ID-based navigation, this is simply the cursor's focused_task_id
+/// No more index lookups that can desync with filtered/sorted lists!
 fn current_task_id(model: Model) -> Option(String) {
+  model.cursor.focused_task_id
+}
+
+/// Validate cursor after filter/sort/search changes
+/// If the focused task is no longer visible in the filtered list,
+/// fall back to the first task in the column (or None if empty)
+fn validate_cursor(model: Model) -> Model {
   let tasks = model.tasks_in_column(model, model.cursor.column_index)
-  case list.at(tasks, model.cursor.task_index) {
-    Ok(task) -> Some(task.id)
-    Error(_) -> None
+
+  // Check if current focus is still valid
+  let is_valid = case model.cursor.focused_task_id {
+    None -> False
+    Some(id) -> list.any(tasks, fn(t) { t.id == id })
+  }
+
+  case is_valid {
+    True -> model
+    False -> {
+      // Fall back to first task in column
+      let new_focus = case list.first(tasks) {
+        Ok(task) -> Some(task.id)
+        Error(_) -> None
+      }
+      Model(..model, cursor: Cursor(..model.cursor, focused_task_id: new_focus))
+    }
   }
 }
 
@@ -470,7 +575,8 @@ fn handle_input_backspace(model: Model) -> Model {
 fn handle_input_submit(model: Model) -> Model {
   case model.input {
     Some(model.SearchInput(q)) ->
-      Model(..model, input: None, search_query: q)
+      // Validate cursor after search changes the visible tasks
+      Model(..model, input: None, search_query: q) |> validate_cursor
     _ -> Model(..model, input: None)
   }
 }

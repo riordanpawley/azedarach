@@ -49,10 +49,11 @@ fn render_column(
   // Column header
   let header = render_header(name, width, header_color, is_selected, sem)
 
-  // Task cards
+  // Task cards - ID-based cursor matching (no more index-based comparison!)
   let cards =
-    list.index_map(tasks, fn(task, task_idx) {
-      let is_cursor = is_selected && model.cursor.task_index == task_idx
+    list.map(tasks, fn(task) {
+      // Match by task ID instead of index - immune to filter/sort changes
+      let is_cursor = is_selected && model.cursor.focused_task_id == Some(task.id)
       let session_state = dict.get(model.sessions, task.id)
       render_card(task, session_state, width - 2, is_cursor, model)
     })
