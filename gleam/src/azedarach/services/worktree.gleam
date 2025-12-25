@@ -1,5 +1,7 @@
 // Worktree service - git worktree management
 
+import gleam/int
+import gleam/list
 import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
@@ -123,6 +125,3 @@ fn get_project_name() -> String {
     Error(_) -> "project"
   }
 }
-
-import gleam/int
-import gleam/list

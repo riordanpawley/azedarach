@@ -1,7 +1,7 @@
 // State detector - detect Claude session state from output
 
 import gleam/list
-import gleam/regex
+import gleam/result
 import gleam/string
 import azedarach/domain/session.{type State}
 
@@ -126,5 +126,3 @@ pub fn detect_with_context(output: String) -> DetectedState {
 
   DetectedState(state: state, context: last_line)
 }
-
-import gleam/result
