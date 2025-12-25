@@ -4,10 +4,12 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set
 import gleam/string
 import shore/ui
 import shore/style
 import azedarach/config
+import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
@@ -20,6 +22,10 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.ActionMenu -> render_action_menu(model)
     model.SortMenu -> render_sort_menu(model)
     model.FilterMenu -> render_filter_menu(model)
+    model.StatusFilterMenu -> render_status_filter_menu(model)
+    model.PriorityFilterMenu -> render_priority_filter_menu(model)
+    model.TypeFilterMenu -> render_type_filter_menu(model)
+    model.SessionFilterMenu -> render_session_filter_menu(model)
     model.HelpOverlay -> render_help(model)
     model.SettingsOverlay -> render_settings(model)
     model.DiagnosticsOverlay -> render_diagnostics(model)
@@ -112,25 +118,185 @@ fn render_sort_menu(model: Model) -> Node {
 fn render_filter_menu(model: Model) -> Node {
   let colors = model.colors
 
+  let status_count = set.size(model.status_filter)
+  let priority_count = set.size(model.priority_filter)
+  let type_count = set.size(model.type_filter)
+  let session_count = set.size(model.session_filter)
+
   let items = [
-    #("s", "Status"),
-    #("p", "Priority"),
-    #("t", "Type"),
-    #("S", "Session state"),
-    #("e", "Hide epic children"),
-    #("c", "Clear all"),
+    #("s", "Status", status_count),
+    #("p", "Priority", priority_count),
+    #("t", "Type", type_count),
+    #("S", "Session state", session_count),
   ]
 
   let entries =
     list.map(items, fn(item) {
-      let #(key, desc) = item
+      let #(key, desc, count) = item
+      let count_text = case count {
+        0 -> ""
+        n -> " (" <> int.to_string(n) <> ")"
+      }
       hbox([
         styled_text(" " <> key <> " ", colors.yellow),
+        text(desc),
+        styled_text(count_text, colors.green),
+        styled_text(" →", colors.subtext0),
+      ])
+    })
+
+  let extra = [
+    hbox([
+      styled_text(" e ", colors.yellow),
+      text("Hide epic children"),
+      styled_text(
+        case model.hide_epic_children {
+          True -> " ●"
+          False -> ""
+        },
+        colors.green,
+      ),
+    ]),
+    hbox([styled_text(" c ", colors.yellow), text("Clear all")]),
+  ]
+
+  overlay_box("Filter", list.append(entries, extra), model)
+}
+
+fn render_status_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("o", "Open", task.Open),
+    #("i", "In Progress", task.InProgress),
+    #("r", "Review", task.Review),
+    #("d", "Done", task.Done),
+    #("b", "Blocked", task.Blocked),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, status) = item
+      let active = set.contains(model.status_filter, status)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
         text(desc),
       ])
     })
 
-  overlay_box("Filter", entries, model)
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Status", list.append(entries, footer), model)
+}
+
+fn render_priority_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("1", "P1 (Critical)", task.P1),
+    #("2", "P2 (High)", task.P2),
+    #("3", "P3 (Medium)", task.P3),
+    #("4", "P4 (Low)", task.P4),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, priority) = item
+      let active = set.contains(model.priority_filter, priority)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Priority", list.append(entries, footer), model)
+}
+
+fn render_type_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("t", "Task", task.Task),
+    #("b", "Bug", task.Bug),
+    #("e", "Epic", task.Epic),
+    #("f", "Feature", task.Feature),
+    #("c", "Chore", task.Chore),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, issue_type) = item
+      let active = set.contains(model.type_filter, issue_type)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Type", list.append(entries, footer), model)
+}
+
+fn render_session_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("i", "Idle", session.Idle),
+    #("b", "Busy", session.Busy),
+    #("w", "Waiting", session.Waiting),
+    #("d", "Done", session.Done),
+    #("e", "Error", session.Error),
+    #("p", "Paused", session.Paused),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, state) = item
+      let active = set.contains(model.session_filter, state)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Session", list.append(entries, footer), model)
 }
 
 fn render_help(model: Model) -> Node {

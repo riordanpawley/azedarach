@@ -61,6 +61,22 @@ pub fn update(
       Model(..model, overlay: Some(model.FilterMenu)),
       effects.none(),
     )
+    model.OpenStatusFilterMenu -> #(
+      Model(..model, overlay: Some(model.StatusFilterMenu)),
+      effects.none(),
+    )
+    model.OpenPriorityFilterMenu -> #(
+      Model(..model, overlay: Some(model.PriorityFilterMenu)),
+      effects.none(),
+    )
+    model.OpenTypeFilterMenu -> #(
+      Model(..model, overlay: Some(model.TypeFilterMenu)),
+      effects.none(),
+    )
+    model.OpenSessionFilterMenu -> #(
+      Model(..model, overlay: Some(model.SessionFilterMenu)),
+      effects.none(),
+    )
     model.OpenSortMenu -> #(
       Model(..model, overlay: Some(model.SortMenu)),
       effects.none(),

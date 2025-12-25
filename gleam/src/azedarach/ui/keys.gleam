@@ -3,6 +3,8 @@
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import azedarach/domain/session
+import azedarach/domain/task
 import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
   Normal, Select,
@@ -55,12 +57,16 @@ fn handle_input_key(event: KeyEvent) -> Option(Msg) {
 fn handle_overlay_key(
   overlay: Overlay,
   event: KeyEvent,
-  _model: Model,
+  model: Model,
 ) -> Option(Msg) {
   case overlay {
     model.ActionMenu -> handle_action_menu_key(event)
     model.SortMenu -> handle_sort_menu_key(event)
     model.FilterMenu -> handle_filter_menu_key(event)
+    model.StatusFilterMenu -> handle_status_filter_menu_key(event, model)
+    model.PriorityFilterMenu -> handle_priority_filter_menu_key(event, model)
+    model.TypeFilterMenu -> handle_type_filter_menu_key(event, model)
+    model.SessionFilterMenu -> handle_session_filter_menu_key(event, model)
     model.HelpOverlay -> handle_simple_close(event)
     model.SettingsOverlay -> handle_simple_close(event)
     model.DiagnosticsOverlay -> handle_simple_close(event)
@@ -110,11 +116,82 @@ fn handle_sort_menu_key(event: KeyEvent) -> Option(Msg) {
 }
 
 fn handle_filter_menu_key(event: KeyEvent) -> Option(Msg) {
+  case event.key, has_modifier(event, Shift) {
+    "escape", _ -> Some(model.CloseOverlay)
+    "s", False -> Some(model.OpenStatusFilterMenu)
+    "p", False -> Some(model.OpenPriorityFilterMenu)
+    "t", False -> Some(model.OpenTypeFilterMenu)
+    "s", True -> Some(model.OpenSessionFilterMenu)
+    // Shift+S for Session
+    "e", _ -> Some(model.ToggleHideEpicChildren)
+    "c", _ -> Some(model.ClearFilters)
+    _, _ -> None
+  }
+}
+
+fn handle_status_filter_menu_key(event: KeyEvent, model: Model) -> Option(Msg) {
+  let _ = model
+  // Used for future filter state display
   case event.key {
-    "escape" -> Some(model.CloseOverlay)
-    "c" -> Some(model.ClearFilters)
-    "e" -> Some(model.ToggleHideEpicChildren)
-    // Sub-menus would need additional state
+    "escape" -> Some(model.OpenFilterMenu)
+    // Back to filter menu
+    "q" -> Some(model.CloseOverlay)
+    "o" -> Some(model.ToggleStatusFilter(task.Open))
+    "i" -> Some(model.ToggleStatusFilter(task.InProgress))
+    "r" -> Some(model.ToggleStatusFilter(task.Review))
+    "d" -> Some(model.ToggleStatusFilter(task.Done))
+    "b" -> Some(model.ToggleStatusFilter(task.Blocked))
+    _ -> None
+  }
+}
+
+fn handle_priority_filter_menu_key(event: KeyEvent, model: Model) -> Option(Msg) {
+  let _ = model
+  // Used for future filter state display
+  case event.key {
+    "escape" -> Some(model.OpenFilterMenu)
+    // Back to filter menu
+    "q" -> Some(model.CloseOverlay)
+    "1" -> Some(model.TogglePriorityFilter(task.P1))
+    "2" -> Some(model.TogglePriorityFilter(task.P2))
+    "3" -> Some(model.TogglePriorityFilter(task.P3))
+    "4" -> Some(model.TogglePriorityFilter(task.P4))
+    _ -> None
+  }
+}
+
+fn handle_type_filter_menu_key(event: KeyEvent, model: Model) -> Option(Msg) {
+  let _ = model
+  // Used for future filter state display
+  case event.key {
+    "escape" -> Some(model.OpenFilterMenu)
+    // Back to filter menu
+    "q" -> Some(model.CloseOverlay)
+    "t" -> Some(model.ToggleTypeFilter(task.Task))
+    "b" -> Some(model.ToggleTypeFilter(task.Bug))
+    "e" -> Some(model.ToggleTypeFilter(task.Epic))
+    "f" -> Some(model.ToggleTypeFilter(task.Feature))
+    "c" -> Some(model.ToggleTypeFilter(task.Chore))
+    _ -> None
+  }
+}
+
+fn handle_session_filter_menu_key(
+  event: KeyEvent,
+  model: Model,
+) -> Option(Msg) {
+  let _ = model
+  // Used for future filter state display
+  case event.key {
+    "escape" -> Some(model.OpenFilterMenu)
+    // Back to filter menu
+    "q" -> Some(model.CloseOverlay)
+    "i" -> Some(model.ToggleSessionFilter(session.Idle))
+    "b" -> Some(model.ToggleSessionFilter(session.Busy))
+    "w" -> Some(model.ToggleSessionFilter(session.Waiting))
+    "d" -> Some(model.ToggleSessionFilter(session.Done))
+    "e" -> Some(model.ToggleSessionFilter(session.Error))
+    "p" -> Some(model.ToggleSessionFilter(session.Paused))
     _ -> None
   }
 }

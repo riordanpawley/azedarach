@@ -70,6 +70,11 @@ pub type Overlay {
   ActionMenu
   SortMenu
   FilterMenu
+  // Filter sub-menus
+  StatusFilterMenu
+  PriorityFilterMenu
+  TypeFilterMenu
+  SessionFilterMenu
   HelpOverlay
   SettingsOverlay
   DiagnosticsOverlay
@@ -139,6 +144,10 @@ pub type Msg {
   // Overlay
   OpenActionMenu
   OpenFilterMenu
+  OpenStatusFilterMenu
+  OpenPriorityFilterMenu
+  OpenTypeFilterMenu
+  OpenSessionFilterMenu
   OpenSortMenu
   OpenHelp
   OpenSettings
