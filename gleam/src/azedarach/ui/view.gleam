@@ -4,69 +4,31 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-import azedarach/ui/model.{type Model, type Overlay}
+import shore
+import shore/ui
+import shore/style
+import azedarach/ui/model.{type Model, type Msg, type Overlay}
 import azedarach/ui/theme.{type Colors}
 import azedarach/ui/view/board
 import azedarach/ui/view/status_bar
 import azedarach/ui/view/overlays
 
-// Shore element types (simplified - actual types from Shore)
-pub type Element {
-  Box(children: List(Element), props: BoxProps)
-  Text(content: String, props: TextProps)
-  Empty
-}
-
-pub type BoxProps {
-  BoxProps(
-    direction: Direction,
-    width: Option(Int),
-    height: Option(Int),
-    padding: Int,
-    border: Bool,
-    bg: Option(String),
-    fg: Option(String),
-  )
-}
-
-pub type TextProps {
-  TextProps(
-    fg: Option(String),
-    bg: Option(String),
-    bold: Bool,
-    dim: Bool,
-  )
-}
-
-pub type Direction {
-  Row
-  Column
-}
+/// Re-export Node type for use in other view modules
+pub type Node =
+  shore.Node(Msg)
 
 // Main render function
-pub fn render(model: Model) -> Element {
-  let #(width, height) = model.terminal_size
+pub fn render(model: Model) -> Node {
   let colors = model.colors
 
   // Main layout: board + status bar
   let main_content =
-    Box(
-      [
-        // Board area (takes remaining height)
-        board.render(model),
-        // Status bar (1 line at bottom)
-        status_bar.render(model),
-      ],
-      BoxProps(
-        direction: Column,
-        width: Some(width),
-        height: Some(height),
-        padding: 0,
-        border: False,
-        bg: Some(colors.base),
-        fg: Some(colors.text),
-      ),
-    )
+    ui.col([
+      // Board area (takes remaining height)
+      board.render(model),
+      // Status bar (1 line at bottom)
+      status_bar.render(model),
+    ])
 
   // Overlay on top if present
   case model.overlay {
@@ -76,87 +38,49 @@ pub fn render(model: Model) -> Element {
 }
 
 fn render_with_overlay(
-  background: Element,
+  background: Node,
   overlay: Overlay,
   model: Model,
-) -> Element {
+) -> Node {
   let overlay_element = overlays.render(overlay, model)
 
   // Stack overlay on background
-  Box(
-    [background, overlay_element],
-    BoxProps(
-      direction: Column,
-      width: None,
-      height: None,
-      padding: 0,
-      border: False,
-      bg: None,
-      fg: None,
-    ),
-  )
+  ui.col([background, overlay_element])
 }
 
-// Helper constructors
-pub fn text(content: String) -> Element {
-  Text(content, TextProps(fg: None, bg: None, bold: False, dim: False))
+// Helper constructors using Shore's ui module
+pub fn text(content: String) -> Node {
+  ui.text(content)
 }
 
-pub fn styled_text(content: String, fg: String) -> Element {
-  Text(content, TextProps(fg: Some(fg), bg: None, bold: False, dim: False))
+pub fn styled_text(content: String, fg: String) -> Node {
+  ui.text_styled(content, Some(style.hex(fg)), None)
 }
 
-pub fn bold_text(content: String, fg: String) -> Element {
-  Text(content, TextProps(fg: Some(fg), bg: None, bold: True, dim: False))
+pub fn bold_text(content: String, fg: String) -> Node {
+  // Shore doesn't have a direct bold - use styled text
+  ui.text_styled(content, Some(style.hex(fg)), None)
 }
 
-pub fn dim_text(content: String) -> Element {
-  Text(content, TextProps(fg: None, bg: None, bold: False, dim: True))
+pub fn dim_text(content: String) -> Node {
+  // Use a muted color for dim text
+  ui.text_styled(content, Some(style.hex("#6e738d")), None)
 }
 
-pub fn hbox(children: List(Element)) -> Element {
-  Box(
-    children,
-    BoxProps(
-      direction: Row,
-      width: None,
-      height: None,
-      padding: 0,
-      border: False,
-      bg: None,
-      fg: None,
-    ),
-  )
+pub fn hbox(children: List(Node)) -> Node {
+  ui.row(children)
 }
 
-pub fn vbox(children: List(Element)) -> Element {
-  Box(
-    children,
-    BoxProps(
-      direction: Column,
-      width: None,
-      height: None,
-      padding: 0,
-      border: False,
-      bg: None,
-      fg: None,
-    ),
-  )
+pub fn vbox(children: List(Node)) -> Node {
+  ui.col(children)
 }
 
-pub fn bordered_box(children: List(Element), fg: String) -> Element {
-  Box(
-    children,
-    BoxProps(
-      direction: Column,
-      width: None,
-      height: None,
-      padding: 1,
-      border: True,
-      bg: None,
-      fg: Some(fg),
-    ),
-  )
+pub fn bordered_box(children: List(Node), fg: String) -> Node {
+  ui.box_styled(children, None, Some(style.hex(fg)))
+}
+
+pub fn empty() -> Node {
+  ui.text("")
 }
 
 // Pad string to width

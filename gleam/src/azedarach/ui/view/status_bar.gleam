@@ -6,18 +6,17 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 import gleam/string
+import shore/ui
+import shore/style
 import azedarach/domain/session
 import azedarach/ui/model.{type Model, type Mode, Normal, Select}
 import azedarach/ui/theme
 import azedarach/ui/view.{
-  type Element, Box, BoxProps, Row, Text, TextProps, hbox, pad_left, pad_right,
-  styled_text, text,
+  type Node, empty, hbox, pad_left, pad_right, styled_text, text,
 }
 
-pub fn render(model: Model) -> Element {
-  let #(width, _height) = model.terminal_size
+pub fn render(model: Model) -> Node {
   let colors = model.colors
-  let sem = theme.semantic(colors)
 
   // Left side: mode + project
   let left = render_left(model)
@@ -28,38 +27,15 @@ pub fn render(model: Model) -> Element {
   // Right side: session counts, dev server port
   let right = render_right(model)
 
-  // Calculate spacing
-  let left_len = element_length(left)
-  let center_len = element_length(center)
-  let right_len = element_length(right)
-  let spacer_len = width - left_len - center_len - right_len
-
-  let spacer1_len = spacer_len / 2
-  let spacer2_len = spacer_len - spacer1_len
-
-  Box(
-    [
-      left,
-      text(string.repeat(" ", spacer1_len)),
-      center,
-      text(string.repeat(" ", spacer2_len)),
-      right,
-    ],
-    BoxProps(
-      direction: Row,
-      width: Some(width),
-      height: Some(1),
-      padding: 0,
-      border: False,
-      bg: Some(colors.surface0),
-      fg: Some(colors.text),
-    ),
+  // Status bar as a row with background color
+  ui.bar2(
+    style.hex(colors.surface0),
+    hbox([left, center, right]),
   )
 }
 
-fn render_left(model: Model) -> Element {
+fn render_left(model: Model) -> Node {
   let colors = model.colors
-  let sem = theme.semantic(colors)
 
   // Mode indicator
   let mode_text = case model.mode {
@@ -85,13 +61,13 @@ fn render_left(model: Model) -> Element {
   }
 
   hbox([
-    Text(mode_text, TextProps(fg: Some(colors.base), bg: Some(mode_bg), bold: True, dim: False)),
+    ui.text_styled(mode_text, Some(style.hex(colors.base)), Some(style.hex(mode_bg))),
     styled_text(project, colors.text),
     styled_text(pending, colors.yellow),
   ])
 }
 
-fn render_center(model: Model) -> Element {
+fn render_center(model: Model) -> Node {
   let colors = model.colors
 
   case model.input {
@@ -101,13 +77,12 @@ fn render_center(model: Model) -> Element {
         styled_text(query, colors.text),
         styled_text("█", colors.yellow),
       ])
-    _ -> view.Empty
+    _ -> empty()
   }
 }
 
-fn render_right(model: Model) -> Element {
+fn render_right(model: Model) -> Node {
   let colors = model.colors
-  let sem = theme.semantic(colors)
 
   // Count sessions by state
   let busy_count =
@@ -156,14 +131,4 @@ fn render_right(model: Model) -> Element {
     styled_text(session_text, colors.blue),
     styled_text(help_hint, colors.subtext0),
   ])
-}
-
-// Approximate element length for spacing calculation
-fn element_length(el: Element) -> Int {
-  case el {
-    Text(content, _) -> string.length(content)
-    Box(children, _) ->
-      list.fold(children, 0, fn(acc, child) { acc + element_length(child) })
-    view.Empty -> 0
-  }
 }

@@ -48,12 +48,14 @@ fn start_with_supervision(cfg: config.Config) -> Nil {
       // Initialize coordinator (starts beads refresh, project discovery)
       app_supervisor.initialize_coordinator(context)
 
-      // Start the TUI
-      app.start_with_context(context)
-
-      // Keep the main process alive
-      // The TUI will handle shutdown
-      process.sleep_forever()
+      // Start the TUI (now returns Result)
+      case app.start_with_context(context) {
+        Ok(_) -> Nil
+        Error(_) -> {
+          io.println_error("Failed to start TUI")
+          halt(1)
+        }
+      }
     }
     Error(e) -> {
       io.println_error("Failed to start application: " <> app_supervisor.error_to_string(e))
