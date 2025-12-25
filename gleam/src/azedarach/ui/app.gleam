@@ -9,30 +9,58 @@ import azedarach/ui/update
 import azedarach/ui/view
 import azedarach/ui/theme
 import azedarach/actors/coordinator
+import azedarach/actors/app_supervisor.{type AppContext}
 
 // Shore app configuration
 pub type App {
-  App(config: Config, coordinator: Subject(coordinator.Msg))
+  App(
+    config: Config,
+    coordinator: Subject(coordinator.Msg),
+    context: AppContext,
+  )
 }
 
+/// Start with existing supervision context (preferred method)
+pub fn start_with_context(context: AppContext) -> Nil {
+  // Initialize theme
+  let colors = theme.load(context.config.theme)
+
+  // Create initial model with app context
+  let initial_model = model.init_with_context(context.config, colors, context)
+
+  // Start Shore TUI
+  run_tui_with_context(initial_model, context)
+}
+
+/// Legacy start function (starts its own coordinator)
+/// Deprecated: Use start_with_context instead
 pub fn start(config: Config) -> Nil {
   // Initialize theme
   let colors = theme.load(config.theme)
 
-  // Start coordinator actor
+  // Start coordinator actor (legacy - not supervised)
   let assert Ok(coord) = coordinator.start(config)
 
   // Create initial model
   let initial_model = model.init(config, colors)
 
   // Start Shore TUI
-  // Note: Shore API is subject to change - this is the expected pattern
   run_tui(initial_model, coord)
 }
 
-fn run_tui(initial: Model, coord: Subject(coordinator.Msg)) -> Nil {
+fn run_tui_with_context(initial: Model, context: AppContext) -> Nil {
   // Shore's main loop - TEA pattern
-  // This will be refined based on Shore's actual API
+  shore_run(
+    init: fn() { #(initial, request_beads(context.coordinator)) },
+    update: fn(model, msg) {
+      update.update_with_context(model, msg, context)
+    },
+    view: fn(model) { view.render(model) },
+  )
+}
+
+fn run_tui(initial: Model, coord: Subject(coordinator.Msg)) -> Nil {
+  // Shore's main loop - TEA pattern (legacy)
   shore_run(
     init: fn() { #(initial, request_beads(coord)) },
     update: fn(model, msg) { update.update(model, msg, coord) },
@@ -55,7 +83,10 @@ pub type Cmd {
   Batch(List(Cmd))
   RequestBeads
   StartSession(bead_id: String)
-  // ... more commands
+  StartSessionMonitor(bead_id: String, tmux_session: String)
+  StopSessionMonitor(bead_id: String)
+  StartServerMonitor(bead_id: String, server_name: String, tmux_session: String, window_name: String)
+  StopServerMonitor(bead_id: String, server_name: String)
 }
 
 pub type Element =

@@ -1,6 +1,7 @@
 // Coordinator Actor - central orchestration
 // Manages task cache, session registry, routes commands
 // Handles project switching and periodic refresh
+// Integrates with OTP supervision tree for session/server monitors
 
 import gleam/dict.{type Dict}
 import gleam/erlang
