@@ -37,6 +37,22 @@ pub fn render(overlay: Overlay, model: Model) -> Element {
 fn render_action_menu(model: Model) -> Element {
   let colors = model.colors
 
+  // Build git actions based on workflow mode
+  let git_actions = case model.config.git.workflow_mode {
+    config.Local -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (merge to " <> model.config.git.base_branch <> ")"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+    config.Origin -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (create PR)"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+  }
+
   let items = [
     #("Session", [
       #("s", "Start session"),
@@ -52,13 +68,7 @@ fn render_action_menu(model: Model) -> Element {
       #("v", "View server"),
       #("^r", "Restart"),
     ]),
-    #("Git", [
-      #("u", "Update from main"),
-      #("m", "Merge to main"),
-      #("f", "Show diff"),
-      #("P", "Create PR"),
-      #("d", "Delete/cleanup"),
-    ]),
+    #("Git", git_actions),
     #("Task", [
       #("h", "Move left"),
       #("l", "Move right"),
