@@ -1,9 +1,8 @@
 // Configuration loading and schema
 
-import gleam/dynamic.{type Dynamic}
+import gleam/decode.{type Decoder}
 import gleam/json
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import simplifile
 
@@ -138,127 +137,174 @@ pub fn default_config() -> Config {
 }
 
 fn parse_config(content: String) -> Result(Config, ConfigError) {
-  case json.decode(content, config_decoder()) {
+  case json.parse(from: content, using: config_decoder()) {
     Ok(cfg) -> Ok(cfg)
     Error(e) -> Error(ParseError(string.inspect(e)))
   }
 }
 
-fn config_decoder() -> fn(Dynamic) -> Result(Config, List(dynamic.DecodeError)) {
-  dynamic.decode8(
-    Config,
-    dynamic.optional_field("worktree", worktree_decoder())
-      |> with_default(default_config().worktree),
-    dynamic.optional_field("session", session_decoder())
-      |> with_default(default_config().session),
-    dynamic.optional_field("devServer", dev_server_decoder())
-      |> with_default(default_config().dev_server),
-    dynamic.optional_field("git", git_decoder())
-      |> with_default(default_config().git),
-    dynamic.optional_field("pr", pr_decoder())
-      |> with_default(default_config().pr),
-    dynamic.optional_field("beads", beads_decoder())
-      |> with_default(default_config().beads),
-    dynamic.optional_field("polling", polling_decoder())
-      |> with_default(default_config().polling),
-    dynamic.optional_field("theme", dynamic.string)
-      |> with_default(default_config().theme),
+// ============================================================================
+// Decoders
+// ============================================================================
+
+fn config_decoder() -> Decoder(Config) {
+  let defaults = default_config()
+
+  use worktree <- decode.optional_field(
+    "worktree",
+    worktree_decoder(),
+    defaults.worktree,
   )
+  use session <- decode.optional_field(
+    "session",
+    session_decoder(),
+    defaults.session,
+  )
+  use dev_server <- decode.optional_field(
+    "devServer",
+    dev_server_decoder(),
+    defaults.dev_server,
+  )
+  use git <- decode.optional_field("git", git_decoder(), defaults.git)
+  use pr <- decode.optional_field("pr", pr_decoder(), defaults.pr)
+  use beads <- decode.optional_field("beads", beads_decoder(), defaults.beads)
+  use polling <- decode.optional_field(
+    "polling",
+    polling_decoder(),
+    defaults.polling,
+  )
+  use theme <- decode.optional_field("theme", decode.string, defaults.theme)
+
+  decode.success(Config(
+    worktree:,
+    session:,
+    dev_server:,
+    git:,
+    pr:,
+    beads:,
+    polling:,
+    theme:,
+  ))
 }
 
-fn with_default(
-  decoder: fn(Dynamic) -> Result(Option(a), List(dynamic.DecodeError)),
-  default: a,
-) -> fn(Dynamic) -> Result(a, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case decoder(dyn) {
-      Ok(Some(value)) -> Ok(value)
-      Ok(None) -> Ok(default)
-      Error(_) -> Ok(default)
-    }
+fn worktree_decoder() -> Decoder(WorktreeConfig) {
+  use path_template <- decode.field("pathTemplate", decode.string)
+  use init_commands <- decode.field("initCommands", decode.list(decode.string))
+  use continue_on_failure <- decode.optional_field(
+    "continueOnFailure",
+    decode.bool,
+    True,
+  )
+
+  decode.success(WorktreeConfig(path_template:, init_commands:, continue_on_failure:))
+}
+
+fn session_decoder() -> Decoder(SessionConfig) {
+  use shell <- decode.optional_field("shell", decode.string, "zsh")
+  use tmux_prefix <- decode.optional_field("tmuxPrefix", decode.string, "C-a")
+  use background_tasks <- decode.optional_field(
+    "backgroundTasks",
+    decode.list(decode.string),
+    [],
+  )
+
+  decode.success(SessionConfig(shell:, tmux_prefix:, background_tasks:))
+}
+
+fn dev_server_decoder() -> Decoder(DevServerConfig) {
+  use servers <- decode.optional_field(
+    "servers",
+    decode.list(server_definition_decoder()),
+    default_config().dev_server.servers,
+  )
+
+  decode.success(DevServerConfig(servers:))
+}
+
+fn server_definition_decoder() -> Decoder(ServerDefinition) {
+  use name <- decode.field("name", decode.string)
+  use command <- decode.field("command", decode.string)
+  use ports <- decode.optional_field(
+    "ports",
+    decode.list(port_decoder()),
+    [#("PORT", 3000)],
+  )
+
+  decode.success(ServerDefinition(name:, command:, ports:))
+}
+
+fn port_decoder() -> Decoder(#(String, Int)) {
+  use name <- decode.field("name", decode.string)
+  use port <- decode.field("port", decode.int)
+  decode.success(#(name, port))
+}
+
+fn git_decoder() -> Decoder(GitConfig) {
+  use workflow_mode <- decode.optional_field(
+    "workflowMode",
+    workflow_mode_decoder(),
+    Origin,
+  )
+  use push_branch_on_create <- decode.optional_field(
+    "pushBranchOnCreate",
+    decode.bool,
+    True,
+  )
+  use push_enabled <- decode.optional_field("pushEnabled", decode.bool, True)
+  use fetch_enabled <- decode.optional_field("fetchEnabled", decode.bool, True)
+  use base_branch <- decode.optional_field("baseBranch", decode.string, "main")
+  use remote <- decode.optional_field("remote", decode.string, "origin")
+  use branch_prefix <- decode.optional_field(
+    "branchPrefix",
+    decode.string,
+    "az-",
+  )
+
+  decode.success(GitConfig(
+    workflow_mode:,
+    push_branch_on_create:,
+    push_enabled:,
+    fetch_enabled:,
+    base_branch:,
+    remote:,
+    branch_prefix:,
+  ))
+}
+
+fn workflow_mode_decoder() -> Decoder(WorkflowMode) {
+  use mode <- decode.then(decode.string)
+  case mode {
+    "local" -> decode.success(Local)
+    "origin" -> decode.success(Origin)
+    _ -> decode.success(Origin)
   }
 }
 
-fn worktree_decoder() -> fn(Dynamic) ->
-  Result(WorktreeConfig, List(dynamic.DecodeError)) {
-  dynamic.decode3(
-    WorktreeConfig,
-    dynamic.field("pathTemplate", dynamic.string),
-    dynamic.field("initCommands", dynamic.list(dynamic.string)),
-    dynamic.optional_field("continueOnFailure", dynamic.bool)
-      |> with_default(True),
+fn pr_decoder() -> Decoder(PrConfig) {
+  use enabled <- decode.optional_field("enabled", decode.bool, True)
+  use auto_draft <- decode.optional_field("autoDraft", decode.bool, True)
+  use auto_merge <- decode.optional_field("autoMerge", decode.bool, False)
+
+  decode.success(PrConfig(enabled:, auto_draft:, auto_merge:))
+}
+
+fn beads_decoder() -> Decoder(BeadsConfig) {
+  use sync_enabled <- decode.optional_field("syncEnabled", decode.bool, True)
+
+  decode.success(BeadsConfig(sync_enabled:))
+}
+
+fn polling_decoder() -> Decoder(PollingConfig) {
+  use beads_refresh_ms <- decode.optional_field(
+    "beadsRefresh",
+    decode.int,
+    30_000,
   )
-}
-
-fn session_decoder() -> fn(Dynamic) ->
-  Result(SessionConfig, List(dynamic.DecodeError)) {
-  dynamic.decode3(
-    SessionConfig,
-    dynamic.optional_field("shell", dynamic.string) |> with_default("zsh"),
-    dynamic.optional_field("tmuxPrefix", dynamic.string) |> with_default("C-a"),
-    dynamic.optional_field("backgroundTasks", dynamic.list(dynamic.string))
-      |> with_default([]),
+  use session_monitor_ms <- decode.optional_field(
+    "sessionMonitor",
+    decode.int,
+    500,
   )
-}
 
-fn dev_server_decoder() -> fn(Dynamic) ->
-  Result(DevServerConfig, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    // For now, use default - full implementation would parse servers object
-    Ok(default_config().dev_server)
-  }
-}
-
-fn git_decoder() -> fn(Dynamic) -> Result(GitConfig, List(dynamic.DecodeError)) {
-  dynamic.decode7(
-    GitConfig,
-    dynamic.field("workflowMode", workflow_mode_decoder()),
-    dynamic.optional_field("pushBranchOnCreate", dynamic.bool)
-      |> with_default(True),
-    dynamic.optional_field("pushEnabled", dynamic.bool) |> with_default(True),
-    dynamic.optional_field("fetchEnabled", dynamic.bool) |> with_default(True),
-    dynamic.optional_field("baseBranch", dynamic.string) |> with_default("main"),
-    dynamic.optional_field("remote", dynamic.string) |> with_default("origin"),
-    dynamic.optional_field("branchPrefix", dynamic.string)
-      |> with_default("az-"),
-  )
-}
-
-fn workflow_mode_decoder() -> fn(Dynamic) ->
-  Result(WorkflowMode, List(dynamic.DecodeError)) {
-  fn(dyn) {
-    case dynamic.string(dyn) {
-      Ok("local") -> Ok(Local)
-      Ok("origin") -> Ok(Origin)
-      Ok(_) -> Ok(Origin)
-      Error(e) -> Error(e)
-    }
-  }
-}
-
-fn pr_decoder() -> fn(Dynamic) -> Result(PrConfig, List(dynamic.DecodeError)) {
-  dynamic.decode3(
-    PrConfig,
-    dynamic.optional_field("enabled", dynamic.bool) |> with_default(True),
-    dynamic.optional_field("autoDraft", dynamic.bool) |> with_default(True),
-    dynamic.optional_field("autoMerge", dynamic.bool) |> with_default(False),
-  )
-}
-
-fn beads_decoder() -> fn(Dynamic) ->
-  Result(BeadsConfig, List(dynamic.DecodeError)) {
-  dynamic.decode1(
-    BeadsConfig,
-    dynamic.optional_field("syncEnabled", dynamic.bool) |> with_default(True),
-  )
-}
-
-fn polling_decoder() -> fn(Dynamic) ->
-  Result(PollingConfig, List(dynamic.DecodeError)) {
-  dynamic.decode2(
-    PollingConfig,
-    dynamic.optional_field("beadsRefresh", dynamic.int)
-      |> with_default(30_000),
-    dynamic.optional_field("sessionMonitor", dynamic.int) |> with_default(500),
-  )
+  decode.success(PollingConfig(beads_refresh_ms:, session_monitor_ms:))
 }
