@@ -2,7 +2,6 @@
 // Full implementation matching TypeScript BeadsClient
 
 import gleam/decode.{type Decoder}
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/json
 import gleam/list
@@ -515,25 +514,16 @@ fn build_update_args(id: String, options: UpdateOptions) -> List(String) {
 // ============================================================================
 
 fn parse_beads_list(output: String) -> Result(List(Task), BeadsError) {
-  case decode.run(dynamic.from(output), json_string_decoder(decode.list(task_decoder()))) {
+  case json.parse(from: output, using: decode.list(task_decoder())) {
     Ok(tasks) -> Ok(tasks)
     Error(e) -> Error(ParseError(string.inspect(e)))
   }
 }
 
 fn parse_single_bead(output: String, id: String) -> Result(Task, BeadsError) {
-  case decode.run(dynamic.from(output), json_string_decoder(task_decoder())) {
+  case json.parse(from: output, using: task_decoder()) {
     Ok(t) -> Ok(t)
     Error(_) -> Error(NotFound(id))
-  }
-}
-
-/// Decode a JSON string into a value
-fn json_string_decoder(inner: Decoder(a)) -> Decoder(a) {
-  use json_string <- decode.then(decode.string)
-  case json.parse(json_string, inner) {
-    Ok(value) -> decode.success(value)
-    Error(_) -> decode.failure(json_string, "valid JSON")
   }
 }
 
