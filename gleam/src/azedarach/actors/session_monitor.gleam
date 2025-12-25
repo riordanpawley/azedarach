@@ -1,250 +1,221 @@
-// Session Monitor Actor - polls tmux sessions for state changes
-//
-// Polls @az_status tmux session option to detect Claude session state
-// changes. Sends SessionMonitorUpdate messages to the coordinator when
-// state transitions are detected.
-//
-// This mirrors TmuxSessionMonitor.ts from the TypeScript implementation.
+// Session Monitor Actor
+// Polls tmux pane output and detects Claude session state changes
+// Managed by the SessionsSupervisor, transient restart strategy
 
-import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
-import gleam/string
-import azedarach/domain/session
+import azedarach/domain/session.{type State}
 import azedarach/services/tmux
+import azedarach/services/state_detector
 
-// Polling interval in milliseconds
-const poll_interval_ms = 500
+// Default polling interval in milliseconds
+const default_poll_interval_ms = 500
 
-// ============================================================================
-// Types
-// ============================================================================
+// Lines to capture from tmux pane
+const capture_lines = 50
 
-/// State update sent when a session's state changes
-pub type StateUpdate {
-  StateUpdate(bead_id: String, state: session.State)
-}
+// Crash threshold for "unknown" state
+const max_crashes = 3
 
-/// Callback function type for state updates
-pub type UpdateCallback =
-  fn(StateUpdate) -> Nil
+const crash_window_ms = 60_000
 
-pub type SessionMonitorState {
-  SessionMonitorState(
-    // Previous session states for change detection (bead_id -> State)
-    previous_states: Dict(String, session.State),
-    // Callback to invoke on state changes
-    on_update: Option(UpdateCallback),
+/// Monitor state
+pub type MonitorState {
+  MonitorState(
+    bead_id: String,
+    tmux_session: String,
+    poll_interval_ms: Int,
+    last_state: State,
+    coordinator: Subject(CoordinatorUpdate),
+    crash_count: Int,
+    first_crash_at: Option(Int),
     // Self reference for scheduling
     self_subject: Option(Subject(Msg)),
   )
 }
 
-// Messages the session monitor can receive
+/// Messages the monitor can receive
 pub type Msg {
-  // Set the update callback
-  SetCallback(UpdateCallback)
-  // Trigger a poll cycle
+  /// Set self reference and trigger first poll
+  SetSelf(Subject(Msg))
+  /// Periodic poll tick
   Poll
-  // Stop the monitor
+  /// Stop the monitor gracefully
   Stop
+  /// Manual state refresh request
+  Refresh
 }
 
-// ============================================================================
-// Actor Implementation
-// ============================================================================
+/// Message sent to coordinator when state changes
+pub type CoordinatorUpdate {
+  StateChanged(bead_id: String, state: State)
+  MonitorCrashed(bead_id: String, crash_count: Int)
+}
 
-/// Start the session monitor actor
-pub fn start() -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
+/// Configuration for starting a monitor
+pub type MonitorConfig {
+  MonitorConfig(
+    bead_id: String,
+    tmux_session: String,
+    poll_interval_ms: Option(Int),
+    coordinator: Subject(CoordinatorUpdate),
+  )
+}
+
+/// Start a new session monitor
+pub fn start(
+  config: MonitorConfig,
+) -> Result(Subject(Msg), actor.StartError) {
+  let poll_interval = option.unwrap(config.poll_interval_ms, default_poll_interval_ms)
+
+  // We need to pass the subject to the actor for self-scheduling
+  // Using a two-phase initialization: start then set self reference
+  let result = actor.start_spec(actor.Spec(
     init: fn() {
       let state =
-        SessionMonitorState(
-          previous_states: dict.new(),
-          on_update: None,
+        MonitorState(
+          bead_id: config.bead_id,
+          tmux_session: config.tmux_session,
+          poll_interval_ms: poll_interval,
+          last_state: session.Idle,
+          coordinator: config.coordinator,
+          crash_count: 0,
+          first_crash_at: None,
           self_subject: None,
         )
+
       actor.Ready(state, process.new_selector())
     },
     init_timeout: 5000,
     loop: handle_message,
   ))
+
+  // After starting, send a message to set self reference and trigger first poll
+  case result {
+    Ok(subject) -> {
+      process.send(subject, SetSelf(subject))
+      Ok(subject)
+    }
+    Error(e) -> Error(e)
+  }
 }
 
-/// Initialize the monitor and start polling
-pub fn initialize(subject: Subject(Msg)) -> Nil {
-  schedule_poll(subject)
-}
-
-/// Set the callback to receive state updates
-pub fn set_callback(subject: Subject(Msg), callback: UpdateCallback) -> Nil {
-  process.send(subject, SetCallback(callback))
-}
-
-/// Stop the session monitor
+/// Send stop message to monitor
 pub fn stop(subject: Subject(Msg)) -> Nil {
   process.send(subject, Stop)
 }
 
-// Message handler
-fn handle_message(
-  msg: Msg,
-  state: SessionMonitorState,
-) -> actor.Next(Msg, SessionMonitorState) {
+/// Request immediate state refresh
+pub fn refresh(subject: Subject(Msg)) -> Nil {
+  process.send(subject, Refresh)
+}
+
+/// Main message handler
+fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState) {
   case msg {
-    SetCallback(callback) -> {
-      actor.continue(SessionMonitorState(..state, on_update: Some(callback)))
+    SetSelf(subject) -> {
+      // Store self reference and schedule first poll
+      let new_state = MonitorState(..state, self_subject: Some(subject))
+      schedule_poll_with_subject(subject, new_state.poll_interval_ms)
+      actor.continue(new_state)
     }
+    Poll -> handle_poll(state)
+    Refresh -> handle_poll(state)
+    Stop -> actor.Stop(process.Normal)
+  }
+}
 
-    Poll -> {
-      let new_state = poll_sessions(state)
-
-      // Schedule next poll
-      case state.self_subject {
-        Some(self) -> {
-          schedule_poll(self)
-          actor.continue(new_state)
-        }
-        None -> {
-          // First poll - set up self reference
-          let self = process.new_subject()
-          schedule_poll(self)
-          actor.continue(SessionMonitorState(..new_state, self_subject: Some(self)))
-        }
-      }
-    }
-
-    Stop -> {
+/// Handle poll tick - capture pane and detect state
+fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
+  // Check if tmux session still exists
+  case tmux.session_exists(state.tmux_session) {
+    False -> {
+      // Session gone, notify and stop
+      notify_state_change(state, session.Idle)
       actor.Stop(process.Normal)
     }
-  }
-}
+    True -> {
+      // Capture pane and detect state
+      case tmux.capture_pane(state.tmux_session <> ":main", capture_lines) {
+        Ok(output) -> {
+          let detected = state_detector.detect(output)
 
-// ============================================================================
-// Polling Logic
-// ============================================================================
-
-/// Poll all tmux sessions and detect state changes
-fn poll_sessions(state: SessionMonitorState) -> SessionMonitorState {
-  case tmux.discover_az_sessions() {
-    Ok(sessions) -> {
-      let #(new_states, updates) =
-        process_sessions(sessions, state.previous_states)
-
-      // Invoke callback for each update
-      case state.on_update {
-        Some(callback) -> {
-          list.each(updates, fn(update) {
-            callback(update)
-          })
-        }
-        None -> Nil
-      }
-
-      SessionMonitorState(..state, previous_states: new_states)
-    }
-    Error(_) -> {
-      // tmux not running or error - clear state
-      SessionMonitorState(..state, previous_states: dict.new())
-    }
-  }
-}
-
-/// Process all sessions and detect state changes
-fn process_sessions(
-  sessions: List(String),
-  previous_states: Dict(String, session.State),
-) -> #(Dict(String, session.State), List(StateUpdate)) {
-  let new_states = dict.new()
-  let updates = []
-
-  // Process each session
-  let #(new_states, updates) =
-    list.fold(sessions, #(new_states, updates), fn(acc, session_name) {
-      let #(states, updates) = acc
-      case parse_bead_id(session_name) {
-        Some(bead_id) -> {
-          let current_state = get_session_state(session_name)
-          let updated_states = dict.insert(states, bead_id, current_state)
-
-          // Check if state changed
-          case dict.get(previous_states, bead_id) {
-            Ok(prev_state) if prev_state != current_state -> {
-              // State changed - create update
-              let update = StateUpdate(bead_id, current_state)
-              #(updated_states, [update, ..updates])
+          // Only notify if state changed
+          let new_state = case detected != state.last_state {
+            True -> {
+              notify_state_change(state, detected)
+              MonitorState(..state, last_state: detected)
             }
-            Error(_) -> {
-              // New session - also send update for initial state
-              let update = StateUpdate(bead_id, current_state)
-              #(updated_states, [update, ..updates])
-            }
-            _ -> {
-              // No change
-              #(updated_states, updates)
-            }
+            False -> state
           }
+
+          // Schedule next poll using self reference
+          case state.self_subject {
+            Some(subject) ->
+              schedule_poll_with_subject(subject, state.poll_interval_ms)
+            None -> Nil
+          }
+          actor.continue(new_state)
         }
-        None -> acc
-      }
-    })
-
-  // Check for sessions that disappeared (session ended)
-  let #(final_states, final_updates) =
-    dict.fold(previous_states, #(new_states, updates), fn(acc, bead_id, _prev_state) {
-      let #(states, updates) = acc
-      case dict.has_key(new_states, bead_id) {
-        True -> acc
-        False -> {
-          // Session disappeared - send Idle update
-          let update = StateUpdate(bead_id, session.Idle)
-          #(states, [update, ..updates])
+        Error(_) -> {
+          // Tmux command failed - might be transient, keep polling
+          case state.self_subject {
+            Some(subject) ->
+              schedule_poll_with_subject(subject, state.poll_interval_ms)
+            None -> Nil
+          }
+          actor.continue(state)
         }
-      }
-    })
-
-  #(final_states, final_updates)
-}
-
-/// Get current state from tmux session option
-fn get_session_state(session_name: String) -> session.State {
-  case tmux.get_option(session_name, "@az_status") {
-    Ok(status) -> session.state_from_string(status)
-    Error(_) -> {
-      // Fall back to detecting from pane output
-      // Default to Busy for sessions that haven't set status yet
-      session.Busy
-    }
-  }
-}
-
-/// Parse bead ID from session name (e.g., "az-abc123" -> "abc123")
-fn parse_bead_id(session_name: String) -> Option(String) {
-  case string.starts_with(session_name, "az-") {
-    True -> Some(string.drop_start(session_name, 3))
-    False -> {
-      // Also handle sessions ending in -az (legacy format)
-      case string.ends_with(session_name, "-az") {
-        True -> {
-          let len = string.length(session_name)
-          Some(string.slice(session_name, 0, len - 3))
-        }
-        False -> None
       }
     }
   }
 }
 
-/// Schedule next poll after interval
-fn schedule_poll(subject: Subject(Msg)) -> Nil {
+/// Notify coordinator of state change
+fn notify_state_change(state: MonitorState, new_state: State) -> Nil {
+  process.send(state.coordinator, StateChanged(state.bead_id, new_state))
+}
+
+/// Schedule next poll tick with explicit subject
+fn schedule_poll_with_subject(subject: Subject(Msg), interval_ms: Int) -> Nil {
+  // Spawn a process to sleep and then send Poll message
   process.start(
     fn() {
-      process.sleep(poll_interval_ms)
+      process.sleep(interval_ms)
       process.send(subject, Poll)
     },
     True,
   )
   Nil
+}
+
+/// Get child spec for supervision
+pub fn child_spec(config: MonitorConfig) -> ChildSpec {
+  ChildSpec(
+    id: "session_monitor_" <> config.bead_id,
+    start: fn() { start(config) },
+    restart: Transient,
+    shutdown_ms: 5000,
+  )
+}
+
+/// Restart strategy for supervisors
+pub type RestartStrategy {
+  /// Always restart
+  Permanent
+  /// Restart only on abnormal exit
+  Transient
+  /// Never restart
+  Temporary
+}
+
+/// Child specification for supervisor
+pub type ChildSpec {
+  ChildSpec(
+    id: String,
+    start: fn() -> Result(Subject(Msg), actor.StartError),
+    restart: RestartStrategy,
+    shutdown_ms: Int,
+  )
 }
