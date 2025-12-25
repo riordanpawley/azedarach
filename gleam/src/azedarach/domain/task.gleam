@@ -73,7 +73,7 @@ pub fn status_to_string(status: Status) -> String {
     Open -> "open"
     InProgress -> "in_progress"
     Review -> "review"
-    Done -> "done"
+    Done -> "closed"
     Blocked -> "blocked"
   }
 }
