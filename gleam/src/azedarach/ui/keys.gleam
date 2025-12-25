@@ -68,7 +68,7 @@ fn handle_overlay_key(
     model.TypeFilterMenu -> handle_type_filter_menu_key(event, model)
     model.SessionFilterMenu -> handle_session_filter_menu_key(event, model)
     model.HelpOverlay -> handle_simple_close(event)
-    model.SettingsOverlay -> handle_simple_close(event)
+    model.SettingsOverlay(_) -> handle_settings_key(event)
     model.DiagnosticsOverlay -> handle_simple_close(event)
     model.LogsViewer -> handle_simple_close(event)
     model.ProjectSelector -> handle_project_selector_key(event)
@@ -192,6 +192,16 @@ fn handle_session_filter_menu_key(
     "d" -> Some(model.ToggleSessionFilter(session.Done))
     "e" -> Some(model.ToggleSessionFilter(session.Error))
     "p" -> Some(model.ToggleSessionFilter(session.Paused))
+    _ -> None
+  }
+}
+
+fn handle_settings_key(event: KeyEvent) -> Option(Msg) {
+  case event.key {
+    "escape" | "q" -> Some(model.CloseOverlay)
+    "j" | "down" -> Some(model.SettingsNavigateDown)
+    "k" | "up" -> Some(model.SettingsNavigateUp)
+    " " | "enter" | "return" -> Some(model.SettingsToggleCurrent)
     _ -> None
   }
 }
