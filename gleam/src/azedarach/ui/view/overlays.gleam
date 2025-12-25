@@ -27,7 +27,7 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.TypeFilterMenu -> render_type_filter_menu(model)
     model.SessionFilterMenu -> render_session_filter_menu(model)
     model.HelpOverlay -> render_help(model)
-    model.SettingsOverlay -> render_settings(model)
+    model.SettingsOverlay(focus_index) -> render_settings(focus_index, model)
     model.DiagnosticsOverlay -> render_diagnostics(model)
     model.LogsViewer -> render_logs(model)
     model.ProjectSelector -> render_project_selector(model)
@@ -346,28 +346,43 @@ fn render_help(model: Model) -> Node {
   overlay_box("Help", section_elements, model)
 }
 
-fn render_settings(model: Model) -> Node {
+fn render_settings(focus_index: Int, model: Model) -> Node {
   let colors = model.colors
-  let git = model.config.git
-
-  let items = [
-    #("Workflow", config_workflow_mode_to_string(git.workflow_mode)),
-    #("Push enabled", bool_to_string(git.push_enabled)),
-    #("Fetch enabled", bool_to_string(git.fetch_enabled)),
-    #("Base branch", git.base_branch),
-    #("Theme", model.config.theme),
-  ]
+  let settings = config.editable_settings()
 
   let entries =
-    list.map(items, fn(item) {
-      let #(label, value) = item
+    list.index_map(settings, fn(setting, idx) {
+      let is_focused = idx == focus_index
+      let value = { setting.get_value }(model.config)
+      let value_str = config.setting_value_to_string(value)
+
+      let indicator = case is_focused {
+        True -> ">"
+        False -> " "
+      }
+
+      let label_color = case is_focused {
+        True -> colors.yellow
+        False -> colors.subtext0
+      }
+      let value_color = case is_focused {
+        True -> colors.green
+        False -> colors.text
+      }
+
       hbox([
-        styled_text(label <> ": ", colors.subtext0),
-        styled_text(value, colors.text),
+        styled_text(indicator <> " ", colors.yellow),
+        styled_text(setting.label <> ": ", label_color),
+        styled_text(value_str, value_color),
       ])
     })
 
-  overlay_box("Settings", entries, model)
+  let footer = [
+    text(""),
+    dim_text("j/k: navigate • Space/Enter: toggle • Esc: close"),
+  ]
+
+  overlay_box("Settings", list.append(entries, footer), model)
 }
 
 fn render_diagnostics(model: Model) -> Node {
@@ -541,18 +556,4 @@ fn overlay_box(title: String, content: List(Node), model: Model) -> Node {
     [bold_text(title, colors.mauve), text(""), ..content],
     sem.border_focused,
   )
-}
-
-fn config_workflow_mode_to_string(mode: config.WorkflowMode) -> String {
-  case mode {
-    config.Local -> "local"
-    config.Origin -> "origin"
-  }
-}
-
-fn bool_to_string(b: Bool) -> String {
-  case b {
-    True -> "yes"
-    False -> "no"
-  }
 }

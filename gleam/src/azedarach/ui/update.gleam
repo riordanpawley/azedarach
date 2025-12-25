@@ -10,6 +10,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
+import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -86,7 +87,7 @@ pub fn update(
       effects.none(),
     )
     model.OpenSettings -> #(
-      Model(..model, overlay: Some(model.SettingsOverlay)),
+      Model(..model, overlay: Some(model.SettingsOverlay(0))),
       effects.none(),
     )
     model.OpenDiagnostics -> #(
@@ -327,6 +328,12 @@ pub fn update(
     model.ConfirmAction -> handle_confirm(model, coord)
     model.CancelAction -> #(Model(..model, overlay: None), effects.none())
 
+    // Settings - navigation and toggle
+    model.SettingsNavigateUp -> #(settings_navigate(model, -1), effects.none())
+    model.SettingsNavigateDown -> #(settings_navigate(model, 1), effects.none())
+    model.SettingsToggleCurrent -> handle_settings_toggle(model)
+    model.SettingsSaved(result) -> handle_settings_saved(model, result)
+
     // Data updates - pure state updates (from coordinator async messages)
     model.BeadsLoaded(tasks) -> #(
       Model(..model, tasks: tasks, loading: False),
@@ -550,5 +557,62 @@ fn handle_confirm(
       #(Model(..model, overlay: None), effect)
     }
     _ -> #(model, effects.none())
+  }
+}
+
+// =============================================================================
+// Settings helpers
+// =============================================================================
+
+fn settings_navigate(model: Model, direction: Int) -> Model {
+  case model.overlay {
+    Some(model.SettingsOverlay(focus_index)) -> {
+      let settings = config.editable_settings()
+      let max_idx = list.length(settings) - 1
+      let new_idx = int.clamp(focus_index + direction, 0, max_idx)
+      Model(..model, overlay: Some(model.SettingsOverlay(new_idx)))
+    }
+    _ -> model
+  }
+}
+
+fn handle_settings_toggle(model: Model) -> #(Model, Effect(Msg)) {
+  case model.overlay {
+    Some(model.SettingsOverlay(focus_index)) -> {
+      let settings = config.editable_settings()
+      case list.at(settings, focus_index) {
+        Ok(setting) -> {
+          // Toggle the setting and save
+          let new_config = { setting.toggle }(model.config)
+          // Save synchronously and update model
+          let save_result = config.save(new_config, None)
+          case save_result {
+            Ok(_) -> #(
+              Model(..model, config: new_config),
+              effects.none(),
+            )
+            Error(err) -> #(
+              model,
+              effects.from(fn() { model.SettingsSaved(Error(err)) }),
+            )
+          }
+        }
+        Error(_) -> #(model, effects.none())
+      }
+    }
+    _ -> #(model, effects.none())
+  }
+}
+
+fn handle_settings_saved(
+  model: Model,
+  result: Result(Nil, config.ConfigError),
+) -> #(Model, Effect(Msg)) {
+  case result {
+    Ok(_) -> #(model, effects.none())
+    Error(_err) -> {
+      // Could add a toast here for error notification
+      #(model, effects.none())
+    }
   }
 }
