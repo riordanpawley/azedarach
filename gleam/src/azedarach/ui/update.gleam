@@ -15,6 +15,7 @@ import azedarach/ui/model.{
 }
 import azedarach/ui/app.{type Cmd}
 import azedarach/actors/coordinator
+import azedarach/actors/app_supervisor.{type AppContext}
 
 pub fn update(
   model: Model,
@@ -384,6 +385,53 @@ pub fn update(
     model.ForceRedraw -> #(model, app.None)
     model.KeyPressed(_, _) -> #(model, app.None)
     // Handled by keys module
+  }
+}
+
+/// Update with supervision context (preferred method)
+/// This version can start/stop session monitors through the supervision tree
+pub fn update_with_context(
+  model: Model,
+  msg: Msg,
+  context: AppContext,
+) -> #(Model, Cmd) {
+  // Use the context's coordinator
+  let #(new_model, cmd) = update(model, msg, context.coordinator)
+
+  // Handle supervision-related side effects
+  let supervision_cmd = case msg {
+    // When a session is started, start the session monitor
+    model.SessionStateChanged(id, state) -> {
+      case state.tmux_session, state.state {
+        Some(tmux_name), session.Busy -> {
+          app_supervisor.start_session_monitor(context, id, tmux_name)
+          app.None
+        }
+        _, session.Idle -> {
+          app_supervisor.stop_session_monitor(context, id)
+          app.None
+        }
+        _, _ -> app.None
+      }
+    }
+    // When a dev server is started/stopped, manage server monitor
+    model.DevServerStateChanged(key, state) -> {
+      case state.running {
+        True -> app.None
+        // Server monitors are started by coordinator
+        False -> app.None
+        // Server monitors stop themselves
+      }
+    }
+    _ -> app.None
+  }
+
+  // Combine commands if needed
+  case cmd, supervision_cmd {
+    app.None, app.None -> #(new_model, app.None)
+    c, app.None -> #(new_model, c)
+    app.None, c -> #(new_model, c)
+    c1, c2 -> #(new_model, app.Batch([c1, c2]))
   }
 }
 
