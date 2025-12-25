@@ -5,16 +5,17 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import shore/ui
+import shore/style
 import azedarach/config
 import azedarach/domain/task
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
 import azedarach/ui/view.{
-  type Element, Box, BoxProps, Column, Row, Text, TextProps, bold_text,
-  bordered_box, dim_text, hbox, styled_text, text, vbox,
+  type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
 }
 
-pub fn render(overlay: Overlay, model: Model) -> Element {
+pub fn render(overlay: Overlay, model: Model) -> Node {
   case overlay {
     model.ActionMenu -> render_action_menu(model)
     model.SortMenu -> render_sort_menu(model)
@@ -34,7 +35,7 @@ pub fn render(overlay: Overlay, model: Model) -> Element {
   }
 }
 
-fn render_action_menu(model: Model) -> Element {
+fn render_action_menu(model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -82,7 +83,7 @@ fn render_action_menu(model: Model) -> Element {
   overlay_box("Actions", sections, model)
 }
 
-fn render_sort_menu(model: Model) -> Element {
+fn render_sort_menu(model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -108,7 +109,7 @@ fn render_sort_menu(model: Model) -> Element {
   overlay_box("Sort", entries, model)
 }
 
-fn render_filter_menu(model: Model) -> Element {
+fn render_filter_menu(model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -132,7 +133,7 @@ fn render_filter_menu(model: Model) -> Element {
   overlay_box("Filter", entries, model)
 }
 
-fn render_help(model: Model) -> Element {
+fn render_help(model: Model) -> Node {
   let colors = model.colors
 
   let sections = [
@@ -179,7 +180,7 @@ fn render_help(model: Model) -> Element {
   overlay_box("Help", section_elements, model)
 }
 
-fn render_settings(model: Model) -> Element {
+fn render_settings(model: Model) -> Node {
   let colors = model.colors
   let git = model.config.git
 
@@ -203,7 +204,7 @@ fn render_settings(model: Model) -> Element {
   overlay_box("Settings", entries, model)
 }
 
-fn render_diagnostics(model: Model) -> Element {
+fn render_diagnostics(model: Model) -> Node {
   let colors = model.colors
 
   let stats = [
@@ -225,12 +226,12 @@ fn render_diagnostics(model: Model) -> Element {
   overlay_box("Diagnostics", entries, model)
 }
 
-fn render_logs(model: Model) -> Element {
+fn render_logs(model: Model) -> Node {
   // Placeholder - would show actual logs
   overlay_box("Logs", [dim_text("(no logs)")], model)
 }
 
-fn render_project_selector(model: Model) -> Element {
+fn render_project_selector(model: Model) -> Node {
   let colors = model.colors
 
   let projects =
@@ -254,7 +255,7 @@ fn render_project_selector(model: Model) -> Element {
   }
 }
 
-fn render_detail_panel(bead_id: String, model: Model) -> Element {
+fn render_detail_panel(bead_id: String, model: Model) -> Node {
   let colors = model.colors
 
   // Find task
@@ -287,7 +288,7 @@ fn render_detail_panel(bead_id: String, model: Model) -> Element {
   }
 }
 
-fn render_image_attach(bead_id: String, model: Model) -> Element {
+fn render_image_attach(bead_id: String, model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -299,11 +300,11 @@ fn render_image_attach(bead_id: String, model: Model) -> Element {
   overlay_box("Attach Image to " <> bead_id, items, model)
 }
 
-fn render_image_preview(_path: String, model: Model) -> Element {
+fn render_image_preview(_path: String, model: Model) -> Node {
   overlay_box("Image Preview", [dim_text("(preview not available in terminal)")], model)
 }
 
-fn render_dev_server_menu(bead_id: String, model: Model) -> Element {
+fn render_dev_server_menu(bead_id: String, model: Model) -> Node {
   // Show configured servers
   let servers = model.config.dev_server.servers
   let entries =
@@ -317,11 +318,11 @@ fn render_dev_server_menu(bead_id: String, model: Model) -> Element {
   overlay_box("Dev Servers for " <> bead_id, entries, model)
 }
 
-fn render_diff_viewer(_bead_id: String, model: Model) -> Element {
+fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
   overlay_box("Diff", [dim_text("(loading diff...)")], model)
 }
 
-fn render_merge_choice(bead_id: String, behind: Int, model: Model) -> Element {
+fn render_merge_choice(bead_id: String, behind: Int, model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -337,7 +338,7 @@ fn render_merge_choice(bead_id: String, behind: Int, model: Model) -> Element {
   overlay_box("↓ Branch Behind main", items, model)
 }
 
-fn render_confirm(action: model.PendingAction, model: Model) -> Element {
+fn render_confirm(action: model.PendingAction, model: Model) -> Node {
   let colors = model.colors
 
   let #(title, description) = case action {
@@ -366,7 +367,7 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Element {
 }
 
 // Helper to create overlay box
-fn overlay_box(title: String, content: List(Element), model: Model) -> Element {
+fn overlay_box(title: String, content: List(Node), model: Model) -> Node {
   let colors = model.colors
   let sem = theme.semantic(colors)
 
