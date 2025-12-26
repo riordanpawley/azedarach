@@ -317,7 +317,11 @@ pub fn edit_bead(
               // Read back and parse
               case read_temp_file(temp_file) {
                 Ok(edited) -> {
-                  let _ = delete_temp_file(temp_file)
+                  // Cleanup temp file (best-effort)
+                  case delete_temp_file(temp_file) {
+                    Ok(_) -> Nil
+                    Error(_) -> Nil  // Cleanup failure is non-fatal
+                  }
                   parse_from_markdown(edited)
                 }
                 Error(msg) -> Error(EditorFailed(msg))
@@ -351,7 +355,11 @@ pub fn create_bead(
           // Read back and parse
           case read_temp_file(temp_file) {
             Ok(edited) -> {
-              let _ = delete_temp_file(temp_file)
+              // Cleanup temp file (best-effort)
+              case delete_temp_file(temp_file) {
+                Ok(_) -> Nil
+                Error(_) -> Nil  // Cleanup failure is non-fatal
+              }
               parse_from_markdown(edited)
             }
             Error(msg) -> Error(EditorFailed(msg))
