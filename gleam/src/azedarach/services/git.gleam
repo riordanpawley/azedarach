@@ -4,7 +4,7 @@ import gleam/int
 import gleam/list
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
+import azedarach/config.{type Config, Local, Origin}
 import azedarach/util/shell
 
 pub type GitError {
@@ -25,9 +25,20 @@ pub fn error_to_string(err: GitError) -> String {
   }
 }
 
-// Check how many commits behind main
-pub fn commits_behind_main(worktree: String, config: Config) -> Result(Int, GitError) {
+/// Get the comparison base ref based on workflow mode.
+/// Local mode: compare against local base branch (e.g., "main")
+/// Origin mode: compare against remote tracking branch (e.g., "origin/main")
+pub fn comparison_base(config: Config) -> String {
   let base = config.git.base_branch
+  case config.git.workflow_mode {
+    Local -> base
+    Origin -> config.git.remote <> "/" <> base
+  }
+}
+
+// Check how many commits behind base (uses origin/main in Origin mode)
+pub fn commits_behind_main(worktree: String, config: Config) -> Result(Int, GitError) {
+  let base = comparison_base(config)
   let args = ["rev-list", "--count", "HEAD.." <> base]
   case shell.run("git", args, worktree) {
     Ok(output) -> {
@@ -40,9 +51,9 @@ pub fn commits_behind_main(worktree: String, config: Config) -> Result(Int, GitE
   }
 }
 
-// Check how many commits ahead of main
+// Check how many commits ahead of base (uses origin/main in Origin mode)
 pub fn commits_ahead_main(worktree: String, config: Config) -> Result(Int, GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   let args = ["rev-list", "--count", base <> "..HEAD"]
   case shell.run("git", args, worktree) {
     Ok(output) -> {
@@ -55,12 +66,12 @@ pub fn commits_ahead_main(worktree: String, config: Config) -> Result(Int, GitEr
   }
 }
 
-// Check for merge conflicts (dry run)
+// Check for merge conflicts (dry run) - compares against comparison base
 pub fn check_merge_conflicts(
   worktree: String,
   config: Config,
 ) -> Result(List(String), GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   let args = ["merge-tree", "--write-tree", base, "HEAD"]
   case shell.run_exit_code("git", args, worktree) {
     #(0, _) -> Ok([])
@@ -189,17 +200,21 @@ pub fn create_pr(
 }
 
 // Delete branch (local and remote)
-pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
+pub fn delete_branch(
+  bead_id: String,
+  config: Config,
+  project_path: String,
+) -> Result(Nil, GitError) {
   let branch = config.git.branch_prefix <> bead_id
 
   // Delete local
-  shell.run("git", ["branch", "-D", branch], ".")
+  shell.run("git", ["branch", "-D", branch], project_path)
   |> result.unwrap(Nil)
 
   // Delete remote if push enabled
   case config.git.push_enabled {
     True -> {
-      shell.run("git", ["push", config.git.remote, "--delete", branch], ".")
+      shell.run("git", ["push", config.git.remote, "--delete", branch], project_path)
       |> result.unwrap(Nil)
     }
     False -> Nil
@@ -208,9 +223,9 @@ pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
   Ok(Nil)
 }
 
-// Get diff (for viewing)
+// Get diff (for viewing) - uses origin/main in Origin mode
 pub fn diff(worktree: String, config: Config) -> Result(String, GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   case shell.run("git", ["diff", base <> "...HEAD"], worktree) {
     Ok(output) -> Ok(output)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -218,10 +233,10 @@ pub fn diff(worktree: String, config: Config) -> Result(String, GitError) {
 }
 
 // Fetch from remote
-pub fn fetch(config: Config) -> Result(Nil, GitError) {
+pub fn fetch(config: Config, project_path: String) -> Result(Nil, GitError) {
   case config.git.fetch_enabled {
     True -> {
-      case shell.run("git", ["fetch", config.git.remote], ".") {
+      case shell.run("git", ["fetch", config.git.remote], project_path) {
         Ok(_) -> Ok(Nil)
         Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
       }
