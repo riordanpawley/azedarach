@@ -27,11 +27,8 @@ pub fn render(model: Model) -> Node {
   // Right side: session counts, dev server port
   let right = render_right(model)
 
-  // Status bar as a row with background color
-  ui.bar2(
-    style.hex(colors.surface0),
-    hbox([left, center, right]),
-  )
+  // Shore doesn't support hex colors, use hbox directly
+  hbox([left, center, right])
 }
 
 fn render_left(model: Model) -> Node {
@@ -61,7 +58,8 @@ fn render_left(model: Model) -> Node {
   }
 
   hbox([
-    ui.text_styled(mode_text, Some(style.hex(colors.base)), Some(style.hex(mode_bg))),
+    // Shore doesn't support hex colors, use plain text
+    text(mode_text),
     styled_text(project, colors.text),
     styled_text(pending, colors.yellow),
   ])

@@ -90,9 +90,9 @@ pub type Overlay {
 }
 
 pub type PendingAction {
-  DeleteWorktree(bead_id: String)
-  DeleteBead(bead_id: String)
-  StopSession(bead_id: String)
+  DeleteWorktreeAction(bead_id: String)
+  DeleteBeadAction(bead_id: String)
+  StopSessionAction(bead_id: String)
 }
 
 pub type SortField {

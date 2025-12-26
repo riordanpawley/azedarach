@@ -69,7 +69,8 @@ fn render_column(
     False -> sem.border
   }
 
-  ui.box_styled([header, ..content], Some(name), Some(style.hex(border_color)))
+  // Shore doesn't support hex colors, use plain box
+  ui.box_styled([header, ..content], Some(name), None)
 }
 
 fn render_header(
@@ -141,8 +142,8 @@ fn render_card(
   // Card with optional background highlight for cursor
   case is_cursor {
     True ->
-      // Use bar2 for background color
-      ui.bar2(style.hex(colors.surface0), vbox([line1, line2]))
+      // Shore doesn't support hex colors, use plain vbox
+      vbox([line1, line2])
     False -> vbox([line1, line2])
   }
 }

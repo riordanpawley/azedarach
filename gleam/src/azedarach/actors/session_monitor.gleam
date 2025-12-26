@@ -5,6 +5,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import azedarach/domain/session.{type State}
 import azedarach/services/tmux
 import azedarach/services/state_detector
@@ -69,27 +70,26 @@ pub fn start(
 ) -> Result(Subject(Msg), actor.StartError) {
   let poll_interval = option.unwrap(config.poll_interval_ms, default_poll_interval_ms)
 
-  // We need to pass the subject to the actor for self-scheduling
-  // Using a two-phase initialization: start then set self reference
-  let result = actor.start_spec(actor.Spec(
-    init: fn() {
-      let state =
-        MonitorState(
-          bead_id: config.bead_id,
-          tmux_session: config.tmux_session,
-          poll_interval_ms: poll_interval,
-          last_state: session.Idle,
-          coordinator: config.coordinator,
-          crash_count: 0,
-          first_crash_at: None,
-          self_subject: None,
-        )
+  let initial_state =
+    MonitorState(
+      bead_id: config.bead_id,
+      tmux_session: config.tmux_session,
+      poll_interval_ms: poll_interval,
+      last_state: session.Idle,
+      coordinator: config.coordinator,
+      crash_count: 0,
+      first_crash_at: None,
+      self_subject: None,
+    )
 
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  let result =
+    actor.new(initial_state)
+    |> actor.on_message(handle_message)
+    |> actor.start
+    |> result.map(fn(started) {
+      let actor.Started(_, data) = started
+      data
+    })
 
   // After starting, send a message to set self reference and trigger first poll
   case result {
@@ -112,7 +112,7 @@ pub fn refresh(subject: Subject(Msg)) -> Nil {
 }
 
 /// Main message handler
-fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState) {
+fn handle_message(state: MonitorState, msg: Msg) -> actor.Next(MonitorState, Msg) {
   case msg {
     SetSelf(subject) -> {
       // Store self reference and schedule first poll
@@ -122,18 +122,18 @@ fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState
     }
     Poll -> handle_poll(state)
     Refresh -> handle_poll(state)
-    Stop -> actor.Stop(process.Normal)
+    Stop -> actor.stop()
   }
 }
 
 /// Handle poll tick - capture pane and detect state
-fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
+fn handle_poll(state: MonitorState) -> actor.Next(MonitorState, Msg) {
   // Check if tmux session still exists
   case tmux.session_exists(state.tmux_session) {
     False -> {
       // Session gone, notify and stop
       notify_state_change(state, session.Idle)
-      actor.Stop(process.Normal)
+      actor.stop()
     }
     True -> {
       // Capture pane and detect state
@@ -179,14 +179,11 @@ fn notify_state_change(state: MonitorState, new_state: State) -> Nil {
 
 /// Schedule next poll tick with explicit subject
 fn schedule_poll_with_subject(subject: Subject(Msg), interval_ms: Int) -> Nil {
-  // Spawn a process to sleep and then send Poll message
-  process.start(
-    fn() {
-      process.sleep(interval_ms)
-      process.send(subject, Poll)
-    },
-    True,
-  )
+  // Spawn a linked process to sleep and then send Poll message
+  let _ = process.spawn(fn() {
+    process.sleep(interval_ms)
+    process.send(subject, Poll)
+  })
   Nil
 }
 

@@ -175,7 +175,7 @@ fn handle_type_filter_menu_key(event: KeyEvent, model: Model) -> Option(Msg) {
     "escape" -> Some(model.OpenFilterMenu)
     // Back to filter menu
     "q" -> Some(model.CloseOverlay)
-    "t" -> Some(model.ToggleTypeFilter(task.Task))
+    "t" -> Some(model.ToggleTypeFilter(task.TaskType))
     "b" -> Some(model.ToggleTypeFilter(task.Bug))
     "e" -> Some(model.ToggleTypeFilter(task.Epic))
     "f" -> Some(model.ToggleTypeFilter(task.Feature))
@@ -290,10 +290,14 @@ fn handle_normal_key(event: KeyEvent, model: Model) -> Option(Msg) {
 fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
   case event.key, has_modifier(event, Shift), has_modifier(event, Ctrl) {
     // Navigation
-    "h" | "left", _, _ -> Some(model.MoveLeft)
-    "j" | "down", _, _ -> Some(model.MoveDown)
-    "k" | "up", _, _ -> Some(model.MoveUp)
-    "l" | "right", _, _ -> Some(model.MoveRight)
+    "h", _, _ -> Some(model.MoveLeft)
+    "left", _, _ -> Some(model.MoveLeft)
+    "j", _, _ -> Some(model.MoveDown)
+    "down", _, _ -> Some(model.MoveDown)
+    "k", _, _ -> Some(model.MoveUp)
+    "up", _, _ -> Some(model.MoveUp)
+    "l", False, False -> Some(model.MoveRight)
+    "right", _, _ -> Some(model.MoveRight)
     "d", _, True -> Some(model.PageDown)
     // Ctrl+d
     "u", _, True -> Some(model.PageUp)
@@ -308,7 +312,8 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "g", _, _ -> Some(model.EnterGoto)
 
     // Quick actions
-    "enter" | "return", _, _ -> Some(model.OpenDetailPanel)
+    "enter", _, _ -> Some(model.OpenDetailPanel)
+    "return", _, _ -> Some(model.OpenDetailPanel)
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
