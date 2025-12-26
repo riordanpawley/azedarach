@@ -113,9 +113,9 @@ fn start_new_session(
   bead_id: String,
   tmux_name: String,
 ) -> Result(SessionState, SessionError) {
-  // Create worktree
+  // Create worktree (using project_path from opts)
   use wt_path <- result.try(
-    worktree.ensure(bead_id, config)
+    worktree.ensure(bead_id, config, opts.project_path)
     |> result.map_error(WorktreeError),
   )
 

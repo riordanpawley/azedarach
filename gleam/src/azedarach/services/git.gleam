@@ -4,7 +4,7 @@ import gleam/int
 import gleam/list
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
+import azedarach/config.{type Config, Local, Origin}
 import azedarach/util/shell
 
 pub type GitError {
@@ -25,46 +25,55 @@ pub fn error_to_string(err: GitError) -> String {
   }
 }
 
-// Helper to convert shell errors to git errors
-fn shell_to_git_error(err: shell.ShellError) -> GitError {
-  case err {
-    shell.CommandError(code, stderr) -> CommandFailed(code, stderr)
-    shell.NotFound(cmd) -> CommandFailed(127, "Command not found: " <> cmd)
+/// Get the comparison base ref based on workflow mode.
+/// Local mode: compare against local base branch (e.g., "main")
+/// Origin mode: compare against remote tracking branch (e.g., "origin/main")
+pub fn comparison_base(config: Config) -> String {
+  let base = config.git.base_branch
+  case config.git.workflow_mode {
+    Local -> base
+    Origin -> config.git.remote <> "/" <> base
   }
 }
 
-// Check how many commits behind main
+// Check how many commits behind base (uses origin/main in Origin mode)
 pub fn commits_behind_main(worktree: String, config: Config) -> Result(Int, GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   let args = ["rev-list", "--count", "HEAD.." <> base]
-  use output <- result.try(
-    shell.run("git", args, worktree)
-    |> result.map_error(shell_to_git_error),
-  )
-  int.parse(string.trim(output))
-  |> result.unwrap(0)
-  |> Ok
+  case shell.run("git", args, worktree) {
+    Ok(output) -> {
+      case int.parse(string.trim(output)) {
+        Ok(n) -> Ok(n)
+        Error(_) -> Ok(0)
+      }
+    }
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+  }
 }
 
-// Check how many commits ahead of main
+// Check how many commits ahead of base (uses origin/main in Origin mode)
 pub fn commits_ahead_main(worktree: String, config: Config) -> Result(Int, GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   let args = ["rev-list", "--count", base <> "..HEAD"]
-  use output <- result.try(
-    shell.run("git", args, worktree)
-    |> result.map_error(shell_to_git_error),
-  )
-  int.parse(string.trim(output))
-  |> result.unwrap(0)
-  |> Ok
+  case shell.run("git", args, worktree) {
+    Ok(output) -> {
+      case int.parse(string.trim(output)) {
+        Ok(n) -> Ok(n)
+        Error(_) -> Ok(0)
+      }
+    }
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+  }
 }
 
-// Check for merge conflicts (dry run)
+// Check for merge conflicts (dry run) - compares against comparison base
 pub fn check_merge_conflicts(
   worktree: String,
   config: Config,
 ) -> Result(List(String), GitError) {
-  let base = config.git.base_branch
+  let base = comparison_base(config)
   let args = ["merge-tree", "--write-tree", base, "HEAD"]
   case shell.run_exit_code("git", args, worktree) {
     #(0, _) -> Ok([])
@@ -92,18 +101,14 @@ pub fn merge_main(worktree: String, config: Config) -> Result(Nil, GitError) {
       let base = config.git.base_branch
       case shell.run("git", ["merge", base, "--no-edit"], worktree) {
         Ok(_) -> Ok(Nil)
-        Error(e) -> Error(shell_to_git_error(e))
+        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
       }
     }
-    Ok(files) -> {
+    Ok([_, ..] as files) -> {
       // Conflicts detected - start merge anyway (creates conflict markers)
-      // We intentionally ignore the result here because we expect it to "fail"
-      // with conflicts - that's the point
       let base = config.git.base_branch
-      case shell.run("git", ["merge", base, "-m", "Merge " <> base], worktree) {
-        Ok(_) -> Nil
-        Error(_) -> Nil  // Expected - merge will exit non-zero due to conflicts
-      }
+      let _ = shell.run("git", ["merge", base, "-m", "Merge " <> base], worktree)
       Error(MergeConflict(files))
     }
     Error(e) -> Error(e)
@@ -124,46 +129,48 @@ pub fn merge_to_main(worktree: String, config: Config) -> Result(Nil, GitError) 
         Ok(_) -> {
           case shell.run("git", ["merge", branch_name, "--no-edit"], worktree) {
             Ok(_) -> {
-              // Switch back - must succeed or we're in a bad state
-              case shell.run("git", ["checkout", branch_name], worktree) {
-                Ok(_) -> Ok(Nil)
-                Error(e) -> Error(shell_to_git_error(e))
-              }
+              // Switch back
+              let _ = shell.run("git", ["checkout", branch_name], worktree)
+              Ok(Nil)
             }
-            Error(e) -> {
-              // Switch back even on error - best effort
-              case shell.run("git", ["checkout", branch_name], worktree) {
-                Ok(_) -> Nil
-                Error(_) -> Nil  // Already have an error to report
-              }
-              Error(shell_to_git_error(e))
+            Error(shell.CommandError(code, stderr)) -> {
+              // Switch back even on error
+              let _ = shell.run("git", ["checkout", branch_name], worktree)
+              Error(CommandFailed(code, stderr))
             }
+            Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
           }
         }
-        Error(e) -> Error(shell_to_git_error(e))
+        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
       }
     }
-    Error(e) -> Error(shell_to_git_error(e))
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
   }
 }
 
 // Create WIP commit
 pub fn wip_commit(worktree: String) -> Result(Nil, GitError) {
   // Stage all changes
-  use _ <- result.try(
-    shell.run("git", ["add", "-A"], worktree)
-    |> result.map_error(shell_to_git_error),
-  )
-
-  // Check if there's anything to commit (exit 0 = no changes)
-  case shell.run("git", ["diff", "--cached", "--quiet"], worktree) {
-    Ok(_) -> Error(NothingToCommit)
-    Error(_) -> {
-      // There are changes, commit
-      shell.run("git", ["commit", "-m", "wip: paused session"], worktree)
-      |> result.map_error(shell_to_git_error)
-      |> result.replace(Nil)
+  case shell.run("git", ["add", "-A"], worktree) {
+    Ok(_) -> {
+      // Check if there's anything to commit
+      case shell.run("git", ["diff", "--cached", "--quiet"], worktree) {
+        Ok(_) -> Error(NothingToCommit)
+        // Exit 0 means no changes
+        Error(_) -> {
+          // There are changes, commit
+          case shell.run("git", ["commit", "-m", "wip: paused session"], worktree) {
+            Ok(_) -> Ok(Nil)
+            Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+            Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+          }
+        }
+      }
     }
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
   }
 }
 
@@ -174,44 +181,48 @@ pub fn create_pr(
   config: Config,
 ) -> Result(String, GitError) {
   // Ensure changes are pushed
-  use _ <- result.try(case config.git.push_enabled {
+  case config.git.push_enabled {
     True -> {
       let branch = config.git.branch_prefix <> bead_id
-      shell.run("git", ["push", "-u", config.git.remote, branch], worktree)
-      |> result.map_error(shell_to_git_error)
+      let _ = shell.run("git", ["push", "-u", config.git.remote, branch], worktree)
+      Nil
     }
-    False -> Ok("")
-  })
+    False -> Nil
+  }
 
   // Create PR
   let draft_flag = case config.pr.auto_draft {
     True -> ["--draft"]
     False -> []
   }
-  let args = ["pr", "create", "--fill"] |> list.append(draft_flag)
 
-  shell.run("gh", args, worktree)
-  |> result.map_error(shell_to_git_error)
-  |> result.map(string.trim)
+  let args =
+    ["pr", "create", "--fill"]
+    |> list.append(draft_flag)
+
+  case shell.run("gh", args, worktree) {
+    Ok(output) -> Ok(string.trim(output))
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "gh not found"))
+  }
 }
 
 // Delete branch (local and remote)
-pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
+pub fn delete_branch(
+  bead_id: String,
+  config: Config,
+  project_path: String,
+) -> Result(Nil, GitError) {
   let branch = config.git.branch_prefix <> bead_id
 
-  // Delete local - may fail if branch doesn't exist
-  case shell.run("git", ["branch", "-D", branch], ".") {
-    Ok(_) -> Nil
-    Error(_) -> Nil  // Branch might not exist locally
-  }
+  // Delete local (best-effort)
+  let _ = shell.run("git", ["branch", "-D", branch], project_path)
 
-  // Delete remote if push enabled
+  // Delete remote if push enabled (best-effort)
   case config.git.push_enabled {
     True -> {
-      case shell.run("git", ["push", config.git.remote, "--delete", branch], ".") {
-        Ok(_) -> Nil
-        Error(_) -> Nil  // Branch might not exist remotely
-      }
+      let _ = shell.run("git", ["push", config.git.remote, "--delete", branch], project_path)
+      Nil
     }
     False -> Nil
   }
@@ -219,20 +230,26 @@ pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
   Ok(Nil)
 }
 
-// Get diff (for viewing)
+// Get diff (for viewing) - uses origin/main in Origin mode
 pub fn diff(worktree: String, config: Config) -> Result(String, GitError) {
-  let base = config.git.base_branch
-  shell.run("git", ["diff", base <> "...HEAD"], worktree)
-  |> result.map_error(shell_to_git_error)
+  let base = comparison_base(config)
+  case shell.run("git", ["diff", base <> "...HEAD"], worktree) {
+    Ok(output) -> Ok(output)
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+  }
 }
 
 // Fetch from remote
-pub fn fetch(config: Config) -> Result(Nil, GitError) {
+pub fn fetch(config: Config, project_path: String) -> Result(Nil, GitError) {
   case config.git.fetch_enabled {
-    True ->
-      shell.run("git", ["fetch", config.git.remote], ".")
-      |> result.map_error(shell_to_git_error)
-      |> result.replace(Nil)
+    True -> {
+      case shell.run("git", ["fetch", config.git.remote], project_path) {
+        Ok(_) -> Ok(Nil)
+        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+      }
+    }
     False -> Ok(Nil)
   }
 }
