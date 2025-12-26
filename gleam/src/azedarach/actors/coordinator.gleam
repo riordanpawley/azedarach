@@ -417,21 +417,31 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              let _ = tmux.send_keys(tmux_name, "C-c")
-              case session_state.worktree_path {
-                Some(path) -> {
-                  let _ = git.wip_commit(path)
-                  Nil
+              case tmux.send_keys(tmux_name, "C-c") {
+                Ok(_) -> {
+                  case session_state.worktree_path {
+                    Some(path) -> {
+                      // WIP commit is best-effort - don't fail pause if it fails
+                      case git.wip_commit(path) {
+                        Ok(_) -> Nil
+                        Error(_) -> Nil
+                      }
+                    }
+                    None -> Nil
+                  }
+                  let new_session =
+                    session.SessionState(..session_state, state: session.Paused)
+                  let new_sessions = dict.insert(state.sessions, id, new_session)
+                  notify_ui(state, SessionStateChanged(id, new_session))
+                  actor.continue(
+                    CoordinatorState(..state, sessions: new_sessions),
+                  )
                 }
-                None -> Nil
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to pause: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
               }
-              let new_session =
-                session.SessionState(..session_state, state: session.Paused)
-              let new_sessions = dict.insert(state.sessions, id, new_session)
-              notify_ui(state, SessionStateChanged(id, new_session))
-              actor.continue(
-                CoordinatorState(..state, sessions: new_sessions),
-              )
             }
             None -> {
               notify_ui(state, Toast("No tmux session", Warning))
@@ -451,15 +461,29 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              let _ = tmux.send_keys(tmux_name, "claude")
-              let _ = tmux.send_keys(tmux_name, "Enter")
-              let new_session =
-                session.SessionState(..session_state, state: session.Busy)
-              let new_sessions = dict.insert(state.sessions, id, new_session)
-              notify_ui(state, SessionStateChanged(id, new_session))
-              actor.continue(
-                CoordinatorState(..state, sessions: new_sessions),
-              )
+              case tmux.send_keys(tmux_name, "claude") {
+                Ok(_) -> {
+                  case tmux.send_keys(tmux_name, "Enter") {
+                    Ok(_) -> {
+                      let new_session =
+                        session.SessionState(..session_state, state: session.Busy)
+                      let new_sessions = dict.insert(state.sessions, id, new_session)
+                      notify_ui(state, SessionStateChanged(id, new_session))
+                      actor.continue(
+                        CoordinatorState(..state, sessions: new_sessions),
+                      )
+                    }
+                    Error(e) -> {
+                      notify_ui(state, Toast("Failed to send Enter: " <> tmux.error_to_string(e), ErrorLevel))
+                      actor.continue(state)
+                    }
+                  }
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to resume: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
             }
             None -> {
               notify_ui(state, Toast("No tmux session", Warning))
@@ -479,23 +503,30 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              let _ = tmux.kill_session(tmux_name)
-              let new_sessions = dict.delete(state.sessions, id)
-              notify_ui(
-                state,
-                SessionStateChanged(
-                  id,
-                  session.SessionState(
-                    bead_id: id,
-                    state: session.Idle,
-                    started_at: None,
-                    last_output: None,
-                    worktree_path: session_state.worktree_path,
-                    tmux_session: None,
-                  ),
-                ),
-              )
-              actor.continue(CoordinatorState(..state, sessions: new_sessions))
+              case tmux.kill_session(tmux_name) {
+                Ok(_) -> {
+                  let new_sessions = dict.delete(state.sessions, id)
+                  notify_ui(
+                    state,
+                    SessionStateChanged(
+                      id,
+                      session.SessionState(
+                        bead_id: id,
+                        state: session.Idle,
+                        started_at: None,
+                        last_output: None,
+                        worktree_path: session_state.worktree_path,
+                        tmux_session: None,
+                      ),
+                    ),
+                  )
+                  actor.continue(CoordinatorState(..state, sessions: new_sessions))
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to stop: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
             }
             None -> actor.continue(state)
           }
@@ -612,19 +643,23 @@ fn handle_message(
                 Ok(_) -> notify_ui(state, Toast("Updated from main", Success))
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name = id <> "-az"
-                  let _ = tmux.new_window(tmux_name, "merge")
-                  let prompt =
-                    "There are merge conflicts. Please resolve: "
-                    <> string.join(files, ", ")
-                  let _ = tmux.send_keys(
-                    tmux_name <> ":merge",
-                    "claude -p \"" <> prompt <> "\"",
-                  )
-                  let _ = tmux.send_keys(tmux_name <> ":merge", "Enter")
-                  notify_ui(
-                    state,
-                    Toast("Conflicts detected. Claude resolving.", Warning),
-                  )
+                  case tmux.new_window(tmux_name, "merge") {
+                    Ok(_) -> {
+                      let prompt =
+                        "There are merge conflicts. Please resolve: "
+                        <> string.join(files, ", ")
+                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                        Ok(_) -> {
+                          case tmux.send_keys(tmux_name <> ":merge", "Enter") {
+                            Ok(_) -> notify_ui(state, Toast("Conflicts detected. Claude resolving.", Warning))
+                            Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                          }
+                        }
+                        Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                      }
+                    }
+                    Error(e) -> notify_ui(state, Toast("Failed to create merge window: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
                 Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
@@ -857,46 +892,92 @@ fn handle_start_session(
 
       case tmux.session_exists(tmux_name) {
         True -> {
-          let _ = tmux.attach(tmux_name)
-          state
+          case tmux.attach(tmux_name) {
+            Ok(_) -> state
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to attach: " <> tmux.error_to_string(e), ErrorLevel))
+              state
+            }
+          }
         }
         False -> {
-          let _ = tmux.new_session(tmux_name, worktree_path)
+          case tmux.new_session(tmux_name, worktree_path) {
+            Ok(_) -> {
+              // Run init commands (best-effort, don't fail session start)
+              run_init_commands(tmux_name, state.config.worktree.init_commands)
 
-          run_init_commands(tmux_name, state.config.worktree.init_commands)
-          let _ = tmux.set_option(tmux_name, "@az_init_done", "1")
+              // Set init done marker (best-effort)
+              case tmux.set_option(tmux_name, "@az_init_done", "1") {
+                Ok(_) -> Nil
+                Error(_) -> Nil
+              }
 
-          list.each(state.config.session.background_tasks, fn(cmd) {
-            let window_name =
-              "task-" <> int.to_string(int.absolute_value(unique_integer()))
-            let _ = tmux.new_window(tmux_name, window_name)
-            let _ = tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-            let _ = tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
-          })
+              // Start background tasks (best-effort, log failures)
+              list.each(state.config.session.background_tasks, fn(cmd) {
+                let window_name =
+                  "task-" <> int.to_string(int.absolute_value(unique_integer()))
+                case tmux.new_window(tmux_name, window_name) {
+                  Ok(_) -> {
+                    case tmux.send_keys(tmux_name <> ":" <> window_name, cmd) {
+                      Ok(_) -> {
+                        case tmux.send_keys(tmux_name <> ":" <> window_name, "Enter") {
+                          Ok(_) -> Nil
+                          Error(_) -> Nil
+                        }
+                      }
+                      Error(_) -> Nil
+                    }
+                  }
+                  Error(e) -> {
+                    notify_ui(state, Toast("Failed to start background task: " <> tmux.error_to_string(e), Warning))
+                  }
+                }
+              })
 
-          let claude_cmd = case with_work, yolo {
-            True, True -> build_start_work_command(id, state, True)
-            True, False -> build_start_work_command(id, state, False)
-            False, _ -> "claude"
+              let claude_cmd = case with_work, yolo {
+                True, True -> build_start_work_command(id, state, True)
+                True, False -> build_start_work_command(id, state, False)
+                False, _ -> "claude"
+              }
+
+              // Start Claude - this is critical
+              case tmux.send_keys(tmux_name <> ":main", claude_cmd) {
+                Ok(_) -> {
+                  case tmux.send_keys(tmux_name <> ":main", "Enter") {
+                    Ok(_) -> {
+                      let session_state =
+                        session.SessionState(
+                          bead_id: id,
+                          state: session.Busy,
+                          started_at: Some(now_iso()),
+                          last_output: None,
+                          worktree_path: Some(worktree_path),
+                          tmux_session: Some(tmux_name),
+                        )
+
+                      let new_sessions = dict.insert(state.sessions, id, session_state)
+                      notify_ui(state, SessionStateChanged(id, session_state))
+                      notify_ui(state, Toast("Session started", Success))
+
+                      CoordinatorState(..state, sessions: new_sessions)
+                    }
+                    Error(e) -> {
+                      notify_ui(state, Toast("Failed to start Claude: " <> tmux.error_to_string(e), ErrorLevel))
+                      state
+                    }
+                  }
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to start Claude: " <> tmux.error_to_string(e), ErrorLevel))
+                  state
+                }
+              }
+            }
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to create session: " <> tmux.error_to_string(e), ErrorLevel))
+              state
+            }
           }
-          let _ = tmux.send_keys(tmux_name <> ":main", claude_cmd)
-          let _ = tmux.send_keys(tmux_name <> ":main", "Enter")
-
-          let session_state =
-            session.SessionState(
-              bead_id: id,
-              state: session.Busy,
-              started_at: Some(now_iso()),
-              last_output: None,
-              worktree_path: Some(worktree_path),
-              tmux_session: Some(tmux_name),
-            )
-
-          let new_sessions = dict.insert(state.sessions, id, session_state)
-          notify_ui(state, SessionStateChanged(id, session_state))
-          notify_ui(state, Toast("Session started", Success))
-
-          CoordinatorState(..state, sessions: new_sessions)
         }
       }
     }
@@ -926,29 +1007,47 @@ fn start_dev_server(
       let tmux_name = id <> "-az"
       let window_name = "dev-" <> server_name
 
-      let _ = tmux.new_window(tmux_name, window_name)
-
-      let port = get_server_port(server)
-      let cmd = "PORT=" <> int.to_string(port) <> " " <> server.command
-      let _ = tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-      let _ = tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
-
-      let key = id <> ":" <> server_name
-      let ds =
-        DevServerState(
-          name: server_name,
-          running: True,
-          port: Some(port),
-          window_name: window_name,
-        )
-      let new_servers = dict.insert(state.dev_servers, key, ds)
-      notify_ui(state, DevServerStateChanged(key, ds))
-      notify_ui(
-        state,
-        Toast("Dev server started on port " <> int.to_string(port), Success),
-      )
-
-      actor.continue(CoordinatorState(..state, dev_servers: new_servers))
+      case tmux.new_window(tmux_name, window_name) {
+        Ok(_) -> {
+          let port = get_server_port(server)
+          let cmd = "PORT=" <> int.to_string(port) <> " " <> server.command
+          case tmux.send_keys(tmux_name <> ":" <> window_name, cmd) {
+            Ok(_) -> {
+              case tmux.send_keys(tmux_name <> ":" <> window_name, "Enter") {
+                Ok(_) -> {
+                  let key = id <> ":" <> server_name
+                  let ds =
+                    DevServerState(
+                      name: server_name,
+                      running: True,
+                      port: Some(port),
+                      window_name: window_name,
+                    )
+                  let new_servers = dict.insert(state.dev_servers, key, ds)
+                  notify_ui(state, DevServerStateChanged(key, ds))
+                  notify_ui(
+                    state,
+                    Toast("Dev server started on port " <> int.to_string(port), Success),
+                  )
+                  actor.continue(CoordinatorState(..state, dev_servers: new_servers))
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to start dev server: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
+            }
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to start dev server: " <> tmux.error_to_string(e), ErrorLevel))
+              actor.continue(state)
+            }
+          }
+        }
+        Error(e) -> {
+          notify_ui(state, Toast("Failed to create dev server window: " <> tmux.error_to_string(e), ErrorLevel))
+          actor.continue(state)
+        }
+      }
     }
     Error(_) -> {
       notify_ui(state, Toast("Server config not found", ErrorLevel))
@@ -966,8 +1065,16 @@ fn get_server_port(server: config.ServerDefinition) -> Int {
 
 fn run_init_commands(tmux_name: String, commands: List(String)) -> Nil {
   list.each(commands, fn(cmd) {
-    let _ = tmux.send_keys(tmux_name, cmd)
-    let _ = tmux.send_keys(tmux_name, "Enter")
+    // Init commands are best-effort - don't fail session start if one fails
+    case tmux.send_keys(tmux_name, cmd) {
+      Ok(_) -> {
+        case tmux.send_keys(tmux_name, "Enter") {
+          Ok(_) -> Nil
+          Error(_) -> Nil
+        }
+      }
+      Error(_) -> Nil
+    }
     process.sleep(1000)
   })
 }
