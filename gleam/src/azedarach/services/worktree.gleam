@@ -22,6 +22,14 @@ pub fn error_to_string(err: WorktreeError) -> String {
   }
 }
 
+// Helper to convert shell errors to worktree errors
+fn shell_to_worktree_error(err: shell.ShellError) -> WorktreeError {
+  case err {
+    shell.CommandError(code, stderr) -> CommandFailed(code, stderr)
+    shell.NotFound(cmd) -> CommandFailed(127, "Command not found: " <> cmd)
+  }
+}
+
 // Ensure worktree exists, creating if necessary
 pub fn ensure(bead_id: String, config: Config) -> Result(String, WorktreeError) {
   let path = worktree_path(bead_id, config)
@@ -49,8 +57,8 @@ pub fn create(
       case config.git.push_branch_on_create, config.git.push_enabled {
         True, True -> {
           let push_args = ["push", "-u", config.git.remote, branch_name]
-          shell.run("git", push_args, path)
-          |> result.unwrap(Nil)
+          let _ = shell.run("git", push_args, path)
+          Nil
         }
         _, _ -> Nil
       }
@@ -64,12 +72,13 @@ pub fn create(
           let args2 = ["worktree", "add", path, branch_name]
           case shell.run("git", args2, ".") {
             Ok(_) -> Ok(path)
-            Error(shell.CommandError(c, s)) -> Error(CommandFailed(c, s))
+            Error(e) -> Error(shell_to_worktree_error(e))
           }
         }
         False -> Error(CommandFailed(code, stderr))
       }
     }
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 
@@ -77,7 +86,7 @@ pub fn create(
 pub fn delete(path: String) -> Result(Nil, WorktreeError) {
   case shell.run("git", ["worktree", "remove", "--force", path], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 
@@ -104,7 +113,7 @@ pub fn list() -> Result(List(String), WorktreeError) {
         })
       Ok(paths)
     }
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 

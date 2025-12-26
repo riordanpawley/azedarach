@@ -6,19 +6,21 @@
 //
 // When attaching, we also update the bead's notes with a markdown link.
 
-import gleam/decode.{type Decoder}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/dict.{type Dict}
-import gleam/erlang
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
 import azedarach/util/shell
 import simplifile
 import tempo
+
+// Erlang FFI for unique integer generation
+@external(erlang, "erlang", "unique_integer")
+fn unique_integer() -> Int
 
 // ============================================================================
 // Types
@@ -441,8 +443,8 @@ fn get_mime_type(ext: String) -> String {
 }
 
 fn generate_id() -> String {
-  let timestamp = int.to_string(erlang.unique_integer([positive]))
-  let random = int.to_string(erlang.unique_integer([positive]))
+  let timestamp = int.to_string(int.absolute_value(unique_integer()))
+  let random = int.to_string(int.absolute_value(unique_integer()))
   timestamp <> "-" <> random
 }
 

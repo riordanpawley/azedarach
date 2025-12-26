@@ -2,8 +2,6 @@
 
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/util/shell
 
@@ -17,6 +15,14 @@ pub fn error_to_string(err: TmuxError) -> String {
     CommandFailed(code, stderr) ->
       "tmux command failed (" <> int.to_string(code) <> "): " <> stderr
     SessionNotFound(name) -> "Session not found: " <> name
+  }
+}
+
+// Helper to convert shell errors to tmux errors
+fn shell_to_tmux_error(err: shell.ShellError) -> TmuxError {
+  case err {
+    shell.CommandError(code, stderr) -> CommandFailed(code, stderr)
+    shell.NotFound(cmd) -> CommandFailed(127, "Command not found: " <> cmd)
   }
 }
 
@@ -42,7 +48,7 @@ pub fn new_session(name: String, cwd: String) -> Result(Nil, TmuxError) {
   ]
   case shell.run("tmux", args, ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -50,7 +56,7 @@ pub fn new_session(name: String, cwd: String) -> Result(Nil, TmuxError) {
 pub fn kill_session(name: String) -> Result(Nil, TmuxError) {
   case shell.run("tmux", ["kill-session", "-t", name], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -61,13 +67,13 @@ pub fn attach(name: String) -> Result(Nil, TmuxError) {
     True -> {
       case shell.run("tmux", ["switch-client", "-t", name], ".") {
         Ok(_) -> Ok(Nil)
-        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(e) -> Error(shell_to_tmux_error(e))
       }
     }
     False -> {
       case shell.run("tmux", ["attach-session", "-t", name], ".") {
         Ok(_) -> Ok(Nil)
-        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(e) -> Error(shell_to_tmux_error(e))
       }
     }
   }
@@ -78,7 +84,7 @@ pub fn new_window(session: String, name: String) -> Result(Nil, TmuxError) {
   let args = ["new-window", "-t", session, "-n", name]
   case shell.run("tmux", args, ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -87,7 +93,7 @@ pub fn kill_window(session: String, window: String) -> Result(Nil, TmuxError) {
   let target = session <> ":" <> window
   case shell.run("tmux", ["kill-window", "-t", target], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -96,7 +102,7 @@ pub fn select_window(session: String, window: String) -> Result(Nil, TmuxError) 
   let target = session <> ":" <> window
   case shell.run("tmux", ["select-window", "-t", target], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -104,7 +110,7 @@ pub fn select_window(session: String, window: String) -> Result(Nil, TmuxError) 
 pub fn send_keys(target: String, keys: String) -> Result(Nil, TmuxError) {
   case shell.run("tmux", ["send-keys", "-t", target, keys], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -120,7 +126,7 @@ pub fn capture_pane(target: String, lines: Int) -> Result(String, TmuxError) {
   ]
   case shell.run("tmux", args, ".") {
     Ok(output) -> Ok(output)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -128,7 +134,7 @@ pub fn capture_pane(target: String, lines: Int) -> Result(String, TmuxError) {
 pub fn set_option(target: String, name: String, value: String) -> Result(Nil, TmuxError) {
   case shell.run("tmux", ["set-option", "-t", target, name, value], ".") {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -136,7 +142,7 @@ pub fn set_option(target: String, name: String, value: String) -> Result(Nil, Tm
 pub fn get_option(target: String, name: String) -> Result(String, TmuxError) {
   case shell.run("tmux", ["show-option", "-v", "-t", target, name], ".") {
     Ok(output) -> Ok(string.trim(output))
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -151,7 +157,7 @@ pub fn list_windows(session: String) -> Result(List(String), TmuxError) {
         |> list.filter(fn(s) { s != "" })
       Ok(windows)
     }
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 
@@ -165,7 +171,7 @@ pub fn list_sessions() -> Result(List(String), TmuxError) {
         |> list.filter(fn(s) { s != "" })
       Ok(sessions)
     }
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_tmux_error(e))
   }
 }
 

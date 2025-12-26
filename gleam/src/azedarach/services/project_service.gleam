@@ -4,7 +4,7 @@
 // Projects are stored globally in ~/.config/azedarach/projects.json
 // Each project has its own beads database at .beads/
 
-import gleam/decode.{type Decoder}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -112,13 +112,13 @@ fn parse_registry(content: String) -> Result(ProjectsConfig, ProjectError) {
 fn registry_decoder() -> Decoder(ProjectsConfig) {
   use projects <- decode.optional_field(
     "projects",
-    decode.list(project_entry_decoder()),
     [],
+    decode.list(project_entry_decoder()),
   )
   use default_project <- decode.optional_field(
     "defaultProject",
-    decode.optional(decode.string),
     None,
+    decode.optional(decode.string),
   )
   decode.success(ProjectsConfig(projects:, default_project:))
 }
@@ -128,8 +128,8 @@ fn project_entry_decoder() -> Decoder(ProjectEntry) {
   use path <- decode.field("path", decode.string)
   use beads_path <- decode.optional_field(
     "beadsPath",
-    decode.optional(decode.string),
     None,
+    decode.optional(decode.string),
   )
   decode.success(ProjectEntry(name:, path:, beads_path:))
 }

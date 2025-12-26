@@ -2,7 +2,7 @@
 
 import gleam/dynamic/decode.{type Decoder}
 import gleam/json
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option}
 import gleam/string
 import simplifile
 
@@ -150,30 +150,31 @@ fn parse_config(content: String) -> Result(Config, ConfigError) {
 fn config_decoder() -> Decoder(Config) {
   let defaults = default_config()
 
+  // New API: optional_field(key, default, decoder, next)
   use worktree <- decode.optional_field(
     "worktree",
-    worktree_decoder(),
     defaults.worktree,
+    worktree_decoder(),
   )
   use session <- decode.optional_field(
     "session",
-    session_decoder(),
     defaults.session,
+    session_decoder(),
   )
   use dev_server <- decode.optional_field(
     "devServer",
-    dev_server_decoder(),
     defaults.dev_server,
+    dev_server_decoder(),
   )
-  use git <- decode.optional_field("git", git_decoder(), defaults.git)
-  use pr <- decode.optional_field("pr", pr_decoder(), defaults.pr)
-  use beads <- decode.optional_field("beads", beads_decoder(), defaults.beads)
+  use git <- decode.optional_field("git", defaults.git, git_decoder())
+  use pr <- decode.optional_field("pr", defaults.pr, pr_decoder())
+  use beads <- decode.optional_field("beads", defaults.beads, beads_decoder())
   use polling <- decode.optional_field(
     "polling",
-    polling_decoder(),
     defaults.polling,
+    polling_decoder(),
   )
-  use theme <- decode.optional_field("theme", decode.string, defaults.theme)
+  use theme <- decode.optional_field("theme", defaults.theme, decode.string)
 
   decode.success(Config(
     worktree:,
@@ -192,20 +193,20 @@ fn worktree_decoder() -> Decoder(WorktreeConfig) {
   use init_commands <- decode.field("initCommands", decode.list(decode.string))
   use continue_on_failure <- decode.optional_field(
     "continueOnFailure",
-    decode.bool,
     True,
+    decode.bool,
   )
 
   decode.success(WorktreeConfig(path_template:, init_commands:, continue_on_failure:))
 }
 
 fn session_decoder() -> Decoder(SessionConfig) {
-  use shell <- decode.optional_field("shell", decode.string, "zsh")
-  use tmux_prefix <- decode.optional_field("tmuxPrefix", decode.string, "C-a")
+  use shell <- decode.optional_field("shell", "zsh", decode.string)
+  use tmux_prefix <- decode.optional_field("tmuxPrefix", "C-a", decode.string)
   use background_tasks <- decode.optional_field(
     "backgroundTasks",
-    decode.list(decode.string),
     [],
+    decode.list(decode.string),
   )
 
   decode.success(SessionConfig(shell:, tmux_prefix:, background_tasks:))
@@ -214,8 +215,8 @@ fn session_decoder() -> Decoder(SessionConfig) {
 fn dev_server_decoder() -> Decoder(DevServerConfig) {
   use servers <- decode.optional_field(
     "servers",
-    decode.list(server_definition_decoder()),
     default_config().dev_server.servers,
+    decode.list(server_definition_decoder()),
   )
 
   decode.success(DevServerConfig(servers:))
@@ -226,8 +227,8 @@ fn server_definition_decoder() -> Decoder(ServerDefinition) {
   use command <- decode.field("command", decode.string)
   use ports <- decode.optional_field(
     "ports",
-    decode.list(port_decoder()),
     [#("PORT", 3000)],
+    decode.list(port_decoder()),
   )
 
   decode.success(ServerDefinition(name:, command:, ports:))
@@ -242,22 +243,22 @@ fn port_decoder() -> Decoder(#(String, Int)) {
 fn git_decoder() -> Decoder(GitConfig) {
   use workflow_mode <- decode.optional_field(
     "workflowMode",
-    workflow_mode_decoder(),
     Origin,
+    workflow_mode_decoder(),
   )
   use push_branch_on_create <- decode.optional_field(
     "pushBranchOnCreate",
-    decode.bool,
     True,
+    decode.bool,
   )
-  use push_enabled <- decode.optional_field("pushEnabled", decode.bool, True)
-  use fetch_enabled <- decode.optional_field("fetchEnabled", decode.bool, True)
-  use base_branch <- decode.optional_field("baseBranch", decode.string, "main")
-  use remote <- decode.optional_field("remote", decode.string, "origin")
+  use push_enabled <- decode.optional_field("pushEnabled", True, decode.bool)
+  use fetch_enabled <- decode.optional_field("fetchEnabled", True, decode.bool)
+  use base_branch <- decode.optional_field("baseBranch", "main", decode.string)
+  use remote <- decode.optional_field("remote", "origin", decode.string)
   use branch_prefix <- decode.optional_field(
     "branchPrefix",
-    decode.string,
     "az-",
+    decode.string,
   )
 
   decode.success(GitConfig(
@@ -281,15 +282,15 @@ fn workflow_mode_decoder() -> Decoder(WorkflowMode) {
 }
 
 fn pr_decoder() -> Decoder(PrConfig) {
-  use enabled <- decode.optional_field("enabled", decode.bool, True)
-  use auto_draft <- decode.optional_field("autoDraft", decode.bool, True)
-  use auto_merge <- decode.optional_field("autoMerge", decode.bool, False)
+  use enabled <- decode.optional_field("enabled", True, decode.bool)
+  use auto_draft <- decode.optional_field("autoDraft", True, decode.bool)
+  use auto_merge <- decode.optional_field("autoMerge", False, decode.bool)
 
   decode.success(PrConfig(enabled:, auto_draft:, auto_merge:))
 }
 
 fn beads_decoder() -> Decoder(BeadsConfig) {
-  use sync_enabled <- decode.optional_field("syncEnabled", decode.bool, True)
+  use sync_enabled <- decode.optional_field("syncEnabled", True, decode.bool)
 
   decode.success(BeadsConfig(sync_enabled:))
 }
@@ -297,13 +298,13 @@ fn beads_decoder() -> Decoder(BeadsConfig) {
 fn polling_decoder() -> Decoder(PollingConfig) {
   use beads_refresh_ms <- decode.optional_field(
     "beadsRefresh",
-    decode.int,
     30_000,
+    decode.int,
   )
   use session_monitor_ms <- decode.optional_field(
     "sessionMonitor",
-    decode.int,
     500,
+    decode.int,
   )
 
   decode.success(PollingConfig(beads_refresh_ms:, session_monitor_ms:))

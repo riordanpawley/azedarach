@@ -1,8 +1,6 @@
 // Shell utility - command execution
 
-import gleam/erlang/os
 import gleam/list
-import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import shellout
@@ -58,9 +56,13 @@ pub fn command_exists(cmd: String) -> Bool {
   }
 }
 
+// Get environment variable using Erlang FFI
+@external(erlang, "os", "getenv")
+fn erlang_getenv(name: String) -> Result(String, Nil)
+
 // Get environment variable
 pub fn get_env(name: String) -> Result(String, Nil) {
-  os.get_env(name)
+  erlang_getenv(name)
 }
 
 // Set environment variable for subprocess
@@ -170,7 +172,7 @@ pub fn rm(path: String, recursive: Bool) -> Result(Nil, ShellError) {
 
 /// Get home directory
 pub fn home_dir() -> String {
-  os.get_env("HOME")
+  get_env("HOME")
   |> result.unwrap("/home/user")
 }
 

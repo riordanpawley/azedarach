@@ -3,7 +3,7 @@
 // Projects are discovered by finding directories with .azedarach.json
 // Each project has its own beads database and configuration.
 
-import gleam/decode.{type Decoder}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -60,13 +60,13 @@ pub fn from_path(path: String) -> Result(Project, String) {
 /// Parse project config JSON for name and prefix
 fn parse_project_config(content: String) -> Result(#(String, String), Nil) {
   let decoder = {
-    use name <- decode.optional_field("projectName", decode.string, "")
-    use prefix <- decode.optional_field("beadPrefix", decode.string, "")
+    use name <- decode.optional_field("projectName", "", decode.string)
+    use prefix <- decode.optional_field("beadPrefix", "", decode.string)
     decode.success(#(name, prefix))
   }
 
   json.parse(from: content, using: decoder)
-  |> result.nil_error
+  |> result.map_error(fn(_) { Nil })
 }
 
 /// Discover projects in common locations
@@ -89,8 +89,8 @@ pub fn discover() -> List(Project) {
           let full_path = base <> "/" <> entry
           // Only include if it has .azedarach.json
           case shell.path_exists(full_path <> "/.azedarach.json") {
-            True -> from_path(full_path) |> option.from_result
-            False -> None
+            True -> from_path(full_path)
+            False -> Error("No config")
           }
         })
       }
