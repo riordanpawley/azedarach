@@ -37,7 +37,10 @@ pub type SessionConfig {
 }
 
 pub type DevServerConfig {
-  DevServerConfig(servers: List(ServerDefinition))
+  DevServerConfig(
+    servers: List(ServerDefinition),
+    port_pattern: Option(String),
+  )
 }
 
 pub type ServerDefinition {
@@ -45,6 +48,7 @@ pub type ServerDefinition {
     name: String,
     command: String,
     ports: List(#(String, Int)),
+    cwd: Option(String),
   )
 }
 
@@ -113,13 +117,17 @@ pub fn default_config() -> Config {
       tmux_prefix: "C-a",
       background_tasks: [],
     ),
-    dev_server: DevServerConfig(servers: [
-      ServerDefinition(
-        name: "default",
-        command: "npm run dev",
-        ports: [#("PORT", 3000)],
-      ),
-    ]),
+    dev_server: DevServerConfig(
+      servers: [
+        ServerDefinition(
+          name: "default",
+          command: "npm run dev",
+          ports: [#("PORT", 3000)],
+          cwd: None,
+        ),
+      ],
+      port_pattern: None,
+    ),
     git: GitConfig(
       workflow_mode: Origin,
       push_branch_on_create: True,
@@ -217,8 +225,13 @@ fn dev_server_decoder() -> Decoder(DevServerConfig) {
     decode.list(server_definition_decoder()),
     default_config().dev_server.servers,
   )
+  use port_pattern <- decode.optional_field(
+    "portPattern",
+    decode.optional(decode.string),
+    None,
+  )
 
-  decode.success(DevServerConfig(servers:))
+  decode.success(DevServerConfig(servers:, port_pattern:))
 }
 
 fn server_definition_decoder() -> Decoder(ServerDefinition) {
@@ -229,8 +242,13 @@ fn server_definition_decoder() -> Decoder(ServerDefinition) {
     decode.list(port_decoder()),
     [#("PORT", 3000)],
   )
+  use cwd <- decode.optional_field(
+    "cwd",
+    decode.optional(decode.string),
+    None,
+  )
 
-  decode.success(ServerDefinition(name:, command:, ports:))
+  decode.success(ServerDefinition(name:, command:, ports:, cwd:))
 }
 
 fn port_decoder() -> Decoder(#(String, Int)) {
@@ -347,17 +365,25 @@ fn session_to_json(sess: SessionConfig) -> json.Json {
 }
 
 fn dev_server_to_json(ds: DevServerConfig) -> json.Json {
-  json.object([
-    #("servers", json.array(ds.servers, server_definition_to_json)),
-  ])
+  let base = [#("servers", json.array(ds.servers, server_definition_to_json))]
+  let with_pattern = case ds.port_pattern {
+    Some(p) -> list.append(base, [#("portPattern", json.string(p))])
+    None -> base
+  }
+  json.object(with_pattern)
 }
 
 fn server_definition_to_json(sd: ServerDefinition) -> json.Json {
-  json.object([
+  let base = [
     #("name", json.string(sd.name)),
     #("command", json.string(sd.command)),
     #("ports", json.array(sd.ports, port_to_json)),
-  ])
+  ]
+  let with_cwd = case sd.cwd {
+    Some(c) -> list.append(base, [#("cwd", json.string(c))])
+    None -> base
+  }
+  json.object(with_cwd)
 }
 
 fn port_to_json(port: #(String, Int)) -> json.Json {

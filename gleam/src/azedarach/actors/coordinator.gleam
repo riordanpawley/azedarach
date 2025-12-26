@@ -18,7 +18,9 @@ import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/services/beads
 import azedarach/services/bead_editor
+import azedarach/services/dev_server_state.{type DevServerState, DevServerState}
 import azedarach/services/image
+import azedarach/services/port_allocator
 import azedarach/services/tmux
 import azedarach/services/worktree
 import azedarach/services/git
@@ -35,6 +37,7 @@ pub type CoordinatorState {
     tasks: List(Task),
     sessions: Dict(String, SessionState),
     dev_servers: Dict(String, DevServerState),
+    port_allocator: Option(Subject(port_allocator.Msg)),
     ui_subject: Option(Subject(UiMsg)),
     // Project management
     current_project: Option(Project),
@@ -44,14 +47,7 @@ pub type CoordinatorState {
   )
 }
 
-pub type DevServerState {
-  DevServerState(
-    name: String,
-    running: Bool,
-    port: Option(Int),
-    window_name: String,
-  )
-}
+// DevServerState is imported from dev_server_state module
 
 // Messages the coordinator can receive
 pub type Msg {
@@ -126,12 +122,19 @@ pub type ToastLevel {
 pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
   actor.start_spec(actor.Spec(
     init: fn() {
+      // Start port allocator
+      let allocator = case port_allocator.start() {
+        Ok(a) -> Some(a)
+        Error(_) -> None
+      }
+
       let state =
         CoordinatorState(
           config: config,
           tasks: [],
           sessions: dict.new(),
           dev_servers: dict.new(),
+          port_allocator: allocator,
           ui_subject: None,
           current_project: None,
           available_projects: [],
@@ -549,15 +552,29 @@ fn handle_message(
     ToggleDevServer(id, server_name) -> {
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
-        Ok(ds) if ds.running -> {
-          let window = ds.window_name
-          tmux.kill_window(id <> "-az", window)
-          let new_ds = DevServerState(..ds, running: False, port: None)
-          let new_servers = dict.insert(state.dev_servers, key, new_ds)
-          notify_ui(state, DevServerStateChanged(key, new_ds))
-          actor.continue(CoordinatorState(..state, dev_servers: new_servers))
+        Ok(ds) -> {
+          case dev_server_state.is_running(ds) {
+            True -> {
+              let window = ds.window_name
+              tmux.kill_window(id <> "-az", window)
+              // Release port from allocator
+              case state.port_allocator, ds.port {
+                Some(allocator), Some(_) ->
+                  port_allocator.release(allocator, key)
+                _, _ -> Nil
+              }
+              let new_ds = dev_server_state.make_idle(server_name)
+              let new_servers = dict.insert(state.dev_servers, key, new_ds)
+              notify_ui(state, DevServerStateChanged(key, new_ds))
+              actor.continue(CoordinatorState(..state, dev_servers: new_servers))
+            }
+            False -> {
+              let new_state = ensure_session(state, id)
+              start_dev_server(new_state, id, server_name)
+            }
+          }
         }
-        _ -> {
+        Error(_) -> {
           let new_state = ensure_session(state, id)
           start_dev_server(new_state, id, server_name)
         }
@@ -930,21 +947,43 @@ fn start_dev_server(
     Ok(server) -> {
       let tmux_name = id <> "-az"
       let window_name = "dev-" <> server_name
+      let key = id <> ":" <> server_name
+
+      // Get worktree path for this bead
+      let worktree_path = case state.current_project {
+        Some(proj) -> {
+          let project_name = get_project_name(proj.path)
+          let parent_dir = get_parent_dir(proj.path)
+          Some(parent_dir <> "/" <> project_name <> "-" <> id)
+        }
+        None -> None
+      }
 
       tmux.new_window(tmux_name, window_name)
 
-      let port = get_server_port(server)
-      let cmd = "PORT=" <> int.to_string(port) <> " " <> server.command
+      // Allocate port using allocator (with conflict resolution)
+      let base_port = get_server_base_port(server)
+      let port = case state.port_allocator {
+        Some(allocator) -> port_allocator.allocate(allocator, base_port, key)
+        None -> base_port
+      }
+
+      // Build env string from all port configs
+      let env_str = build_port_env_string(server.ports, port)
+      let cmd = env_str <> " " <> server.command
       tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
       tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
 
-      let key = id <> ":" <> server_name
       let ds =
         DevServerState(
           name: server_name,
-          running: True,
+          status: dev_server_state.Starting,
           port: Some(port),
           window_name: window_name,
+          tmux_session: Some(tmux_name),
+          worktree_path: worktree_path,
+          started_at: Some(erlang_monotonic_time()),
+          error: None,
         )
       let new_servers = dict.insert(state.dev_servers, key, ds)
       notify_ui(state, DevServerStateChanged(key, ds))
@@ -962,12 +1001,43 @@ fn start_dev_server(
   }
 }
 
-fn get_server_port(server: config.ServerDefinition) -> Int {
+fn get_server_base_port(server: config.ServerDefinition) -> Int {
   case list.find(server.ports, fn(p) { p.0 == "PORT" }) {
     Ok(#(_, port)) -> port
     Error(_) -> 3000
   }
 }
+
+fn build_port_env_string(ports: List(#(String, Int)), allocated_port: Int) -> String {
+  ports
+  |> list.map(fn(p) {
+    let #(name, _base) = p
+    // Use allocated port for PORT, base port for others
+    let port_value = case name {
+      "PORT" -> allocated_port
+      _ -> p.1
+    }
+    name <> "=" <> int.to_string(port_value)
+  })
+  |> string.join(" ")
+}
+
+fn get_project_name(path: String) -> String {
+  path
+  |> string.split("/")
+  |> list.last
+  |> result.unwrap("project")
+}
+
+fn get_parent_dir(path: String) -> String {
+  path
+  |> string.split("/")
+  |> list.take(list.length(string.split(path, "/")) - 1)
+  |> string.join("/")
+}
+
+@external(erlang, "erlang", "monotonic_time")
+fn erlang_monotonic_time() -> Int
 
 fn run_init_commands(tmux_name: String, commands: List(String)) -> Nil {
   list.each(commands, fn(cmd) {
