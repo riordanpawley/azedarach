@@ -8,19 +8,16 @@
 // - get_state(): Get current session state
 // - list_active(): List all running sessions
 
-import gleam/dict.{type Dict}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/core/hooks
-import azedarach/domain/session.{type SessionState, type State, SessionState}
+import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/services/tmux
 import azedarach/services/worktree
 import azedarach/services/state_detector
-import azedarach/services/git
 import azedarach/util/shell
 import tempo
 
@@ -106,116 +103,118 @@ pub fn start(
   // Check if session already exists
   case tmux.session_exists(tmux_name) {
     True -> Error(SessionExists(bead_id))
-    False -> {
-      // Create worktree (using project_path from opts)
-      case worktree.ensure(bead_id, config, opts.project_path) {
-        Ok(wt_path) -> {
-          // Create tmux session
-          case tmux.new_session(tmux_name, wt_path) {
-            Ok(_) -> {
-              // Create additional windows
-              let _ = tmux.new_window(tmux_name, window_shell)
-
-              // Install Claude Code hooks
-              let _ = install_hooks(bead_id, wt_path)
-
-              // Launch Claude in the main window
-              let claude_cmd = build_claude_command(opts, config)
-              let _ = tmux.send_keys(tmux_name <> ":" <> window_claude, claude_cmd <> " Enter")
-
-              // Set session status option
-              let _ = tmux.set_option(tmux_name, "@az_status", "busy")
-
-              Ok(SessionState(
-                bead_id: bead_id,
-                state: session.Busy,
-                started_at: Some(now_iso()),
-                last_output: None,
-                worktree_path: Some(wt_path),
-                tmux_session: Some(tmux_name),
-              ))
-            }
-            Error(e) -> Error(TmuxError(e))
-          }
-        }
-        Error(e) -> Error(WorktreeError(e))
-      }
-    }
+    False -> start_new_session(opts, config, bead_id, tmux_name)
   }
+}
+
+fn start_new_session(
+  opts: StartOptions,
+  config: Config,
+  bead_id: String,
+  tmux_name: String,
+) -> Result(SessionState, SessionError) {
+  // Create worktree (using project_path from opts)
+  use wt_path <- result.try(
+    worktree.ensure(bead_id, config, opts.project_path)
+    |> result.map_error(WorktreeError),
+  )
+
+  // Create tmux session
+  use _ <- result.try(
+    tmux.new_session(tmux_name, wt_path)
+    |> result.map_error(TmuxError),
+  )
+
+  // Create additional windows
+  use _ <- result.try(
+    tmux.new_window(tmux_name, window_shell)
+    |> result.map_error(TmuxError),
+  )
+
+  // Install Claude Code hooks (optional - warn on failure but continue)
+  let _ = install_hooks(bead_id, wt_path)
+
+  // Launch Claude in the main window
+  let claude_cmd = build_claude_command(opts, config)
+  use _ <- result.try(
+    tmux.send_keys(tmux_name <> ":" <> window_claude, claude_cmd <> " Enter")
+    |> result.map_error(TmuxError),
+  )
+
+  // Set session status option (non-fatal if this fails)
+  let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+
+  Ok(SessionState(
+    bead_id: bead_id,
+    state: session.Busy,
+    started_at: Some(now_iso()),
+    last_output: None,
+    worktree_path: Some(wt_path),
+    tmux_session: Some(tmux_name),
+  ))
 }
 
 /// Stop a session
 pub fn stop(bead_id: String) -> Result(Nil, SessionError) {
   let tmux_name = session_name(bead_id)
+  use _ <- require_session_exists(bead_id, tmux_name)
 
-  case tmux.session_exists(tmux_name) {
-    False -> Error(SessionNotFound(bead_id))
-    True -> {
-      case tmux.kill_session(tmux_name) {
-        Ok(_) -> Ok(Nil)
-        Error(e) -> Error(TmuxError(e))
-      }
-    }
-  }
+  tmux.kill_session(tmux_name)
+  |> result.map_error(TmuxError)
 }
 
 /// Pause a session (send Ctrl+C)
 pub fn pause(bead_id: String) -> Result(Nil, SessionError) {
   let tmux_name = session_name(bead_id)
+  use _ <- require_session_exists(bead_id, tmux_name)
 
-  case tmux.session_exists(tmux_name) {
-    False -> Error(SessionNotFound(bead_id))
-    True -> {
-      // Send Ctrl+C to the claude window
-      let target = tmux_name <> ":" <> window_claude
-      case tmux.send_keys(target, "C-c") {
-        Ok(_) -> {
-          // Update status
-          let _ = tmux.set_option(tmux_name, "@az_status", "paused")
-          Ok(Nil)
-        }
-        Error(e) -> Error(TmuxError(e))
-      }
-    }
-  }
+  let target = tmux_name <> ":" <> window_claude
+  use _ <- result.try(
+    tmux.send_keys(target, "C-c")
+    |> result.map_error(TmuxError),
+  )
+
+  // Update status (non-fatal if this fails)
+  let _ = tmux.set_option(tmux_name, "@az_status", "paused")
+  Ok(Nil)
 }
 
 /// Resume a paused session
 pub fn resume(bead_id: String, prompt: Option(String)) -> Result(Nil, SessionError) {
   let tmux_name = session_name(bead_id)
+  use _ <- require_session_exists(bead_id, tmux_name)
 
-  case tmux.session_exists(tmux_name) {
-    False -> Error(SessionNotFound(bead_id))
-    True -> {
-      let target = tmux_name <> ":" <> window_claude
-      let resume_prompt = case prompt {
-        Some(p) -> p
-        None -> "/resume"
-      }
+  let target = tmux_name <> ":" <> window_claude
+  let resume_prompt = option.unwrap(prompt, "/resume")
 
-      case tmux.send_keys(target, resume_prompt <> " Enter") {
-        Ok(_) -> {
-          let _ = tmux.set_option(tmux_name, "@az_status", "busy")
-          Ok(Nil)
-        }
-        Error(e) -> Error(TmuxError(e))
-      }
-    }
-  }
+  use _ <- result.try(
+    tmux.send_keys(target, resume_prompt <> " Enter")
+    |> result.map_error(TmuxError),
+  )
+
+  // Update status (non-fatal if this fails)
+  let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+  Ok(Nil)
 }
 
 /// Attach to a session
 pub fn attach(bead_id: String) -> Result(Nil, SessionError) {
   let tmux_name = session_name(bead_id)
+  use _ <- require_session_exists(bead_id, tmux_name)
 
+  tmux.attach(tmux_name)
+  |> result.map_error(TmuxError)
+}
+
+/// Helper: require session exists before proceeding
+fn require_session_exists(
+  bead_id: String,
+  tmux_name: String,
+  next: fn(Nil) -> Result(Nil, SessionError),
+) -> Result(Nil, SessionError) {
   case tmux.session_exists(tmux_name) {
     False -> Error(SessionNotFound(bead_id))
-    True -> {
-      case tmux.attach(tmux_name) {
-        Ok(_) -> Ok(Nil)
-        Error(e) -> Error(TmuxError(e))
-      }
-    }
+    True -> next(Nil)
   }
 }
 
@@ -230,17 +229,15 @@ pub fn get_state(bead_id: String) -> Result(SessionState, SessionError) {
   case tmux.session_exists(tmux_name) {
     False -> Error(SessionNotFound(bead_id))
     True -> {
-      // Try to get status from tmux option first
-      let state = case tmux.get_option(tmux_name, "@az_status") {
-        Ok(status) -> session.state_from_string(status)
-        Error(_) -> {
-          // Fall back to detecting from pane output
-          case tmux.capture_pane(tmux_name <> ":" <> window_claude, 50) {
-            Ok(output) -> state_detector.detect(output)
-            Error(_) -> session.Unknown
-          }
-        }
-      }
+      // Try to get status from tmux option, fall back to pane detection
+      let state =
+        tmux.get_option(tmux_name, "@az_status")
+        |> result.map(session.state_from_string)
+        |> result.lazy_unwrap(fn() {
+          tmux.capture_pane(tmux_name <> ":" <> window_claude, 50)
+          |> result.map(state_detector.detect)
+          |> result.unwrap(session.Unknown)
+        })
 
       Ok(SessionState(
         bead_id: bead_id,
@@ -256,25 +253,20 @@ pub fn get_state(bead_id: String) -> Result(SessionState, SessionError) {
 
 /// List all active azedarach sessions
 pub fn list_active() -> Result(List(SessionState), SessionError) {
-  case tmux.discover_az_sessions() {
-    Ok(sessions) -> {
-      let states =
-        sessions
-        |> list.filter_map(fn(name) {
-          case parse_session_name(name) {
-            Some(bead_id) -> {
-              case get_state(bead_id) {
-                Ok(state) -> Ok(state)
-                Error(_) -> Error(Nil)
-              }
-            }
-            None -> Error(Nil)
-          }
-        })
-      Ok(states)
-    }
-    Error(e) -> Error(TmuxError(e))
-  }
+  use sessions <- result.try(
+    tmux.discover_az_sessions()
+    |> result.map_error(TmuxError),
+  )
+
+  sessions
+  |> list.filter_map(fn(name) {
+    parse_session_name(name)
+    |> option.to_result(Nil)
+    |> result.try(fn(bead_id) {
+      get_state(bead_id) |> result.replace_error(Nil)
+    })
+  })
+  |> Ok
 }
 
 /// Check if a session exists
@@ -286,7 +278,7 @@ pub fn exists(bead_id: String) -> Bool {
 // Claude Command Building
 // ============================================================================
 
-fn build_claude_command(opts: StartOptions, config: Config) -> String {
+fn build_claude_command(opts: StartOptions, _config: Config) -> String {
   let base = "claude"
 
   // Add model if specified
@@ -326,7 +318,10 @@ fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
   let settings_path = claude_dir <> "/settings.local.json"
 
   // Create .claude directory
-  let _ = shell.mkdir_p(claude_dir)
+  case shell.mkdir_p(claude_dir) {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Directory might already exist
+  }
 
   // Generate hooks configuration using the hooks module
   case hooks.generate_hook_config_auto(bead_id) {

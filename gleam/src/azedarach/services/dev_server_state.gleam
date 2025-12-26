@@ -1,10 +1,8 @@
 // Dev Server State Types and Persistence
 // Rich state model matching TypeScript implementation
 
-import gleam/decode.{type Decoder}
-import gleam/int
+import gleam/dynamic/decode.{type Decoder}
 import gleam/json
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
@@ -143,15 +141,14 @@ pub fn load_from_tmux(
   case tmux.session_exists(session_name) {
     False -> Ok(None)
     True -> {
-      case tmux.get_option(session_name, tmux_opt_metadata) {
-        Ok(json_str) -> {
-          case decode_metadata(json_str) {
-            Ok(meta) -> Ok(Some(metadata_to_state(meta)))
-            Error(_) -> Ok(None)
-          }
-        }
-        Error(_) -> Ok(None)
-      }
+      tmux.get_option(session_name, tmux_opt_metadata)
+      |> result.map(fn(json_str) {
+        decode_metadata(json_str)
+        |> result.map(fn(meta) { Some(metadata_to_state(meta)) })
+        |> result.unwrap(None)
+      })
+      |> result.unwrap(None)
+      |> Ok
     }
   }
 }
@@ -226,26 +223,26 @@ fn metadata_decoder() -> Decoder(TmuxMetadata) {
   use bead_id <- decode.field("beadId", decode.string)
   use server_name <- decode.field("serverName", decode.string)
   use status <- decode.field("status", decode.string)
-  use port <- decode.optional_field("port", decode.optional(decode.int), None)
+  use port <- decode.optional_field("port", None, decode.optional(decode.int))
   use worktree_path <- decode.optional_field(
     "worktreePath",
-    decode.optional(decode.string),
     None,
+    decode.optional(decode.string),
   )
   use project_path <- decode.optional_field(
     "projectPath",
-    decode.optional(decode.string),
     None,
+    decode.optional(decode.string),
   )
   use started_at <- decode.optional_field(
     "startedAt",
-    decode.optional(decode.int),
     None,
+    decode.optional(decode.int),
   )
   use error <- decode.optional_field(
     "error",
-    decode.optional(decode.string),
     None,
+    decode.optional(decode.string),
   )
 
   decode.success(TmuxMetadata(

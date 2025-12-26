@@ -227,7 +227,7 @@ pub fn move_task(
 /// Create a new bead
 pub fn create_bead(coord: Subject(coordinator.Msg)) -> Effect(Msg) {
   from(fn() {
-    coordinator.send(coord, coordinator.CreateBeadViaEditor(task.Task))
+    coordinator.send(coord, coordinator.CreateBeadViaEditor(task.TaskType))
     model.Tick
   })
 }
@@ -235,7 +235,7 @@ pub fn create_bead(coord: Subject(coordinator.Msg)) -> Effect(Msg) {
 /// Create bead with Claude integration
 pub fn create_bead_with_claude(coord: Subject(coordinator.Msg)) -> Effect(Msg) {
   from(fn() {
-    coordinator.send(coord, coordinator.CreateBeadViaEditor(task.Task))
+    coordinator.send(coord, coordinator.CreateBeadViaEditor(task.TaskType))
     model.Tick
   })
 }

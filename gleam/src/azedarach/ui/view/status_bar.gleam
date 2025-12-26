@@ -3,21 +3,16 @@
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
-import shore/ui
-import shore/style
 import azedarach/domain/session
-import azedarach/ui/model.{type Model, type Mode, Normal, Select}
-import azedarach/ui/theme
-import azedarach/ui/view.{
-  type Node, empty, hbox, pad_left, pad_right, styled_text, text,
+import azedarach/ui/model.{type Model, Normal, Select}
+import azedarach/ui/view/utils.{
+  type Node, empty, hbox, styled_text, text,
 }
 
 pub fn render(model: Model) -> Node {
-  let colors = model.colors
-
   // Left side: mode + project
   let left = render_left(model)
 
@@ -27,11 +22,8 @@ pub fn render(model: Model) -> Node {
   // Right side: session counts, dev server port
   let right = render_right(model)
 
-  // Status bar as a row with background color
-  ui.bar2(
-    style.hex(colors.surface0),
-    hbox([left, center, right]),
-  )
+  // Shore doesn't support hex colors, use hbox directly
+  hbox([left, center, right])
 }
 
 fn render_left(model: Model) -> Node {
@@ -41,11 +33,6 @@ fn render_left(model: Model) -> Node {
   let mode_text = case model.mode {
     Normal -> " NORMAL "
     Select(selected) -> " SELECT(" <> int.to_string(set.size(selected)) <> ") "
-  }
-
-  let mode_bg = case model.mode {
-    Normal -> colors.blue
-    Select(_) -> colors.mauve
   }
 
   // Project name
@@ -61,7 +48,8 @@ fn render_left(model: Model) -> Node {
   }
 
   hbox([
-    ui.text_styled(mode_text, Some(style.hex(colors.base)), Some(style.hex(mode_bg))),
+    // Shore doesn't support hex colors, use plain text
+    text(mode_text),
     styled_text(project, colors.text),
     styled_text(pending, colors.yellow),
   ])
