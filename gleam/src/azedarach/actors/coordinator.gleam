@@ -4,7 +4,6 @@
 // Integrates with OTP supervision tree for session/server monitors
 
 import gleam/dict.{type Dict}
-import gleam/erlang
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/list
@@ -12,6 +11,10 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
+
+// Erlang FFI for unique integer generation
+@external(erlang, "erlang", "unique_integer")
+fn unique_integer() -> Int
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState, SessionState}
@@ -119,29 +122,23 @@ pub type ToastLevel {
   Info
   Success
   Warning
-  Error
+  ErrorLevel
 }
 
 // Start the coordinator
 pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let state =
-        CoordinatorState(
-          config: config,
-          tasks: [],
-          sessions: dict.new(),
-          dev_servers: dict.new(),
-          ui_subject: None,
-          current_project: None,
-          available_projects: [],
-          self_subject: None,
-        )
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  let initial_state =
+    CoordinatorState(
+      config: config,
+      tasks: [],
+      sessions: dict.new(),
+      dev_servers: dict.new(),
+      ui_subject: None,
+      current_project: None,
+      available_projects: [],
+      self_subject: None,
+    )
+  actor.start(initial_state, handle_message)
 }
 
 /// Initialize the coordinator after creation
@@ -159,7 +156,7 @@ pub fn send(subject: Subject(Msg), msg: Msg) -> Nil {
 fn handle_message(
   msg: Msg,
   state: CoordinatorState,
-) -> actor.Next(Msg, CoordinatorState) {
+) -> actor.Next(CoordinatorState, Msg) {
   case msg {
     Subscribe(ui) -> {
       actor.continue(CoordinatorState(..state, ui_subject: Some(ui)))
@@ -230,7 +227,7 @@ fn handle_message(
           ))
         }
         Error(e) -> {
-          notify_ui(state, Toast(project_service.error_to_string(e), Error))
+          notify_ui(state, Toast(project_service.error_to_string(e), ErrorLevel))
           actor.continue(state)
         }
       }
@@ -253,7 +250,7 @@ fn handle_message(
               spawn_beads_load_for_project(state, proj)
             }
             Error(e) -> {
-              notify_ui(state, Toast(project_service.error_to_string(e), Error))
+              notify_ui(state, Toast(project_service.error_to_string(e), ErrorLevel))
             }
           }
         }
@@ -276,7 +273,7 @@ fn handle_message(
           actor.continue(CoordinatorState(..state, tasks: tasks))
         }
         Error(e) -> {
-          notify_ui(state, Toast(beads.error_to_string(e), Error))
+          notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           actor.continue(state)
         }
       }
@@ -301,7 +298,7 @@ fn handle_message(
           notify_ui(state, Toast("Bead created: " <> id, Success))
           spawn_beads_load(process.new_subject(), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -315,10 +312,10 @@ fn handle_message(
               spawn_beads_load(process.new_subject(), state.config)
             }
             Error(e) ->
-              notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+              notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -332,10 +329,10 @@ fn handle_message(
               spawn_beads_load(process.new_subject(), state.config)
             }
             Error(e) ->
-              notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+              notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -346,7 +343,7 @@ fn handle_message(
           notify_ui(state, Toast("Bead deleted", Success))
           spawn_beads_load(process.new_subject(), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -357,7 +354,7 @@ fn handle_message(
           let new_status = next_status(found_task.status, direction)
           case beads.update_status(id, new_status, state.config) {
             Ok(_) -> spawn_beads_load(process.new_subject(), state.config)
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
         Error(_) -> Nil
@@ -368,7 +365,7 @@ fn handle_message(
     SearchBeads(pattern) -> {
       case beads.search(pattern, state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -376,7 +373,7 @@ fn handle_message(
     GetReadyBeads -> {
       case beads.ready(state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -535,7 +532,7 @@ fn handle_message(
                     ),
                   )
                 }
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -619,7 +616,7 @@ fn handle_message(
                     Toast("Conflicts detected. Claude resolving.", Warning),
                   )
                 }
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -637,7 +634,7 @@ fn handle_message(
             Some(path) -> {
               case git.merge_to_main(path, state.config) {
                 Ok(_) -> notify_ui(state, Toast("Merged to main", Success))
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -655,7 +652,7 @@ fn handle_message(
             Some(path) -> {
               case git.create_pr(path, id, state.config) {
                 Ok(url) -> notify_ui(state, Toast("PR created: " <> url, Success))
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -702,10 +699,10 @@ fn handle_message(
                 state,
                 Toast("Image attached: " <> attachment.filename, Success),
               )
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -715,10 +712,10 @@ fn handle_message(
         Ok(attachment) -> {
           case remove_image_from_notes(id, attachment.filename, state.config) {
             Ok(_) -> notify_ui(state, Toast("Image deleted", Success))
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -729,7 +726,7 @@ fn handle_message(
           notify_ui(state, Toast("Dependency added", Success))
           spawn_beads_load(process.new_subject(), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -740,7 +737,7 @@ fn handle_message(
           notify_ui(state, Toast("Dependency removed", Success))
           spawn_beads_load(process.new_subject(), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -770,13 +767,10 @@ fn notify_ui(state: CoordinatorState, msg: UiMsg) -> Nil {
 }
 
 fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
-  process.start(
-    fn() {
-      let result = beads.list_all(config)
-      process.send(reply_to, BeadsLoaded(result))
-    },
-    True,
-  )
+  let _ = process.spawn_link(fn() {
+    let result = beads.list_all(config)
+    process.send(reply_to, BeadsLoaded(result))
+  })
   Nil
 }
 
@@ -784,14 +778,11 @@ fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
 fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
   case state.self_subject {
     Some(reply_to) -> {
-      process.start(
-        fn() {
-          // Run bd list in project directory
-          let result = beads.list_all_in_dir(proj.path, state.config)
-          process.send(reply_to, BeadsLoaded(result))
-        },
-        True,
-      )
+      let _ = process.spawn_link(fn() {
+        // Run bd list in project directory
+        let result = beads.list_all_in_dir(proj.path, state.config)
+        process.send(reply_to, BeadsLoaded(result))
+      })
       Nil
     }
     None -> Nil
@@ -800,37 +791,28 @@ fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
 
 /// Discover projects async
 fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      let projects = project_service.discover_all()
-      process.send(reply_to, ProjectsDiscovered(projects))
-    },
-    True,
-  )
+  let _ = process.spawn_link(fn() {
+    let projects = project_service.discover_all()
+    process.send(reply_to, ProjectsDiscovered(projects))
+  })
   Nil
 }
 
 /// Select initial project async
 fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      let result = project_service.select_initial()
-      process.send(reply_to, InitialProjectSelected(result))
-    },
-    True,
-  )
+  let _ = process.spawn_link(fn() {
+    let result = project_service.select_initial()
+    process.send(reply_to, InitialProjectSelected(result))
+  })
   Nil
 }
 
 /// Schedule periodic refresh tick
 fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      process.sleep(refresh_interval_ms)
-      process.send(reply_to, PeriodicTick)
-    },
-    True,
-  )
+  let _ = process.spawn_link(fn() {
+    process.sleep(refresh_interval_ms)
+    process.send(reply_to, PeriodicTick)
+  })
   Nil
 }
 
@@ -843,7 +825,7 @@ fn next_status(current: task.Status, direction: Int) -> task.Status {
     |> result.unwrap(0)
 
   let new_idx = int.clamp(current_idx + direction, 0, 3)
-  case list.at(statuses, new_idx) {
+  case statuses |> list.drop(new_idx) |> list.first {
     Ok(s) -> s
     Error(_) -> current
   }
@@ -873,7 +855,7 @@ fn handle_start_session(
 
           list.each(state.config.session.background_tasks, fn(cmd) {
             let window_name =
-              "task-" <> int.to_string(erlang.unique_integer([positive]))
+              "task-" <> int.to_string(int.absolute_value(unique_integer()))
             tmux.new_window(tmux_name, window_name)
             tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
             tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
@@ -906,7 +888,7 @@ fn handle_start_session(
       }
     }
     Error(e) -> {
-      notify_ui(state, Toast(worktree.error_to_string(e), Error))
+      notify_ui(state, Toast(worktree.error_to_string(e), ErrorLevel))
       state
     }
   }
@@ -956,7 +938,7 @@ fn start_dev_server(
       actor.continue(CoordinatorState(..state, dev_servers: new_servers))
     }
     Error(_) -> {
-      notify_ui(state, Toast("Server config not found", Error))
+      notify_ui(state, Toast("Server config not found", ErrorLevel))
       actor.continue(state)
     }
   }

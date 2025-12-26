@@ -1,10 +1,8 @@
 // Bead Editor Service - markdown template editing in tmux popup
 // Matches TypeScript BeadEditorService behavior
 
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/regex
 import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
@@ -222,7 +220,7 @@ fn parse_title(lines: List(String)) -> String {
   |> list.find(fn(line) { string.starts_with(line, "# ") })
   |> result.map(fn(line) {
     // Format: "# ID: Title"
-    let trimmed = string.drop_left(line, 2)
+    let trimmed = string.drop_start(line, 2)
     case string.split_once(trimmed, ": ") {
       Ok(#(_, title)) -> string.trim(title)
       Error(_) -> string.trim(trimmed)
