@@ -22,6 +22,7 @@ import {
 } from "./BeadsClient.js"
 import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
 import { FileLockManager } from "./FileLockManager.js"
+import { getBeadSessionName } from "./paths.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 import { WorktreeSessionService } from "./WorktreeSessionService.js"
@@ -971,8 +972,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start Claude session in a new "merge" window within the same session
 						const windowName = "merge"
+						const sessionName = getBeadSessionName(beadId)
 
-						yield* worktreeSession.ensureWindow(beadId, windowName, {
+						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
 							command: `claude -p "${resolvePrompt}"`,
 						})
@@ -1471,8 +1473,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
 						const windowName = "merge"
+						const sessionName = getBeadSessionName(beadId)
 
-						yield* worktreeSession.ensureWindow(beadId, windowName, {
+						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
 							command: `claude -p "${resolvePrompt}"`,
 						})
@@ -1727,8 +1730,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						const windowName = "merge"
+						const sessionName = getBeadSessionName(beadId)
 
-						yield* worktreeSession.ensureWindow(beadId, windowName, {
+						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
 							command: `claude -p "${resolvePrompt}"`,
 						})
