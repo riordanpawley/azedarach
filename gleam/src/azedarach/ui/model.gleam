@@ -171,6 +171,7 @@ pub type Msg {
   MergeToMain
   ShowDiff
   CreatePR
+  CompleteSession
   DeleteCleanup
   MoveTaskLeft
   MoveTaskRight
@@ -304,7 +305,7 @@ fn column_to_status(column: Int) -> task.Status {
   case column {
     0 -> task.Open
     1 -> task.InProgress
-    2 -> task.Review
+    2 -> task.Blocked
     _ -> task.Done
   }
 }

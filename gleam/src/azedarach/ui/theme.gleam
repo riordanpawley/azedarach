@@ -61,10 +61,10 @@ pub type SemanticColors {
     session_error: String,
     session_paused: String,
     // Column headers
-    column_backlog: String,
+    column_open: String,
     column_in_progress: String,
-    column_review: String,
-    column_done: String,
+    column_blocked: String,
+    column_closed: String,
   )
 }
 
@@ -100,10 +100,10 @@ pub fn semantic(colors: Colors) -> SemanticColors {
     session_done: colors.green,
     session_error: colors.red,
     session_paused: colors.mauve,
-    column_backlog: colors.subtext0,
-    column_in_progress: colors.blue,
-    column_review: colors.peach,
-    column_done: colors.green,
+    column_open: colors.blue,
+    column_in_progress: colors.mauve,
+    column_blocked: colors.red,
+    column_closed: colors.green,
   )
 }
 
@@ -239,10 +239,10 @@ pub fn catppuccin_latte() -> Colors {
 pub fn column_color(colors: Colors, column: Int) -> String {
   let sem = semantic(colors)
   case column {
-    0 -> sem.column_backlog
+    0 -> sem.column_open
     1 -> sem.column_in_progress
-    2 -> sem.column_review
-    _ -> sem.column_done
+    2 -> sem.column_blocked
+    _ -> sem.column_closed
   }
 }
 

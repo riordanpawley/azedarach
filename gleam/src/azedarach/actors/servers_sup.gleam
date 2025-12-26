@@ -8,7 +8,8 @@ import gleam/option.{type Option}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
-import azedarach/actors/server_monitor.{type MonitorConfig, type ServerStatus}
+import azedarach/actors/server_monitor.{type MonitorConfig}
+import azedarach/services/dev_server_state.{type DevServerState}
 
 // Crash tracking for "unknown" state after repeated failures
 const max_crashes = 3
@@ -46,8 +47,7 @@ pub type Msg {
   HandleStatusChange(
     bead_id: String,
     server_name: String,
-    status: ServerStatus,
-    port: Option(Int),
+    state: DevServerState,
   )
 }
 
@@ -56,8 +56,7 @@ pub type CoordinatorUpdate {
   ServerStatusChanged(
     bead_id: String,
     server_name: String,
-    status: ServerStatus,
-    port: Option(Int),
+    state: DevServerState,
   )
   ServerMarkedUnknown(bead_id: String, server_name: String, reason: String)
 }
@@ -91,6 +90,8 @@ pub fn start_monitor(
   window_name: String,
   port: Option(Int),
   poll_interval_ms: Option(Int),
+  port_pattern: Option(String),
+  worktree_path: Option(String),
 ) -> Nil {
   let config =
     server_monitor.MonitorConfig(
@@ -100,6 +101,8 @@ pub fn start_monitor(
       window_name: window_name,
       port: port,
       poll_interval_ms: poll_interval_ms,
+      port_pattern: port_pattern,
+      worktree_path: worktree_path,
       coordinator: create_monitor_callback(supervisor, bead_id, server_name),
     )
   process.send(supervisor, StartMonitor(config))
@@ -145,10 +148,10 @@ fn handle_message(
       actor.continue(state)
     }
 
-    HandleStatusChange(bead_id, server_name, status, port) -> {
+    HandleStatusChange(bead_id, server_name, dev_state) -> {
       process.send(
         state.coordinator,
-        ServerStatusChanged(bead_id, server_name, status, port),
+        ServerStatusChanged(bead_id, server_name, dev_state),
       )
       actor.continue(state)
     }
@@ -300,8 +303,8 @@ fn forward_monitor_updates(
   server_name: String,
 ) -> Nil {
   case process.receive(from, 60_000) {
-    Ok(server_monitor.ServerStatusChanged(_, _, status, port)) -> {
-      process.send(to, HandleStatusChange(bead_id, server_name, status, port))
+    Ok(server_monitor.ServerStatusChanged(_, _, dev_state)) -> {
+      process.send(to, HandleStatusChange(bead_id, server_name, dev_state))
       forward_monitor_updates(from, to, bead_id, server_name)
     }
     Ok(server_monitor.ServerMonitorCrashed(_, _)) -> {

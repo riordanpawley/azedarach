@@ -257,6 +257,8 @@ pub fn start_server_monitor(
     window_name,
     port,
     None,
+    None,
+    None,
   )
 }
 

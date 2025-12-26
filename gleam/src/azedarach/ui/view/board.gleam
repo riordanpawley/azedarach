@@ -12,7 +12,7 @@ import azedarach/ui/view/utils.{
   type Node, center, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
 }
 
-const column_names = ["Backlog", "In Progress", "Review", "Done"]
+const column_names = ["Open", "In Progress", "Blocked", "Closed"]
 
 pub fn render(model: Model) -> Node {
   let #(width, height) = model.terminal_size

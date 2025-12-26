@@ -299,11 +299,12 @@ fn clean_anchor(content: String, anchor: String) -> String {
 /// Open a bead in the editor via tmux popup
 pub fn edit_bead(
   id: String,
+  project_path: String,
   config: Config,
 ) -> Result(ParsedContent, EditorError) {
   // Fetch the bead
   use t <- result.try(
-    beads.show(id, config)
+    beads.show(id, project_path, config)
     |> result.replace_error(BeadNotFound(id)),
   )
 
@@ -451,6 +452,7 @@ fn escape_for_shell(s: String) -> String {
 pub fn apply_changes(
   id: String,
   parsed: ParsedContent,
+  project_path: String,
   config: Config,
 ) -> Result(Nil, EditorError) {
   let options =
@@ -467,7 +469,7 @@ pub fn apply_changes(
       estimate: parsed.estimate,
     )
 
-  case beads.update(id, options, config) {
+  case beads.update(id, options, project_path, config) {
     Ok(_) -> Ok(Nil)
     Error(beads.NotFound(i)) -> Error(BeadNotFound(i))
     Error(e) -> Error(EditorFailed(beads.error_to_string(e)))
@@ -478,6 +480,7 @@ pub fn apply_changes(
 pub fn create_from_parsed(
   parsed: ParsedContent,
   issue_type: IssueType,
+  project_path: String,
   config: Config,
 ) -> Result(String, EditorError) {
   let options =
@@ -494,7 +497,7 @@ pub fn create_from_parsed(
       estimate: parsed.estimate,
     )
 
-  case beads.create(options, config) {
+  case beads.create(options, project_path, config) {
     Ok(id) -> Ok(id)
     Error(e) -> Error(EditorFailed(beads.error_to_string(e)))
   }
