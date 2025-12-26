@@ -110,26 +110,38 @@ pub fn start(
           case tmux.new_session(tmux_name, wt_path) {
             Ok(_) -> {
               // Create additional windows
-              let _ = tmux.new_window(tmux_name, window_shell)
+              case tmux.new_window(tmux_name, window_shell) {
+                Ok(_) -> {
+                  // Install Claude Code hooks (warn on failure but continue)
+                  case install_hooks(bead_id, wt_path) {
+                    Ok(_) -> Nil
+                    Error(_) -> Nil  // Hooks are optional - session can work without them
+                  }
 
-              // Install Claude Code hooks
-              let _ = install_hooks(bead_id, wt_path)
+                  // Launch Claude in the main window
+                  let claude_cmd = build_claude_command(opts, config)
+                  case tmux.send_keys(tmux_name <> ":" <> window_claude, claude_cmd <> " Enter") {
+                    Ok(_) -> {
+                      // Set session status option (warn on failure but continue)
+                      case tmux.set_option(tmux_name, "@az_status", "busy") {
+                        Ok(_) -> Nil
+                        Error(_) -> Nil  // Status tracking failure is not fatal
+                      }
 
-              // Launch Claude in the main window
-              let claude_cmd = build_claude_command(opts, config)
-              let _ = tmux.send_keys(tmux_name <> ":" <> window_claude, claude_cmd <> " Enter")
-
-              // Set session status option
-              let _ = tmux.set_option(tmux_name, "@az_status", "busy")
-
-              Ok(SessionState(
-                bead_id: bead_id,
-                state: session.Busy,
-                started_at: Some(now_iso()),
-                last_output: None,
-                worktree_path: Some(wt_path),
-                tmux_session: Some(tmux_name),
-              ))
+                      Ok(SessionState(
+                        bead_id: bead_id,
+                        state: session.Busy,
+                        started_at: Some(now_iso()),
+                        last_output: None,
+                        worktree_path: Some(wt_path),
+                        tmux_session: Some(tmux_name),
+                      ))
+                    }
+                    Error(e) -> Error(TmuxError(e))
+                  }
+                }
+                Error(e) -> Error(TmuxError(e))
+              }
             }
             Error(e) -> Error(TmuxError(e))
           }
@@ -166,8 +178,11 @@ pub fn pause(bead_id: String) -> Result(Nil, SessionError) {
       let target = tmux_name <> ":" <> window_claude
       case tmux.send_keys(target, "C-c") {
         Ok(_) -> {
-          // Update status
-          let _ = tmux.set_option(tmux_name, "@az_status", "paused")
+          // Update status (non-fatal if this fails)
+          case tmux.set_option(tmux_name, "@az_status", "paused") {
+            Ok(_) -> Nil
+            Error(_) -> Nil  // Status tracking failure is not fatal
+          }
           Ok(Nil)
         }
         Error(e) -> Error(TmuxError(e))
@@ -191,7 +206,11 @@ pub fn resume(bead_id: String, prompt: Option(String)) -> Result(Nil, SessionErr
 
       case tmux.send_keys(target, resume_prompt <> " Enter") {
         Ok(_) -> {
-          let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+          // Update status (non-fatal if this fails)
+          case tmux.set_option(tmux_name, "@az_status", "busy") {
+            Ok(_) -> Nil
+            Error(_) -> Nil  // Status tracking failure is not fatal
+          }
           Ok(Nil)
         }
         Error(e) -> Error(TmuxError(e))
@@ -322,7 +341,10 @@ fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
   let settings_path = claude_dir <> "/settings.local.json"
 
   // Create .claude directory
-  let _ = shell.mkdir_p(claude_dir)
+  case shell.mkdir_p(claude_dir) {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Directory might already exist
+  }
 
   // Generate hooks configuration using the hooks module
   case hooks.generate_hook_config_auto(bead_id) {

@@ -100,8 +100,13 @@ pub fn merge_main(worktree: String, config: Config) -> Result(Nil, GitError) {
     }
     Ok(files) -> {
       // Conflicts detected - start merge anyway (creates conflict markers)
+      // We intentionally ignore the result here because we expect it to "fail"
+      // with conflicts - that's the point
       let base = config.git.base_branch
-      let _ = shell.run("git", ["merge", base, "-m", "Merge " <> base], worktree)
+      case shell.run("git", ["merge", base, "-m", "Merge " <> base], worktree) {
+        Ok(_) -> Nil
+        Error(_) -> Nil  // Expected - merge will exit non-zero due to conflicts
+      }
       Error(MergeConflict(files))
     }
     Error(e) -> Error(e)
@@ -122,13 +127,18 @@ pub fn merge_to_main(worktree: String, config: Config) -> Result(Nil, GitError) 
         Ok(_) -> {
           case shell.run("git", ["merge", branch_name, "--no-edit"], worktree) {
             Ok(_) -> {
-              // Switch back
-              let _ = shell.run("git", ["checkout", branch_name], worktree)
-              Ok(Nil)
+              // Switch back - must succeed or we're in a bad state
+              case shell.run("git", ["checkout", branch_name], worktree) {
+                Ok(_) -> Ok(Nil)
+                Error(e) -> Error(shell_to_git_error(e))
+              }
             }
             Error(e) -> {
-              // Switch back even on error
-              let _ = shell.run("git", ["checkout", branch_name], worktree)
+              // Switch back even on error - best effort
+              case shell.run("git", ["checkout", branch_name], worktree) {
+                Ok(_) -> Nil
+                Error(_) -> Nil  // Already have an error to report
+              }
               Error(shell_to_git_error(e))
             }
           }
@@ -169,28 +179,32 @@ pub fn create_pr(
   config: Config,
 ) -> Result(String, GitError) {
   // Ensure changes are pushed
-  case config.git.push_enabled {
+  let push_result = case config.git.push_enabled {
     True -> {
       let branch = config.git.branch_prefix <> bead_id
-      let _ = shell.run("git", ["push", "-u", config.git.remote, branch], worktree)
-      Nil
+      shell.run("git", ["push", "-u", config.git.remote, branch], worktree)
     }
-    False -> Nil
+    False -> Ok("")
   }
 
-  // Create PR
-  let draft_flag = case config.pr.auto_draft {
-    True -> ["--draft"]
-    False -> []
-  }
-
-  let args =
-    ["pr", "create", "--fill"]
-    |> list.append(draft_flag)
-
-  case shell.run("gh", args, worktree) {
-    Ok(output) -> Ok(string.trim(output))
+  case push_result {
     Error(e) -> Error(shell_to_git_error(e))
+    Ok(_) -> {
+      // Create PR
+      let draft_flag = case config.pr.auto_draft {
+        True -> ["--draft"]
+        False -> []
+      }
+
+      let args =
+        ["pr", "create", "--fill"]
+        |> list.append(draft_flag)
+
+      case shell.run("gh", args, worktree) {
+        Ok(output) -> Ok(string.trim(output))
+        Error(e) -> Error(shell_to_git_error(e))
+      }
+    }
   }
 }
 
@@ -198,14 +212,19 @@ pub fn create_pr(
 pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
   let branch = config.git.branch_prefix <> bead_id
 
-  // Delete local
-  let _ = shell.run("git", ["branch", "-D", branch], ".")
+  // Delete local - may fail if branch doesn't exist
+  case shell.run("git", ["branch", "-D", branch], ".") {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Branch might not exist locally
+  }
 
   // Delete remote if push enabled
   case config.git.push_enabled {
     True -> {
-      let _ = shell.run("git", ["push", config.git.remote, "--delete", branch], ".")
-      Nil
+      case shell.run("git", ["push", config.git.remote, "--delete", branch], ".") {
+        Ok(_) -> Nil
+        Error(_) -> Nil  // Branch might not exist remotely
+      }
     }
     False -> Nil
   }

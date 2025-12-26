@@ -78,7 +78,10 @@ pub fn load_registry() -> Result(ProjectsConfig, ProjectError) {
 /// Uses atomic write (write-to-temp-then-rename) to prevent corruption on crash
 pub fn save_registry(config: ProjectsConfig) -> Result(Nil, ProjectError) {
   // Ensure config directory exists
-  let _ = simplifile.create_directory_all(config_path())
+  case simplifile.create_directory_all(config_path()) {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Directory may already exist, continue to try writing
+  }
 
   let content = encode_registry(config)
   let final_path = projects_path()
@@ -91,8 +94,11 @@ pub fn save_registry(config: ProjectsConfig) -> Result(Nil, ProjectError) {
       case simplifile.rename(temp_path, final_path) {
         Ok(_) -> Ok(Nil)
         Error(_) -> {
-          // Clean up temp file on rename failure
-          let _ = simplifile.delete(temp_path)
+          // Clean up temp file on rename failure (best-effort)
+          case simplifile.delete(temp_path) {
+            Ok(_) -> Nil
+            Error(_) -> Nil  // Cleanup failure is non-fatal
+          }
           Error(StorageError("Failed to save projects config (rename failed)"))
         }
       }

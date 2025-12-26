@@ -52,12 +52,14 @@ pub fn create(
   let args = ["worktree", "add", "-b", branch_name, path, base_branch]
   case shell.run("git", args, ".") {
     Ok(_) -> {
-      // Push branch if configured
+      // Push branch if configured (non-fatal - worktree creation succeeded)
       case config.git.push_branch_on_create, config.git.push_enabled {
         True, True -> {
           let push_args = ["push", "-u", config.git.remote, branch_name]
-          let _ = shell.run("git", push_args, path)
-          Nil
+          case shell.run("git", push_args, path) {
+            Ok(_) -> Nil
+            Error(_) -> Nil  // Push failure is non-fatal - worktree was created
+          }
         }
         _, _ -> Nil
       }

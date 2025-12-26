@@ -554,7 +554,11 @@ fn guard_clipboard_size(
 ) -> Result(ImageAttachment, ImageError) {
   case size {
     0 -> {
-      let _ = simplifile.delete(path)
+      // Cleanup empty temp file (best-effort)
+      case simplifile.delete(path) {
+        Ok(_) -> Nil
+        Error(_) -> Nil  // Cleanup failure is non-fatal
+      }
       Error(ClipboardError("Clipboard does not contain image data", Some(tool)))
     }
     _ -> next(Nil)

@@ -342,7 +342,10 @@ fn execute_hooks_install(bead_id: String, project_path: Option(String)) -> Resul
   let settings_path = claude_dir <> "/settings.local.json"
 
   // Ensure .claude directory exists
-  let _ = shell.mkdir_p(claude_dir)
+  case shell.mkdir_p(claude_dir) {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Directory may already exist, continue to try writing
+  }
 
   // Generate hooks configuration
   case hooks.generate_hook_config_auto(bead_id) {

@@ -399,8 +399,10 @@ fn handle_message(
                 _ -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  let _ = tmux.attach(tmux_name)
-                  Nil
+                  case tmux.attach(tmux_name) {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to attach: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
               }
             }
@@ -545,22 +547,32 @@ fn handle_message(
                   notify_ui(state, Toast("Merged main", Success))
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  let _ = tmux.attach(tmux_name)
-                  Nil
+                  case tmux.attach(tmux_name) {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to attach after merge: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  let _ = tmux.new_window(tmux_name, "merge")
-                  let prompt =
-                    "There are merge conflicts in: "
-                    <> string.join(files, ", ")
-                    <> ". Please resolve these conflicts, then stage and commit the resolution."
-                  let _ = tmux.send_keys(
-                    tmux_name <> ":merge",
-                    "claude -p \"" <> prompt <> "\"",
-                  )
-                  let _ = tmux.send_keys(tmux_name <> ":merge", "Enter")
+                  case tmux.new_window(tmux_name, "merge") {
+                    Ok(_) -> {
+                      let prompt =
+                        "There are merge conflicts in: "
+                        <> string.join(files, ", ")
+                        <> ". Please resolve these conflicts, then stage and commit the resolution."
+                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                        Ok(_) -> {
+                          case tmux.send_keys(tmux_name <> ":merge", "Enter") {
+                            Ok(_) -> Nil
+                            Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                          }
+                        }
+                        Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                      }
+                    }
+                    Error(e) -> notify_ui(state, Toast("Failed to create merge window: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                   notify_ui(
                     state,
                     Toast(
@@ -585,7 +597,10 @@ fn handle_message(
       case dict.get(state.dev_servers, key) {
         Ok(ds) if ds.running -> {
           let window = ds.window_name
-          let _ = tmux.kill_window(id <> "-az", window)
+          case tmux.kill_window(id <> "-az", window) {
+            Ok(_) -> Nil
+            Error(e) -> notify_ui(state, Toast("Failed to stop dev server window: " <> tmux.error_to_string(e), Warning))
+          }
           let new_ds = DevServerState(..ds, running: False, port: None)
           let new_servers = dict.insert(state.dev_servers, key, new_ds)
           notify_ui(state, DevServerStateChanged(key, new_ds))
@@ -602,8 +617,10 @@ fn handle_message(
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
-          let _ = tmux.select_window(id <> "-az", ds.window_name)
-          Nil
+          case tmux.select_window(id <> "-az", ds.window_name) {
+            Ok(_) -> Nil
+            Error(e) -> notify_ui(state, Toast("Failed to select window: " <> tmux.error_to_string(e), ErrorLevel))
+          }
         }
         Error(_) -> notify_ui(state, Toast("Dev server not running", Warning))
       }
@@ -614,7 +631,10 @@ fn handle_message(
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
-          let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c")
+          case tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c") {
+            Ok(_) -> Nil
+            Error(e) -> notify_ui(state, Toast("Failed to stop dev server: " <> tmux.error_to_string(e), Warning))
+          }
           process.sleep(100)
           case
             list.find(state.config.dev_server.servers, fn(s) {
@@ -622,9 +642,15 @@ fn handle_message(
             })
           {
             Ok(server) -> {
-              let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, server.command)
-              let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter")
-              Nil
+              case tmux.send_keys(id <> "-az:" <> ds.window_name, server.command) {
+                Ok(_) -> {
+                  case tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter") {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to restart dev server: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
+                }
+                Error(e) -> notify_ui(state, Toast("Failed to restart dev server: " <> tmux.error_to_string(e), ErrorLevel))
+              }
             }
             Error(_) -> Nil
           }
@@ -713,16 +739,23 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              let _ = tmux.kill_session(tmux_name)
-              Nil
+              case tmux.kill_session(tmux_name) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to kill session: " <> tmux.error_to_string(e), Warning))
+              }
             }
             None -> Nil
           }
           case session_state.worktree_path {
             Some(path) -> {
-              let _ = worktree.delete(path)
-              let _ = git.delete_branch(id, state.config)
-              Nil
+              case worktree.delete(path) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to delete worktree: " <> worktree.error_to_string(e), Warning))
+              }
+              case git.delete_branch(id, state.config) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to delete branch: " <> git.error_to_string(e), Warning))
+              }
             }
             None -> Nil
           }
