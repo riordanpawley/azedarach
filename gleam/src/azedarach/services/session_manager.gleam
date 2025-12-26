@@ -92,10 +92,148 @@ pub fn parse_session_name(name: String) -> Option(String) {
 }
 
 // ============================================================================
+// Session Building Utilities
+// ============================================================================
+
+/// Options for building a tmux session from a bead
+pub type BuildSessionOptions {
+  BuildSessionOptions(
+    bead_id: String,
+    window_name: String,
+    command: String,
+    init_commands: List(String),
+  )
+}
+
+/// Result of building a tmux session
+pub type BuildSessionResult {
+  BuildSessionResult(
+    session_name: String,
+    target: String,
+    worktree_path: String,
+  )
+}
+
+/// Build a tmux session from a bead ID
+///
+/// This is the primary entry point for creating tmux sessions for beads.
+/// It consolidates:
+/// 1. Session name generation (uses session_name)
+/// 2. Worktree path computation (uses worktree.worktree_path)
+/// 3. Session creation
+/// 4. Window creation with command
+///
+/// Example:
+/// ```gleam
+/// let result = build_session_from_bead(
+///   BuildSessionOptions(
+///     bead_id: "az-05y",
+///     window_name: "claude",
+///     command: "claude --model opus",
+///     init_commands: [],
+///   ),
+///   config,
+/// )
+/// // result.target = "az-05y:claude"
+/// ```
+pub fn build_session_from_bead(
+  opts: BuildSessionOptions,
+  config: Config,
+) -> Result(BuildSessionResult, SessionError) {
+  let tmux_name = session_name(opts.bead_id)
+  let wt_path = worktree.worktree_path(opts.bead_id, config)
+  let target = tmux_name <> ":" <> opts.window_name
+
+  // Ensure worktree exists
+  case worktree.ensure(opts.bead_id, config) {
+    Ok(path) -> {
+      // Create or get session
+      case ensure_session(tmux_name, path, opts.init_commands) {
+        Ok(_) -> {
+          // Ensure window exists and run command
+          case ensure_window(tmux_name, opts.window_name, opts.command) {
+            Ok(_) ->
+              Ok(BuildSessionResult(
+                session_name: tmux_name,
+                target: target,
+                worktree_path: path,
+              ))
+            Error(e) -> Error(TmuxError(e))
+          }
+        }
+        Error(e) -> Error(TmuxError(e))
+      }
+    }
+    Error(e) -> Error(WorktreeError(e))
+  }
+}
+
+/// Ensure a tmux session exists, creating if necessary
+fn ensure_session(
+  name: String,
+  cwd: String,
+  init_commands: List(String),
+) -> Result(Nil, tmux.TmuxError) {
+  case tmux.session_exists(name) {
+    True -> Ok(Nil)
+    False -> {
+      case tmux.new_session(name, cwd) {
+        Ok(_) -> {
+          // Run init commands
+          list.each(init_commands, fn(cmd) {
+            let _ = tmux.send_keys(name <> ":main", cmd <> " Enter")
+            Nil
+          })
+          Ok(Nil)
+        }
+        Error(e) -> Error(e)
+      }
+    }
+  }
+}
+
+/// Ensure a window exists in a session, creating if necessary
+///
+/// If the window doesn't exist, creates it and sends the command.
+/// If it does exist, just sends the command to the existing window.
+pub fn ensure_window(
+  session: String,
+  window: String,
+  command: String,
+) -> Result(Nil, tmux.TmuxError) {
+  let target = session <> ":" <> window
+
+  case window_exists(session, window) {
+    True -> {
+      // Window exists, just send command
+      let _ = tmux.select_window(session, window)
+      tmux.send_keys(target, command <> " Enter")
+    }
+    False -> {
+      // Create new window and send command
+      case tmux.new_window(session, window) {
+        Ok(_) -> tmux.send_keys(target, command <> " Enter")
+        Error(e) -> Error(e)
+      }
+    }
+  }
+}
+
+/// Check if a window exists in a session
+fn window_exists(session: String, window: String) -> Bool {
+  case tmux.list_windows(session) {
+    Ok(windows) -> list.contains(windows, window)
+    Error(_) -> False
+  }
+}
+
+// ============================================================================
 // Session Lifecycle
 // ============================================================================
 
 /// Start a new Claude session for a bead
+///
+/// Uses build_session_from_bead internally for consistent session creation.
 pub fn start(
   opts: StartOptions,
   config: Config,
@@ -107,38 +245,41 @@ pub fn start(
   case tmux.session_exists(tmux_name) {
     True -> Error(SessionExists(bead_id))
     False -> {
-      // Create worktree
-      case worktree.ensure(bead_id, config) {
-        Ok(wt_path) -> {
-          // Create tmux session
-          case tmux.new_session(tmux_name, wt_path) {
-            Ok(_) -> {
-              // Create additional windows
-              let _ = tmux.new_window(tmux_name, window_shell)
+      // Build the Claude command
+      let claude_cmd = build_claude_command(opts, config)
 
-              // Install Claude Code hooks
-              let _ = install_hooks(bead_id, wt_path)
+      // Use the consolidated build function
+      case
+        build_session_from_bead(
+          BuildSessionOptions(
+            bead_id: bead_id,
+            window_name: window_claude,
+            command: claude_cmd,
+            init_commands: [],
+          ),
+          config,
+        )
+      {
+        Ok(result) -> {
+          // Create additional shell window
+          let _ = tmux.new_window(tmux_name, window_shell)
 
-              // Launch Claude in the main window
-              let claude_cmd = build_claude_command(opts, config)
-              let _ = tmux.send_keys(tmux_name <> ":" <> window_claude, claude_cmd <> " Enter")
+          // Install Claude Code hooks
+          let _ = install_hooks(bead_id, result.worktree_path)
 
-              // Set session status option
-              let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+          // Set session status option
+          let _ = tmux.set_option(tmux_name, "@az_status", "busy")
 
-              Ok(SessionState(
-                bead_id: bead_id,
-                state: session.Busy,
-                started_at: Some(now_iso()),
-                last_output: None,
-                worktree_path: Some(wt_path),
-                tmux_session: Some(tmux_name),
-              ))
-            }
-            Error(e) -> Error(TmuxError(e))
-          }
+          Ok(SessionState(
+            bead_id: bead_id,
+            state: session.Busy,
+            started_at: Some(now_iso()),
+            last_output: None,
+            worktree_path: Some(result.worktree_path),
+            tmux_session: Some(result.session_name),
+          ))
         }
-        Error(e) -> Error(WorktreeError(e))
+        Error(e) -> Error(e)
       }
     }
   }
