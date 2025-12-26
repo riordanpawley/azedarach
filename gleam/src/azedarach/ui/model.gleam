@@ -6,7 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/set.{type Set}
 import gleam/string
-import azedarach/config.{type Config, type ConfigError}
+import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}

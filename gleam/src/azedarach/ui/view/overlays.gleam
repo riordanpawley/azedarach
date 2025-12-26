@@ -3,11 +3,8 @@
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/set
-import gleam/string
-import shore/ui
-import shore/style
 import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
@@ -503,7 +500,7 @@ fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
   overlay_box("Diff", [dim_text("(loading diff...)")], model)
 }
 
-fn render_merge_choice(bead_id: String, behind: Int, model: Model) -> Node {
+fn render_merge_choice(_bead_id: String, behind: Int, model: Model) -> Node {
   let colors = model.colors
 
   let items = [

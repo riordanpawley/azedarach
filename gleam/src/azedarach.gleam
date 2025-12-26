@@ -3,8 +3,6 @@
 
 import argv
 import gleam/io
-import gleam/result
-import gleam/erlang/process
 import azedarach/cli
 import azedarach/config
 import azedarach/ui/app

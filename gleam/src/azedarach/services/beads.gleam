@@ -6,7 +6,6 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{
@@ -114,7 +113,7 @@ pub fn list_all(config: Config) -> Result(List(Task), BeadsError) {
 }
 
 /// List all beads in a specific directory
-pub fn list_all_in_dir(dir: String, config: Config) -> Result(List(Task), BeadsError) {
+pub fn list_all_in_dir(dir: String, _config: Config) -> Result(List(Task), BeadsError) {
   case shell.run("bd", ["list", "--json"], dir) {
     Ok(output) -> {
       case parse_beads_list(output) {
@@ -128,7 +127,7 @@ pub fn list_all_in_dir(dir: String, config: Config) -> Result(List(Task), BeadsE
 }
 
 /// List all beads including tombstones
-pub fn list_all_with_tombstones(config: Config) -> Result(List(Task), BeadsError) {
+pub fn list_all_with_tombstones(_config: Config) -> Result(List(Task), BeadsError) {
   case shell.run("bd", ["list", "--json"], ".") {
     Ok(output) -> parse_beads_list(output)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -137,7 +136,7 @@ pub fn list_all_with_tombstones(config: Config) -> Result(List(Task), BeadsError
 }
 
 /// Show a specific bead
-pub fn show(id: String, config: Config) -> Result(Task, BeadsError) {
+pub fn show(id: String, _config: Config) -> Result(Task, BeadsError) {
   case shell.run("bd", ["show", id, "--json"], ".") {
     Ok(output) -> parse_single_bead(output, id)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -146,7 +145,7 @@ pub fn show(id: String, config: Config) -> Result(Task, BeadsError) {
 }
 
 /// Create a new bead with options
-pub fn create(options: CreateOptions, config: Config) -> Result(String, BeadsError) {
+pub fn create(options: CreateOptions, _config: Config) -> Result(String, BeadsError) {
   let args = build_create_args(options)
   case shell.run("bd", args, ".") {
     Ok(output) -> Ok(string.trim(output))
@@ -174,7 +173,7 @@ pub fn create_simple(
 pub fn update(
   id: String,
   options: UpdateOptions,
-  config: Config,
+  _config: Config,
 ) -> Result(Nil, BeadsError) {
   let args = build_update_args(id, options)
   case args {
@@ -233,7 +232,7 @@ pub fn append_notes(
 }
 
 /// Delete a bead (uses --no-daemon to avoid process issues)
-pub fn delete(id: String, config: Config) -> Result(Nil, BeadsError) {
+pub fn delete(id: String, _config: Config) -> Result(Nil, BeadsError) {
   case shell.run("bd", ["delete", id, "--no-daemon"], ".") {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -245,7 +244,7 @@ pub fn delete(id: String, config: Config) -> Result(Nil, BeadsError) {
 pub fn close(
   id: String,
   reason: Option(String),
-  config: Config,
+  _config: Config,
 ) -> Result(Nil, BeadsError) {
   let args = case reason {
     Some(r) -> ["close", id, "--reason=" <> r]
@@ -259,7 +258,7 @@ pub fn close(
 }
 
 /// Edit a bead in $EDITOR (opens external editor)
-pub fn edit(id: String, config: Config) -> Result(Nil, BeadsError) {
+pub fn edit(id: String, _config: Config) -> Result(Nil, BeadsError) {
   case shell.run("bd", ["edit", id], ".") {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -272,7 +271,7 @@ pub fn edit(id: String, config: Config) -> Result(Nil, BeadsError) {
 // ============================================================================
 
 /// Search beads by pattern
-pub fn search(pattern: String, config: Config) -> Result(List(Task), BeadsError) {
+pub fn search(pattern: String, _config: Config) -> Result(List(Task), BeadsError) {
   case shell.run("bd", ["search", pattern, "--json"], ".") {
     Ok(output) -> {
       case parse_beads_list(output) {
@@ -286,7 +285,7 @@ pub fn search(pattern: String, config: Config) -> Result(List(Task), BeadsError)
 }
 
 /// Get ready (unblocked) beads
-pub fn ready(config: Config) -> Result(List(Task), BeadsError) {
+pub fn ready(_config: Config) -> Result(List(Task), BeadsError) {
   case shell.run("bd", ["ready", "--json"], ".") {
     Ok(output) -> {
       case parse_beads_list(output) {
@@ -336,7 +335,7 @@ pub fn add_dependency(
   id: String,
   depends_on: String,
   dep_type: DependentType,
-  config: Config,
+  _config: Config,
 ) -> Result(Nil, BeadsError) {
   let type_str = task.dependent_type_to_string(dep_type)
   case shell.run("bd", ["dep", "add", id, depends_on, "--type=" <> type_str], ".") {
@@ -350,7 +349,7 @@ pub fn add_dependency(
 pub fn remove_dependency(
   id: String,
   depends_on: String,
-  config: Config,
+  _config: Config,
 ) -> Result(Nil, BeadsError) {
   case shell.run("bd", ["dep", "remove", id, depends_on], ".") {
     Ok(_) -> Ok(Nil)
@@ -373,7 +372,7 @@ pub fn add_child_to_epic(
 // ============================================================================
 
 /// Sync beads (for worktrees)
-pub fn sync(config: Config) -> Result(Nil, BeadsError) {
+pub fn sync(_config: Config) -> Result(Nil, BeadsError) {
   case shell.run("bd", ["sync"], ".") {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
@@ -382,7 +381,7 @@ pub fn sync(config: Config) -> Result(Nil, BeadsError) {
 }
 
 /// Sync from main branch (for new worktrees)
-pub fn sync_from_main(config: Config) -> Result(Nil, BeadsError) {
+pub fn sync_from_main(_config: Config) -> Result(Nil, BeadsError) {
   case shell.run("bd", ["sync", "--from-main"], ".") {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))

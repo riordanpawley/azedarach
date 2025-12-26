@@ -241,7 +241,7 @@ pub fn get_children(task: Task) -> List(String) {
 
 /// Check if task is blocked
 pub fn is_blocked(task: Task) -> Bool {
-  task.status == Blocked || list.length(task.blockers) > 0
+  task.status == Blocked || task.blockers != []
 }
 
 /// Create an empty/default task for new bead creation

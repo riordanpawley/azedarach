@@ -1,10 +1,9 @@
 // View utilities - shared helpers for view modules
 
-import gleam/option.{None, Some}
+import gleam/option.{None}
 import gleam/string
 import shore
 import shore/ui
-import shore/style
 import azedarach/ui/model.{type Msg}
 
 /// Re-export Node type for use in view modules

@@ -5,7 +5,7 @@
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/int
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, None}
 import gleam/otp/actor
 import gleam/result
 import azedarach/actors/session_monitor.{type MonitorConfig}

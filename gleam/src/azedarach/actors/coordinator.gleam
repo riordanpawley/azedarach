@@ -17,7 +17,7 @@ import gleam/string
 fn unique_integer() -> Int
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
-import azedarach/domain/session.{type SessionState, SessionState}
+import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/services/beads
 import azedarach/services/bead_editor
@@ -417,7 +417,7 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.send_keys(tmux_name, "C-c")
+              let _ = tmux.send_keys(tmux_name, "C-c")
               case session_state.worktree_path {
                 Some(path) -> {
                   let _ = git.wip_commit(path)
@@ -451,8 +451,8 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.send_keys(tmux_name, "claude")
-              tmux.send_keys(tmux_name, "Enter")
+              let _ = tmux.send_keys(tmux_name, "claude")
+              let _ = tmux.send_keys(tmux_name, "Enter")
               let new_session =
                 session.SessionState(..session_state, state: session.Busy)
               let new_sessions = dict.insert(state.sessions, id, new_session)
@@ -479,7 +479,7 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.kill_session(tmux_name)
+              let _ = tmux.kill_session(tmux_name)
               let new_sessions = dict.delete(state.sessions, id)
               notify_ui(
                 state,
@@ -612,15 +612,15 @@ fn handle_message(
                 Ok(_) -> notify_ui(state, Toast("Updated from main", Success))
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name = id <> "-az"
-                  tmux.new_window(tmux_name, "merge")
+                  let _ = tmux.new_window(tmux_name, "merge")
                   let prompt =
                     "There are merge conflicts. Please resolve: "
                     <> string.join(files, ", ")
-                  tmux.send_keys(
+                  let _ = tmux.send_keys(
                     tmux_name <> ":merge",
                     "claude -p \"" <> prompt <> "\"",
                   )
-                  tmux.send_keys(tmux_name <> ":merge", "Enter")
+                  let _ = tmux.send_keys(tmux_name <> ":merge", "Enter")
                   notify_ui(
                     state,
                     Toast("Conflicts detected. Claude resolving.", Warning),
@@ -857,21 +857,21 @@ fn handle_start_session(
 
       case tmux.session_exists(tmux_name) {
         True -> {
-          tmux.attach(tmux_name)
+          let _ = tmux.attach(tmux_name)
           state
         }
         False -> {
-          tmux.new_session(tmux_name, worktree_path)
+          let _ = tmux.new_session(tmux_name, worktree_path)
 
           run_init_commands(tmux_name, state.config.worktree.init_commands)
-          tmux.set_option(tmux_name, "@az_init_done", "1")
+          let _ = tmux.set_option(tmux_name, "@az_init_done", "1")
 
           list.each(state.config.session.background_tasks, fn(cmd) {
             let window_name =
               "task-" <> int.to_string(int.absolute_value(unique_integer()))
-            tmux.new_window(tmux_name, window_name)
-            tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-            tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
+            let _ = tmux.new_window(tmux_name, window_name)
+            let _ = tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
+            let _ = tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
           })
 
           let claude_cmd = case with_work, yolo {
@@ -879,8 +879,8 @@ fn handle_start_session(
             True, False -> build_start_work_command(id, state, False)
             False, _ -> "claude"
           }
-          tmux.send_keys(tmux_name <> ":main", claude_cmd)
-          tmux.send_keys(tmux_name <> ":main", "Enter")
+          let _ = tmux.send_keys(tmux_name <> ":main", claude_cmd)
+          let _ = tmux.send_keys(tmux_name <> ":main", "Enter")
 
           let session_state =
             session.SessionState(
@@ -926,12 +926,12 @@ fn start_dev_server(
       let tmux_name = id <> "-az"
       let window_name = "dev-" <> server_name
 
-      tmux.new_window(tmux_name, window_name)
+      let _ = tmux.new_window(tmux_name, window_name)
 
       let port = get_server_port(server)
       let cmd = "PORT=" <> int.to_string(port) <> " " <> server.command
-      tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-      tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
+      let _ = tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
+      let _ = tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
 
       let key = id <> ":" <> server_name
       let ds =
@@ -966,8 +966,8 @@ fn get_server_port(server: config.ServerDefinition) -> Int {
 
 fn run_init_commands(tmux_name: String, commands: List(String)) -> Nil {
   list.each(commands, fn(cmd) {
-    tmux.send_keys(tmux_name, cmd)
-    tmux.send_keys(tmux_name, "Enter")
+    let _ = tmux.send_keys(tmux_name, cmd)
+    let _ = tmux.send_keys(tmux_name, "Enter")
     process.sleep(1000)
   })
 }

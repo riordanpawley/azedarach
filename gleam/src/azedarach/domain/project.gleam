@@ -3,10 +3,10 @@
 // Projects are discovered by finding directories with .azedarach.json
 // Each project has its own beads database and configuration.
 
-import gleam/dynamic/decode.{type Decoder}
+import gleam/dynamic/decode
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, None}
 import gleam/result
 import gleam/string
 import azedarach/util/shell

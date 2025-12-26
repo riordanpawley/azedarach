@@ -6,7 +6,7 @@ import gleam/string
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
-  type Model, type Msg, type Mode, type Overlay, type InputState,
+  type Model, type Msg, type Overlay,
   Normal, Select,
 }
 
