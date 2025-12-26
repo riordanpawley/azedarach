@@ -5,8 +5,9 @@
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/int
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, None}
 import gleam/otp/actor
+import gleam/result
 import azedarach/actors/session_monitor.{type MonitorConfig}
 import azedarach/domain/session.{type State}
 
@@ -58,21 +59,21 @@ pub type CoordinatorUpdate {
 pub fn start(
   coordinator: Subject(CoordinatorUpdate),
 ) -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let state =
-        SupervisorState(
-          monitors: dict.new(),
-          crash_tracking: dict.new(),
-          coordinator: coordinator,
-          self_subject: None,
-        )
+  let initial_state =
+    SupervisorState(
+      monitors: dict.new(),
+      crash_tracking: dict.new(),
+      coordinator: coordinator,
+      self_subject: None,
+    )
 
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) {
+    let actor.Started(_, data) = started
+    data
+  })
 }
 
 /// Start a monitor for a session
@@ -110,9 +111,9 @@ pub fn list_monitors(supervisor: Subject(Msg)) -> List(String) {
 
 /// Main message handler
 fn handle_message(
-  msg: Msg,
   state: SupervisorState,
-) -> actor.Next(Msg, SupervisorState) {
+  msg: Msg,
+) -> actor.Next(SupervisorState, Msg) {
   case msg {
     StartMonitor(config) -> handle_start_monitor(state, config)
 
@@ -138,7 +139,7 @@ fn handle_message(
 fn handle_start_monitor(
   state: SupervisorState,
   config: MonitorConfig,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   // Check if monitor already exists
   case dict.get(state.monitors, config.bead_id) {
     Ok(_) -> {
@@ -167,7 +168,7 @@ fn handle_start_monitor(
 fn handle_stop_monitor(
   state: SupervisorState,
   bead_id: String,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   case dict.get(state.monitors, bead_id) {
     Ok(monitor) -> {
       session_monitor.stop(monitor)
@@ -182,7 +183,7 @@ fn handle_stop_monitor(
 fn handle_monitor_down(
   state: SupervisorState,
   bead_id: String,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   // Remove from monitors
   let new_monitors = dict.delete(state.monitors, bead_id)
 
@@ -253,11 +254,10 @@ fn create_monitor_callback(
   // For now, create a simple forwarding subject
   let callback_subject = process.new_subject()
 
-  // Spawn a process to forward messages
-  process.start(
-    fn() { forward_monitor_updates(callback_subject, supervisor, bead_id) },
-    True,
-  )
+  // Spawn a linked process to forward messages
+  let _ = process.spawn(fn() {
+    forward_monitor_updates(callback_subject, supervisor, bead_id)
+  })
 
   callback_subject
 }

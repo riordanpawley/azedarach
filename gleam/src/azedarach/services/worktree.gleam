@@ -22,13 +22,26 @@ pub fn error_to_string(err: WorktreeError) -> String {
   }
 }
 
+// Helper to convert shell errors to worktree errors
+fn shell_to_worktree_error(err: shell.ShellError) -> WorktreeError {
+  case err {
+    shell.CommandError(code, stderr) -> CommandFailed(code, stderr)
+    shell.NotFound(cmd) -> CommandFailed(127, "Command not found: " <> cmd)
+  }
+}
+
 // Ensure worktree exists, creating if necessary
-pub fn ensure(bead_id: String, config: Config) -> Result(String, WorktreeError) {
-  let path = worktree_path(bead_id, config)
+pub fn ensure(
+  bead_id: String,
+  config: Config,
+  project_path: String,
+) -> Result(String, WorktreeError) {
+  let project_name = get_project_name(project_path)
+  let path = worktree_path(bead_id, config, project_name)
 
   case exists(path) {
     True -> Ok(path)
-    False -> create(bead_id, path, config)
+    False -> create(bead_id, path, config, project_path)
   }
 }
 
@@ -37,20 +50,23 @@ pub fn create(
   bead_id: String,
   path: String,
   config: Config,
+  project_path: String,
 ) -> Result(String, WorktreeError) {
   let branch_name = config.git.branch_prefix <> bead_id
   let base_branch = config.git.base_branch
 
   // Create worktree with new branch from base
   let args = ["worktree", "add", "-b", branch_name, path, base_branch]
-  case shell.run("git", args, ".") {
+  case shell.run("git", args, project_path) {
     Ok(_) -> {
-      // Push branch if configured
+      // Push branch if configured (non-fatal - worktree creation succeeded)
       case config.git.push_branch_on_create, config.git.push_enabled {
         True, True -> {
           let push_args = ["push", "-u", config.git.remote, branch_name]
-          shell.run("git", push_args, path)
-          |> result.unwrap(Nil)
+          case shell.run("git", push_args, path) {
+            Ok(_) -> Nil
+            Error(_) -> Nil  // Push failure is non-fatal - worktree was created
+          }
         }
         _, _ -> Nil
       }
@@ -62,22 +78,23 @@ pub fn create(
         True -> {
           // Try to add worktree for existing branch
           let args2 = ["worktree", "add", path, branch_name]
-          case shell.run("git", args2, ".") {
+          case shell.run("git", args2, project_path) {
             Ok(_) -> Ok(path)
-            Error(shell.CommandError(c, s)) -> Error(CommandFailed(c, s))
+            Error(e) -> Error(shell_to_worktree_error(e))
           }
         }
         False -> Error(CommandFailed(code, stderr))
       }
     }
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 
 // Delete a worktree
-pub fn delete(path: String) -> Result(Nil, WorktreeError) {
-  case shell.run("git", ["worktree", "remove", "--force", path], ".") {
+pub fn delete(path: String, project_path: String) -> Result(Nil, WorktreeError) {
+  case shell.run("git", ["worktree", "remove", "--force", path], project_path) {
     Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 
@@ -90,8 +107,8 @@ pub fn exists(path: String) -> Bool {
 }
 
 // List all worktrees
-pub fn list() -> Result(List(String), WorktreeError) {
-  case shell.run("git", ["worktree", "list", "--porcelain"], ".") {
+pub fn list(project_path: String) -> Result(List(String), WorktreeError) {
+  case shell.run("git", ["worktree", "list", "--porcelain"], project_path) {
     Ok(output) -> {
       let paths =
         output
@@ -104,24 +121,25 @@ pub fn list() -> Result(List(String), WorktreeError) {
         })
       Ok(paths)
     }
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(e) -> Error(shell_to_worktree_error(e))
   }
 }
 
 // Get the worktree path for a bead
-pub fn worktree_path(bead_id: String, config: Config) -> String {
+pub fn worktree_path(bead_id: String, config: Config, project_name: String) -> String {
   let template = config.worktree.path_template
 
   // Replace placeholders
   template
   |> string.replace("{bead-id}", bead_id)
-  |> string.replace("{project}", get_project_name())
+  |> string.replace("{project}", project_name)
 }
 
-// Get project name from current directory
-fn get_project_name() -> String {
-  case shell.run("basename", ["$(pwd)"], ".") {
-    Ok(name) -> string.trim(name)
-    Error(_) -> "project"
-  }
+// Get project name from project path (extracts basename)
+fn get_project_name(project_path: String) -> String {
+  // Split path and get last component
+  project_path
+  |> string.split("/")
+  |> list.last()
+  |> result.unwrap("project")
 }

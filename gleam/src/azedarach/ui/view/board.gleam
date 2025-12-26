@@ -1,21 +1,18 @@
 // Kanban board view - 4 columns
 
 import gleam/dict
-import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/string
+import gleam/option.{None, Some}
 import shore/ui
-import shore/style
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session
-import azedarach/ui/model.{type Model, Cursor}
+import azedarach/ui/model.{type Model}
 import azedarach/ui/theme
-import azedarach/ui/view.{
+import azedarach/ui/view/utils.{
   type Node, center, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
 }
 
-const column_names = ["Backlog", "In Progress", "Review", "Done"]
+const column_names = ["Open", "In Progress", "Blocked", "Closed"]
 
 pub fn render(model: Model) -> Node {
   let #(width, height) = model.terminal_size
@@ -36,7 +33,7 @@ fn render_column(
   index: Int,
   name: String,
   width: Int,
-  height: Int,
+  _height: Int,
 ) -> Node {
   let colors = model.colors
   let sem = theme.semantic(colors)
@@ -63,13 +60,8 @@ fn render_column(
     False -> cards
   }
 
-  // Use box_styled for the bordered column
-  let border_color = case is_selected {
-    True -> sem.border_focused
-    False -> sem.border
-  }
-
-  ui.box_styled([header, ..content], Some(name), Some(style.hex(border_color)))
+  // Shore doesn't support hex colors, use plain box
+  ui.box_styled([header, ..content], Some(name), None)
 }
 
 fn render_header(
@@ -77,7 +69,7 @@ fn render_header(
   width: Int,
   color: String,
   is_selected: Bool,
-  sem: theme.SemanticColors,
+  _sem: theme.SemanticColors,
 ) -> Node {
   let indicator = case is_selected {
     True -> "▶ "
@@ -141,8 +133,8 @@ fn render_card(
   // Card with optional background highlight for cursor
   case is_cursor {
     True ->
-      // Use bar2 for background color
-      ui.bar2(style.hex(colors.surface0), vbox([line1, line2]))
+      // Shore doesn't support hex colors, use plain vbox
+      vbox([line1, line2])
     False -> vbox([line1, line2])
   }
 }

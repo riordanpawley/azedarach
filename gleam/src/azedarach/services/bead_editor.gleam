@@ -1,16 +1,13 @@
 // Bead Editor Service - markdown template editing in tmux popup
 // Matches TypeScript BeadEditorService behavior
 
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/regex
 import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type IssueType, type Priority, type Status, type Task}
 import azedarach/services/beads
-import azedarach/services/tmux
 import azedarach/util/shell
 
 // ============================================================================
@@ -222,7 +219,7 @@ fn parse_title(lines: List(String)) -> String {
   |> list.find(fn(line) { string.starts_with(line, "# ") })
   |> result.map(fn(line) {
     // Format: "# ID: Title"
-    let trimmed = string.drop_left(line, 2)
+    let trimmed = string.drop_start(line, 2)
     case string.split_once(trimmed, ": ") {
       Ok(#(_, title)) -> string.trim(title)
       Error(_) -> string.trim(trimmed)
@@ -302,38 +299,37 @@ fn clean_anchor(content: String, anchor: String) -> String {
 /// Open a bead in the editor via tmux popup
 pub fn edit_bead(
   id: String,
+  project_path: String,
   config: Config,
 ) -> Result(ParsedContent, EditorError) {
   // Fetch the bead
-  case beads.show(id, config) {
-    Ok(t) -> {
-      // Serialize to markdown
-      let markdown = serialize_to_markdown(t)
+  use t <- result.try(
+    beads.show(id, project_path, config)
+    |> result.replace_error(BeadNotFound(id)),
+  )
 
-      // Write to temp file
-      let temp_file = "/tmp/bead-edit-" <> id <> ".md"
-      case write_temp_file(temp_file, markdown) {
-        Ok(_) -> {
-          // Open editor in tmux popup
-          case open_editor_popup(temp_file, config) {
-            Ok(_) -> {
-              // Read back and parse
-              case read_temp_file(temp_file) {
-                Ok(edited) -> {
-                  let _ = delete_temp_file(temp_file)
-                  parse_from_markdown(edited)
-                }
-                Error(msg) -> Error(EditorFailed(msg))
-              }
-            }
-            Error(e) -> Error(e)
-          }
-        }
-        Error(msg) -> Error(EditorFailed(msg))
-      }
-    }
-    Error(_) -> Error(BeadNotFound(id))
-  }
+  // Serialize to markdown and write to temp file
+  let markdown = serialize_to_markdown(t)
+  let temp_file = "/tmp/bead-edit-" <> id <> ".md"
+
+  use _ <- result.try(
+    write_temp_file(temp_file, markdown)
+    |> result.map_error(EditorFailed),
+  )
+
+  // Open editor in tmux popup
+  use _ <- result.try(open_editor_popup(temp_file, config))
+
+  // Read back the edited content
+  use edited <- result.try(
+    read_temp_file(temp_file)
+    |> result.map_error(EditorFailed),
+  )
+
+  // Cleanup temp file (best-effort)
+  let _ = delete_temp_file(temp_file)
+
+  parse_from_markdown(edited)
 }
 
 /// Create a new bead via editor
@@ -341,34 +337,32 @@ pub fn create_bead(
   issue_type: IssueType,
   config: Config,
 ) -> Result(ParsedContent, EditorError) {
-  // Generate template
+  // Generate template and write to temp file
   let markdown = serialize_new_template(issue_type)
-
-  // Write to temp file
   let temp_file = "/tmp/bead-new-" <> task.issue_type_to_string(issue_type) <> ".md"
-  case write_temp_file(temp_file, markdown) {
-    Ok(_) -> {
-      // Open editor in tmux popup
-      case open_editor_popup(temp_file, config) {
-        Ok(_) -> {
-          // Read back and parse
-          case read_temp_file(temp_file) {
-            Ok(edited) -> {
-              let _ = delete_temp_file(temp_file)
-              parse_from_markdown(edited)
-            }
-            Error(msg) -> Error(EditorFailed(msg))
-          }
-        }
-        Error(e) -> Error(e)
-      }
-    }
-    Error(msg) -> Error(EditorFailed(msg))
-  }
+
+  use _ <- result.try(
+    write_temp_file(temp_file, markdown)
+    |> result.map_error(EditorFailed),
+  )
+
+  // Open editor in tmux popup
+  use _ <- result.try(open_editor_popup(temp_file, config))
+
+  // Read back the edited content
+  use edited <- result.try(
+    read_temp_file(temp_file)
+    |> result.map_error(EditorFailed),
+  )
+
+  // Cleanup temp file (best-effort)
+  let _ = delete_temp_file(temp_file)
+
+  parse_from_markdown(edited)
 }
 
 /// Open editor in tmux popup with wait-for synchronization
-fn open_editor_popup(file_path: String, config: Config) -> Result(Nil, EditorError) {
+fn open_editor_popup(file_path: String, _config: Config) -> Result(Nil, EditorError) {
   // Get editor from environment
   let editor = get_editor()
 
@@ -403,23 +397,16 @@ fn open_editor_popup(file_path: String, config: Config) -> Result(Nil, EditorErr
 }
 
 fn get_editor() -> String {
-  case shell.get_env("EDITOR") {
-    Ok(e) -> e
-    Error(_) -> {
-      case shell.get_env("VISUAL") {
-        Ok(v) -> v
-        Error(_) -> "vim"
-      }
-    }
-  }
+  shell.get_env("EDITOR")
+  |> result.lazy_or(fn() { shell.get_env("VISUAL") })
+  |> result.unwrap("vim")
 }
 
 fn generate_id() -> String {
   // Simple timestamp-based ID
-  case shell.run("date", ["+%s%N"], ".") {
-    Ok(output) -> string.trim(output)
-    Error(_) -> "default"
-  }
+  shell.run("date", ["+%s%N"], ".")
+  |> result.map(string.trim)
+  |> result.unwrap("default")
 }
 
 // ============================================================================
@@ -465,6 +452,7 @@ fn escape_for_shell(s: String) -> String {
 pub fn apply_changes(
   id: String,
   parsed: ParsedContent,
+  project_path: String,
   config: Config,
 ) -> Result(Nil, EditorError) {
   let options =
@@ -481,7 +469,7 @@ pub fn apply_changes(
       estimate: parsed.estimate,
     )
 
-  case beads.update(id, options, config) {
+  case beads.update(id, options, project_path, config) {
     Ok(_) -> Ok(Nil)
     Error(beads.NotFound(i)) -> Error(BeadNotFound(i))
     Error(e) -> Error(EditorFailed(beads.error_to_string(e)))
@@ -492,6 +480,7 @@ pub fn apply_changes(
 pub fn create_from_parsed(
   parsed: ParsedContent,
   issue_type: IssueType,
+  project_path: String,
   config: Config,
 ) -> Result(String, EditorError) {
   let options =
@@ -508,7 +497,7 @@ pub fn create_from_parsed(
       estimate: parsed.estimate,
     )
 
-  case beads.create(options, config) {
+  case beads.create(options, project_path, config) {
     Ok(id) -> Ok(id)
     Error(e) -> Error(EditorFailed(beads.error_to_string(e)))
   }

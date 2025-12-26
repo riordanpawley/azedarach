@@ -4,10 +4,10 @@
 
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import gleam/set.{type Set}
 
 /// Port allocator state
@@ -41,18 +41,16 @@ pub type Msg {
 
 /// Start the port allocator actor
 pub fn start() -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let state =
-        AllocatorState(
-          allocated: set.new(),
-          ownership: dict.new(),
-        )
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  let initial_state =
+    AllocatorState(
+      allocated: set.new(),
+      ownership: dict.new(),
+    )
+
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
 }
 
 /// Allocate a port for a bead:server
@@ -102,9 +100,9 @@ pub fn bulk_init(allocator: Subject(Msg), ports: List(#(String, Int))) -> Nil {
 
 /// Main message handler
 fn handle_message(
-  msg: Msg,
   state: AllocatorState,
-) -> actor.Next(Msg, AllocatorState) {
+  msg: Msg,
+) -> actor.Next(AllocatorState, Msg) {
   case msg {
     Allocate(base_port, owner_key, reply_to) -> {
       // Check if owner already has a port

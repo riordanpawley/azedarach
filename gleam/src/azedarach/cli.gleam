@@ -17,7 +17,6 @@
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/config
 import azedarach/core/hooks
@@ -101,9 +100,14 @@ pub fn parse(args: List(String)) -> Result(Command, String) {
     ["project"] -> Ok(Help)
     ["project", "--help"] -> Ok(Help)
 
-    // TUI with path
-    [path] if !string.starts_with(path, "-") -> Ok(Run(Some(path)))
-    [path, "--help"] | [path, "-h"] -> Ok(Help)
+    // TUI with path - handle single argument that's not a flag
+    [_path, "--help"] | [_path, "-h"] -> Ok(Help)
+    [path] -> {
+      case string.starts_with(path, "-") {
+        True -> Error("Unknown flag: " <> path)
+        False -> Ok(Run(Some(path)))
+      }
+    }
 
     _ -> Error("Unknown arguments: " <> string.join(args, " "))
   }
@@ -338,13 +342,16 @@ fn execute_hooks_install(bead_id: String, project_path: Option(String)) -> Resul
   let settings_path = claude_dir <> "/settings.local.json"
 
   // Ensure .claude directory exists
-  let _ = shell.mkdir_p(claude_dir)
+  case shell.mkdir_p(claude_dir) {
+    Ok(_) -> Nil
+    Error(_) -> Nil  // Directory may already exist, continue to try writing
+  }
 
   // Generate hooks configuration
   case hooks.generate_hook_config_auto(bead_id) {
     Ok(hooks_json) -> {
       // Read existing settings if they exist
-      let existing = case shell.read_file(settings_path) {
+      let _existing = case shell.read_file(settings_path) {
         Ok(content) -> content
         Error(_) -> "{}"
       }

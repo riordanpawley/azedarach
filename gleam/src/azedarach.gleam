@@ -3,8 +3,6 @@
 
 import argv
 import gleam/io
-import gleam/result
-import gleam/erlang/process
 import azedarach/cli
 import azedarach/config
 import azedarach/ui/app
@@ -30,6 +28,12 @@ pub fn main() {
 
     Ok(cli.Version) -> {
       io.println("azedarach 1.0.0")
+    }
+
+    // Handle other commands (not yet implemented in main)
+    Ok(_other) -> {
+      io.println_error("Command not yet implemented")
+      halt(1)
     }
 
     Error(e) -> {

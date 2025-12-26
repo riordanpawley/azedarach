@@ -3,17 +3,14 @@
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/set
-import gleam/string
-import shore/ui
-import shore/style
 import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
-import azedarach/ui/view.{
+import azedarach/ui/view/utils.{
   type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
 }
 
@@ -44,6 +41,22 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
 fn render_action_menu(model: Model) -> Node {
   let colors = model.colors
 
+  // Build git actions based on workflow mode
+  let git_actions = case model.config.git.workflow_mode {
+    config.Local -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (merge to " <> model.config.git.base_branch <> ")"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+    config.Origin -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (create PR)"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+  }
+
   let items = [
     #("Session", [
       #("s", "Start session"),
@@ -59,13 +72,7 @@ fn render_action_menu(model: Model) -> Node {
       #("v", "View server"),
       #("^r", "Restart"),
     ]),
-    #("Git", [
-      #("u", "Update from main"),
-      #("m", "Merge to main"),
-      #("f", "Show diff"),
-      #("P", "Create PR"),
-      #("d", "Delete/cleanup"),
-    ]),
+    #("Git", git_actions),
     #("Task", [
       #("h", "Move left"),
       #("l", "Move right"),
@@ -234,7 +241,7 @@ fn render_type_filter_menu(model: Model) -> Node {
   let colors = model.colors
 
   let items = [
-    #("t", "Task", task.Task),
+    #("t", "Task", task.TaskType),
     #("b", "Bug", task.Bug),
     #("e", "Epic", task.Epic),
     #("f", "Feature", task.Feature),
@@ -454,11 +461,11 @@ fn render_detail_panel(bead_id: String, model: Model) -> Node {
       ]
 
       // Add design notes if present
-      let with_notes = case task.design_notes {
-        Some(notes) -> list.append(lines, [
+      let with_notes = case task.design {
+        Some(design) -> list.append(lines, [
           text(""),
           bold_text("Design Notes:", colors.mauve),
-          dim_text(notes),
+          dim_text(design),
         ])
         None -> lines
       }
@@ -503,7 +510,7 @@ fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
   overlay_box("Diff", [dim_text("(loading diff...)")], model)
 }
 
-fn render_merge_choice(bead_id: String, behind: Int, model: Model) -> Node {
+fn render_merge_choice(_bead_id: String, behind: Int, model: Model) -> Node {
   let colors = model.colors
 
   let items = [
@@ -523,15 +530,15 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Node {
   let colors = model.colors
 
   let #(title, description) = case action {
-    model.DeleteWorktree(id) -> #(
+    model.DeleteWorktreeAction(id) -> #(
       "Cleanup " <> id <> "?",
       "This will: kill session, delete worktree, delete branch",
     )
-    model.DeleteBead(id) -> #(
+    model.DeleteBeadAction(id) -> #(
       "Delete " <> id <> "?",
       "This will permanently delete the bead",
     )
-    model.StopSession(id) -> #(
+    model.StopSessionAction(id) -> #(
       "Stop session " <> id <> "?",
       "This will kill the tmux session",
     )
