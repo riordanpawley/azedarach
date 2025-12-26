@@ -3,21 +3,16 @@
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
-import shore/ui
-import shore/style
 import azedarach/domain/session
-import azedarach/ui/model.{type Model, type Mode, Normal, Select}
-import azedarach/ui/theme
+import azedarach/ui/model.{type Model, Normal, Select}
 import azedarach/ui/view/utils.{
-  type Node, empty, hbox, pad_left, pad_right, styled_text, text,
+  type Node, empty, hbox, styled_text, text,
 }
 
 pub fn render(model: Model) -> Node {
-  let colors = model.colors
-
   // Left side: mode + project
   let left = render_left(model)
 
@@ -38,11 +33,6 @@ fn render_left(model: Model) -> Node {
   let mode_text = case model.mode {
     Normal -> " NORMAL "
     Select(selected) -> " SELECT(" <> int.to_string(set.size(selected)) <> ") "
-  }
-
-  let mode_bg = case model.mode {
-    Normal -> colors.blue
-    Select(_) -> colors.mauve
   }
 
   // Project name

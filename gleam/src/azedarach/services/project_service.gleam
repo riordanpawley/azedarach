@@ -8,9 +8,8 @@ import gleam/dynamic/decode.{type Decoder}
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
-import azedarach/domain/project.{type Project, Project}
+import azedarach/domain/project.{type Project}
 import azedarach/util/shell
 import simplifile
 

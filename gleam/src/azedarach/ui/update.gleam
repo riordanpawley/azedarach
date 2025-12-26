@@ -14,7 +14,7 @@ import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
-  type Model, type Msg, type Mode, type Overlay, type InputState,
+  type Model, type Msg,
   Cursor, Model, Normal, Select,
 }
 import azedarach/ui/effects.{type Effect}

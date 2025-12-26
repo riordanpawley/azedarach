@@ -1,15 +1,12 @@
 // Kanban board view - 4 columns
 
 import gleam/dict
-import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/string
+import gleam/option.{None, Some}
 import shore/ui
-import shore/style
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session
-import azedarach/ui/model.{type Model, Cursor}
+import azedarach/ui/model.{type Model}
 import azedarach/ui/theme
 import azedarach/ui/view/utils.{
   type Node, center, dim_text, hbox, pad_right, styled_text, text, truncate, vbox,
@@ -36,7 +33,7 @@ fn render_column(
   index: Int,
   name: String,
   width: Int,
-  height: Int,
+  _height: Int,
 ) -> Node {
   let colors = model.colors
   let sem = theme.semantic(colors)
@@ -63,12 +60,6 @@ fn render_column(
     False -> cards
   }
 
-  // Use box_styled for the bordered column
-  let border_color = case is_selected {
-    True -> sem.border_focused
-    False -> sem.border
-  }
-
   // Shore doesn't support hex colors, use plain box
   ui.box_styled([header, ..content], Some(name), None)
 }
@@ -78,7 +69,7 @@ fn render_header(
   width: Int,
   color: String,
   is_selected: Bool,
-  sem: theme.SemanticColors,
+  _sem: theme.SemanticColors,
 ) -> Node {
   let indicator = case is_selected {
     True -> "▶ "

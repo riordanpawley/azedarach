@@ -8,19 +8,15 @@
 // - get_state(): Get current session state
 // - list_active(): List all running sessions
 
-import gleam/dict.{type Dict}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/core/hooks
-import azedarach/domain/session.{type SessionState, type State, SessionState}
+import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/services/tmux
 import azedarach/services/worktree
 import azedarach/services/state_detector
-import azedarach/services/git
 import azedarach/util/shell
 import tempo
 
@@ -286,7 +282,7 @@ pub fn exists(bead_id: String) -> Bool {
 // Claude Command Building
 // ============================================================================
 
-fn build_claude_command(opts: StartOptions, config: Config) -> String {
+fn build_claude_command(opts: StartOptions, _config: Config) -> String {
   let base = "claude"
 
   // Add model if specified

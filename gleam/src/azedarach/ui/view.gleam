@@ -1,6 +1,6 @@
 // Main view - renders the entire UI
 
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import shore/ui
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/view/board

@@ -16,10 +16,9 @@ const default_poll_interval_ms = 500
 // Lines to capture from tmux pane
 const capture_lines = 50
 
-// Crash threshold for "unknown" state
-const max_crashes = 3
-
-const crash_window_ms = 60_000
+// Crash threshold for "unknown" state - currently tracked by supervisor
+// const max_crashes = 3
+// const crash_window_ms = 60_000
 
 /// Monitor state
 pub type MonitorState {

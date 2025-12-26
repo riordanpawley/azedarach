@@ -8,7 +8,6 @@ import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type IssueType, type Priority, type Status, type Task}
 import azedarach/services/beads
-import azedarach/services/tmux
 import azedarach/util/shell
 
 // ============================================================================
@@ -366,7 +365,7 @@ pub fn create_bead(
 }
 
 /// Open editor in tmux popup with wait-for synchronization
-fn open_editor_popup(file_path: String, config: Config) -> Result(Nil, EditorError) {
+fn open_editor_popup(file_path: String, _config: Config) -> Result(Nil, EditorError) {
   // Get editor from environment
   let editor = get_editor()
 

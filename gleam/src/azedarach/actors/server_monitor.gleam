@@ -3,7 +3,7 @@
 // Managed by the ServersSupervisor, transient restart strategy
 
 import gleam/erlang/process.{type Subject}
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option}
 import gleam/otp/actor
 import gleam/result
 import azedarach/services/tmux

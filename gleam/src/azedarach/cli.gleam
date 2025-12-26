@@ -17,7 +17,6 @@
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/config
 import azedarach/core/hooks
@@ -102,7 +101,7 @@ pub fn parse(args: List(String)) -> Result(Command, String) {
     ["project", "--help"] -> Ok(Help)
 
     // TUI with path - handle single argument that's not a flag
-    [path, "--help"] | [path, "-h"] -> Ok(Help)
+    [_path, "--help"] | [_path, "-h"] -> Ok(Help)
     [path] -> {
       case string.starts_with(path, "-") {
         True -> Error("Unknown flag: " <> path)
@@ -349,7 +348,7 @@ fn execute_hooks_install(bead_id: String, project_path: Option(String)) -> Resul
   case hooks.generate_hook_config_auto(bead_id) {
     Ok(hooks_json) -> {
       // Read existing settings if they exist
-      let existing = case shell.read_file(settings_path) {
+      let _existing = case shell.read_file(settings_path) {
         Ok(content) -> content
         Error(_) -> "{}"
       }
