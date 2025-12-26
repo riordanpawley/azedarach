@@ -107,8 +107,8 @@ pub fn start(
   case tmux.session_exists(tmux_name) {
     True -> Error(SessionExists(bead_id))
     False -> {
-      // Create worktree
-      case worktree.ensure(bead_id, config) {
+      // Create worktree (using project_path from opts)
+      case worktree.ensure(bead_id, config, opts.project_path) {
         Ok(wt_path) -> {
           // Create tmux session
           case tmux.new_session(tmux_name, wt_path) {

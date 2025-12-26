@@ -171,6 +171,7 @@ pub type Msg {
   MergeToMain
   ShowDiff
   CreatePR
+  CompleteSession
   DeleteCleanup
   MoveTaskLeft
   MoveTaskRight

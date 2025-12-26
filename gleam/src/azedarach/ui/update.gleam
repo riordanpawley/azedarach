@@ -200,6 +200,16 @@ pub fn update(
         None -> #(model, effects.none())
       }
     }
+    model.CompleteSession -> {
+      case current_task_id(model) {
+        Some(id) -> {
+          // CompleteSession does the right thing based on workflow_mode
+          coordinator.send(coord, coordinator.CompleteSession(id))
+          #(Model(..model, overlay: None), app.None)
+        }
+        None -> #(model, app.None)
+      }
+    }
     model.DeleteCleanup -> {
       case current_task_id(model) {
         Some(id) -> #(

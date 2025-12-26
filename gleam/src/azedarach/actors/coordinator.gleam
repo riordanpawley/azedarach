@@ -12,7 +12,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
+import azedarach/config.{type Config, Local, Origin}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState, SessionState}
 import azedarach/domain/project.{type Project}
@@ -84,6 +84,7 @@ pub type Msg {
   UpdateFromMain(id: String)
   MergeToMain(id: String)
   CreatePR(id: String)
+  CompleteSession(id: String)
   DeleteCleanup(id: String)
   // Images
   PasteImage(id: String)
@@ -116,6 +117,18 @@ pub type ToastLevel {
   Success
   Warning
   Error
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Get project path from state, falling back to "." if no project is selected
+fn get_project_path(state: CoordinatorState) -> String {
+  case state.current_project {
+    Some(proj) -> proj.path
+    None -> "."
+  }
 }
 
 // Start the coordinator
@@ -268,7 +281,7 @@ fn handle_message(
     RefreshBeads -> {
       // Async load beads
       let self = process.new_subject()
-      spawn_beads_load(self, state.config)
+      spawn_beads_load(self, get_project_path(state), state.config)
       actor.continue(state)
     }
 
@@ -299,10 +312,11 @@ fn handle_message(
             issue_type: Some(issue_type),
           )
       }
-      case beads.create(options, state.config) {
+      let project_path = get_project_path(state)
+      case beads.create(options, project_path, state.config) {
         Ok(id) -> {
           notify_ui(state, Toast("Bead created: " <> id, Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -310,12 +324,13 @@ fn handle_message(
     }
 
     CreateBeadViaEditor(issue_type) -> {
+      let project_path = get_project_path(state)
       case bead_editor.create_bead(issue_type, state.config) {
         Ok(parsed) -> {
-          case bead_editor.create_from_parsed(parsed, issue_type, state.config) {
+          case bead_editor.create_from_parsed(parsed, issue_type, project_path, state.config) {
             Ok(id) -> {
               notify_ui(state, Toast("Bead created: " <> id, Success))
-              spawn_beads_load(process.new_subject(), state.config)
+              spawn_beads_load(process.new_subject(), project_path, state.config)
             }
             Error(e) ->
               notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
@@ -327,12 +342,13 @@ fn handle_message(
     }
 
     EditBead(id) -> {
-      case bead_editor.edit_bead(id, state.config) {
+      let project_path = get_project_path(state)
+      case bead_editor.edit_bead(id, project_path, state.config) {
         Ok(parsed) -> {
-          case bead_editor.apply_changes(id, parsed, state.config) {
+          case bead_editor.apply_changes(id, parsed, project_path, state.config) {
             Ok(_) -> {
               notify_ui(state, Toast("Bead updated", Success))
-              spawn_beads_load(process.new_subject(), state.config)
+              spawn_beads_load(process.new_subject(), project_path, state.config)
             }
             Error(e) ->
               notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
@@ -344,10 +360,11 @@ fn handle_message(
     }
 
     DeleteBead(id) -> {
-      case beads.delete(id, state.config) {
+      let project_path = get_project_path(state)
+      case beads.delete(id, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Bead deleted", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -355,11 +372,12 @@ fn handle_message(
     }
 
     MoveTask(id, direction) -> {
+      let project_path = get_project_path(state)
       case list.find(state.tasks, fn(t) { t.id == id }) {
         Ok(found_task) -> {
           let new_status = next_status(found_task.status, direction)
-          case beads.update_status(id, new_status, state.config) {
-            Ok(_) -> spawn_beads_load(process.new_subject(), state.config)
+          case beads.update_status(id, new_status, project_path, state.config) {
+            Ok(_) -> spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
             Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
           }
         }
@@ -369,7 +387,8 @@ fn handle_message(
     }
 
     SearchBeads(pattern) -> {
-      case beads.search(pattern, state.config) {
+      let project_path = get_project_path(state)
+      case beads.search(pattern, project_path, state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -377,7 +396,8 @@ fn handle_message(
     }
 
     GetReadyBeads -> {
-      case beads.ready(state.config) {
+      let project_path = get_project_path(state)
+      case beads.ready(project_path, state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -683,7 +703,41 @@ fn handle_message(
       actor.continue(state)
     }
 
+    // Complete session based on workflow mode:
+    // - Local mode: merge directly to base branch
+    // - Origin mode: create PR
+    CompleteSession(id) -> {
+      case dict.get(state.sessions, id) {
+        Ok(session_state) -> {
+          case session_state.worktree_path {
+            Some(path) -> {
+              case state.config.git.workflow_mode {
+                Local -> {
+                  // Local mode: merge directly to main
+                  case git.merge_to_main(path, state.config) {
+                    Ok(_) -> notify_ui(state, Toast("Merged to " <> state.config.git.base_branch, Success))
+                    Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                  }
+                }
+                Origin -> {
+                  // Origin mode: create PR
+                  case git.create_pr(path, id, state.config) {
+                    Ok(url) -> notify_ui(state, Toast("PR created: " <> url, Success))
+                    Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                  }
+                }
+              }
+            }
+            None -> notify_ui(state, Toast("No worktree", Warning))
+          }
+        }
+        Error(_) -> notify_ui(state, Toast("No session", Warning))
+      }
+      actor.continue(state)
+    }
+
     DeleteCleanup(id) -> {
+      let project_path = get_project_path(state)
       case dict.get(state.sessions, id) {
         Ok(session_state) -> {
           case session_state.tmux_session {
@@ -692,8 +746,8 @@ fn handle_message(
           }
           case session_state.worktree_path {
             Some(path) -> {
-              let _ = worktree.delete(path)
-              let _ = git.delete_branch(id, state.config)
+              let _ = worktree.delete(path, project_path)
+              let _ = git.delete_branch(id, state.config, project_path)
               Nil
             }
             None -> Nil
@@ -710,10 +764,11 @@ fn handle_message(
     }
 
     PasteImage(id) -> {
+      let project_path = get_project_path(state)
       case image.attach_from_clipboard(id) {
         Ok(attachment) -> {
           let link = image.build_notes_link(id, attachment)
-          case beads.append_notes(id, link, state.config) {
+          case beads.append_notes(id, link, project_path, state.config) {
             Ok(_) ->
               notify_ui(
                 state,
@@ -728,9 +783,10 @@ fn handle_message(
     }
 
     DeleteImage(id, attachment_id) -> {
+      let project_path = get_project_path(state)
       case image.remove(id, attachment_id) {
         Ok(attachment) -> {
-          case remove_image_from_notes(id, attachment.filename, state.config) {
+          case remove_image_from_notes(id, attachment.filename, project_path, state.config) {
             Ok(_) -> notify_ui(state, Toast("Image deleted", Success))
             Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
           }
@@ -741,10 +797,11 @@ fn handle_message(
     }
 
     AddDependency(id, depends_on, dep_type) -> {
-      case beads.add_dependency(id, depends_on, dep_type, state.config) {
+      let project_path = get_project_path(state)
+      case beads.add_dependency(id, depends_on, dep_type, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency added", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -752,10 +809,11 @@ fn handle_message(
     }
 
     RemoveDependency(id, depends_on) -> {
-      case beads.remove_dependency(id, depends_on, state.config) {
+      let project_path = get_project_path(state)
+      case beads.remove_dependency(id, depends_on, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency removed", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
       }
@@ -786,10 +844,10 @@ fn notify_ui(state: CoordinatorState, msg: UiMsg) -> Nil {
   }
 }
 
-fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
+fn spawn_beads_load(reply_to: Subject(Msg), project_path: String, config: Config) -> Nil {
   process.start(
     fn() {
-      let result = beads.list_all(config)
+      let result = beads.list_all(project_path, config)
       process.send(reply_to, BeadsLoaded(result))
     },
     True,
@@ -804,7 +862,7 @@ fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
       process.start(
         fn() {
           // Run bd list in project directory
-          let result = beads.list_all_in_dir(proj.path, state.config)
+          let result = beads.list_all(proj.path, state.config)
           process.send(reply_to, BeadsLoaded(result))
         },
         True,
@@ -872,7 +930,8 @@ fn handle_start_session(
   with_work: Bool,
   yolo: Bool,
 ) -> CoordinatorState {
-  let worktree_result = worktree.ensure(id, state.config)
+  let project_path = get_project_path(state)
+  let worktree_result = worktree.ensure(id, state.config, project_path)
   case worktree_result {
     Ok(worktree_path) -> {
       let tmux_name = id <> "-az"
@@ -1082,9 +1141,10 @@ fn now_iso() -> String {
 fn remove_image_from_notes(
   issue_id: String,
   filename: String,
+  project_path: String,
   config: Config,
 ) -> Result(Nil, beads.BeadsError) {
-  case beads.show(issue_id, config) {
+  case beads.show(issue_id, project_path, config) {
     Ok(t) -> {
       case t.notes {
         Some(notes) -> {
@@ -1097,7 +1157,7 @@ fn remove_image_from_notes(
             True -> Ok(Nil)
             False -> {
               let new_notes = string.join(filtered, "\n") |> string.trim
-              beads.update_notes(issue_id, new_notes, config)
+              beads.update_notes(issue_id, new_notes, project_path, config)
             }
           }
         }
