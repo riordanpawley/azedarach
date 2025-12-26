@@ -8,6 +8,7 @@
 // - get_state(): Get current session state
 // - list_active(): List all running sessions
 
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -177,10 +178,15 @@ fn ensure_session(
     True -> Ok(Nil)
     False -> {
       use _ <- result.try(tmux.new_session(name, cwd))
-      // Run init commands
+      // Run init commands, logging any failures
       list.each(init_commands, fn(cmd) {
-        let _ = tmux.send_keys(name <> ":main", cmd <> " Enter")
-        Nil
+        case tmux.send_keys(name <> ":main", cmd <> " Enter") {
+          Ok(_) -> Nil
+          Error(e) ->
+            io.println_error(
+              "Warning: init command failed for " <> name <> ": " <> tmux.error_to_string(e),
+            )
+        }
       })
       Ok(Nil)
     }
@@ -200,8 +206,14 @@ pub fn ensure_window(
 
   case window_exists(session, window) {
     True -> {
-      // Window exists, just send command
-      let _ = tmux.select_window(session, window)
+      // Window exists, select it and send command
+      case tmux.select_window(session, window) {
+        Ok(_) -> Nil
+        Error(e) ->
+          io.println_error(
+            "Warning: select_window failed for " <> target <> ": " <> tmux.error_to_string(e),
+          )
+      }
       tmux.send_keys(target, command <> " Enter")
     }
     False -> {
@@ -256,13 +268,31 @@ pub fn start(
       )
 
       // Create additional shell window
-      let _ = tmux.new_window(tmux_name, window_shell)
+      case tmux.new_window(tmux_name, window_shell) {
+        Ok(_) -> Nil
+        Error(e) ->
+          io.println_error(
+            "Warning: failed to create shell window for " <> tmux_name <> ": " <> tmux.error_to_string(e),
+          )
+      }
 
       // Install Claude Code hooks
-      let _ = install_hooks(bead_id, result.worktree_path)
+      case install_hooks(bead_id, result.worktree_path) {
+        Ok(_) -> Nil
+        Error(msg) ->
+          io.println_error(
+            "Warning: failed to install hooks for " <> bead_id <> ": " <> msg,
+          )
+      }
 
       // Set session status option
-      let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+      case tmux.set_option(tmux_name, "@az_status", "busy") {
+        Ok(_) -> Nil
+        Error(e) ->
+          io.println_error(
+            "Warning: failed to set status for " <> tmux_name <> ": " <> tmux.error_to_string(e),
+          )
+      }
 
       Ok(SessionState(
         bead_id: bead_id,
@@ -296,8 +326,14 @@ pub fn pause(bead_id: String) -> Result(Nil, SessionError) {
     |> result.map_error(TmuxError),
   )
 
-  // Update status (non-fatal if this fails)
-  let _ = tmux.set_option(tmux_name, "@az_status", "paused")
+  // Update status (non-fatal, log warning if fails)
+  case tmux.set_option(tmux_name, "@az_status", "paused") {
+    Ok(_) -> Nil
+    Error(e) ->
+      io.println_error(
+        "Warning: failed to set paused status for " <> tmux_name <> ": " <> tmux.error_to_string(e),
+      )
+  }
   Ok(Nil)
 }
 
@@ -314,8 +350,14 @@ pub fn resume(bead_id: String, prompt: Option(String)) -> Result(Nil, SessionErr
     |> result.map_error(TmuxError),
   )
 
-  // Update status (non-fatal if this fails)
-  let _ = tmux.set_option(tmux_name, "@az_status", "busy")
+  // Update status (non-fatal, log warning if fails)
+  case tmux.set_option(tmux_name, "@az_status", "busy") {
+    Ok(_) -> Nil
+    Error(e) ->
+      io.println_error(
+        "Warning: failed to set busy status for " <> tmux_name <> ": " <> tmux.error_to_string(e),
+      )
+  }
   Ok(Nil)
 }
 
@@ -435,14 +477,19 @@ fn escape_quotes(s: String) -> String {
 /// Creates .claude/settings.local.json with hook configuration that calls
 /// az-notify.sh for each Claude Code event. This enables authoritative
 /// state detection from Claude's native hook system.
-fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
+fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, String) {
   let claude_dir = worktree_path <> "/.claude"
   let settings_path = claude_dir <> "/settings.local.json"
 
   // Create .claude directory
   case shell.mkdir_p(claude_dir) {
     Ok(_) -> Nil
-    Error(_) -> Nil  // Directory might already exist
+    Error(e) -> {
+      // Log but continue - directory might already exist
+      io.println_error(
+        "Warning: mkdir_p failed for " <> claude_dir <> ": " <> shell.error_to_string(e),
+      )
+    }
   }
 
   // Generate hooks configuration using the hooks module
@@ -451,7 +498,8 @@ fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
       // Write settings file
       case shell.write_file(settings_path, hooks_json) {
         Ok(_) -> Ok(Nil)
-        Error(_) -> Error(Nil)
+        Error(e) ->
+          Error("failed to write settings file: " <> shell.error_to_string(e))
       }
     }
     Error(_) -> {
@@ -467,12 +515,13 @@ fn install_hooks(bead_id: String, worktree_path: String) -> Result(Nil, Nil) {
           let hooks_json = hooks.generate_hook_config(bead_id, path)
           case shell.write_file(settings_path, hooks_json) {
             Ok(_) -> Ok(Nil)
-            Error(_) -> Error(Nil)
+            Error(e) ->
+              Error("failed to write settings file: " <> shell.error_to_string(e))
           }
         }
         None -> {
           // No notify script found - hooks won't work but session can still run
-          Error(Nil)
+          Error("no az-notify.sh script found in common locations")
         }
       }
     }
