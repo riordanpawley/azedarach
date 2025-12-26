@@ -5,6 +5,7 @@
 // See effects.gleam for effect helpers.
 
 import gleam/erlang/process.{type Subject}
+import gleam/otp/actor
 import gleam/result
 import shore
 import azedarach/config.{type Config}
@@ -17,7 +18,7 @@ import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
 
 /// Start with existing supervision context (preferred method)
-pub fn start_with_context(context: AppContext) -> Result(Nil, shore.StartError) {
+pub fn start_with_context(context: AppContext) -> Result(Nil, actor.StartError) {
   // Initialize theme
   let colors = theme.load(context.config.theme)
 
@@ -42,7 +43,7 @@ pub fn start_with_context(context: AppContext) -> Result(Nil, shore.StartError) 
 
 /// Legacy start function (starts its own coordinator)
 /// Deprecated: Use start_with_context instead
-pub fn start(config: Config) -> Result(Nil, shore.StartError) {
+pub fn start(config: Config) -> Result(Nil, actor.StartError) {
   // Initialize theme
   let colors = theme.load(config.theme)
 

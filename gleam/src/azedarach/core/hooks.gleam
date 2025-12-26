@@ -5,8 +5,6 @@
 //
 // This module mirrors the TypeScript src/core/hooks.ts implementation.
 
-import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/util/shell
 

@@ -59,7 +59,7 @@ pub type Priority {
 }
 
 pub type IssueType {
-  Task
+  TaskType
   Bug
   Epic
   Feature
@@ -73,7 +73,7 @@ pub fn status_to_string(status: Status) -> String {
     Open -> "open"
     InProgress -> "in_progress"
     Review -> "review"
-    Done -> "done"
+    Done -> "closed"
     Blocked -> "blocked"
   }
 }
@@ -158,7 +158,7 @@ pub fn compare_priority(a: Priority, b: Priority) -> Order {
 
 pub fn issue_type_to_string(t: IssueType) -> String {
   case t {
-    Task -> "task"
+    TaskType -> "task"
     Bug -> "bug"
     Epic -> "epic"
     Feature -> "feature"
@@ -168,18 +168,18 @@ pub fn issue_type_to_string(t: IssueType) -> String {
 
 pub fn issue_type_from_string(s: String) -> IssueType {
   case s {
-    "task" -> Task
+    "task" -> TaskType
     "bug" -> Bug
     "epic" -> Epic
     "feature" -> Feature
     "chore" -> Chore
-    _ -> Task
+    _ -> TaskType
   }
 }
 
 pub fn type_icon(t: IssueType) -> String {
   case t {
-    Task -> "T"
+    TaskType -> "T"
     Bug -> "B"
     Epic -> "E"
     Feature -> "F"
@@ -189,7 +189,7 @@ pub fn type_icon(t: IssueType) -> String {
 
 pub fn type_display(t: IssueType) -> String {
   case t {
-    Task -> "Task"
+    TaskType -> "Task"
     Bug -> "Bug"
     Epic -> "Epic"
     Feature -> "Feature"
@@ -233,15 +233,15 @@ pub fn get_children(task: Task) -> List(String) {
   task.dependents
   |> list.filter_map(fn(dep) {
     case dep.dep_type {
-      ParentChild -> option.Some(dep.id)
-      _ -> option.None
+      ParentChild -> Ok(dep.id)
+      _ -> Error(Nil)
     }
   })
 }
 
 /// Check if task is blocked
 pub fn is_blocked(task: Task) -> Bool {
-  task.status == Blocked || list.length(task.blockers) > 0
+  task.status == Blocked || task.blockers != []
 }
 
 /// Create an empty/default task for new bead creation
@@ -252,7 +252,7 @@ pub fn empty(id: String) -> Task {
     description: "",
     status: Open,
     priority: P2,
-    issue_type: Task,
+    issue_type: TaskType,
     parent_id: option.None,
     created_at: "",
     updated_at: "",

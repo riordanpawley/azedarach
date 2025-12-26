@@ -6,6 +6,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import azedarach/services/dev_server_state.{type DevServerState, type DevServerStatus}
 import azedarach/services/port_detector
 import azedarach/services/tmux
@@ -34,6 +35,8 @@ pub type MonitorState {
 
 /// Messages the monitor can receive
 pub type Msg {
+  /// Init message to set self reference and start polling
+  Init(Subject(Msg))
   /// Periodic poll tick
   Poll
   /// Stop the monitor gracefully
@@ -80,51 +83,31 @@ pub fn start(
   let poll_interval =
     option.unwrap(config.poll_interval_ms, default_poll_interval_ms)
 
-  // Create the actor with a two-phase init to capture self subject
-  let self_subject_ref = process.new_subject()
+  let initial_state =
+    MonitorState(
+      bead_id: config.bead_id,
+      server_name: config.server_name,
+      tmux_session: config.tmux_session,
+      window_name: config.window_name,
+      port: config.port,
+      poll_interval_ms: poll_interval,
+      last_status: dev_server_state.Starting,
+      port_pattern: config.port_pattern,
+      worktree_path: config.worktree_path,
+      started_at: Some(erlang_monotonic_time()),
+      port_detector: None,
+      self_subject: None,
+      coordinator: config.coordinator,
+    )
 
-  let result =
-    actor.start_spec(actor.Spec(
-      init: fn() {
-        // Wait briefly for self_subject to be sent back
-        let self_sub = case process.receive(self_subject_ref, 100) {
-          Ok(s) -> Some(s)
-          Error(_) -> None
-        }
-
-        let state =
-          MonitorState(
-            bead_id: config.bead_id,
-            server_name: config.server_name,
-            tmux_session: config.tmux_session,
-            window_name: config.window_name,
-            port: config.port,
-            poll_interval_ms: poll_interval,
-            last_status: dev_server_state.Starting,
-            port_pattern: config.port_pattern,
-            worktree_path: config.worktree_path,
-            started_at: Some(erlang_monotonic_time()),
-            port_detector: None,
-            self_subject: self_sub,
-            coordinator: config.coordinator,
-          )
-
-        // Schedule initial poll
-        schedule_poll(poll_interval)
-
-        actor.Ready(state, process.new_selector())
-      },
-      init_timeout: 5000,
-      loop: handle_message,
-    ))
-
-  // Send the self subject back to the actor
-  case result {
-    Ok(subject) -> process.send(self_subject_ref, subject)
-    Error(_) -> Nil
-  }
-
-  result
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) {
+    // Send Init message to set self reference and start polling
+    process.send(started.data, Init(started.data))
+    started.data
+  })
 }
 
 /// External bindings
@@ -142,8 +125,17 @@ pub fn refresh(subject: Subject(Msg)) -> Nil {
 }
 
 /// Main message handler
-fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState) {
+fn handle_message(
+  state: MonitorState,
+  msg: Msg,
+) -> actor.Next(MonitorState, Msg) {
   case msg {
+    Init(self) -> {
+      // Set self reference and start polling
+      let new_state = MonitorState(..state, self_subject: Some(self))
+      schedule_poll(self, state.poll_interval_ms)
+      actor.continue(new_state)
+    }
     Poll -> handle_poll(state)
     Refresh -> handle_poll(state)
     Stop -> {
@@ -152,7 +144,7 @@ fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState
         Some(detector) -> port_detector.stop(detector)
         None -> Nil
       }
-      actor.Stop(process.Normal)
+      actor.stop()
     }
     PortDetected(port) -> handle_port_detected(state, port)
     PortDetectionTimeout -> handle_port_timeout(state)
@@ -161,13 +153,13 @@ fn handle_message(msg: Msg, state: MonitorState) -> actor.Next(Msg, MonitorState
 }
 
 /// Handle poll tick - check window status
-fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
+fn handle_poll(state: MonitorState) -> actor.Next(MonitorState, Msg) {
   // Check if tmux session still exists
   case tmux.session_exists(state.tmux_session) {
     False -> {
       // Session gone, notify and stop
       notify_status_change(state, dev_server_state.Error("Session stopped"))
-      actor.Stop(process.Normal)
+      actor.stop()
     }
     True -> {
       // Check if window exists
@@ -179,7 +171,7 @@ fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
             False -> {
               // Window gone, server stopped
               notify_status_change(state, dev_server_state.Error("Stopped unexpectedly"))
-              actor.Stop(process.Normal)
+              actor.stop()
             }
             True -> {
               // Window exists - check if we need to start port detection
@@ -199,7 +191,10 @@ fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
                 _ -> state
               }
 
-              schedule_poll(state.poll_interval_ms)
+              case state.self_subject {
+                Some(self) -> schedule_poll(self, state.poll_interval_ms)
+                None -> Nil
+              }
               actor.continue(new_state)
             }
           }
@@ -211,7 +206,10 @@ fn handle_poll(state: MonitorState) -> actor.Next(Msg, MonitorState) {
             last_status: dev_server_state.Error("Tmux command failed"),
           )
           notify_status_change(new_state, dev_server_state.Error("Tmux command failed"))
-          schedule_poll(state.poll_interval_ms)
+          case state.self_subject {
+            Some(self) -> schedule_poll(self, state.poll_interval_ms)
+            None -> Nil
+          }
           actor.continue(new_state)
         }
       }
@@ -233,7 +231,7 @@ fn start_port_detection(state: MonitorState) -> MonitorState {
       let callback = process.new_subject()
 
       // Forward callback messages to self
-      process.start(fn() { forward_port_detection(callback, self) }, True)
+      let _ = process.spawn(fn() { forward_port_detection(callback, self) })
 
       // Start the port detector
       let target = state.tmux_session <> ":" <> state.window_name
@@ -287,7 +285,10 @@ fn forward_port_detection(
 }
 
 /// Handle port detected
-fn handle_port_detected(state: MonitorState, port: Int) -> actor.Next(Msg, MonitorState) {
+fn handle_port_detected(
+  state: MonitorState,
+  port: Int,
+) -> actor.Next(MonitorState, Msg) {
   let new_state = MonitorState(
     ..state,
     port: Some(port),
@@ -298,14 +299,17 @@ fn handle_port_detected(state: MonitorState, port: Int) -> actor.Next(Msg, Monit
 }
 
 /// Handle port detection timeout
-fn handle_port_timeout(state: MonitorState) -> actor.Next(Msg, MonitorState) {
+fn handle_port_timeout(state: MonitorState) -> actor.Next(MonitorState, Msg) {
   // Keep running without port - not an error, just couldn't detect
   let new_state = MonitorState(..state, port_detector: None)
   actor.continue(new_state)
 }
 
 /// Handle port detection failed
-fn handle_port_failed(state: MonitorState, _reason: String) -> actor.Next(Msg, MonitorState) {
+fn handle_port_failed(
+  state: MonitorState,
+  _reason: String,
+) -> actor.Next(MonitorState, Msg) {
   // Keep running without port
   let new_state = MonitorState(..state, port_detector: None)
   actor.continue(new_state)
@@ -345,15 +349,13 @@ fn notify_status_change(state: MonitorState, new_status: DevServerStatus) -> Nil
   )
 }
 
-/// Schedule next poll tick
-fn schedule_poll(interval_ms: Int) -> Nil {
-  process.start(
-    fn() {
+/// Schedule next poll tick by spawning a process that sends Poll after delay
+fn schedule_poll(self: Subject(Msg), interval_ms: Int) -> Nil {
+  let _ =
+    process.spawn(fn() {
       process.sleep(interval_ms)
-      Nil
-    },
-    True,
-  )
+      process.send(self, Poll)
+    })
   Nil
 }
 

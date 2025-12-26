@@ -4,7 +4,6 @@
 // Integrates with OTP supervision tree for session/server monitors
 
 import gleam/dict.{type Dict}
-import gleam/erlang
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/list
@@ -12,9 +11,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
-import azedarach/config.{type Config}
+// Erlang FFI for unique integer generation
+@external(erlang, "erlang", "unique_integer")
+fn unique_integer() -> Int
+import azedarach/config.{type Config, Local, Origin}
 import azedarach/domain/task.{type Task}
-import azedarach/domain/session.{type SessionState, SessionState}
+import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
 import azedarach/services/beads
 import azedarach/services/bead_editor
@@ -84,6 +86,7 @@ pub type Msg {
   UpdateFromMain(id: String)
   MergeToMain(id: String)
   CreatePR(id: String)
+  CompleteSession(id: String)
   DeleteCleanup(id: String)
   // Images
   PasteImage(id: String)
@@ -115,36 +118,46 @@ pub type ToastLevel {
   Info
   Success
   Warning
-  Error
+  ErrorLevel
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Get project path from state, falling back to "." if no project is selected
+fn get_project_path(state: CoordinatorState) -> String {
+  case state.current_project {
+    Some(proj) -> proj.path
+    None -> "."
+  }
 }
 
 // Start the coordinator
 pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      // Start port allocator
-      let allocator = case port_allocator.start() {
-        Ok(a) -> Some(a)
-        Error(_) -> None
-      }
+  // Start port allocator
+  let allocator = case port_allocator.start() {
+    Ok(a) -> Some(a)
+    Error(_) -> None
+  }
 
-      let state =
-        CoordinatorState(
-          config: config,
-          tasks: [],
-          sessions: dict.new(),
-          dev_servers: dict.new(),
-          port_allocator: allocator,
-          ui_subject: None,
-          current_project: None,
-          available_projects: [],
-          self_subject: None,
-        )
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  let initial_state =
+    CoordinatorState(
+      config: config,
+      tasks: [],
+      sessions: dict.new(),
+      dev_servers: dict.new(),
+      port_allocator: allocator,
+      ui_subject: None,
+      current_project: None,
+      available_projects: [],
+      self_subject: None,
+    )
+
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
 }
 
 /// Initialize the coordinator after creation
@@ -160,9 +173,9 @@ pub fn send(subject: Subject(Msg), msg: Msg) -> Nil {
 
 // Message handler
 fn handle_message(
-  msg: Msg,
   state: CoordinatorState,
-) -> actor.Next(Msg, CoordinatorState) {
+  msg: Msg,
+) -> actor.Next(CoordinatorState, Msg) {
   case msg {
     Subscribe(ui) -> {
       actor.continue(CoordinatorState(..state, ui_subject: Some(ui)))
@@ -233,7 +246,7 @@ fn handle_message(
           ))
         }
         Error(e) -> {
-          notify_ui(state, Toast(project_service.error_to_string(e), Error))
+          notify_ui(state, Toast(project_service.error_to_string(e), ErrorLevel))
           actor.continue(state)
         }
       }
@@ -256,7 +269,7 @@ fn handle_message(
               spawn_beads_load_for_project(state, proj)
             }
             Error(e) -> {
-              notify_ui(state, Toast(project_service.error_to_string(e), Error))
+              notify_ui(state, Toast(project_service.error_to_string(e), ErrorLevel))
             }
           }
         }
@@ -268,7 +281,7 @@ fn handle_message(
     RefreshBeads -> {
       // Async load beads
       let self = process.new_subject()
-      spawn_beads_load(self, state.config)
+      spawn_beads_load(self, get_project_path(state), state.config)
       actor.continue(state)
     }
 
@@ -279,7 +292,7 @@ fn handle_message(
           actor.continue(CoordinatorState(..state, tasks: tasks))
         }
         Error(e) -> {
-          notify_ui(state, Toast(beads.error_to_string(e), Error))
+          notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           actor.continue(state)
         }
       }
@@ -299,68 +312,73 @@ fn handle_message(
             issue_type: Some(issue_type),
           )
       }
-      case beads.create(options, state.config) {
+      let project_path = get_project_path(state)
+      case beads.create(options, project_path, state.config) {
         Ok(id) -> {
           notify_ui(state, Toast("Bead created: " <> id, Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     CreateBeadViaEditor(issue_type) -> {
+      let project_path = get_project_path(state)
       case bead_editor.create_bead(issue_type, state.config) {
         Ok(parsed) -> {
-          case bead_editor.create_from_parsed(parsed, issue_type, state.config) {
+          case bead_editor.create_from_parsed(parsed, issue_type, project_path, state.config) {
             Ok(id) -> {
               notify_ui(state, Toast("Bead created: " <> id, Success))
-              spawn_beads_load(process.new_subject(), state.config)
+              spawn_beads_load(process.new_subject(), project_path, state.config)
             }
             Error(e) ->
-              notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+              notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     EditBead(id) -> {
-      case bead_editor.edit_bead(id, state.config) {
+      let project_path = get_project_path(state)
+      case bead_editor.edit_bead(id, project_path, state.config) {
         Ok(parsed) -> {
-          case bead_editor.apply_changes(id, parsed, state.config) {
+          case bead_editor.apply_changes(id, parsed, project_path, state.config) {
             Ok(_) -> {
               notify_ui(state, Toast("Bead updated", Success))
-              spawn_beads_load(process.new_subject(), state.config)
+              spawn_beads_load(process.new_subject(), project_path, state.config)
             }
             Error(e) ->
-              notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+              notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     DeleteBead(id) -> {
-      case beads.delete(id, state.config) {
+      let project_path = get_project_path(state)
+      case beads.delete(id, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Bead deleted", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     MoveTask(id, direction) -> {
+      let project_path = get_project_path(state)
       case list.find(state.tasks, fn(t) { t.id == id }) {
         Ok(found_task) -> {
           let new_status = next_status(found_task.status, direction)
-          case beads.update_status(id, new_status, state.config) {
-            Ok(_) -> spawn_beads_load(process.new_subject(), state.config)
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+          case beads.update_status(id, new_status, project_path, state.config) {
+            Ok(_) -> spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
         Error(_) -> Nil
@@ -369,17 +387,19 @@ fn handle_message(
     }
 
     SearchBeads(pattern) -> {
-      case beads.search(pattern, state.config) {
+      let project_path = get_project_path(state)
+      case beads.search(pattern, project_path, state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     GetReadyBeads -> {
-      case beads.ready(state.config) {
+      let project_path = get_project_path(state)
+      case beads.ready(project_path, state.config) {
         Ok(results) -> notify_ui(state, SearchResults(results))
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -401,7 +421,10 @@ fn handle_message(
                 _ -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.attach(tmux_name)
+                  case tmux.attach(tmux_name) {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to attach: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
               }
             }
@@ -418,21 +441,31 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.send_keys(tmux_name, "C-c")
-              case session_state.worktree_path {
-                Some(path) -> {
-                  let _ = git.wip_commit(path)
-                  Nil
+              case tmux.send_keys(tmux_name, "C-c") {
+                Ok(_) -> {
+                  case session_state.worktree_path {
+                    Some(path) -> {
+                      // WIP commit is best-effort - don't fail pause if it fails
+                      case git.wip_commit(path) {
+                        Ok(_) -> Nil
+                        Error(_) -> Nil
+                      }
+                    }
+                    None -> Nil
+                  }
+                  let new_session =
+                    session.SessionState(..session_state, state: session.Paused)
+                  let new_sessions = dict.insert(state.sessions, id, new_session)
+                  notify_ui(state, SessionStateChanged(id, new_session))
+                  actor.continue(
+                    CoordinatorState(..state, sessions: new_sessions),
+                  )
                 }
-                None -> Nil
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to pause: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
               }
-              let new_session =
-                session.SessionState(..session_state, state: session.Paused)
-              let new_sessions = dict.insert(state.sessions, id, new_session)
-              notify_ui(state, SessionStateChanged(id, new_session))
-              actor.continue(
-                CoordinatorState(..state, sessions: new_sessions),
-              )
             }
             None -> {
               notify_ui(state, Toast("No tmux session", Warning))
@@ -452,15 +485,29 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.send_keys(tmux_name, "claude")
-              tmux.send_keys(tmux_name, "Enter")
-              let new_session =
-                session.SessionState(..session_state, state: session.Busy)
-              let new_sessions = dict.insert(state.sessions, id, new_session)
-              notify_ui(state, SessionStateChanged(id, new_session))
-              actor.continue(
-                CoordinatorState(..state, sessions: new_sessions),
-              )
+              case tmux.send_keys(tmux_name, "claude") {
+                Ok(_) -> {
+                  case tmux.send_keys(tmux_name, "Enter") {
+                    Ok(_) -> {
+                      let new_session =
+                        session.SessionState(..session_state, state: session.Busy)
+                      let new_sessions = dict.insert(state.sessions, id, new_session)
+                      notify_ui(state, SessionStateChanged(id, new_session))
+                      actor.continue(
+                        CoordinatorState(..state, sessions: new_sessions),
+                      )
+                    }
+                    Error(e) -> {
+                      notify_ui(state, Toast("Failed to send Enter: " <> tmux.error_to_string(e), ErrorLevel))
+                      actor.continue(state)
+                    }
+                  }
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to resume: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
             }
             None -> {
               notify_ui(state, Toast("No tmux session", Warning))
@@ -480,23 +527,30 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.tmux_session {
             Some(tmux_name) -> {
-              tmux.kill_session(tmux_name)
-              let new_sessions = dict.delete(state.sessions, id)
-              notify_ui(
-                state,
-                SessionStateChanged(
-                  id,
-                  session.SessionState(
-                    bead_id: id,
-                    state: session.Idle,
-                    started_at: None,
-                    last_output: None,
-                    worktree_path: session_state.worktree_path,
-                    tmux_session: None,
-                  ),
-                ),
-              )
-              actor.continue(CoordinatorState(..state, sessions: new_sessions))
+              case tmux.kill_session(tmux_name) {
+                Ok(_) -> {
+                  let new_sessions = dict.delete(state.sessions, id)
+                  notify_ui(
+                    state,
+                    SessionStateChanged(
+                      id,
+                      session.SessionState(
+                        bead_id: id,
+                        state: session.Idle,
+                        started_at: None,
+                        last_output: None,
+                        worktree_path: session_state.worktree_path,
+                        tmux_session: None,
+                      ),
+                    ),
+                  )
+                  actor.continue(CoordinatorState(..state, sessions: new_sessions))
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to stop: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
             }
             None -> actor.continue(state)
           }
@@ -515,21 +569,32 @@ fn handle_message(
                   notify_ui(state, Toast("Merged main", Success))
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.attach(tmux_name)
+                  case tmux.attach(tmux_name) {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to attach after merge: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.new_window(tmux_name, "merge")
-                  let prompt =
-                    "There are merge conflicts in: "
-                    <> string.join(files, ", ")
-                    <> ". Please resolve these conflicts, then stage and commit the resolution."
-                  tmux.send_keys(
-                    tmux_name <> ":merge",
-                    "claude -p \"" <> prompt <> "\"",
-                  )
-                  tmux.send_keys(tmux_name <> ":merge", "Enter")
+                  case tmux.new_window(tmux_name, "merge") {
+                    Ok(_) -> {
+                      let prompt =
+                        "There are merge conflicts in: "
+                        <> string.join(files, ", ")
+                        <> ". Please resolve these conflicts, then stage and commit the resolution."
+                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                        Ok(_) -> {
+                          case tmux.send_keys(tmux_name <> ":merge", "Enter") {
+                            Ok(_) -> Nil
+                            Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                          }
+                        }
+                        Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                      }
+                    }
+                    Error(e) -> notify_ui(state, Toast("Failed to create merge window: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                   notify_ui(
                     state,
                     Toast(
@@ -538,7 +603,7 @@ fn handle_message(
                     ),
                   )
                 }
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -556,7 +621,10 @@ fn handle_message(
           case dev_server_state.is_running(ds) {
             True -> {
               let window = ds.window_name
-              tmux.kill_window(id <> "-az", window)
+              case tmux.kill_window(id <> "-az", window) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to stop dev server window: " <> tmux.error_to_string(e), Warning))
+              }
               // Release port from allocator
               case state.port_allocator, ds.port {
                 Some(allocator), Some(_) ->
@@ -584,7 +652,12 @@ fn handle_message(
     ViewDevServer(id, server_name) -> {
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
-        Ok(ds) -> tmux.select_window(id <> "-az", ds.window_name)
+        Ok(ds) -> {
+          case tmux.select_window(id <> "-az", ds.window_name) {
+            Ok(_) -> Nil
+            Error(e) -> notify_ui(state, Toast("Failed to select window: " <> tmux.error_to_string(e), ErrorLevel))
+          }
+        }
         Error(_) -> notify_ui(state, Toast("Dev server not running", Warning))
       }
       actor.continue(state)
@@ -594,7 +667,10 @@ fn handle_message(
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
-          tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c")
+          case tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c") {
+            Ok(_) -> Nil
+            Error(e) -> notify_ui(state, Toast("Failed to stop dev server: " <> tmux.error_to_string(e), Warning))
+          }
           process.sleep(100)
           case
             list.find(state.config.dev_server.servers, fn(s) {
@@ -602,8 +678,15 @@ fn handle_message(
             })
           {
             Ok(server) -> {
-              tmux.send_keys(id <> "-az:" <> ds.window_name, server.command)
-              tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter")
+              case tmux.send_keys(id <> "-az:" <> ds.window_name, server.command) {
+                Ok(_) -> {
+                  case tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter") {
+                    Ok(_) -> Nil
+                    Error(e) -> notify_ui(state, Toast("Failed to restart dev server: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
+                }
+                Error(e) -> notify_ui(state, Toast("Failed to restart dev server: " <> tmux.error_to_string(e), ErrorLevel))
+              }
             }
             Error(_) -> Nil
           }
@@ -622,21 +705,25 @@ fn handle_message(
                 Ok(_) -> notify_ui(state, Toast("Updated from main", Success))
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name = id <> "-az"
-                  tmux.new_window(tmux_name, "merge")
-                  let prompt =
-                    "There are merge conflicts. Please resolve: "
-                    <> string.join(files, ", ")
-                  tmux.send_keys(
-                    tmux_name <> ":merge",
-                    "claude -p \"" <> prompt <> "\"",
-                  )
-                  tmux.send_keys(tmux_name <> ":merge", "Enter")
-                  notify_ui(
-                    state,
-                    Toast("Conflicts detected. Claude resolving.", Warning),
-                  )
+                  case tmux.new_window(tmux_name, "merge") {
+                    Ok(_) -> {
+                      let prompt =
+                        "There are merge conflicts. Please resolve: "
+                        <> string.join(files, ", ")
+                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                        Ok(_) -> {
+                          case tmux.send_keys(tmux_name <> ":merge", "Enter") {
+                            Ok(_) -> notify_ui(state, Toast("Conflicts detected. Claude resolving.", Warning))
+                            Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                          }
+                        }
+                        Error(e) -> notify_ui(state, Toast("Failed to start resolver: " <> tmux.error_to_string(e), ErrorLevel))
+                      }
+                    }
+                    Error(e) -> notify_ui(state, Toast("Failed to create merge window: " <> tmux.error_to_string(e), ErrorLevel))
+                  }
                 }
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -654,7 +741,7 @@ fn handle_message(
             Some(path) -> {
               case git.merge_to_main(path, state.config) {
                 Ok(_) -> notify_ui(state, Toast("Merged to main", Success))
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -672,7 +759,40 @@ fn handle_message(
             Some(path) -> {
               case git.create_pr(path, id, state.config) {
                 Ok(url) -> notify_ui(state, Toast("PR created: " <> url, Success))
-                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), Error))
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
+              }
+            }
+            None -> notify_ui(state, Toast("No worktree", Warning))
+          }
+        }
+        Error(_) -> notify_ui(state, Toast("No session", Warning))
+      }
+      actor.continue(state)
+    }
+
+    // Complete session based on workflow mode:
+    // - Local mode: merge directly to base branch
+    // - Origin mode: create PR
+    CompleteSession(id) -> {
+      case dict.get(state.sessions, id) {
+        Ok(session_state) -> {
+          case session_state.worktree_path {
+            Some(path) -> {
+              case state.config.git.workflow_mode {
+                Local -> {
+                  // Local mode: merge directly to main
+                  case git.merge_to_main(path, state.config) {
+                    Ok(_) -> notify_ui(state, Toast("Merged to " <> state.config.git.base_branch, Success))
+                    Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
+                  }
+                }
+                Origin -> {
+                  // Origin mode: create PR
+                  case git.create_pr(path, id, state.config) {
+                    Ok(url) -> notify_ui(state, Toast("PR created: " <> url, Success))
+                    Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
+                  }
+                }
               }
             }
             None -> notify_ui(state, Toast("No worktree", Warning))
@@ -684,17 +804,28 @@ fn handle_message(
     }
 
     DeleteCleanup(id) -> {
+      let project_path = get_project_path(state)
       case dict.get(state.sessions, id) {
         Ok(session_state) -> {
           case session_state.tmux_session {
-            Some(tmux_name) -> tmux.kill_session(tmux_name)
+            Some(tmux_name) -> {
+              case tmux.kill_session(tmux_name) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to kill session: " <> tmux.error_to_string(e), Warning))
+              }
+            }
             None -> Nil
           }
           case session_state.worktree_path {
             Some(path) -> {
-              let _ = worktree.delete(path)
-              let _ = git.delete_branch(id, state.config)
-              Nil
+              case worktree.delete(path, project_path) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to delete worktree: " <> worktree.error_to_string(e), Warning))
+              }
+              case git.delete_branch(id, state.config, project_path) {
+                Ok(_) -> Nil
+                Error(e) -> notify_ui(state, Toast("Failed to delete branch: " <> git.error_to_string(e), Warning))
+              }
             }
             None -> Nil
           }
@@ -710,54 +841,58 @@ fn handle_message(
     }
 
     PasteImage(id) -> {
+      let project_path = get_project_path(state)
       case image.attach_from_clipboard(id) {
         Ok(attachment) -> {
           let link = image.build_notes_link(id, attachment)
-          case beads.append_notes(id, link, state.config) {
+          case beads.append_notes(id, link, project_path, state.config) {
             Ok(_) ->
               notify_ui(
                 state,
                 Toast("Image attached: " <> attachment.filename, Success),
               )
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     DeleteImage(id, attachment_id) -> {
+      let project_path = get_project_path(state)
       case image.remove(id, attachment_id) {
         Ok(attachment) -> {
-          case remove_image_from_notes(id, attachment.filename, state.config) {
+          case remove_image_from_notes(id, attachment.filename, project_path, state.config) {
             Ok(_) -> notify_ui(state, Toast("Image deleted", Success))
-            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
-        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     AddDependency(id, depends_on, dep_type) -> {
-      case beads.add_dependency(id, depends_on, dep_type, state.config) {
+      let project_path = get_project_path(state)
+      case beads.add_dependency(id, depends_on, dep_type, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency added", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
 
     RemoveDependency(id, depends_on) -> {
-      case beads.remove_dependency(id, depends_on, state.config) {
+      let project_path = get_project_path(state)
+      case beads.remove_dependency(id, depends_on, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency removed", Success))
-          spawn_beads_load(process.new_subject(), state.config)
+          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
         }
-        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), Error))
+        Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
     }
@@ -786,14 +921,11 @@ fn notify_ui(state: CoordinatorState, msg: UiMsg) -> Nil {
   }
 }
 
-fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
-  process.start(
-    fn() {
-      let result = beads.list_all(config)
-      process.send(reply_to, BeadsLoaded(result))
-    },
-    True,
-  )
+fn spawn_beads_load(reply_to: Subject(Msg), project_path: String, config: Config) -> Nil {
+  let _ = process.spawn(fn() {
+    let result = beads.list_all(project_path, config)
+    process.send(reply_to, BeadsLoaded(result))
+  })
   Nil
 }
 
@@ -801,14 +933,11 @@ fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
 fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
   case state.self_subject {
     Some(reply_to) -> {
-      process.start(
-        fn() {
-          // Run bd list in project directory
-          let result = beads.list_all_in_dir(proj.path, state.config)
-          process.send(reply_to, BeadsLoaded(result))
-        },
-        True,
-      )
+      let _ = process.spawn(fn() {
+        // Run bd list in project directory
+        let result = beads.list_all(proj.path, state.config)
+        process.send(reply_to, BeadsLoaded(result))
+      })
       Nil
     }
     None -> Nil
@@ -817,42 +946,33 @@ fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
 
 /// Discover projects async
 fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      let projects = project_service.discover_all()
-      process.send(reply_to, ProjectsDiscovered(projects))
-    },
-    True,
-  )
+  let _ = process.spawn(fn() {
+    let projects = project_service.discover_all()
+    process.send(reply_to, ProjectsDiscovered(projects))
+  })
   Nil
 }
 
 /// Select initial project async
 fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      let result = project_service.select_initial()
-      process.send(reply_to, InitialProjectSelected(result))
-    },
-    True,
-  )
+  let _ = process.spawn(fn() {
+    let result = project_service.select_initial()
+    process.send(reply_to, InitialProjectSelected(result))
+  })
   Nil
 }
 
 /// Schedule periodic refresh tick
 fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
-  process.start(
-    fn() {
-      process.sleep(refresh_interval_ms)
-      process.send(reply_to, PeriodicTick)
-    },
-    True,
-  )
+  let _ = process.spawn(fn() {
+    process.sleep(refresh_interval_ms)
+    process.send(reply_to, PeriodicTick)
+  })
   Nil
 }
 
 fn next_status(current: task.Status, direction: Int) -> task.Status {
-  let statuses = [task.Open, task.InProgress, task.Review, task.Done]
+  let statuses = [task.Open, task.InProgress, task.Blocked, task.Done]
   let current_idx =
     list.index_map(statuses, fn(s, i) { #(s, i) })
     |> list.find(fn(pair) { pair.0 == current })
@@ -860,7 +980,7 @@ fn next_status(current: task.Status, direction: Int) -> task.Status {
     |> result.unwrap(0)
 
   let new_idx = int.clamp(current_idx + direction, 0, 3)
-  case list.at(statuses, new_idx) {
+  case statuses |> list.drop(new_idx) |> list.first {
     Ok(s) -> s
     Error(_) -> current
   }
@@ -872,58 +992,111 @@ fn handle_start_session(
   with_work: Bool,
   yolo: Bool,
 ) -> CoordinatorState {
-  let worktree_result = worktree.ensure(id, state.config)
+  let project_path = get_project_path(state)
+  let worktree_result = worktree.ensure(id, state.config, project_path)
   case worktree_result {
     Ok(worktree_path) -> {
       let tmux_name = id <> "-az"
 
       case tmux.session_exists(tmux_name) {
         True -> {
-          tmux.attach(tmux_name)
-          state
+          case tmux.attach(tmux_name) {
+            Ok(_) -> state
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to attach: " <> tmux.error_to_string(e), ErrorLevel))
+              state
+            }
+          }
         }
         False -> {
-          tmux.new_session(tmux_name, worktree_path)
+          case tmux.new_session(tmux_name, worktree_path) {
+            Ok(_) -> {
+              // Run init commands - warn on failure but continue
+              run_init_commands(tmux_name, state.config.worktree.init_commands, state)
 
-          run_init_commands(tmux_name, state.config.worktree.init_commands)
-          tmux.set_option(tmux_name, "@az_init_done", "1")
+              // Set init done marker - warn on failure but continue
+              case tmux.set_option(tmux_name, "@az_init_done", "1") {
+                Ok(_) -> Nil
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to set init marker: " <> tmux.error_to_string(e), Warning))
+                }
+              }
 
-          list.each(state.config.session.background_tasks, fn(cmd) {
-            let window_name =
-              "task-" <> int.to_string(erlang.unique_integer([positive]))
-            tmux.new_window(tmux_name, window_name)
-            tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-            tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
-          })
+              // Start background tasks - warn on failure but continue
+              list.each(state.config.session.background_tasks, fn(cmd) {
+                let window_name =
+                  "task-" <> int.to_string(int.absolute_value(unique_integer()))
+                case tmux.new_window(tmux_name, window_name) {
+                  Ok(_) -> {
+                    case tmux.send_keys(tmux_name <> ":" <> window_name, cmd) {
+                      Ok(_) -> {
+                        case tmux.send_keys(tmux_name <> ":" <> window_name, "Enter") {
+                          Ok(_) -> Nil
+                          Error(e) -> {
+                            notify_ui(state, Toast("Background task Enter failed: " <> tmux.error_to_string(e), Warning))
+                          }
+                        }
+                      }
+                      Error(e) -> {
+                        notify_ui(state, Toast("Background task failed: " <> tmux.error_to_string(e), Warning))
+                      }
+                    }
+                  }
+                  Error(e) -> {
+                    notify_ui(state, Toast("Failed to create task window: " <> tmux.error_to_string(e), Warning))
+                  }
+                }
+              })
 
-          let claude_cmd = case with_work, yolo {
-            True, True -> build_start_work_command(id, state, True)
-            True, False -> build_start_work_command(id, state, False)
-            False, _ -> "claude"
+              let claude_cmd = case with_work, yolo {
+                True, True -> build_start_work_command(id, state, True)
+                True, False -> build_start_work_command(id, state, False)
+                False, _ -> "claude"
+              }
+
+              // Start Claude - this is critical
+              case tmux.send_keys(tmux_name <> ":main", claude_cmd) {
+                Ok(_) -> {
+                  case tmux.send_keys(tmux_name <> ":main", "Enter") {
+                    Ok(_) -> {
+                      let session_state =
+                        session.SessionState(
+                          bead_id: id,
+                          state: session.Busy,
+                          started_at: Some(now_iso()),
+                          last_output: None,
+                          worktree_path: Some(worktree_path),
+                          tmux_session: Some(tmux_name),
+                        )
+
+                      let new_sessions = dict.insert(state.sessions, id, session_state)
+                      notify_ui(state, SessionStateChanged(id, session_state))
+                      notify_ui(state, Toast("Session started", Success))
+
+                      CoordinatorState(..state, sessions: new_sessions)
+                    }
+                    Error(e) -> {
+                      notify_ui(state, Toast("Failed to start Claude: " <> tmux.error_to_string(e), ErrorLevel))
+                      state
+                    }
+                  }
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to start Claude: " <> tmux.error_to_string(e), ErrorLevel))
+                  state
+                }
+              }
+            }
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to create session: " <> tmux.error_to_string(e), ErrorLevel))
+              state
+            }
           }
-          tmux.send_keys(tmux_name <> ":main", claude_cmd)
-          tmux.send_keys(tmux_name <> ":main", "Enter")
-
-          let session_state =
-            session.SessionState(
-              bead_id: id,
-              state: session.Busy,
-              started_at: Some(now_iso()),
-              last_output: None,
-              worktree_path: Some(worktree_path),
-              tmux_session: Some(tmux_name),
-            )
-
-          let new_sessions = dict.insert(state.sessions, id, session_state)
-          notify_ui(state, SessionStateChanged(id, session_state))
-          notify_ui(state, Toast("Session started", Success))
-
-          CoordinatorState(..state, sessions: new_sessions)
         }
       }
     }
     Error(e) -> {
-      notify_ui(state, Toast(worktree.error_to_string(e), Error))
+      notify_ui(state, Toast(worktree.error_to_string(e), ErrorLevel))
       state
     }
   }
@@ -940,7 +1113,7 @@ fn start_dev_server(
   state: CoordinatorState,
   id: String,
   server_name: String,
-) -> actor.Next(Msg, CoordinatorState) {
+) -> actor.Next(CoordinatorState, Msg) {
   case
     list.find(state.config.dev_server.servers, fn(s) { s.name == server_name })
   {
@@ -959,43 +1132,61 @@ fn start_dev_server(
         None -> None
       }
 
-      tmux.new_window(tmux_name, window_name)
+      case tmux.new_window(tmux_name, window_name) {
+        Ok(_) -> {
+          // Allocate port using allocator (with conflict resolution)
+          let base_port = get_server_base_port(server)
+          let port = case state.port_allocator {
+            Some(allocator) -> port_allocator.allocate(allocator, base_port, key)
+            None -> base_port
+          }
 
-      // Allocate port using allocator (with conflict resolution)
-      let base_port = get_server_base_port(server)
-      let port = case state.port_allocator {
-        Some(allocator) -> port_allocator.allocate(allocator, base_port, key)
-        None -> base_port
+          // Build env string from all port configs
+          let env_str = build_port_env_string(server.ports, port)
+          let cmd = env_str <> " " <> server.command
+          case tmux.send_keys(tmux_name <> ":" <> window_name, cmd) {
+            Ok(_) -> {
+              case tmux.send_keys(tmux_name <> ":" <> window_name, "Enter") {
+                Ok(_) -> {
+                  let ds =
+                    DevServerState(
+                      name: server_name,
+                      status: dev_server_state.Starting,
+                      port: Some(port),
+                      window_name: window_name,
+                      tmux_session: Some(tmux_name),
+                      worktree_path: worktree_path,
+                      started_at: Some(erlang_monotonic_time()),
+                      error: None,
+                    )
+                  let new_servers = dict.insert(state.dev_servers, key, ds)
+                  notify_ui(state, DevServerStateChanged(key, ds))
+                  notify_ui(
+                    state,
+                    Toast("Dev server started on port " <> int.to_string(port), Success),
+                  )
+                  actor.continue(CoordinatorState(..state, dev_servers: new_servers))
+                }
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to start dev server: " <> tmux.error_to_string(e), ErrorLevel))
+                  actor.continue(state)
+                }
+              }
+            }
+            Error(e) -> {
+              notify_ui(state, Toast("Failed to start dev server: " <> tmux.error_to_string(e), ErrorLevel))
+              actor.continue(state)
+            }
+          }
+        }
+        Error(e) -> {
+          notify_ui(state, Toast("Failed to create dev server window: " <> tmux.error_to_string(e), ErrorLevel))
+          actor.continue(state)
+        }
       }
-
-      // Build env string from all port configs
-      let env_str = build_port_env_string(server.ports, port)
-      let cmd = env_str <> " " <> server.command
-      tmux.send_keys(tmux_name <> ":" <> window_name, cmd)
-      tmux.send_keys(tmux_name <> ":" <> window_name, "Enter")
-
-      let ds =
-        DevServerState(
-          name: server_name,
-          status: dev_server_state.Starting,
-          port: Some(port),
-          window_name: window_name,
-          tmux_session: Some(tmux_name),
-          worktree_path: worktree_path,
-          started_at: Some(erlang_monotonic_time()),
-          error: None,
-        )
-      let new_servers = dict.insert(state.dev_servers, key, ds)
-      notify_ui(state, DevServerStateChanged(key, ds))
-      notify_ui(
-        state,
-        Toast("Dev server started on port " <> int.to_string(port), Success),
-      )
-
-      actor.continue(CoordinatorState(..state, dev_servers: new_servers))
     }
     Error(_) -> {
-      notify_ui(state, Toast("Server config not found", Error))
+      notify_ui(state, Toast("Server config not found", ErrorLevel))
       actor.continue(state)
     }
   }
@@ -1039,10 +1230,21 @@ fn get_parent_dir(path: String) -> String {
 @external(erlang, "erlang", "monotonic_time")
 fn erlang_monotonic_time() -> Int
 
-fn run_init_commands(tmux_name: String, commands: List(String)) -> Nil {
+fn run_init_commands(tmux_name: String, commands: List(String), state: CoordinatorState) -> Nil {
   list.each(commands, fn(cmd) {
-    tmux.send_keys(tmux_name, cmd)
-    tmux.send_keys(tmux_name, "Enter")
+    case tmux.send_keys(tmux_name, cmd) {
+      Ok(_) -> {
+        case tmux.send_keys(tmux_name, "Enter") {
+          Ok(_) -> Nil
+          Error(e) -> {
+            notify_ui(state, Toast("Init command Enter failed: " <> tmux.error_to_string(e), Warning))
+          }
+        }
+      }
+      Error(e) -> {
+        notify_ui(state, Toast("Init command failed (" <> cmd <> "): " <> tmux.error_to_string(e), Warning))
+      }
+    }
     process.sleep(1000)
   })
 }
@@ -1082,9 +1284,10 @@ fn now_iso() -> String {
 fn remove_image_from_notes(
   issue_id: String,
   filename: String,
+  project_path: String,
   config: Config,
 ) -> Result(Nil, beads.BeadsError) {
-  case beads.show(issue_id, config) {
+  case beads.show(issue_id, project_path, config) {
     Ok(t) -> {
       case t.notes {
         Some(notes) -> {
@@ -1097,7 +1300,7 @@ fn remove_image_from_notes(
             True -> Ok(Nil)
             False -> {
               let new_notes = string.join(filtered, "\n") |> string.trim
-              beads.update_notes(issue_id, new_notes, config)
+              beads.update_notes(issue_id, new_notes, project_path, config)
             }
           }
         }
