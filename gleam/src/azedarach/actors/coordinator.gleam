@@ -903,16 +903,18 @@ fn handle_start_session(
         False -> {
           case tmux.new_session(tmux_name, worktree_path) {
             Ok(_) -> {
-              // Run init commands (best-effort, don't fail session start)
-              run_init_commands(tmux_name, state.config.worktree.init_commands)
+              // Run init commands - warn on failure but continue
+              run_init_commands(tmux_name, state.config.worktree.init_commands, state)
 
-              // Set init done marker (best-effort)
+              // Set init done marker - warn on failure but continue
               case tmux.set_option(tmux_name, "@az_init_done", "1") {
                 Ok(_) -> Nil
-                Error(_) -> Nil
+                Error(e) -> {
+                  notify_ui(state, Toast("Failed to set init marker: " <> tmux.error_to_string(e), Warning))
+                }
               }
 
-              // Start background tasks (best-effort, log failures)
+              // Start background tasks - warn on failure but continue
               list.each(state.config.session.background_tasks, fn(cmd) {
                 let window_name =
                   "task-" <> int.to_string(int.absolute_value(unique_integer()))
@@ -922,14 +924,18 @@ fn handle_start_session(
                       Ok(_) -> {
                         case tmux.send_keys(tmux_name <> ":" <> window_name, "Enter") {
                           Ok(_) -> Nil
-                          Error(_) -> Nil
+                          Error(e) -> {
+                            notify_ui(state, Toast("Background task Enter failed: " <> tmux.error_to_string(e), Warning))
+                          }
                         }
                       }
-                      Error(_) -> Nil
+                      Error(e) -> {
+                        notify_ui(state, Toast("Background task failed: " <> tmux.error_to_string(e), Warning))
+                      }
                     }
                   }
                   Error(e) -> {
-                    notify_ui(state, Toast("Failed to start background task: " <> tmux.error_to_string(e), Warning))
+                    notify_ui(state, Toast("Failed to create task window: " <> tmux.error_to_string(e), Warning))
                   }
                 }
               })
@@ -1063,17 +1069,20 @@ fn get_server_port(server: config.ServerDefinition) -> Int {
   }
 }
 
-fn run_init_commands(tmux_name: String, commands: List(String)) -> Nil {
+fn run_init_commands(tmux_name: String, commands: List(String), state: CoordinatorState) -> Nil {
   list.each(commands, fn(cmd) {
-    // Init commands are best-effort - don't fail session start if one fails
     case tmux.send_keys(tmux_name, cmd) {
       Ok(_) -> {
         case tmux.send_keys(tmux_name, "Enter") {
           Ok(_) -> Nil
-          Error(_) -> Nil
+          Error(e) -> {
+            notify_ui(state, Toast("Init command Enter failed: " <> tmux.error_to_string(e), Warning))
+          }
         }
       }
-      Error(_) -> Nil
+      Error(e) -> {
+        notify_ui(state, Toast("Init command failed (" <> cmd <> "): " <> tmux.error_to_string(e), Warning))
+      }
     }
     process.sleep(1000)
   })
