@@ -2,6 +2,7 @@
 
 import gleam/int
 import gleam/list
+import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/util/shell
@@ -36,30 +37,26 @@ fn shell_to_git_error(err: shell.ShellError) -> GitError {
 pub fn commits_behind_main(worktree: String, config: Config) -> Result(Int, GitError) {
   let base = config.git.base_branch
   let args = ["rev-list", "--count", "HEAD.." <> base]
-  case shell.run("git", args, worktree) {
-    Ok(output) -> {
-      case int.parse(string.trim(output)) {
-        Ok(n) -> Ok(n)
-        Error(_) -> Ok(0)
-      }
-    }
-    Error(e) -> Error(shell_to_git_error(e))
-  }
+  use output <- result.try(
+    shell.run("git", args, worktree)
+    |> result.map_error(shell_to_git_error),
+  )
+  int.parse(string.trim(output))
+  |> result.unwrap(0)
+  |> Ok
 }
 
 // Check how many commits ahead of main
 pub fn commits_ahead_main(worktree: String, config: Config) -> Result(Int, GitError) {
   let base = config.git.base_branch
   let args = ["rev-list", "--count", base <> "..HEAD"]
-  case shell.run("git", args, worktree) {
-    Ok(output) -> {
-      case int.parse(string.trim(output)) {
-        Ok(n) -> Ok(n)
-        Error(_) -> Ok(0)
-      }
-    }
-    Error(e) -> Error(shell_to_git_error(e))
-  }
+  use output <- result.try(
+    shell.run("git", args, worktree)
+    |> result.map_error(shell_to_git_error),
+  )
+  int.parse(string.trim(output))
+  |> result.unwrap(0)
+  |> Ok
 }
 
 // Check for merge conflicts (dry run)
@@ -153,22 +150,20 @@ pub fn merge_to_main(worktree: String, config: Config) -> Result(Nil, GitError) 
 // Create WIP commit
 pub fn wip_commit(worktree: String) -> Result(Nil, GitError) {
   // Stage all changes
-  case shell.run("git", ["add", "-A"], worktree) {
-    Ok(_) -> {
-      // Check if there's anything to commit
-      case shell.run("git", ["diff", "--cached", "--quiet"], worktree) {
-        Ok(_) -> Error(NothingToCommit)
-        // Exit 0 means no changes
-        Error(_) -> {
-          // There are changes, commit
-          case shell.run("git", ["commit", "-m", "wip: paused session"], worktree) {
-            Ok(_) -> Ok(Nil)
-            Error(e) -> Error(shell_to_git_error(e))
-          }
-        }
-      }
+  use _ <- result.try(
+    shell.run("git", ["add", "-A"], worktree)
+    |> result.map_error(shell_to_git_error),
+  )
+
+  // Check if there's anything to commit (exit 0 = no changes)
+  case shell.run("git", ["diff", "--cached", "--quiet"], worktree) {
+    Ok(_) -> Error(NothingToCommit)
+    Error(_) -> {
+      // There are changes, commit
+      shell.run("git", ["commit", "-m", "wip: paused session"], worktree)
+      |> result.map_error(shell_to_git_error)
+      |> result.replace(Nil)
     }
-    Error(e) -> Error(shell_to_git_error(e))
   }
 }
 
@@ -179,33 +174,25 @@ pub fn create_pr(
   config: Config,
 ) -> Result(String, GitError) {
   // Ensure changes are pushed
-  let push_result = case config.git.push_enabled {
+  use _ <- result.try(case config.git.push_enabled {
     True -> {
       let branch = config.git.branch_prefix <> bead_id
       shell.run("git", ["push", "-u", config.git.remote, branch], worktree)
+      |> result.map_error(shell_to_git_error)
     }
     False -> Ok("")
+  })
+
+  // Create PR
+  let draft_flag = case config.pr.auto_draft {
+    True -> ["--draft"]
+    False -> []
   }
+  let args = ["pr", "create", "--fill"] |> list.append(draft_flag)
 
-  case push_result {
-    Error(e) -> Error(shell_to_git_error(e))
-    Ok(_) -> {
-      // Create PR
-      let draft_flag = case config.pr.auto_draft {
-        True -> ["--draft"]
-        False -> []
-      }
-
-      let args =
-        ["pr", "create", "--fill"]
-        |> list.append(draft_flag)
-
-      case shell.run("gh", args, worktree) {
-        Ok(output) -> Ok(string.trim(output))
-        Error(e) -> Error(shell_to_git_error(e))
-      }
-    }
-  }
+  shell.run("gh", args, worktree)
+  |> result.map_error(shell_to_git_error)
+  |> result.map(string.trim)
 }
 
 // Delete branch (local and remote)
@@ -235,21 +222,17 @@ pub fn delete_branch(bead_id: String, config: Config) -> Result(Nil, GitError) {
 // Get diff (for viewing)
 pub fn diff(worktree: String, config: Config) -> Result(String, GitError) {
   let base = config.git.base_branch
-  case shell.run("git", ["diff", base <> "...HEAD"], worktree) {
-    Ok(output) -> Ok(output)
-    Error(e) -> Error(shell_to_git_error(e))
-  }
+  shell.run("git", ["diff", base <> "...HEAD"], worktree)
+  |> result.map_error(shell_to_git_error)
 }
 
 // Fetch from remote
 pub fn fetch(config: Config) -> Result(Nil, GitError) {
   case config.git.fetch_enabled {
-    True -> {
-      case shell.run("git", ["fetch", config.git.remote], ".") {
-        Ok(_) -> Ok(Nil)
-        Error(e) -> Error(shell_to_git_error(e))
-      }
-    }
+    True ->
+      shell.run("git", ["fetch", config.git.remote], ".")
+      |> result.map_error(shell_to_git_error)
+      |> result.replace(Nil)
     False -> Ok(Nil)
   }
 }
