@@ -910,7 +910,7 @@ fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
 }
 
 fn next_status(current: task.Status, direction: Int) -> task.Status {
-  let statuses = [task.Open, task.InProgress, task.Review, task.Done]
+  let statuses = [task.Open, task.InProgress, task.Blocked, task.Done]
   let current_idx =
     list.index_map(statuses, fn(s, i) { #(s, i) })
     |> list.find(fn(pair) { pair.0 == current })
