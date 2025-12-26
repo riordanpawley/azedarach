@@ -1,12 +1,11 @@
 // Beads service - bd CLI wrapper
 // Full implementation matching TypeScript BeadsClient
 
-import gleam/decode.{type Decoder}
+import gleam/dynamic/decode.{type Decoder}
 import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{
@@ -317,10 +316,10 @@ pub fn get_epic_children(
           case show(id, project_path, config) {
             Ok(child) ->
               case child.is_tombstone {
-                True -> None
-                False -> Some(child)
+                True -> Error(Nil)
+                False -> Ok(child)
               }
-            Error(_) -> None
+            Error(_) -> Error(Nil)
           }
         })
       Ok(children)
@@ -544,20 +543,20 @@ fn task_decoder() -> Decoder(Task) {
   use status <- decode.field("status", status_decoder())
   use created_at <- decode.field("created_at", decode.string)
   use updated_at <- decode.field("updated_at", decode.string)
-  use description <- decode.optional_field("description", decode.string, "")
-  use priority <- decode.optional_field("priority", priority_decoder(), task.P2)
-  use issue_type <- decode.optional_field("type", issue_type_decoder(), task.Task)
-  use parent_id <- decode.optional_field("parent_id", decode.optional(decode.string), None)
-  use design <- decode.optional_field("design", decode.optional(decode.string), None)
-  use notes <- decode.optional_field("notes", decode.optional(decode.string), None)
-  use acceptance <- decode.optional_field("acceptance", decode.optional(decode.string), None)
-  use assignee <- decode.optional_field("assignee", decode.optional(decode.string), None)
-  use labels <- decode.optional_field("labels", decode.list(decode.string), [])
-  use estimate <- decode.optional_field("estimate", decode.optional(decode.string), None)
-  use dependents <- decode.optional_field("dependents", decode.list(dependent_decoder()), [])
-  use blockers <- decode.optional_field("blockers", decode.list(decode.string), [])
-  use attachments <- decode.optional_field("attachments", decode.list(decode.string), [])
-  use is_tombstone <- decode.optional_field("tombstone", decode.bool, False)
+  use description <- decode.optional_field("description", "", decode.string)
+  use priority <- decode.optional_field("priority", task.P2, priority_decoder())
+  use issue_type <- decode.optional_field("type", task.TaskType, issue_type_decoder())
+  use parent_id <- decode.optional_field("parent_id", None, decode.optional(decode.string))
+  use design <- decode.optional_field("design", None, decode.optional(decode.string))
+  use notes <- decode.optional_field("notes", None, decode.optional(decode.string))
+  use acceptance <- decode.optional_field("acceptance", None, decode.optional(decode.string))
+  use assignee <- decode.optional_field("assignee", None, decode.optional(decode.string))
+  use labels <- decode.optional_field("labels", [], decode.list(decode.string))
+  use estimate <- decode.optional_field("estimate", None, decode.optional(decode.string))
+  use dependents <- decode.optional_field("dependents", [], decode.list(dependent_decoder()))
+  use blockers <- decode.optional_field("blockers", [], decode.list(decode.string))
+  use attachments <- decode.optional_field("attachments", [], decode.list(decode.string))
+  use is_tombstone <- decode.optional_field("tombstone", False, decode.bool)
 
   decode.success(Task(
     id:,

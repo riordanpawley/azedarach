@@ -6,7 +6,7 @@ import gleam/string
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
-  type Model, type Msg, type Mode, type Overlay, type InputState,
+  type Model, type Msg, type Overlay,
   Normal, Select,
 }
 
@@ -48,8 +48,12 @@ fn handle_input_key(event: KeyEvent) -> Option(Msg) {
     "escape" -> Some(model.InputCancel)
     "enter" | "return" -> Some(model.InputSubmit)
     "backspace" -> Some(model.InputBackspace)
-    key if is_printable(key) -> Some(model.InputChar(key))
-    _ -> None
+    key -> {
+      case is_printable(key) {
+        True -> Some(model.InputChar(key))
+        False -> None
+      }
+    }
   }
 }
 
@@ -90,12 +94,17 @@ fn handle_action_menu_key(event: KeyEvent) -> Option(Msg) {
     "!", _ -> Some(model.StartSessionYolo)
     "a", _ -> Some(model.AttachSession)
     "p", False -> Some(model.PauseSession)
-    "r", False -> Some(model.ResumeSession)
+    "p", True -> Some(model.CreatePR)
+    "r", False -> {
+      case has_modifier(event, Ctrl) {
+        True -> Some(model.RestartDevServer)
+        False -> Some(model.ResumeSession)
+      }
+    }
     "x", _ -> Some(model.StopSession)
-    "r", _ if has_modifier(event, Ctrl) -> Some(model.RestartDevServer)
     "v", _ -> Some(model.ViewDevServer)
     "u", _ -> Some(model.UpdateFromMain)
-    "c", _ -> Some(model.CompleteSession)
+    "m", _ -> Some(model.MergeToMain)
     "f", _ -> Some(model.ShowDiff)
     "d", _ -> Some(model.DeleteCleanup)
     "h", _ -> Some(model.MoveTaskLeft)
@@ -166,7 +175,7 @@ fn handle_type_filter_menu_key(event: KeyEvent, model: Model) -> Option(Msg) {
     "escape" -> Some(model.OpenFilterMenu)
     // Back to filter menu
     "q" -> Some(model.CloseOverlay)
-    "t" -> Some(model.ToggleTypeFilter(task.Task))
+    "t" -> Some(model.ToggleTypeFilter(task.TaskType))
     "b" -> Some(model.ToggleTypeFilter(task.Bug))
     "e" -> Some(model.ToggleTypeFilter(task.Epic))
     "f" -> Some(model.ToggleTypeFilter(task.Feature))
@@ -281,10 +290,14 @@ fn handle_normal_key(event: KeyEvent, model: Model) -> Option(Msg) {
 fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
   case event.key, has_modifier(event, Shift), has_modifier(event, Ctrl) {
     // Navigation
-    "h" | "left", _, _ -> Some(model.MoveLeft)
-    "j" | "down", _, _ -> Some(model.MoveDown)
-    "k" | "up", _, _ -> Some(model.MoveUp)
-    "l" | "right", _, _ -> Some(model.MoveRight)
+    "h", _, _ -> Some(model.MoveLeft)
+    "left", _, _ -> Some(model.MoveLeft)
+    "j", _, _ -> Some(model.MoveDown)
+    "down", _, _ -> Some(model.MoveDown)
+    "k", _, _ -> Some(model.MoveUp)
+    "up", _, _ -> Some(model.MoveUp)
+    "l", False, False -> Some(model.MoveRight)
+    "right", _, _ -> Some(model.MoveRight)
     "d", _, True -> Some(model.PageDown)
     // Ctrl+d
     "u", _, True -> Some(model.PageUp)
@@ -299,7 +312,8 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "g", _, _ -> Some(model.EnterGoto)
 
     // Quick actions
-    "enter" | "return", _, _ -> Some(model.OpenDetailPanel)
+    "enter", _, _ -> Some(model.OpenDetailPanel)
+    "return", _, _ -> Some(model.OpenDetailPanel)
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)

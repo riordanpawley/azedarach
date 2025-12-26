@@ -6,7 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/set.{type Set}
 import gleam/string
-import azedarach/config.{type Config, type ConfigError}
+import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session.{type SessionState}
 import azedarach/domain/project.{type Project}
@@ -90,9 +90,9 @@ pub type Overlay {
 }
 
 pub type PendingAction {
-  DeleteWorktree(bead_id: String)
-  DeleteBead(bead_id: String)
-  StopSession(bead_id: String)
+  DeleteWorktreeAction(bead_id: String)
+  DeleteBeadAction(bead_id: String)
+  StopSessionAction(bead_id: String)
 }
 
 pub type SortField {
