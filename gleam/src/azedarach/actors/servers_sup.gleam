@@ -6,6 +6,7 @@ import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import gleam/string
 import azedarach/actors/server_monitor.{type MonitorConfig, type ServerStatus}
 
@@ -65,20 +66,20 @@ pub type CoordinatorUpdate {
 pub fn start(
   coordinator: Subject(CoordinatorUpdate),
 ) -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let state =
-        SupervisorState(
-          monitors: dict.new(),
-          crash_tracking: dict.new(),
-          coordinator: coordinator,
-        )
+  let initial_state =
+    SupervisorState(
+      monitors: dict.new(),
+      crash_tracking: dict.new(),
+      coordinator: coordinator,
+    )
 
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 5000,
-    loop: handle_message,
-  ))
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) {
+    let actor.Started(_, data) = started
+    data
+  })
 }
 
 /// Start a monitor for a server
@@ -125,9 +126,9 @@ pub fn list_monitors(supervisor: Subject(Msg)) -> List(String) {
 
 /// Main message handler
 fn handle_message(
-  msg: Msg,
   state: SupervisorState,
-) -> actor.Next(Msg, SupervisorState) {
+  msg: Msg,
+) -> actor.Next(SupervisorState, Msg) {
   case msg {
     StartMonitor(config) -> handle_start_monitor(state, config)
 
@@ -158,7 +159,7 @@ fn handle_message(
 fn handle_start_monitor(
   state: SupervisorState,
   config: MonitorConfig,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   let key = make_key(config.bead_id, config.server_name)
 
   // Check if monitor already exists
@@ -188,7 +189,7 @@ fn handle_start_monitor(
 fn handle_stop_monitor(
   state: SupervisorState,
   key: String,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   case dict.get(state.monitors, key) {
     Ok(monitor) -> {
       server_monitor.stop(monitor)
@@ -203,7 +204,7 @@ fn handle_stop_monitor(
 fn handle_monitor_down(
   state: SupervisorState,
   key: String,
-) -> actor.Next(Msg, SupervisorState) {
+) -> actor.Next(SupervisorState, Msg) {
   // Remove from monitors
   let new_monitors = dict.delete(state.monitors, key)
 
@@ -284,12 +285,9 @@ fn create_monitor_callback(
 ) -> Subject(server_monitor.CoordinatorUpdate) {
   let callback_subject = process.new_subject()
 
-  process.start(
-    fn() {
-      forward_monitor_updates(callback_subject, supervisor, bead_id, server_name)
-    },
-    True,
-  )
+  let _ = process.spawn(fn() {
+    forward_monitor_updates(callback_subject, supervisor, bead_id, server_name)
+  })
 
   callback_subject
 }

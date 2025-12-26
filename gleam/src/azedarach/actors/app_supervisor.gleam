@@ -5,6 +5,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import azedarach/config.{type Config}
 import azedarach/actors/coordinator
 import azedarach/actors/sessions_sup
@@ -79,69 +80,71 @@ fn start_supervisor(
   config: Config,
   on_ready: Subject(AppContext),
 ) -> Result(Subject(Msg), actor.StartError) {
-  actor.start_spec(actor.Spec(
-    init: fn() {
-      let self = process.new_subject()
+  let initial_state =
+    SupervisorState(
+      config: config,
+      coordinator: None,
+      sessions_sup: None,
+      servers_sup: None,
+      on_ready: Some(on_ready),
+    )
 
-      // Start children in order
-      start_children(config, self)
+  let start_result =
+    actor.new(initial_state)
+    |> actor.on_message(handle_message)
+    |> actor.start
+    |> result.map(fn(started) {
+      let actor.Started(_, data) = started
+      data
+    })
 
-      let state =
-        SupervisorState(
-          config: config,
-          coordinator: None,
-          sessions_sup: None,
-          servers_sup: None,
-          on_ready: Some(on_ready),
-        )
-
-      actor.Ready(state, process.new_selector())
-    },
-    init_timeout: 30_000,
-    loop: handle_message,
-  ))
+  // Start children after supervisor is running
+  case start_result {
+    Ok(supervisor) -> {
+      start_children(config, supervisor)
+      Ok(supervisor)
+    }
+    Error(e) -> Error(e)
+  }
 }
 
 /// Start all children asynchronously
 fn start_children(config: Config, supervisor: Subject(Msg)) -> Nil {
   // Start each child in a separate process
-  process.start(
-    fn() {
-      // Create coordinator update subject for supervisors
-      let coord_update_subject = process.new_subject()
+  let _ = process.spawn(fn() {
+    // Create coordinator update subject for supervisors
+    let coord_update_subject = process.new_subject()
 
-      // Start Sessions Supervisor
-      case sessions_sup.start(coord_update_subject) {
-        Ok(sessions) -> {
-          process.send(supervisor, ChildStarted(SessionsSupChild(sessions)))
-        }
-        Error(_) -> {
-          process.send(supervisor, ChildFailed(SessionsSupChild(process.new_subject()), "Failed to start"))
-        }
+    // Start Sessions Supervisor
+    case sessions_sup.start(coord_update_subject) {
+      Ok(sessions) -> {
+        process.send(supervisor, ChildStarted(SessionsSupChild(sessions)))
       }
+      Error(_) -> {
+        process.send(supervisor, ChildFailed(SessionsSupChild(process.new_subject()), "Failed to start"))
+      }
+    }
 
-      // Start Servers Supervisor
-      case servers_sup.start(create_server_coordinator_callback()) {
-        Ok(servers) -> {
-          process.send(supervisor, ChildStarted(ServersSupChild(servers)))
-        }
-        Error(_) -> {
-          process.send(supervisor, ChildFailed(ServersSupChild(process.new_subject()), "Failed to start"))
-        }
+    // Start Servers Supervisor
+    case servers_sup.start(create_server_coordinator_callback()) {
+      Ok(servers) -> {
+        process.send(supervisor, ChildStarted(ServersSupChild(servers)))
       }
+      Error(_) -> {
+        process.send(supervisor, ChildFailed(ServersSupChild(process.new_subject()), "Failed to start"))
+      }
+    }
 
-      // Start Coordinator
-      case coordinator.start(config) {
-        Ok(coord) -> {
-          process.send(supervisor, ChildStarted(CoordinatorChild(coord)))
-        }
-        Error(_) -> {
-          process.send(supervisor, ChildFailed(CoordinatorChild(process.new_subject()), "Failed to start"))
-        }
+    // Start Coordinator
+    case coordinator.start(config) {
+      Ok(coord) -> {
+        process.send(supervisor, ChildStarted(CoordinatorChild(coord)))
       }
-    },
-    True,
-  )
+      Error(_) -> {
+        process.send(supervisor, ChildFailed(CoordinatorChild(process.new_subject()), "Failed to start"))
+      }
+    }
+  })
   Nil
 }
 
@@ -152,9 +155,9 @@ fn create_server_coordinator_callback() -> Subject(servers_sup.CoordinatorUpdate
 
 /// Handle supervisor messages
 fn handle_message(
-  msg: Msg,
   state: SupervisorState,
-) -> actor.Next(Msg, SupervisorState) {
+  msg: Msg,
+) -> actor.Next(SupervisorState, Msg) {
   case msg {
     ChildStarted(child) -> {
       let new_state = case child {
@@ -184,7 +187,7 @@ fn handle_message(
 
     Shutdown -> {
       // Stop all children gracefully
-      actor.Stop(process.Normal)
+      actor.stop()
     }
   }
 }

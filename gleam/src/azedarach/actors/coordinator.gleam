@@ -138,7 +138,11 @@ pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
       available_projects: [],
       self_subject: None,
     )
-  actor.start(initial_state, handle_message)
+
+  actor.new(initial_state)
+  |> actor.on_message(handle_message)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
 }
 
 /// Initialize the coordinator after creation
@@ -154,8 +158,8 @@ pub fn send(subject: Subject(Msg), msg: Msg) -> Nil {
 
 // Message handler
 fn handle_message(
-  msg: Msg,
   state: CoordinatorState,
+  msg: Msg,
 ) -> actor.Next(CoordinatorState, Msg) {
   case msg {
     Subscribe(ui) -> {
@@ -395,7 +399,8 @@ fn handle_message(
                 _ -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.attach(tmux_name)
+                  let _ = tmux.attach(tmux_name)
+                  Nil
                 }
               }
             }
@@ -509,21 +514,22 @@ fn handle_message(
                   notify_ui(state, Toast("Merged main", Success))
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.attach(tmux_name)
+                  let _ = tmux.attach(tmux_name)
+                  Nil
                 }
                 Error(git.MergeConflict(files)) -> {
                   let tmux_name =
                     session_state.tmux_session |> option.unwrap(id <> "-az")
-                  tmux.new_window(tmux_name, "merge")
+                  let _ = tmux.new_window(tmux_name, "merge")
                   let prompt =
                     "There are merge conflicts in: "
                     <> string.join(files, ", ")
                     <> ". Please resolve these conflicts, then stage and commit the resolution."
-                  tmux.send_keys(
+                  let _ = tmux.send_keys(
                     tmux_name <> ":merge",
                     "claude -p \"" <> prompt <> "\"",
                   )
-                  tmux.send_keys(tmux_name <> ":merge", "Enter")
+                  let _ = tmux.send_keys(tmux_name <> ":merge", "Enter")
                   notify_ui(
                     state,
                     Toast(
@@ -548,7 +554,7 @@ fn handle_message(
       case dict.get(state.dev_servers, key) {
         Ok(ds) if ds.running -> {
           let window = ds.window_name
-          tmux.kill_window(id <> "-az", window)
+          let _ = tmux.kill_window(id <> "-az", window)
           let new_ds = DevServerState(..ds, running: False, port: None)
           let new_servers = dict.insert(state.dev_servers, key, new_ds)
           notify_ui(state, DevServerStateChanged(key, new_ds))
@@ -564,7 +570,10 @@ fn handle_message(
     ViewDevServer(id, server_name) -> {
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
-        Ok(ds) -> tmux.select_window(id <> "-az", ds.window_name)
+        Ok(ds) -> {
+          let _ = tmux.select_window(id <> "-az", ds.window_name)
+          Nil
+        }
         Error(_) -> notify_ui(state, Toast("Dev server not running", Warning))
       }
       actor.continue(state)
@@ -574,7 +583,7 @@ fn handle_message(
       let key = id <> ":" <> server_name
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
-          tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c")
+          let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c")
           process.sleep(100)
           case
             list.find(state.config.dev_server.servers, fn(s) {
@@ -582,8 +591,9 @@ fn handle_message(
             })
           {
             Ok(server) -> {
-              tmux.send_keys(id <> "-az:" <> ds.window_name, server.command)
-              tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter")
+              let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, server.command)
+              let _ = tmux.send_keys(id <> "-az:" <> ds.window_name, "Enter")
+              Nil
             }
             Error(_) -> Nil
           }
@@ -667,7 +677,10 @@ fn handle_message(
       case dict.get(state.sessions, id) {
         Ok(session_state) -> {
           case session_state.tmux_session {
-            Some(tmux_name) -> tmux.kill_session(tmux_name)
+            Some(tmux_name) -> {
+              let _ = tmux.kill_session(tmux_name)
+              Nil
+            }
             None -> Nil
           }
           case session_state.worktree_path {
@@ -767,7 +780,7 @@ fn notify_ui(state: CoordinatorState, msg: UiMsg) -> Nil {
 }
 
 fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
-  let _ = process.spawn_link(fn() {
+  let _ = process.spawn(fn() {
     let result = beads.list_all(config)
     process.send(reply_to, BeadsLoaded(result))
   })
@@ -778,7 +791,7 @@ fn spawn_beads_load(reply_to: Subject(Msg), config: Config) -> Nil {
 fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
   case state.self_subject {
     Some(reply_to) -> {
-      let _ = process.spawn_link(fn() {
+      let _ = process.spawn(fn() {
         // Run bd list in project directory
         let result = beads.list_all_in_dir(proj.path, state.config)
         process.send(reply_to, BeadsLoaded(result))
@@ -791,7 +804,7 @@ fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
 
 /// Discover projects async
 fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
-  let _ = process.spawn_link(fn() {
+  let _ = process.spawn(fn() {
     let projects = project_service.discover_all()
     process.send(reply_to, ProjectsDiscovered(projects))
   })
@@ -800,7 +813,7 @@ fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
 
 /// Select initial project async
 fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
-  let _ = process.spawn_link(fn() {
+  let _ = process.spawn(fn() {
     let result = project_service.select_initial()
     process.send(reply_to, InitialProjectSelected(result))
   })
@@ -809,7 +822,7 @@ fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
 
 /// Schedule periodic refresh tick
 fn schedule_tick(reply_to: Subject(Msg)) -> Nil {
-  let _ = process.spawn_link(fn() {
+  let _ = process.spawn(fn() {
     process.sleep(refresh_interval_ms)
     process.send(reply_to, PeriodicTick)
   })
@@ -905,7 +918,7 @@ fn start_dev_server(
   state: CoordinatorState,
   id: String,
   server_name: String,
-) -> actor.Next(Msg, CoordinatorState) {
+) -> actor.Next(CoordinatorState, Msg) {
   case
     list.find(state.config.dev_server.servers, fn(s) { s.name == server_name })
   {

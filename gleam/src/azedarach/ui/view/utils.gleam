@@ -1,6 +1,6 @@
 // View utilities - shared helpers for view modules
 
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import shore
 import shore/ui
@@ -16,18 +16,19 @@ pub fn text(content: String) -> Node {
   ui.text(content)
 }
 
-pub fn styled_text(content: String, fg: String) -> Node {
-  ui.text_styled(content, Some(style.hex(fg)), None)
+pub fn styled_text(content: String, _fg: String) -> Node {
+  // Shore only supports basic ANSI colors, use text for now
+  ui.text(content)
 }
 
-pub fn bold_text(content: String, fg: String) -> Node {
-  // Shore doesn't have a direct bold - use styled text
-  ui.text_styled(content, Some(style.hex(fg)), None)
+pub fn bold_text(content: String, _fg: String) -> Node {
+  // Shore doesn't have a direct bold or hex colors - use plain text
+  ui.text(content)
 }
 
 pub fn dim_text(content: String) -> Node {
-  // Use a muted color for dim text
-  ui.text_styled(content, Some(style.hex("#6e738d")), None)
+  // Use plain text since Shore doesn't support hex colors
+  ui.text(content)
 }
 
 pub fn hbox(children: List(Node)) -> Node {
@@ -38,8 +39,9 @@ pub fn vbox(children: List(Node)) -> Node {
   ui.col(children)
 }
 
-pub fn bordered_box(children: List(Node), fg: String) -> Node {
-  ui.box_styled(children, None, Some(style.hex(fg)))
+pub fn bordered_box(children: List(Node), _fg: String) -> Node {
+  // Shore doesn't support hex colors for borders, use plain box
+  ui.box_styled(children, None, None)
 }
 
 pub fn empty() -> Node {

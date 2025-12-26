@@ -15,7 +15,7 @@ import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
   type Model, type Msg, type Mode, type Overlay, type InputState,
-  Cursor, Normal, Select,
+  Cursor, Model, Normal, Select,
 }
 import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
@@ -145,7 +145,7 @@ pub fn update(
     model.StopSession -> {
       case current_task_id(model) {
         Some(id) -> #(
-          Model(..model, overlay: Some(model.ConfirmDialog(model.StopSession(id)))),
+          Model(..model, overlay: Some(model.ConfirmDialog(model.StopSessionAction(id)))),
           effects.none(),
         )
         None -> #(model, effects.none())
@@ -203,7 +203,7 @@ pub fn update(
     model.DeleteCleanup -> {
       case current_task_id(model) {
         Some(id) -> #(
-          Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteWorktree(id)))),
+          Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteWorktreeAction(id)))),
           effects.none(),
         )
         None -> #(model, effects.none())
@@ -242,7 +242,7 @@ pub fn update(
     model.DeleteBead -> {
       case current_task_id(model) {
         Some(id) -> #(
-          Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteBead(id)))),
+          Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteBeadAction(id)))),
           effects.none(),
         )
         None -> #(model, effects.none())
@@ -456,8 +456,8 @@ fn open_detail_panel(model: Model) -> Model {
 
 fn current_task_id(model: Model) -> Option(String) {
   let tasks = model.tasks_in_column(model, model.cursor.column_index)
-  case list.at(tasks, model.cursor.task_index) {
-    Ok(task) -> Some(task.id)
+  case list.drop(tasks, model.cursor.task_index) |> list.first {
+    Ok(t) -> Some(t.id)
     Error(_) -> None
   }
 }
@@ -550,9 +550,9 @@ fn handle_confirm(
   case model.overlay {
     Some(model.ConfirmDialog(action)) -> {
       let effect = case action {
-        model.DeleteWorktree(id) -> effects.delete_cleanup(coord, id)
-        model.DeleteBead(id) -> effects.delete_bead(coord, id)
-        model.StopSession(id) -> effects.stop_session(coord, id)
+        model.DeleteWorktreeAction(id) -> effects.delete_cleanup(coord, id)
+        model.DeleteBeadAction(id) -> effects.delete_bead(coord, id)
+        model.StopSessionAction(id) -> effects.stop_session(coord, id)
       }
       #(Model(..model, overlay: None), effect)
     }
@@ -580,10 +580,10 @@ fn handle_settings_toggle(model: Model) -> #(Model, Effect(Msg)) {
   case model.overlay {
     Some(model.SettingsOverlay(focus_index)) -> {
       let settings = config.editable_settings()
-      case list.at(settings, focus_index) {
+      case list.drop(settings, focus_index) |> list.first {
         Ok(setting) -> {
           // Toggle the setting and save
-          let new_config = { setting.toggle }(model.config)
+          let new_config = setting.toggle(model.config)
           // Save synchronously and update model
           let save_result = config.save(new_config, None)
           case save_result {
