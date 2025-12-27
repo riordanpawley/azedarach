@@ -165,6 +165,8 @@ pub type Msg {
   OpenProjectSelector
   OpenDetailPanel
   CloseOverlay
+  // Project selection
+  SelectProject(index: Int)
   // Actions
   StartSession
   StartSessionWithWork

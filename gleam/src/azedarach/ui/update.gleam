@@ -117,6 +117,18 @@ pub fn update(
     model.OpenDetailPanel -> #(open_detail_panel(model), effects.none())
     model.CloseOverlay -> #(Model(..model, overlay: None), effects.none())
 
+    // Project selection
+    model.SelectProject(index) -> {
+      // Get project at index (1-indexed from UI, convert to 0-indexed)
+      case list.drop(model.projects, index) |> list.first {
+        Ok(proj) -> #(
+          Model(..model, overlay: None),
+          effects.switch_project(coord, proj.path),
+        )
+        Error(_) -> #(model, effects.none())
+      }
+    }
+
     // Session actions - side effects go through Shore effects
     model.StartSession -> {
       case current_task_id(model) {

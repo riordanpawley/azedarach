@@ -55,6 +55,14 @@ pub fn refresh_beads(coord: Subject(coordinator.Msg)) -> Effect(Msg) {
   })
 }
 
+/// Switch to a different project
+pub fn switch_project(coord: Subject(coordinator.Msg), path: String) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.SwitchProject(path))
+    model.Tick
+  })
+}
+
 /// Start a Claude session for a task
 pub fn start_session(
   coord: Subject(coordinator.Msg),
