@@ -253,3 +253,21 @@ pub fn fetch(config: Config, project_path: String) -> Result(Nil, GitError) {
     False -> Ok(Nil)
   }
 }
+
+// Abort an in-progress merge
+pub fn abort_merge(worktree: String) -> Result(Nil, GitError) {
+  case shell.run("git", ["merge", "--abort"], worktree) {
+    Ok(_) -> Ok(Nil)
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+  }
+}
+
+// Check if a merge is currently in progress (has conflicts)
+pub fn is_merge_in_progress(worktree: String) -> Bool {
+  // Git creates MERGE_HEAD when a merge is in progress
+  case shell.run("git", ["rev-parse", "--verify", "MERGE_HEAD"], worktree) {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+}

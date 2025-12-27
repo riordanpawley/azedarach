@@ -87,7 +87,7 @@ pub type Overlay {
   ImagePreview(path: String)
   DevServerMenu(bead_id: String)
   DiffViewer(bead_id: String)
-  MergeChoice(bead_id: String, behind_count: Int)
+  MergeChoice(bead_id: String, behind_count: Int, merge_in_progress: Bool)
   ConfirmDialog(action: PendingAction)
 }
 
@@ -221,6 +221,7 @@ pub type Msg {
   // MergeChoice
   MergeAndAttach
   SkipAndAttach
+  AbortMerge
   // Confirm
   ConfirmAction
   CancelAction
@@ -237,7 +238,7 @@ pub type Msg {
   ShowToast(level: ToastLevel, message: String)
   ToastExpired(Int)
   // Coordinator events
-  RequestMergeChoice(bead_id: String, behind_count: Int)
+  RequestMergeChoice(bead_id: String, behind_count: Int, merge_in_progress: Bool)
   ProjectChanged(project: Project)
   ProjectsUpdated(projects: List(Project))
   // System
