@@ -3,7 +3,7 @@
 > Research into orchestrating parallel Claude Code sessions via beads and azedarach
 
 **Date:** 2025-12-27
-**Status:** Initial Research Complete
+**Status:** All Phases Complete (Phase 1-4 ✅)
 
 ---
 
@@ -468,26 +468,43 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
    - Polling with `az status`
    - Error handling for crashes/stuck sessions
 
-### Phase 4: Agent Mail for Coordination
+### Phase 4: Agent Mail for Coordination ✅
+
+**Status: Complete**
 
 **Use case**: When agents NEED to coordinate on shared concerns (not just avoid conflicts).
 
-1. **MCP Server Integration**
-   - Install Agent Mail MCP server
-   - Configure in azedarach
+1. **MCP Server Integration** ✅
+   - Installation: `curl -fsSL ".../install.sh" | bash -s -- --yes`
+   - MCP config for `uvx mcp-agent-mail`
+   - Template: `.claude/session-templates/agent-mail.md`
 
-2. **Agent Identity**
-   - Unique identities per session
-   - Persistent across restarts
+2. **Agent Identity** ✅
+   - Naming convention: `{task-id}-worker`, `orchestrator-{epic}`, `supervisor-{ts}`
+   - Registration via `register_agent` MCP tool
+   - `whoami` to verify identity
 
-3. **File Lease System**
-   - Advisory locks on files
-   - Prevents conflicts at source
-   - Git-backed persistence
+3. **File Lease System** ✅
+   - `file_reservation_paths` for acquiring leases with glob patterns
+   - `get_file_reservations` to check existing leases
+   - `release_file_reservations` on completion
+   - TTL-based expiration, exclusive mode, reason linking to bead ID
 
-4. **Inter-Agent Messaging**
-   - Agents can request info from each other
-   - Async coordination without orchestrator bottleneck
+4. **Inter-Agent Messaging** ✅
+   - `send_message` with subject patterns: [BLOCKED], [DISCOVERY], [QUESTION], [HANDOFF]
+   - `fetch_inbox` for receiving messages
+   - `acknowledge_message` to mark handled
+   - `search_messages` for history
+
+5. **Supervisor Integration** ✅
+   - Added Agent Mail section to supervisor template
+   - Enhanced ASSESS phase with reservation checks
+   - Enhanced MONITOR phase with inbox polling
+   - Worker instructions for Agent Mail setup
+
+**Templates:**
+- `.claude/session-templates/agent-mail.md` - Full Agent Mail guide
+- `.claude/session-templates/supervisor.md` - Updated with Agent Mail integration
 
 **Note**: Phase 4 is for advanced scenarios where file conflict avoidance isn't enough - e.g., agents need to share discovered context or negotiate API contracts.
 
