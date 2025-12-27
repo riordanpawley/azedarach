@@ -6,6 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/string
 import azedarach/domain/session
 import azedarach/domain/task
+import azedarach/services/image
 import azedarach/ui/model.{
   type Model, type Msg, type Overlay,
   Normal, Select,
@@ -79,6 +80,7 @@ fn handle_overlay_key(
     model.ProjectSelector -> handle_project_selector_key(event)
     model.DetailPanel(_) -> handle_detail_panel_key(event)
     model.ImageAttach(_) -> handle_image_attach_key(event)
+    model.ImageList(bead_id) -> handle_image_list_key(event, bead_id)
     model.ImagePreview(_) -> handle_simple_close(event)
     model.DevServerMenu(_) -> handle_simple_close(event)
     model.DiffViewer(_) -> handle_simple_close(event)
@@ -236,12 +238,14 @@ fn handle_project_selector_key(event: KeyEvent) -> Option(Msg) {
 }
 
 fn handle_detail_panel_key(event: KeyEvent) -> Option(Msg) {
-  case event.key {
-    "escape" | "q" -> Some(model.CloseOverlay)
-    "e" -> Some(model.EditBead)
-    "i" -> Some(model.AttachImage)
+  case event.key, has_modifier(event, Shift) {
+    "escape", _ | "q", _ -> Some(model.CloseOverlay)
+    "e", _ -> Some(model.EditBead)
+    "i", False -> Some(model.AttachImage)
+    "i", True -> Some(model.OpenImageList)
+    // Shift+I for image list
     // Scroll with j/k or ctrl+u/d
-    _ -> None
+    _, _ -> None
   }
 }
 
@@ -251,6 +255,39 @@ fn handle_image_attach_key(event: KeyEvent) -> Option(Msg) {
     "p" | "v" -> Some(model.PasteFromClipboard)
     "f" -> Some(model.SelectFile)
     _ -> None
+  }
+}
+
+fn handle_image_list_key(event: KeyEvent, bead_id: String) -> Option(Msg) {
+  let is_shift = has_modifier(event, Shift)
+
+  case event.key {
+    "escape" | "q" -> Some(model.CloseOverlay)
+    "a" -> Some(model.AttachImage)
+    // add new image
+    // Number keys: plain = open, shift = delete
+    key -> {
+      case int.parse(key) {
+        Ok(n) if n >= 1 && n <= 9 -> {
+          // Get the nth attachment
+          case image.list(bead_id) {
+            Ok(attachments) -> {
+              case list.drop(attachments, n - 1) |> list.first {
+                Ok(attachment) -> {
+                  case is_shift {
+                    True -> Some(model.DeleteImage(attachment.id))
+                    False -> Some(model.OpenImage(bead_id, attachment.id))
+                  }
+                }
+                Error(_) -> None
+              }
+            }
+            Error(_) -> None
+          }
+        }
+        _ -> None
+      }
+    }
   }
 }
 
