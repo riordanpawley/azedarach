@@ -102,7 +102,7 @@ pub type SortField {
 }
 
 pub type Toast {
-  Toast(message: String, level: ToastLevel, expires_at: Int)
+  Toast(id: Int, message: String, level: ToastLevel, expires_at: Int)
 }
 
 pub type ToastLevel {
@@ -111,6 +111,15 @@ pub type ToastLevel {
   Warning
   Error
 }
+
+/// Default toast duration in milliseconds
+pub const toast_duration_ms = 5000
+
+/// Longer duration for error toasts (to read suggestions)
+pub const error_toast_duration_ms = 8000
+
+/// Maximum visible toasts
+pub const max_visible_toasts = 3
 
 pub type DevServerState {
   DevServerState(
@@ -213,6 +222,8 @@ pub type Msg {
   BeadsLoaded(List(Task))
   SessionStateChanged(String, SessionState)
   DevServerStateChanged(String, DevServerState)
+  // Toast notifications
+  ShowToast(level: ToastLevel, message: String)
   ToastExpired(Int)
   // System
   TerminalResized(Int, Int)
@@ -289,6 +300,40 @@ pub fn init_with_context(
     terminal_size: #(80, 24),
     app_context: Some(context),
   )
+}
+
+// =============================================================================
+// Toast helpers
+// =============================================================================
+
+/// Add a toast to the model with proper expiration
+/// Returns the updated model and the toast ID for scheduling expiration
+pub fn add_toast(model: Model, level: ToastLevel, message: String, now_ms: Int) -> #(Model, Int) {
+  let duration = case level {
+    Error -> error_toast_duration_ms
+    _ -> toast_duration_ms
+  }
+  let expires_at = now_ms + duration
+  let toast = Toast(id: expires_at, message: message, level: level, expires_at: expires_at)
+
+  // Keep only the last (max_visible - 1) toasts and add the new one
+  let kept_toasts = model.toasts
+    |> list.reverse
+    |> list.take(max_visible_toasts - 1)
+    |> list.reverse
+
+  let new_model = Model(..model, toasts: list.append(kept_toasts, [toast]))
+  #(new_model, expires_at)
+}
+
+/// Get level icon for display
+pub fn toast_icon(level: ToastLevel) -> String {
+  case level {
+    Info -> "i"
+    Success -> "+"
+    Warning -> "!"
+    Error -> "!"
+  }
 }
 
 // Get tasks for a specific column
