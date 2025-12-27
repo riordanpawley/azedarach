@@ -325,12 +325,12 @@ fn handle_goto_key(event: KeyEvent) -> Option(Msg) {
 // Normal mode key handling
 fn handle_normal_key(event: KeyEvent, model: Model) -> Option(Msg) {
   case model.mode {
-    Normal -> handle_normal_mode_key(event)
+    Normal -> handle_normal_mode_key(event, model)
     Select(_) -> handle_select_mode_key(event)
   }
 }
 
-fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
+fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
   case event.key, has_modifier(event, Shift), has_modifier(event, Ctrl) {
     // Navigation
     "h", _, _ -> Some(model.MoveLeft)
@@ -354,9 +354,11 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "v", _, _ -> Some(model.EnterSelect)
     "g", _, _ -> Some(model.EnterGoto)
 
-    // Quick actions
-    "enter", _, _ -> Some(model.OpenDetailPanel)
-    "return", _, _ -> Some(model.OpenDetailPanel)
+    // Quick actions - Enter on epic drills down, otherwise opens detail
+    "enter", _, _ -> handle_enter_key(model)
+    "return", _, _ -> handle_enter_key(model)
+    // Escape exits epic drill-down mode (if active)
+    "escape", _, _ -> handle_escape_key(model)
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
@@ -368,14 +370,48 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "r", True, _ -> Some(model.ForceRedraw)
     // Shift+R (refresh)
 
-    // Quit
-    "q", _, _ -> Some(model.Quit)
+    // Quit (or exit drill-down if active)
+    "q", _, _ -> handle_quit_key(model)
 
     // Redraw
     "l", _, True -> Some(model.ForceRedraw)
     // Ctrl+L
 
     _, _, _ -> None
+  }
+}
+
+// Handle Enter key - drill down into epics, detail panel for others
+fn handle_enter_key(model: Model) -> Option(Msg) {
+  case get_current_task(model) {
+    Some(t) if task.is_epic(t) -> Some(model.DrillDownEpic(t.id))
+    Some(_) -> Some(model.OpenDetailPanel)
+    None -> None
+  }
+}
+
+// Handle Escape key - exit epic drill-down if active, otherwise no action
+fn handle_escape_key(model: Model) -> Option(Msg) {
+  case model.current_epic {
+    Some(_) -> Some(model.ExitEpicDrill)
+    None -> None
+  }
+}
+
+// Handle q key - exit drill-down if active, otherwise quit
+fn handle_quit_key(model: Model) -> Option(Msg) {
+  case model.current_epic {
+    Some(_) -> Some(model.ExitEpicDrill)
+    None -> Some(model.Quit)
+  }
+}
+
+// Get the task at the current cursor position
+fn get_current_task(model: Model) -> Option(task.Task) {
+  let tasks = model.tasks_in_column(model, model.cursor.column_index)
+  case list.drop(tasks, model.cursor.task_index) |> list.first {
+    Ok(t) -> Some(t)
+    Error(_) -> None
   }
 }
 
