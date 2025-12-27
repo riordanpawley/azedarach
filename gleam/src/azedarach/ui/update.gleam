@@ -117,6 +117,16 @@ pub fn update(
     model.OpenDetailPanel -> #(open_detail_panel(model), effects.none())
     model.CloseOverlay -> #(Model(..model, overlay: None), effects.none())
 
+    // Epic drill-down
+    model.DrillDownEpic(id) -> #(
+      Model(..model, current_epic: Some(id), cursor: Cursor(column_index: 0, task_index: 0)),
+      effects.none(),
+    )
+    model.ExitEpicDrill -> #(
+      Model(..model, current_epic: None, cursor: Cursor(column_index: 0, task_index: 0)),
+      effects.none(),
+    )
+
     // Project selection
     model.SelectProject(index) -> {
       // Get project at index (1-indexed from UI, convert to 0-indexed)

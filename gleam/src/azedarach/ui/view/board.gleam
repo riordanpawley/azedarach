@@ -1,8 +1,10 @@
 // Kanban board view - 4 columns
 
 import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import shore/ui
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session
@@ -17,9 +19,93 @@ const column_names = ["Open", "In Progress", "Blocked", "Closed"]
 pub fn render(model: Model) -> Node {
   let #(width, height) = model.terminal_size
   let column_width = width / 4
-  let board_height = height - 1
-  // Reserve 1 line for status bar
 
+  // Check if we're in epic drill-down mode
+  case model.current_epic {
+    Some(_) -> render_with_epic_header(model, width, height, column_width)
+    None -> render_board(model, height - 1, column_width)
+  }
+}
+
+fn render_with_epic_header(
+  model: Model,
+  width: Int,
+  height: Int,
+  column_width: Int,
+) -> Node {
+  let colors = model.colors
+
+  // Get epic info
+  let epic_header = case model.get_current_epic(model) {
+    Some(epic) -> {
+      let #(completed, total) = model.epic_progress(model, epic.id)
+      render_epic_header(epic, completed, total, width, colors)
+    }
+    None -> text("")
+  }
+
+  // Board takes remaining height (minus status bar and epic header)
+  let board_height = height - 2
+  let board = render_board(model, board_height, column_width)
+
+  vbox([epic_header, board])
+}
+
+fn render_epic_header(
+  epic: Task,
+  completed: Int,
+  total: Int,
+  width: Int,
+  colors: theme.Colors,
+) -> Node {
+  // Back indicator
+  let back_hint = "← Backspace"
+
+  // Epic title (truncated)
+  let title_max = width - string.length(back_hint) - 30
+  let epic_title = "Epic: " <> truncate(epic.title, title_max)
+
+  // Progress bar
+  let progress_bar = render_progress_bar(completed, total, 20, colors)
+
+  // Progress text
+  let progress_text =
+    " " <> int.to_string(completed) <> "/" <> int.to_string(total) <> " "
+
+  hbox([
+    styled_text(back_hint, colors.overlay0),
+    text(" "),
+    styled_text(epic_title, colors.mauve),
+    text(" "),
+    progress_bar,
+    styled_text(progress_text, colors.subtext0),
+  ])
+}
+
+fn render_progress_bar(
+  completed: Int,
+  total: Int,
+  bar_width: Int,
+  colors: theme.Colors,
+) -> Node {
+  case total {
+    0 -> styled_text("[" <> string.repeat("-", bar_width) <> "]", colors.subtext0)
+    _ -> {
+      let filled = { completed * bar_width } / total
+      let empty = bar_width - filled
+      let filled_str = string.repeat("█", filled)
+      let empty_str = string.repeat("░", empty)
+      hbox([
+        styled_text("[", colors.subtext0),
+        styled_text(filled_str, colors.green),
+        styled_text(empty_str, colors.surface1),
+        styled_text("]", colors.subtext0),
+      ])
+    }
+  }
+}
+
+fn render_board(model: Model, board_height: Int, column_width: Int) -> Node {
   let columns =
     list.index_map(column_names, fn(name, idx) {
       render_column(model, idx, name, column_width, board_height)
