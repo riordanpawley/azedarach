@@ -8,6 +8,7 @@ import gleam/set
 import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
+import azedarach/services/image
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
 import azedarach/ui/view/utils.{
@@ -30,6 +31,7 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.ProjectSelector -> render_project_selector(model)
     model.DetailPanel(bead_id) -> render_detail_panel(bead_id, model)
     model.ImageAttach(bead_id) -> render_image_attach(bead_id, model)
+    model.ImageList(bead_id) -> render_image_list(bead_id, model)
     model.ImagePreview(path) -> render_image_preview(path, model)
     model.DevServerMenu(bead_id) -> render_dev_server_menu(bead_id, model)
     model.DiffViewer(bead_id) -> render_diff_viewer(bead_id, model)
@@ -493,6 +495,38 @@ fn render_image_attach(bead_id: String, model: Model) -> Node {
   overlay_box("Attach Image to " <> bead_id, items, model)
 }
 
+fn render_image_list(bead_id: String, model: Model) -> Node {
+  let colors = model.colors
+
+  // Get attachments for this bead
+  let attachments = case image.list(bead_id) {
+    Ok(list) -> list
+    Error(_) -> []
+  }
+
+  case list.is_empty(attachments) {
+    True -> overlay_box("Images for " <> bead_id, [dim_text("(no images attached)")], model)
+    False -> {
+      let entries =
+        list.index_map(attachments, fn(attachment, idx) {
+          let key = int.to_string(idx + 1)
+          hbox([
+            styled_text(" " <> key <> " ", colors.yellow),
+            text(attachment.filename),
+            dim_text(" (" <> attachment.original_path <> ")"),
+          ])
+        })
+
+      let footer = [
+        text(""),
+        dim_text("1-9: open • Shift+1-9: delete • a: attach • Esc: close"),
+      ]
+
+      overlay_box("Images for " <> bead_id, list.append(entries, footer), model)
+    }
+  }
+}
+
 fn render_image_preview(_path: String, model: Model) -> Node {
   overlay_box("Image Preview", [dim_text("(preview not available in terminal)")], model)
 }
@@ -580,6 +614,10 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Node {
     model.StopSessionAction(id) -> #(
       "Stop session " <> id <> "?",
       "This will kill the tmux session",
+    )
+    model.DeleteImageAction(_bead_id, attachment_id) -> #(
+      "Delete image?",
+      "This will permanently delete the image: " <> attachment_id,
     )
   }
 

@@ -287,6 +287,30 @@ pub fn paste_image(coord: Subject(coordinator.Msg), id: String) -> Effect(Msg) {
   })
 }
 
+/// Attach image from file path
+pub fn attach_file(
+  coord: Subject(coordinator.Msg),
+  id: String,
+  path: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AttachFile(id, path))
+    model.Tick
+  })
+}
+
+/// Open image in system viewer
+pub fn open_image(
+  coord: Subject(coordinator.Msg),
+  id: String,
+  attachment_id: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.OpenImage(id, attachment_id))
+    model.Tick
+  })
+}
+
 /// Delete an attached image
 pub fn delete_image(
   coord: Subject(coordinator.Msg),

@@ -36,6 +36,7 @@ pub type Model {
     type_filter: Set(task.IssueType),
     session_filter: Set(session.State),
     hide_epic_children: Bool,
+    current_epic: Option(String),
     sort_by: SortField,
     search_query: String,
     // Config and theme
@@ -63,7 +64,7 @@ pub type InputState {
   SearchInput(query: String)
   TitleInput(text: String)
   NotesInput(text: String)
-  PathInput(text: String)
+  PathInput(path: String, bead_id: String)
 }
 
 pub type Overlay {
@@ -82,6 +83,7 @@ pub type Overlay {
   ProjectSelector
   DetailPanel(bead_id: String)
   ImageAttach(bead_id: String)
+  ImageList(bead_id: String)
   ImagePreview(path: String)
   DevServerMenu(bead_id: String)
   DiffViewer(bead_id: String)
@@ -93,6 +95,7 @@ pub type PendingAction {
   DeleteWorktreeAction(bead_id: String)
   DeleteBeadAction(bead_id: String)
   StopSessionAction(bead_id: String)
+  DeleteImageAction(bead_id: String, attachment_id: String)
 }
 
 pub type SortField {
@@ -165,6 +168,9 @@ pub type Msg {
   OpenProjectSelector
   OpenDetailPanel
   CloseOverlay
+  // Epic drill-down
+  DrillDownEpic(bead_id: String)
+  ExitEpicDrill
   // Project selection
   SelectProject(index: Int)
   // Actions
@@ -192,8 +198,11 @@ pub type Msg {
   DeleteBead
   // Image
   AttachImage
+  OpenImageList
   PasteFromClipboard
   SelectFile
+  AttachFileSubmit(bead_id: String, path: String)
+  OpenImage(bead_id: String, attachment_id: String)
   PreviewImage(String)
   DeleteImage(String)
   // Input
@@ -265,6 +274,7 @@ pub fn init(config: Config, colors: Colors) -> Model {
     type_filter: set.new(),
     session_filter: set.new(),
     hide_epic_children: False,
+    current_epic: None,
     sort_by: SortBySession,
     search_query: "",
     config: config,
@@ -298,6 +308,7 @@ pub fn init_with_context(
     type_filter: set.new(),
     session_filter: set.new(),
     hide_epic_children: False,
+    current_epic: None,
     sort_by: SortBySession,
     search_query: "",
     config: config,
@@ -364,11 +375,29 @@ fn column_to_status(column: Int) -> task.Status {
 
 fn apply_filters(tasks: List(Task), model: Model) -> List(Task) {
   tasks
+  |> filter_by_current_epic(model.current_epic)
   |> filter_by_status(model.status_filter)
   |> filter_by_priority(model.priority_filter)
   |> filter_by_type(model.type_filter)
   |> filter_by_session_state(model.session_filter, model.sessions)
   |> filter_epic_children(model.hide_epic_children)
+}
+
+fn filter_by_current_epic(
+  tasks: List(Task),
+  epic_id: Option(String),
+) -> List(Task) {
+  case epic_id {
+    None -> tasks
+    Some(id) ->
+      list.filter(tasks, fn(t) {
+        // Include the epic itself
+        t.id == id
+        // Include children of this epic
+        || option.map(t.parent_id, fn(pid) { pid == id })
+        |> option.unwrap(False)
+      })
+  }
 }
 
 fn filter_by_status(tasks: List(Task), filter: Set(task.Status)) -> List(Task) {
@@ -462,4 +491,42 @@ fn compare_session_state(
     None, Some(_) -> order.Gt
     None, None -> order.Eq
   }
+}
+
+// =============================================================================
+// Epic drill-down helpers
+// =============================================================================
+
+/// Check if we're currently in epic drill-down mode
+pub fn in_epic_drill(model: Model) -> Bool {
+  option.is_some(model.current_epic)
+}
+
+/// Get the current epic task if in drill-down mode
+pub fn get_current_epic(model: Model) -> Option(Task) {
+  case model.current_epic {
+    None -> None
+    Some(id) ->
+      list.find(model.tasks, fn(t) { t.id == id })
+      |> option.from_result
+  }
+}
+
+/// Get epic children (not including the epic itself)
+pub fn get_epic_children(model: Model, epic_id: String) -> List(Task) {
+  list.filter(model.tasks, fn(t) {
+    case t.parent_id {
+      Some(pid) -> pid == epic_id
+      None -> False
+    }
+  })
+}
+
+/// Calculate epic progress as (completed, total)
+pub fn epic_progress(model: Model, epic_id: String) -> #(Int, Int) {
+  let children = get_epic_children(model, epic_id)
+  let total = list.length(children)
+  let completed =
+    list.count(children, fn(t) { t.status == task.Done })
+  #(completed, total)
 }

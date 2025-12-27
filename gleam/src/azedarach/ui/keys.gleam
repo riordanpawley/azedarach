@@ -6,6 +6,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/string
 import azedarach/domain/session
 import azedarach/domain/task
+import azedarach/services/image
 import azedarach/ui/model.{
   type Model, type Msg, type Overlay,
   Normal, Select,
@@ -79,6 +80,7 @@ fn handle_overlay_key(
     model.ProjectSelector -> handle_project_selector_key(event)
     model.DetailPanel(_) -> handle_detail_panel_key(event)
     model.ImageAttach(_) -> handle_image_attach_key(event)
+    model.ImageList(bead_id) -> handle_image_list_key(event, bead_id)
     model.ImagePreview(_) -> handle_simple_close(event)
     model.DevServerMenu(_) -> handle_simple_close(event)
     model.DiffViewer(_) -> handle_simple_close(event)
@@ -236,12 +238,14 @@ fn handle_project_selector_key(event: KeyEvent) -> Option(Msg) {
 }
 
 fn handle_detail_panel_key(event: KeyEvent) -> Option(Msg) {
-  case event.key {
-    "escape" | "q" -> Some(model.CloseOverlay)
-    "e" -> Some(model.EditBead)
-    "i" -> Some(model.AttachImage)
+  case event.key, has_modifier(event, Shift) {
+    "escape", _ | "q", _ -> Some(model.CloseOverlay)
+    "e", _ -> Some(model.EditBead)
+    "i", False -> Some(model.AttachImage)
+    "i", True -> Some(model.OpenImageList)
+    // Shift+I for image list
     // Scroll with j/k or ctrl+u/d
-    _ -> None
+    _, _ -> None
   }
 }
 
@@ -251,6 +255,39 @@ fn handle_image_attach_key(event: KeyEvent) -> Option(Msg) {
     "p" | "v" -> Some(model.PasteFromClipboard)
     "f" -> Some(model.SelectFile)
     _ -> None
+  }
+}
+
+fn handle_image_list_key(event: KeyEvent, bead_id: String) -> Option(Msg) {
+  let is_shift = has_modifier(event, Shift)
+
+  case event.key {
+    "escape" | "q" -> Some(model.CloseOverlay)
+    "a" -> Some(model.AttachImage)
+    // add new image
+    // Number keys: plain = open, shift = delete
+    key -> {
+      case int.parse(key) {
+        Ok(n) if n >= 1 && n <= 9 -> {
+          // Get the nth attachment
+          case image.list(bead_id) {
+            Ok(attachments) -> {
+              case list.drop(attachments, n - 1) |> list.first {
+                Ok(attachment) -> {
+                  case is_shift {
+                    True -> Some(model.DeleteImage(attachment.id))
+                    False -> Some(model.OpenImage(bead_id, attachment.id))
+                  }
+                }
+                Error(_) -> None
+              }
+            }
+            Error(_) -> None
+          }
+        }
+        _ -> None
+      }
+    }
   }
 }
 
@@ -289,12 +326,12 @@ fn handle_goto_key(event: KeyEvent) -> Option(Msg) {
 // Normal mode key handling
 fn handle_normal_key(event: KeyEvent, model: Model) -> Option(Msg) {
   case model.mode {
-    Normal -> handle_normal_mode_key(event)
+    Normal -> handle_normal_mode_key(event, model)
     Select(_) -> handle_select_mode_key(event)
   }
 }
 
-fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
+fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
   case event.key, has_modifier(event, Shift), has_modifier(event, Ctrl) {
     // Navigation
     "h", _, _ -> Some(model.MoveLeft)
@@ -318,9 +355,11 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "v", _, _ -> Some(model.EnterSelect)
     "g", _, _ -> Some(model.EnterGoto)
 
-    // Quick actions
-    "enter", _, _ -> Some(model.OpenDetailPanel)
-    "return", _, _ -> Some(model.OpenDetailPanel)
+    // Quick actions - Enter on epic drills down, otherwise opens detail
+    "enter", _, _ -> handle_enter_key(model)
+    "return", _, _ -> handle_enter_key(model)
+    // Escape exits epic drill-down mode (if active)
+    "escape", _, _ -> handle_escape_key(model)
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
@@ -332,14 +371,48 @@ fn handle_normal_mode_key(event: KeyEvent) -> Option(Msg) {
     "r", True, _ -> Some(model.ForceRedraw)
     // Shift+R (refresh)
 
-    // Quit
-    "q", _, _ -> Some(model.Quit)
+    // Quit (or exit drill-down if active)
+    "q", _, _ -> handle_quit_key(model)
 
     // Redraw
     "l", _, True -> Some(model.ForceRedraw)
     // Ctrl+L
 
     _, _, _ -> None
+  }
+}
+
+// Handle Enter key - drill down into epics, detail panel for others
+fn handle_enter_key(model: Model) -> Option(Msg) {
+  case get_current_task(model) {
+    Some(t) if task.is_epic(t) -> Some(model.DrillDownEpic(t.id))
+    Some(_) -> Some(model.OpenDetailPanel)
+    None -> None
+  }
+}
+
+// Handle Escape key - exit epic drill-down if active, otherwise no action
+fn handle_escape_key(model: Model) -> Option(Msg) {
+  case model.current_epic {
+    Some(_) -> Some(model.ExitEpicDrill)
+    None -> None
+  }
+}
+
+// Handle q key - exit drill-down if active, otherwise quit
+fn handle_quit_key(model: Model) -> Option(Msg) {
+  case model.current_epic {
+    Some(_) -> Some(model.ExitEpicDrill)
+    None -> Some(model.Quit)
+  }
+}
+
+// Get the task at the current cursor position
+fn get_current_task(model: Model) -> Option(task.Task) {
+  let tasks = model.tasks_in_column(model, model.cursor.column_index)
+  case list.drop(tasks, model.cursor.task_index) |> list.first {
+    Ok(t) -> Some(t)
+    Error(_) -> None
   }
 }
 
