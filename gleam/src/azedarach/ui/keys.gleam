@@ -82,7 +82,7 @@ fn handle_overlay_key(
     model.ImagePreview(_) -> handle_simple_close(event)
     model.DevServerMenu(_) -> handle_simple_close(event)
     model.DiffViewer(_) -> handle_simple_close(event)
-    model.MergeChoice(_, _) -> handle_merge_choice_key(event)
+    model.MergeChoice(_, _, merge_in_progress) -> handle_merge_choice_key(event, merge_in_progress)
     model.ConfirmDialog(_) -> handle_confirm_key(event)
   }
 }
@@ -254,13 +254,13 @@ fn handle_image_attach_key(event: KeyEvent) -> Option(Msg) {
   }
 }
 
-fn handle_merge_choice_key(event: KeyEvent) -> Option(Msg) {
-  case event.key {
-    "escape" -> Some(model.CloseOverlay)
-    "m" -> Some(model.MergeAndAttach)
-    "s" -> Some(model.SkipAndAttach)
-    "a" -> Some(model.AbortMerge)
-    _ -> None
+fn handle_merge_choice_key(event: KeyEvent, merge_in_progress: Bool) -> Option(Msg) {
+  case event.key, merge_in_progress {
+    "escape", _ -> Some(model.CloseOverlay)
+    "m", _ -> Some(model.MergeAndAttach)
+    "s", _ -> Some(model.SkipAndAttach)
+    "a", True -> Some(model.AbortMerge)
+    _, _ -> None
   }
 }
 
