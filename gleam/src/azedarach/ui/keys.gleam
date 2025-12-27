@@ -1,5 +1,6 @@
 // Keyboard handling - map keys to messages
 
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -223,9 +224,14 @@ fn handle_simple_close(event: KeyEvent) -> Option(Msg) {
 
 fn handle_project_selector_key(event: KeyEvent) -> Option(Msg) {
   case event.key {
-    "escape" -> Some(model.CloseOverlay)
-    // Numbers 1-9 would select projects
-    _ -> None
+    "escape" | "q" -> Some(model.CloseOverlay)
+    // Numbers 1-9 select projects (0-indexed internally)
+    key -> {
+      case int.parse(key) {
+        Ok(n) if n >= 1 && n <= 9 -> Some(model.SelectProject(n - 1))
+        _ -> None
+      }
+    }
   }
 }
 

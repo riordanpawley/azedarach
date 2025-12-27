@@ -8,7 +8,7 @@ import gleam/set.{type Set}
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
-import azedarach/domain/session.{type SessionState}
+import azedarach/domain/session
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
 import azedarach/actors/app_supervisor.{type AppContext}
@@ -18,7 +18,7 @@ pub type Model {
   Model(
     // Core data
     tasks: List(Task),
-    sessions: Dict(String, SessionState),
+    sessions: Dict(String, session.SessionState),
     dev_servers: Dict(String, DevServerState),
     // Multi-project
     projects: List(Project),
@@ -102,7 +102,7 @@ pub type SortField {
 }
 
 pub type Toast {
-  Toast(message: String, level: ToastLevel, expires_at: Int)
+  Toast(id: Int, message: String, level: ToastLevel, expires_at: Int)
 }
 
 pub type ToastLevel {
@@ -111,6 +111,15 @@ pub type ToastLevel {
   Warning
   Error
 }
+
+/// Default toast duration in milliseconds
+pub const toast_duration_ms = 5000
+
+/// Longer duration for error toasts (to read suggestions)
+pub const error_toast_duration_ms = 8000
+
+/// Maximum visible toasts
+pub const max_visible_toasts = 3
 
 pub type DevServerState {
   DevServerState(
@@ -156,6 +165,8 @@ pub type Msg {
   OpenProjectSelector
   OpenDetailPanel
   CloseOverlay
+  // Project selection
+  SelectProject(index: Int)
   // Actions
   StartSession
   StartSessionWithWork
@@ -211,9 +222,15 @@ pub type Msg {
   SettingsSaved(Result(Nil, config.ConfigError))
   // Data updates
   BeadsLoaded(List(Task))
-  SessionStateChanged(String, SessionState)
+  SessionStateChanged(String, session.SessionState)
   DevServerStateChanged(String, DevServerState)
+  // Toast notifications
+  ShowToast(level: ToastLevel, message: String)
   ToastExpired(Int)
+  // Coordinator events
+  RequestMergeChoice(bead_id: String, behind_count: Int)
+  ProjectChanged(project: Project)
+  ProjectsUpdated(projects: List(Project))
   // System
   TerminalResized(Int, Int)
   Tick
@@ -291,6 +308,40 @@ pub fn init_with_context(
   )
 }
 
+// =============================================================================
+// Toast helpers
+// =============================================================================
+
+/// Add a toast to the model with proper expiration
+/// Returns the updated model and the toast ID for scheduling expiration
+pub fn add_toast(model: Model, level: ToastLevel, message: String, now_ms: Int) -> #(Model, Int) {
+  let duration = case level {
+    Error -> error_toast_duration_ms
+    _ -> toast_duration_ms
+  }
+  let expires_at = now_ms + duration
+  let toast = Toast(id: expires_at, message: message, level: level, expires_at: expires_at)
+
+  // Keep only the last (max_visible - 1) toasts and add the new one
+  let kept_toasts = model.toasts
+    |> list.reverse
+    |> list.take(max_visible_toasts - 1)
+    |> list.reverse
+
+  let new_model = Model(..model, toasts: list.append(kept_toasts, [toast]))
+  #(new_model, expires_at)
+}
+
+/// Get level icon for display
+pub fn toast_icon(level: ToastLevel) -> String {
+  case level {
+    Info -> "i"
+    Success -> "+"
+    Warning -> "!"
+    Error -> "!"
+  }
+}
+
 // Get tasks for a specific column
 pub fn tasks_in_column(model: Model, column: Int) -> List(Task) {
   let status = column_to_status(column)
@@ -315,6 +366,7 @@ fn apply_filters(tasks: List(Task), model: Model) -> List(Task) {
   |> filter_by_status(model.status_filter)
   |> filter_by_priority(model.priority_filter)
   |> filter_by_type(model.type_filter)
+  |> filter_by_session_state(model.session_filter, model.sessions)
   |> filter_epic_children(model.hide_epic_children)
 }
 
@@ -342,6 +394,24 @@ fn filter_by_type(tasks: List(Task), filter: Set(task.IssueType)) -> List(Task) 
   }
 }
 
+fn filter_by_session_state(
+  tasks: List(Task),
+  filter: Set(session.State),
+  sessions: Dict(String, session.SessionState),
+) -> List(Task) {
+  case set.is_empty(filter) {
+    True -> tasks
+    False ->
+      list.filter(tasks, fn(t) {
+        case dict.get(sessions, t.id) {
+          Ok(session_state) -> set.contains(filter, session_state.state)
+          // If no session, treat as Idle
+          Error(_) -> set.contains(filter, session.Idle)
+        }
+      })
+  }
+}
+
 fn filter_epic_children(tasks: List(Task), hide: Bool) -> List(Task) {
   case hide {
     False -> tasks
@@ -365,7 +435,7 @@ fn apply_search(tasks: List(Task), query: String) -> List(Task) {
 fn apply_sort(
   tasks: List(Task),
   sort_by: SortField,
-  sessions: Dict(String, SessionState),
+  sessions: Dict(String, session.SessionState),
 ) -> List(Task) {
   case sort_by {
     SortBySession ->
@@ -382,8 +452,8 @@ fn apply_sort(
 }
 
 fn compare_session_state(
-  a: Option(SessionState),
-  b: Option(SessionState),
+  a: Option(session.SessionState),
+  b: Option(session.SessionState),
 ) -> order.Order {
   case a, b {
     Some(sa), Some(sb) -> session.compare_state(sa.state, sb.state)
