@@ -317,7 +317,122 @@
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 10. Cleanup
+## 10. Planning Workflow
+
+**Goal:** Use AI to plan complex features and auto-create beads
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ USER FLOW: Planning Workflow                                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Press 'p' to open planning overlay                                       │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ Planning                                                             │ │
+│     │                                                                      │ │
+│     │ Describe the feature you want to build:                              │ │
+│     │ ┌──────────────────────────────────────────────────────────────────┐│ │
+│     │ │ Add user authentication with OAuth and JWT tokens               ││ │
+│     │ └──────────────────────────────────────────────────────────────────┘│ │
+│     │                                                                      │ │
+│     │ Enter: Start planning                                                │ │
+│     │ Esc: Cancel                                                          │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  2. Press Enter to submit                                                    │
+│     └── Claude Code starts in tmux session "az-planning"                    │
+│     └── Overlay shows: "Generating plan..."                                 │
+│                                                                              │
+│  3. Planning phases (automatic):                                             │
+│                                                                              │
+│     ┌───────────────────────────────────────────────────────────────────┐   │
+│     │ Phase 1: GENERATE                                                  │   │
+│     │ Claude analyzes your description and creates initial plan:         │   │
+│     │ - Identifies distinct tasks                                        │   │
+│     │ - Determines task types (epic, task, bug, feature, chore)          │   │
+│     │ - Sets priorities (P1-P4)                                          │   │
+│     │ - Creates dependency graph                                         │   │
+│     └───────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                               │
+│     ┌───────────────────────────────────────────────────────────────────┐   │
+│     │ Phase 2: REVIEW (up to 5 passes)                                   │   │
+│     │ Claude reviews and refines the plan:                               │   │
+│     │ - Are tasks small enough? (break down if needed)                   │   │
+│     │ - Are dependencies correct? (sequential vs parallel)              │   │
+│     │ - Is the epic structure right?                                     │   │
+│     │ - Missing edge cases or tests?                                     │   │
+│     │                                                                    │   │
+│     │ Overlay shows: "Reviewing plan... (pass 2/5)"                      │   │
+│     └───────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                               │
+│     ┌───────────────────────────────────────────────────────────────────┐   │
+│     │ Phase 3: CREATE BEADS                                              │   │
+│     │ Once approved, creates beads with bd CLI:                          │   │
+│     │ - Epic for the main feature                                        │   │
+│     │ - Child tasks linked to epic (parent-child deps)                   │   │
+│     │ - Blocking dependencies between sequential tasks                   │   │
+│     │ - Proper metadata (type, priority, description)                    │   │
+│     └───────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+│  4. Planning complete                                                        │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ Planning Complete                                                    │ │
+│     │                                                                      │ │
+│     │ Created 5 beads:                                                     │ │
+│     │   [epic]    az-abc  Add user authentication                          │ │
+│     │   [task]    az-def  Set up OAuth providers                           │ │
+│     │   [task]    az-ghi  Implement JWT token flow                         │ │
+│     │   [task]    az-jkl  Create login/signup UI                           │ │
+│     │   [task]    az-mno  Add auth middleware                              │ │
+│     │                                                                      │ │
+│     │ Press Enter or Esc to close                                          │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  5. Start working                                                            │
+│     └── Navigate to epic: Enter to drill-down and see children             │
+│     └── Navigate to tasks: Space+s on each to start parallel sessions      │
+│     └── Dependencies ensure proper order for blocked tasks                  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Planning Overlay Keybindings
+
+| Key | Action | When |
+|-----|--------|------|
+| `Enter` | Submit description | In input mode |
+| `Esc` | Cancel / Close | Any phase |
+| `a` | Attach to session | During generation/review |
+| `Enter` / `q` | Close | After completion |
+
+### Debugging the Planning Session
+
+Press `a` during generation or review to attach to the planning tmux session. This is useful for:
+- Seeing what Claude is generating in real-time
+- Manually guiding the planning if needed
+- Debugging if planning gets stuck
+
+### Example Use Cases
+
+**Feature with clear subtasks:**
+```
+"Add dark mode with user preference persistence"
+→ Creates: epic + toggle component + theme context + localStorage + CSS variables tasks
+```
+
+**Bug fix with investigation:**
+```
+"Users report slow load times on dashboard"
+→ Creates: epic + profiling task + optimization tasks based on findings
+```
+
+**Infrastructure work:**
+```
+"Set up CI/CD pipeline with GitHub Actions"
+→ Creates: epic + build workflow + test workflow + deploy workflow tasks
+```
+
+## 11. Cleanup
 
 **Goal:** Remove worktree, branch, session after work complete
 
