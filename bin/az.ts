@@ -23,6 +23,7 @@ const CLI_SUBCOMMANDS = new Set([
 	"start",
 	"attach",
 	"pause",
+	"kill",
 	"status",
 	"sync",
 	"notify",
