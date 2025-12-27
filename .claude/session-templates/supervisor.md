@@ -348,6 +348,84 @@ bd update [TASK_ID] --notes="BLOCKED: Type-check failed
 $(bun run type-check 2>&1 | tail -20)"
 ```
 
+## Agent Mail Integration (Optional)
+
+For advanced coordination, integrate Agent Mail MCP for messaging and file leases.
+
+### Setup
+
+Register as supervisor at session start:
+```
+MCP: register_agent
+- project_key: "{{PROJECT_PATH}}"
+- agent_name: "supervisor-{{TIMESTAMP}}"
+- capabilities: ["orchestrate", "monitor"]
+```
+
+### Enhanced ASSESS Phase
+
+Before spawning, check file reservations:
+```
+MCP: get_file_reservations
+- project_key: "{{PROJECT_PATH}}"
+```
+
+If target files are reserved by another agent:
+1. Check the `reason` field for task ID
+2. Either wait for that task to complete, or spawn different task
+
+### Enhanced MONITOR Phase
+
+While polling `az status`, also check inbox:
+```
+MCP: fetch_inbox
+- project_key: "{{PROJECT_PATH}}"
+- agent_name: "supervisor-{{TIMESTAMP}}"
+- unread_only: true
+```
+
+Handle message types:
+| Subject Pattern | Action |
+|-----------------|--------|
+| `[BLOCKED] ...` | Analyze blocker, provide guidance or reassign |
+| `[DISCOVERY] ...` | Review new work, add to epic or defer |
+| `[QUESTION] ...` | Provide answer via reply message |
+| `[HANDOFF] ...` | Coordinate transition between agents |
+
+Acknowledge after handling:
+```
+MCP: acknowledge_message
+- message_id: "..."
+```
+
+### Worker Instructions
+
+When spawning workers with Agent Mail, add to their prompt:
+```
+## Agent Mail Setup
+
+1. Register: register_agent(project_key, "{{TASK_ID}}-worker", ["code"])
+2. Acquire leases: file_reservation_paths(project_key, agent_name, [files], 3600, true, "{{TASK_ID}}")
+3. Check inbox before starting: fetch_inbox(project_key, agent_name)
+
+## During Work
+
+- If blocked: send_message to supervisor with "[BLOCKED] reason"
+- If discover work: create bead, send "[DISCOVERY] ..." message
+- Check inbox periodically for supervisor instructions
+
+## Completion
+
+- Release leases: release_file_reservations(project_key, agent_name)
+- Close bead normally
+```
+
+### Full Reference
+
+See `.claude/session-templates/agent-mail.md` for complete Agent Mail documentation.
+
+---
+
 ## Starting the Supervisor
 
 Begin the supervisor loop:
