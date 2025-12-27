@@ -17,6 +17,7 @@ pub type Config {
     pr: PrConfig,
     beads: BeadsConfig,
     polling: PollingConfig,
+    gates: GatesConfig,
     theme: String,
   )
 }
@@ -82,6 +83,21 @@ pub type PollingConfig {
   PollingConfig(beads_refresh_ms: Int, session_monitor_ms: Int)
 }
 
+/// Quality gate definition - a named check with command to run
+pub type GateDefinition {
+  GateDefinition(
+    name: String,
+    command: String,
+    args: List(String),
+    fix_args: Option(List(String)),  // Optional fix command args
+    advisory: Bool,  // If true, failure is warning not error
+  )
+}
+
+pub type GatesConfig {
+  GatesConfig(gates: List(GateDefinition))
+}
+
 pub type ConfigError {
   FileNotFound(path: String)
   ParseError(message: String)
@@ -141,8 +157,43 @@ pub fn default_config() -> Config {
     pr: PrConfig(enabled: True, auto_draft: True, auto_merge: False),
     beads: BeadsConfig(sync_enabled: True),
     polling: PollingConfig(beads_refresh_ms: 30_000, session_monitor_ms: 500),
+    gates: default_gates_config(),
     theme: "catppuccin-macchiato",
   )
+}
+
+/// Default quality gates - can be overridden per project
+pub fn default_gates_config() -> GatesConfig {
+  GatesConfig(gates: [
+    GateDefinition(
+      name: "Type-check",
+      command: "bun",
+      args: ["run", "type-check"],
+      fix_args: None,
+      advisory: False,
+    ),
+    GateDefinition(
+      name: "Lint",
+      command: "bun",
+      args: ["run", "lint"],
+      fix_args: Some(["run", "fix"]),
+      advisory: True,  // Lint failures are warnings
+    ),
+    GateDefinition(
+      name: "Test",
+      command: "bun",
+      args: ["run", "test"],
+      fix_args: None,
+      advisory: False,
+    ),
+    GateDefinition(
+      name: "Build",
+      command: "bun",
+      args: ["run", "build"],
+      fix_args: None,
+      advisory: False,
+    ),
+  ])
 }
 
 fn parse_config(content: String) -> Result(Config, ConfigError) {
@@ -183,6 +234,11 @@ fn config_decoder() -> Decoder(Config) {
     defaults.polling,
     polling_decoder(),
   )
+  use gates <- decode.optional_field(
+    "gates",
+    defaults.gates,
+    gates_decoder(),
+  )
   use theme <- decode.optional_field("theme", defaults.theme, decode.string)
 
   decode.success(Config(
@@ -193,6 +249,7 @@ fn config_decoder() -> Decoder(Config) {
     pr:,
     beads:,
     polling:,
+    gates:,
     theme:,
   ))
 }
@@ -329,6 +386,30 @@ fn polling_decoder() -> Decoder(PollingConfig) {
   decode.success(PollingConfig(beads_refresh_ms:, session_monitor_ms:))
 }
 
+fn gates_decoder() -> Decoder(GatesConfig) {
+  use gates <- decode.optional_field(
+    "gates",
+    default_gates_config().gates,
+    decode.list(gate_definition_decoder()),
+  )
+
+  decode.success(GatesConfig(gates:))
+}
+
+fn gate_definition_decoder() -> Decoder(GateDefinition) {
+  use name <- decode.field("name", decode.string)
+  use command <- decode.field("command", decode.string)
+  use args <- decode.field("args", decode.list(decode.string))
+  use fix_args <- decode.optional_field(
+    "fixArgs",
+    None,
+    decode.optional(decode.list(decode.string)),
+  )
+  use advisory <- decode.optional_field("advisory", False, decode.bool)
+
+  decode.success(GateDefinition(name:, command:, args:, fix_args:, advisory:))
+}
+
 // ============================================================================
 // Encoders
 // ============================================================================
@@ -346,6 +427,7 @@ fn config_to_json(cfg: Config) -> json.Json {
     #("pr", pr_to_json(cfg.pr)),
     #("beads", beads_to_json(cfg.beads)),
     #("polling", polling_to_json(cfg.polling)),
+    #("gates", gates_to_json(cfg.gates)),
     #("theme", json.string(cfg.theme)),
   ])
 }
@@ -433,6 +515,26 @@ fn polling_to_json(polling: PollingConfig) -> json.Json {
     #("beadsRefresh", json.int(polling.beads_refresh_ms)),
     #("sessionMonitor", json.int(polling.session_monitor_ms)),
   ])
+}
+
+fn gates_to_json(gates: GatesConfig) -> json.Json {
+  json.object([
+    #("gates", json.array(gates.gates, gate_definition_to_json)),
+  ])
+}
+
+fn gate_definition_to_json(gate: GateDefinition) -> json.Json {
+  let base = [
+    #("name", json.string(gate.name)),
+    #("command", json.string(gate.command)),
+    #("args", json.array(gate.args, json.string)),
+    #("advisory", json.bool(gate.advisory)),
+  ]
+  let with_fix = case gate.fix_args {
+    Some(args) -> list.append(base, [#("fixArgs", json.array(args, json.string))])
+    None -> base
+  }
+  json.object(with_fix)
 }
 
 // ============================================================================

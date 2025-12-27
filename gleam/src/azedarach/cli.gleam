@@ -318,7 +318,7 @@ fn execute_kill(issue_id: String) -> Result(Nil, String) {
   }
 }
 
-/// Run quality gates (type-check, lint, test, build) for an issue's worktree
+/// Run quality gates for an issue's worktree (configurable via .azedarach.json)
 fn execute_gate(issue_id: String, fix: Bool) -> Result(Nil, String) {
   io.println("Running quality gates for: " <> issue_id)
   io.println("")
@@ -337,37 +337,42 @@ fn execute_gate(issue_id: String, fix: Bool) -> Result(Nil, String) {
   io.println("Worktree: " <> worktree_path)
   io.println("")
 
-  // Run quality gates
-  let gates = [
-    #("Type-check", "bun", ["run", "type-check"]),
-    #("Lint", "bun", ["run", "lint"]),
-    #("Test", "bun", ["run", "test"]),
-    #("Build", "bun", ["run", "build"]),
-  ]
+  // Load config to get gates (uses defaults if no config file)
+  let cfg = case config.load(Some(worktree_path)) {
+    Ok(c) -> c
+    Error(_) -> config.default_config()
+  }
 
-  let results = list.map(gates, fn(gate) {
-    let #(name, cmd, args) = gate
-    io.print("▶ " <> name <> "... ")
+  // Run each configured gate
+  let results = list.map(cfg.gates.gates, fn(gate) {
+    io.print("▶ " <> gate.name <> "... ")
 
-    // If fix mode and it's lint, try fix first
-    let actual_args = case fix, name {
-      True, "Lint" -> ["run", "fix"]
-      _, _ -> args
+    // Use fix_args if fix mode and available, otherwise use normal args
+    let args = case fix, gate.fix_args {
+      True, Some(fix_args) -> fix_args
+      _, _ -> gate.args
     }
 
-    case shell.run(cmd, actual_args, worktree_path) {
+    case shell.run(gate.command, args, worktree_path) {
       Ok(_) -> {
         io.println("✓")
-        True
+        #(True, gate.advisory)
       }
       Error(_) -> {
-        io.println("✗")
-        False
+        case gate.advisory {
+          True -> io.println("✗ (advisory)")
+          False -> io.println("✗")
+        }
+        #(False, gate.advisory)
       }
     }
   })
 
-  let passed = list.count(results, fn(r) { r })
+  // Count passes (advisory failures don't count as failures)
+  let passed = list.count(results, fn(r) {
+    let #(success, advisory) = r
+    success || advisory
+  })
   let total = list.length(results)
 
   io.println("")
@@ -567,7 +572,7 @@ SESSION COMMANDS:
     az sync [--all]                 Sync beads database
 
 ORCHESTRATION COMMANDS:
-    az gate <issue-id> [--fix]      Run quality gates (type-check, lint, test, build)
+    az gate <issue-id> [--fix]      Run quality gates (configurable in .azedarach.json)
 
 HOOK COMMANDS:
     az notify <event> <bead-id>     Handle Claude Code hook notification
