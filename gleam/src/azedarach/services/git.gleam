@@ -253,3 +253,12 @@ pub fn fetch(config: Config, project_path: String) -> Result(Nil, GitError) {
     False -> Ok(Nil)
   }
 }
+
+// Abort an in-progress merge
+pub fn abort_merge(worktree: String) -> Result(Nil, GitError) {
+  case shell.run("git", ["merge", "--abort"], worktree) {
+    Ok(_) -> Ok(Nil)
+    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+    Error(shell.NotFound(_)) -> Error(CommandFailed(1, "git not found"))
+  }
+}
