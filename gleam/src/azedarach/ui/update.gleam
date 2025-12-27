@@ -21,6 +21,17 @@ import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
 
+/// Get current time in milliseconds (for toast scheduling)
+@external(erlang, "erlang", "system_time")
+fn system_time_native() -> Int
+
+fn now_ms() -> Int {
+  // Convert native time units to milliseconds
+  // Erlang's system_time with no arg returns native units
+  // We use monotonic time for internal timing
+  system_time_native() / 1_000_000
+}
+
 pub fn update(
   model: Model,
   msg: Msg,
@@ -357,8 +368,15 @@ pub fn update(
       Model(..model, dev_servers: dict.insert(model.dev_servers, id, state)),
       effects.none(),
     )
+    // Toast notifications
+    model.ShowToast(level, message) -> {
+      let current_time = now_ms()
+      let #(new_model, toast_id) = model.add_toast(model, level, message, current_time)
+      let duration = toast_id - current_time
+      #(new_model, effects.schedule_toast_expiration(toast_id, duration))
+    }
     model.ToastExpired(id) -> #(
-      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
+      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.id != id })),
       effects.none(),
     )
 
