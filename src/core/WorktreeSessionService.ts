@@ -28,6 +28,7 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, Option, Schedule } from "effect"
 import { AppConfig } from "../config/index.js"
+import { getBeadSessionName, getWorktreePath } from "./paths.js"
 import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -71,6 +72,44 @@ export interface WorktreeSessionResult {
 	/** The tmux session name */
 	readonly sessionName: string
 	/** Path to the worktree */
+	readonly worktreePath: string
+}
+
+/**
+ * Options for building a tmux session from a bead ID
+ *
+ * This is the primary entry point for creating tmux sessions for beads.
+ * Consolidates session name generation, worktree path computation, and
+ * the common pattern of getOrCreateSession + ensureWindow.
+ */
+export interface BuildTmuxSessionFromBeadOptions {
+	/** The bead ID (e.g., "az-05y") */
+	readonly beadId: string
+	/** Path to the main project directory */
+	readonly projectPath: string
+	/** Name of the window to create (e.g., "code", "dev", "merge") */
+	readonly windowName: string
+	/** Command to run in the window */
+	readonly command: string
+	/** Working directory override (defaults to worktree path) */
+	readonly cwd?: string
+	/** Init commands to run before main command */
+	readonly initCommands?: readonly string[]
+	/** Custom tmux prefix key */
+	readonly tmuxPrefix?: string
+	/** Background tasks to spawn in separate windows */
+	readonly backgroundTasks?: readonly string[]
+}
+
+/**
+ * Result of building a tmux session from a bead
+ */
+export interface BuildTmuxSessionFromBeadResult {
+	/** The tmux session name (same as beadId) */
+	readonly sessionName: string
+	/** The tmux target (sessionName:windowName) */
+	readonly target: string
+	/** Path to the worktree directory */
 	readonly worktreePath: string
 }
 
@@ -144,6 +183,155 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				})
 
 			return {
+				/**
+				 * Build a tmux session from a bead ID
+				 *
+				 * This is the primary entry point for creating tmux sessions for beads.
+				 * It consolidates:
+				 * 1. Session name generation (uses getBeadSessionName)
+				 * 2. Worktree path computation (uses getWorktreePath)
+				 * 3. Session creation (getOrCreateSession)
+				 * 4. Window creation (ensureWindow)
+				 *
+				 * @example
+				 * ```ts
+				 * const result = yield* worktreeSession.buildTmuxSessionFromBead({
+				 *   beadId: "az-05y",
+				 *   projectPath: "/home/user/project",
+				 *   windowName: "code",
+				 *   command: "claude --model opus",
+				 *   initCommands: ["direnv allow"],
+				 * })
+				 * // result.target = "az-05y:code"
+				 * ```
+				 */
+				buildTmuxSessionFromBead: (
+					options: BuildTmuxSessionFromBeadOptions,
+				): Effect.Effect<
+					BuildTmuxSessionFromBeadResult,
+					WorktreeSessionError | TmuxError | SessionNotFoundError | ShellNotReadyError,
+					CommandExecutor.CommandExecutor
+				> =>
+					Effect.gen(function* () {
+						const {
+							beadId,
+							projectPath,
+							windowName,
+							command,
+							cwd,
+							initCommands,
+							tmuxPrefix,
+							backgroundTasks,
+						} = options
+
+						// Use canonical path functions instead of inline computation
+						const sessionName = getBeadSessionName(beadId)
+						const worktreePath = getWorktreePath(projectPath, beadId)
+						const effectiveCwd = cwd ?? worktreePath
+
+						// Create or get the session
+						yield* Effect.gen(function* () {
+							const exists = yield* tmux.hasSession(sessionName)
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const shell = sessionConfig.shell
+
+							if (!exists) {
+								yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
+								yield* tmux.newSession(sessionName, {
+									cwd: worktreePath,
+									command: `${shell} -i`,
+									prefix: tmuxPrefix ?? sessionConfig.tmuxPrefix,
+									azOptions: {
+										worktreePath,
+										projectPath,
+									},
+								})
+
+								yield* waitForShellReady(sessionName, "@az_shell_ready")
+
+								if (initCommands && initCommands.length > 0) {
+									for (const cmd of initCommands) {
+										yield* tmux.sendKeys(sessionName, cmd)
+									}
+								}
+
+								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+								yield* tmux.sendKeys(sessionName, marker)
+
+								yield* waitForTmuxOption(
+									sessionName,
+									"@az_init_done",
+									`Init commands not complete for session ${sessionName}`,
+								)
+
+								// Spawn background tasks in separate windows
+								const tasks = backgroundTasks ?? []
+								yield* Effect.forEach(
+									tasks,
+									(task, i) =>
+										Effect.gen(function* () {
+											const taskWindowName = `task-${i + 1}`
+											yield* Effect.log(
+												`Spawning background task window: ${taskWindowName} (${task})`,
+											)
+
+											yield* tmux.newWindow(sessionName, taskWindowName, {
+												cwd: worktreePath,
+												command: `${shell} -i`,
+											})
+
+											const target = `${sessionName}:${taskWindowName}`
+											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+											if (initCommands && initCommands.length > 0) {
+												for (const initCmd of initCommands) {
+													yield* tmux.sendKeys(target, initCmd)
+												}
+											}
+
+											yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+										}),
+									{ concurrency: "unbounded" },
+								)
+							}
+
+							return sessionName
+						})
+
+						// Ensure the window exists
+						const target = `${sessionName}:${windowName}`
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const shell = sessionConfig.shell
+
+						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
+
+						if (!windowExists) {
+							yield* tmux.newWindow(sessionName, windowName, {
+								cwd: effectiveCwd,
+								command: `${shell} -i`,
+							})
+
+							yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
+
+							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+							yield* tmux.sendKeys(target, waitCmd)
+
+							yield* Effect.log(`[buildTmuxSessionFromBead] Shell ready for ${target}`)
+
+							yield* tmux.sendKeys(target, command)
+						} else {
+							yield* Effect.log(`[buildTmuxSessionFromBead] Window ${target} exists, sending command`)
+							yield* tmux.selectWindow(sessionName, windowName)
+							yield* tmux.sendKeys(target, command)
+						}
+
+						return {
+							sessionName,
+							target,
+							worktreePath,
+						}
+					}),
+
 				getOrCreateSession: (
 					beadId: string,
 					options: {
