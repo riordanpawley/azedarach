@@ -90,6 +90,8 @@ pub type Msg {
   DeleteCleanup(id: String)
   // Images
   PasteImage(id: String)
+  AttachFile(id: String, path: String)
+  OpenImage(id: String, attachment_id: String)
   DeleteImage(id: String, attachment_id: String)
   // Dependencies
   AddDependency(id: String, depends_on: String, dep_type: task.DependentType)
@@ -854,6 +856,33 @@ fn handle_message(
             Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+
+    AttachFile(id, path) -> {
+      let project_path = get_project_path(state)
+      case image.attach_file(id, path) {
+        Ok(attachment) -> {
+          let link = image.build_notes_link(id, attachment)
+          case beads.append_notes(id, link, project_path, state.config) {
+            Ok(_) ->
+              notify_ui(
+                state,
+                Toast("Image attached: " <> attachment.filename, Success),
+              )
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
+          }
+        }
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+
+    OpenImage(id, attachment_id) -> {
+      case image.open_in_viewer(id, attachment_id) {
+        Ok(_) -> notify_ui(state, Toast("Opening image...", Info))
         Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
       }
       actor.continue(state)
