@@ -528,15 +528,26 @@ fn render_merge_choice(_bead_id: String, behind: Int, merge_in_progress: Bool, m
     False -> "Merge main into your branch before attaching?"
   }
 
-  let base_items = [
+  let header_items = [
     text(status_text),
     text(""),
     text(prompt_text),
     text(""),
-    hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")]),
-    hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")]),
   ]
 
+  // Only show "Merge & Attach" if no merge in progress
+  let merge_item = case merge_in_progress {
+    False -> [hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")])]
+    True -> []
+  }
+
+  // "Skip & Attach" becomes just "Attach" when merge in progress
+  let attach_item = case merge_in_progress {
+    True -> [hbox([styled_text(" s ", colors.yellow), text("Attach (keep conflicts)")])]
+    False -> [hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")])]
+  }
+
+  // Only show "Abort Merge" if merge in progress
   let abort_item = case merge_in_progress {
     True -> [hbox([styled_text(" a ", colors.red), text("Abort Merge")])]
     False -> []
@@ -544,7 +555,7 @@ fn render_merge_choice(_bead_id: String, behind: Int, merge_in_progress: Bool, m
 
   let footer = [hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")])]
 
-  let items = list.flatten([base_items, abort_item, footer])
+  let items = list.flatten([header_items, merge_item, attach_item, abort_item, footer])
 
   let title = case merge_in_progress {
     True -> "⚠ Merge Conflicts"
