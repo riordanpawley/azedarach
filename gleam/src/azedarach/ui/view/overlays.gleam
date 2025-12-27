@@ -33,7 +33,7 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.ImagePreview(path) -> render_image_preview(path, model)
     model.DevServerMenu(bead_id) -> render_dev_server_menu(bead_id, model)
     model.DiffViewer(bead_id) -> render_diff_viewer(bead_id, model)
-    model.MergeChoice(bead_id, behind) -> render_merge_choice(bead_id, behind, model)
+    model.MergeChoice(bead_id, behind, merge_in_progress) -> render_merge_choice(bead_id, behind, merge_in_progress, model)
     model.ConfirmDialog(action) -> render_confirm(action, model)
   }
 }
@@ -515,21 +515,43 @@ fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
   overlay_box("Diff", [dim_text("(loading diff...)")], model)
 }
 
-fn render_merge_choice(_bead_id: String, behind: Int, model: Model) -> Node {
+fn render_merge_choice(_bead_id: String, behind: Int, merge_in_progress: Bool, model: Model) -> Node {
   let colors = model.colors
 
-  let items = [
-    text(int.to_string(behind) <> " commits behind main"),
+  let status_text = case merge_in_progress, behind {
+    True, _ -> "Merge in progress (conflicts detected)"
+    False, n -> int.to_string(n) <> " commits behind main"
+  }
+
+  let prompt_text = case merge_in_progress {
+    True -> "Resolve conflicts or abort the merge?"
+    False -> "Merge main into your branch before attaching?"
+  }
+
+  let base_items = [
+    text(status_text),
     text(""),
-    text("Merge main into your branch before attaching?"),
+    text(prompt_text),
     text(""),
     hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")]),
     hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")]),
-    hbox([styled_text(" a ", colors.red), text("Abort Merge")]),
-    hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")]),
   ]
 
-  overlay_box("↓ Branch Behind main", items, model)
+  let abort_item = case merge_in_progress {
+    True -> [hbox([styled_text(" a ", colors.red), text("Abort Merge")])]
+    False -> []
+  }
+
+  let footer = [hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")])]
+
+  let items = list.flatten([base_items, abort_item, footer])
+
+  let title = case merge_in_progress {
+    True -> "⚠ Merge Conflicts"
+    False -> "↓ Branch Behind main"
+  }
+
+  overlay_box(title, items, model)
 }
 
 fn render_confirm(action: model.PendingAction, model: Model) -> Node {

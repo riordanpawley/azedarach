@@ -109,7 +109,7 @@ pub type UiMsg {
   SessionStateChanged(String, SessionState)
   DevServerStateChanged(String, DevServerState)
   Toast(message: String, level: ToastLevel)
-  RequestMergeChoice(bead_id: String, behind_count: Int)
+  RequestMergeChoice(bead_id: String, behind_count: Int, merge_in_progress: Bool)
   // Project updates
   ProjectChanged(Project)
   ProjectsUpdated(List(Project))
@@ -415,9 +415,10 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.worktree_path {
             Some(path) -> {
+              let merge_in_progress = git.is_merge_in_progress(path)
               case git.commits_behind_main(path, state.config) {
-                Ok(behind) if behind > 0 -> {
-                  notify_ui(state, RequestMergeChoice(id, behind))
+                Ok(behind) if behind > 0 || merge_in_progress -> {
+                  notify_ui(state, RequestMergeChoice(id, behind, merge_in_progress))
                 }
                 _ -> {
                   let tmux_name =
