@@ -380,6 +380,12 @@ pub fn update(
       effects.none(),
     )
 
+    // Coordinator events
+    model.RequestMergeChoice(bead_id, behind_count) -> #(
+      Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count))),
+      effects.none(),
+    )
+
     // System messages - pure state updates
     model.TerminalResized(w, h) -> #(
       Model(..model, terminal_size: #(w, h)),

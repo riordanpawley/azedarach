@@ -36,9 +36,15 @@ pub fn start_with_context(context: AppContext) -> Result(Nil, actor.StartError) 
       redraw: shore.on_timer(16),
     )
 
-  // Start the application
-  shore.start(spec)
-  |> result.map(fn(_subject) { Nil })
+  // Start the application and set up coordinator subscription
+  case shore.start(spec) {
+    Ok(shore_subject) -> {
+      // Subscribe to coordinator for UiMsg notifications
+      start_ui_bridge(shore_subject, context.coordinator)
+      Ok(Nil)
+    }
+    Error(e) -> Error(e)
+  }
 }
 
 /// Legacy start function (starts its own coordinator)
@@ -64,9 +70,94 @@ pub fn start(config: Config) -> Result(Nil, actor.StartError) {
       redraw: shore.on_timer(16),
     )
 
-  // Start the application
-  shore.start(spec)
-  |> result.map(fn(_subject) { Nil })
+  // Start the application and set up coordinator subscription
+  case shore.start(spec) {
+    Ok(shore_subject) -> {
+      // Subscribe to coordinator for UiMsg notifications
+      start_ui_bridge(shore_subject, coord)
+      Ok(Nil)
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+// =============================================================================
+// UI Bridge - forwards coordinator UiMsg to Shore
+// =============================================================================
+
+/// Start the UI bridge that translates coordinator UiMsg to Shore Msg
+fn start_ui_bridge(
+  shore_subject: Subject(Msg),
+  coord: Subject(coordinator.Msg),
+) -> Nil {
+  // Create a subject to receive UiMsg from coordinator
+  let ui_receiver: Subject(coordinator.UiMsg) = process.new_subject()
+
+  // Subscribe to coordinator
+  coordinator.send(coord, coordinator.Subscribe(ui_receiver))
+
+  // Spawn bridge process that forwards messages
+  let _ = process.spawn_link(fn() {
+    ui_bridge_loop(shore_subject, ui_receiver)
+  })
+
+  Nil
+}
+
+/// Bridge loop - receives UiMsg and forwards translated Msg to Shore
+fn ui_bridge_loop(
+  shore_subject: Subject(Msg),
+  ui_receiver: Subject(coordinator.UiMsg),
+) -> Nil {
+  // Wait for UiMsg from coordinator
+  case process.receive_forever(ui_receiver) {
+    msg -> {
+      // Translate and forward to Shore
+      case translate_ui_msg(msg) {
+        Ok(shore_msg) -> process.send(shore_subject, shore_msg)
+        Error(Nil) -> Nil
+      }
+      // Continue loop
+      ui_bridge_loop(shore_subject, ui_receiver)
+    }
+  }
+}
+
+/// Translate coordinator UiMsg to model Msg
+fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
+  case msg {
+    coordinator.TasksUpdated(tasks) -> Ok(model.BeadsLoaded(tasks))
+
+    coordinator.SessionStateChanged(id, state) ->
+      Ok(model.SessionStateChanged(id, state))
+
+    coordinator.DevServerStateChanged(id, state) ->
+      Ok(model.DevServerStateChanged(
+        id,
+        model.DevServerState(
+          name: state.name,
+          running: state.running,
+          port: state.port,
+          window_name: state.window_name,
+        ),
+      ))
+
+    coordinator.Toast(message, level) -> {
+      let model_level = effects.coordinator_to_model_toast_level(level)
+      Ok(model.ShowToast(model_level, message))
+    }
+
+    coordinator.RequestMergeChoice(bead_id, behind_count) ->
+      Ok(model.RequestMergeChoice(bead_id, behind_count))
+
+    coordinator.ProjectChanged(_project) ->
+      Ok(model.Tick)
+      // TODO: Add ProjectChanged message to model
+
+    coordinator.ProjectsUpdated(_projects) ->
+      Ok(model.Tick)
+      // TODO: Add ProjectsUpdated message to model
+  }
 }
 
 /// Initialize the model with supervision context
