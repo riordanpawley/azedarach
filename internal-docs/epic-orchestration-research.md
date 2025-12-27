@@ -420,18 +420,22 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 
 **Updated template**: `.claude/session-templates/orchestrator.md`
 
-### Phase 2: `az` CLI for Programmatic Control
+### Phase 2: `az` CLI for Programmatic Control ✅
+
+**Status: Complete**
 
 1. **Session management commands**
-   - `az sessions` - List active sessions with state
-   - `az status <id>` - Get detailed session state
-   - `az spawn <task>` - Spawn session for task
-   - `az attach <id>` - Attach to session
-   - `az kill <id>` - Terminate session
+   - `az status` - List active sessions with state ✅
+   - `az start <task>` - Spawn session for task (existing) ✅
+   - `az attach <id>` - Attach to tmux session ✅
+   - `az kill <id>` - Terminate session ✅
+   - `az pause <id>` - Pause session (existing)
 
 2. **Integration with beads**
-   - Auto-claim task when spawning
-   - Update session state in bead notes
+   - Auto-claim task when spawning (`--assignee=<session-name>`) ✅
+   - Status set to `in_progress` on start ✅
+
+**Updated files**: `src/cli/index.ts`, `bin/az.ts`
 
 ### Phase 3: VC-Style AI Supervisor
 
