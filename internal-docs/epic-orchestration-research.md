@@ -399,27 +399,41 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 
 ---
 
-## Recommendations
+## Implementation Roadmap
 
-### Short-Term (Quick Wins)
+### Phase 1: Enhanced Orchestrator Template ✅
 
-1. **Enhance orchestrator.md template**
-   - Add file conflict detection
-   - Improve progress reporting
-   - Add retry logic
+**Status: Complete**
 
-2. **Add `az` CLI commands**
-   - `az sessions` - List active sessions
-   - `az status <id>` - Get session state
-   - `az spawn <task>` - Spawn for task
+1. **Assignee-based claiming**
+   - Subagents claim tasks with `--assignee="session-id"`
+   - Enables tracking, resumability, ownership
+
+2. **Notes discipline**
+   - Structured progress format (COMPLETED/IN PROGRESS/NEXT)
+   - Updates at: claim, 50% progress, completion
+
+3. **File conflict detection**
+   - Analyze task designs for file paths before spawning
+   - Create file-to-task mapping
+   - Only parallelize non-overlapping tasks
+
+**Updated template**: `.claude/session-templates/orchestrator.md`
+
+### Phase 2: `az` CLI for Programmatic Control
+
+1. **Session management commands**
+   - `az sessions` - List active sessions with state
+   - `az status <id>` - Get detailed session state
+   - `az spawn <task>` - Spawn session for task
    - `az attach <id>` - Attach to session
+   - `az kill <id>` - Terminate session
 
-3. **Improve TUI feedback**
-   - Real-time session state updates
-   - Progress bars for epics
-   - Notification for completed tasks
+2. **Integration with beads**
+   - Auto-claim task when spawning
+   - Update session state in bead notes
 
-### Medium-Term (VC-Style Features)
+### Phase 3: VC-Style AI Supervisor
 
 1. **AI Assessment Phase**
    - Pre-execution review by supervisor
@@ -437,27 +451,33 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
    - Lint checking
    - Build verification
 
-4. **Agent Claiming via Assignee**
-   - Use `assignee` field with session ID
-   - Filter `bd ready` results by unassigned
-   - Already supported in beads CLI
-
-### Long-Term (Full Orchestration)
-
-1. **Agent Mail Integration**
-   - MCP server installation
-   - Identity management
-   - File lease system
-
-2. **Continuous Orchestrator**
+4. **Continuous Event Loop**
    - Long-running AI supervisor
-   - Event loop processing
-   - Automatic issue discovery
+   - Claims ready issues automatically
+   - Spawns agents, monitors, iterates
 
-3. **Multi-Repo Support**
-   - Cross-repo dependencies
-   - Monorepo orchestration
-   - Shared context
+### Phase 4: Agent Mail for Coordination
+
+**Use case**: When agents NEED to coordinate on shared concerns (not just avoid conflicts).
+
+1. **MCP Server Integration**
+   - Install Agent Mail MCP server
+   - Configure in azedarach
+
+2. **Agent Identity**
+   - Unique identities per session
+   - Persistent across restarts
+
+3. **File Lease System**
+   - Advisory locks on files
+   - Prevents conflicts at source
+   - Git-backed persistence
+
+4. **Inter-Agent Messaging**
+   - Agents can request info from each other
+   - Async coordination without orchestrator bottleneck
+
+**Note**: Phase 4 is for advanced scenarios where file conflict avoidance isn't enough - e.g., agents need to share discovered context or negotiate API contracts.
 
 ---
 
