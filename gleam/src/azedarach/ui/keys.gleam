@@ -11,6 +11,7 @@ import azedarach/ui/model.{
   type Model, type Msg, type Overlay,
   Normal, Select,
 }
+import azedarach/ui/textfield
 
 // Key event from Shore
 pub type KeyEvent {
@@ -86,6 +87,7 @@ fn handle_overlay_key(
     model.DiffViewer(_) -> handle_simple_close(event)
     model.MergeChoice(_, _, merge_in_progress) -> handle_merge_choice_key(event, merge_in_progress)
     model.ConfirmDialog(_) -> handle_confirm_key(event)
+    model.PlanningOverlay(state) -> handle_planning_key(event, state)
   }
 }
 
@@ -309,6 +311,46 @@ fn handle_confirm_key(event: KeyEvent) -> Option(Msg) {
   }
 }
 
+fn handle_planning_key(
+  event: KeyEvent,
+  state: model.PlanningOverlayState,
+) -> Option(Msg) {
+  case state {
+    // Input state - use TextField key handling
+    model.PlanningInput(field) -> {
+      let mods = textfield.Modifiers(
+        ctrl: has_modifier(event, Ctrl),
+        alt: has_modifier(event, Alt),
+        shift: has_modifier(event, Shift),
+      )
+      case textfield.handle_key(field, event.key, mods) {
+        textfield.Updated(new_field) ->
+          Some(model.PlanningFieldUpdate(new_field))
+        textfield.Submit(_) -> Some(model.PlanningSubmit)
+        textfield.Cancel -> Some(model.PlanningCancel)
+        textfield.Ignored -> None
+      }
+    }
+    // Generating/Reviewing/Creating - allow cancel or attach
+    model.PlanningGenerating(_)
+    | model.PlanningReviewing(_, _, _)
+    | model.PlanningCreatingBeads(_) -> {
+      case event.key {
+        "escape" -> Some(model.PlanningCancel)
+        "a" -> Some(model.PlanningAttachSession)
+        _ -> None
+      }
+    }
+    // Complete or Error - close overlay
+    model.PlanningComplete(_) | model.PlanningError(_) -> {
+      case event.key {
+        "escape" | "q" | "enter" | "return" -> Some(model.CloseOverlay)
+        _ -> None
+      }
+    }
+  }
+}
+
 // Goto mode (after pressing 'g')
 fn handle_goto_key(event: KeyEvent) -> Option(Msg) {
   case event.key {
@@ -363,6 +405,7 @@ fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
+    "p", False, _ -> Some(model.OpenPlanning)
     "l", True, _ -> Some(model.OpenLogs)
     // Shift+L
     "c", False, _ -> Some(model.CreateBead)

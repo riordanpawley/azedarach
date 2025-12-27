@@ -11,6 +11,7 @@ import azedarach/domain/task.{type Task}
 import azedarach/domain/session
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
+import azedarach/ui/textfield.{type TextField}
 import azedarach/actors/app_supervisor.{type AppContext}
 
 // Main model holding all application state
@@ -89,6 +90,18 @@ pub type Overlay {
   DiffViewer(bead_id: String)
   MergeChoice(bead_id: String, behind_count: Int, merge_in_progress: Bool)
   ConfirmDialog(action: PendingAction)
+  // Planning workflow
+  PlanningOverlay(state: PlanningOverlayState)
+}
+
+/// State for the planning overlay
+pub type PlanningOverlayState {
+  PlanningInput(field: TextField)
+  PlanningGenerating(description: String)
+  PlanningReviewing(description: String, pass: Int, max_passes: Int)
+  PlanningCreatingBeads(description: String)
+  PlanningComplete(created_ids: List(String))
+  PlanningError(message: String)
 }
 
 pub type PendingAction {
@@ -248,6 +261,13 @@ pub type Msg {
   ForceRedraw
   // Keyboard raw
   KeyPressed(key: String, modifiers: List(Modifier))
+  // Planning workflow
+  OpenPlanning
+  PlanningFieldUpdate(TextField)
+  PlanningSubmit
+  PlanningCancel
+  PlanningStateUpdated(PlanningOverlayState)
+  PlanningAttachSession
 }
 
 pub type Modifier {

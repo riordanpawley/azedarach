@@ -186,3 +186,6 @@ export {
 	vcStatusPollerAtom,
 	vcStatusRefAtom,
 } from "./vc.js"
+// Planning workflow atoms
+export type { Plan, PlanningState, PlannedTask, ReviewFeedback } from "./planning.js"
+export { planningStateAtom, runPlanningAtom, resetPlanningAtom } from "./planning.js"
