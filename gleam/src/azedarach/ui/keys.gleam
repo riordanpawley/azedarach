@@ -257,9 +257,9 @@ fn handle_image_attach_key(event: KeyEvent) -> Option(Msg) {
 fn handle_merge_choice_key(event: KeyEvent, merge_in_progress: Bool) -> Option(Msg) {
   case event.key, merge_in_progress {
     "escape", _ -> Some(model.CloseOverlay)
-    "m", _ -> Some(model.MergeAndAttach)
+    "m", False -> Some(model.MergeAndAttach)  // Only when no merge in progress
     "s", _ -> Some(model.SkipAndAttach)
-    "a", True -> Some(model.AbortMerge)
+    "a", True -> Some(model.AbortMerge)  // Only when merge in progress
     _, _ -> None
   }
 }
