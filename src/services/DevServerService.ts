@@ -11,7 +11,12 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/index.js"
-import { parseSessionName, WINDOW_NAMES } from "../core/paths.js"
+import {
+	getBeadSessionName,
+	getWorktreePath,
+	parseSessionName,
+	WINDOW_NAMES,
+} from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
@@ -436,11 +441,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				const current = yield* getServerState(beadId, name)
 				if (current.status === "running" || current.status === "starting") return current
 
-				const projectName = pathService.basename(projectPath)
-				const worktreePath = pathService.join(
-					pathService.dirname(projectPath),
-					`${projectName}-${beadId}`,
-				)
+				// Use canonical path computation instead of inline
+				const worktreePath = getWorktreePath(projectPath, beadId)
 				if (!(yield* fs.exists(worktreePath).pipe(Effect.catchAll(() => Effect.succeed(false))))) {
 					return yield* Effect.fail(new NoWorktreeError({ beadId, message: "No worktree found" }))
 				}
@@ -480,7 +482,8 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
 				)
 
-				const tmuxSessionName = beadId
+				// Use canonical session name instead of inline
+				const tmuxSessionName = getBeadSessionName(beadId)
 				const targetWindow = `${tmuxSessionName}:${WINDOW_NAMES.DEV}`
 				const cwd = srvConfig?.cwd ? pathService.join(worktreePath, srvConfig.cwd) : worktreePath
 

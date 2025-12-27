@@ -292,6 +292,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.board.refreshGitStats(),
 	},
 	{
+		key: "p",
+		mode: "normal",
+		description: "Open planning workflow",
+		action: bc.overlay.push({ _tag: "planning" }),
+	},
+	{
 		key: "S-l",
 		mode: "normal",
 		description: "View logs in tmux popup",

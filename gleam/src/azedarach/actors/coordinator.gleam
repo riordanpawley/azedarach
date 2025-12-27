@@ -22,6 +22,7 @@ import azedarach/services/beads
 import azedarach/services/bead_editor
 import azedarach/services/dev_server_state.{type DevServerState, DevServerState}
 import azedarach/services/image
+import azedarach/services/planning
 import azedarach/services/port_allocator
 import azedarach/services/tmux
 import azedarach/services/worktree
@@ -78,6 +79,7 @@ pub type Msg {
   ResumeSession(id: String)
   StopSession(id: String)
   MergeAndAttach(id: String)
+  AbortMerge(id: String)
   // Dev servers
   ToggleDevServer(id: String, server: String)
   ViewDevServer(id: String, server: String)
@@ -90,10 +92,15 @@ pub type Msg {
   DeleteCleanup(id: String)
   // Images
   PasteImage(id: String)
+  AttachFile(id: String, path: String)
+  OpenImage(id: String, attachment_id: String)
   DeleteImage(id: String, attachment_id: String)
   // Dependencies
   AddDependency(id: String, depends_on: String, dep_type: task.DependentType)
   RemoveDependency(id: String, depends_on: String)
+  // Planning
+  RunPlanning(description: String)
+  AttachPlanningSession
   // Internal
   BeadsLoaded(Result(List(Task), beads.BeadsError))
   ProjectsDiscovered(List(Project))
@@ -108,10 +115,22 @@ pub type UiMsg {
   SessionStateChanged(String, SessionState)
   DevServerStateChanged(String, DevServerState)
   Toast(message: String, level: ToastLevel)
-  RequestMergeChoice(bead_id: String, behind_count: Int)
+  RequestMergeChoice(bead_id: String, behind_count: Int, merge_in_progress: Bool)
   // Project updates
   ProjectChanged(Project)
   ProjectsUpdated(List(Project))
+  // Planning
+  PlanningStateUpdated(PlanningState)
+}
+
+/// Planning workflow state for UI updates
+pub type PlanningState {
+  PlanningIdle
+  PlanningGenerating(description: String)
+  PlanningReviewing(description: String, pass: Int, max_passes: Int)
+  PlanningCreatingBeads(description: String)
+  PlanningComplete(created_ids: List(String))
+  PlanningError(message: String)
 }
 
 pub type ToastLevel {
@@ -414,9 +433,10 @@ fn handle_message(
         Ok(session_state) -> {
           case session_state.worktree_path {
             Some(path) -> {
+              let merge_in_progress = git.is_merge_in_progress(path)
               case git.commits_behind_main(path, state.config) {
-                Ok(behind) if behind > 0 -> {
-                  notify_ui(state, RequestMergeChoice(id, behind))
+                Ok(behind) if behind > 0 || merge_in_progress -> {
+                  notify_ui(state, RequestMergeChoice(id, behind, merge_in_progress))
                 }
                 _ -> {
                   let tmux_name =
@@ -603,6 +623,24 @@ fn handle_message(
                     ),
                   )
                 }
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
+              }
+            }
+            None -> notify_ui(state, Toast("No worktree", Warning))
+          }
+        }
+        Error(_) -> notify_ui(state, Toast("Session not found", Warning))
+      }
+      actor.continue(state)
+    }
+
+    AbortMerge(id) -> {
+      case dict.get(state.sessions, id) {
+        Ok(session_state) -> {
+          case session_state.worktree_path {
+            Some(path) -> {
+              case git.abort_merge(path) {
+                Ok(_) -> notify_ui(state, Toast("Merge aborted", Success))
                 Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }
@@ -859,6 +897,33 @@ fn handle_message(
       actor.continue(state)
     }
 
+    AttachFile(id, path) -> {
+      let project_path = get_project_path(state)
+      case image.attach_file(id, path) {
+        Ok(attachment) -> {
+          let link = image.build_notes_link(id, attachment)
+          case beads.append_notes(id, link, project_path, state.config) {
+            Ok(_) ->
+              notify_ui(
+                state,
+                Toast("Image attached: " <> attachment.filename, Success),
+              )
+            Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
+          }
+        }
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+
+    OpenImage(id, attachment_id) -> {
+      case image.open_in_viewer(id, attachment_id) {
+        Ok(_) -> notify_ui(state, Toast("Opening image...", Info))
+        Error(e) -> notify_ui(state, Toast(image.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+
     DeleteImage(id, attachment_id) -> {
       let project_path = get_project_path(state)
       case image.remove(id, attachment_id) {
@@ -909,6 +974,63 @@ fn handle_message(
         Error(_) -> actor.continue(state)
       }
     }
+
+    // Planning workflow
+    RunPlanning(description) -> {
+      let project_path = get_project_path(state)
+      // Spawn the planning workflow in a separate process
+      spawn_planning_workflow(state, description, project_path)
+      actor.continue(state)
+    }
+
+    AttachPlanningSession -> {
+      case planning.attach_session() {
+        Ok(_) -> Nil
+        Error(e) -> notify_ui(state, Toast("Failed to attach: " <> planning.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+  }
+}
+
+/// Spawn the planning workflow in a background process
+fn spawn_planning_workflow(
+  state: CoordinatorState,
+  description: String,
+  project_path: String,
+) -> Nil {
+  let ui_subject = state.ui_subject
+  let config = state.config
+
+  let _ = process.spawn(fn() {
+    // Notify: generating
+    notify_planning_state(ui_subject, PlanningGenerating(description))
+
+    // Start the planning workflow
+    case planning.run_planning_workflow(description, project_path, config, 5) {
+      Ok(created_ids) -> {
+        notify_planning_state(ui_subject, PlanningComplete(created_ids))
+        // Also show a success toast
+        case ui_subject {
+          Some(ui) -> {
+            let count = list.length(created_ids)
+            process.send(ui, Toast("Created " <> int.to_string(count) <> " beads from plan", Success))
+          }
+          None -> Nil
+        }
+      }
+      Error(e) -> {
+        notify_planning_state(ui_subject, PlanningError(planning.error_to_string(e)))
+      }
+    }
+  })
+  Nil
+}
+
+fn notify_planning_state(ui_subject: Option(Subject(UiMsg)), state: PlanningState) -> Nil {
+  case ui_subject {
+    Some(ui) -> process.send(ui, PlanningStateUpdated(state))
+    None -> Nil
   }
 }
 
