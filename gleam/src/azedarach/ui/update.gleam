@@ -11,6 +11,7 @@ import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
 import azedarach/config
+import azedarach/domain/project
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -20,6 +21,17 @@ import azedarach/ui/model.{
 import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
+
+/// Get current time in milliseconds (for toast scheduling)
+@external(erlang, "erlang", "system_time")
+fn system_time_native() -> Int
+
+fn now_ms() -> Int {
+  // Convert native time units to milliseconds
+  // Erlang's system_time with no arg returns native units
+  // We use monotonic time for internal timing
+  system_time_native() / 1_000_000
+}
 
 pub fn update(
   model: Model,
@@ -104,6 +116,18 @@ pub fn update(
     )
     model.OpenDetailPanel -> #(open_detail_panel(model), effects.none())
     model.CloseOverlay -> #(Model(..model, overlay: None), effects.none())
+
+    // Project selection
+    model.SelectProject(index) -> {
+      // Get project at index (1-indexed from UI, convert to 0-indexed)
+      case list.drop(model.projects, index) |> list.first {
+        Ok(proj) -> #(
+          Model(..model, overlay: None),
+          effects.switch_project(coord, proj.path),
+        )
+        Error(_) -> #(model, effects.none())
+      }
+    }
 
     // Session actions - side effects go through Shore effects
     model.StartSession -> {
@@ -357,8 +381,29 @@ pub fn update(
       Model(..model, dev_servers: dict.insert(model.dev_servers, id, state)),
       effects.none(),
     )
+    // Toast notifications
+    model.ShowToast(level, message) -> {
+      let current_time = now_ms()
+      let #(new_model, toast_id) = model.add_toast(model, level, message, current_time)
+      let duration = toast_id - current_time
+      #(new_model, effects.schedule_toast_expiration(toast_id, duration))
+    }
     model.ToastExpired(id) -> #(
-      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
+      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.id != id })),
+      effects.none(),
+    )
+
+    // Coordinator events
+    model.RequestMergeChoice(bead_id, behind_count) -> #(
+      Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count))),
+      effects.none(),
+    )
+    model.ProjectChanged(project) -> #(
+      Model(..model, current_project: Some(project.path)),
+      effects.none(),
+    )
+    model.ProjectsUpdated(projects) -> #(
+      Model(..model, projects: projects),
       effects.none(),
     )
 
