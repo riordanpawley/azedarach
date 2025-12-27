@@ -11,6 +11,7 @@ import azedarach/domain/task.{type Task}
 import azedarach/domain/session
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
+import azedarach/ui/textfield.{type TextField}
 import azedarach/actors/app_supervisor.{type AppContext}
 
 // Main model holding all application state
@@ -95,7 +96,7 @@ pub type Overlay {
 
 /// State for the planning overlay
 pub type PlanningOverlayState {
-  PlanningInput(description: String)
+  PlanningInput(field: TextField)
   PlanningGenerating(description: String)
   PlanningReviewing(description: String, pass: Int, max_passes: Int)
   PlanningCreatingBeads(description: String)
@@ -261,8 +262,7 @@ pub type Msg {
   KeyPressed(key: String, modifiers: List(Modifier))
   // Planning workflow
   OpenPlanning
-  PlanningInputChar(String)
-  PlanningInputBackspace
+  PlanningFieldUpdate(TextField)
   PlanningSubmit
   PlanningCancel
   PlanningStateUpdated(PlanningOverlayState)

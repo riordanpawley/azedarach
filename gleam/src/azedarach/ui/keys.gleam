@@ -11,6 +11,7 @@ import azedarach/ui/model.{
   type Model, type Msg, type Overlay,
   Normal, Select,
 }
+import azedarach/ui/textfield
 
 // Key event from Shore
 pub type KeyEvent {
@@ -314,18 +315,19 @@ fn handle_planning_key(
   state: model.PlanningOverlayState,
 ) -> Option(Msg) {
   case state {
-    // Input state - handle text input
-    model.PlanningInput(_) -> {
-      case event.key {
-        "escape" -> Some(model.PlanningCancel)
-        "enter" | "return" -> Some(model.PlanningSubmit)
-        "backspace" -> Some(model.PlanningInputBackspace)
-        key -> {
-          case is_printable(key) {
-            True -> Some(model.PlanningInputChar(key))
-            False -> None
-          }
-        }
+    // Input state - use TextField key handling
+    model.PlanningInput(field) -> {
+      let mods = textfield.Modifiers(
+        ctrl: has_modifier(event, Ctrl),
+        alt: has_modifier(event, Alt),
+        shift: has_modifier(event, Shift),
+      )
+      case textfield.handle_key(field, event.key, mods) {
+        textfield.Updated(new_field) ->
+          Some(model.PlanningFieldUpdate(new_field))
+        textfield.Submit(_) -> Some(model.PlanningSubmit)
+        textfield.Cancel -> Some(model.PlanningCancel)
+        textfield.Ignored -> None
       }
     }
     // Generating/Reviewing/Creating - allow cancel or attach

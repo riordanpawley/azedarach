@@ -19,6 +19,7 @@ import azedarach/ui/model.{
   Cursor, Model, Normal, Select,
 }
 import azedarach/ui/effects.{type Effect}
+import azedarach/ui/textfield
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
 
@@ -458,24 +459,14 @@ pub fn update(
 
     // Planning workflow messages
     model.OpenPlanning -> #(
-      Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput("")))),
+      Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(textfield.new())))),
       effects.none(),
     )
 
-    model.PlanningInputChar(c) -> {
+    model.PlanningFieldUpdate(field) -> {
       case model.overlay {
-        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> #(
-          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(desc <> c)))),
-          effects.none(),
-        )
-        _ -> #(model, effects.none())
-      }
-    }
-
-    model.PlanningInputBackspace -> {
-      case model.overlay {
-        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> #(
-          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(string.drop_end(desc, 1))))),
+        Some(model.PlanningOverlay(model.PlanningInput(_))) -> #(
+          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(field)))),
           effects.none(),
         )
         _ -> #(model, effects.none())
@@ -484,8 +475,8 @@ pub fn update(
 
     model.PlanningSubmit -> {
       case model.overlay {
-        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> {
-          case string.trim(desc) {
+        Some(model.PlanningOverlay(model.PlanningInput(field))) -> {
+          case string.trim(textfield.get_text(field)) {
             "" -> #(model, effects.none())  // Don't submit empty
             trimmed -> #(
               Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningGenerating(trimmed)))),
@@ -504,7 +495,7 @@ pub fn update(
 
     model.PlanningStateUpdated(state) -> {
       let overlay_state = case state {
-        model.PlanningInput(desc) -> model.PlanningInput(desc)
+        model.PlanningInput(field) -> model.PlanningInput(field)
         model.PlanningGenerating(desc) -> model.PlanningGenerating(desc)
         model.PlanningReviewing(desc, pass, max) -> model.PlanningReviewing(desc, pass, max)
         model.PlanningCreatingBeads(desc) -> model.PlanningCreatingBeads(desc)
