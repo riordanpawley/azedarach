@@ -225,6 +225,8 @@ pub type Msg {
   // Toast notifications
   ShowToast(level: ToastLevel, message: String)
   ToastExpired(Int)
+  // Coordinator events
+  RequestMergeChoice(bead_id: String, behind_count: Int)
   // System
   TerminalResized(Int, Int)
   Tick
