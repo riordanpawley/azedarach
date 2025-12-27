@@ -424,7 +424,7 @@ fn render_project_selector(model: Model) -> Node {
 
   let projects =
     list.index_map(model.projects, fn(project, idx) {
-      let is_current = Some(project.name) == model.current_project
+      let is_current = Some(project.path) == model.current_project
       let indicator = case is_current {
         True -> "●"
         False -> " "
@@ -437,9 +437,14 @@ fn render_project_selector(model: Model) -> Node {
       ])
     })
 
+  let footer = [
+    text(""),
+    dim_text("1-9: select • Esc: close"),
+  ]
+
   case list.is_empty(projects) {
-    True -> overlay_box("Projects", [dim_text("(no projects configured)")], model)
-    False -> overlay_box("Select Project", projects, model)
+    True -> overlay_box("Projects", [dim_text("(no projects found)")], model)
+    False -> overlay_box("Select Project", list.append(projects, footer), model)
   }
 }
 
