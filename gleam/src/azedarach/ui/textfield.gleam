@@ -215,8 +215,13 @@ fn skip_spaces_left(graphemes: List(String), pos: Int) -> Int {
     True -> 0
     False -> {
       case list_get(graphemes, pos) {
-        Some(char) if is_whitespace(char) -> skip_spaces_left(graphemes, pos - 1)
-        _ -> pos
+        Some(char) -> {
+          case is_whitespace(char) {
+            True -> skip_spaces_left(graphemes, pos - 1)
+            False -> pos
+          }
+        }
+        None -> pos
       }
     }
   }
@@ -229,8 +234,13 @@ fn skip_spaces_right(graphemes: List(String), pos: Int) -> Int {
     True -> len
     False -> {
       case list_get(graphemes, pos) {
-        Some(char) if is_whitespace(char) -> skip_spaces_right(graphemes, pos + 1)
-        _ -> pos
+        Some(char) -> {
+          case is_whitespace(char) {
+            True -> skip_spaces_right(graphemes, pos + 1)
+            False -> pos
+          }
+        }
+        None -> pos
       }
     }
   }
@@ -242,8 +252,13 @@ fn find_word_start(graphemes: List(String), pos: Int) -> Int {
     True -> 0
     False -> {
       case list_get(graphemes, pos - 1) {
-        Some(char) if is_word_char(char) -> find_word_start(graphemes, pos - 1)
-        _ -> pos
+        Some(char) -> {
+          case is_word_char(char) {
+            True -> find_word_start(graphemes, pos - 1)
+            False -> pos
+          }
+        }
+        None -> pos
       }
     }
   }
@@ -256,8 +271,13 @@ fn find_word_end(graphemes: List(String), pos: Int) -> Int {
     True -> len
     False -> {
       case list_get(graphemes, pos) {
-        Some(char) if is_word_char(char) -> find_word_end(graphemes, pos + 1)
-        _ -> pos
+        Some(char) -> {
+          case is_word_char(char) {
+            True -> find_word_end(graphemes, pos + 1)
+            False -> pos
+          }
+        }
+        None -> pos
       }
     }
   }

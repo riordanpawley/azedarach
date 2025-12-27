@@ -428,8 +428,12 @@ fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
 // Handle Enter key - drill down into epics, detail panel for others
 fn handle_enter_key(model: Model) -> Option(Msg) {
   case get_current_task(model) {
-    Some(t) if task.is_epic(t) -> Some(model.DrillDownEpic(t.id))
-    Some(_) -> Some(model.OpenDetailPanel)
+    Some(t) -> {
+      case task.is_epic(t) {
+        True -> Some(model.DrillDownEpic(t.id))
+        False -> Some(model.OpenDetailPanel)
+      }
+    }
     None -> None
   }
 }

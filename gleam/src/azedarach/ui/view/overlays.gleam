@@ -721,13 +721,14 @@ fn render_planning(state: model.PlanningOverlayState, model: Model) -> Node {
 
     model.PlanningComplete(ids) -> {
       let count = list.length(ids)
-      let items = [
-        styled_text("Created " <> int.to_string(count) <> " beads:", colors.green),
-        text(""),
-        ..list.map(ids, fn(id) { text("  • " <> id) }),
-        text(""),
-        dim_text("Enter/Esc: close"),
-      ]
+      let id_items = list.map(ids, fn(id) { text("  • " <> id) })
+      let items = list.flatten([
+        [styled_text("Created " <> int.to_string(count) <> " beads:", colors.green)],
+        [text("")],
+        id_items,
+        [text("")],
+        [dim_text("Enter/Esc: close")],
+      ])
 
       overlay_box("Planning Complete", items, model)
     }
