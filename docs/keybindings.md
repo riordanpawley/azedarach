@@ -97,7 +97,8 @@ When in drill-down mode:
 |-----|--------|-------|
 | `h/j/k/l` | Navigate | Works normally within children |
 | `Enter` | Open detail | On child tasks, opens detail panel |
-| `Backspace` | Exit drill-down | Returns to main board |
+| `q` | Exit drill-down | Returns to main board (doesn't quit app) |
+| `Esc` | Exit drill-down | Same as `q` |
 
 ### Cursor Restoration
 
