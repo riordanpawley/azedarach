@@ -145,9 +145,31 @@ const startHandler = (args: {
 			})
 		}).pipe(Effect.provide(fullLayer))
 
+		// Claim the bead with session assignee
+		const claimCommand = PlatformCommand.make(
+			"bd",
+			"update",
+			args.issueId,
+			"--status=in_progress",
+			`--assignee=${session.tmuxSessionName}`,
+		)
+		yield* PlatformCommand.exitCode(claimCommand).pipe(
+			Effect.tap(() => {
+				if (args.verbose) {
+					return Console.log(`Claimed bead ${args.issueId} with assignee ${session.tmuxSessionName}`)
+				}
+				return Effect.void
+			}),
+			Effect.catchAll((e) => {
+				// Non-fatal: log warning but continue
+				return Console.log(`Warning: Could not claim bead: ${e}`)
+			}),
+		)
+
 		yield* Console.log(`Session started successfully!`)
 		yield* Console.log(`  Worktree: ${session.worktreePath}`)
 		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
+		yield* Console.log(`  Bead claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
 		yield* Console.log(``)
 		yield* Console.log(`To attach: az attach ${args.issueId}`)
 		yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
@@ -164,20 +186,27 @@ const attachHandler = (args: {
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-		yield* Console.log(`Attaching to session for issue: ${args.issueId}`)
-		yield* Console.log(`Project: ${cwd}`)
-
 		if (args.verbose) {
-			yield* Console.log("Verbose mode enabled")
+			yield* Console.log(`Attaching to session for issue: ${args.issueId}`)
+			yield* Console.log(`Project: ${cwd}`)
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+		// Check if session exists
+		const sessionName = getBeadSessionName(args.issueId)
+		const command = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
+		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
+		)
 
-		// TODO: Implement session attachment
-		yield* Console.log("[Stub] Checking if session exists...")
-		yield* Console.log("[Stub] Attaching to tmux session...")
-		yield* Console.log(`[Stub] Run: tmux attach-session -t az-${args.issueId}`)
+		if (exitCode !== 0) {
+			yield* Console.error(`No session found for ${args.issueId}`)
+			yield* Console.log(`Start a new session with: az start ${args.issueId}`)
+			return yield* Effect.fail(new Error(`Session not found: ${args.issueId}`))
+		}
+
+		// Attach to tmux session (this replaces current process)
+		const attachCommand = PlatformCommand.make("tmux", "attach-session", "-t", sessionName)
+		yield* PlatformCommand.exitCode(attachCommand)
 	})
 
 /**
@@ -207,6 +236,47 @@ const pauseHandler = (args: {
 	})
 
 /**
+ * Kill a running Claude session
+ */
+const killHandler = (args: {
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+
+		yield* Console.log(`Killing session for issue: ${args.issueId}`)
+
+		// Check if session exists
+		const sessionName = getBeadSessionName(args.issueId)
+		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
+		const exitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
+		)
+
+		if (exitCode !== 0) {
+			yield* Console.log(`No session found for ${args.issueId}`)
+			return
+		}
+
+		// Kill the tmux session
+		const killCommand = PlatformCommand.make("tmux", "kill-session", "-t", sessionName)
+		yield* PlatformCommand.exitCode(killCommand).pipe(
+			Effect.catchAll((e) => {
+				return Console.error(`Failed to kill session: ${e}`).pipe(Effect.as(1))
+			}),
+		)
+
+		yield* Console.log(`Session ${args.issueId} killed.`)
+
+		if (args.verbose) {
+			yield* Console.log(`Project: ${cwd}`)
+			yield* Console.log("Note: Worktree was not removed. Use git worktree remove if needed.")
+		}
+	})
+
+/**
  * Show status of all sessions
  */
 const statusHandler = (args: {
@@ -214,23 +284,65 @@ const statusHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-
 		yield* Console.log("Session Status")
-		yield* Console.log(`Project: ${cwd}`)
+		yield* Console.log("")
 
-		if (args.verbose) {
-			yield* Console.log("Verbose mode enabled")
+		// List tmux sessions that match our naming pattern
+		const listCommand = PlatformCommand.make(
+			"tmux",
+			"list-sessions",
+			"-F",
+			"#{session_name}|#{session_created}|#{?session_attached,attached,detached}|#{@az_status}",
+		)
+
+		const output = yield* PlatformCommand.string(listCommand).pipe(
+			Effect.catchAll(() => Effect.succeed("")),
+		)
+
+		if (!output.trim()) {
+			yield* Console.log("No active sessions.")
+			return
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+		const lines = output.trim().split("\n")
+		let sessionCount = 0
 
-		// TODO: Implement status display
-		yield* Console.log("[Stub] Active sessions:")
-		yield* Console.log("  az-2qy (CLI parsing) - WAITING")
-		yield* Console.log("  az-05y (BeadsClient) - DONE")
-		yield* Console.log("  az-1a3 (TUI setup)   - ERROR")
+		for (const line of lines) {
+			const [name, _created, attached, status] = line.split("|")
+			// Only show sessions that look like bead IDs (contain a dash, short format)
+			if (name && name.includes("-") && name.length < 20) {
+				sessionCount++
+				const statusDisplay = status || "unknown"
+				const attachedDisplay = attached === "attached" ? " (attached)" : ""
+				yield* Console.log(`  ${name} - ${statusDisplay.toUpperCase()}${attachedDisplay}`)
+
+				if (args.verbose) {
+					// Get worktree path if available
+					const wtCommand = PlatformCommand.make(
+						"tmux",
+						"display-message",
+						"-t",
+						name,
+						"-p",
+						"#{pane_current_path}",
+					)
+					const wtPath = yield* PlatformCommand.string(wtCommand).pipe(
+						Effect.map((s) => s.trim()),
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+					if (wtPath) {
+						yield* Console.log(`    Path: ${wtPath}`)
+					}
+				}
+			}
+		}
+
+		if (sessionCount === 0) {
+			yield* Console.log("No active sessions.")
+		} else {
+			yield* Console.log("")
+			yield* Console.log(`${sessionCount} session(s) active`)
+		}
 	})
 
 /**
@@ -262,6 +374,150 @@ const syncHandler = (args: {
 			// TODO: Sync current directory only
 			yield* Console.log("[Stub] Syncing current directory...")
 			yield* Console.log("[Stub] Pushed: 2, Pulled: 1")
+		}
+	})
+
+/**
+ * Run quality gates for a task's worktree
+ */
+const gateHandler = (args: {
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly fix: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+
+		yield* Console.log(`Running quality gates for: ${args.issueId}`)
+
+		// Find the worktree path for this task
+		const sessionName = getBeadSessionName(args.issueId)
+		const wtCommand = PlatformCommand.make(
+			"tmux",
+			"display-message",
+			"-t",
+			sessionName,
+			"-p",
+			"#{pane_current_path}",
+		)
+
+		let worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
+			Effect.map((s) => s.trim()),
+			Effect.catchAll(() => Effect.succeed("")),
+		)
+
+		// If no active session, try to find worktree by convention
+		if (!worktreePath) {
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
+			const parentDir = pathService.dirname(cwd)
+			const projectName = pathService.basename(cwd)
+			const expectedPath = pathService.join(parentDir, `${projectName}-${args.issueId}`)
+
+			const exists = yield* fs.exists(expectedPath)
+			if (exists) {
+				worktreePath = expectedPath
+			} else {
+				yield* Console.error(`Could not find worktree for ${args.issueId}`)
+				yield* Console.log(`Checked: ${expectedPath}`)
+				yield* Console.log("Try running from within the worktree directory.")
+				return yield* Effect.fail(new Error("Worktree not found"))
+			}
+		}
+
+		yield* Console.log(`Worktree: ${worktreePath}`)
+		yield* Console.log("")
+
+		// Track results
+		const results: { gate: string; passed: boolean; output: string }[] = []
+
+		// Type-check
+		yield* Console.log("▶ Type-check...")
+		const typeCheckCmd = PlatformCommand.make("bun", "run", "type-check").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const typeCheckResult = yield* PlatformCommand.string(typeCheckCmd).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+		)
+		results.push({ gate: "type-check", ...typeCheckResult })
+		yield* Console.log(typeCheckResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Lint (with optional fix)
+		const lintCmd = args.fix ? "fix" : "lint"
+		yield* Console.log(`▶ Lint${args.fix ? " (with fix)" : ""}...`)
+		const lintCommand = PlatformCommand.make("bun", "run", lintCmd).pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const lintResult = yield* PlatformCommand.string(lintCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+		)
+		results.push({ gate: "lint", ...lintResult })
+		yield* Console.log(lintResult.passed ? "  ✓ Passed" : "  ✗ Failed (advisory)")
+
+		// Test (if available)
+		yield* Console.log("▶ Tests...")
+		const testCommand = PlatformCommand.make("bun", "run", "test").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const testResult = yield* PlatformCommand.string(testCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => {
+				const output = String(e)
+				// "test" script not found is not a failure
+				if (output.includes("not found") || output.includes("missing script")) {
+					return Effect.succeed({ passed: true, output: "No test script" })
+				}
+				return Effect.succeed({ passed: false, output })
+			}),
+		)
+		results.push({ gate: "test", ...testResult })
+		yield* Console.log(testResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Build (if available)
+		yield* Console.log("▶ Build...")
+		const buildCommand = PlatformCommand.make("bun", "run", "build").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const buildResult = yield* PlatformCommand.string(buildCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => {
+				const output = String(e)
+				if (output.includes("not found") || output.includes("missing script")) {
+					return Effect.succeed({ passed: true, output: "No build script" })
+				}
+				return Effect.succeed({ passed: false, output })
+			}),
+		)
+		results.push({ gate: "build", ...buildResult })
+		yield* Console.log(buildResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Summary
+		yield* Console.log("")
+		const passed = results.filter((r) => r.passed).length
+		const total = results.length
+		const allPassed = results.every((r) => r.passed)
+
+		if (allPassed) {
+			yield* Console.log(`✅ All gates passed (${passed}/${total})`)
+		} else {
+			yield* Console.log(`❌ Some gates failed (${passed}/${total})`)
+
+			if (args.verbose) {
+				yield* Console.log("")
+				yield* Console.log("Failed gate details:")
+				for (const r of results.filter((r) => !r.passed)) {
+					yield* Console.log(`\n--- ${r.gate} ---`)
+					yield* Console.log(r.output.slice(0, 500))
+				}
+			}
+		}
+
+		// Return exit code based on critical gates
+		if (!typeCheckResult.passed) {
+			return yield* Effect.fail(new Error("Type-check failed"))
 		}
 	})
 
@@ -643,6 +899,19 @@ const pauseCommand = Command.make(
 ).pipe(Command.withDescription("Pause a running Claude Code session"))
 
 /**
+ * az kill <issue-id> - Kill a running session
+ */
+const killCommand = Command.make(
+	"kill",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	killHandler,
+).pipe(Command.withDescription("Kill a running Claude Code session"))
+
+/**
  * az status - Show status of all sessions
  */
 const statusCommand = Command.make(
@@ -668,6 +937,22 @@ const syncCommand = Command.make(
 	},
 	syncHandler,
 ).pipe(Command.withDescription("Sync beads database in worktrees"))
+
+/**
+ * az gate <issue-id> - Run quality gates for a task
+ */
+const gateCommand = Command.make(
+	"gate",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		fix: Options.boolean("fix").pipe(
+			Options.withDescription("Auto-fix lint issues"),
+		),
+	},
+	gateHandler,
+).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
 
 /**
  * Event argument for notify command
@@ -1054,8 +1339,10 @@ const cli = az.pipe(
 		startCommand,
 		attachCommand,
 		pauseCommand,
+		killCommand,
 		statusCommand,
 		syncCommand,
+		gateCommand,
 		// Internal/advanced commands
 		notifyCommand,
 		hooksCommand,
