@@ -131,6 +131,17 @@ pub fn merge_and_attach(
   })
 }
 
+/// Abort an in-progress merge
+pub fn abort_merge(
+  coord: Subject(coordinator.Msg),
+  id: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AbortMerge(id))
+    model.Tick
+  })
+}
+
 // =============================================================================
 // Dev Server Effects
 // =============================================================================

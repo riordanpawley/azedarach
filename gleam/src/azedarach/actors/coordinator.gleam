@@ -78,6 +78,7 @@ pub type Msg {
   ResumeSession(id: String)
   StopSession(id: String)
   MergeAndAttach(id: String)
+  AbortMerge(id: String)
   // Dev servers
   ToggleDevServer(id: String, server: String)
   ViewDevServer(id: String, server: String)
@@ -603,6 +604,24 @@ fn handle_message(
                     ),
                   )
                 }
+                Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
+              }
+            }
+            None -> notify_ui(state, Toast("No worktree", Warning))
+          }
+        }
+        Error(_) -> notify_ui(state, Toast("Session not found", Warning))
+      }
+      actor.continue(state)
+    }
+
+    AbortMerge(id) -> {
+      case dict.get(state.sessions, id) {
+        Ok(session_state) -> {
+          case session_state.worktree_path {
+            Some(path) -> {
+              case git.abort_merge(path) {
+                Ok(_) -> notify_ui(state, Toast("Merge aborted", Success))
                 Error(e) -> notify_ui(state, Toast(git.error_to_string(e), ErrorLevel))
               }
             }

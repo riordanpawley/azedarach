@@ -357,6 +357,15 @@ pub fn update(
         _ -> #(model, effects.none())
       }
     }
+    model.AbortMerge -> {
+      case model.overlay {
+        Some(model.MergeChoice(id, _)) -> #(
+          Model(..model, overlay: None),
+          effects.abort_merge(coord, id),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
 
     // Confirm dialog - uses handle_confirm which returns effects
     model.ConfirmAction -> handle_confirm(model, coord)

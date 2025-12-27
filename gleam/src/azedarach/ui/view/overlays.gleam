@@ -525,6 +525,7 @@ fn render_merge_choice(_bead_id: String, behind: Int, model: Model) -> Node {
     text(""),
     hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")]),
     hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")]),
+    hbox([styled_text(" a ", colors.red), text("Abort Merge")]),
     hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")]),
   ]
 

@@ -259,6 +259,7 @@ fn handle_merge_choice_key(event: KeyEvent) -> Option(Msg) {
     "escape" -> Some(model.CloseOverlay)
     "m" -> Some(model.MergeAndAttach)
     "s" -> Some(model.SkipAndAttach)
+    "a" -> Some(model.AbortMerge)
     _ -> None
   }
 }

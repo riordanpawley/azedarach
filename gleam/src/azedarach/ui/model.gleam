@@ -212,6 +212,7 @@ pub type Msg {
   // MergeChoice
   MergeAndAttach
   SkipAndAttach
+  AbortMerge
   // Confirm
   ConfirmAction
   CancelAction
