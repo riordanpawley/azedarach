@@ -11,6 +11,7 @@ import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
 import azedarach/config
+import azedarach/domain/project
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -383,6 +384,14 @@ pub fn update(
     // Coordinator events
     model.RequestMergeChoice(bead_id, behind_count) -> #(
       Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count))),
+      effects.none(),
+    )
+    model.ProjectChanged(project) -> #(
+      Model(..model, current_project: Some(project.path)),
+      effects.none(),
+    )
+    model.ProjectsUpdated(projects) -> #(
+      Model(..model, projects: projects),
       effects.none(),
     )
 

@@ -8,7 +8,7 @@ import gleam/set.{type Set}
 import gleam/string
 import azedarach/config.{type Config}
 import azedarach/domain/task.{type Task}
-import azedarach/domain/session.{type SessionState}
+import azedarach/domain/session
 import azedarach/domain/project.{type Project}
 import azedarach/ui/theme.{type Colors}
 import azedarach/actors/app_supervisor.{type AppContext}
@@ -18,7 +18,7 @@ pub type Model {
   Model(
     // Core data
     tasks: List(Task),
-    sessions: Dict(String, SessionState),
+    sessions: Dict(String, session.SessionState),
     dev_servers: Dict(String, DevServerState),
     // Multi-project
     projects: List(Project),
@@ -220,13 +220,15 @@ pub type Msg {
   SettingsSaved(Result(Nil, config.ConfigError))
   // Data updates
   BeadsLoaded(List(Task))
-  SessionStateChanged(String, SessionState)
+  SessionStateChanged(String, session.SessionState)
   DevServerStateChanged(String, DevServerState)
   // Toast notifications
   ShowToast(level: ToastLevel, message: String)
   ToastExpired(Int)
   // Coordinator events
   RequestMergeChoice(bead_id: String, behind_count: Int)
+  ProjectChanged(project: Project)
+  ProjectsUpdated(projects: List(Project))
   // System
   TerminalResized(Int, Int)
   Tick
@@ -362,6 +364,7 @@ fn apply_filters(tasks: List(Task), model: Model) -> List(Task) {
   |> filter_by_status(model.status_filter)
   |> filter_by_priority(model.priority_filter)
   |> filter_by_type(model.type_filter)
+  |> filter_by_session_state(model.session_filter, model.sessions)
   |> filter_epic_children(model.hide_epic_children)
 }
 
@@ -389,6 +392,24 @@ fn filter_by_type(tasks: List(Task), filter: Set(task.IssueType)) -> List(Task) 
   }
 }
 
+fn filter_by_session_state(
+  tasks: List(Task),
+  filter: Set(session.State),
+  sessions: Dict(String, session.SessionState),
+) -> List(Task) {
+  case set.is_empty(filter) {
+    True -> tasks
+    False ->
+      list.filter(tasks, fn(t) {
+        case dict.get(sessions, t.id) {
+          Ok(session_state) -> set.contains(filter, session_state.state)
+          // If no session, treat as Idle
+          Error(_) -> set.contains(filter, session.Idle)
+        }
+      })
+  }
+}
+
 fn filter_epic_children(tasks: List(Task), hide: Bool) -> List(Task) {
   case hide {
     False -> tasks
@@ -412,7 +433,7 @@ fn apply_search(tasks: List(Task), query: String) -> List(Task) {
 fn apply_sort(
   tasks: List(Task),
   sort_by: SortField,
-  sessions: Dict(String, SessionState),
+  sessions: Dict(String, session.SessionState),
 ) -> List(Task) {
   case sort_by {
     SortBySession ->
@@ -429,8 +450,8 @@ fn apply_sort(
 }
 
 fn compare_session_state(
-  a: Option(SessionState),
-  b: Option(SessionState),
+  a: Option(session.SessionState),
+  b: Option(session.SessionState),
 ) -> order.Order {
   case a, b {
     Some(sa), Some(sb) -> session.compare_state(sa.state, sb.state)

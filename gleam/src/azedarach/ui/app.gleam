@@ -150,13 +150,11 @@ fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
     coordinator.RequestMergeChoice(bead_id, behind_count) ->
       Ok(model.RequestMergeChoice(bead_id, behind_count))
 
-    coordinator.ProjectChanged(_project) ->
-      Ok(model.Tick)
-      // TODO: Add ProjectChanged message to model
+    coordinator.ProjectChanged(project) ->
+      Ok(model.ProjectChanged(project))
 
-    coordinator.ProjectsUpdated(_projects) ->
-      Ok(model.Tick)
-      // TODO: Add ProjectsUpdated message to model
+    coordinator.ProjectsUpdated(projects) ->
+      Ok(model.ProjectsUpdated(projects))
   }
 }
 
