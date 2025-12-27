@@ -351,6 +351,7 @@ pub fn handle_key(
 
     // Word deletion with Alt
     "backspace", False, True -> Updated(delete_word_back(field))
+    "delete", False, True -> Updated(delete_word_forward(field))
     "d", False, True -> Updated(delete_word_forward(field))
 
     // Basic navigation
