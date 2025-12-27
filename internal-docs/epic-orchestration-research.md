@@ -48,19 +48,20 @@ This document researches approaches for orchestrating epics (multi-task features
 | Close issue | `bd close <id> --reason="..."` | Mark complete |
 | Add dependency | `bd dep add <child> <parent> --type=parent-child` | Link epics to children |
 
-### Agent Claiming (TODO)
+### Agent Claiming
 
-**Current state**: Beads has an `assignee` field but no dedicated `claimed_by` field or `bd claim` command in azedarach's integration.
+**Use `assignee` field** to track which agent is working on an issue:
 
-**What's needed for atomic claiming**:
-1. Check if beads CLI now has `claimed_by` field (user reports it does)
-2. Add `claimed_by: Option(String)` to Gleam `Task` type
-3. Add `bd update <id> --claimed_by="agent-id"` support
-4. Or use `assignee` field for this purpose
+```bash
+bd update az-123 --status=in_progress --assignee="claude-session-abc"
+```
 
-**Workaround**: Use `bd update <id> --status=in_progress --assignee="session-abc"`
+This provides:
+- Agent identity tracking (who's working on what)
+- Resumability (if agent crashes, we know who had it)
+- Conflict detection (`bd ready` can filter out already-assigned issues)
 
-**VC approach**: SQLite transactions for true atomicity - two agents can't claim same issue simultaneously.
+**Note**: Unlike VC's SQLite transactions, this isn't atomically exclusive - two agents could theoretically claim the same issue. In practice, the orchestrator controls spawning so this is fine.
 
 ### Dependency Types
 
@@ -436,10 +437,10 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
    - Lint checking
    - Build verification
 
-4. **Agent Claiming Integration**
-   - Verify beads CLI `claimed_by` field support
-   - Add to azedarach Task type and beads service
-   - Use `assignee` field as workaround until then
+4. **Agent Claiming via Assignee**
+   - Use `assignee` field with session ID
+   - Filter `bd ready` results by unassigned
+   - Already supported in beads CLI
 
 ### Long-Term (Full Orchestration)
 
