@@ -14,6 +14,7 @@ import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
+import { PlanningService } from "../../core/PlanningService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { TemplateService } from "../../core/TemplateService.js"
@@ -75,6 +76,7 @@ const appLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
+	PlanningService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),
