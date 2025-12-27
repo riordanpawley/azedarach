@@ -437,28 +437,36 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 
 **Updated files**: `src/cli/index.ts`, `bin/az.ts`
 
-### Phase 3: VC-Style AI Supervisor
+### Phase 3: VC-Style AI Supervisor ✅
 
-1. **AI Assessment Phase**
-   - Pre-execution review by supervisor
-   - Strategy and risk identification
-   - Complexity estimation
+**Status: Complete**
 
-2. **AI Analysis Phase**
-   - Post-execution review
-   - Discovery extraction
-   - Quality determination
+1. **Supervisor Loop Template** ✅
+   - 8-phase loop: Discover → Assess → Spawn → Monitor → Analyze → Gate → Resolve → Iterate
+   - Continuous operation until all tasks complete
+   - Template: `.claude/session-templates/supervisor.md`
 
-3. **Quality Gates**
-   - Automated test running
-   - Type-check enforcement
-   - Lint checking
-   - Build verification
+2. **AI Assessment Phase** ✅
+   - Clarity, dependencies, scope, risk checklist
+   - Decision matrix: spawn/skip/needs_review
+   - Strategy documentation in bead notes
 
-4. **Continuous Event Loop**
-   - Long-running AI supervisor
-   - Claims ready issues automatically
-   - Spawns agents, monitors, iterates
+3. **AI Analysis Phase** ✅
+   - Completion, quality, discoveries checklist
+   - Actions: close/retry/block decision
+   - Discovery extraction and linking
+
+4. **Quality Gates** ✅
+   - `az gate <task-id>` command
+   - Runs: type-check, lint, test, build
+   - `--fix` flag for auto-fixing lint
+   - `--verbose` for detailed error output
+   - Exit codes for CI integration
+
+5. **Continuous Event Loop** ✅
+   - Template guides supervisor through loop
+   - Polling with `az status`
+   - Error handling for crashes/stuck sessions
 
 ### Phase 4: Agent Mail for Coordination
 

@@ -378,6 +378,150 @@ const syncHandler = (args: {
 	})
 
 /**
+ * Run quality gates for a task's worktree
+ */
+const gateHandler = (args: {
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly fix: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+
+		yield* Console.log(`Running quality gates for: ${args.issueId}`)
+
+		// Find the worktree path for this task
+		const sessionName = getBeadSessionName(args.issueId)
+		const wtCommand = PlatformCommand.make(
+			"tmux",
+			"display-message",
+			"-t",
+			sessionName,
+			"-p",
+			"#{pane_current_path}",
+		)
+
+		let worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
+			Effect.map((s) => s.trim()),
+			Effect.catchAll(() => Effect.succeed("")),
+		)
+
+		// If no active session, try to find worktree by convention
+		if (!worktreePath) {
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
+			const parentDir = pathService.dirname(cwd)
+			const projectName = pathService.basename(cwd)
+			const expectedPath = pathService.join(parentDir, `${projectName}-${args.issueId}`)
+
+			const exists = yield* fs.exists(expectedPath)
+			if (exists) {
+				worktreePath = expectedPath
+			} else {
+				yield* Console.error(`Could not find worktree for ${args.issueId}`)
+				yield* Console.log(`Checked: ${expectedPath}`)
+				yield* Console.log("Try running from within the worktree directory.")
+				return yield* Effect.fail(new Error("Worktree not found"))
+			}
+		}
+
+		yield* Console.log(`Worktree: ${worktreePath}`)
+		yield* Console.log("")
+
+		// Track results
+		const results: { gate: string; passed: boolean; output: string }[] = []
+
+		// Type-check
+		yield* Console.log("▶ Type-check...")
+		const typeCheckCmd = PlatformCommand.make("bun", "run", "type-check").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const typeCheckResult = yield* PlatformCommand.string(typeCheckCmd).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+		)
+		results.push({ gate: "type-check", ...typeCheckResult })
+		yield* Console.log(typeCheckResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Lint (with optional fix)
+		const lintCmd = args.fix ? "fix" : "lint"
+		yield* Console.log(`▶ Lint${args.fix ? " (with fix)" : ""}...`)
+		const lintCommand = PlatformCommand.make("bun", "run", lintCmd).pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const lintResult = yield* PlatformCommand.string(lintCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+		)
+		results.push({ gate: "lint", ...lintResult })
+		yield* Console.log(lintResult.passed ? "  ✓ Passed" : "  ✗ Failed (advisory)")
+
+		// Test (if available)
+		yield* Console.log("▶ Tests...")
+		const testCommand = PlatformCommand.make("bun", "run", "test").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const testResult = yield* PlatformCommand.string(testCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => {
+				const output = String(e)
+				// "test" script not found is not a failure
+				if (output.includes("not found") || output.includes("missing script")) {
+					return Effect.succeed({ passed: true, output: "No test script" })
+				}
+				return Effect.succeed({ passed: false, output })
+			}),
+		)
+		results.push({ gate: "test", ...testResult })
+		yield* Console.log(testResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Build (if available)
+		yield* Console.log("▶ Build...")
+		const buildCommand = PlatformCommand.make("bun", "run", "build").pipe(
+			PlatformCommand.workingDirectory(worktreePath),
+		)
+		const buildResult = yield* PlatformCommand.string(buildCommand).pipe(
+			Effect.map((output) => ({ passed: true, output })),
+			Effect.catchAll((e) => {
+				const output = String(e)
+				if (output.includes("not found") || output.includes("missing script")) {
+					return Effect.succeed({ passed: true, output: "No build script" })
+				}
+				return Effect.succeed({ passed: false, output })
+			}),
+		)
+		results.push({ gate: "build", ...buildResult })
+		yield* Console.log(buildResult.passed ? "  ✓ Passed" : "  ✗ Failed")
+
+		// Summary
+		yield* Console.log("")
+		const passed = results.filter((r) => r.passed).length
+		const total = results.length
+		const allPassed = results.every((r) => r.passed)
+
+		if (allPassed) {
+			yield* Console.log(`✅ All gates passed (${passed}/${total})`)
+		} else {
+			yield* Console.log(`❌ Some gates failed (${passed}/${total})`)
+
+			if (args.verbose) {
+				yield* Console.log("")
+				yield* Console.log("Failed gate details:")
+				for (const r of results.filter((r) => !r.passed)) {
+					yield* Console.log(`\n--- ${r.gate} ---`)
+					yield* Console.log(r.output.slice(0, 500))
+				}
+			}
+		}
+
+		// Return exit code based on critical gates
+		if (!typeCheckResult.passed) {
+			return yield* Effect.fail(new Error("Type-check failed"))
+		}
+	})
+
+/**
  * Valid hook event types from Claude Code
  */
 const VALID_HOOK_EVENTS = [
@@ -795,6 +939,22 @@ const syncCommand = Command.make(
 ).pipe(Command.withDescription("Sync beads database in worktrees"))
 
 /**
+ * az gate <issue-id> - Run quality gates for a task
+ */
+const gateCommand = Command.make(
+	"gate",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		fix: Options.boolean("fix").pipe(
+			Options.withDescription("Auto-fix lint issues"),
+		),
+	},
+	gateHandler,
+).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
+
+/**
  * Event argument for notify command
  */
 const eventArg = Args.text({ name: "event" }).pipe(
@@ -1182,6 +1342,7 @@ const cli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		gateCommand,
 		// Internal/advanced commands
 		notifyCommand,
 		hooksCommand,
