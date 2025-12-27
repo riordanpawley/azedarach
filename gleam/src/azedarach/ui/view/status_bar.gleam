@@ -1,0 +1,122 @@
+// Status bar - bottom line with mode, project, session info
+
+import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/set
+import gleam/string
+import azedarach/domain/session
+import azedarach/ui/model.{type Model, Normal, Select}
+import azedarach/ui/view/utils.{
+  type Node, empty, hbox, styled_text, text,
+}
+
+pub fn render(model: Model) -> Node {
+  // Left side: mode + project
+  let left = render_left(model)
+
+  // Center: search query if active
+  let center = render_center(model)
+
+  // Right side: session counts, dev server port
+  let right = render_right(model)
+
+  // Shore doesn't support hex colors, use hbox directly
+  hbox([left, center, right])
+}
+
+fn render_left(model: Model) -> Node {
+  let colors = model.colors
+
+  // Mode indicator
+  let mode_text = case model.mode {
+    Normal -> " NORMAL "
+    Select(selected) -> " SELECT(" <> int.to_string(set.size(selected)) <> ") "
+  }
+
+  // Project name
+  let project = case model.current_project {
+    Some(p) -> " " <> p <> " "
+    None -> ""
+  }
+
+  // Pending key indicator (for goto mode)
+  let pending = case model.pending_key {
+    Some(k) -> " g+" <> k
+    None -> ""
+  }
+
+  hbox([
+    // Shore doesn't support hex colors, use plain text
+    text(mode_text),
+    styled_text(project, colors.text),
+    styled_text(pending, colors.yellow),
+  ])
+}
+
+fn render_center(model: Model) -> Node {
+  let colors = model.colors
+
+  case model.input {
+    Some(model.SearchInput(query)) ->
+      hbox([
+        styled_text("/", colors.yellow),
+        styled_text(query, colors.text),
+        styled_text("█", colors.yellow),
+      ])
+    _ -> empty()
+  }
+}
+
+fn render_right(model: Model) -> Node {
+  let colors = model.colors
+
+  // Count sessions by state
+  let busy_count =
+    dict.values(model.sessions)
+    |> list.filter(fn(s) { s.state == session.Busy })
+    |> list.length
+
+  let waiting_count =
+    dict.values(model.sessions)
+    |> list.filter(fn(s) { s.state == session.Waiting })
+    |> list.length
+
+  // Dev server ports
+  let dev_ports =
+    dict.values(model.dev_servers)
+    |> list.filter(fn(s) { s.running })
+    |> list.filter_map(fn(s) { option.to_result(s.port, Nil) })
+    |> list.map(int.to_string)
+    |> string.join(",")
+
+  let dev_text = case dev_ports {
+    "" -> ""
+    ports -> " DEV:" <> ports <> " "
+  }
+
+  // Session status
+  let session_text = case busy_count, waiting_count {
+    0, 0 -> ""
+    b, 0 -> " " <> int.to_string(b) <> "● "
+    0, w -> " " <> int.to_string(w) <> "○ "
+    b, w -> " " <> int.to_string(b) <> "● " <> int.to_string(w) <> "○ "
+  }
+
+  // Loading indicator
+  let loading_text = case model.loading {
+    True -> " ⟳ "
+    False -> ""
+  }
+
+  // Help hint
+  let help_hint = " ?:help "
+
+  hbox([
+    styled_text(loading_text, colors.blue),
+    styled_text(dev_text, colors.green),
+    styled_text(session_text, colors.blue),
+    styled_text(help_hint, colors.subtext0),
+  ])
+}
