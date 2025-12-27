@@ -51,7 +51,7 @@ export const planningStateAtom = appRuntime.subscriptionRef(
  * 2. Reviews and refines up to 5 times
  * 3. Creates beads from the final plan
  *
- * Usage: const runPlanning = useSetAtom(runPlanningAtom)
+ * Usage: const runPlanning = useAtomSet(runPlanningAtom)
  *        runPlanning("Add user authentication feature")
  */
 export const runPlanningAtom = appRuntime.fn((featureDescription: string) =>
@@ -80,7 +80,7 @@ export const runPlanningAtom = appRuntime.fn((featureDescription: string) =>
  *
  * Clears all planning state and returns to idle.
  *
- * Usage: const resetPlanning = useSetAtom(resetPlanningAtom)
+ * Usage: const resetPlanning = useAtomSet(resetPlanningAtom)
  *        resetPlanning()
  */
 export const resetPlanningAtom = appRuntime.fn(() =>

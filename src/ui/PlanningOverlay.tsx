@@ -11,7 +11,7 @@
  */
 
 import { Result } from "@effect-atom/atom"
-import { useAtomValue, useSetAtom } from "@effect-atom/atom-react"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useCallback, useState } from "react"
 import type { Plan, PlanningState, ReviewFeedback } from "../core/PlanningService.js"
@@ -359,8 +359,8 @@ const ErrorPhase = ({
 export const PlanningOverlay = ({ onClose }: PlanningOverlayProps) => {
 	const [description, setDescription] = useState("")
 	const planningStateResult = useAtomValue(planningStateAtom)
-	const runPlanning = useSetAtom(runPlanningAtom)
-	const resetPlanning = useSetAtom(resetPlanningAtom)
+	const runPlanning = useAtomSet(runPlanningAtom)
+	const resetPlanning = useAtomSet(resetPlanningAtom)
 
 	const state: PlanningState = Result.isSuccess(planningStateResult)
 		? planningStateResult.value
