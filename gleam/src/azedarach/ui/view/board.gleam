@@ -59,7 +59,7 @@ fn render_epic_header(
   colors: theme.Colors,
 ) -> Node {
   // Back indicator
-  let back_hint = "← Backspace"
+  let back_hint = "← q/Esc"
 
   // Epic title (truncated)
   let title_max = width - string.length(back_hint) - 30

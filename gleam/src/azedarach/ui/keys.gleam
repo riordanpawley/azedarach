@@ -320,8 +320,8 @@ fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
     // Quick actions - Enter on epic drills down, otherwise opens detail
     "enter", _, _ -> handle_enter_key(model)
     "return", _, _ -> handle_enter_key(model)
-    // Backspace exits epic drill-down mode
-    "backspace", _, _ -> handle_backspace_key(model)
+    // Escape exits epic drill-down mode (if active)
+    "escape", _, _ -> handle_escape_key(model)
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
@@ -333,8 +333,8 @@ fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
     "r", True, _ -> Some(model.ForceRedraw)
     // Shift+R (refresh)
 
-    // Quit
-    "q", _, _ -> Some(model.Quit)
+    // Quit (or exit drill-down if active)
+    "q", _, _ -> handle_quit_key(model)
 
     // Redraw
     "l", _, True -> Some(model.ForceRedraw)
@@ -353,11 +353,19 @@ fn handle_enter_key(model: Model) -> Option(Msg) {
   }
 }
 
-// Handle Backspace key - exit epic drill-down if active
-fn handle_backspace_key(model: Model) -> Option(Msg) {
+// Handle Escape key - exit epic drill-down if active, otherwise no action
+fn handle_escape_key(model: Model) -> Option(Msg) {
   case model.current_epic {
     Some(_) -> Some(model.ExitEpicDrill)
     None -> None
+  }
+}
+
+// Handle q key - exit drill-down if active, otherwise quit
+fn handle_quit_key(model: Model) -> Option(Msg) {
+  case model.current_epic {
+    Some(_) -> Some(model.ExitEpicDrill)
+    None -> Some(model.Quit)
   }
 }
 
