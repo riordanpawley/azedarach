@@ -131,21 +131,83 @@ NEXT:
 - If you discover issues outside scope, create a new bead and link it
 ```
 
-### 3. Monitor Subagent Progress
+### 3. Alternative: Spawn via `az` CLI (Recommended for Isolation)
 
-After spawning background agents, use **TaskOutput** to check their status:
+Instead of Task tool subagents, use `az` CLI to spawn **isolated tmux sessions**. This provides:
+- True process isolation (separate tmux sessions)
+- Persistent sessions (survive orchestrator restart)
+- CLI-based monitoring and control
+- Auto-claiming with session ID as assignee
 
+**Spawn a session:**
+```bash
+az start [TASK_ID] [PROJECT_PATH]
+```
+
+This automatically:
+1. Creates a git worktree for the task
+2. Spawns a tmux session with Claude Code
+3. Claims the bead with `--assignee=[session-name]`
+4. Sets status to `in_progress`
+
+**Spawn multiple sessions in parallel:**
+```bash
+# Spawn all non-conflicting tasks
+az start az-001 /path/to/project &
+az start az-002 /path/to/project &
+az start az-003 /path/to/project &
+wait
+```
+
+**Monitor all sessions:**
+```bash
+az status
+# Output:
+#   az-001 - BUSY
+#   az-002 - WAITING
+#   az-003 - BUSY
+```
+
+**Check detailed progress:**
+```bash
+az status -v  # Shows worktree paths
+bd show az-001  # See bead notes for progress
+```
+
+**Attach to debug:**
+```bash
+az attach az-001  # Opens tmux session
+```
+
+**Kill stuck session:**
+```bash
+az kill az-001
+```
+
+### 4. Monitor Subagent Progress
+
+**For Task tool subagents:**
 - `TaskOutput` with `block: false` - Check progress without waiting
 - `TaskOutput` with `block: true` - Wait for completion (use when idle)
 
-Track agent IDs returned from Task tool spawns to monitor each subagent.
+**For az CLI sessions:**
+```bash
+# Check all session states
+az status
+
+# Poll until a session completes
+while az status | grep -q "az-001.*BUSY"; do
+  sleep 30
+done
+echo "az-001 completed or needs attention"
+```
 
 **Check bead notes for progress:**
 ```bash
 bd show [TASK_ID]  # See notes field for progress updates
 ```
 
-### 4. Handle Completion
+### 5. Handle Completion
 
 When a subagent completes successfully:
 1. Verify the task was closed: `bd show [TASK_ID]`
@@ -159,7 +221,7 @@ When a subagent reports errors:
 3. Update bead status: `bd update [TASK_ID] --status=blocked --notes="[reason]"`
 4. Clear assignee if abandoning: `bd update [TASK_ID] --assignee=""`
 
-### 5. Complete the Epic
+### 6. Complete the Epic
 
 When all child tasks are closed:
 1. Verify all work: `bd show {{EPIC_ID}}`
@@ -167,7 +229,9 @@ When all child tasks are closed:
 3. Update epic notes with summary
 4. Close the epic: `bd close {{EPIC_ID}} --reason="All child tasks completed"`
 
-## Beads Quick Reference
+## Quick Reference
+
+### Beads Commands
 
 | Action | Command |
 |--------|---------|
@@ -180,6 +244,17 @@ When all child tasks are closed:
 | Link discovered issue | `bd dep add [NEW_ID] [PARENT_ID] --type=discovered-from` |
 | Check blocked tasks | `bd blocked` |
 | Check ready tasks | `bd ready` |
+
+### az CLI Commands (Session Management)
+
+| Action | Command |
+|--------|---------|
+| Start session (auto-claims) | `az start [ID] [PROJECT_PATH]` |
+| List all sessions | `az status` |
+| List with details | `az status -v` |
+| Attach to session | `az attach [ID]` |
+| Kill session | `az kill [ID]` |
+| Pause session | `az pause [ID]` |
 
 ## Coordination Rules
 
