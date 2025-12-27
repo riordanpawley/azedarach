@@ -54,6 +54,7 @@ The default mode for navigation and basic actions.
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
 | `Tab` | Toggle view mode | Switch between Kanban and Compact views |
+| `p` | Open planning | AI-powered planning workflow |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `a` | Toggle VC auto-pilot | Start/stop VC executor |
@@ -212,6 +213,65 @@ Settings are stored in `.azedarach.json` in your project root:
   }
 }
 ```
+
+## Planning Overlay
+
+Press `p` to open the AI-powered planning overlay. This lets you describe a feature in natural language and automatically generates beads with proper epics, tasks, and dependencies.
+
+### Input Phase
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| Type | Add characters | Build your description |
+| `Backspace` | Delete character | Remove last character |
+| `Enter` | Submit | Start the planning workflow |
+| `Esc` | Cancel | Close without planning |
+
+### Generation/Review Phase
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Esc` | Cancel | Stop planning and close |
+| `a` | Attach to session | View the planning tmux session |
+
+### Completion/Error Phase
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Enter` | Close | Return to normal mode |
+| `Esc` | Close | Return to normal mode |
+| `q` | Close | Return to normal mode |
+
+### How Planning Works
+
+1. **Input**: Describe what you want to build in natural language
+2. **Generate**: Claude Code creates an initial plan with tasks, types, and dependencies
+3. **Review**: The plan is automatically reviewed up to 5 times to:
+   - Break down large tasks into smaller ones
+   - Ensure correct dependency ordering
+   - Optimize for parallel development
+4. **Create**: Beads are created with:
+   - An epic as the parent feature
+   - Child tasks linked to the epic
+   - Blocking dependencies for sequential work
+   - Proper priorities and types
+
+### Example Workflow
+
+```
+1. Press 'p' to open planning
+2. Type: "Add user authentication with OAuth"
+3. Press Enter to start
+4. Wait for generation and review passes
+5. Beads are created automatically
+6. Navigate to the epic and start sessions on children
+```
+
+### Tips
+
+- **Be specific**: "Add dark mode toggle to settings page with localStorage" works better than "add dark mode"
+- **Include constraints**: "Must work offline" or "Should use existing auth library"
+- **Press 'a' to debug**: Attach to the planning session if you want to see what Claude is doing
 
 ## View Modes
 

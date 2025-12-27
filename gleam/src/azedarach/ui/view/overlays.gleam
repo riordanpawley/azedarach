@@ -5,12 +5,14 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/set
+import gleam/string
 import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/services/image
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
+import azedarach/ui/textfield
 import azedarach/ui/view/utils.{
   type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
 }
@@ -37,6 +39,7 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.DiffViewer(bead_id) -> render_diff_viewer(bead_id, model)
     model.MergeChoice(bead_id, behind, merge_in_progress) -> render_merge_choice(bead_id, behind, merge_in_progress, model)
     model.ConfirmDialog(action) -> render_confirm(action, model)
+    model.PlanningOverlay(state) -> render_planning(state, model)
   }
 }
 
@@ -629,6 +632,118 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Node {
   ]
 
   overlay_box(title, items, model)
+}
+
+fn render_planning(state: model.PlanningOverlayState, model: Model) -> Node {
+  let colors = model.colors
+
+  case state {
+    model.PlanningInput(field) -> {
+      // Render text field with cursor
+      let #(before, cursor_char, after) = textfield.split_at_cursor(field)
+
+      // Build input line with cursor highlight
+      let input_line = hbox([
+        text(before),
+        // Highlight cursor position with inverted colors
+        styled_text(
+          case cursor_char {
+            Some(c) -> c
+            None -> "_"
+          },
+          colors.yellow,
+        ),
+        text(after),
+      ])
+
+      let items = [
+        text("Describe the feature you want to build:"),
+        text(""),
+        input_line,
+        text(""),
+        dim_text("Enter: generate plan • Esc: cancel"),
+        text(""),
+        dim_text("Editing: Alt+←/→ word nav • Alt+Backspace delete word • Ctrl+U clear"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningGenerating(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Generating plan...", colors.yellow),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningReviewing(desc, pass, max_passes) -> {
+      let progress = "[" <> int.to_string(pass) <> "/" <> int.to_string(max_passes) <> "]"
+
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        hbox([
+          styled_text("Reviewing plan... ", colors.yellow),
+          styled_text(progress, colors.green),
+        ]),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningCreatingBeads(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Creating beads...", colors.green),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningComplete(ids) -> {
+      let count = list.length(ids)
+      let items = [
+        styled_text("Created " <> int.to_string(count) <> " beads:", colors.green),
+        text(""),
+        ..list.map(ids, fn(id) { text("  • " <> id) }),
+        text(""),
+        dim_text("Enter/Esc: close"),
+      ]
+
+      overlay_box("Planning Complete", items, model)
+    }
+
+    model.PlanningError(message) -> {
+      let items = [
+        styled_text("Error:", colors.red),
+        text(""),
+        text(message),
+        text(""),
+        dim_text("Enter/Esc: close"),
+      ]
+
+      overlay_box("Planning Failed", items, model)
+    }
+  }
 }
 
 // Helper to create overlay box
