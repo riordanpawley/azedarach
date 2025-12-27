@@ -89,6 +89,18 @@ pub type Overlay {
   DiffViewer(bead_id: String)
   MergeChoice(bead_id: String, behind_count: Int)
   ConfirmDialog(action: PendingAction)
+  // Planning workflow
+  PlanningOverlay(state: PlanningOverlayState)
+}
+
+/// State for the planning overlay
+pub type PlanningOverlayState {
+  PlanningInput(description: String)
+  PlanningGenerating(description: String)
+  PlanningReviewing(description: String, pass: Int, max_passes: Int)
+  PlanningCreatingBeads(description: String)
+  PlanningComplete(created_ids: List(String))
+  PlanningError(message: String)
 }
 
 pub type PendingAction {
@@ -247,6 +259,14 @@ pub type Msg {
   ForceRedraw
   // Keyboard raw
   KeyPressed(key: String, modifiers: List(Modifier))
+  // Planning workflow
+  OpenPlanning
+  PlanningInputChar(String)
+  PlanningInputBackspace
+  PlanningSubmit
+  PlanningCancel
+  PlanningStateUpdated(PlanningOverlayState)
+  PlanningAttachSession
 }
 
 pub type Modifier {
