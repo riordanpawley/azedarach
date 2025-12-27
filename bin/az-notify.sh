@@ -50,7 +50,9 @@ case "$EVENT" in
         ;;
 esac
 
-SESSION_NAME="claude-${BEAD_ID}"
+# Session name is just the bead ID (e.g., "az-05y")
+# This matches the naming convention in paths.ts and session_manager.gleam
+SESSION_NAME="${BEAD_ID}"
 log "Setting @az_status=$STATUS on session $SESSION_NAME"
 
 # Set tmux session option
