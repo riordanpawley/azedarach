@@ -139,6 +139,14 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
     "beadsRefresh": 30000,
     "sessionMonitor": 500
   },
+  "gates": {
+    "gates": [
+      { "name": "Type-check", "command": "bun", "args": ["run", "type-check"] },
+      { "name": "Lint", "command": "bun", "args": ["run", "lint"], "fixArgs": ["run", "fix"], "advisory": true },
+      { "name": "Test", "command": "bun", "args": ["run", "test"] },
+      { "name": "Build", "command": "bun", "args": ["run", "build"] }
+    ]
+  },
   "theme": "catppuccin-macchiato"
 }
 ```
