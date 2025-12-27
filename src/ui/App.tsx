@@ -44,6 +44,7 @@ import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
 import { ImagePreviewOverlay } from "./ImagePreviewOverlay.js"
 import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
+import { PlanningOverlay } from "./PlanningOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
 import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
@@ -78,6 +79,7 @@ export const App = () => {
 		showingProjectSelector,
 		showingDiffViewer,
 		showingDevServerMenu,
+		showingPlanning,
 	} = useOverlays()
 
 	const {
@@ -381,6 +383,9 @@ export const App = () => {
 
 			{/* Merge choice overlay */}
 			{showingMergeChoice && <MergeChoiceOverlay />}
+
+			{/* Planning overlay */}
+			{showingPlanning && <PlanningOverlay onClose={dismissOverlay} />}
 
 			{/* Orchestration overlay - rendered when in orchestrate mode */}
 			{isOrchestrate && mode._tag === "orchestrate" && (

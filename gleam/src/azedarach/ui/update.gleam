@@ -11,6 +11,7 @@ import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
 import azedarach/config
+import azedarach/domain/project
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -18,8 +19,20 @@ import azedarach/ui/model.{
   Cursor, Model, Normal, Select,
 }
 import azedarach/ui/effects.{type Effect}
+import azedarach/ui/textfield
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
+
+/// Get current time in milliseconds (for toast scheduling)
+@external(erlang, "erlang", "system_time")
+fn system_time_native() -> Int
+
+fn now_ms() -> Int {
+  // Convert native time units to milliseconds
+  // Erlang's system_time with no arg returns native units
+  // We use monotonic time for internal timing
+  system_time_native() / 1_000_000
+}
 
 pub fn update(
   model: Model,
@@ -104,6 +117,28 @@ pub fn update(
     )
     model.OpenDetailPanel -> #(open_detail_panel(model), effects.none())
     model.CloseOverlay -> #(Model(..model, overlay: None), effects.none())
+
+    // Epic drill-down
+    model.DrillDownEpic(id) -> #(
+      Model(..model, current_epic: Some(id), cursor: Cursor(column_index: 0, task_index: 0)),
+      effects.none(),
+    )
+    model.ExitEpicDrill -> #(
+      Model(..model, current_epic: None, cursor: Cursor(column_index: 0, task_index: 0)),
+      effects.none(),
+    )
+
+    // Project selection
+    model.SelectProject(index) -> {
+      // Get project at index (1-indexed from UI, convert to 0-indexed)
+      case list.drop(model.projects, index) |> list.first {
+        Ok(proj) -> #(
+          Model(..model, overlay: None),
+          effects.switch_project(coord, proj.path),
+        )
+        Error(_) -> #(model, effects.none())
+      }
+    }
 
     // Session actions - side effects go through Shore effects
     model.StartSession -> {
@@ -269,6 +304,15 @@ pub fn update(
         None -> #(model, effects.none())
       }
     }
+    model.OpenImageList -> {
+      case current_task_id(model) {
+        Some(id) -> #(
+          Model(..model, overlay: Some(model.ImageList(id))),
+          effects.none(),
+        )
+        None -> #(model, effects.none())
+      }
+    }
     model.PasteFromClipboard -> {
       case current_task_id(model) {
         Some(id) -> #(
@@ -278,25 +322,43 @@ pub fn update(
         None -> #(model, effects.none())
       }
     }
-    model.SelectFile -> #(
-      Model(..model, input: Some(model.PathInput(""))),
-      effects.none(),
+    model.SelectFile -> {
+      // Get bead_id from ImageAttach overlay
+      case model.overlay {
+        Some(model.ImageAttach(bead_id)) -> #(
+          Model(..model, input: Some(model.PathInput("", bead_id))),
+          effects.none(),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+    model.AttachFileSubmit(bead_id, path) -> #(
+      Model(..model, overlay: None),
+      effects.attach_file(coord, bead_id, path),
+    )
+    model.OpenImage(bead_id, attachment_id) -> #(
+      model,
+      effects.open_image(coord, bead_id, attachment_id),
     )
     model.PreviewImage(path) -> #(
       Model(..model, overlay: Some(model.ImagePreview(path))),
       effects.none(),
     )
-    model.DeleteImage(path) -> {
-      case current_task_id(model) {
-        Some(id) -> #(model, effects.delete_image(coord, id, path))
-        None -> #(model, effects.none())
+    model.DeleteImage(attachment_id) -> {
+      // Get bead_id from ImageList overlay
+      case model.overlay {
+        Some(model.ImageList(bead_id)) -> #(
+          Model(..model, overlay: Some(model.ConfirmDialog(model.DeleteImageAction(bead_id, attachment_id)))),
+          effects.none(),
+        )
+        _ -> #(model, effects.none())
       }
     }
 
-    // Input handling - pure state updates
+    // Input handling - pure state updates (except PathInput which needs effect)
     model.InputChar(c) -> #(handle_input_char(model, c), effects.none())
     model.InputBackspace -> #(handle_input_backspace(model), effects.none())
-    model.InputSubmit -> #(handle_input_submit(model), effects.none())
+    model.InputSubmit -> handle_input_submit_with_effect(model, coord)
     model.InputCancel -> #(Model(..model, input: None), effects.none())
 
     // Filter/sort - pure state updates
@@ -317,7 +379,7 @@ pub fn update(
     // MergeChoice - side effects go through Shore effects
     model.MergeAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> #(
+        Some(model.MergeChoice(id, _, _)) -> #(
           Model(..model, overlay: None),
           effects.merge_and_attach(coord, id),
         )
@@ -326,9 +388,18 @@ pub fn update(
     }
     model.SkipAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> #(
+        Some(model.MergeChoice(id, _, _)) -> #(
           Model(..model, overlay: None),
           effects.attach_session(coord, id),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+    model.AbortMerge -> {
+      case model.overlay {
+        Some(model.MergeChoice(id, _, _)) -> #(
+          Model(..model, overlay: None),
+          effects.abort_merge(coord, id),
         )
         _ -> #(model, effects.none())
       }
@@ -357,8 +428,29 @@ pub fn update(
       Model(..model, dev_servers: dict.insert(model.dev_servers, id, state)),
       effects.none(),
     )
+    // Toast notifications
+    model.ShowToast(level, message) -> {
+      let current_time = now_ms()
+      let #(new_model, toast_id) = model.add_toast(model, level, message, current_time)
+      let duration = toast_id - current_time
+      #(new_model, effects.schedule_toast_expiration(toast_id, duration))
+    }
     model.ToastExpired(id) -> #(
-      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.expires_at != id })),
+      Model(..model, toasts: list.filter(model.toasts, fn(t) { t.id != id })),
+      effects.none(),
+    )
+
+    // Coordinator events
+    model.RequestMergeChoice(bead_id, behind_count, merge_in_progress) -> #(
+      Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count, merge_in_progress))),
+      effects.none(),
+    )
+    model.ProjectChanged(project) -> #(
+      Model(..model, current_project: Some(project.path)),
+      effects.none(),
+    )
+    model.ProjectsUpdated(projects) -> #(
+      Model(..model, projects: projects),
       effects.none(),
     )
 
@@ -373,6 +465,62 @@ pub fn update(
     model.ForceRedraw -> #(model, effects.none())
     model.KeyPressed(_, _) -> #(model, effects.none())
     // Handled by keys module
+
+    // Planning workflow messages
+    model.OpenPlanning -> #(
+      Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(textfield.new())))),
+      effects.none(),
+    )
+
+    model.PlanningFieldUpdate(field) -> {
+      case model.overlay {
+        Some(model.PlanningOverlay(model.PlanningInput(_))) -> #(
+          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(field)))),
+          effects.none(),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+
+    model.PlanningSubmit -> {
+      case model.overlay {
+        Some(model.PlanningOverlay(model.PlanningInput(field))) -> {
+          case string.trim(textfield.get_text(field)) {
+            "" -> #(model, effects.none())  // Don't submit empty
+            trimmed -> #(
+              Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningGenerating(trimmed)))),
+              effects.run_planning(coord, trimmed),
+            )
+          }
+        }
+        _ -> #(model, effects.none())
+      }
+    }
+
+    model.PlanningCancel -> #(
+      Model(..model, overlay: None),
+      effects.none(),
+    )
+
+    model.PlanningStateUpdated(state) -> {
+      let overlay_state = case state {
+        model.PlanningInput(field) -> model.PlanningInput(field)
+        model.PlanningGenerating(desc) -> model.PlanningGenerating(desc)
+        model.PlanningReviewing(desc, pass, max) -> model.PlanningReviewing(desc, pass, max)
+        model.PlanningCreatingBeads(desc) -> model.PlanningCreatingBeads(desc)
+        model.PlanningComplete(ids) -> model.PlanningComplete(ids)
+        model.PlanningError(msg) -> model.PlanningError(msg)
+      }
+      #(
+        Model(..model, overlay: Some(model.PlanningOverlay(overlay_state))),
+        effects.none(),
+      )
+    }
+
+    model.PlanningAttachSession -> #(
+      model,
+      effects.attach_planning_session(coord),
+    )
   }
 }
 
@@ -480,8 +628,8 @@ fn handle_input_char(model: Model, c: String) -> Model {
       Model(..model, input: Some(model.TitleInput(t <> c)))
     Some(model.NotesInput(n)) ->
       Model(..model, input: Some(model.NotesInput(n <> c)))
-    Some(model.PathInput(p)) ->
-      Model(..model, input: Some(model.PathInput(p <> c)))
+    Some(model.PathInput(p, bead_id)) ->
+      Model(..model, input: Some(model.PathInput(p <> c, bead_id)))
     None -> model
   }
 }
@@ -494,17 +642,26 @@ fn handle_input_backspace(model: Model) -> Model {
       Model(..model, input: Some(model.TitleInput(string.drop_end(t, 1))))
     Some(model.NotesInput(n)) ->
       Model(..model, input: Some(model.NotesInput(string.drop_end(n, 1))))
-    Some(model.PathInput(p)) ->
-      Model(..model, input: Some(model.PathInput(string.drop_end(p, 1))))
+    Some(model.PathInput(p, bead_id)) ->
+      Model(..model, input: Some(model.PathInput(string.drop_end(p, 1), bead_id)))
     None -> model
   }
 }
 
-fn handle_input_submit(model: Model) -> Model {
+fn handle_input_submit_with_effect(
+  model: Model,
+  coord: Subject(coordinator.Msg),
+) -> #(Model, Effect(Msg)) {
   case model.input {
-    Some(model.SearchInput(q)) ->
-      Model(..model, input: None, search_query: q)
-    _ -> Model(..model, input: None)
+    Some(model.SearchInput(q)) -> #(
+      Model(..model, input: None, search_query: q),
+      effects.none(),
+    )
+    Some(model.PathInput(path, bead_id)) -> #(
+      Model(..model, input: None, overlay: None),
+      effects.attach_file(coord, bead_id, path),
+    )
+    _ -> #(Model(..model, input: None), effects.none())
   }
 }
 
@@ -563,6 +720,8 @@ fn handle_confirm(
         model.DeleteWorktreeAction(id) -> effects.delete_cleanup(coord, id)
         model.DeleteBeadAction(id) -> effects.delete_bead(coord, id)
         model.StopSessionAction(id) -> effects.stop_session(coord, id)
+        model.DeleteImageAction(bead_id, attachment_id) ->
+          effects.delete_image(coord, bead_id, attachment_id)
       }
       #(Model(..model, overlay: None), effect)
     }

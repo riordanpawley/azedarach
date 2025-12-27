@@ -1,5 +1,6 @@
 // Shell utility - command execution
 
+import gleam/int
 import gleam/list
 import gleam/result
 import gleam/string
@@ -8,6 +9,14 @@ import shellout
 pub type ShellError {
   CommandError(exit_code: Int, stderr: String)
   NotFound(command: String)
+}
+
+pub fn error_to_string(err: ShellError) -> String {
+  case err {
+    CommandError(code, stderr) ->
+      "command failed (" <> int.to_string(code) <> "): " <> stderr
+    NotFound(cmd) -> "command not found: " <> cmd
+  }
 }
 
 // Run a command and get output
@@ -224,6 +233,14 @@ pub fn basename(path: String) -> String {
   |> list.last
   |> result.unwrap("")
 }
+
+// ============================================================================
+// Timing
+// ============================================================================
+
+/// Sleep for a number of milliseconds
+@external(erlang, "timer", "sleep")
+pub fn sleep_ms(ms: Int) -> Nil
 
 // ============================================================================
 // Helpers

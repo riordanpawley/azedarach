@@ -5,11 +5,14 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/set
+import gleam/string
 import azedarach/config
 import azedarach/domain/session
 import azedarach/domain/task
+import azedarach/services/image
 import azedarach/ui/model.{type Model, type Overlay}
 import azedarach/ui/theme
+import azedarach/ui/textfield
 import azedarach/ui/view/utils.{
   type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
 }
@@ -30,11 +33,13 @@ pub fn render(overlay: Overlay, model: Model) -> Node {
     model.ProjectSelector -> render_project_selector(model)
     model.DetailPanel(bead_id) -> render_detail_panel(bead_id, model)
     model.ImageAttach(bead_id) -> render_image_attach(bead_id, model)
+    model.ImageList(bead_id) -> render_image_list(bead_id, model)
     model.ImagePreview(path) -> render_image_preview(path, model)
     model.DevServerMenu(bead_id) -> render_dev_server_menu(bead_id, model)
     model.DiffViewer(bead_id) -> render_diff_viewer(bead_id, model)
-    model.MergeChoice(bead_id, behind) -> render_merge_choice(bead_id, behind, model)
+    model.MergeChoice(bead_id, behind, merge_in_progress) -> render_merge_choice(bead_id, behind, merge_in_progress, model)
     model.ConfirmDialog(action) -> render_confirm(action, model)
+    model.PlanningOverlay(state) -> render_planning(state, model)
   }
 }
 
@@ -424,7 +429,7 @@ fn render_project_selector(model: Model) -> Node {
 
   let projects =
     list.index_map(model.projects, fn(project, idx) {
-      let is_current = Some(project.name) == model.current_project
+      let is_current = Some(project.path) == model.current_project
       let indicator = case is_current {
         True -> "●"
         False -> " "
@@ -437,9 +442,14 @@ fn render_project_selector(model: Model) -> Node {
       ])
     })
 
+  let footer = [
+    text(""),
+    dim_text("1-9: select • Esc: close"),
+  ]
+
   case list.is_empty(projects) {
-    True -> overlay_box("Projects", [dim_text("(no projects configured)")], model)
-    False -> overlay_box("Select Project", projects, model)
+    True -> overlay_box("Projects", [dim_text("(no projects found)")], model)
+    False -> overlay_box("Select Project", list.append(projects, footer), model)
   }
 }
 
@@ -488,6 +498,38 @@ fn render_image_attach(bead_id: String, model: Model) -> Node {
   overlay_box("Attach Image to " <> bead_id, items, model)
 }
 
+fn render_image_list(bead_id: String, model: Model) -> Node {
+  let colors = model.colors
+
+  // Get attachments for this bead
+  let attachments = case image.list(bead_id) {
+    Ok(list) -> list
+    Error(_) -> []
+  }
+
+  case list.is_empty(attachments) {
+    True -> overlay_box("Images for " <> bead_id, [dim_text("(no images attached)")], model)
+    False -> {
+      let entries =
+        list.index_map(attachments, fn(attachment, idx) {
+          let key = int.to_string(idx + 1)
+          hbox([
+            styled_text(" " <> key <> " ", colors.yellow),
+            text(attachment.filename),
+            dim_text(" (" <> attachment.original_path <> ")"),
+          ])
+        })
+
+      let footer = [
+        text(""),
+        dim_text("1-9: open • Shift+1-9: delete • a: attach • Esc: close"),
+      ]
+
+      overlay_box("Images for " <> bead_id, list.append(entries, footer), model)
+    }
+  }
+}
+
 fn render_image_preview(_path: String, model: Model) -> Node {
   overlay_box("Image Preview", [dim_text("(preview not available in terminal)")], model)
 }
@@ -510,20 +552,54 @@ fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
   overlay_box("Diff", [dim_text("(loading diff...)")], model)
 }
 
-fn render_merge_choice(_bead_id: String, behind: Int, model: Model) -> Node {
+fn render_merge_choice(_bead_id: String, behind: Int, merge_in_progress: Bool, model: Model) -> Node {
   let colors = model.colors
 
-  let items = [
-    text(int.to_string(behind) <> " commits behind main"),
+  let status_text = case merge_in_progress, behind {
+    True, _ -> "Merge in progress (conflicts detected)"
+    False, n -> int.to_string(n) <> " commits behind main"
+  }
+
+  let prompt_text = case merge_in_progress {
+    True -> "Resolve conflicts or abort the merge?"
+    False -> "Merge main into your branch before attaching?"
+  }
+
+  let header_items = [
+    text(status_text),
     text(""),
-    text("Merge main into your branch before attaching?"),
+    text(prompt_text),
     text(""),
-    hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")]),
-    hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")]),
-    hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")]),
   ]
 
-  overlay_box("↓ Branch Behind main", items, model)
+  // Only show "Merge & Attach" if no merge in progress
+  let merge_item = case merge_in_progress {
+    False -> [hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")])]
+    True -> []
+  }
+
+  // "Skip & Attach" becomes just "Attach" when merge in progress
+  let attach_item = case merge_in_progress {
+    True -> [hbox([styled_text(" s ", colors.yellow), text("Attach (keep conflicts)")])]
+    False -> [hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")])]
+  }
+
+  // Only show "Abort Merge" if merge in progress
+  let abort_item = case merge_in_progress {
+    True -> [hbox([styled_text(" a ", colors.red), text("Abort Merge")])]
+    False -> []
+  }
+
+  let footer = [hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")])]
+
+  let items = list.flatten([header_items, merge_item, attach_item, abort_item, footer])
+
+  let title = case merge_in_progress {
+    True -> "⚠ Merge Conflicts"
+    False -> "↓ Branch Behind main"
+  }
+
+  overlay_box(title, items, model)
 }
 
 fn render_confirm(action: model.PendingAction, model: Model) -> Node {
@@ -542,6 +618,10 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Node {
       "Stop session " <> id <> "?",
       "This will kill the tmux session",
     )
+    model.DeleteImageAction(_bead_id, attachment_id) -> #(
+      "Delete image?",
+      "This will permanently delete the image: " <> attachment_id,
+    )
   }
 
   let items = [
@@ -552,6 +632,118 @@ fn render_confirm(action: model.PendingAction, model: Model) -> Node {
   ]
 
   overlay_box(title, items, model)
+}
+
+fn render_planning(state: model.PlanningOverlayState, model: Model) -> Node {
+  let colors = model.colors
+
+  case state {
+    model.PlanningInput(field) -> {
+      // Render text field with cursor
+      let #(before, cursor_char, after) = textfield.split_at_cursor(field)
+
+      // Build input line with cursor highlight
+      let input_line = hbox([
+        text(before),
+        // Highlight cursor position with inverted colors
+        styled_text(
+          case cursor_char {
+            Some(c) -> c
+            None -> "_"
+          },
+          colors.yellow,
+        ),
+        text(after),
+      ])
+
+      let items = [
+        text("Describe the feature you want to build:"),
+        text(""),
+        input_line,
+        text(""),
+        dim_text("Enter: generate plan • Esc: cancel"),
+        text(""),
+        dim_text("Editing: Alt+←/→ word nav • Alt+Backspace delete word • Ctrl+U clear"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningGenerating(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Generating plan...", colors.yellow),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningReviewing(desc, pass, max_passes) -> {
+      let progress = "[" <> int.to_string(pass) <> "/" <> int.to_string(max_passes) <> "]"
+
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        hbox([
+          styled_text("Reviewing plan... ", colors.yellow),
+          styled_text(progress, colors.green),
+        ]),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningCreatingBeads(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Creating beads...", colors.green),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningComplete(ids) -> {
+      let count = list.length(ids)
+      let items = [
+        styled_text("Created " <> int.to_string(count) <> " beads:", colors.green),
+        text(""),
+        ..list.map(ids, fn(id) { text("  • " <> id) }),
+        text(""),
+        dim_text("Enter/Esc: close"),
+      ]
+
+      overlay_box("Planning Complete", items, model)
+    }
+
+    model.PlanningError(message) -> {
+      let items = [
+        styled_text("Error:", colors.red),
+        text(""),
+        text(message),
+        text(""),
+        dim_text("Enter/Esc: close"),
+      ]
+
+      overlay_box("Planning Failed", items, model)
+    }
+  }
 }
 
 // Helper to create overlay box

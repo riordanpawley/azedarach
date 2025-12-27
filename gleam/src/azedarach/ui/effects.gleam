@@ -55,6 +55,14 @@ pub fn refresh_beads(coord: Subject(coordinator.Msg)) -> Effect(Msg) {
   })
 }
 
+/// Switch to a different project
+pub fn switch_project(coord: Subject(coordinator.Msg), path: String) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.SwitchProject(path))
+    model.Tick
+  })
+}
+
 /// Start a Claude session for a task
 pub fn start_session(
   coord: Subject(coordinator.Msg),
@@ -119,6 +127,17 @@ pub fn merge_and_attach(
 ) -> Effect(Msg) {
   from(fn() {
     coordinator.send(coord, coordinator.MergeAndAttach(id))
+    model.Tick
+  })
+}
+
+/// Abort an in-progress merge
+pub fn abort_merge(
+  coord: Subject(coordinator.Msg),
+  id: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AbortMerge(id))
     model.Tick
   })
 }
@@ -268,6 +287,30 @@ pub fn paste_image(coord: Subject(coordinator.Msg), id: String) -> Effect(Msg) {
   })
 }
 
+/// Attach image from file path
+pub fn attach_file(
+  coord: Subject(coordinator.Msg),
+  id: String,
+  path: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AttachFile(id, path))
+    model.Tick
+  })
+}
+
+/// Open image in system viewer
+pub fn open_image(
+  coord: Subject(coordinator.Msg),
+  id: String,
+  attachment_id: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.OpenImage(id, attachment_id))
+    model.Tick
+  })
+}
+
 /// Delete an attached image
 pub fn delete_image(
   coord: Subject(coordinator.Msg),
@@ -276,6 +319,75 @@ pub fn delete_image(
 ) -> Effect(Msg) {
   from(fn() {
     coordinator.send(coord, coordinator.DeleteImage(id, attachment_id))
+    model.Tick
+  })
+}
+
+// =============================================================================
+// Toast Effects
+// =============================================================================
+
+/// Schedule a toast expiration message after the specified delay
+/// The delay_ms is calculated as (expires_at - now_ms) in the update handler
+pub fn schedule_toast_expiration(
+  toast_id: Int,
+  delay_ms: Int,
+) -> Effect(Msg) {
+  from(fn() {
+    // Use process.sleep to wait, then return the expiration message
+    // Note: This is a simple approach - in production you might want
+    // to use process.send_after for true async scheduling
+    let safe_delay = case delay_ms > 0 {
+      True -> delay_ms
+      False -> 0
+    }
+    process.sleep(safe_delay)
+    model.ToastExpired(toast_id)
+  })
+}
+
+/// Show a toast notification directly
+/// This is useful for UI-local notifications or testing
+pub fn show_toast(level: model.ToastLevel, message: String) -> Effect(Msg) {
+  from(fn() {
+    model.ShowToast(level, message)
+  })
+}
+
+/// Convert coordinator toast level to model toast level
+pub fn coordinator_to_model_toast_level(
+  level: coordinator.ToastLevel,
+) -> model.ToastLevel {
+  case level {
+    coordinator.Info -> model.Info
+    coordinator.Success -> model.Success
+    coordinator.Warning -> model.Warning
+    coordinator.ErrorLevel -> model.Error
+  }
+}
+
+// =============================================================================
+// Planning Effects
+// =============================================================================
+
+/// Run the planning workflow
+/// This spawns a process that will send state updates back to the UI
+pub fn run_planning(
+  coord: Subject(coordinator.Msg),
+  description: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.RunPlanning(description))
+    model.Tick
+  })
+}
+
+/// Attach to the planning session (for manual inspection)
+pub fn attach_planning_session(
+  coord: Subject(coordinator.Msg),
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AttachPlanningSession)
     model.Tick
   })
 }
