@@ -108,7 +108,7 @@ fn render_toast(toast: Toast) -> Node {
 
 fn toast_prefix(level: ToastLevel) -> String {
   case level {
-    model.Error -> "[ERROR]"
+    model.ErrorLevel -> "[ERROR]"
     model.Warning -> "[WARN]"
     model.Success -> "[OK]"
     model.Info -> "[INFO]"

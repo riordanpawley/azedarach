@@ -362,7 +362,7 @@ pub fn coordinator_to_model_toast_level(
     coordinator.Info -> model.Info
     coordinator.Success -> model.Success
     coordinator.Warning -> model.Warning
-    coordinator.ErrorLevel -> model.Error
+    coordinator.ErrorLevel -> model.ErrorLevel
   }
 }
 

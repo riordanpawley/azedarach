@@ -125,7 +125,7 @@ pub type ToastLevel {
   Info
   Success
   Warning
-  Error
+  ErrorLevel
 }
 
 /// Default toast duration in milliseconds
@@ -348,7 +348,7 @@ pub fn init_with_context(
 /// Returns the updated model and the toast ID for scheduling expiration
 pub fn add_toast(model: Model, level: ToastLevel, message: String, now_ms: Int) -> #(Model, Int) {
   let duration = case level {
-    Error -> error_toast_duration_ms
+    ErrorLevel -> error_toast_duration_ms
     _ -> toast_duration_ms
   }
   let expires_at = now_ms + duration
@@ -370,7 +370,7 @@ pub fn toast_icon(level: ToastLevel) -> String {
     Info -> "i"
     Success -> "+"
     Warning -> "!"
-    Error -> "!"
+    ErrorLevel -> "!"
   }
 }
 

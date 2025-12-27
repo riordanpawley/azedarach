@@ -147,8 +147,8 @@ fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
       Ok(model.ShowToast(model_level, message))
     }
 
-    coordinator.RequestMergeChoice(bead_id, behind_count) ->
-      Ok(model.RequestMergeChoice(bead_id, behind_count))
+    coordinator.RequestMergeChoice(bead_id, behind_count, merge_in_progress) ->
+      Ok(model.RequestMergeChoice(bead_id, behind_count, merge_in_progress))
 
     coordinator.ProjectChanged(project) ->
       Ok(model.ProjectChanged(project))

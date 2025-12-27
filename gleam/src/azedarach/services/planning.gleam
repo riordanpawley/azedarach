@@ -77,7 +77,7 @@ pub type PlanningState {
   Refining(pass: Int)
   CreatingBeads
   Complete(created_ids: List(String))
-  Error(message: String)
+  Failed(message: String)
 }
 
 /// Planning session name
@@ -296,7 +296,7 @@ pub fn create_beads_from_plan(
     create_tasks_with_deps(with_deps, epic_id, mapping1, project_path, config)
   )
 
-  Ok(list.concat([created_ids, ids1, ids2]))
+  Ok(list.flatten([created_ids, ids1, ids2]))
 }
 
 fn create_tasks_batch(
@@ -377,7 +377,7 @@ fn create_tasks_with_deps_loop(
             Ok(#(new_ids, new_mapping)) -> {
               create_tasks_with_deps_loop(
                 still_waiting,
-                list.concat([created, new_ids]),
+                list.flatten([created, new_ids]),
                 epic_id,
                 new_mapping,
                 project_path,
@@ -566,7 +566,7 @@ fn wait_for_response(timeout_seconds: Int) -> Result(String, PlanningError) {
   wait_loop(timeout_seconds * 2, timeout_seconds * 2)
 }
 
-fn wait_loop(polls_remaining: Int, _max_polls: Int) -> Result(String, PlanningError) {
+fn wait_loop(polls_remaining: Int, max_polls: Int) -> Result(String, PlanningError) {
   case polls_remaining {
     0 -> Error(SessionNotReady("Timeout waiting for Claude response"))
     _ -> {
@@ -580,7 +580,7 @@ fn wait_loop(polls_remaining: Int, _max_polls: Int) -> Result(String, PlanningEr
           // Check if Claude is done (look for prompt or waiting indicator)
           case is_response_complete(output) {
             True -> Ok(output)
-            False -> wait_loop(polls_remaining - 1, _max_polls)
+            False -> wait_loop(polls_remaining - 1, max_polls)
           }
         }
         Error(e) -> Error(TmuxError(e))
