@@ -86,6 +86,7 @@ fn handle_overlay_key(
     model.DiffViewer(_) -> handle_simple_close(event)
     model.MergeChoice(_, _) -> handle_merge_choice_key(event)
     model.ConfirmDialog(_) -> handle_confirm_key(event)
+    model.PlanningOverlay(state) -> handle_planning_key(event, state)
   }
 }
 
@@ -308,6 +309,45 @@ fn handle_confirm_key(event: KeyEvent) -> Option(Msg) {
   }
 }
 
+fn handle_planning_key(
+  event: KeyEvent,
+  state: model.PlanningOverlayState,
+) -> Option(Msg) {
+  case state {
+    // Input state - handle text input
+    model.PlanningInput(_) -> {
+      case event.key {
+        "escape" -> Some(model.PlanningCancel)
+        "enter" | "return" -> Some(model.PlanningSubmit)
+        "backspace" -> Some(model.PlanningInputBackspace)
+        key -> {
+          case is_printable(key) {
+            True -> Some(model.PlanningInputChar(key))
+            False -> None
+          }
+        }
+      }
+    }
+    // Generating/Reviewing/Creating - allow cancel or attach
+    model.PlanningGenerating(_)
+    | model.PlanningReviewing(_, _, _)
+    | model.PlanningCreatingBeads(_) -> {
+      case event.key {
+        "escape" -> Some(model.PlanningCancel)
+        "a" -> Some(model.PlanningAttachSession)
+        _ -> None
+      }
+    }
+    // Complete or Error - close overlay
+    model.PlanningComplete(_) | model.PlanningError(_) -> {
+      case event.key {
+        "escape" | "q" | "enter" | "return" -> Some(model.CloseOverlay)
+        _ -> None
+      }
+    }
+  }
+}
+
 // Goto mode (after pressing 'g')
 fn handle_goto_key(event: KeyEvent) -> Option(Msg) {
   case event.key {
@@ -362,6 +402,7 @@ fn handle_normal_mode_key(event: KeyEvent, model: Model) -> Option(Msg) {
     "?", _, _ -> Some(model.OpenHelp)
     "s", False, _ -> Some(model.OpenSettings)
     "d", False, _ -> Some(model.OpenDiagnostics)
+    "p", False, _ -> Some(model.OpenPlanning)
     "l", True, _ -> Some(model.OpenLogs)
     // Shift+L
     "c", False, _ -> Some(model.CreateBead)

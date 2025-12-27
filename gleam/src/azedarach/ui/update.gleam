@@ -455,6 +455,72 @@ pub fn update(
     model.ForceRedraw -> #(model, effects.none())
     model.KeyPressed(_, _) -> #(model, effects.none())
     // Handled by keys module
+
+    // Planning workflow messages
+    model.OpenPlanning -> #(
+      Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput("")))),
+      effects.none(),
+    )
+
+    model.PlanningInputChar(c) -> {
+      case model.overlay {
+        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> #(
+          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(desc <> c)))),
+          effects.none(),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+
+    model.PlanningInputBackspace -> {
+      case model.overlay {
+        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> #(
+          Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningInput(string.drop_end(desc, 1))))),
+          effects.none(),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+
+    model.PlanningSubmit -> {
+      case model.overlay {
+        Some(model.PlanningOverlay(model.PlanningInput(desc))) -> {
+          case string.trim(desc) {
+            "" -> #(model, effects.none())  // Don't submit empty
+            trimmed -> #(
+              Model(..model, overlay: Some(model.PlanningOverlay(model.PlanningGenerating(trimmed)))),
+              effects.run_planning(coord, trimmed),
+            )
+          }
+        }
+        _ -> #(model, effects.none())
+      }
+    }
+
+    model.PlanningCancel -> #(
+      Model(..model, overlay: None),
+      effects.none(),
+    )
+
+    model.PlanningStateUpdated(state) -> {
+      let overlay_state = case state {
+        model.PlanningInput(desc) -> model.PlanningInput(desc)
+        model.PlanningGenerating(desc) -> model.PlanningGenerating(desc)
+        model.PlanningReviewing(desc, pass, max) -> model.PlanningReviewing(desc, pass, max)
+        model.PlanningCreatingBeads(desc) -> model.PlanningCreatingBeads(desc)
+        model.PlanningComplete(ids) -> model.PlanningComplete(ids)
+        model.PlanningError(msg) -> model.PlanningError(msg)
+      }
+      #(
+        Model(..model, overlay: Some(model.PlanningOverlay(overlay_state))),
+        effects.none(),
+      )
+    }
+
+    model.PlanningAttachSession -> #(
+      model,
+      effects.attach_planning_session(coord),
+    )
   }
 }
 

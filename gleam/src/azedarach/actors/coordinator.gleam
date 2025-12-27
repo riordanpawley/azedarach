@@ -22,6 +22,7 @@ import azedarach/services/beads
 import azedarach/services/bead_editor
 import azedarach/services/dev_server_state.{type DevServerState, DevServerState}
 import azedarach/services/image
+import azedarach/services/planning
 import azedarach/services/port_allocator
 import azedarach/services/tmux
 import azedarach/services/worktree
@@ -96,6 +97,9 @@ pub type Msg {
   // Dependencies
   AddDependency(id: String, depends_on: String, dep_type: task.DependentType)
   RemoveDependency(id: String, depends_on: String)
+  // Planning
+  RunPlanning(description: String)
+  AttachPlanningSession
   // Internal
   BeadsLoaded(Result(List(Task), beads.BeadsError))
   ProjectsDiscovered(List(Project))
@@ -114,6 +118,18 @@ pub type UiMsg {
   // Project updates
   ProjectChanged(Project)
   ProjectsUpdated(List(Project))
+  // Planning
+  PlanningStateUpdated(PlanningState)
+}
+
+/// Planning workflow state for UI updates
+pub type PlanningState {
+  PlanningIdle
+  PlanningGenerating(description: String)
+  PlanningReviewing(description: String, pass: Int, max_passes: Int)
+  PlanningCreatingBeads(description: String)
+  PlanningComplete(created_ids: List(String))
+  PlanningError(message: String)
 }
 
 pub type ToastLevel {
@@ -938,6 +954,63 @@ fn handle_message(
         Error(_) -> actor.continue(state)
       }
     }
+
+    // Planning workflow
+    RunPlanning(description) -> {
+      let project_path = get_project_path(state)
+      // Spawn the planning workflow in a separate process
+      spawn_planning_workflow(state, description, project_path)
+      actor.continue(state)
+    }
+
+    AttachPlanningSession -> {
+      case planning.attach_session() {
+        Ok(_) -> Nil
+        Error(e) -> notify_ui(state, Toast("Failed to attach: " <> planning.error_to_string(e), ErrorLevel))
+      }
+      actor.continue(state)
+    }
+  }
+}
+
+/// Spawn the planning workflow in a background process
+fn spawn_planning_workflow(
+  state: CoordinatorState,
+  description: String,
+  project_path: String,
+) -> Nil {
+  let ui_subject = state.ui_subject
+  let config = state.config
+
+  let _ = process.spawn(fn() {
+    // Notify: generating
+    notify_planning_state(ui_subject, PlanningGenerating(description))
+
+    // Start the planning workflow
+    case planning.run_planning_workflow(description, project_path, config, 5) {
+      Ok(created_ids) -> {
+        notify_planning_state(ui_subject, PlanningComplete(created_ids))
+        // Also show a success toast
+        case ui_subject {
+          Some(ui) -> {
+            let count = list.length(created_ids)
+            process.send(ui, Toast("Created " <> int.to_string(count) <> " beads from plan", Success))
+          }
+          None -> Nil
+        }
+      }
+      Error(e) -> {
+        notify_planning_state(ui_subject, PlanningError(planning.error_to_string(e)))
+      }
+    }
+  })
+  Nil
+}
+
+fn notify_planning_state(ui_subject: Option(Subject(UiMsg)), state: PlanningState) -> Nil {
+  case ui_subject {
+    Some(ui) -> process.send(ui, PlanningStateUpdated(state))
+    None -> Nil
   }
 }
 

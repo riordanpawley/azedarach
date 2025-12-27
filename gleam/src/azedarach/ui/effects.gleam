@@ -354,3 +354,29 @@ pub fn coordinator_to_model_toast_level(
     coordinator.ErrorLevel -> model.Error
   }
 }
+
+// =============================================================================
+// Planning Effects
+// =============================================================================
+
+/// Run the planning workflow
+/// This spawns a process that will send state updates back to the UI
+pub fn run_planning(
+  coord: Subject(coordinator.Msg),
+  description: String,
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.RunPlanning(description))
+    model.Tick
+  })
+}
+
+/// Attach to the planning session (for manual inspection)
+pub fn attach_planning_session(
+  coord: Subject(coordinator.Msg),
+) -> Effect(Msg) {
+  from(fn() {
+    coordinator.send(coord, coordinator.AttachPlanningSession)
+    model.Tick
+  })
+}
