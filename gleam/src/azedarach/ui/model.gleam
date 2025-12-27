@@ -63,7 +63,7 @@ pub type InputState {
   SearchInput(query: String)
   TitleInput(text: String)
   NotesInput(text: String)
-  PathInput(text: String)
+  PathInput(path: String, bead_id: String)
 }
 
 pub type Overlay {
@@ -82,6 +82,7 @@ pub type Overlay {
   ProjectSelector
   DetailPanel(bead_id: String)
   ImageAttach(bead_id: String)
+  ImageList(bead_id: String)
   ImagePreview(path: String)
   DevServerMenu(bead_id: String)
   DiffViewer(bead_id: String)
@@ -93,6 +94,7 @@ pub type PendingAction {
   DeleteWorktreeAction(bead_id: String)
   DeleteBeadAction(bead_id: String)
   StopSessionAction(bead_id: String)
+  DeleteImageAction(bead_id: String, attachment_id: String)
 }
 
 pub type SortField {
@@ -192,8 +194,11 @@ pub type Msg {
   DeleteBead
   // Image
   AttachImage
+  OpenImageList
   PasteFromClipboard
   SelectFile
+  AttachFileSubmit(bead_id: String, path: String)
+  OpenImage(bead_id: String, attachment_id: String)
   PreviewImage(String)
   DeleteImage(String)
   // Input
