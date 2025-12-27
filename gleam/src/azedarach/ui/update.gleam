@@ -378,7 +378,7 @@ pub fn update(
     // MergeChoice - side effects go through Shore effects
     model.MergeAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> #(
+        Some(model.MergeChoice(id, _, _)) -> #(
           Model(..model, overlay: None),
           effects.merge_and_attach(coord, id),
         )
@@ -387,9 +387,18 @@ pub fn update(
     }
     model.SkipAndAttach -> {
       case model.overlay {
-        Some(model.MergeChoice(id, _)) -> #(
+        Some(model.MergeChoice(id, _, _)) -> #(
           Model(..model, overlay: None),
           effects.attach_session(coord, id),
+        )
+        _ -> #(model, effects.none())
+      }
+    }
+    model.AbortMerge -> {
+      case model.overlay {
+        Some(model.MergeChoice(id, _, _)) -> #(
+          Model(..model, overlay: None),
+          effects.abort_merge(coord, id),
         )
         _ -> #(model, effects.none())
       }
@@ -431,8 +440,8 @@ pub fn update(
     )
 
     // Coordinator events
-    model.RequestMergeChoice(bead_id, behind_count) -> #(
-      Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count))),
+    model.RequestMergeChoice(bead_id, behind_count, merge_in_progress) -> #(
+      Model(..model, overlay: Some(model.MergeChoice(bead_id, behind_count, merge_in_progress))),
       effects.none(),
     )
     model.ProjectChanged(project) -> #(
