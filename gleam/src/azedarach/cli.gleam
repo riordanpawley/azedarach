@@ -2,11 +2,13 @@
 //
 // Commands:
 //   az                             Launch TUI (default)
-//   az start <issue-id>            Start a new Claude session
+//   az start <issue-id>            Start a new Claude session (claims bead)
 //   az attach <issue-id>           Attach to existing session
 //   az pause <issue-id>            Pause a running session
+//   az kill <issue-id>             Kill a session (destroy tmux session)
 //   az status                      Show status of all sessions
 //   az sync [--all]                Sync beads database
+//   az gate <issue-id> [--fix]     Run quality gates (orchestration)
 //   az notify <event> <bead-id>    Hook notification endpoint
 //   az hooks install <bead-id>     Install hooks into .claude/settings.local.json
 //   az add <path> [--name]         Register a project
@@ -14,6 +16,7 @@
 //   az project add/list/remove/switch
 //   az --help                      Show help
 
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -37,8 +40,11 @@ pub type Command {
   Start(issue_id: String, project_path: Option(String))
   Attach(issue_id: String)
   Pause(issue_id: String)
+  Kill(issue_id: String)
   Status
   Sync(all: Bool)
+  // Quality gates
+  Gate(issue_id: String, fix: Bool)
   // Hook notifications
   Notify(event: String, bead_id: String)
   // Hook management
@@ -71,9 +77,14 @@ pub fn parse(args: List(String)) -> Result(Command, String) {
     ["start", issue_id, path] -> Ok(Start(issue_id, Some(path)))
     ["attach", issue_id] -> Ok(Attach(issue_id))
     ["pause", issue_id] -> Ok(Pause(issue_id))
+    ["kill", issue_id] -> Ok(Kill(issue_id))
     ["status"] -> Ok(Status)
     ["sync"] -> Ok(Sync(False))
     ["sync", "--all"] -> Ok(Sync(True))
+
+    // Quality gates (for orchestration)
+    ["gate", issue_id] -> Ok(Gate(issue_id, False))
+    ["gate", issue_id, "--fix"] -> Ok(Gate(issue_id, True))
 
     // Hook notification (called by Claude Code hooks)
     ["notify", event, bead_id] -> Ok(Notify(event, bead_id))
@@ -128,8 +139,10 @@ pub fn execute(cmd: Command) -> Result(Nil, String) {
     Start(issue_id, project_path) -> execute_start(issue_id, project_path)
     Attach(issue_id) -> execute_attach(issue_id)
     Pause(issue_id) -> execute_pause(issue_id)
+    Kill(issue_id) -> execute_kill(issue_id)
     Status -> execute_status()
     Sync(all) -> execute_sync(all)
+    Gate(issue_id, fix) -> execute_gate(issue_id, fix)
     Notify(event, bead_id) -> execute_notify(event, bead_id)
     HooksInstall(bead_id, project_path) -> execute_hooks_install(bead_id, project_path)
 
@@ -180,6 +193,14 @@ fn execute_start(issue_id: String, project_path: Option(String)) -> Result(Nil, 
           case session.tmux_session {
             Some(ts) -> {
               io.println("  tmux session: " <> ts)
+
+              // Claim the bead with session assignee (for orchestration)
+              let _ = shell.run("bd", [
+                "update", issue_id,
+                "--status=in_progress",
+                "--assignee=" <> ts,
+              ], cwd)
+
               io.println("")
               io.println("To attach: az attach " <> issue_id)
               io.println("Or directly: tmux attach-session -t " <> ts)
@@ -271,6 +292,98 @@ fn execute_sync(all: Bool) -> Result(Nil, String) {
         Error(shell.CommandError(_, stderr)) -> Error("Sync failed: " <> stderr)
         Error(shell.NotFound(_)) -> Error("bd command not found")
       }
+    }
+  }
+}
+
+fn execute_kill(issue_id: String) -> Result(Nil, String) {
+  io.println("Killing session for issue: " <> issue_id)
+
+  let session_name = session_manager.session_name(issue_id)
+
+  case tmux.session_exists(session_name) {
+    False -> {
+      io.println("No session found for " <> issue_id)
+      Ok(Nil)
+    }
+    True -> {
+      case tmux.kill_session(session_name) {
+        Ok(_) -> {
+          io.println("Session " <> issue_id <> " killed.")
+          Ok(Nil)
+        }
+        Error(_) -> Error("Failed to kill session")
+      }
+    }
+  }
+}
+
+/// Run quality gates for an issue's worktree (configurable via .azedarach.json)
+fn execute_gate(issue_id: String, fix: Bool) -> Result(Nil, String) {
+  io.println("Running quality gates for: " <> issue_id)
+  io.println("")
+
+  let session_name = session_manager.session_name(issue_id)
+
+  // Try to find worktree path from tmux session or convention
+  let worktree_path = case tmux.get_option(session_name, "@az_worktree") {
+    Ok(path) -> path
+    Error(_) -> {
+      // Fall back to convention: ../{project}-{issue_id}
+      "../azedarach-" <> issue_id
+    }
+  }
+
+  io.println("Worktree: " <> worktree_path)
+  io.println("")
+
+  // Load config to get gates (uses defaults if no config file)
+  let cfg = case config.load(Some(worktree_path)) {
+    Ok(c) -> c
+    Error(_) -> config.default_config()
+  }
+
+  // Run each configured gate
+  let results = list.map(cfg.gates.gates, fn(gate) {
+    io.print("▶ " <> gate.name <> "... ")
+
+    // Use fix_args if fix mode and available, otherwise use normal args
+    let args = case fix, gate.fix_args {
+      True, Some(fix_args) -> fix_args
+      _, _ -> gate.args
+    }
+
+    case shell.run(gate.command, args, worktree_path) {
+      Ok(_) -> {
+        io.println("✓")
+        #(True, gate.advisory)
+      }
+      Error(_) -> {
+        case gate.advisory {
+          True -> io.println("✗ (advisory)")
+          False -> io.println("✗")
+        }
+        #(False, gate.advisory)
+      }
+    }
+  })
+
+  // Count passes (advisory failures don't count as failures)
+  let passed = list.count(results, fn(r) {
+    let #(success, advisory) = r
+    success || advisory
+  })
+  let total = list.length(results)
+
+  io.println("")
+  case passed == total {
+    True -> {
+      io.println("✅ All gates passed (" <> int.to_string(passed) <> "/" <> int.to_string(total) <> ")")
+      Ok(Nil)
+    }
+    False -> {
+      io.println("❌ Some gates failed (" <> int.to_string(passed) <> "/" <> int.to_string(total) <> ")")
+      Error("Quality gates failed")
     }
   }
 }
@@ -451,11 +564,15 @@ USAGE:
     az [PROJECT_PATH]               Launch TUI for specific project
 
 SESSION COMMANDS:
-    az start <issue-id> [path]      Start a new Claude session
+    az start <issue-id> [path]      Start a new Claude session (claims bead)
     az attach <issue-id>            Attach to an existing session
     az pause <issue-id>             Pause a running session (Ctrl+C)
+    az kill <issue-id>              Kill a session (destroy tmux session)
     az status                       Show status of all sessions
     az sync [--all]                 Sync beads database
+
+ORCHESTRATION COMMANDS:
+    az gate <issue-id> [--fix]      Run quality gates (configurable in .azedarach.json)
 
 HOOK COMMANDS:
     az notify <event> <bead-id>     Handle Claude Code hook notification
