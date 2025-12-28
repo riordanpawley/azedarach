@@ -50,13 +50,31 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 
 | Feature | Reason |
 |---------|--------|
-| Epic orchestration / swarm | Deferred to v2 |
+| Epic orchestration / swarm | Deferred to v2 (see below) |
 | VC integration | Not yet used |
 | Command mode (`:`) | Tied to VC |
 | Compact view | Nice-to-have |
 | Keybind customization | Stretch goal |
 | Attach inline | Deprecated |
 | Chat about task | Not needed |
+
+### v2.0 Features: Epic Orchestration
+
+Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds multi-agent orchestration:
+
+| Feature | Description |
+|---------|-------------|
+| **CLI orchestration commands** | `az kill`, `az gate` for programmatic control |
+| **Beads claiming** | `az start` auto-claims bead with session assignee |
+| **Orchestrator template** | Prompt template for AI-driven epic orchestration |
+| **Supervisor template** | VC-style continuous supervision loop |
+| **Agent Mail integration** | File leases + messaging for multi-agent coordination |
+| **Quality gates** | Type-check, lint, test, build verification |
+
+**Session Templates** (in `.claude/session-templates/`):
+- `orchestrator.md` - Orchestrate epic child tasks with claiming and notes discipline
+- `supervisor.md` - VC-style AI supervisor with 8-phase loop
+- `agent-mail.md` - Agent Mail MCP integration guide
 
 ---
 
@@ -120,6 +138,14 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
   "polling": {
     "beadsRefresh": 30000,
     "sessionMonitor": 500
+  },
+  "gates": {
+    "gates": [
+      { "name": "Type-check", "command": "bun", "args": ["run", "type-check"] },
+      { "name": "Lint", "command": "bun", "args": ["run", "lint"], "fixArgs": ["run", "fix"], "advisory": true },
+      { "name": "Test", "command": "bun", "args": ["run", "test"] },
+      { "name": "Build", "command": "bun", "args": ["run", "build"] }
+    ]
   },
   "theme": "catppuccin-macchiato"
 }
