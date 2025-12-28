@@ -11,7 +11,6 @@ import gleam/set
 import gleam/string
 import gleam/erlang/process.{type Subject}
 import azedarach/config
-import azedarach/domain/project
 import azedarach/domain/session
 import azedarach/domain/task
 import azedarach/ui/model.{
@@ -20,8 +19,10 @@ import azedarach/ui/model.{
 }
 import azedarach/ui/effects.{type Effect}
 import azedarach/ui/textfield
+import azedarach/ui/keys
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
+import azedarach/util/logger
 
 /// Get current time in milliseconds (for toast scheduling)
 @external(erlang, "erlang", "system_time")
@@ -460,11 +461,36 @@ pub fn update(
       effects.none(),
     )
     model.Tick -> #(model, effects.none())
-    model.Quit -> #(model, effects.none())
-    // Will be handled by Shore
+    model.Quit -> {
+      logger.info("update: Quit message received!")
+      // Send exit signal to quit the application
+      case model.exit_subject {
+        Some(exit_subj) -> {
+          logger.info("update: exit_subject exists, calling effects.quit")
+          #(model, effects.quit(exit_subj))
+        }
+        None -> {
+          logger.warn("update: exit_subject is None, cannot quit!")
+          #(model, effects.none())
+        }
+      }
+    }
     model.ForceRedraw -> #(model, effects.none())
-    model.KeyPressed(_, _) -> #(model, effects.none())
-    // Handled by keys module
+    model.KeyPressed(key, modifiers) -> {
+      // Convert model.Modifier to keys.Modifier
+      let key_modifiers = list.map(modifiers, fn(m) {
+        case m {
+          model.Ctrl -> keys.Ctrl
+          model.Shift -> keys.Shift
+          model.Alt -> keys.Alt
+        }
+      })
+      let event = keys.KeyEvent(key: key, modifiers: key_modifiers)
+      case keys.handle_key(model, event) {
+        Some(msg) -> update(model, msg, coord)
+        None -> #(model, effects.none())
+      }
+    }
 
     // Planning workflow messages
     model.OpenPlanning -> #(

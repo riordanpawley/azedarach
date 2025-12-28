@@ -5,7 +5,6 @@ import gleam/dynamic/decode.{type Decoder}
 import gleam/json
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/string
 import azedarach/services/tmux
 
 /// Dev server status - matches TypeScript DevServerStatus
@@ -28,6 +27,12 @@ pub type DevServerState {
     started_at: Option(Int),
     error: Option(String),
   )
+}
+
+/// Create the standard key format for dev server state lookup
+/// Key format: "bead_id:server_name"
+pub fn make_key(bead_id: String, server_name: String) -> String {
+  bead_id <> ":" <> server_name
 }
 
 /// Create an idle state for a server

@@ -109,7 +109,7 @@ pub fn default_update_options() -> UpdateOptions {
 
 /// List all beads (filters out tombstones)
 pub fn list_all(project_path: String, config: Config) -> Result(List(Task), BeadsError) {
-  case shell.run("bd", ["list", "--json"], project_path) {
+  case shell.run(config.beads.command, ["list", "--json"], project_path) {
     Ok(output) -> {
       case parse_beads_list(output) {
         Ok(tasks) -> Ok(filter_tombstones(tasks))
@@ -123,7 +123,7 @@ pub fn list_all(project_path: String, config: Config) -> Result(List(Task), Bead
 
 /// List all beads including tombstones
 pub fn list_all_with_tombstones(project_path: String, config: Config) -> Result(List(Task), BeadsError) {
-  case shell.run("bd", ["list", "--json"], project_path) {
+  case shell.run(config.beads.command, ["list", "--json"], project_path) {
     Ok(output) -> parse_beads_list(output)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -132,7 +132,7 @@ pub fn list_all_with_tombstones(project_path: String, config: Config) -> Result(
 
 /// Show a specific bead
 pub fn show(id: String, project_path: String, config: Config) -> Result(Task, BeadsError) {
-  case shell.run("bd", ["show", id, "--json"], project_path) {
+  case shell.run(config.beads.command, ["show", id, "--json"], project_path) {
     Ok(output) -> parse_single_bead(output, id)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -142,7 +142,7 @@ pub fn show(id: String, project_path: String, config: Config) -> Result(Task, Be
 /// Create a new bead with options
 pub fn create(options: CreateOptions, project_path: String, config: Config) -> Result(String, BeadsError) {
   let args = build_create_args(options)
-  case shell.run("bd", args, project_path) {
+  case shell.run(config.beads.command, args, project_path) {
     Ok(output) -> Ok(string.trim(output))
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -177,7 +177,7 @@ pub fn update(
     [_] -> Ok(Nil)
     // No updates to make
     _ -> {
-      case shell.run("bd", args, project_path) {
+      case shell.run(config.beads.command, args, project_path) {
         Ok(_) -> Ok(Nil)
         Error(shell.CommandError(code, stderr)) ->
           Error(CommandFailed(code, stderr))
@@ -233,7 +233,7 @@ pub fn append_notes(
 
 /// Delete a bead (uses --no-daemon to avoid process issues)
 pub fn delete(id: String, project_path: String, config: Config) -> Result(Nil, BeadsError) {
-  case shell.run("bd", ["delete", id, "--no-daemon"], project_path) {
+  case shell.run(config.beads.command, ["delete", id, "--no-daemon"], project_path) {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -251,7 +251,7 @@ pub fn close(
     Some(r) -> ["close", id, "--reason=" <> r]
     None -> ["close", id]
   }
-  case shell.run("bd", args, project_path) {
+  case shell.run(config.beads.command, args, project_path) {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -260,7 +260,7 @@ pub fn close(
 
 /// Edit a bead in $EDITOR (opens external editor)
 pub fn edit(id: String, project_path: String, config: Config) -> Result(Nil, BeadsError) {
-  case shell.run("bd", ["edit", id], project_path) {
+  case shell.run(config.beads.command, ["edit", id], project_path) {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -273,7 +273,7 @@ pub fn edit(id: String, project_path: String, config: Config) -> Result(Nil, Bea
 
 /// Search beads by pattern
 pub fn search(pattern: String, project_path: String, config: Config) -> Result(List(Task), BeadsError) {
-  case shell.run("bd", ["search", pattern, "--json"], project_path) {
+  case shell.run(config.beads.command, ["search", pattern, "--json"], project_path) {
     Ok(output) -> {
       case parse_beads_list(output) {
         Ok(tasks) -> Ok(filter_tombstones(tasks))
@@ -287,7 +287,7 @@ pub fn search(pattern: String, project_path: String, config: Config) -> Result(L
 
 /// Get ready (unblocked) beads
 pub fn ready(project_path: String, config: Config) -> Result(List(Task), BeadsError) {
-  case shell.run("bd", ["ready", "--json"], project_path) {
+  case shell.run(config.beads.command, ["ready", "--json"], project_path) {
     Ok(output) -> {
       case parse_beads_list(output) {
         Ok(tasks) -> Ok(filter_tombstones(tasks))
@@ -341,7 +341,7 @@ pub fn add_dependency(
   config: Config,
 ) -> Result(Nil, BeadsError) {
   let type_str = task.dependent_type_to_string(dep_type)
-  case shell.run("bd", ["dep", "add", id, depends_on, "--type=" <> type_str], project_path) {
+  case shell.run(config.beads.command, ["dep", "add", id, depends_on, "--type=" <> type_str], project_path) {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -355,7 +355,7 @@ pub fn remove_dependency(
   project_path: String,
   config: Config,
 ) -> Result(Nil, BeadsError) {
-  case shell.run("bd", ["dep", "remove", id, depends_on], project_path) {
+  case shell.run(config.beads.command, ["dep", "remove", id, depends_on], project_path) {
     Ok(_) -> Ok(Nil)
     Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
     Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
@@ -377,20 +377,32 @@ pub fn add_child_to_epic(
 // ============================================================================
 
 /// Sync beads (for worktrees)
+/// Respects config.beads.sync_enabled - returns Ok(Nil) if sync is disabled
 pub fn sync(project_path: String, config: Config) -> Result(Nil, BeadsError) {
-  case shell.run("bd", ["sync"], project_path) {
-    Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
-    Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
+  case config.beads.sync_enabled {
+    False -> Ok(Nil)  // Sync disabled, skip silently
+    True -> {
+      case shell.run(config.beads.command, ["sync"], project_path) {
+        Ok(_) -> Ok(Nil)
+        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
+      }
+    }
   }
 }
 
 /// Sync from main branch (for new worktrees)
+/// Respects config.beads.sync_enabled - returns Ok(Nil) if sync is disabled
 pub fn sync_from_main(project_path: String, config: Config) -> Result(Nil, BeadsError) {
-  case shell.run("bd", ["sync", "--from-main"], project_path) {
-    Ok(_) -> Ok(Nil)
-    Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
-    Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
+  case config.beads.sync_enabled {
+    False -> Ok(Nil)  // Sync disabled, skip silently
+    True -> {
+      case shell.run(config.beads.command, ["sync", "--from-main"], project_path) {
+        Ok(_) -> Ok(Nil)
+        Error(shell.CommandError(code, stderr)) -> Error(CommandFailed(code, stderr))
+        Error(shell.NotFound(cmd)) -> Error(CommandFailed(127, "Command not found: " <> cmd))
+      }
+    }
   }
 }
 

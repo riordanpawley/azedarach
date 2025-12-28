@@ -5,6 +5,7 @@ import gleam/list
 import gleam/result
 import gleam/string
 import shellout
+import envoy
 
 pub type ShellError {
   CommandError(exit_code: Int, stderr: String)
@@ -65,13 +66,9 @@ pub fn command_exists(cmd: String) -> Bool {
   }
 }
 
-// Get environment variable using Erlang FFI
-@external(erlang, "os", "getenv")
-fn erlang_getenv(name: String) -> Result(String, Nil)
-
-// Get environment variable
+// Get environment variable using envoy (handles charlist conversion properly)
 pub fn get_env(name: String) -> Result(String, Nil) {
-  erlang_getenv(name)
+  envoy.get(name)
 }
 
 // Set environment variable for subprocess

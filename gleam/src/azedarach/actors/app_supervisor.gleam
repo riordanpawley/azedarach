@@ -7,6 +7,8 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import azedarach/config.{type Config}
+import azedarach/domain/session
+import azedarach/services/dev_server_state
 import azedarach/actors/coordinator
 import azedarach/actors/sessions_sup
 import azedarach/actors/servers_sup
@@ -109,48 +111,131 @@ fn start_supervisor(
 }
 
 /// Start all children asynchronously
+/// Order: Coordinator first, then supervisors (so we can wire callbacks properly)
 fn start_children(config: Config, supervisor: Subject(Msg)) -> Nil {
   // Start each child in a separate process
   let _ = process.spawn(fn() {
-    // Create coordinator update subject for supervisors
-    let coord_update_subject = process.new_subject()
-
-    // Start Sessions Supervisor
-    case sessions_sup.start(coord_update_subject) {
-      Ok(sessions) -> {
-        process.send(supervisor, ChildStarted(SessionsSupChild(sessions)))
-      }
-      Error(_) -> {
-        process.send(supervisor, ChildFailed(SessionsSupChild(process.new_subject()), "Failed to start"))
-      }
-    }
-
-    // Start Servers Supervisor
-    case servers_sup.start(create_server_coordinator_callback()) {
-      Ok(servers) -> {
-        process.send(supervisor, ChildStarted(ServersSupChild(servers)))
-      }
-      Error(_) -> {
-        process.send(supervisor, ChildFailed(ServersSupChild(process.new_subject()), "Failed to start"))
-      }
-    }
-
-    // Start Coordinator
+    // Start Coordinator FIRST so we have its subject for callbacks
     case coordinator.start(config) {
       Ok(coord) -> {
         process.send(supervisor, ChildStarted(CoordinatorChild(coord)))
+
+        // Create bridge subjects that forward monitor updates to coordinator
+        let sessions_callback = create_sessions_coordinator_bridge(coord)
+        let servers_callback = create_servers_coordinator_bridge(coord)
+
+        // Start Sessions Supervisor with proper callback
+        case sessions_sup.start(sessions_callback) {
+          Ok(sessions) -> {
+            process.send(supervisor, ChildStarted(SessionsSupChild(sessions)))
+          }
+          Error(_) -> {
+            process.send(supervisor, ChildFailed(SessionsSupChild(process.new_subject()), "Failed to start sessions supervisor"))
+          }
+        }
+
+        // Start Servers Supervisor with proper callback
+        case servers_sup.start(servers_callback) {
+          Ok(servers) -> {
+            process.send(supervisor, ChildStarted(ServersSupChild(servers)))
+          }
+          Error(_) -> {
+            process.send(supervisor, ChildFailed(ServersSupChild(process.new_subject()), "Failed to start servers supervisor"))
+          }
+        }
       }
       Error(_) -> {
-        process.send(supervisor, ChildFailed(CoordinatorChild(process.new_subject()), "Failed to start"))
+        process.send(supervisor, ChildFailed(CoordinatorChild(process.new_subject()), "Failed to start coordinator"))
       }
     }
   })
   Nil
 }
 
-/// Create a stub callback for server coordinator updates
-fn create_server_coordinator_callback() -> Subject(servers_sup.CoordinatorUpdate) {
-  process.new_subject()
+/// Create a bridge subject that forwards sessions_sup.CoordinatorUpdate to coordinator
+fn create_sessions_coordinator_bridge(
+  coord: Subject(coordinator.Msg),
+) -> Subject(sessions_sup.CoordinatorUpdate) {
+  let bridge_subject = process.new_subject()
+
+  // Spawn bridge process that converts and forwards messages
+  let _ = process.spawn(fn() {
+    forward_session_updates(bridge_subject, coord)
+  })
+
+  bridge_subject
+}
+
+/// Forward session monitor updates to coordinator
+fn forward_session_updates(
+  from: Subject(sessions_sup.CoordinatorUpdate),
+  to: Subject(coordinator.Msg),
+) -> Nil {
+  case process.receive(from, 60_000) {
+    Ok(sessions_sup.SessionStateChanged(bead_id, state)) -> {
+      // Convert sessions_sup message to coordinator message
+      process.send(to, coordinator.SessionMonitorUpdate(bead_id, state))
+      forward_session_updates(from, to)
+    }
+    Ok(sessions_sup.SessionMarkedUnknown(bead_id, _reason)) -> {
+      // Mark session as Unknown state
+      process.send(to, coordinator.SessionMonitorUpdate(bead_id, session.Unknown))
+      forward_session_updates(from, to)
+    }
+    Error(_) -> {
+      // Timeout, continue listening
+      forward_session_updates(from, to)
+    }
+  }
+}
+
+/// Create a bridge subject that forwards servers_sup.CoordinatorUpdate to coordinator
+fn create_servers_coordinator_bridge(
+  coord: Subject(coordinator.Msg),
+) -> Subject(servers_sup.CoordinatorUpdate) {
+  let bridge_subject = process.new_subject()
+
+  // Spawn bridge process that converts and forwards messages
+  let _ = process.spawn(fn() {
+    forward_server_updates(bridge_subject, coord)
+  })
+
+  bridge_subject
+}
+
+/// Forward server monitor updates to coordinator
+fn forward_server_updates(
+  from: Subject(servers_sup.CoordinatorUpdate),
+  to: Subject(coordinator.Msg),
+) -> Nil {
+  case process.receive(from, 60_000) {
+    Ok(servers_sup.ServerStatusChanged(bead_id, server_name, dev_state)) -> {
+      // Forward the DevServerState to coordinator
+      let key = dev_server_state.make_key(bead_id, server_name)
+      process.send(to, coordinator.DevServerUpdate(key, dev_state))
+      forward_server_updates(from, to)
+    }
+    Ok(servers_sup.ServerMarkedUnknown(bead_id, server_name, reason)) -> {
+      // Create error state and forward
+      let key = dev_server_state.make_key(bead_id, server_name)
+      let error_state = dev_server_state.DevServerState(
+        name: server_name,
+        status: dev_server_state.Error(reason),
+        port: None,
+        window_name: server_name,
+        tmux_session: None,
+        worktree_path: None,
+        started_at: None,
+        error: Some(reason),
+      )
+      process.send(to, coordinator.DevServerUpdate(key, error_state))
+      forward_server_updates(from, to)
+    }
+    Error(_) -> {
+      // Timeout, continue listening
+      forward_server_updates(from, to)
+    }
+  }
 }
 
 /// Handle supervisor messages

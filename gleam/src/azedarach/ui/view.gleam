@@ -1,14 +1,19 @@
 // Main view - renders the entire UI
 
-import gleam/list
 import gleam/option.{None, Some}
-import gleam/string
+import shore/layout
+import shore/style
 import shore/ui
-import azedarach/ui/model.{type Model, type Overlay, type Toast, type ToastLevel}
+import gleam/int
+import gleam/list
+import azedarach/ui/model.{type Model}
 import azedarach/ui/view/board
 import azedarach/ui/view/status_bar
 import azedarach/ui/view/overlays
 import azedarach/ui/view/utils
+import azedarach/ui/keybinds
+import azedarach/util/logger
+import shore/key
 
 // Re-export common types and functions from utils for convenience
 pub type Node =
@@ -40,77 +45,17 @@ pub const truncate = utils.truncate
 
 // Main render function
 pub fn render(model: Model) -> Node {
-  // Main layout: board + status bar
-  let main_content =
-    ui.col([
-      // Board area (takes remaining height)
-      board.render(model),
-      // Status bar (1 line at bottom)
-      status_bar.render(model),
-    ])
+  // DEBUG: Minimal test - just keybinds and text
+  // This tests if Shore's keybind detection works at all
+  logger.debug("view.render: creating MINIMAL test view with q keybind")
 
-  // Overlay on top if present
-  let with_overlay = case model.overlay {
-    None -> main_content
-    Some(overlay) -> render_with_overlay(main_content, overlay, model)
-  }
-
-  // Toasts at bottom-right (rendered as part of the content)
-  case model.toasts {
-    [] -> with_overlay
-    toasts -> ui.col([with_overlay, render_toasts(toasts)])
-  }
+  ui.col([
+    // Put keybind FIRST - this is how Shore examples do it
+    ui.keybind(key.Char("q"), model.Quit),
+    ui.text("Press 'q' to quit (minimal test)"),
+    ui.text("Press Ctrl+X for Shore's built-in exit"),
+  ])
 }
 
-fn render_with_overlay(
-  background: Node,
-  overlay: Overlay,
-  model: Model,
-) -> Node {
-  let overlay_element = overlays.render(overlay, model)
-
-  // Stack overlay on background
-  ui.col([background, overlay_element])
-}
-
-// =============================================================================
-// Toast Rendering
-// =============================================================================
-
-fn render_toasts(toasts: List(Toast)) -> Node {
-  // Render toasts as a column of styled text boxes
-  let toast_nodes = list.map(toasts, render_toast)
-  ui.col(toast_nodes)
-}
-
-fn render_toast(toast: Toast) -> Node {
-  let icon = model.toast_icon(toast.level)
-  let prefix = toast_prefix(toast.level)
-
-  // Split message by newlines to support multi-line
-  let lines = string.split(toast.message, "\n")
-
-  case lines {
-    [] -> ui.text("")
-    [first, ..rest] -> {
-      // First line with icon and prefix
-      let first_line = ui.text(prefix <> " " <> icon <> " " <> first <> " ")
-
-      // Additional lines with indentation
-      let rest_lines = list.map(rest, fn(line) {
-        ui.text("   " <> line <> " ")
-      })
-
-      ui.col([first_line, ..rest_lines])
-    }
-  }
-}
-
-fn toast_prefix(level: ToastLevel) -> String {
-  case level {
-    model.ErrorLevel -> "[ERROR]"
-    model.Warning -> "[WARN]"
-    model.Success -> "[OK]"
-    model.Info -> "[INFO]"
-  }
-}
+// TODO: Add toast rendering back when needed
+// Toasts were removed to simplify layout - they were breaking the grid sizing

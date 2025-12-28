@@ -1,6 +1,7 @@
 // TEA Model - All application state
 
 import gleam/dict.{type Dict}
+import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
@@ -49,6 +50,8 @@ pub type Model {
     terminal_size: #(Int, Int),
     // OTP supervision context (optional for backwards compatibility)
     app_context: Option(AppContext),
+    // Exit signal - send to this subject to quit the app
+    exit_subject: Option(Subject(Nil)),
   )
 }
 
@@ -303,6 +306,7 @@ pub fn init(config: Config, colors: Colors) -> Model {
     toasts: [],
     terminal_size: #(80, 24),
     app_context: None,
+    exit_subject: None,
   )
 }
 
@@ -311,6 +315,7 @@ pub fn init_with_context(
   config: Config,
   colors: Colors,
   context: AppContext,
+  exit_subj: Subject(Nil),
 ) -> Model {
   Model(
     tasks: [],
@@ -337,6 +342,7 @@ pub fn init_with_context(
     toasts: [],
     terminal_size: #(80, 24),
     app_context: Some(context),
+    exit_subject: Some(exit_subj),
   )
 }
 

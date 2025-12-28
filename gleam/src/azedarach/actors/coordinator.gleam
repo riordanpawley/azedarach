@@ -11,6 +11,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
+import azedarach/util/logger
 // Erlang FFI for unique integer generation
 @external(erlang, "erlang", "unique_integer")
 fn unique_integer() -> Int
@@ -57,7 +58,7 @@ pub type Msg {
   // Subscription
   Subscribe(Subject(UiMsg))
   // Lifecycle
-  Initialize
+  Initialize(self: Subject(Msg))
   PeriodicTick
   // Project management
   SwitchProject(path: String)
@@ -106,6 +107,7 @@ pub type Msg {
   ProjectsDiscovered(List(Project))
   InitialProjectSelected(Result(Project, project_service.ProjectError))
   SessionMonitorUpdate(id: String, state: session.State)
+  DevServerUpdate(key: String, state: DevServerState)
 }
 
 // Messages sent to UI
@@ -182,7 +184,8 @@ pub fn start(config: Config) -> Result(Subject(Msg), actor.StartError) {
 /// Initialize the coordinator after creation
 /// Call this after start() to begin periodic refresh and project discovery
 pub fn initialize(subject: Subject(Msg)) -> Nil {
-  process.send(subject, Initialize)
+  // Pass the subject to itself so the actor knows its own address for timers
+  process.send(subject, Initialize(subject))
 }
 
 // Send message to coordinator
@@ -197,20 +200,38 @@ fn handle_message(
 ) -> actor.Next(CoordinatorState, Msg) {
   case msg {
     Subscribe(ui) -> {
+      // Send current state to newly subscribed UI
+      // This ensures UI gets data even if it subscribes after initial load
+      case list.is_empty(state.tasks) {
+        False -> process.send(ui, TasksUpdated(state.tasks))
+        True -> Nil
+      }
+      case state.current_project {
+        Some(proj) -> process.send(ui, ProjectChanged(proj))
+        None -> Nil
+      }
+      case list.is_empty(state.available_projects) {
+        False -> process.send(ui, ProjectsUpdated(state.available_projects))
+        True -> Nil
+      }
       actor.continue(CoordinatorState(..state, ui_subject: Some(ui)))
     }
 
-    Initialize -> {
-      // Store self reference for periodic refresh
-      let self = process.new_subject()
+    Initialize(self) -> {
+      logger.info("Coordinator: Initialize message received")
+      // Use the passed-in self reference (the actor's actual subject)
+      // This is required because actors don't have built-in access to their own subject
 
       // Start project discovery
+      logger.debug("Coordinator: Starting project discovery...")
       spawn_project_discovery(self)
+      logger.debug("Coordinator: Starting initial project selection...")
       spawn_initial_project(self)
 
       // Schedule first periodic tick
       schedule_tick(self)
 
+      logger.info("Coordinator: Initialization complete, self_subject set")
       actor.continue(CoordinatorState(..state, self_subject: Some(self)))
     }
 
@@ -236,15 +257,24 @@ fn handle_message(
     }
 
     InitialProjectSelected(result) -> {
+      logger.debug("Coordinator: InitialProjectSelected received")
       case result {
         Ok(proj) -> {
+          logger.info_ctx("Coordinator: Project selected", [
+            #("name", project.display_name(proj)),
+            #("path", proj.path),
+          ])
           notify_ui(state, ProjectChanged(proj))
           notify_ui(state, Toast("Project: " <> project.display_name(proj), Info))
           // Load beads for this project
+          logger.debug("Coordinator: Spawning beads load for project...")
           spawn_beads_load_for_project(state, proj)
           actor.continue(CoordinatorState(..state, current_project: Some(proj)))
         }
         Error(e) -> {
+          logger.error_ctx("Coordinator: Project selection failed", [
+            #("error", project_service.error_to_string(e)),
+          ])
           notify_ui(state, Toast(project_service.error_to_string(e), Warning))
           actor.continue(state)
         }
@@ -298,19 +328,26 @@ fn handle_message(
     }
 
     RefreshBeads -> {
-      // Async load beads
-      let self = process.new_subject()
-      spawn_beads_load(self, get_project_path(state), state.config)
+      // Async load beads - use self_subject so result comes back to coordinator
+      // spawn_beads_load handles None case (logs warning, discards result)
+      spawn_beads_load(state.self_subject, get_project_path(state), state.config)
       actor.continue(state)
     }
 
     BeadsLoaded(result) -> {
+      logger.debug("Coordinator: BeadsLoaded message received")
       case result {
         Ok(tasks) -> {
+          logger.info_ctx("Coordinator: Beads loaded successfully", [
+            #("count", int.to_string(list.length(tasks))),
+          ])
           notify_ui(state, TasksUpdated(tasks))
           actor.continue(CoordinatorState(..state, tasks: tasks))
         }
         Error(e) -> {
+          logger.error_ctx("Coordinator: Beads loading failed", [
+            #("error", beads.error_to_string(e)),
+          ])
           notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           actor.continue(state)
         }
@@ -335,7 +372,7 @@ fn handle_message(
       case beads.create(options, project_path, state.config) {
         Ok(id) -> {
           notify_ui(state, Toast("Bead created: " <> id, Success))
-          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+          spawn_beads_load(state.self_subject, get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
@@ -349,7 +386,7 @@ fn handle_message(
           case bead_editor.create_from_parsed(parsed, issue_type, project_path, state.config) {
             Ok(id) -> {
               notify_ui(state, Toast("Bead created: " <> id, Success))
-              spawn_beads_load(process.new_subject(), project_path, state.config)
+              spawn_beads_load(state.self_subject, project_path, state.config)
             }
             Error(e) ->
               notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
@@ -367,7 +404,7 @@ fn handle_message(
           case bead_editor.apply_changes(id, parsed, project_path, state.config) {
             Ok(_) -> {
               notify_ui(state, Toast("Bead updated", Success))
-              spawn_beads_load(process.new_subject(), project_path, state.config)
+              spawn_beads_load(state.self_subject, project_path, state.config)
             }
             Error(e) ->
               notify_ui(state, Toast(bead_editor.error_to_string(e), ErrorLevel))
@@ -383,7 +420,7 @@ fn handle_message(
       case beads.delete(id, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Bead deleted", Success))
-          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+          spawn_beads_load(state.self_subject, get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
@@ -396,7 +433,7 @@ fn handle_message(
         Ok(found_task) -> {
           let new_status = next_status(found_task.status, direction)
           case beads.update_status(id, new_status, project_path, state.config) {
-            Ok(_) -> spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+            Ok(_) -> spawn_beads_load(state.self_subject, get_project_path(state), state.config)
             Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
           }
         }
@@ -653,7 +690,7 @@ fn handle_message(
     }
 
     ToggleDevServer(id, server_name) -> {
-      let key = id <> ":" <> server_name
+      let key = dev_server_state.make_key(id, server_name)
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
           case dev_server_state.is_running(ds) {
@@ -688,7 +725,7 @@ fn handle_message(
     }
 
     ViewDevServer(id, server_name) -> {
-      let key = id <> ":" <> server_name
+      let key = dev_server_state.make_key(id, server_name)
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
           case tmux.select_window(id <> "-az", ds.window_name) {
@@ -702,7 +739,7 @@ fn handle_message(
     }
 
     RestartDevServer(id, server_name) -> {
-      let key = id <> ":" <> server_name
+      let key = dev_server_state.make_key(id, server_name)
       case dict.get(state.dev_servers, key) {
         Ok(ds) -> {
           case tmux.send_keys(id <> "-az:" <> ds.window_name, "C-c") {
@@ -943,7 +980,7 @@ fn handle_message(
       case beads.add_dependency(id, depends_on, dep_type, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency added", Success))
-          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+          spawn_beads_load(state.self_subject, get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
@@ -955,7 +992,7 @@ fn handle_message(
       case beads.remove_dependency(id, depends_on, project_path, state.config) {
         Ok(_) -> {
           notify_ui(state, Toast("Dependency removed", Success))
-          spawn_beads_load(process.new_subject(), get_project_path(state), state.config)
+          spawn_beads_load(state.self_subject, get_project_path(state), state.config)
         }
         Error(e) -> notify_ui(state, Toast(beads.error_to_string(e), ErrorLevel))
       }
@@ -973,6 +1010,13 @@ fn handle_message(
         }
         Error(_) -> actor.continue(state)
       }
+    }
+
+    DevServerUpdate(key, dev_state) -> {
+      // Update dev server state and notify UI
+      let new_servers = dict.insert(state.dev_servers, key, dev_state)
+      notify_ui(state, DevServerStateChanged(key, dev_state))
+      actor.continue(CoordinatorState(..state, dev_servers: new_servers))
     }
 
     // Planning workflow
@@ -1043,33 +1087,60 @@ fn notify_ui(state: CoordinatorState, msg: UiMsg) -> Nil {
   }
 }
 
-fn spawn_beads_load(reply_to: Subject(Msg), project_path: String, config: Config) -> Nil {
+/// Spawn async beads load. Takes Option(Subject) - if None, result is discarded.
+/// Use state.self_subject to ensure results come back to the coordinator.
+fn spawn_beads_load(reply_to: Option(Subject(Msg)), project_path: String, config: Config) -> Nil {
+  logger.debug_ctx("spawn_beads_load: Starting", [#("path", project_path)])
   let _ = process.spawn(fn() {
+    logger.debug_ctx("spawn_beads_load: Calling beads.list_all", [#("path", project_path)])
     let result = beads.list_all(project_path, config)
-    process.send(reply_to, BeadsLoaded(result))
+    logger.debug_ctx("spawn_beads_load: Got result", [
+      #("success", case result { Ok(_) -> "true" Error(_) -> "false" }),
+    ])
+    // Only send if we have a valid reply subject
+    case reply_to {
+      Some(subject) -> process.send(subject, BeadsLoaded(result))
+      None -> {
+        logger.warn("spawn_beads_load: No reply subject, discarding result")
+        Nil
+      }
+    }
   })
   Nil
 }
 
 /// Load beads for a specific project (runs in project directory)
 fn spawn_beads_load_for_project(state: CoordinatorState, proj: Project) -> Nil {
+  logger.debug_ctx("spawn_beads_load_for_project: Starting", [#("path", proj.path)])
   case state.self_subject {
     Some(reply_to) -> {
       let _ = process.spawn(fn() {
+        logger.debug_ctx("spawn_beads_load_for_project: Calling beads.list_all", [#("path", proj.path)])
         // Run bd list in project directory
         let result = beads.list_all(proj.path, state.config)
+        logger.debug_ctx("spawn_beads_load_for_project: Got result", [
+          #("success", case result { Ok(_) -> "true" Error(_) -> "false" }),
+        ])
         process.send(reply_to, BeadsLoaded(result))
       })
       Nil
     }
-    None -> Nil
+    None -> {
+      logger.warn("spawn_beads_load_for_project: No self_subject, skipping load")
+      Nil
+    }
   }
 }
 
 /// Discover projects async
 fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
+  logger.debug("spawn_project_discovery: Starting")
   let _ = process.spawn(fn() {
+    logger.debug("spawn_project_discovery: Calling discover_all")
     let projects = project_service.discover_all()
+    logger.debug_ctx("spawn_project_discovery: Found projects", [
+      #("count", int.to_string(list.length(projects))),
+    ])
     process.send(reply_to, ProjectsDiscovered(projects))
   })
   Nil
@@ -1077,8 +1148,13 @@ fn spawn_project_discovery(reply_to: Subject(Msg)) -> Nil {
 
 /// Select initial project async
 fn spawn_initial_project(reply_to: Subject(Msg)) -> Nil {
+  logger.debug("spawn_initial_project: Starting")
   let _ = process.spawn(fn() {
+    logger.debug("spawn_initial_project: Calling select_initial")
     let result = project_service.select_initial()
+    logger.debug_ctx("spawn_initial_project: Got result", [
+      #("success", case result { Ok(_) -> "true" Error(_) -> "false" }),
+    ])
     process.send(reply_to, InitialProjectSelected(result))
   })
   Nil
@@ -1242,7 +1318,7 @@ fn start_dev_server(
     Ok(server) -> {
       let tmux_name = id <> "-az"
       let window_name = "dev-" <> server_name
-      let key = id <> ":" <> server_name
+      let key = dev_server_state.make_key(id, server_name)
 
       // Get worktree path for this bead
       let worktree_path = case state.current_project {
