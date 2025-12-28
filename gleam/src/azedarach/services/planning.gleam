@@ -96,7 +96,7 @@ pub const planning_window = "claude"
 /// The session persists between planning operations.
 pub fn start_session(
   project_path: String,
-  config: Config,
+  _config: Config,
 ) -> Result(Nil, PlanningError) {
   // Check if session already exists
   case tmux.session_exists(planning_session) {
@@ -563,12 +563,19 @@ fn send_prompt(prompt: String) -> Result(Nil, PlanningError) {
 
 fn wait_for_response(timeout_seconds: Int) -> Result(String, PlanningError) {
   // Poll for completion by checking if Claude is waiting for input
-  wait_loop(timeout_seconds * 2, timeout_seconds * 2)
+  // Each poll is 500ms, so multiply by 2 to get number of polls
+  let max_polls = timeout_seconds * 2
+  wait_loop(max_polls, max_polls)
 }
 
 fn wait_loop(polls_remaining: Int, max_polls: Int) -> Result(String, PlanningError) {
   case polls_remaining {
-    0 -> Error(SessionNotReady("Timeout waiting for Claude response"))
+    0 -> {
+      let elapsed_seconds = max_polls / 2
+      Error(SessionNotReady(
+        "Timeout after " <> int.to_string(elapsed_seconds) <> " seconds waiting for Claude response"
+      ))
+    }
     _ -> {
       // Sleep 500ms between polls
       shell.sleep_ms(500)

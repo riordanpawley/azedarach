@@ -8,7 +8,6 @@
 // - Line operations (Ctrl+U clear, Ctrl+A home, Ctrl+E end)
 // - Clipboard-style operations (Ctrl+K kill to end)
 
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string

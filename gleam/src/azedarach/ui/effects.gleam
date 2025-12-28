@@ -15,6 +15,7 @@ import gleam/list
 import azedarach/ui/model.{type Msg}
 import azedarach/actors/coordinator
 import azedarach/domain/task
+import azedarach/util/logger
 
 /// Effect type - a list of thunks that return messages
 pub type Effect(msg) =
@@ -388,6 +389,20 @@ pub fn attach_planning_session(
 ) -> Effect(Msg) {
   from(fn() {
     coordinator.send(coord, coordinator.AttachPlanningSession)
+    model.Tick
+  })
+}
+
+// =============================================================================
+// Quit Effect
+// =============================================================================
+
+/// Send signal to exit the application
+pub fn quit(exit_subject: Subject(Nil)) -> Effect(Msg) {
+  logger.info("effects: quit effect created")
+  from(fn() {
+    logger.info("effects: quit effect EXECUTING - sending to exit_subject")
+    process.send(exit_subject, Nil)
     model.Tick
   })
 }

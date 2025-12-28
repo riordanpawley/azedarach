@@ -6,8 +6,7 @@
 
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
-import gleam/result
-import shore
+import shore.{type Event}
 import azedarach/config.{type Config}
 import azedarach/ui/model.{type Model, type Msg}
 import azedarach/ui/update
@@ -16,6 +15,7 @@ import azedarach/ui/theme
 import azedarach/ui/effects.{type Effect}
 import azedarach/actors/coordinator
 import azedarach/actors/app_supervisor.{type AppContext}
+import azedarach/services/dev_server_state
 
 /// Start with existing supervision context (preferred method)
 pub fn start_with_context(context: AppContext) -> Result(Nil, actor.StartError) {
@@ -28,7 +28,7 @@ pub fn start_with_context(context: AppContext) -> Result(Nil, actor.StartError) 
   // Configure and start Shore with supervision context
   let spec =
     shore.spec(
-      init: fn() { init_with_context(context.config, colors, context) },
+      init: fn() { init_with_context(context.config, colors, context, exit) },
       view: view.render,
       update: fn(model, msg) { update.update_with_context(model, msg, context) },
       exit: exit,
@@ -41,6 +41,8 @@ pub fn start_with_context(context: AppContext) -> Result(Nil, actor.StartError) 
     Ok(shore_subject) -> {
       // Subscribe to coordinator for UiMsg notifications
       start_ui_bridge(shore_subject, context.coordinator)
+      // Block until exit message is received (keeps BEAM VM alive)
+      let _ = process.receive_forever(exit)
       Ok(Nil)
     }
     Error(e) -> Error(e)
@@ -75,6 +77,8 @@ pub fn start(config: Config) -> Result(Nil, actor.StartError) {
     Ok(shore_subject) -> {
       // Subscribe to coordinator for UiMsg notifications
       start_ui_bridge(shore_subject, coord)
+      // Block until exit message is received (keeps BEAM VM alive)
+      let _ = process.receive_forever(exit)
       Ok(Nil)
     }
     Error(e) -> Error(e)
@@ -87,7 +91,7 @@ pub fn start(config: Config) -> Result(Nil, actor.StartError) {
 
 /// Start the UI bridge that translates coordinator UiMsg to Shore Msg
 fn start_ui_bridge(
-  shore_subject: Subject(Msg),
+  shore_subject: Subject(Event(Msg)),
   coord: Subject(coordinator.Msg),
 ) -> Nil {
   // Create a subject to receive UiMsg from coordinator
@@ -97,7 +101,7 @@ fn start_ui_bridge(
   coordinator.send(coord, coordinator.Subscribe(ui_receiver))
 
   // Spawn bridge process that forwards messages
-  let _ = process.spawn_link(fn() {
+  let _ = process.spawn(fn() {
     ui_bridge_loop(shore_subject, ui_receiver)
   })
 
@@ -106,15 +110,15 @@ fn start_ui_bridge(
 
 /// Bridge loop - receives UiMsg and forwards translated Msg to Shore
 fn ui_bridge_loop(
-  shore_subject: Subject(Msg),
+  shore_subject: Subject(Event(Msg)),
   ui_receiver: Subject(coordinator.UiMsg),
 ) -> Nil {
   // Wait for UiMsg from coordinator
   case process.receive_forever(ui_receiver) {
     msg -> {
-      // Translate and forward to Shore
+      // Translate and forward to Shore (wrap with shore.send)
       case translate_ui_msg(msg) {
-        Ok(shore_msg) -> process.send(shore_subject, shore_msg)
+        Ok(shore_msg) -> process.send(shore_subject, shore.send(shore_msg))
         Error(Nil) -> Nil
       }
       // Continue loop
@@ -128,6 +132,8 @@ fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
   case msg {
     coordinator.TasksUpdated(tasks) -> Ok(model.BeadsLoaded(tasks))
 
+    coordinator.SearchResults(tasks) -> Ok(model.BeadsLoaded(tasks))
+
     coordinator.SessionStateChanged(id, state) ->
       Ok(model.SessionStateChanged(id, state))
 
@@ -136,7 +142,7 @@ fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
         id,
         model.DevServerState(
           name: state.name,
-          running: state.running,
+          running: dev_server_state.is_running(state),
           port: state.port,
           window_name: state.window_name,
         ),
@@ -155,6 +161,26 @@ fn translate_ui_msg(msg: coordinator.UiMsg) -> Result(Msg, Nil) {
 
     coordinator.ProjectsUpdated(projects) ->
       Ok(model.ProjectsUpdated(projects))
+
+    coordinator.PlanningStateUpdated(planning_state) ->
+      translate_planning_state(planning_state)
+  }
+}
+
+/// Translate coordinator PlanningState to model PlanningOverlayState
+fn translate_planning_state(state: coordinator.PlanningState) -> Result(Msg, Nil) {
+  case state {
+    coordinator.PlanningIdle -> Error(Nil)
+    coordinator.PlanningGenerating(desc) ->
+      Ok(model.PlanningStateUpdated(model.PlanningGenerating(desc)))
+    coordinator.PlanningReviewing(desc, pass, max_passes) ->
+      Ok(model.PlanningStateUpdated(model.PlanningReviewing(desc, pass, max_passes)))
+    coordinator.PlanningCreatingBeads(desc) ->
+      Ok(model.PlanningStateUpdated(model.PlanningCreatingBeads(desc)))
+    coordinator.PlanningComplete(ids) ->
+      Ok(model.PlanningStateUpdated(model.PlanningComplete(ids)))
+    coordinator.PlanningError(message) ->
+      Ok(model.PlanningStateUpdated(model.PlanningError(message)))
   }
 }
 
@@ -163,8 +189,9 @@ fn init_with_context(
   config: Config,
   colors: theme.Colors,
   context: AppContext,
+  exit_subj: Subject(Nil),
 ) -> #(Model, Effect(Msg)) {
-  let initial_model = model.init_with_context(config, colors, context)
+  let initial_model = model.init_with_context(config, colors, context, exit_subj)
 
   // Request initial beads load via Shore effects
   #(initial_model, effects.refresh_beads(context.coordinator))

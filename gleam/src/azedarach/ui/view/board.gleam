@@ -5,6 +5,8 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import shore/layout
+import shore/style
 import shore/ui
 import azedarach/domain/task.{type Task}
 import azedarach/domain/session
@@ -17,23 +19,16 @@ import azedarach/ui/view/utils.{
 const column_names = ["Open", "In Progress", "Blocked", "Closed"]
 
 pub fn render(model: Model) -> Node {
-  let #(width, height) = model.terminal_size
-  let column_width = width / 4
-
   // Check if we're in epic drill-down mode
   case model.current_epic {
-    Some(_) -> render_with_epic_header(model, width, height, column_width)
-    None -> render_board(model, height - 1, column_width)
+    Some(_) -> render_with_epic_header(model)
+    None -> render_board(model)
   }
 }
 
-fn render_with_epic_header(
-  model: Model,
-  width: Int,
-  height: Int,
-  column_width: Int,
-) -> Node {
+fn render_with_epic_header(model: Model) -> Node {
   let colors = model.colors
+  let #(width, _height) = model.terminal_size
 
   // Get epic info
   let epic_header = case model.get_current_epic(model) {
@@ -44,9 +39,8 @@ fn render_with_epic_header(
     None -> text("")
   }
 
-  // Board takes remaining height (minus status bar and epic header)
-  let board_height = height - 2
-  let board = render_board(model, board_height, column_width)
+  // Board fills remaining space below epic header
+  let board = render_board(model)
 
   vbox([epic_header, board])
 }
@@ -105,63 +99,78 @@ fn render_progress_bar(
   }
 }
 
-fn render_board(model: Model, board_height: Int, column_width: Int) -> Node {
+fn render_board(model: Model) -> Node {
+  // Render each column
   let columns =
     list.index_map(column_names, fn(name, idx) {
-      render_column(model, idx, name, column_width, board_height)
+      render_column(model, idx, name)
     })
 
-  hbox(columns)
+  // Create grid cells for each column
+  let cells =
+    list.index_map(columns, fn(col, idx) {
+      layout.cell(content: col, row: #(0, 0), col: #(idx, idx))
+    })
+
+  // Use Shore's layout.grid for proper side-by-side columns
+  // Use Fill to expand to available space (Shore handles terminal size internally)
+  layout.grid(
+    gap: 0,
+    rows: [style.Fill],
+    cols: [style.Pct(25), style.Pct(25), style.Pct(25), style.Pct(25)],
+    cells: cells,
+  )
 }
 
 fn render_column(
   model: Model,
   index: Int,
   name: String,
-  width: Int,
-  _height: Int,
 ) -> Node {
   let colors = model.colors
-  let sem = theme.semantic(colors)
+  let #(term_width, _height) = model.terminal_size
+  let col_width = term_width / 4
   let is_selected = model.cursor.column_index == index
   let header_color = theme.column_color(colors, index)
 
   // Get tasks for this column
   let tasks = model.tasks_in_column(model, index)
+  let task_count = list.length(tasks)
 
-  // Column header
-  let header = render_header(name, width, header_color, is_selected, sem)
+  // Column header with count like "Open (51)"
+  let header = render_header(name, task_count, col_width, header_color, is_selected)
 
   // Task cards
   let cards =
     list.index_map(tasks, fn(task, task_idx) {
       let is_cursor = is_selected && model.cursor.task_index == task_idx
       let session_state = dict.get(model.sessions, task.id)
-      render_card(task, session_state, width - 2, is_cursor, model)
+      render_card(task, session_state, col_width - 2, is_cursor, model)
     })
 
   // Empty state
   let content = case list.is_empty(cards) {
-    True -> [dim_text(center("(empty)", width - 2))]
+    True -> [dim_text(center("(empty)", col_width - 2))]
     False -> cards
   }
 
-  // Shore doesn't support hex colors, use plain box
-  ui.box_styled([header, ..content], Some(name), None)
+  // Column without box title - header already shows name with count
+  ui.box_styled([header, ..content], None, None)
 }
 
 fn render_header(
   name: String,
+  count: Int,
   width: Int,
   color: String,
   is_selected: Bool,
-  _sem: theme.SemanticColors,
 ) -> Node {
   let indicator = case is_selected {
     True -> "▶ "
     False -> "  "
   }
-  let header_text = indicator <> name
+  // Format like "Open (51)" matching Bun app style
+  let header_text = indicator <> name <> " (" <> int.to_string(count) <> ")"
   let padded = pad_right(header_text, width - 2)
 
   styled_text(padded, color)

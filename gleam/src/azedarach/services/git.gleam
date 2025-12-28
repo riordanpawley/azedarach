@@ -2,7 +2,6 @@
 
 import gleam/int
 import gleam/list
-import gleam/result
 import gleam/string
 import azedarach/config.{type Config, Local, Origin}
 import azedarach/util/shell

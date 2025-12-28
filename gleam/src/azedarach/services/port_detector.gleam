@@ -194,14 +194,6 @@ fn compile_pattern(pattern: String) -> Result(regexp.Regexp, String) {
   |> result.map_error(fn(e) { string.inspect(e) })
 }
 
-/// Make default pattern
-fn make_default_pattern() -> regexp.Regexp {
-  case regexp.from_string(default_port_pattern) {
-    Ok(r) -> r
-    Error(_) -> panic as "Default port pattern should always compile"
-  }
-}
-
 /// Schedule next poll by spawning a process that sends Poll after delay
 fn schedule_poll(self: Subject(Msg), delay_ms: Int) -> Nil {
   let _ =

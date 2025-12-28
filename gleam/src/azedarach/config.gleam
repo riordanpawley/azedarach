@@ -75,7 +75,12 @@ pub type PrConfig {
 }
 
 pub type BeadsConfig {
-  BeadsConfig(sync_enabled: Bool)
+  BeadsConfig(
+    /// Whether to enable beads sync operations
+    sync_enabled: Bool,
+    /// Path to the bd command (default: "bd")
+    command: String,
+  )
 }
 
 pub type PollingConfig {
@@ -139,7 +144,7 @@ pub fn default_config() -> Config {
       branch_prefix: "az-",
     ),
     pr: PrConfig(enabled: True, auto_draft: True, auto_merge: False),
-    beads: BeadsConfig(sync_enabled: True),
+    beads: BeadsConfig(sync_enabled: True, command: "bd"),
     polling: PollingConfig(beads_refresh_ms: 30_000, session_monitor_ms: 500),
     theme: "catppuccin-macchiato",
   )
@@ -310,8 +315,9 @@ fn pr_decoder() -> Decoder(PrConfig) {
 
 fn beads_decoder() -> Decoder(BeadsConfig) {
   use sync_enabled <- decode.optional_field("syncEnabled", True, decode.bool)
+  use command <- decode.optional_field("command", "bd", decode.string)
 
-  decode.success(BeadsConfig(sync_enabled:))
+  decode.success(BeadsConfig(sync_enabled:, command:))
 }
 
 fn polling_decoder() -> Decoder(PollingConfig) {
@@ -425,6 +431,7 @@ fn pr_to_json(pr: PrConfig) -> json.Json {
 fn beads_to_json(beads: BeadsConfig) -> json.Json {
   json.object([
     #("syncEnabled", json.bool(beads.sync_enabled)),
+    #("command", json.string(beads.command)),
   ])
 }
 
@@ -539,7 +546,7 @@ pub fn editable_settings() -> List(SettingDefinition) {
       label: "Beads Sync",
       get_value: fn(c) { BoolValue(c.beads.sync_enabled) },
       toggle: fn(c) {
-        Config(..c, beads: BeadsConfig(sync_enabled: !c.beads.sync_enabled))
+        Config(..c, beads: BeadsConfig(..c.beads, sync_enabled: !c.beads.sync_enabled))
       },
     ),
     SettingDefinition(
