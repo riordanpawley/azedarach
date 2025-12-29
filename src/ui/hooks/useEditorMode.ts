@@ -123,9 +123,13 @@ export function useEditorMode() {
 			isSort: mode._tag === "sort",
 			isFilter: mode._tag === "filter",
 			isOrchestrate: mode._tag === "orchestrate",
+			isMergeSelect: mode._tag === "mergeSelect",
 		}),
 		[mode],
 	)
+
+	// Get merge select source ID from mode state
+	const mergeSelectSourceId = mode._tag === "mergeSelect" ? mode.sourceBeadId : undefined
 
 	// Get pending jump key and jump labels from mode state
 	const pendingJumpKey = mode._tag === "goto" ? mode.pendingJumpKey : undefined
@@ -239,6 +243,7 @@ export function useEditorMode() {
 		sortConfig,
 		filterConfig,
 		activeFilterField,
+		mergeSelectSourceId,
 
 		// Mode checks
 		...modeFlags,

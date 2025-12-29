@@ -18,7 +18,9 @@ import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
+import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
+import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
@@ -36,6 +38,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		PRWorkflow.Default,
 		TmuxService.Default,
 		AppConfig.Default,
+		EditorService.Default,
+		NavigationService.Default,
 	],
 
 	effect: Effect.gen(function* () {
@@ -47,6 +51,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		const prWorkflow = yield* PRWorkflow
 		const tmux = yield* TmuxService
 		const appConfig = yield* AppConfig
+		const editor = yield* EditorService
+		const nav = yield* NavigationService
 		// Note: DON'T capture gitConfig here - it must be fetched fresh per handler
 		// to pick up config changes when switching projects with `gp`
 
@@ -525,6 +531,92 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			})
 
 		// ================================================================
+		// Merge Select Mode Handlers
+		// ================================================================
+
+		/**
+		 * Enter merge select mode (Space+M in action mode)
+		 *
+		 * Allows user to select a target bead to merge the current bead into.
+		 * Requires the source bead to have a worktree (has commits to merge).
+		 */
+		const enterMergeSelect = () =>
+			Effect.gen(function* () {
+				const task = yield* helpers.getActionTargetTask()
+				if (!task) return
+
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
+					yield* toast.show("error", `No worktree for ${task.id} - nothing to merge`)
+					return
+				}
+
+				// Enter merge select mode with this task as the source
+				yield* editor.enterMergeSelect(task.id)
+				yield* toast.show("info", `Select target bead to merge ${task.id} into`)
+			})
+
+		/**
+		 * Confirm merge select (Space in mergeSelect mode)
+		 *
+		 * Merges the source bead into the currently focused target bead.
+		 */
+		const confirmMergeSelect = () =>
+			Effect.gen(function* () {
+				const sourceId = yield* editor.getMergeSelectSourceId()
+				if (!sourceId) {
+					yield* editor.exitToNormal()
+					return
+				}
+
+				const targetId = yield* nav.getFocusedTaskId()
+				if (!targetId) {
+					yield* toast.show("error", "No target bead selected")
+					return
+				}
+
+				if (sourceId === targetId) {
+					yield* toast.show("error", "Cannot merge bead into itself")
+					return
+				}
+
+				// Exit merge select mode first
+				yield* editor.exitToNormal()
+
+				// Get project path
+				const projectPath = yield* helpers.getProjectPath()
+
+				// Perform the merge
+				yield* toast.show("info", `Merging ${sourceId} into ${targetId}...`)
+
+				yield* prWorkflow
+					.mergeBeadIntoBead({
+						sourceBeadId: sourceId,
+						targetBeadId: targetId,
+						projectPath,
+					})
+					.pipe(
+						Effect.tap(() => board.refresh()),
+						Effect.tap(() =>
+							toast.show("success", `Merged ${sourceId} into ${targetId}. Source bead closed.`),
+						),
+						Effect.catchAll((error) => {
+							const formatted = formatForToast(error)
+							return toast.show("error", `Merge failed: ${formatted}`)
+						}),
+					)
+			})
+
+		/**
+		 * Cancel merge select mode (Escape in mergeSelect mode)
+		 */
+		const cancelMergeSelect = () =>
+			Effect.gen(function* () {
+				yield* editor.exitToNormal()
+				yield* toast.show("info", "Merge cancelled")
+			})
+
+		// ================================================================
 		// Public API
 		// ================================================================
 
@@ -537,6 +629,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			showDiff,
 			// Expose doMergeToMain for direct calls if needed
 			doMergeToMain,
+			// Merge select mode
+			enterMergeSelect,
+			confirmMergeSelect,
+			cancelMergeSelect,
 		}
 	}),
 }) {}

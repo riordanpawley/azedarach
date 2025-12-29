@@ -92,6 +92,7 @@ export const App = () => {
 		sortConfig,
 		filterConfig,
 		activeFilterField,
+		mergeSelectSourceId,
 		isJump,
 		isAction,
 		isSearch,
@@ -247,6 +248,8 @@ export const App = () => {
 				return mode.activeField ? `filter: ${mode.activeField}` : "filter"
 			case "orchestrate":
 				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
+			case "mergeSelect":
+				return `merge ${mode.sourceBeadId} into...`
 		}
 	}, [mode, searchQuery, selectedIds])
 
@@ -275,6 +278,7 @@ export const App = () => {
 					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
 					isActionMode={isAction}
+					mergeSelectSourceId={mergeSelectSourceId}
 				/>
 			</box>
 		)

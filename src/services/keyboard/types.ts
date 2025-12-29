@@ -29,6 +29,7 @@ import type { BeadsError } from "../../core/BeadsClient.js"
  * - sort: Sort menu
  * - filter: Filter menu for status/priority/type/session filtering
  * - orchestrate: Epic orchestration mode for managing child tasks
+ * - mergeSelect: Selecting target bead to merge source into
  * - *: Universal (matches any mode)
  */
 export type KeyMode =
@@ -43,6 +44,7 @@ export type KeyMode =
 	| "sort"
 	| "filter"
 	| "orchestrate"
+	| "mergeSelect"
 	| "*"
 
 // ============================================================================
@@ -60,10 +62,15 @@ export type KeybindingDeps = CommandExecutor.CommandExecutor
  *
  * Actions may have platform requirements (CommandExecutor, FileSystem, BeadsClient)
  * which are satisfied by the runtime layer when KeyboardService is used.
+ *
+ * The `mode` field can be:
+ * - A single KeyMode string: matches only that mode
+ * - An array of KeyMode strings: matches any of those modes
+ * - "*": matches any mode (lowest priority)
  */
 export interface Keybinding {
 	readonly key: string
-	readonly mode: KeyMode
+	readonly mode: KeyMode | ReadonlyArray<KeyMode>
 	readonly description: string
 	readonly action: Effect.Effect<void, BeadsError, KeybindingDeps>
 }

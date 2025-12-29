@@ -68,6 +68,8 @@ export interface TaskCardProps {
 	pendingJumpKey?: string | null
 	/** Number of image attachments for this task */
 	attachmentCount?: number
+	/** Whether this task is the source bead in merge select mode */
+	isMergeSource?: boolean
 }
 
 /**
@@ -102,8 +104,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		return theme.lavender
 	}
 
-	// Border color: action mode > multi-select > selection > context health > default
+	// Border color: merge source > action mode > multi-select > selection > context health > default
 	const getBorderColor = () => {
+		// Merge source card gets flamingo (distinct highlight during merge select)
+		if (props.isMergeSource) return theme.flamingo
 		// Action mode selected card gets mauve (matches action palette)
 		if (props.isSelected && props.isActionMode) return theme.mauve
 		if (props.isMultiSelected) return theme.mauve

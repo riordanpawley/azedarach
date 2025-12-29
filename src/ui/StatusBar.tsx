@@ -115,6 +115,12 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "Enter", action: "Spawn" },
 		{ key: "Esc", action: "Exit" },
 	],
+	mergeSelect: [
+		{ key: "hjkl", action: "Nav" },
+		{ key: "Space", action: "Merge" },
+		{ key: "Enter", action: "Merge" },
+		{ key: "Esc", action: "Cancel" },
+	],
 }
 
 /**
@@ -163,6 +169,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.lavender
 			case "command":
 				return theme.pink
+			case "mergeSelect":
+				return theme.flamingo
 			default:
 				return theme.text
 		}
@@ -187,6 +195,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "FLT"
 			case "command":
 				return "CMD"
+			case "mergeSelect":
+				return "MRG"
 			default:
 				return "???"
 		}
