@@ -5,21 +5,21 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
 ## Mode Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                               NORMAL MODE (NOR)                                      │
-│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  f: filter  :: cmd │
-└─────────────────────────────────────────────────────────────────────────────────────┘
-         │           │           │           │           │           │           │           │
-         │           ▼           ▼           ▼           ▼           ▼           ▼           ▼
-         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │ │ FILTER   │ │ COMMAND  │
-         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │ │ (FLT)    │ │ (CMD)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │ │ status/  │ │ send to  │
-         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │ │ pri/type │ │ VC REPL  │
-         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘
-         │         │             │           │             │            │            │            │
-         └─────────┴─────────────┴───────────┴─────────────┴────────────┴────────────┴────────────┘
-                                        Esc: return to Normal
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            NORMAL MODE (NOR)                                │
+│  hjkl: navigate  g: goto  v: select  Space: act  /: search  ,: sort  f: filter │
+└────────────────────────────────────────────────────────────────────────────┘
+         │           │           │           │           │           │
+         │           ▼           ▼           ▼           ▼           ▼
+         │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+         │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │
+         │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │
+         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │
+         │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │
+         │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘
+         │         │             │           │             │            │
+         └─────────┴─────────────┴───────────┴─────────────┴────────────┘
+                                    Esc: return to Normal
 ```
 
 ## Normal Mode
@@ -50,7 +50,6 @@ The default mode for navigation and basic actions.
 | `,` | Enter Sort mode | Change task sort order |
 | `f` | Enter Filter mode | Filter tasks by status/priority/type/session |
 | `/` | Enter Search mode | Filter tasks by title/ID |
-| `:` | Enter Command mode | Send commands to VC REPL |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
 | `Tab` | Toggle view mode | Switch between Kanban and Compact views |
@@ -506,40 +505,6 @@ Press `/` to enter search mode for filtering tasks.
 3. Press `Enter` to confirm and return to normal mode
 4. Navigate filtered results with hjkl
 5. Press `/` then `Esc` to clear the filter
-
-## Command Mode
-
-Press `:` to enter command mode for sending commands to the VC REPL.
-
-| Key | Action | Notes |
-|-----|--------|-------|
-| `Enter` | Send command | Sends command to VC, returns to Normal |
-| `Esc` | Cancel | Clear input, return to Normal |
-| `Backspace` | Delete character | Remove last character from input |
-| Any char | Add to input | Build command to send |
-
-### How Command Mode Works
-
-- **VC must be running**: The VC auto-pilot must be active (start manually via tmux)
-- **Natural language**: Commands are conversational (e.g., "What's ready to work on?")
-- **Sent to REPL**: The command is sent directly to the VC tmux session
-- **Feedback**: A toast notification confirms when the command is sent
-- **Error handling**: Shows error if VC is not running
-
-### Example
-
-1. Start VC auto-pilot manually if not already running
-2. Press `:` to enter command mode
-3. Type `Let's continue working`
-4. Press `Enter` to send the command to VC
-5. VC will process the command in its REPL session
-
-### Common Commands
-
-- `What's ready to work on?` - Ask VC for available tasks
-- `Let's continue working` - Resume work on current task
-- `Add Docker support` - Request a new feature
-- `Run tests` - Ask VC to run tests
 
 ## Sort Mode
 

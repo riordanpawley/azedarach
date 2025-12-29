@@ -3,7 +3,7 @@
  *
  * Handles special input processing:
  * - Escape (universal exit)
- * - Text input (search/command modes)
+ * - Text input (search mode)
  * - Jump label input (2-char sequence)
  * - Confirm dialog input (y/n)
  * - Image attach overlay input
@@ -17,7 +17,6 @@
 
 import { Effect, Record, SubscriptionRef } from "effect"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
-import { VCService } from "../../core/VCService.js"
 import { generateJumpLabels } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService, type JumpTarget } from "../EditorService.js"
@@ -50,7 +49,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			EditorService.Default,
 			NavigationService.Default,
 			BoardService.Default,
-			VCService.Default,
 			ImageAttachmentService.Default,
 			ProjectService.Default,
 			ProjectStateService.Default,
@@ -65,7 +63,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const editor = yield* EditorService
 			const nav = yield* NavigationService
 			const board = yield* BoardService
-			const vc = yield* VCService
 			const imageAttachment = yield* ImageAttachmentService
 			const projectService = yield* ProjectService
 			const projectState = yield* ProjectStateService
@@ -121,47 +118,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						// Single printable character
 						if (key.length === 1 && !key.startsWith("C-")) {
 							yield* editor.updateSearch(mode.query + key)
-							return true
-						}
-						return false
-					}
-
-					// Command mode text input
-					if (mode._tag === "command") {
-						if (key === "return") {
-							if (!mode.input.trim()) {
-								yield* editor.clearCommand()
-								return true
-							}
-
-							// Send command to VC using injected service
-							yield* vc.sendCommand(mode.input).pipe(
-								Effect.tap(() => toast.show("success", `Sent to VC: ${mode.input}`)),
-								Effect.catchAll((error) => {
-									const msg =
-										error && typeof error === "object" && "_tag" in error
-											? error._tag === "VCNotRunningError"
-												? "VC is not running - start it with 'a' key"
-												: String((error as { message?: string }).message || error)
-											: String(error)
-									return Effect.gen(function* () {
-										yield* Effect.logError(`VC command: ${msg}`, { error })
-										yield* toast.show("error", msg)
-									})
-								}),
-							)
-							yield* editor.clearCommand()
-							return true
-						}
-						if (key === "backspace") {
-							if (mode.input.length > 0) {
-								yield* editor.updateCommand(mode.input.slice(0, -1))
-							}
-							return true
-						}
-						// Single printable character
-						if (key.length === 1 && !key.startsWith("C-")) {
-							yield* editor.updateCommand(mode.input + key)
 							return true
 						}
 						return false
@@ -839,8 +795,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return mode.gotoSubMode === "pending" ? "goto-pending" : "goto-jump"
 						case "search":
 							return "search"
-						case "command":
-							return "command"
 						case "sort":
 							return "sort"
 						case "filter":

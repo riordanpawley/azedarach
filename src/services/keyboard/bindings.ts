@@ -180,12 +180,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.editor.enterSearch(),
 	},
 	{
-		key: ":",
-		mode: "normal",
-		description: "Enter command mode",
-		action: bc.editor.enterCommand(),
-	},
-	{
 		key: ",",
 		mode: "normal",
 		description: "Enter sort mode",

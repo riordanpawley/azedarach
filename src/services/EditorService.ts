@@ -131,7 +131,6 @@ export type EditorMode =
 	  }
 	| { readonly _tag: "action"; readonly targetTaskId: string | null }
 	| { readonly _tag: "search"; readonly query: string }
-	| { readonly _tag: "command"; readonly input: string }
 	| { readonly _tag: "sort" }
 	| { readonly _tag: "filter"; readonly activeField: FilterField | null }
 	| {
@@ -189,15 +188,6 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				Effect.gen(function* () {
 					const m = yield* SubscriptionRef.get(mode)
 					return m._tag === "search" ? m.query : ""
-				}),
-
-			/**
-			 * Get current command input (only in command mode)
-			 */
-			getCommandInput: (): Effect.Effect<string> =>
-				Effect.gen(function* () {
-					const m = yield* SubscriptionRef.get(mode)
-					return m._tag === "command" ? m.input : ""
 				}),
 
 			openFile: (filePath: string) =>
@@ -326,29 +316,6 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				),
 
 			clearSearch: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
-
-			// ========================================================================
-			// Command Mode
-			// ========================================================================
-
-			enterCommand: () =>
-				SubscriptionRef.set(mode, Data.struct({ _tag: "command" as const, input: "" })),
-
-			updateCommand: (input: string) =>
-				SubscriptionRef.update(
-					mode,
-					(m): EditorMode => (m._tag === "command" ? Data.struct({ ...m, input }) : m),
-				),
-
-			clearCommand: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
-
-			executeCommand: () =>
-				Effect.gen(function* () {
-					const m = yield* SubscriptionRef.get(mode)
-					if (m._tag !== "command") return
-					// Command execution logic here (implemented in KeyboardService or App)
-					yield* SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const }))
-				}),
 
 			// ========================================================================
 			// Sort Mode

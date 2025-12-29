@@ -173,13 +173,12 @@ export interface NavigationState {
  * Editor modes (Helix-style)
  *
  * - action: Action menu mode triggered by Space
- * - command: VC command input mode triggered by ':'
  * - goto: Jump mode triggered by 'g' - shows 2-char labels for instant jumping
  * - normal: Default navigation mode (hjkl to move)
  * - search: Search/filter mode triggered by '/'
  * - select: Multi-selection mode triggered by 'v'
  */
-export type EditorMode = "action" | "command" | "goto" | "normal" | "search" | "select" | "sort"
+export type EditorMode = "action" | "goto" | "normal" | "search" | "select" | "sort"
 
 /**
  * View modes for the board display

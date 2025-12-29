@@ -30,7 +30,6 @@ import {
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
-import { CommandInput } from "./CommandInput.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
@@ -86,7 +85,6 @@ export const App = () => {
 		mode,
 		selectedIds,
 		searchQuery,
-		commandInput,
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,
@@ -96,7 +94,6 @@ export const App = () => {
 		isJump,
 		isAction,
 		isSearch,
-		isCommand,
 		isSort,
 		isFilter,
 		isOrchestrate,
@@ -229,8 +226,6 @@ export const App = () => {
 		switch (mode._tag) {
 			case "action":
 				return "action"
-			case "command":
-				return "command"
 			case "goto":
 				if (mode.gotoSubMode === "pending") return "g..."
 				if (mode.gotoSubMode === "jump")
@@ -349,9 +344,6 @@ export const App = () => {
 
 			{/* Search input */}
 			{isSearch && <SearchInput query={searchQuery} />}
-
-			{/* Command input */}
-			{isCommand && <CommandInput input={commandInput} />}
 
 			{/* Detail panel */}
 			{showingDetail && selectedTask && <DetailPanel task={selectedTask} />}
