@@ -81,6 +81,8 @@ export interface GitStatus {
  */
 export interface TaskWithSession extends Issue, SessionMetrics, GitStatus {
 	sessionState: SessionState
+	/** Whether a git worktree exists for this task (even if no session is running) */
+	hasWorktree?: boolean
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean
 }
@@ -127,6 +129,12 @@ export const CONFLICT_INDICATOR = "⚔️"
  * showing as small icon with vertical lines (||).
  */
 export const DEV_SERVER_INDICATOR = "💻"
+
+/**
+ * Worktree indicator shown when a git worktree exists but no session is running
+ * Indicates there's existing work that can be resumed or cleaned up
+ */
+export const WORKTREE_INDICATOR = "📁"
 
 /**
  * Agent phase indicators

@@ -11,7 +11,7 @@ import { useMemo } from "react"
 import { taskRunningOperationAtom } from "./atoms.js"
 import { columnColors, getPriorityColor, theme } from "./theme.js"
 import type { JumpTarget, TaskWithSession } from "./types.js"
-import { COLUMNS, SESSION_INDICATORS } from "./types.js"
+import { COLUMNS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
 
 /**
  * Operation indicators shown when an async operation is running on the task
@@ -117,7 +117,11 @@ interface CompactRowProps {
 }
 
 const CompactRow = (props: CompactRowProps) => {
-	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	// Show worktree indicator for idle tasks with worktrees, otherwise session indicator
+	const indicator =
+		props.task.hasWorktree && props.task.sessionState === "idle"
+			? WORKTREE_INDICATOR
+			: SESSION_INDICATORS[props.task.sessionState]
 	const priorityLabel = `P${props.task.priority}`
 	const statusLabel = getStatusLabel(props.task.status)
 	const statusColor = getStatusColor(props.task.status)

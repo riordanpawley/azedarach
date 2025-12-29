@@ -43,11 +43,15 @@ const NETWORK_ACTIONS = new Set(["P", "m", "d"])
 
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
+	const hasWorktree = props.task?.hasWorktree ?? false
 	const runningOperation = props.runningOperation ?? null
 	const isOnline = props.isOnline ?? true
 	const devServerStatus = props.devServerStatus ?? "idle"
 	const devServerPort = props.devServerPort
 	const workflowMode = props.workflowMode ?? "origin"
+
+	// Check if this is an orphaned worktree (worktree exists but no session)
+	const isOrphanedWorktree = hasWorktree && sessionState === "idle"
 
 	// Helper to check if an action is available based on session state
 	const isAvailableByState = (action: string): boolean => {
@@ -62,30 +66,30 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
-			case "r": // Dev server toggle - only if worktree exists (session not idle)
-				return sessionState !== "idle"
+			case "r": // Dev server toggle (when active) OR Resume session (when orphaned worktree)
+				return sessionState !== "idle" || isOrphanedWorktree
 			case "v": // View dev server - only if dev server is running
 				return devServerStatus === "running" || devServerStatus === "starting"
 			case "R": // Resume - only if paused
 				return sessionState === "paused"
 			case "x": // Stop - only if not idle
 				return sessionState !== "idle"
-			case "P": // Create PR - only if session has worktree (not idle)
-				return sessionState !== "idle"
-			case "m": // Merge to main - only if session has worktree (not idle)
-				return sessionState !== "idle"
-			case "d": // Cleanup/Delete worktree - only if session exists
-				return sessionState !== "idle"
-			case "f": // Diff vs main - only if session has worktree (not idle)
-				return sessionState !== "idle"
-			case "u": // Update from main - only if session has worktree (not idle)
-				return sessionState !== "idle"
+			case "P": // Create PR - only if session has worktree (not idle) OR orphaned worktree
+				return sessionState !== "idle" || isOrphanedWorktree
+			case "m": // Merge to main - only if session has worktree (not idle) OR orphaned worktree
+				return sessionState !== "idle" || isOrphanedWorktree
+			case "d": // Cleanup/Delete worktree - session exists OR orphaned worktree
+				return sessionState !== "idle" || isOrphanedWorktree
+			case "f": // Diff vs main - only if session has worktree (not idle) OR orphaned worktree
+				return sessionState !== "idle" || isOrphanedWorktree
+			case "u": // Update from main - only if session has worktree (not idle) OR orphaned worktree
+				return sessionState !== "idle" || isOrphanedWorktree
 			case "D": // Delete bead - always available
 				return true
 			case "i": // Image attach - always available
 				return true
-			case "H": // Helix editor - always available
-				return true
+			case "H": // Helix editor - only if worktree exists (active session or orphaned)
+				return sessionState !== "idle" || isOrphanedWorktree
 			case "h": // Move left - always available
 			case "l": // Move right - always available
 				return true
@@ -94,8 +98,12 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		}
 	}
 
-	// Get dev server status text
+	// Get dev server status text OR resume label for orphaned worktrees
 	const getDevServerLabel = (): string => {
+		// For orphaned worktrees, 'r' means "resume session"
+		if (isOrphanedWorktree) {
+			return "resume"
+		}
 		switch (devServerStatus) {
 			case "running":
 				return devServerPort ? `dev :${devServerPort}` : "dev (running)"
