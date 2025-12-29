@@ -118,7 +118,8 @@ export const pushOverlayAtom = appRuntime.fn(
 					readonly _tag: "devServerMenu"
 					readonly beadId: string
 					readonly mode: "toggle" | "attach"
-			  },
+			  }
+			| { readonly _tag: "planning" },
 	) =>
 		Effect.gen(function* () {
 			const overlayService = yield* OverlayService

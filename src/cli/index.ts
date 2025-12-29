@@ -3,20 +3,104 @@
  *
  * Uses @effect/cli for type-safe command parsing and validation.
  * Provides commands for managing Claude Code sessions via TUI and direct control.
+ *
+ * ARCHITECTURE NOTE:
+ * - CLI handlers use `yield* ServiceName` to get dependencies
+ * - Layer is provided ONCE at the top level in `run()`
+ * - Handlers should NEVER use `Effect.provide` internally
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { FileSystem, Path, Command as PlatformCommand } from "@effect/platform"
+import { FileSystem, Path, Command as PlatformCommand, PlatformLogger } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Console, Effect, Layer, Option, SubscriptionRef } from "effect"
-import { AppConfigConfig } from "../config/AppConfig.js"
+import { Console, Effect, Layer, Logger, Option, SubscriptionRef } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
+import { AttachmentService } from "../core/AttachmentService.js"
+import { BeadEditorService } from "../core/BeadEditorService.js"
+import { BeadsClient } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
+import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
+import { PlanningService } from "../core/PlanningService.js"
+import { PRWorkflow } from "../core/PRWorkflow.js"
+import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getBeadSessionName } from "../core/paths.js"
+import { TemplateService } from "../core/TemplateService.js"
+import { TerminalService } from "../core/TerminalService.js"
+import { TmuxService } from "../core/TmuxService.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
+import { TmuxSessionMonitor } from "../core/TmuxSessionMonitor.js"
+import { VCService } from "../core/VCService.js"
+import { BoardService } from "../services/BoardService.js"
+import { ClockService } from "../services/ClockService.js"
+import { CommandQueueService } from "../services/CommandQueueService.js"
+import { DevServerService } from "../services/DevServerService.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
+import { DiffService } from "../services/DiffService.js"
+import { EditorService } from "../services/EditorService.js"
+import { KeyboardService } from "../services/KeyboardService.js"
+import { MutationQueue } from "../services/MutationQueue.js"
+import { NavigationService } from "../services/NavigationService.js"
+import { NetworkService } from "../services/NetworkService.js"
+import { OfflineService } from "../services/OfflineService.js"
+import { OverlayService } from "../services/OverlayService.js"
 import { ProjectService } from "../services/ProjectService.js"
+import { ProjectStateService } from "../services/ProjectStateService.js"
+import { SessionService } from "../services/SessionService.js"
+import { SettingsService } from "../services/SettingsService.js"
+import { ToastService } from "../services/ToastService.js"
+import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
+
+// ============================================================================
+// CLI Layer - All services needed by CLI commands
+// ============================================================================
+
+/**
+ * Unified layer for CLI commands.
+ * Provides all services that handlers might need - layer is provided ONCE at run().
+ */
+const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az-cli.log", { flag: "a" }))
+
+const cliLayer = Layer.mergeAll(
+	MutationQueue.Default,
+	SessionService.Default,
+	AttachmentService.Default,
+	OverlayService.Default,
+	ImageAttachmentService.Default,
+	BoardService.Default,
+	ClockService.Default,
+	TmuxService.Default,
+	BeadEditorService.Default,
+	PRWorkflow.Default,
+	TerminalService.Default,
+	EditorService.Default,
+	KeyboardService.Default,
+	ToastService.Default,
+	NavigationService.Default,
+	ClaudeSessionManager.Default,
+	BeadsClient.Default,
+	AppConfig.Default,
+	VCService.Default,
+	ViewService.Default,
+	TmuxSessionMonitor.Default,
+	CommandQueueService.Default,
+	PTYMonitor.Default,
+	DiagnosticsService.Default,
+	ProjectService.Default,
+	ProjectStateService.Default,
+	SettingsService.Default,
+	TemplateService.Default,
+	NetworkService.Default,
+	OfflineService.Default,
+	DevServerService.Default,
+	DiffService.Default,
+	PlanningService.Default,
+).pipe(
+	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+	Layer.provideMerge(BunContext.layer),
+)
 
 // ============================================================================
 // Shared Options
@@ -115,36 +199,26 @@ const startHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const configPath = Option.getOrUndefined(args.config)
 
 		yield* Console.log(`Starting Claude session for issue: ${args.issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
-			if (configPath) {
-				yield* Console.log(`Using config: ${configPath}`)
+			if (Option.isSome(args.config)) {
+				yield* Console.log(`Using config: ${args.config.value}`)
 			}
 		}
 
 		// Validate beads database
 		yield* validateBeadsDatabase(cwd)
 
-		// Create the combined layer with config and platform dependencies
-		const appConfigLayer = AppConfigConfig.Default(cwd, configPath)
-		const fullLayer = Layer.provideMerge(
-			ClaudeSessionManager.Default,
-			Layer.merge(appConfigLayer, BunContext.layer),
-		)
-
-		// Start the session using ClaudeSessionManager
-		const session = yield* Effect.gen(function* () {
-			const sessionManager = yield* ClaudeSessionManager
-			return yield* sessionManager.start({
-				beadId: args.issueId,
-				projectPath: cwd,
-			})
-		}).pipe(Effect.provide(fullLayer))
+		// Start the session using ClaudeSessionManager (provided by cliLayer)
+		const sessionManager = yield* ClaudeSessionManager
+		const session = yield* sessionManager.start({
+			beadId: args.issueId,
+			projectPath: cwd,
+		})
 
 		// Claim the bead with session assignee
 		const claimCommand = PlatformCommand.make(
@@ -753,17 +827,13 @@ const projectAddHandler = (args: {
 			yield* Console.log(`  Beads: ${beadsPath}`)
 		}
 
-		// Create ProjectService layer and add project
-		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
-
-		yield* Effect.gen(function* () {
-			const projectService = yield* ProjectService
-			yield* projectService.addProject({
-				name: projectName,
-				path: absolutePath,
-				beadsPath,
-			})
-		}).pipe(Effect.provide(fullLayer))
+		// Add project via ProjectService (provided by cliLayer)
+		const projectService = yield* ProjectService
+		yield* projectService.addProject({
+			name: projectName,
+			path: absolutePath,
+			beadsPath,
+		})
 
 		yield* Console.log(`Project '${projectName}' added successfully.`)
 	})
@@ -773,17 +843,11 @@ const projectAddHandler = (args: {
  */
 const projectListHandler = (args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
-		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
+		const projectService = yield* ProjectService
+		const projects = yield* projectService.getProjects()
+		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 
-		const result = yield* Effect.gen(function* () {
-			const projectService = yield* ProjectService
-			const projects = yield* projectService.getProjects()
-			const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
-
-			return { projects, currentProject }
-		}).pipe(Effect.provide(fullLayer))
-
-		if (result.projects.length === 0) {
+		if (projects.length === 0) {
 			yield* Console.log("No projects registered.")
 			yield* Console.log("Use 'az project add <path>' to register a project.")
 			return
@@ -792,8 +856,8 @@ const projectListHandler = (args: { readonly verbose: boolean }) =>
 		yield* Console.log("Registered projects:")
 		yield* Console.log("")
 
-		for (const project of result.projects) {
-			const isCurrent = result.currentProject?.name === project.name
+		for (const project of projects) {
+			const isCurrent = currentProject?.name === project.name
 			const marker = isCurrent ? "* " : "  "
 			yield* Console.log(`${marker}${project.name}`)
 			yield* Console.log(`    Path: ${project.path}`)
@@ -806,7 +870,7 @@ const projectListHandler = (args: { readonly verbose: boolean }) =>
 			yield* Console.log("")
 		}
 
-		if (!result.currentProject) {
+		if (!currentProject) {
 			yield* Console.log("No current project selected.")
 		}
 	})
@@ -820,12 +884,8 @@ const projectRemoveHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Removing project: ${args.name}`)
 		}
 
-		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
-
-		yield* Effect.gen(function* () {
-			const projectService = yield* ProjectService
-			yield* projectService.removeProject(args.name)
-		}).pipe(Effect.provide(fullLayer))
+		const projectService = yield* ProjectService
+		yield* projectService.removeProject(args.name)
 
 		yield* Console.log(`Project '${args.name}' removed successfully.`)
 	})
@@ -839,13 +899,9 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
 			yield* Console.log(`Switching to project: ${args.name}`)
 		}
 
-		const fullLayer = Layer.provide(ProjectService.Default, BunContext.layer)
-
-		yield* Effect.gen(function* () {
-			const projectService = yield* ProjectService
-			yield* projectService.switchProject(args.name)
-			yield* projectService.setDefaultProject(args.name)
-		}).pipe(Effect.provide(fullLayer))
+		const projectService = yield* ProjectService
+		yield* projectService.switchProject(args.name)
+		yield* projectService.setDefaultProject(args.name)
 
 		yield* Console.log(`Switched to project '${args.name}' and set as default.`)
 	})
@@ -1358,28 +1414,26 @@ const cli = az.pipe(
 // ============================================================================
 
 /**
- * CLI runner function
- *
- * Takes raw process.argv (including binary and script path) and returns
- * an Effect that executes the appropriate command.
+ * CLI with application services provided via Command.provide
  */
-const cliRunner = Command.run(cli, {
+const cliWithServices = cli.pipe(Command.provide(cliLayer))
+
+/**
+ * CLI runner function - returns an Effect that still needs BunContext
+ */
+const cliRunner = Command.run(cliWithServices, {
 	name: "Azedarach",
 	version: "0.1.0",
 })
 
-/**
- * Full CLI Effect - ready to be executed with process.argv
- *
- * Usage in entry point:
- * ```ts
- * Effect.suspend(() => cli(process.argv)).pipe(BunRuntime.runMain)
- * ```
- */
 export { cli }
 
 /**
- * Run the CLI with the provided arguments (full process.argv)
+ * Export the layer for ManagedRuntime usage
  */
-export const run = (argv: ReadonlyArray<string>) =>
-	cliRunner(argv).pipe(Effect.provide(BunContext.layer))
+export { cliLayer }
+
+/**
+ * Export the raw runner for ManagedRuntime pattern
+ */
+export { cliRunner }

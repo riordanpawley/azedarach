@@ -61,6 +61,38 @@
 					"Write notes for resumability (COMPLETED, IN PROGRESS, NEXT, BLOCKERS)"
 				]
 			}
+		},
+		{
+			"id": "azedarach-cli",
+			"name": "Azedarach CLI",
+			"path": ".claude/skills/workflow/azedarach-cli.skill.md",
+			"type": "workflow",
+			"priority": "high",
+			"confidence": {
+				"required": 0.7,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"contentPatterns": ["az dev", "az dev start", "az dev stop", "az dev restart"],
+				"keywords": [
+					"dev server",
+					"start server",
+					"stop server",
+					"restart server",
+					"azedarach",
+					"az cli",
+					"worktree session",
+					"tmux session"
+				]
+			},
+			"affinities": ["beads-tracking"],
+			"affinity_threshold": 0.5,
+			"validation": {
+				"enforces": [
+					"Use 'az dev' commands for server control in worktrees",
+					"Never use raw npm/bun commands for dev servers - breaks TUI state"
+				]
+			}
 		}
 	]
 }
