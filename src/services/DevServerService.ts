@@ -28,10 +28,52 @@ const TMUX_OPT_METADATA = "@az-devserver-meta"
 const PORT_POLL_INTERVAL = 500
 const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
+const PORT_CHECK_TIMEOUT_MS = 1000
 
-export type DevServerStatus = "idle" | "starting" | "running" | "error"
+/**
+ * Check if a port is open by attempting a TCP connection.
+ * Returns true if connection succeeds, false otherwise.
+ */
+const checkPortOpen = (port: number, host = "127.0.0.1"): Effect.Effect<boolean> =>
+	Effect.async<boolean>((resume) => {
+		const socket = Bun.connect({
+			hostname: host,
+			port,
+			socket: {
+				open(socket) {
+					socket.end()
+					resume(Effect.succeed(true))
+				},
+				error() {
+					resume(Effect.succeed(false))
+				},
+				close() {
+					// Connection closed after successful open is fine
+				},
+				data() {
+					// We don't expect data, just checking connectivity
+				},
+			},
+		})
 
-const DevServerStatusSchema = Schema.Literal("idle", "starting", "running", "error")
+		// Timeout handling
+		const timeout = setTimeout(() => {
+			socket.then((s) => s.end()).catch(() => {})
+			resume(Effect.succeed(false))
+		}, PORT_CHECK_TIMEOUT_MS)
+
+		// Cleanup timeout on success/error
+		socket
+			.then(() => clearTimeout(timeout))
+			.catch(() => {
+				clearTimeout(timeout)
+				resume(Effect.succeed(false))
+			})
+	})
+
+export type DevServerStatus = "idle" | "starting" | "running" | "stopped" | "error"
+
+const DevServerStatusSchema = Schema.Literal("idle", "starting", "running", "stopped", "error")
 
 const DevServerMetadata = Schema.Struct({
 	beadId: Schema.String,
@@ -379,6 +421,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				const servers = yield* SubscriptionRef.get(serversRef)
 				for (const [beadId, beadServers] of HashMap.entries(servers)) {
 					for (const [name, state] of HashMap.entries(beadServers)) {
+						// Check running servers - verify port is still responding
 						if (state.status === "running" && state.tmuxSession) {
 							// Check if session and pane still exist
 							const hasSession = yield* tmux.hasSession(state.tmuxSession.split(":")[0])
@@ -389,10 +432,34 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 							}
 
 							if (!hasSession || (state.paneId && !hasPane)) {
+								// Session/pane gone - mark as idle
 								if (state.port) yield* releasePort(state.port)
 								yield* updateState(beadId, name, {
 									...makeIdleState(name),
 									error: "Stopped unexpectedly",
+								})
+							} else if (state.port) {
+								// Pane exists - check if port is still responding
+								const portOpen = yield* checkPortOpen(state.port)
+								if (!portOpen) {
+									// Port is down but pane exists - server was stopped manually (e.g., Ctrl+C)
+									yield* updateState(beadId, name, {
+										status: "stopped",
+										error: undefined,
+									})
+								}
+							}
+						}
+
+						// Check stopped servers - detect if port comes back (manual restart)
+						if (state.status === "stopped" && state.port && state.tmuxSession) {
+							const portOpen = yield* checkPortOpen(state.port)
+							if (portOpen) {
+								// Port is back! Server was manually restarted
+								yield* updateState(beadId, name, {
+									status: "running",
+									startedAt: new Date(),
+									error: undefined,
 								})
 							}
 						}
@@ -665,8 +732,12 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 							status: HashMap.get(servers, key).pipe(
 								Option.match({
 									onNone: () => "stopped" as const,
-									onSome: (s) =>
-										s.status === "running" ? ("running" as const) : ("started" as const),
+									onSome: (s) => {
+										if (s.status === "running") return "running" as const
+										if (s.status === "stopped" || s.status === "idle" || s.status === "error")
+											return "stopped" as const
+										return "started" as const // "starting" status
+									},
 								}),
 							),
 							port: HashMap.get(servers, key).pipe(
