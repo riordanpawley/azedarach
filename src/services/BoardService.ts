@@ -25,6 +25,7 @@ import { BeadsClient } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
+import { WorktreeManager } from "../core/WorktreeManager.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { ColumnStatus, GitStatus, TaskWithSession } from "../ui/types.js"
 import { COLUMNS } from "../ui/types.js"
@@ -243,6 +244,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		DiagnosticsService.Default,
 		AppConfig.Default,
 		MutationQueue.Default,
+		WorktreeManager.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const beadsClient = yield* BeadsClient
@@ -253,6 +255,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
 		const mutationQueue = yield* MutationQueue
+		const worktreeManager = yield* WorktreeManager
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
@@ -416,9 +419,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
 							const sessionState = session?.state ?? "idle"
 
+							// Check if worktree exists for this task (even if no session running)
+							const hasWorktree = projectPath
+								? yield* worktreeManager
+										.exists({ beadId: issue.id, projectPath })
+										.pipe(Effect.catchAll(() => Effect.succeed(false)))
+								: false
+
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
-							if (sessionState !== "idle" && projectPath) {
+							// Fetch git status if there's an active session OR if worktree exists
+							if ((sessionState !== "idle" || hasWorktree) && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
 								// Use cached git status to avoid redundant git commands
 								const cachedStatus = yield* getCachedGitStatus(
@@ -438,6 +449,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
+								hasWorktree: hasWorktree || undefined,
 								hasMergeConflict,
 								...gitStatus,
 								sessionStartedAt: session?.startedAt

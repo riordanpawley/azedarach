@@ -109,7 +109,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 *
 		 * Updates the worktree branch with latest changes from main.
 		 * Useful for syncing before creating a PR or resolving conflicts.
-		 * Requires an active session with a worktree.
+		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
@@ -122,7 +122,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -152,7 +153,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 *
 		 * Creates a GitHub PR for the current task's worktree branch.
 		 * First updates from main to ensure the branch is synced and resolve any conflicts.
-		 * Requires an active session with a worktree.
+		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
@@ -174,7 +175,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -257,6 +259,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * - If conflicts detected, offers to ask Claude to resolve them
 		 * - Claude resolution merges main into worktree, then prompts Claude
 		 * - User retries Space+m after Claude resolves
+		 * Requires a worktree (active session or orphaned worktree).
 		 * Blocked if task already has an operation in progress.
 		 */
 		const mergeToMain = () =>
@@ -277,7 +280,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
@@ -382,7 +386,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Cleanup worktree action (Space+d)
 		 *
 		 * Shows confirmation dialog, then deletes the worktree and branch for
-		 * the current task. Requires an active session with a worktree.
+		 * the current task. Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
@@ -398,7 +402,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree to delete for ${task.id}`)
 					return
 				}
@@ -433,6 +438,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 *
 		 * Aborts an in-progress merge in the worktree. Use this when a merge
 		 * conflict resolution is stuck or you want to cancel the merge.
+		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
@@ -445,7 +451,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const isBusy = yield* helpers.checkBusy(task.id)
 				if (isBusy) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree for ${task.id} - nothing to abort`)
 					return
 				}
@@ -475,14 +482,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 *
 		 * Opens the DiffViewer overlay showing changes since branch diverged from main.
 		 *
-		 * Requires an active session with a worktree.
+		 * Requires a worktree (active session or orphaned worktree).
 		 */
 		const showDiff = () =>
 			Effect.gen(function* () {
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
-				if (task.sessionState === "idle") {
+				// Require worktree: active session OR orphaned worktree
+				if (task.sessionState === "idle" && !task.hasWorktree) {
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}

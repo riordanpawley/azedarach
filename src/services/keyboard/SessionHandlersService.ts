@@ -514,6 +514,65 @@ What would you like to discuss?`
 				})
 
 			/**
+			 * Resume orphaned session action (Space+r when hasWorktree && idle)
+			 *
+			 * Starts a new Claude session on an existing orphaned worktree.
+			 * This is essentially "start session" but reusing the existing worktree
+			 * instead of creating a new one.
+			 *
+			 * Only valid when task has a worktree but no running session.
+			 * Queued to prevent race conditions with other operations on the same task.
+			 * Blocked if task already has an operation in progress.
+			 */
+			const resumeOrphanedSession = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					// Check if task has an operation in progress
+					const isBusy = yield* helpers.checkBusy(task.id)
+					if (isBusy) return
+
+					// Must be orphaned worktree (hasWorktree && idle)
+					if (!task.hasWorktree || task.sessionState !== "idle") {
+						yield* toast.show("error", `No orphaned worktree for ${task.id}`)
+						return
+					}
+
+					// Get current project path
+					const projectPath = yield* helpers.getProjectPath()
+
+					// Build a prompt that notes this is resuming work
+					const initialPrompt = `Resuming work on bead ${task.id} (${task.issue_type}): ${task.title}
+
+Run \`bd show ${task.id}\` to see full description and context.
+
+This worktree already has work in progress. Check:
+1. \`git status\` to see uncommitted changes
+2. \`git log --oneline -5\` to see recent commits
+3. Read the design notes on the bead for context
+
+Continue from where the previous session left off.`
+
+					yield* helpers.withQueue(
+						task.id,
+						"start",
+						sessionManager
+							.start({
+								beadId: task.id,
+								projectPath,
+								initialPrompt,
+							})
+							.pipe(
+								Effect.tap(() =>
+									toast.show("success", `Resumed session for ${task.id} on existing worktree`),
+								),
+								Effect.catchAll(helpers.showErrorToast("Failed to resume")),
+							),
+					)
+				})
+
+			/**
 			 * Start Helix editor in a tmux window (Space+H)
 			 *
 			 * Opens Helix editor in a dedicated "hx" window within the bead's tmux session.
@@ -595,6 +654,7 @@ What would you like to discuss?`
 				attachInline,
 				pauseSession,
 				resumeSession,
+				resumeOrphanedSession,
 				stopSession,
 				startHelixSession,
 			}

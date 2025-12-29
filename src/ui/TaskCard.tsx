@@ -13,6 +13,7 @@ import {
 	DEV_SERVER_INDICATOR,
 	PHASE_INDICATORS,
 	SESSION_INDICATORS,
+	WORKTREE_INDICATOR,
 } from "./types.js"
 
 /**
@@ -189,6 +190,11 @@ export const TaskCard = (props: TaskCardProps) => {
 		line += `${props.task.id} [${props.task.issue_type}]`
 		if (indicator) {
 			line += ` ${indicator}`
+		}
+		// Show worktree indicator when worktree exists but no session running
+		// This indicates there's existing work that can be resumed or cleaned up
+		if (props.task.hasWorktree && props.task.sessionState === "idle") {
+			line += ` ${WORKTREE_INDICATOR}`
 		}
 		// Show conflict indicator when worktree has active merge conflict (e.g., "🔵 ⚔️")
 		if (props.task.hasMergeConflict) {
