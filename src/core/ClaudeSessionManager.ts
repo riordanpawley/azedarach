@@ -275,10 +275,19 @@ export interface ClaudeSessionManagerService {
 	 *
 	 * Handles mapping TmuxStatus to SessionState and handles
 	 * secondary transitions like "done" detection.
+	 *
+	 * If the session doesn't exist but sessionMeta is provided,
+	 * the session will be registered automatically (orphan recovery).
 	 */
 	readonly updateStateFromTmux: (
 		beadId: string,
 		status: "busy" | "waiting" | "idle",
+		sessionMeta?: {
+			sessionName: string
+			createdAt: number
+			worktreePath: string | null
+			projectPath: string | null
+		},
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
 	/**
@@ -894,12 +903,53 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* publishStateChange(beadId, oldState, newState)
 					}),
 
-				updateStateFromTmux: (beadId: string, status: "busy" | "waiting" | "idle") =>
+				updateStateFromTmux: (
+					beadId: string,
+					status: "busy" | "waiting" | "idle",
+					sessionMeta?: {
+						sessionName: string
+						createdAt: number
+						worktreePath: string | null
+						projectPath: string | null
+					},
+				) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
 						const sessionOpt = HashMap.get(sessions, beadId)
 
+						// If session doesn't exist but we have metadata, create it (orphan recovery)
 						if (sessionOpt._tag === "None") {
+							if (sessionMeta) {
+								yield* Effect.log(`Recovering orphaned session for ${beadId} (status: ${status})`)
+
+								// Map status to SessionState
+								let initialState: SessionState = "busy"
+								if (status === "waiting") initialState = "waiting"
+								if (status === "idle") initialState = "idle"
+
+								const orphanedSession: Session = {
+									beadId,
+									worktreePath:
+										sessionMeta.worktreePath ??
+										getWorktreePath(sessionMeta.projectPath ?? process.cwd(), beadId),
+									tmuxSessionName: sessionMeta.sessionName,
+									state: initialState,
+									startedAt: DateTime.unsafeFromDate(new Date(sessionMeta.createdAt * 1000)),
+									projectPath: sessionMeta.projectPath ?? process.cwd(),
+								}
+
+								yield* Ref.update(sessionsRef, (sessions) =>
+									HashMap.set(sessions, beadId, orphanedSession),
+								)
+
+								// Persist the recovered session
+								const allSessions = yield* Ref.get(sessionsRef)
+								yield* persistSessions(allSessions)
+
+								// Publish as a new session discovery (idle -> currentState)
+								yield* publishStateChange(beadId, "idle", initialState)
+								return
+							}
 							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
 						}
 
