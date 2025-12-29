@@ -19,6 +19,7 @@ import {
 	deepMergeWithDedup,
 	extractMergeableSettings,
 	generateHookConfig,
+	generateWorktreeSkill,
 } from "./hooks.js"
 
 // ============================================================================
@@ -372,6 +373,12 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 				// Write merged settings to target
 				yield* fs.writeFileString(targetSettings, JSON.stringify(mergedSettings, null, "\t"))
+
+				// Inject worktree-specific skill with bead ID context
+				const localSkillsDir = pathService.join(targetClaudeDir, "skills", "local")
+				yield* fs.makeDirectory(localSkillsDir, { recursive: true })
+				const skillPath = pathService.join(localSkillsDir, "worktree-context.skill.md")
+				yield* fs.writeFileString(skillPath, generateWorktreeSkill(beadId))
 			}).pipe(
 				// Don't fail worktree creation if settings copy fails - just log and continue
 				Effect.catchAll((error) =>
