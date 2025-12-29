@@ -59,6 +59,7 @@ const FilterConfigSchema = Schema.transform(
 		type: Schema.Array(IssueTypeLiteral),
 		session: Schema.Array(SessionStateLiteral),
 		hideEpicSubtasks: Schema.Boolean,
+		updatedDaysAgo: Schema.NullOr(Schema.Number),
 	}),
 	// To (runtime form with Sets matching FilterConfig interface)
 	Schema.Struct({
@@ -67,6 +68,7 @@ const FilterConfigSchema = Schema.transform(
 		type: Schema.ReadonlySetFromSelf(IssueTypeLiteral),
 		session: Schema.ReadonlySetFromSelf(SessionStateLiteral),
 		hideEpicSubtasks: Schema.Boolean,
+		updatedDaysAgo: Schema.NullOr(Schema.Number),
 	}),
 	{
 		strict: true,
@@ -77,6 +79,7 @@ const FilterConfigSchema = Schema.transform(
 				type: new Set(encoded.type),
 				session: new Set(encoded.session),
 				hideEpicSubtasks: encoded.hideEpicSubtasks,
+				updatedDaysAgo: encoded.updatedDaysAgo,
 			}),
 		encode: (decoded) => ({
 			status: [...decoded.status],
@@ -84,6 +87,7 @@ const FilterConfigSchema = Schema.transform(
 			type: [...decoded.type],
 			session: [...decoded.session],
 			hideEpicSubtasks: decoded.hideEpicSubtasks,
+			updatedDaysAgo: decoded.updatedDaysAgo,
 		}),
 	},
 )

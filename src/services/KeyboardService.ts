@@ -169,6 +169,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					const handledAsMergeChoice = yield* inputHandlers.handleMergeChoiceInput(key)
 					if (handledAsMergeChoice) return
 
+					// Check for bulkCleanup overlay (handles its own keys)
+					const handledAsBulkCleanup = yield* inputHandlers.handleBulkCleanupInput(key)
+					if (handledAsBulkCleanup) return
+
 					// Check for imageAttach overlay (handles its own keys)
 					const handledAsImageAttach = yield* inputHandlers.handleImageAttachInput(key)
 					if (handledAsImageAttach) return

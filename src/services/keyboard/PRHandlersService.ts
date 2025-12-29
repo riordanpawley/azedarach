@@ -392,50 +392,115 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Cleanup worktree action (Space+d)
 		 *
 		 * Shows confirmation dialog, then deletes the worktree and branch for
-		 * the current task. Requires a worktree (active session or orphaned worktree).
+		 * the current task(s). Supports bulk operations when multiple tasks are selected.
+		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
 		 */
 		const cleanup = () =>
 			Effect.gen(function* () {
-				const task = yield* helpers.getActionTargetTask()
-				if (!task) return
-
-				// DIAGNOSTIC: Log the captured task ID when cleanup action is triggered (az-f3iw)
-				yield* Effect.log(`[cleanup:capture] Captured task.id=${task.id} at action time`)
-
-				// Check if task has an operation in progress
-				const isBusy = yield* helpers.checkBusy(task.id)
-				if (isBusy) return
-
-				// Require worktree: active session OR orphaned worktree
-				if (task.sessionState === "idle" && !task.hasWorktree) {
-					yield* toast.show("error", `No worktree to delete for ${task.id}`)
-					return
-				}
+				const tasks = yield* helpers.getActionTargetTasks()
+				if (tasks.length === 0) return
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
 
-				const windows = yield* tmux.listWindows(task.id)
+				// Filter to tasks with worktrees
+				const tasksWithWorktrees = tasks.filter((t) => t.hasWorktree || t.sessionState !== "idle")
 
-				// DIAGNOSTIC: Log before pushing confirm overlay (az-f3iw)
-				yield* Effect.log(`[cleanup:confirm] Showing confirm dialog for task.id=${task.id}`)
-
-				let message = `Delete worktree and branch for ${task.id}?`
-				if (windows.length > 0) {
-					message += `\n\nThis will terminate the tmux session with ${windows.length} window(s):`
-					for (const window of windows) {
-						message += `\n  • ${window}`
-					}
+				if (tasksWithWorktrees.length === 0) {
+					yield* toast.show("error", "No worktrees to delete")
+					return
 				}
-				message += "\n\nAll uncommitted changes will be lost."
 
-				// Show confirmation dialog before cleanup
+				// Single task cleanup - use simple confirm dialog
+				if (tasksWithWorktrees.length === 1) {
+					const task = tasksWithWorktrees[0]!
+
+					// Check if task has an operation in progress
+					const isBusy = yield* helpers.checkBusy(task.id)
+					if (isBusy) return
+
+					const windows = yield* tmux.listWindows(task.id)
+
+					let message = `Delete worktree and branch for ${task.id}?`
+					if (windows.length > 0) {
+						message += `\n\nThis will terminate the tmux session with ${windows.length} window(s):`
+						for (const window of windows) {
+							message += `\n  • ${window}`
+						}
+					}
+					message += "\n\nAll uncommitted changes will be lost."
+
+					yield* overlay.push({
+						_tag: "confirm",
+						message,
+						onConfirm: doCleanup(task.id, projectPath),
+					})
+					return
+				}
+
+				// Bulk cleanup - use bulkCleanup dialog with choice
+				const taskIds = tasksWithWorktrees.map((t) => t.id)
+
+				// Define worktree-only cleanup (keep beads open)
+				const onWorktreeOnly = Effect.gen(function* () {
+					yield* toast.show("info", `Cleaning up ${taskIds.length} worktrees...`)
+
+					yield* Effect.all(
+						tasksWithWorktrees.map((task) =>
+							Effect.gen(function* () {
+								const isBusy = yield* helpers.checkBusy(task.id)
+								if (isBusy) return
+
+								yield* helpers.withQueue(
+									task.id,
+									"cleanup",
+									prWorkflow
+										.cleanup({ beadId: task.id, projectPath, closeBead: false })
+										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
+								)
+							}),
+						),
+						{ concurrency: "unbounded" },
+					)
+
+					yield* board.refresh().pipe(Effect.catchAll(Effect.logError))
+					yield* toast.show("success", `Cleaned up ${taskIds.length} worktrees`)
+				}).pipe(Effect.catchAll(Effect.logError))
+
+				// Define full cleanup (close beads too)
+				const onFullCleanup = Effect.gen(function* () {
+					yield* toast.show("info", `Full cleanup of ${taskIds.length} beads...`)
+
+					yield* Effect.all(
+						tasksWithWorktrees.map((task) =>
+							Effect.gen(function* () {
+								const isBusy = yield* helpers.checkBusy(task.id)
+								if (isBusy) return
+
+								yield* helpers.withQueue(
+									task.id,
+									"cleanup",
+									prWorkflow
+										.cleanup({ beadId: task.id, projectPath, closeBead: true })
+										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
+								)
+							}),
+						),
+						{ concurrency: "unbounded" },
+					)
+
+					yield* board.refresh().pipe(Effect.catchAll(Effect.logError))
+					yield* toast.show("success", `Full cleanup of ${taskIds.length} beads completed`)
+				}).pipe(Effect.catchAll(Effect.logError))
+
+				// Show bulk cleanup dialog
 				yield* overlay.push({
-					_tag: "confirm",
-					message,
-					onConfirm: doCleanup(task.id, projectPath),
+					_tag: "bulkCleanup",
+					taskIds,
+					onWorktreeOnly,
+					onFullCleanup,
 				})
 			})
 
