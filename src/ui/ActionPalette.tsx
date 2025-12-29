@@ -66,8 +66,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "p": // Pause - only if busy
 				return sessionState === "busy"
-			case "r": // Dev server toggle (when active) OR Resume session (when orphaned worktree)
-				return sessionState !== "idle" || isOrphanedWorktree
+			case "r": // Dev server toggle - only if worktree exists (session not idle)
+				return sessionState !== "idle"
 			case "v": // View dev server - only if dev server is running
 				return devServerStatus === "running" || devServerStatus === "starting"
 			case "R": // Resume - only if paused
@@ -98,12 +98,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		}
 	}
 
-	// Get dev server status text OR resume label for orphaned worktrees
+	// Get dev server status text
 	const getDevServerLabel = (): string => {
-		// For orphaned worktrees, 'r' means "resume session"
-		if (isOrphanedWorktree) {
-			return "resume"
-		}
 		switch (devServerStatus) {
 			case "running":
 				return devServerPort ? `dev :${devServerPort}` : "dev (running)"
