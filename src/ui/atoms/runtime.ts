@@ -45,7 +45,7 @@ import { ViewService } from "../../services/ViewService.js"
 const platformLayer = BunContext.layer
 
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az.log", { flag: "a" }))
-const appLayer = Layer.mergeAll(
+export const appLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
 	AttachmentService.Default,

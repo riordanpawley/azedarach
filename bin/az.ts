@@ -57,11 +57,12 @@ if (shouldWrapInTmux() && !isCliSubcommand()) {
 	await execInTmux(process.argv)
 } else {
 	// Normal startup path - dynamic imports keep the fast path minimal
-	const { BunRuntime } = await import("@effect/platform-bun")
+	const { BunContext, BunRuntime } = await import("@effect/platform-bun")
 	const { Effect } = await import("effect")
-	const { run } = await import("../src/cli/index.js")
+	const { cliRunner } = await import("../src/cli/index.js")
 
-	// Note: @effect/cli expects full process.argv (it handles stripping binary/script path)
-	// Effect.suspend ensures lazy evaluation of CLI parsing
-	Effect.suspend(() => run(process.argv)).pipe(BunRuntime.runMain)
+	// Two-level layer provision (idiomatic @effect/cli pattern):
+	// 1. Command.provide(cliLayer) - our app services (done in cli/index.ts)
+	// 2. Effect.provide(BunContext.layer) - platform services for @effect/cli internals
+	cliRunner(process.argv).pipe(Effect.provide(BunContext.layer), BunRuntime.runMain)
 }
