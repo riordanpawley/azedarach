@@ -118,6 +118,7 @@ export interface SortConfig {
  * - sort: Sort menu mode triggered by ','
  * - filter: Filter menu mode triggered by 'f' - filter by status/priority/type/session
  * - orchestrate: Epic orchestration mode for managing child tasks ('o' from epic detail)
+ * - mergeSelect: Mode for selecting a target bead to merge the current bead into
  */
 export type EditorMode =
 	| { readonly _tag: "normal" }
@@ -140,6 +141,10 @@ export type EditorMode =
 			readonly childTasks: ReadonlyArray<OrchestrationTask>
 			readonly selectedIds: ReadonlyArray<string>
 			readonly focusIndex: number
+	  }
+	| {
+			readonly _tag: "mergeSelect"
+			readonly sourceBeadId: string
 	  }
 
 /**
@@ -617,6 +622,40 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Exit orchestrate mode and return to normal
 			 */
 			exitOrchestrate: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
+
+			// ========================================================================
+			// Merge Select Mode
+			// ========================================================================
+
+			/**
+			 * Enter merge select mode for selecting a target bead to merge into.
+			 * Called when 'M' is pressed in action mode for a bead with commits.
+			 *
+			 * @param sourceBeadId - The bead whose work will be merged into the target
+			 */
+			enterMergeSelect: (sourceBeadId: string) =>
+				SubscriptionRef.set(
+					mode,
+					Data.struct({
+						_tag: "mergeSelect" as const,
+						sourceBeadId,
+					}),
+				),
+
+			/**
+			 * Get the source bead ID from merge select mode.
+			 * Returns null if not in merge select mode.
+			 */
+			getMergeSelectSourceId: (): Effect.Effect<string | null> =>
+				Effect.gen(function* () {
+					const m = yield* SubscriptionRef.get(mode)
+					return m._tag === "mergeSelect" ? m.sourceBeadId : null
+				}),
+
+			/**
+			 * Exit merge select mode and return to normal
+			 */
+			exitMergeSelect: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
 		}
 	}),
 }) {}

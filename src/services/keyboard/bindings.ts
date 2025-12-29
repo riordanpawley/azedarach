@@ -74,55 +74,63 @@ export interface BindingContext {
  *
  * @param bc - Binding context with all services
  */
+/**
+ * Modes that support standard board navigation (hjkl/arrows)
+ *
+ * These modes use the same navigation bindings - moving cursor around the board.
+ * Orchestrate mode is excluded because it has its own linear navigation.
+ */
+const BOARD_NAV_MODES = ["normal", "select", "mergeSelect"] as const
+
 export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybinding> => [
 	// ========================================================================
-	// Normal Mode - Navigation
+	// Board Navigation (shared across normal, select, mergeSelect modes)
 	// ========================================================================
 	{
 		key: "j",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move down",
 		action: bc.nav.move("down"),
 	},
 	{
 		key: "k",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move up",
 		action: bc.nav.move("up"),
 	},
 	{
 		key: "h",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move left",
 		action: bc.nav.move("left"),
 	},
 	{
 		key: "l",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move right",
 		action: bc.nav.move("right"),
 	},
 	{
 		key: "down",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move down",
 		action: bc.nav.move("down"),
 	},
 	{
 		key: "up",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move up",
 		action: bc.nav.move("up"),
 	},
 	{
 		key: "left",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move left",
 		action: bc.nav.move("left"),
 	},
 	{
 		key: "right",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move right",
 		action: bc.nav.move("right"),
 	},
@@ -570,6 +578,12 @@ done
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
 		),
 	},
+	{
+		key: "b",
+		mode: "action",
+		description: "Merge bead into...",
+		action: Effect.suspend(() => bc.prHandlers.enterMergeSelect()),
+	},
 
 	// ========================================================================
 	// Goto-Pending Mode (after pressing 'g')
@@ -617,56 +631,8 @@ done
 	},
 
 	// ========================================================================
-	// Select Mode
+	// Select Mode (navigation handled by BOARD_NAV_MODES)
 	// ========================================================================
-	{
-		key: "j",
-		mode: "select",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "k",
-		mode: "select",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "h",
-		mode: "select",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "l",
-		mode: "select",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
-	{
-		key: "down",
-		mode: "select",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "up",
-		mode: "select",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "left",
-		mode: "select",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "right",
-		mode: "select",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
 	{
 		key: "space",
 		mode: "select",
@@ -971,5 +937,27 @@ done
 		action: bc.orchestrateHandlers
 			.enterFromDetail()
 			.pipe(Effect.catchAll(Effect.logError), Effect.asVoid),
+	},
+
+	// ========================================================================
+	// Merge Select Mode (navigation handled by BOARD_NAV_MODES)
+	// ========================================================================
+	{
+		key: "space",
+		mode: "mergeSelect",
+		description: "Confirm merge",
+		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
+	},
+	{
+		key: "return",
+		mode: "mergeSelect",
+		description: "Confirm merge",
+		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
+	},
+	{
+		key: "escape",
+		mode: "mergeSelect",
+		description: "Cancel",
+		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),
 	},
 ]

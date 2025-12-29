@@ -117,7 +117,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		/**
 		 * Find matching keybinding for key and mode
 		 *
-		 * Priority: specific mode > wildcard "*"
+		 * Priority:
+		 * 1. Exact single mode match (mode === effectiveMode)
+		 * 2. Array mode match (mode includes effectiveMode)
+		 * 3. Wildcard "*" match
 		 */
 		const findBinding = (
 			key: string,
@@ -125,10 +128,21 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		): Effect.Effect<Keybinding | undefined> =>
 			Effect.gen(function* () {
 				const bindings = yield* Ref.get(keybindings)
-				return (
-					bindings.find((b) => b.key === key && b.mode === effectiveMode) ??
-					bindings.find((b) => b.key === key && b.mode === "*")
+
+				// First try exact single mode match (highest priority)
+				const exactMatch = bindings.find(
+					(b) => b.key === key && !Array.isArray(b.mode) && b.mode === effectiveMode,
 				)
+				if (exactMatch) return exactMatch
+
+				// Then try array mode match
+				const arrayMatch = bindings.find(
+					(b) => b.key === key && Array.isArray(b.mode) && b.mode.includes(effectiveMode),
+				)
+				if (arrayMatch) return arrayMatch
+
+				// Finally try wildcard
+				return bindings.find((b) => b.key === key && b.mode === "*")
 			})
 
 		// ====================================================================
@@ -209,9 +223,20 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 
 			/**
 			 * Unregister a keybinding
+			 *
+			 * For array modes, matches if the binding's mode array equals the provided mode array.
 			 */
-			unregister: (key: string, mode: KeyMode): Effect.Effect<void> =>
-				Ref.update(keybindings, (bs) => bs.filter((b) => !(b.key === key && b.mode === mode))),
+			unregister: (key: string, mode: KeyMode | ReadonlyArray<KeyMode>): Effect.Effect<void> =>
+				Ref.update(keybindings, (bs) =>
+					bs.filter((b) => {
+						if (b.key !== key) return true
+						// Compare modes - handle arrays
+						if (Array.isArray(b.mode) && Array.isArray(mode)) {
+							return JSON.stringify(b.mode) !== JSON.stringify(mode)
+						}
+						return b.mode !== mode
+					}),
+				),
 
 			/**
 			 * Get all registered keybindings

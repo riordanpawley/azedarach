@@ -24,6 +24,8 @@ export interface BoardProps {
 	viewMode?: ViewMode
 	/** Whether action mode is active (selected card gets prominent border) */
 	isActionMode?: boolean
+	/** Source bead ID when in merge select mode (highlighted differently) */
+	mergeSelectSourceId?: string
 }
 
 /**
@@ -79,6 +81,7 @@ export const Board = (props: BoardProps) => {
 				pendingJumpKey={props.pendingJumpKey}
 				terminalHeight={props.terminalHeight}
 				isActionMode={props.isActionMode}
+				mergeSelectSourceId={props.mergeSelectSourceId}
 			/>
 		)
 	}
@@ -104,6 +107,7 @@ export const Board = (props: BoardProps) => {
 						pendingJumpKey={props.pendingJumpKey}
 						maxVisible={props.terminalHeight}
 						isActionMode={props.isActionMode}
+						mergeSelectSourceId={props.mergeSelectSourceId}
 					/>
 				)
 			})}
