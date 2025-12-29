@@ -74,55 +74,63 @@ export interface BindingContext {
  *
  * @param bc - Binding context with all services
  */
+/**
+ * Modes that support standard board navigation (hjkl/arrows)
+ *
+ * These modes use the same navigation bindings - moving cursor around the board.
+ * Orchestrate mode is excluded because it has its own linear navigation.
+ */
+const BOARD_NAV_MODES = ["normal", "select", "mergeSelect"] as const
+
 export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybinding> => [
 	// ========================================================================
-	// Normal Mode - Navigation
+	// Board Navigation (shared across normal, select, mergeSelect modes)
 	// ========================================================================
 	{
 		key: "j",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move down",
 		action: bc.nav.move("down"),
 	},
 	{
 		key: "k",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move up",
 		action: bc.nav.move("up"),
 	},
 	{
 		key: "h",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move left",
 		action: bc.nav.move("left"),
 	},
 	{
 		key: "l",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move right",
 		action: bc.nav.move("right"),
 	},
 	{
 		key: "down",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move down",
 		action: bc.nav.move("down"),
 	},
 	{
 		key: "up",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move up",
 		action: bc.nav.move("up"),
 	},
 	{
 		key: "left",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move left",
 		action: bc.nav.move("left"),
 	},
 	{
 		key: "right",
-		mode: "normal",
+		mode: [...BOARD_NAV_MODES],
 		description: "Move right",
 		action: bc.nav.move("right"),
 	},
@@ -623,56 +631,8 @@ done
 	},
 
 	// ========================================================================
-	// Select Mode
+	// Select Mode (navigation handled by BOARD_NAV_MODES)
 	// ========================================================================
-	{
-		key: "j",
-		mode: "select",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "k",
-		mode: "select",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "h",
-		mode: "select",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "l",
-		mode: "select",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
-	{
-		key: "down",
-		mode: "select",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "up",
-		mode: "select",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "left",
-		mode: "select",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "right",
-		mode: "select",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
 	{
 		key: "space",
 		mode: "select",
@@ -980,56 +940,8 @@ done
 	},
 
 	// ========================================================================
-	// Merge Select Mode - Select target bead to merge into
+	// Merge Select Mode (navigation handled by BOARD_NAV_MODES)
 	// ========================================================================
-	{
-		key: "j",
-		mode: "mergeSelect",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "k",
-		mode: "mergeSelect",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "h",
-		mode: "mergeSelect",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "l",
-		mode: "mergeSelect",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
-	{
-		key: "down",
-		mode: "mergeSelect",
-		description: "Move down",
-		action: bc.nav.move("down"),
-	},
-	{
-		key: "up",
-		mode: "mergeSelect",
-		description: "Move up",
-		action: bc.nav.move("up"),
-	},
-	{
-		key: "left",
-		mode: "mergeSelect",
-		description: "Move left",
-		action: bc.nav.move("left"),
-	},
-	{
-		key: "right",
-		mode: "mergeSelect",
-		description: "Move right",
-		action: bc.nav.move("right"),
-	},
 	{
 		key: "space",
 		mode: "mergeSelect",
