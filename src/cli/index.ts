@@ -313,7 +313,7 @@ const statusHandler = (args: {
 		for (const line of lines) {
 			const [name, _created, attached, status] = line.split("|")
 			// Only show sessions that look like bead IDs (contain a dash, short format)
-			if (name && name.includes("-") && name.length < 20) {
+			if (name?.includes("-") && name.length < 20) {
 				sessionCount++
 				const statusDisplay = status || "unknown"
 				const attachedDisplay = attached === "attached" ? " (attached)" : ""
