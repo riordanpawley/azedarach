@@ -180,12 +180,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.editor.enterSearch(),
 	},
 	{
-		key: ":",
-		mode: "normal",
-		description: "Enter command mode",
-		action: bc.editor.enterCommand(),
-	},
-	{
 		key: ",",
 		mode: "normal",
 		description: "Enter sort mode",
@@ -280,12 +274,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		mode: "normal",
 		description: "Create bead via Claude",
 		action: bc.overlay.push({ _tag: "claudeCreate" }),
-	},
-	{
-		key: "a",
-		mode: "normal",
-		description: "Toggle VC auto-pilot",
-		action: Effect.suspend(() => bc.taskHandlers.toggleVC()),
 	},
 	{
 		key: "tab",
