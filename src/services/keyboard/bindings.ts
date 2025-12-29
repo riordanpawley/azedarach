@@ -282,12 +282,6 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.overlay.push({ _tag: "claudeCreate" }),
 	},
 	{
-		key: "a",
-		mode: "normal",
-		description: "Toggle VC auto-pilot",
-		action: Effect.suspend(() => bc.taskHandlers.toggleVC()),
-	},
-	{
 		key: "tab",
 		mode: "normal",
 		description: "Toggle view mode (kanban/compact)",
