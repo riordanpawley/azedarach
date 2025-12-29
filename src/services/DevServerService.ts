@@ -523,16 +523,10 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 			fiber: healthCheckFiber,
 		})
 
-		yield* Effect.addFinalizer(() =>
-			Effect.gen(function* () {
-				const servers = yield* SubscriptionRef.get(serversRef)
-				for (const m of HashMap.values(servers)) {
-					for (const s of HashMap.values(m)) {
-						if (s.tmuxSession) yield* tmux.killSession(s.tmuxSession).pipe(Effect.ignore)
-					}
-				}
-			}),
-		)
+		// NOTE: We intentionally do NOT add a finalizer to kill sessions here.
+		// The finalizer would run when CLI commands exit (since cliLayer includes DevServerService),
+		// which would incorrectly kill Claude sessions that have dev servers running.
+		// Sessions should persist until explicitly stopped by the user.
 
 		function getServerState(beadId: string, name: string) {
 			return SubscriptionRef.get(serversRef).pipe(
