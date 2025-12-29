@@ -555,8 +555,6 @@ The UI uses modal editing like Helix/Vim:
 │     │                    │                                    │
 │     / ──────────────→  search   (filter tasks)               │
 │     │                    │                                    │
-│     : ──────────────→  command  (VC REPL commands)           │
-│     │                    │                                    │
 │     , ──────────────→  sort     (sort menu)                  │
 │                                                               │
 │  All modes: Escape returns to normal                         │

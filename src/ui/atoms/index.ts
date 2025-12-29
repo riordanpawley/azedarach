@@ -79,13 +79,10 @@ export { handleKeyAtom } from "./keyboard.js"
 // Mode service atoms
 export {
 	activeFilterFieldAtom,
-	clearCommandAtom,
 	clearFiltersAtom,
 	clearSearchAtom,
-	commandInputAtom,
 	cycleSortAtom,
 	enterActionAtom,
-	enterCommandAtom,
 	enterFilterAtom,
 	enterGotoAtom,
 	enterJumpAtom,
@@ -114,7 +111,6 @@ export {
 	setPendingJumpKeyAtom,
 	sortConfigAtom,
 	toggleSelectionAtom,
-	updateCommandAtom,
 	updateSearchAtom,
 } from "./mode.js"
 // Navigation atoms
