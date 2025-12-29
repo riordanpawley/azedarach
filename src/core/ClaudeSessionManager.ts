@@ -441,7 +441,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const {
 							beadId,
 							projectPath,
-							baseBranch,
+							baseBranch: explicitBaseBranch,
 							initialPrompt,
 							model,
 							dangerouslySkipPermissions,
@@ -463,11 +463,35 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// to avoid the bug where status updates but session fails (az-g7p)
 						const needsStatusUpdate = issue.status !== "in_progress"
 
+						// Determine effective base branch:
+						// 1. If explicit baseBranch passed, use it
+						// 2. If bead has a parent epic, use the epic branch
+						// 3. Otherwise, use the default (WorktreeManager uses current branch)
+						let effectiveBaseBranch = explicitBaseBranch
+
+						if (!effectiveBaseBranch) {
+							// Check if this bead has a parent epic
+							const parentEpic = yield* beadsClient.getParentEpic(beadId)
+
+							if (parentEpic) {
+								// Ensure epic branch exists by creating epic worktree if needed
+								// This is idempotent - if worktree already exists, it returns the existing one
+								yield* worktreeManager.create({
+									beadId: parentEpic.id,
+									projectPath,
+									// Epic branches from main (no baseBranch = uses current branch)
+								})
+								// Use the epic branch as base for the child task
+								effectiveBaseBranch = parentEpic.id
+								yield* Effect.log(`Child task ${beadId} will branch from epic ${parentEpic.id}`)
+							}
+						}
+
 						// Create worktree (idempotent - returns existing if present)
 						const worktree = yield* worktreeManager.create({
 							beadId,
 							projectPath,
-							baseBranch,
+							baseBranch: effectiveBaseBranch,
 						})
 
 						// NOTE: .claude/ directory is git-tracked so it's already in the worktree.
