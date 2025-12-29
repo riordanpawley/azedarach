@@ -12,10 +12,12 @@ import {
 } from "effect"
 import { AppConfig } from "../config/index.js"
 import {
+	DEV_WINDOW_PREFIX,
 	getBeadSessionName,
+	getDevWindowName,
 	getWorktreePath,
+	parseDevWindowName,
 	parseSessionName,
-	WINDOW_NAMES,
 } from "../core/paths.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { WorktreeSessionService } from "../core/WorktreeSessionService.js"
@@ -80,7 +82,7 @@ const DevServerMetadata = Schema.Struct({
 	serverName: Schema.String,
 	status: DevServerStatusSchema,
 	port: Schema.optional(Schema.Number),
-	paneId: Schema.optional(Schema.String),
+	windowName: Schema.optional(Schema.String),
 	worktreePath: Schema.optional(Schema.String),
 	projectPath: Schema.optional(Schema.String),
 	startedAt: Schema.optional(Schema.String),
@@ -94,7 +96,7 @@ export interface DevServerState {
 	readonly name: string
 	readonly status: DevServerStatus
 	readonly port: number | undefined
-	readonly paneId: string | undefined
+	readonly windowName: string | undefined
 	readonly tmuxSession: string | undefined
 	readonly worktreePath: string | undefined
 	readonly startedAt: Date | undefined
@@ -120,7 +122,7 @@ const makeIdleState = (name: string): DevServerState => ({
 	name,
 	status: "idle",
 	port: undefined,
-	paneId: undefined,
+	windowName: undefined,
 	tmuxSession: undefined,
 	worktreePath: undefined,
 	startedAt: undefined,
@@ -189,7 +191,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						name: m.serverName,
 						status: m.status,
 						port: m.port,
-						paneId: m.paneId,
+						windowName: m.windowName,
 						tmuxSession: sessionName,
 						worktreePath: m.worktreePath,
 						startedAt: m.startedAt ? new Date(m.startedAt) : undefined,
@@ -216,18 +218,55 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					const parsed = parseSessionName(session.name)
 					if (!parsed || parsed.type !== "bead") continue
 
+					// First try to restore from tmux metadata
 					const metadataOpt = yield* readTmuxMetadata(session.name)
-					if (Option.isNone(metadataOpt)) continue
+					if (Option.isSome(metadataOpt)) {
+						const { state, beadPorts: discoveredPorts } = metadataOpt.value
+						const beadServers = HashMap.get(servers, parsed.beadId).pipe(
+							Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+						)
+						servers = HashMap.set(
+							servers,
+							parsed.beadId,
+							HashMap.set(beadServers, state.name, state),
+						)
 
-					const { state, beadPorts: discoveredPorts } = metadataOpt.value
-					const beadServers = HashMap.get(servers, parsed.beadId).pipe(
-						Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
-					)
-					servers = HashMap.set(servers, parsed.beadId, HashMap.set(beadServers, state.name, state))
+						// Restore beadPorts from first discovered server with ports
+						if (discoveredPorts && !beadPorts.has(parsed.beadId)) {
+							beadPorts.set(parsed.beadId, discoveredPorts)
+						}
+					}
 
-					// Restore beadPorts from first discovered server with ports
-					if (discoveredPorts && !beadPorts.has(parsed.beadId)) {
-						beadPorts.set(parsed.beadId, discoveredPorts)
+					// Also scan for dev-* windows as fallback (durability improvement)
+					// This catches servers that may be running but metadata was lost
+					const windows = yield* tmux.listWindows(session.name)
+					for (const windowName of windows) {
+						const serverName = parseDevWindowName(windowName)
+						if (!serverName) continue
+
+						// Check if we already discovered this server via metadata
+						const existingBeadServers = HashMap.get(servers, parsed.beadId).pipe(
+							Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
+						)
+						if (Option.isSome(HashMap.get(existingBeadServers, serverName))) continue
+
+						// Found a dev window without metadata - create a fallback state
+						// We'll mark it as running and let the health check verify via port
+						const fallbackState: DevServerState = {
+							name: serverName,
+							status: "running",
+							port: undefined, // Will be detected by port polling
+							windowName,
+							tmuxSession: session.name,
+							worktreePath: undefined,
+							startedAt: undefined,
+							error: undefined,
+						}
+						servers = HashMap.set(
+							servers,
+							parsed.beadId,
+							HashMap.set(existingBeadServers, serverName, fallbackState),
+						)
 					}
 				}
 				return { servers, beadPorts }
@@ -309,7 +348,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						serverName,
 						status: newState.status,
 						port: newState.port,
-						paneId: newState.paneId,
+						windowName: newState.windowName,
 						worktreePath: newState.worktreePath,
 						projectPath: currentProjectPath,
 						startedAt: newState.startedAt?.toISOString(),
@@ -421,28 +460,27 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				const servers = yield* SubscriptionRef.get(serversRef)
 				for (const [beadId, beadServers] of HashMap.entries(servers)) {
 					for (const [name, state] of HashMap.entries(beadServers)) {
-						// Check running servers - verify port is still responding
+						// Check running servers - verify window exists and port is responding
 						if (state.status === "running" && state.tmuxSession) {
-							// Check if session and pane still exist
-							const hasSession = yield* tmux.hasSession(state.tmuxSession.split(":")[0])
-							let hasPane = false
-							if (hasSession && state.paneId) {
-								const panes = yield* tmux.listPanes(state.tmuxSession)
-								hasPane = panes.some((p) => p.id === state.paneId)
+							// Check if session and window still exist
+							const hasSession = yield* tmux.hasSession(state.tmuxSession)
+							let hasWindow = false
+							if (hasSession && state.windowName) {
+								hasWindow = yield* tmux.hasWindow(state.tmuxSession, state.windowName)
 							}
 
-							if (!hasSession || (state.paneId && !hasPane)) {
-								// Session/pane gone - mark as idle
+							if (!hasSession || (state.windowName && !hasWindow)) {
+								// Session/window gone - mark as idle
 								if (state.port) yield* releasePort(state.port)
 								yield* updateState(beadId, name, {
 									...makeIdleState(name),
 									error: "Stopped unexpectedly",
 								})
 							} else if (state.port) {
-								// Pane exists - check if port is still responding
+								// Window exists - check if port is still responding
 								const portOpen = yield* checkPortOpen(state.port)
 								if (!portOpen) {
-									// Port is down but pane exists - server was stopped manually (e.g., Ctrl+C)
+									// Port is down but window exists - server was stopped manually (e.g., Ctrl+C)
 									yield* updateState(beadId, name, {
 										status: "stopped",
 										error: undefined,
@@ -471,7 +509,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		yield* diagnostics.registerFiber({
 			id: "devserver-health-check",
 			name: "Dev Server Health Check",
-			description: "Monitors dev server tmux sessions and panes",
+			description: "Monitors dev server tmux sessions and windows",
 			fiber: healthCheckFiber,
 		})
 
@@ -545,73 +583,37 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					? beadPorts[primaryEnvVar]
 					: (Object.values(beadPorts)[0] ?? 3000)
 
-				const beadServers = yield* SubscriptionRef.get(serversRef).pipe(
-					Effect.map((s) => HashMap.get(s, beadId).pipe(Option.getOrElse(() => HashMap.empty()))),
-				)
-
-				// Use canonical session name instead of inline
+				// Use canonical session name and window naming
 				const tmuxSessionName = getBeadSessionName(beadId)
-				const targetWindow = `${tmuxSessionName}:${WINDOW_NAMES.DEV}`
+				const windowName = getDevWindowName(name)
+				const targetWindow = `${tmuxSessionName}:${windowName}`
 				const cwd = srvConfig?.cwd ? pathService.join(worktreePath, srvConfig.cwd) : worktreePath
 
+				// Ensure the bead session exists
 				yield* worktreeSession.getOrCreateSession(beadId, {
 					worktreePath,
 					projectPath: currentProjectPath,
 					initCommands: (yield* appConfig.getWorktreeConfig()).initCommands,
 				})
 
-				// If there are already running servers for this bead, we should split the window
-				const runningServers = HashMap.filter(beadServers, (s) => s.status === "running")
-				let paneId: string | undefined
-
-				if (HashMap.size(runningServers) > 0) {
-					// Use the last running server's pane to split from, or just the window
-					const lastRunning = Array.from(HashMap.values(runningServers)).pop()
-					const splitTarget = lastRunning?.paneId ?? targetWindow
-
-					paneId = yield* tmux.splitWindow(splitTarget, {
-						cwd,
-						command: `exec ${yield* appConfig.getSessionConfig().pipe(Effect.map((c) => c.shell))} -i`,
-					})
-
-					// Wait for the new pane's shell to be ready
-					yield* Effect.sleep("500 millis")
-					const marker = `tmux set-option -t ${tmuxSessionName} @az_pane_ready_${paneId.replace("%", "")} 1`
-					yield* tmux.sendKeys(paneId, marker)
-
-					yield* Effect.retry(
-						Effect.gen(function* () {
-							const ready = yield* tmux.getUserOption(
-								tmuxSessionName,
-								`@az_pane_ready_${paneId?.replace("%", "")}`,
-							)
-							if (Option.isNone(ready)) yield* Effect.fail("Not ready")
-						}),
-						{ times: 20, schedule: Schedule.spaced("100 millis") },
-					)
-
-					yield* tmux.sendKeys(paneId, `${envStr} ${command}`)
-				} else {
-					yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.DEV, {
-						command: `${envStr} ${command}`,
-						cwd,
-					})
-					// For the first pane, we don't have a specific pane ID easily from ensureWindow,
-					// but we can list panes to find it.
-					const panes = yield* tmux.listPanes(targetWindow)
-					paneId = panes[0]?.id
-				}
+				// Create a dedicated window for this dev server
+				// Each server gets its own window (e.g., dev-frontend, dev-api)
+				yield* worktreeSession.ensureWindow(tmuxSessionName, windowName, {
+					command: `${envStr} ${command}`,
+					cwd,
+				})
 
 				const newState = yield* updateState(beadId, name, {
 					status: "running",
-					tmuxSession: targetWindow,
-					paneId,
+					tmuxSession: tmuxSessionName,
+					windowName,
 					port: primary,
 					startedAt: new Date(),
 				})
 
+				// Poll for port detection in the dedicated window
 				const pollFiber = yield* pollForPort(
-					paneId ?? targetWindow,
+					targetWindow,
 					new RegExp(config.portPattern ?? "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)"),
 				).pipe(
 					Effect.flatMap((p) =>
@@ -638,10 +640,10 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		function stop(beadId: string, name: string) {
 			return Effect.gen(function* () {
 				const s = yield* getServerState(beadId, name)
-				if (s.paneId) {
-					yield* tmux.killPane(s.paneId).pipe(Effect.ignore)
-				} else if (s.tmuxSession) {
-					yield* tmux.killSession(s.tmuxSession).pipe(Effect.ignore)
+				// Kill the window for this dev server
+				if (s.tmuxSession && s.windowName) {
+					const windowTarget = `${s.tmuxSession}:${s.windowName}`
+					yield* tmux.killWindow(windowTarget).pipe(Effect.ignore)
 				}
 
 				// Check if this is the last running server for this bead
@@ -692,7 +694,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 									name: key,
 									status: "idle",
 									port: defaultPort,
-									paneId: undefined,
+									windowName: undefined,
 									startedAt: undefined,
 									error: undefined,
 									tmuxSession: undefined,
@@ -702,7 +704,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 									name: key,
 									port: s.port ?? defaultPort,
 									status: s.status,
-									paneId: s.paneId,
+									windowName: s.windowName,
 									startedAt: s.startedAt,
 									error: s.error,
 									tmuxSession: s.tmuxSession,
@@ -763,14 +765,13 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				Effect.gen(function* () {
 					const s = yield* getServerState(beadId, name)
 					if (s.status === "running") {
-						const hasSession = yield* tmux.hasSession(s.tmuxSession?.split(":")[0] ?? "")
-						let hasPane = false
-						if (hasSession && s.paneId) {
-							const panes = yield* tmux.listPanes(s.tmuxSession ?? "")
-							hasPane = panes.some((p) => p.id === s.paneId)
+						const hasSession = yield* tmux.hasSession(s.tmuxSession ?? "")
+						let hasWindow = false
+						if (hasSession && s.windowName) {
+							hasWindow = yield* tmux.hasWindow(s.tmuxSession ?? "", s.windowName)
 						}
 
-						if (!hasSession || (s.paneId && !hasPane)) {
+						if (!hasSession || (s.windowName && !hasWindow)) {
 							if (s.port) yield* releasePort(s.port)
 							return yield* updateState(beadId, name, {
 								...makeIdleState(name),

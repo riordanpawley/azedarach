@@ -18,6 +18,34 @@ export const WINDOW_NAMES = {
 } as const
 
 /**
+ * Dev server window name prefix
+ */
+export const DEV_WINDOW_PREFIX = "dev-"
+
+/**
+ * Generate window name for a dev server
+ *
+ * @param serverName - The dev server name (e.g., "frontend", "api")
+ * @returns Window name like "dev-frontend", "dev-api"
+ */
+export function getDevWindowName(serverName: string): string {
+	return `${DEV_WINDOW_PREFIX}${serverName}`
+}
+
+/**
+ * Parse a window name to extract dev server name
+ *
+ * @param windowName - The tmux window name
+ * @returns The server name if it's a dev window, undefined otherwise
+ */
+export function parseDevWindowName(windowName: string): string | undefined {
+	if (windowName.startsWith(DEV_WINDOW_PREFIX)) {
+		return windowName.slice(DEV_WINDOW_PREFIX.length)
+	}
+	return undefined
+}
+
+/**
  * Generate tmux session name for a bead
  *
  * Returns exactly the beadId for consistent naming across:
