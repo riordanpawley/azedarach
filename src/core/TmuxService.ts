@@ -61,6 +61,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					// Enable vi-style copy mode keys (Ctrl-u/d work for half-page scroll in copy mode)
 					yield* runTmux(["set-option", "-t", name, "mode-keys", "vi"])
 
+					// Keep session alive when main command exits (so user can review output/reattach)
+					// See: https://man7.org/linux/man-pages/man1/tmux.1.html (search "remain-on-exit")
+					// When on, panes are not destroyed when the program exits - use respawn-pane to restart
+					yield* runTmux(["set-option", "-t", name, "remain-on-exit", "on"])
+
 					// Set azedarach session options for state tracking
 					if (opts?.azOptions?.worktreePath) {
 						yield* runTmux(["set-option", "-t", name, "@az_worktree", opts.azOptions.worktreePath])
