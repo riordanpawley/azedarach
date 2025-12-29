@@ -16,7 +16,7 @@ export interface DevServerView {
 	readonly name: string
 	readonly status: DevServerStatus
 	readonly port?: number
-	readonly paneId?: string
+	readonly windowName?: string
 	readonly isConfigured: boolean
 	readonly tmuxSession?: string
 	readonly error?: string
@@ -78,7 +78,7 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 					name,
 					status: running.value.status,
 					port: running.value.port,
-					paneId: running.value.paneId,
+					windowName: running.value.windowName,
 					isConfigured: true,
 					tmuxSession: running.value.tmuxSession,
 					error: running.value.error,
@@ -98,7 +98,7 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 					name,
 					status: state.status,
 					port: state.port,
-					paneId: state.paneId,
+					windowName: state.windowName,
 					isConfigured: false,
 					tmuxSession: state.tmuxSession,
 					error: state.error,
