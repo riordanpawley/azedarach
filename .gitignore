@@ -31,6 +31,9 @@ Thumbs.db
 # Claude local settings (personal permissions/hooks)
 .claude/settings.local.json
 
+# Worktree-specific skills (injected by Azedarach)
+.claude/skills/local/
+
 # Environment
 .env.local
 .env*.local

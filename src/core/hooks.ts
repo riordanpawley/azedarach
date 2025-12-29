@@ -274,3 +274,61 @@ export const extractMergeableSettings = (
 	}
 	return result
 }
+
+/**
+ * Generate worktree-specific skill content with bead ID context
+ *
+ * This skill is injected into worktrees so Claude sessions know their
+ * bead ID and how to use the az CLI without having to discover it.
+ *
+ * @param beadId - The bead ID for this worktree session
+ * @returns Markdown skill content
+ */
+export const generateWorktreeSkill = (beadId: string): string => `# Azedarach Worktree Context
+
+**This is an Azedarach-managed worktree session.**
+
+## Your Session
+
+- **Bead ID:** \`${beadId}\`
+- **Branch:** \`${beadId}\`
+
+## Dev Server Commands
+
+Control dev servers without breaking TUI state tracking:
+
+\`\`\`bash
+# Start the dev server
+az dev start ${beadId}
+
+# Stop the dev server
+az dev stop ${beadId}
+
+# Restart after config changes
+az dev restart ${beadId}
+
+# Check server status
+az dev status ${beadId}
+\`\`\`
+
+**Why use az CLI?** Direct commands (npm run dev, ctrl-c) break TUI state tracking.
+The \`az dev\` commands sync state via tmux metadata.
+
+## Session Lifecycle
+
+1. **You're here** - TUI spawned your session in this worktree
+2. **Do your work** - Use \`az dev\` for server control
+3. **Sync beads** - Run \`bd sync\` before finishing
+4. **Complete** - Clean exit triggers TUI completion workflow (PR creation)
+
+## Quick Reference
+
+| Command | Description |
+|---------|-------------|
+| \`az dev start ${beadId}\` | Start dev server |
+| \`az dev stop ${beadId}\` | Stop dev server |
+| \`az dev restart ${beadId}\` | Restart dev server |
+| \`az dev status ${beadId}\` | Check server status |
+| \`bd sync\` | Sync beads changes |
+| \`bd close ${beadId}\` | Mark bead complete |
+`

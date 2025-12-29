@@ -1,46 +1,37 @@
+/**
+ * CLI commands for dev server management
+ *
+ * These handlers delegate to DevServerService - they don't contain business logic,
+ * just CLI argument parsing and output formatting.
+ */
 import { Args, Command, Options } from "@effect/cli"
-import { FileSystem, Path } from "@effect/platform"
-import { BunContext } from "@effect/platform-bun"
-import { Console, Effect, Layer, Option, Schema } from "effect"
-import { AppConfigConfig } from "../config/AppConfig.js"
-import {
-	getBeadSessionName,
-	getWorktreePath,
-	parseSessionName,
-	WINDOW_NAMES,
-} from "../core/paths.js"
-import { TmuxService } from "../core/TmuxService.js"
+import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
+import { DevServerService, type DevServerState } from "../services/DevServerService.js"
+import { ProjectService } from "../services/ProjectService.js"
 
-const DevServerMetadataSchema = Schema.Struct({
-	beadId: Schema.String,
-	serverName: Schema.String,
-	status: Schema.Literal("idle", "starting", "running", "error"),
-	port: Schema.optional(Schema.Number),
-	paneId: Schema.optional(Schema.String),
-	worktreePath: Schema.optional(Schema.String),
-	projectPath: Schema.optional(Schema.String),
-	startedAt: Schema.optional(Schema.String),
-	error: Schema.optional(Schema.String),
-	beadPorts: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Number })),
-})
-type DevServerMetadata = Schema.Schema.Type<typeof DevServerMetadataSchema>
-
-const TMUX_OPT_DEV_METADATA = "@az-devserver-meta"
 const CLI_DEFAULT_SERVER_NAME = "default"
 
-const formatUptime = (startedAt: string | undefined): string => {
-	if (!startedAt) return "-"
-	const start = new Date(startedAt).getTime()
-	const now = Date.now()
-	const diffMs = now - start
-	const seconds = Math.floor(diffMs / 1000)
-	const minutes = Math.floor(seconds / 60)
-	const hours = Math.floor(minutes / 60)
+/**
+ * Format uptime from a start DateTime to now
+ */
+const formatUptime = (startedAt: Date | undefined): Effect.Effect<string, never, never> =>
+	Effect.gen(function* () {
+		if (!startedAt) return "-"
+		const now = yield* DateTime.now
+		const start = DateTime.unsafeMake(startedAt)
+		const durationMs = DateTime.distance(start, now)
+		const seconds = Math.floor(Duration.toMillis(durationMs) / 1000)
+		const minutes = Math.floor(seconds / 60)
+		const hours = Math.floor(minutes / 60)
 
-	if (hours > 0) return `${hours}h ${minutes % 60}m`
-	if (minutes > 0) return `${minutes}m ${seconds % 60}s`
-	return `${seconds}s`
-}
+		if (hours > 0) return `${hours}h ${minutes % 60}m`
+		if (minutes > 0) return `${minutes}m ${seconds % 60}s`
+		return `${seconds}s`
+	})
+
+// ============================================================================
+// CLI Arguments and Options
+// ============================================================================
 
 const beadIdArg = Args.text({ name: "bead-id" }).pipe(
 	Args.withDescription("Beads issue ID (e.g., az-2qy)"),
@@ -64,6 +55,22 @@ const serverOption = Options.text("server").pipe(
 
 const jsonOption = Options.boolean("json").pipe(Options.withDescription("Output in JSON format"))
 
+// ============================================================================
+// Helper to get project path
+// ============================================================================
+
+const getProjectPath = (projectDir: Option.Option<string>) =>
+	Effect.gen(function* () {
+		if (Option.isSome(projectDir)) return projectDir.value
+		const projectService = yield* ProjectService
+		const currentPath = yield* projectService.getCurrentPath()
+		return currentPath ?? process.cwd()
+	})
+
+// ============================================================================
+// Command Handlers - delegate to DevServerService
+// ============================================================================
+
 const devStartHandler = (args: {
 	readonly beadId: string
 	readonly server: Option.Option<string>
@@ -72,145 +79,51 @@ const devStartHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
+		const projectPath = yield* getProjectPath(args.projectDir)
 
-		const appConfigLayer = AppConfigConfig.Default(cwd, undefined)
-		const tmuxLayer = TmuxService.Default
-		const fullLayer = Layer.merge(appConfigLayer, Layer.merge(tmuxLayer, BunContext.layer))
+		const devServerService = yield* DevServerService
 
-		const result = yield* Effect.gen(function* () {
-			const tmux = yield* TmuxService
-			const fs = yield* FileSystem.FileSystem
-			const pathService = yield* Path.Path
-			const configModule = yield* Effect.promise(() => import("../config/index.js"))
-			const appConfig = yield* configModule.AppConfig
+		// Check current status first
+		const currentStatus = yield* devServerService.getStatus(args.beadId, serverName)
 
-			const worktreePath = getWorktreePath(cwd, args.beadId)
-
-			const worktreeExists = yield* fs
-				.exists(worktreePath)
-				.pipe(Effect.catchAll(() => Effect.succeed(false)))
-			if (!worktreeExists) {
-				return yield* Effect.fail(
-					new Error(
-						`No worktree found for ${args.beadId}. Start a Claude session first with: az start ${args.beadId}`,
-					),
-				)
-			}
-
-			const devServerConfig = yield* appConfig.getDevServerConfig()
-			const serverConfig = devServerConfig.servers?.[serverName]
-
-			if (!serverConfig) {
-				return yield* Effect.fail(
-					new Error(
-						`No server configuration found for '${serverName}'. Define it in .azedarach.json under devServer.servers.`,
-					),
-				)
-			}
-
-			const sessionName = getBeadSessionName(args.beadId)
-			const targetWindow = `${sessionName}:${WINDOW_NAMES.DEV}`
-			const serverCwd = serverConfig.cwd
-				? pathService.join(worktreePath, serverConfig.cwd)
-				: worktreePath
-
-			const hasSession = yield* tmux.hasSession(sessionName)
-			if (!hasSession) {
-				return yield* Effect.fail(
-					new Error(
-						`No tmux session for ${args.beadId}. Start a Claude session first with: az start ${args.beadId}`,
-					),
-				)
-			}
-
-			const existingMetaJson = yield* tmux.getUserOption(sessionName, TMUX_OPT_DEV_METADATA)
-			if (Option.isSome(existingMetaJson)) {
-				const existingMeta = yield* Schema.decodeUnknown(Schema.parseJson(DevServerMetadataSchema))(
-					existingMetaJson.value,
-				).pipe(Effect.option)
-				if (Option.isSome(existingMeta) && existingMeta.value.status === "running") {
-					if (args.json) {
-						return {
-							resultStatus: "already_running" as const,
-							serverName: existingMeta.value.serverName,
-							serverStatus: existingMeta.value.status,
-							port: existingMeta.value.port,
-						}
-					}
-					yield* Console.log(`Dev server '${serverName}' is already running for ${args.beadId}`)
-					if (existingMeta.value.port) {
-						yield* Console.log(`  Port: ${existingMeta.value.port}`)
-					}
-					return { resultStatus: "already_running" as const }
-				}
-			}
-
-			const ports = serverConfig.ports ?? { PORT: 3000 }
-			const envStr = Object.entries(ports)
-				.map(([k, v]) => `${k}=${v}`)
-				.join(" ")
-
-			const hasWindow = yield* tmux.hasWindow(sessionName, WINDOW_NAMES.DEV)
-			let paneId: string | undefined
-
-			if (hasWindow) {
-				const panes = yield* tmux.listPanes(targetWindow)
-				paneId = panes[0]?.id
-				if (paneId) {
-					yield* tmux.sendKeys(paneId, `${envStr} ${serverConfig.command}`)
-				}
-			} else {
-				yield* tmux.newWindow(sessionName, WINDOW_NAMES.DEV, {
-					cwd: serverCwd,
-					command: `${envStr} ${serverConfig.command}`,
-				})
-				const panes = yield* tmux.listPanes(targetWindow)
-				paneId = panes[0]?.id
-			}
-
-			const primaryPort = Object.values(ports)[0] ?? 3000
-			const metadata: DevServerMetadata = {
-				beadId: args.beadId,
-				serverName,
-				status: "running",
-				port: primaryPort,
-				paneId,
-				worktreePath,
-				projectPath: cwd,
-				startedAt: new Date().toISOString(),
-				beadPorts: ports,
-			}
-
-			const metadataJson = yield* Schema.encode(Schema.parseJson(DevServerMetadataSchema))(
-				metadata,
-			).pipe(Effect.catchAll(() => Effect.succeed("{}")))
-			yield* tmux
-				.setUserOption(sessionName, TMUX_OPT_DEV_METADATA, metadataJson)
-				.pipe(Effect.ignore)
-
+		if (currentStatus.status === "running") {
 			if (args.json) {
-				return {
-					resultStatus: "started" as const,
+				yield* Console.log(
+					JSON.stringify({
+						resultStatus: "already_running",
+						serverName,
+						serverStatus: "running",
+						port: currentStatus.port,
+					}),
+				)
+			} else {
+				yield* Console.log(`Dev server '${serverName}' is already running for ${args.beadId}`)
+				if (currentStatus.port) {
+					yield* Console.log(`  Port: ${currentStatus.port}`)
+				}
+			}
+			return
+		}
+
+		// Start the server via service
+		const state = yield* devServerService.start(args.beadId, projectPath, serverName)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify({
+					resultStatus: "started",
 					beadId: args.beadId,
 					serverName,
-					serverStatus: "running" as const,
-					port: primaryPort,
-					window: targetWindow,
-				}
-			}
-
+					serverStatus: state.status,
+					port: state.port,
+					window: state.windowName,
+				}),
+			)
+		} else {
 			yield* Console.log(`Started dev server '${serverName}' for ${args.beadId}`)
-			yield* Console.log(`  Port: ${primaryPort}`)
-			yield* Console.log(`  Window: ${targetWindow}`)
-			yield* Console.log(`  Command: ${serverConfig.command}`)
-
-			return { resultStatus: "started" as const }
-		}).pipe(Effect.provide(fullLayer))
-
-		if (args.json && result) {
-			yield* Console.log(JSON.stringify(result, null, 2))
+			if (state.port) yield* Console.log(`  Port: ${state.port}`)
+			if (state.windowName) yield* Console.log(`  Window: ${state.windowName}`)
 		}
 	})
 
@@ -222,77 +135,31 @@ const devStopHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
+		const devServerService = yield* DevServerService
 
-		const tmuxLayer = TmuxService.Default
-		const fullLayer = Layer.merge(tmuxLayer, BunContext.layer)
+		// Check current status
+		const currentStatus = yield* devServerService.getStatus(args.beadId, serverName)
 
-		const result = yield* Effect.gen(function* () {
-			const tmux = yield* TmuxService
-
-			const sessionName = getBeadSessionName(args.beadId)
-
-			const hasSession = yield* tmux.hasSession(sessionName)
-			if (!hasSession) {
-				if (args.json) {
-					return { resultStatus: "not_found" as const, message: "No session found" }
-				}
-				yield* Console.log(`No session found for ${args.beadId}`)
-				return { resultStatus: "not_found" as const }
-			}
-
-			const metadataJson = yield* tmux.getUserOption(sessionName, TMUX_OPT_DEV_METADATA)
-			if (Option.isNone(metadataJson)) {
-				if (args.json) {
-					return { resultStatus: "not_running" as const, message: "Dev server is not running" }
-				}
-				yield* Console.log(`Dev server '${serverName}' is not running for ${args.beadId}`)
-				return { resultStatus: "not_running" as const }
-			}
-
-			const metadataOpt = yield* Schema.decodeUnknown(Schema.parseJson(DevServerMetadataSchema))(
-				metadataJson.value,
-			).pipe(Effect.option)
-
-			if (Option.isNone(metadataOpt) || metadataOpt.value.status !== "running") {
-				if (args.json) {
-					return { resultStatus: "not_running" as const, message: "Dev server is not running" }
-				}
-				yield* Console.log(`Dev server '${serverName}' is not running for ${args.beadId}`)
-				return { resultStatus: "not_running" as const }
-			}
-
-			const metadata = metadataOpt.value
-
-			if (metadata.paneId) {
-				yield* tmux.killPane(metadata.paneId).pipe(Effect.ignore)
-			} else {
-				const targetWindow = `${sessionName}:${WINDOW_NAMES.DEV}`
-				yield* tmux.sendKeys(targetWindow, "C-c").pipe(Effect.ignore)
-				yield* Effect.sleep("500 millis")
-			}
-
-			const updatedMetadata: DevServerMetadata = {
-				beadId: metadata.beadId,
-				serverName: metadata.serverName,
-				status: "idle",
-				worktreePath: metadata.worktreePath,
-				projectPath: metadata.projectPath,
-			}
-			const updatedJson = yield* Schema.encode(Schema.parseJson(DevServerMetadataSchema))(
-				updatedMetadata,
-			).pipe(Effect.catchAll(() => Effect.succeed("{}")))
-			yield* tmux.setUserOption(sessionName, TMUX_OPT_DEV_METADATA, updatedJson).pipe(Effect.ignore)
-
+		if (currentStatus.status !== "running" && currentStatus.status !== "starting") {
 			if (args.json) {
-				return { resultStatus: "stopped" as const, beadId: args.beadId, serverName }
+				yield* Console.log(
+					JSON.stringify({ resultStatus: "not_running", message: "Dev server is not running" }),
+				)
+			} else {
+				yield* Console.log(`Dev server '${serverName}' is not running for ${args.beadId}`)
 			}
+			return
+		}
 
+		// Stop the server via service
+		yield* devServerService.stop(args.beadId, serverName)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify({ resultStatus: "stopped", beadId: args.beadId, serverName }),
+			)
+		} else {
 			yield* Console.log(`Stopped dev server '${serverName}' for ${args.beadId}`)
-			return { resultStatus: "stopped" as const }
-		}).pipe(Effect.provide(fullLayer))
-
-		if (args.json && result) {
-			yield* Console.log(JSON.stringify(result, null, 2))
 		}
 	})
 
@@ -305,27 +172,32 @@ const devRestartHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
+		const projectPath = yield* getProjectPath(args.projectDir)
+		const devServerService = yield* DevServerService
 
 		if (!args.json) {
 			yield* Console.log(`Restarting dev server '${serverName}' for ${args.beadId}...`)
 		}
 
-		yield* devStopHandler({
-			beadId: args.beadId,
-			server: Option.some(serverName),
-			verbose: args.verbose,
-			json: false,
-		}).pipe(Effect.ignore)
-
+		// Stop then start via service
+		yield* devServerService.stop(args.beadId, serverName).pipe(Effect.ignore)
 		yield* Effect.sleep("500 millis")
+		const state = yield* devServerService.start(args.beadId, projectPath, serverName)
 
-		yield* devStartHandler({
-			beadId: args.beadId,
-			server: Option.some(serverName),
-			projectDir: args.projectDir,
-			verbose: args.verbose,
-			json: args.json,
-		})
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify({
+					resultStatus: "restarted",
+					beadId: args.beadId,
+					serverName,
+					serverStatus: state.status,
+					port: state.port,
+				}),
+			)
+		} else {
+			yield* Console.log(`Restarted dev server '${serverName}' for ${args.beadId}`)
+			if (state.port) yield* Console.log(`  Port: ${state.port}`)
+		}
 	})
 
 const devStatusHandler = (args: {
@@ -334,168 +206,121 @@ const devStatusHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const tmuxLayer = TmuxService.Default
-		const fullLayer = Layer.merge(tmuxLayer, BunContext.layer)
+		const devServerService = yield* DevServerService
 
-		yield* Effect.gen(function* () {
-			const tmux = yield* TmuxService
+		// Get all servers for this bead
+		const beadServers = yield* devServerService.getBeadServers(args.beadId)
+		const serverList = Array.from(HashMap.values(beadServers))
 
-			const sessionName = getBeadSessionName(args.beadId)
-
-			const hasSession = yield* tmux.hasSession(sessionName)
-			if (!hasSession) {
-				if (args.json) {
-					yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: [] }))
-					return
-				}
-				yield* Console.log(`No session found for ${args.beadId}`)
-				return
-			}
-
-			const metadataJson = yield* tmux.getUserOption(sessionName, TMUX_OPT_DEV_METADATA)
-
-			if (Option.isNone(metadataJson)) {
-				if (args.json) {
-					yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: [] }))
-					return
-				}
-				yield* Console.log(`No dev servers configured for ${args.beadId}`)
-				return
-			}
-
-			const metadataOpt = yield* Schema.decodeUnknown(Schema.parseJson(DevServerMetadataSchema))(
-				metadataJson.value,
-			).pipe(Effect.option)
-
-			if (Option.isNone(metadataOpt)) {
-				if (args.json) {
-					yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: [] }))
-					return
-				}
-				yield* Console.log(`No dev servers configured for ${args.beadId}`)
-				return
-			}
-
-			const metadata = metadataOpt.value
-
+		if (serverList.length === 0) {
 			if (args.json) {
-				yield* Console.log(
-					JSON.stringify(
-						{
-							beadId: args.beadId,
-							servers: [
-								{
-									name: metadata.serverName,
-									status: metadata.status,
-									port: metadata.port,
-									uptime: metadata.startedAt ? formatUptime(metadata.startedAt) : null,
-									startedAt: metadata.startedAt,
-								},
-							],
-						},
-						null,
-						2,
-					),
-				)
-				return
+				yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: [] }))
+			} else {
+				yield* Console.log(`No dev servers configured for ${args.beadId}`)
 			}
+			return
+		}
 
-			yield* Console.log(`Dev servers for ${args.beadId}:`)
-			yield* Console.log("")
+		if (args.json) {
+			const serversJson = yield* Effect.all(
+				serverList.map((s) =>
+					Effect.gen(function* () {
+						const uptime = yield* formatUptime(s.startedAt)
+						return {
+							name: s.name,
+							status: s.status,
+							port: s.port,
+							uptime: s.startedAt ? uptime : null,
+							startedAt: s.startedAt?.toISOString(),
+						}
+					}),
+				),
+			)
+			yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: serversJson }, null, 2))
+			return
+		}
 
+		yield* Console.log(`Dev servers for ${args.beadId}:`)
+		yield* Console.log("")
+
+		for (const server of serverList) {
 			const statusIcon =
-				metadata.status === "running"
+				server.status === "running"
 					? "🟢"
-					: metadata.status === "starting"
+					: server.status === "starting"
 						? "🟡"
-						: metadata.status === "error"
+						: server.status === "error"
 							? "🔴"
 							: "⚪"
 
-			yield* Console.log(`  ${statusIcon} ${metadata.serverName}`)
-			yield* Console.log(`      Status: ${metadata.status}`)
-			if (metadata.port) {
-				yield* Console.log(`      Port:   ${metadata.port}`)
+			yield* Console.log(`  ${statusIcon} ${server.name}`)
+			yield* Console.log(`      Status: ${server.status}`)
+			if (server.port) yield* Console.log(`      Port:   ${server.port}`)
+			if (server.startedAt && server.status === "running") {
+				const uptime = yield* formatUptime(server.startedAt)
+				yield* Console.log(`      Uptime: ${uptime}`)
 			}
-			if (metadata.startedAt && metadata.status === "running") {
-				yield* Console.log(`      Uptime: ${formatUptime(metadata.startedAt)}`)
-			}
-			if (metadata.error) {
-				yield* Console.log(`      Error:  ${metadata.error}`)
-			}
-		}).pipe(Effect.provide(fullLayer))
+			if (server.error) yield* Console.log(`      Error:  ${server.error}`)
+		}
 	})
 
 const devListHandler = (args: { readonly verbose: boolean; readonly json: boolean }) =>
 	Effect.gen(function* () {
-		const tmuxLayer = TmuxService.Default
-		const fullLayer = Layer.merge(tmuxLayer, BunContext.layer)
+		const devServerService = yield* DevServerService
 
-		yield* Effect.gen(function* () {
-			const tmux = yield* TmuxService
+		// Get all servers from the service's state
+		const allServers = yield* SubscriptionRef.get(devServerService.servers)
 
-			const sessions = yield* tmux.listSessions()
-			const servers: Array<{ beadId: string; metadata: DevServerMetadata }> = []
-
-			for (const session of sessions) {
-				const parsed = parseSessionName(session.name)
-				if (!parsed || parsed.type !== "bead") continue
-
-				const metadataJson = yield* tmux.getUserOption(session.name, TMUX_OPT_DEV_METADATA)
-				if (Option.isNone(metadataJson)) continue
-
-				const metadataOpt = yield* Schema.decodeUnknown(Schema.parseJson(DevServerMetadataSchema))(
-					metadataJson.value,
-				).pipe(Effect.option)
-
-				if (Option.isSome(metadataOpt)) {
-					servers.push({ beadId: parsed.beadId, metadata: metadataOpt.value })
+		// Collect running servers across all beads
+		const runningServers: Array<{ beadId: string; server: DevServerState }> = []
+		for (const [beadId, beadServers] of HashMap.entries(allServers)) {
+			for (const server of HashMap.values(beadServers)) {
+				if (server.status === "running") {
+					runningServers.push({ beadId, server })
 				}
 			}
+		}
 
-			const runningServers = servers.filter((s) => s.metadata.status === "running")
+		if (args.json) {
+			const serversJson = yield* Effect.all(
+				runningServers.map(({ beadId, server }) =>
+					Effect.gen(function* () {
+						const uptime = yield* formatUptime(server.startedAt)
+						return {
+							beadId,
+							name: server.name,
+							status: server.status,
+							port: server.port,
+							uptime,
+							startedAt: server.startedAt?.toISOString(),
+						}
+					}),
+				),
+			)
+			yield* Console.log(JSON.stringify({ servers: serversJson }, null, 2))
+			return
+		}
 
-			if (args.json) {
-				yield* Console.log(
-					JSON.stringify(
-						{
-							servers: runningServers.map((s) => ({
-								beadId: s.beadId,
-								name: s.metadata.serverName,
-								status: s.metadata.status,
-								port: s.metadata.port,
-								uptime: formatUptime(s.metadata.startedAt),
-								startedAt: s.metadata.startedAt,
-							})),
-						},
-						null,
-						2,
-					),
-				)
-				return
-			}
+		if (runningServers.length === 0) {
+			yield* Console.log("No dev servers running.")
+			return
+		}
 
-			if (runningServers.length === 0) {
-				yield* Console.log("No dev servers running.")
-				return
-			}
+		yield* Console.log("Running dev servers:")
+		yield* Console.log("")
+		yield* Console.log("  BEAD         SERVER    PORT    UPTIME")
+		yield* Console.log("  ─────────────────────────────────────────")
 
-			yield* Console.log("Running dev servers:")
-			yield* Console.log("")
-			yield* Console.log("  BEAD         SERVER    PORT    UPTIME")
-			yield* Console.log("  ─────────────────────────────────────────")
+		for (const { beadId, server } of runningServers) {
+			const port = server.port?.toString() ?? "-"
+			const uptime = yield* formatUptime(server.startedAt)
+			yield* Console.log(
+				`  ${beadId.padEnd(12)} ${server.name.padEnd(9)} ${port.padEnd(7)} ${uptime}`,
+			)
+		}
 
-			for (const server of runningServers) {
-				const port = server.metadata.port?.toString() ?? "-"
-				const uptime = formatUptime(server.metadata.startedAt)
-				yield* Console.log(
-					`  ${server.beadId.padEnd(12)} ${server.metadata.serverName.padEnd(9)} ${port.padEnd(7)} ${uptime}`,
-				)
-			}
-
-			yield* Console.log("")
-			yield* Console.log(`${runningServers.length} server(s) running`)
-		}).pipe(Effect.provide(fullLayer))
+		yield* Console.log("")
+		yield* Console.log(`${runningServers.length} server(s) running`)
 	})
 
 const devStartCommand = Command.make(
