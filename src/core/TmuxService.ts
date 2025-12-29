@@ -265,6 +265,17 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 				),
 
 			/**
+			 * Kill a tmux window
+			 *
+			 * @param target - tmux target (session:window)
+			 */
+			killWindow: (target: string) =>
+				runTmux(["kill-window", "-t", target]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+				),
+
+			/**
 			 * List panes in a window
 			 *
 			 * @param target - tmux target (session:window)
