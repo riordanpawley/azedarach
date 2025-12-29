@@ -337,6 +337,29 @@ export interface BeadsClientService {
 		type?: "blocks" | "related" | "parent-child" | "discovered-from",
 		cwd?: string,
 	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Get the parent epic of an issue, if it has one
+	 *
+	 * Looks for a parent-child dependency where this issue depends on an epic.
+	 * Returns the parent epic issue, or undefined if no parent epic exists.
+	 *
+	 * @example
+	 * ```ts
+	 * const parentEpic = yield* BeadsClient.getParentEpic("az-task")
+	 * if (parentEpic) {
+	 *   console.log(`Task is child of epic: ${parentEpic.id}`)
+	 * }
+	 * ```
+	 */
+	readonly getParentEpic: (
+		issueId: string,
+		cwd?: string,
+	) => Effect.Effect<
+		Issue | undefined,
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -770,6 +793,46 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					yield* runBd(args, effectiveCwd)
 				}),
+
+			getParentEpic: (issueId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["show", issueId], effectiveCwd)
+
+					// bd show returns an array with a single item
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+
+					if (parsed.length === 0) {
+						return yield* Effect.fail(new NotFoundError({ issueId }))
+					}
+
+					const issue = parsed[0]!
+
+					// Tombstone issues are effectively deleted
+					if (issue.status === "tombstone") {
+						return yield* Effect.fail(new NotFoundError({ issueId }))
+					}
+
+					// Find parent-child dependency where we depend on an epic
+					const parentChildDep = issue.dependencies?.find(
+						(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
+					)
+
+					if (!parentChildDep) {
+						return undefined
+					}
+
+					// Fetch the full epic issue
+					const epicOutput = yield* runBd(["show", parentChildDep.id], effectiveCwd)
+					const epicParsed = yield* parseJson(Schema.Array(IssueSchema), epicOutput)
+
+					if (epicParsed.length === 0 || epicParsed[0]!.status === "tombstone") {
+						// Epic was deleted, treat as no parent
+						return undefined
+					}
+
+					return epicParsed[0]!
+				}),
 		}
 	}),
 }) {}
@@ -917,3 +980,15 @@ export const addDependency = (
 	cwd?: string,
 ): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
 	Effect.flatMap(BeadsClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
+
+/**
+ * Get the parent epic of an issue, if it has one
+ */
+export const getParentEpic = (
+	issueId: string,
+	cwd?: string,
+): Effect.Effect<
+	Issue | undefined,
+	BeadsError | NotFoundError | ParseError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.getParentEpic(issueId, cwd))
