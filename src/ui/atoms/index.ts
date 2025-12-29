@@ -152,6 +152,9 @@ export {
 	toggleCurrentSettingAtom,
 	validateSettingsAfterEditAtom,
 } from "./overlay.js"
+// Planning workflow atoms
+export type { Plan, PlannedTask, PlanningState, ReviewFeedback } from "./planning.js"
+export { planningStateAtom, resetPlanningAtom, runPlanningAtom } from "./planning.js"
 // PR workflow atoms
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
 // Project service atoms

@@ -10,10 +10,12 @@
  *
  * Flow:
  * 1. Check if tool is Edit or Write
- * 2. Check if file is TypeScript (.ts, .tsx)
+ * 2. Check if file is TypeScript (.ts, .tsx) - skip all other extensions
  * 3. Scan new_string/content for type casting patterns
- * 4. If found, BLOCK the edit with detailed error message
- * 5. Suggest correct patterns (Schema.decode, type annotation)
+ * 4. Skip patterns found inside comments (// or /* */)
+ * 5. Skip patterns in import/export statements (aliasing, not casting)
+ * 6. If found, BLOCK the edit with detailed error message
+ * 7. Suggest correct patterns (Schema.decode, type annotation)
  *
  * Anti-patterns detected:
  * - `as SomeType` (type casting)
@@ -57,6 +59,56 @@ function isImportOrExport(line) {
 }
 
 /**
+ * Check if a position in code is inside a comment
+ * Handles both single-line (//) and multi-line (/* */) comments
+ */
+function isInsideComment(code, matchIndex) {
+  // Check the line for single-line comment
+  const lineStart = code.lastIndexOf("\n", matchIndex) + 1;
+  const lineUpToMatch = code.substring(lineStart, matchIndex);
+
+  // Check if there's a // before the match on this line
+  const singleLineCommentIndex = lineUpToMatch.indexOf("//");
+  if (singleLineCommentIndex !== -1) {
+    // Make sure the // isn't inside a string
+    const beforeComment = lineUpToMatch.substring(0, singleLineCommentIndex);
+    const quoteCount = (beforeComment.match(/"/g) || []).length;
+    const singleQuoteCount = (beforeComment.match(/'/g) || []).length;
+    const backtickCount = (beforeComment.match(/`/g) || []).length;
+
+    // If even number of quotes, the // is not inside a string
+    if (quoteCount % 2 === 0 && singleQuoteCount % 2 === 0 && backtickCount % 2 === 0) {
+      return true;
+    }
+  }
+
+  // Check for multi-line comments
+  // Find the last /* before matchIndex
+  let searchStart = 0;
+  let lastOpenComment = -1;
+  let lastCloseComment = -1;
+
+  while (true) {
+    const openIdx = code.indexOf("/*", searchStart);
+    if (openIdx === -1 || openIdx >= matchIndex) break;
+    lastOpenComment = openIdx;
+    searchStart = openIdx + 2;
+  }
+
+  if (lastOpenComment !== -1) {
+    // Find the closing */ after the last /*
+    lastCloseComment = code.indexOf("*/", lastOpenComment + 2);
+
+    // If no closing or closing is after our match, we're inside a comment
+    if (lastCloseComment === -1 || lastCloseComment > matchIndex) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Scan code for type casting patterns
  */
 function scanForTypeCasting(code) {
@@ -71,6 +123,11 @@ function scanForTypeCasting(code) {
 
       // Skip import/export statements - 'as' in those contexts is aliasing, not casting
       if (isImportOrExport(line)) {
+        continue;
+      }
+
+      // Skip matches inside comments
+      if (isInsideComment(code, match.index)) {
         continue;
       }
 

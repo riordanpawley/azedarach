@@ -1,0 +1,687 @@
+// Configuration loading and schema
+
+import gleam/dynamic/decode.{type Decoder}
+import gleam/json
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/string
+import simplifile
+
+// Main config type
+pub type Config {
+  Config(
+    worktree: WorktreeConfig,
+    session: SessionConfig,
+    dev_server: DevServerConfig,
+    git: GitConfig,
+    pr: PrConfig,
+    beads: BeadsConfig,
+    polling: PollingConfig,
+    gates: GatesConfig,
+    theme: String,
+  )
+}
+
+pub type WorktreeConfig {
+  WorktreeConfig(
+    path_template: String,
+    init_commands: List(String),
+    continue_on_failure: Bool,
+  )
+}
+
+pub type SessionConfig {
+  SessionConfig(
+    shell: String,
+    tmux_prefix: String,
+    background_tasks: List(String),
+  )
+}
+
+pub type DevServerConfig {
+  DevServerConfig(
+    servers: List(ServerDefinition),
+    port_pattern: Option(String),
+  )
+}
+
+pub type ServerDefinition {
+  ServerDefinition(
+    name: String,
+    command: String,
+    ports: List(#(String, Int)),
+    cwd: Option(String),
+  )
+}
+
+pub type GitConfig {
+  GitConfig(
+    workflow_mode: WorkflowMode,
+    push_branch_on_create: Bool,
+    push_enabled: Bool,
+    fetch_enabled: Bool,
+    base_branch: String,
+    remote: String,
+    branch_prefix: String,
+  )
+}
+
+pub type WorkflowMode {
+  Local
+  Origin
+}
+
+pub type PrConfig {
+  PrConfig(enabled: Bool, auto_draft: Bool, auto_merge: Bool)
+}
+
+pub type BeadsConfig {
+  BeadsConfig(
+    /// Whether to enable beads sync operations
+    sync_enabled: Bool,
+    /// Path to the bd command (default: "bd")
+    command: String,
+  )
+}
+
+pub type PollingConfig {
+  PollingConfig(beads_refresh_ms: Int, session_monitor_ms: Int)
+}
+
+/// Quality gate definition - a named check with command to run
+pub type GateDefinition {
+  GateDefinition(
+    name: String,
+    command: String,
+    args: List(String),
+    fix_args: Option(List(String)),  // Optional fix command args
+    advisory: Bool,  // If true, failure is warning not error
+  )
+}
+
+pub type GatesConfig {
+  GatesConfig(gates: List(GateDefinition))
+}
+
+pub type ConfigError {
+  FileNotFound(path: String)
+  ParseError(message: String)
+  ValidationError(message: String)
+}
+
+pub fn error_to_string(err: ConfigError) -> String {
+  case err {
+    FileNotFound(path) -> "Config file not found: " <> path
+    ParseError(msg) -> "Failed to parse config: " <> msg
+    ValidationError(msg) -> "Invalid config: " <> msg
+  }
+}
+
+pub fn load(project_path: Option(String)) -> Result(Config, ConfigError) {
+  let base_path = option.unwrap(project_path, ".")
+  let config_path = base_path <> "/.azedarach.json"
+
+  case simplifile.read(config_path) {
+    Ok(content) -> parse_config(content)
+    Error(_) -> Ok(default_config())
+  }
+}
+
+pub fn default_config() -> Config {
+  Config(
+    worktree: WorktreeConfig(
+      path_template: "../{project}-{bead-id}",
+      init_commands: ["direnv allow"],
+      continue_on_failure: True,
+    ),
+    session: SessionConfig(
+      shell: "zsh",
+      tmux_prefix: "C-a",
+      background_tasks: [],
+    ),
+    dev_server: DevServerConfig(
+      servers: [
+        ServerDefinition(
+          name: "default",
+          command: "npm run dev",
+          ports: [#("PORT", 3000)],
+          cwd: None,
+        ),
+      ],
+      port_pattern: None,
+    ),
+    git: GitConfig(
+      workflow_mode: Origin,
+      push_branch_on_create: True,
+      push_enabled: True,
+      fetch_enabled: True,
+      base_branch: "main",
+      remote: "origin",
+      branch_prefix: "az-",
+    ),
+    pr: PrConfig(enabled: True, auto_draft: True, auto_merge: False),
+    beads: BeadsConfig(sync_enabled: True, command: "bd"),
+    polling: PollingConfig(beads_refresh_ms: 30_000, session_monitor_ms: 500),
+    gates: default_gates_config(),
+    theme: "catppuccin-macchiato",
+  )
+}
+
+/// Default quality gates - can be overridden per project
+pub fn default_gates_config() -> GatesConfig {
+  GatesConfig(gates: [
+    GateDefinition(
+      name: "Type-check",
+      command: "bun",
+      args: ["run", "type-check"],
+      fix_args: None,
+      advisory: False,
+    ),
+    GateDefinition(
+      name: "Lint",
+      command: "bun",
+      args: ["run", "lint"],
+      fix_args: Some(["run", "fix"]),
+      advisory: True,  // Lint failures are warnings
+    ),
+    GateDefinition(
+      name: "Test",
+      command: "bun",
+      args: ["run", "test"],
+      fix_args: None,
+      advisory: False,
+    ),
+    GateDefinition(
+      name: "Build",
+      command: "bun",
+      args: ["run", "build"],
+      fix_args: None,
+      advisory: False,
+    ),
+  ])
+}
+
+fn parse_config(content: String) -> Result(Config, ConfigError) {
+  case json.parse(from: content, using: config_decoder()) {
+    Ok(cfg) -> Ok(cfg)
+    Error(e) -> Error(ParseError(string.inspect(e)))
+  }
+}
+
+// ============================================================================
+// Decoders
+// ============================================================================
+
+fn config_decoder() -> Decoder(Config) {
+  let defaults = default_config()
+
+  // New API: optional_field(key, default, decoder, next)
+  use worktree <- decode.optional_field(
+    "worktree",
+    defaults.worktree,
+    worktree_decoder(),
+  )
+  use session <- decode.optional_field(
+    "session",
+    defaults.session,
+    session_decoder(),
+  )
+  use dev_server <- decode.optional_field(
+    "devServer",
+    defaults.dev_server,
+    dev_server_decoder(),
+  )
+  use git <- decode.optional_field("git", defaults.git, git_decoder())
+  use pr <- decode.optional_field("pr", defaults.pr, pr_decoder())
+  use beads <- decode.optional_field("beads", defaults.beads, beads_decoder())
+  use polling <- decode.optional_field(
+    "polling",
+    defaults.polling,
+    polling_decoder(),
+  )
+  use gates <- decode.optional_field(
+    "gates",
+    defaults.gates,
+    gates_decoder(),
+  )
+  use theme <- decode.optional_field("theme", defaults.theme, decode.string)
+
+  decode.success(Config(
+    worktree:,
+    session:,
+    dev_server:,
+    git:,
+    pr:,
+    beads:,
+    polling:,
+    gates:,
+    theme:,
+  ))
+}
+
+fn worktree_decoder() -> Decoder(WorktreeConfig) {
+  use path_template <- decode.field("pathTemplate", decode.string)
+  use init_commands <- decode.field("initCommands", decode.list(decode.string))
+  use continue_on_failure <- decode.optional_field(
+    "continueOnFailure",
+    True,
+    decode.bool,
+  )
+
+  decode.success(WorktreeConfig(path_template:, init_commands:, continue_on_failure:))
+}
+
+fn session_decoder() -> Decoder(SessionConfig) {
+  use shell <- decode.optional_field("shell", "zsh", decode.string)
+  use tmux_prefix <- decode.optional_field("tmuxPrefix", "C-a", decode.string)
+  use background_tasks <- decode.optional_field(
+    "backgroundTasks",
+    [],
+    decode.list(decode.string),
+  )
+
+  decode.success(SessionConfig(shell:, tmux_prefix:, background_tasks:))
+}
+
+fn dev_server_decoder() -> Decoder(DevServerConfig) {
+  use servers <- decode.optional_field(
+    "servers",
+    default_config().dev_server.servers,
+    decode.list(server_definition_decoder()),
+  )
+  use port_pattern <- decode.optional_field(
+    "portPattern",
+    None,
+    decode.optional(decode.string),
+  )
+
+  decode.success(DevServerConfig(servers:, port_pattern:))
+}
+
+fn server_definition_decoder() -> Decoder(ServerDefinition) {
+  use name <- decode.field("name", decode.string)
+  use command <- decode.field("command", decode.string)
+  use ports <- decode.optional_field(
+    "ports",
+    [#("PORT", 3000)],
+    decode.list(port_decoder()),
+  )
+  use cwd <- decode.optional_field(
+    "cwd",
+    None,
+    decode.optional(decode.string),
+  )
+
+  decode.success(ServerDefinition(name:, command:, ports:, cwd:))
+}
+
+fn port_decoder() -> Decoder(#(String, Int)) {
+  use name <- decode.field("name", decode.string)
+  use port <- decode.field("port", decode.int)
+  decode.success(#(name, port))
+}
+
+fn git_decoder() -> Decoder(GitConfig) {
+  use workflow_mode <- decode.optional_field(
+    "workflowMode",
+    Origin,
+    workflow_mode_decoder(),
+  )
+  use push_branch_on_create <- decode.optional_field(
+    "pushBranchOnCreate",
+    True,
+    decode.bool,
+  )
+  use push_enabled <- decode.optional_field("pushEnabled", True, decode.bool)
+  use fetch_enabled <- decode.optional_field("fetchEnabled", True, decode.bool)
+  use base_branch <- decode.optional_field("baseBranch", "main", decode.string)
+  use remote <- decode.optional_field("remote", "origin", decode.string)
+  use branch_prefix <- decode.optional_field(
+    "branchPrefix",
+    "az-",
+    decode.string,
+  )
+
+  decode.success(GitConfig(
+    workflow_mode:,
+    push_branch_on_create:,
+    push_enabled:,
+    fetch_enabled:,
+    base_branch:,
+    remote:,
+    branch_prefix:,
+  ))
+}
+
+fn workflow_mode_decoder() -> Decoder(WorkflowMode) {
+  use mode <- decode.then(decode.string)
+  case mode {
+    "local" -> decode.success(Local)
+    "origin" -> decode.success(Origin)
+    _ -> decode.success(Origin)
+  }
+}
+
+fn pr_decoder() -> Decoder(PrConfig) {
+  use enabled <- decode.optional_field("enabled", True, decode.bool)
+  use auto_draft <- decode.optional_field("autoDraft", True, decode.bool)
+  use auto_merge <- decode.optional_field("autoMerge", False, decode.bool)
+
+  decode.success(PrConfig(enabled:, auto_draft:, auto_merge:))
+}
+
+fn beads_decoder() -> Decoder(BeadsConfig) {
+  use sync_enabled <- decode.optional_field("syncEnabled", True, decode.bool)
+  use command <- decode.optional_field("command", "bd", decode.string)
+
+  decode.success(BeadsConfig(sync_enabled:, command:))
+}
+
+fn polling_decoder() -> Decoder(PollingConfig) {
+  use beads_refresh_ms <- decode.optional_field(
+    "beadsRefresh",
+    30_000,
+    decode.int,
+  )
+  use session_monitor_ms <- decode.optional_field(
+    "sessionMonitor",
+    500,
+    decode.int,
+  )
+
+  decode.success(PollingConfig(beads_refresh_ms:, session_monitor_ms:))
+}
+
+fn gates_decoder() -> Decoder(GatesConfig) {
+  use gates <- decode.optional_field(
+    "gates",
+    default_gates_config().gates,
+    decode.list(gate_definition_decoder()),
+  )
+
+  decode.success(GatesConfig(gates:))
+}
+
+fn gate_definition_decoder() -> Decoder(GateDefinition) {
+  use name <- decode.field("name", decode.string)
+  use command <- decode.field("command", decode.string)
+  use args <- decode.field("args", decode.list(decode.string))
+  use fix_args <- decode.optional_field(
+    "fixArgs",
+    None,
+    decode.optional(decode.list(decode.string)),
+  )
+  use advisory <- decode.optional_field("advisory", False, decode.bool)
+
+  decode.success(GateDefinition(name:, command:, args:, fix_args:, advisory:))
+}
+
+// ============================================================================
+// Encoders
+// ============================================================================
+
+pub fn encode_config(cfg: Config) -> String {
+  json.to_string(config_to_json(cfg))
+}
+
+fn config_to_json(cfg: Config) -> json.Json {
+  json.object([
+    #("worktree", worktree_to_json(cfg.worktree)),
+    #("session", session_to_json(cfg.session)),
+    #("devServer", dev_server_to_json(cfg.dev_server)),
+    #("git", git_to_json(cfg.git)),
+    #("pr", pr_to_json(cfg.pr)),
+    #("beads", beads_to_json(cfg.beads)),
+    #("polling", polling_to_json(cfg.polling)),
+    #("gates", gates_to_json(cfg.gates)),
+    #("theme", json.string(cfg.theme)),
+  ])
+}
+
+fn worktree_to_json(wt: WorktreeConfig) -> json.Json {
+  json.object([
+    #("pathTemplate", json.string(wt.path_template)),
+    #("initCommands", json.array(wt.init_commands, json.string)),
+    #("continueOnFailure", json.bool(wt.continue_on_failure)),
+  ])
+}
+
+fn session_to_json(sess: SessionConfig) -> json.Json {
+  json.object([
+    #("shell", json.string(sess.shell)),
+    #("tmuxPrefix", json.string(sess.tmux_prefix)),
+    #("backgroundTasks", json.array(sess.background_tasks, json.string)),
+  ])
+}
+
+fn dev_server_to_json(ds: DevServerConfig) -> json.Json {
+  let base = [#("servers", json.array(ds.servers, server_definition_to_json))]
+  let with_pattern = case ds.port_pattern {
+    Some(p) -> list.append(base, [#("portPattern", json.string(p))])
+    None -> base
+  }
+  json.object(with_pattern)
+}
+
+fn server_definition_to_json(sd: ServerDefinition) -> json.Json {
+  let base = [
+    #("name", json.string(sd.name)),
+    #("command", json.string(sd.command)),
+    #("ports", json.array(sd.ports, port_to_json)),
+  ]
+  let with_cwd = case sd.cwd {
+    Some(c) -> list.append(base, [#("cwd", json.string(c))])
+    None -> base
+  }
+  json.object(with_cwd)
+}
+
+fn port_to_json(port: #(String, Int)) -> json.Json {
+  json.object([
+    #("name", json.string(port.0)),
+    #("port", json.int(port.1)),
+  ])
+}
+
+fn git_to_json(git: GitConfig) -> json.Json {
+  json.object([
+    #("workflowMode", workflow_mode_to_json(git.workflow_mode)),
+    #("pushBranchOnCreate", json.bool(git.push_branch_on_create)),
+    #("pushEnabled", json.bool(git.push_enabled)),
+    #("fetchEnabled", json.bool(git.fetch_enabled)),
+    #("baseBranch", json.string(git.base_branch)),
+    #("remote", json.string(git.remote)),
+    #("branchPrefix", json.string(git.branch_prefix)),
+  ])
+}
+
+fn workflow_mode_to_json(mode: WorkflowMode) -> json.Json {
+  case mode {
+    Local -> json.string("local")
+    Origin -> json.string("origin")
+  }
+}
+
+fn pr_to_json(pr: PrConfig) -> json.Json {
+  json.object([
+    #("enabled", json.bool(pr.enabled)),
+    #("autoDraft", json.bool(pr.auto_draft)),
+    #("autoMerge", json.bool(pr.auto_merge)),
+  ])
+}
+
+fn beads_to_json(beads: BeadsConfig) -> json.Json {
+  json.object([
+    #("syncEnabled", json.bool(beads.sync_enabled)),
+    #("command", json.string(beads.command)),
+  ])
+}
+
+fn polling_to_json(polling: PollingConfig) -> json.Json {
+  json.object([
+    #("beadsRefresh", json.int(polling.beads_refresh_ms)),
+    #("sessionMonitor", json.int(polling.session_monitor_ms)),
+  ])
+}
+
+fn gates_to_json(gates: GatesConfig) -> json.Json {
+  json.object([
+    #("gates", json.array(gates.gates, gate_definition_to_json)),
+  ])
+}
+
+fn gate_definition_to_json(gate: GateDefinition) -> json.Json {
+  let base = [
+    #("name", json.string(gate.name)),
+    #("command", json.string(gate.command)),
+    #("args", json.array(gate.args, json.string)),
+    #("advisory", json.bool(gate.advisory)),
+  ]
+  let with_fix = case gate.fix_args {
+    Some(args) -> list.append(base, [#("fixArgs", json.array(args, json.string))])
+    None -> base
+  }
+  json.object(with_fix)
+}
+
+// ============================================================================
+// Save
+// ============================================================================
+
+/// Save config to project path
+pub fn save(cfg: Config, project_path: Option(String)) -> Result(Nil, ConfigError) {
+  let base_path = option.unwrap(project_path, ".")
+  let config_path = base_path <> "/.azedarach.json"
+  let json_string = encode_config(cfg)
+
+  case simplifile.write(config_path, json_string) {
+    Ok(_) -> Ok(Nil)
+    Error(_) -> Error(ParseError("Failed to write config to " <> config_path))
+  }
+}
+
+// ============================================================================
+// Editable Settings
+// ============================================================================
+
+/// Definition of an editable setting
+pub type SettingDefinition {
+  SettingDefinition(
+    key: String,
+    label: String,
+    get_value: fn(Config) -> SettingValue,
+    toggle: fn(Config) -> Config,
+  )
+}
+
+/// Setting value can be bool or string
+pub type SettingValue {
+  BoolValue(Bool)
+  StringValue(String)
+}
+
+/// Format a setting value for display
+pub fn setting_value_to_string(value: SettingValue) -> String {
+  case value {
+    BoolValue(True) -> "yes"
+    BoolValue(False) -> "no"
+    StringValue(s) -> s
+  }
+}
+
+/// All editable settings - matching TypeScript EDITABLE_SETTINGS
+pub fn editable_settings() -> List(SettingDefinition) {
+  [
+    SettingDefinition(
+      key: "pushBranchOnCreate",
+      label: "Push on Create",
+      get_value: fn(c) { BoolValue(c.git.push_branch_on_create) },
+      toggle: fn(c) {
+        Config(
+          ..c,
+          git: GitConfig(..c.git, push_branch_on_create: !c.git.push_branch_on_create),
+        )
+      },
+    ),
+    SettingDefinition(
+      key: "pushEnabled",
+      label: "Git Push",
+      get_value: fn(c) { BoolValue(c.git.push_enabled) },
+      toggle: fn(c) {
+        Config(..c, git: GitConfig(..c.git, push_enabled: !c.git.push_enabled))
+      },
+    ),
+    SettingDefinition(
+      key: "fetchEnabled",
+      label: "Git Fetch",
+      get_value: fn(c) { BoolValue(c.git.fetch_enabled) },
+      toggle: fn(c) {
+        Config(..c, git: GitConfig(..c.git, fetch_enabled: !c.git.fetch_enabled))
+      },
+    ),
+    SettingDefinition(
+      key: "prEnabled",
+      label: "PR Enabled",
+      get_value: fn(c) { BoolValue(c.pr.enabled) },
+      toggle: fn(c) {
+        Config(..c, pr: PrConfig(..c.pr, enabled: !c.pr.enabled))
+      },
+    ),
+    SettingDefinition(
+      key: "autoDraft",
+      label: "Auto Draft PR",
+      get_value: fn(c) { BoolValue(c.pr.auto_draft) },
+      toggle: fn(c) {
+        Config(..c, pr: PrConfig(..c.pr, auto_draft: !c.pr.auto_draft))
+      },
+    ),
+    SettingDefinition(
+      key: "autoMerge",
+      label: "Auto Merge PR",
+      get_value: fn(c) { BoolValue(c.pr.auto_merge) },
+      toggle: fn(c) {
+        Config(..c, pr: PrConfig(..c.pr, auto_merge: !c.pr.auto_merge))
+      },
+    ),
+    SettingDefinition(
+      key: "beadsSyncEnabled",
+      label: "Beads Sync",
+      get_value: fn(c) { BoolValue(c.beads.sync_enabled) },
+      toggle: fn(c) {
+        Config(..c, beads: BeadsConfig(..c.beads, sync_enabled: !c.beads.sync_enabled))
+      },
+    ),
+    SettingDefinition(
+      key: "workflowMode",
+      label: "Workflow Mode",
+      get_value: fn(c) {
+        case c.git.workflow_mode {
+          Local -> StringValue("local")
+          Origin -> StringValue("origin")
+        }
+      },
+      toggle: fn(c) {
+        let new_mode = case c.git.workflow_mode {
+          Local -> Origin
+          Origin -> Local
+        }
+        Config(..c, git: GitConfig(..c.git, workflow_mode: new_mode))
+      },
+    ),
+    SettingDefinition(
+      key: "theme",
+      label: "Theme",
+      get_value: fn(c) { StringValue(c.theme) },
+      toggle: fn(c) {
+        // Cycle between available themes
+        let new_theme = case c.theme {
+          "catppuccin-macchiato" -> "catppuccin-mocha"
+          "catppuccin-mocha" -> "catppuccin-latte"
+          "catppuccin-latte" -> "catppuccin-frappe"
+          _ -> "catppuccin-macchiato"
+        }
+        Config(..c, theme: new_theme)
+      },
+    ),
+  ]
+}

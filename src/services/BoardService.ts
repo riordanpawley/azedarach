@@ -195,6 +195,26 @@ const filterTasks = (
 }
 
 // ============================================================================
+// Cache Types
+// ============================================================================
+
+/** TTL for git status cache in milliseconds (2 seconds) */
+const GIT_STATUS_CACHE_TTL_MS = 2000
+
+/**
+ * Cached git status entry with timestamp
+ */
+interface CachedGitStatus {
+	readonly status: GitStatus & { hasMergeConflict: boolean }
+	readonly timestamp: number
+}
+
+/**
+ * Git status cache keyed by worktree path
+ */
+type GitStatusCache = Map<string, CachedGitStatus>
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -236,6 +256,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
+		// Register with diagnostics
+		yield* diagnostics.trackService("BoardService", "5s beads polling + session state merge")
 
 		yield* diagnostics.trackService("BoardService", "Event-driven refresh with per-project cache")
 
@@ -250,6 +272,48 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
+
+		// Git status cache to avoid redundant git commands
+		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
+
+		/**
+		 * Get git status with caching
+		 *
+		 * Returns cached result if within TTL, otherwise fetches fresh status
+		 * and updates the cache.
+		 */
+		const getCachedGitStatus = (
+			worktreePath: string,
+			baseBranch: string,
+			showLineChanges: boolean,
+		) =>
+			Effect.gen(function* () {
+				const now = Date.now()
+				const cache = yield* Ref.get(gitStatusCache)
+				const cached = cache.get(worktreePath)
+
+				// Return cached value if still valid
+				if (cached && now - cached.timestamp < GIT_STATUS_CACHE_TTL_MS) {
+					return cached.status
+				}
+
+				// Fetch fresh status
+				const [mergeConflict, status] = yield* Effect.all([
+					checkMergeConflict(worktreePath),
+					checkGitStatus(worktreePath, baseBranch, showLineChanges),
+				])
+
+				const result = { ...status, hasMergeConflict: mergeConflict }
+
+				// Update cache
+				yield* Ref.update(gitStatusCache, (c) => {
+					const newCache = new Map(c)
+					newCache.set(worktreePath, { status: result, timestamp: now })
+					return newCache
+				})
+
+				return result
+			})
 
 		const checkMergeConflict = (worktreePath: string) =>
 			Effect.gen(function* () {
@@ -356,15 +420,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							let gitStatus: GitStatus = {}
 							if (sessionState !== "idle" && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
-								const [mergeConflict, status] = yield* Effect.all([
-									checkMergeConflict(worktreePath),
-									checkGitStatus(worktreePath, baseBranch, showLineChanges),
-								])
-								hasMergeConflict = mergeConflict
-								gitStatus = status
+								// Use cached git status to avoid redundant git commands
+								const cachedStatus = yield* getCachedGitStatus(
+									worktreePath,
+									baseBranch,
+									showLineChanges,
+								)
+								hasMergeConflict = cachedStatus.hasMergeConflict
+								gitStatus = {
+									gitBehindCount: cachedStatus.gitBehindCount,
+									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+									gitAdditions: cachedStatus.gitAdditions,
+									gitDeletions: cachedStatus.gitDeletions,
+								}
 							}
 
-							const baseTask = {
+							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
 								hasMergeConflict,
@@ -394,12 +465,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							return baseTask
 						}),
 					),
-					{ concurrency: "unbounded" },
-				).pipe(
-					Effect.map(
-						(list) =>
-							list.filter((t): t is NonNullable<typeof t> => t !== null) as TaskWithSession[],
-					),
+					{ concurrency: 4 },
 				)
 
 				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)

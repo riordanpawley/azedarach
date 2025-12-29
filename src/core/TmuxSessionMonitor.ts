@@ -70,7 +70,7 @@ export class TmuxSessionMonitorError extends Data.TaggedError("TmuxSessionMonito
 /**
  * Polling interval for watching tmux sessions
  */
-const POLL_INTERVAL_MS = 500
+const POLL_INTERVAL_MS = 1000
 
 // ============================================================================
 // Service Definition
