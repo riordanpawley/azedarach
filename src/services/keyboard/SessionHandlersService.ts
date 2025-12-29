@@ -110,6 +110,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 * If the task has attached images, their paths are included so Claude
 			 * can use the Read tool to view them.
 			 *
+			 * If the task has an existing worktree (orphaned), includes additional
+			 * context about checking git status and continuing from previous work.
+			 *
 			 * This helps Claude understand that it should work on a specific beads issue.
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
@@ -151,6 +154,16 @@ Before starting implementation:
 
 Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
+					// If resuming work on an existing worktree, add context about checking git state
+					if (task.hasWorktree) {
+						initialPrompt += `
+
+NOTE: This worktree has existing work. Check:
+- \`git status\` to see uncommitted changes
+- \`git log --oneline -5\` to see recent commits
+- Read the design notes on the bead for context from previous sessions`
+					}
+
 					// Check for attached images and include their paths
 					// This allows Claude to use the Read tool to view them
 					const attachments = yield* imageAttachment
@@ -174,7 +187,12 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 							})
 							.pipe(
 								Effect.tap(() =>
-									toast.show("success", `Started session for ${task.id} with prompt`),
+									toast.show(
+										"success",
+										task.hasWorktree
+											? `Resumed session for ${task.id} on existing worktree`
+											: `Started session for ${task.id} with prompt`,
+									),
 								),
 								Effect.catchAll(helpers.showErrorToast("Failed to start")),
 							),
@@ -187,6 +205,10 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 			 * Starts Claude with a detailed prompt AND the --dangerously-skip-permissions flag.
 			 * This allows Claude to run without permission prompts - useful for trusted tasks
 			 * but should be used with caution.
+			 *
+			 * If the task has an existing worktree (orphaned), includes additional
+			 * context about checking git status and continuing from previous work.
+			 *
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
 			 */
@@ -220,6 +242,16 @@ Before starting implementation:
 
 Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
 
+					// If resuming work on an existing worktree, add context about checking git state
+					if (task.hasWorktree) {
+						initialPrompt += `
+
+NOTE: This worktree has existing work. Check:
+- \`git status\` to see uncommitted changes
+- \`git log --oneline -5\` to see recent commits
+- Read the design notes on the bead for context from previous sessions`
+					}
+
 					// Check for attached images and include their paths
 					const attachments = yield* imageAttachment
 						.list(task.id)
@@ -243,7 +275,12 @@ Goal: Make this bead self-sufficient so any future session could pick it up with
 							})
 							.pipe(
 								Effect.tap(() =>
-									toast.show("success", `Started session for ${task.id} (skip-permissions)`),
+									toast.show(
+										"success",
+										task.hasWorktree
+											? `Resumed session for ${task.id} (skip-permissions)`
+											: `Started session for ${task.id} (skip-permissions)`,
+									),
 								),
 								Effect.catchAll(helpers.showErrorToast("Failed to start")),
 							),

@@ -14,7 +14,7 @@ import { formatElapsedMs } from "../services/ClockService.js"
 import { currentAttachmentsAtom, detailScrollAtom, epicChildrenAtom } from "./atoms.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
-import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS } from "./types.js"
+import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
 
 // Panel chrome heights for maxHeight calculation
 const PANEL_CHROME_HEIGHT = 8 // borders (2) + padding (2) + header (3) + footer (1)
@@ -222,11 +222,20 @@ export const DetailPanel = (props: DetailPanelProps) => {
 				break
 		}
 
+		// Add worktree-specific actions when worktree exists but no session
+		if (props.task.hasWorktree && props.task.sessionState === "idle") {
+			actions.push("d - Cleanup worktree (remove orphaned worktree)")
+		}
+
 		return actions
-	}, [props.task.status])
+	}, [props.task.status, props.task.hasWorktree, props.task.sessionState])
+
+	// Show worktree indicator for idle tasks with worktrees
+	const worktreeIndicator =
+		props.task.hasWorktree && props.task.sessionState === "idle" ? WORKTREE_INDICATOR : ""
 
 	// Build header line
-	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}`
+	const headerLine = `  ${props.task.id} [${props.task.issue_type}]${indicator ? ` ${indicator}` : ""}${worktreeIndicator ? ` ${worktreeIndicator}` : ""}`
 
 	return (
 		<box
@@ -365,6 +374,37 @@ export const DetailPanel = (props: DetailPanelProps) => {
 									? "  j/k:nav  v:preview  o:open  x:remove  i:add  Esc:close"
 									: "  j/k:select  i:add  Esc:close"}
 							</text>
+							<text> </text>
+						</box>
+					)}
+
+					{/* Worktree Status - show when worktree exists (even if session is idle) */}
+					{props.task.hasWorktree && (
+						<box flexDirection="column">
+							<text fg={theme.blue} attributes={ATTR_BOLD}>
+								{"Worktree:"}
+							</text>
+							<box flexDirection="row" gap={2}>
+								<text fg={theme.text}>{"📁 Exists"}</text>
+								{props.task.hasUncommittedChanges && (
+									<text fg={theme.red}>{"● Uncommitted changes"}</text>
+								)}
+								{props.task.gitBehindCount !== undefined && props.task.gitBehindCount > 0 && (
+									<text fg={theme.yellow}>{`↓${props.task.gitBehindCount} behind`}</text>
+								)}
+								{props.task.hasMergeConflict && <text fg={theme.red}>{"⚔️ Merge conflict"}</text>}
+							</box>
+							{(props.task.gitAdditions !== undefined || props.task.gitDeletions !== undefined) && (
+								<box flexDirection="row" gap={1}>
+									<text fg={theme.subtext0}>{"Changes:"}</text>
+									{props.task.gitAdditions !== undefined && props.task.gitAdditions > 0 && (
+										<text fg={theme.green}>{`+${props.task.gitAdditions}`}</text>
+									)}
+									{props.task.gitDeletions !== undefined && props.task.gitDeletions > 0 && (
+										<text fg={theme.red}>{`-${props.task.gitDeletions}`}</text>
+									)}
+								</box>
+							)}
 							<text> </text>
 						</box>
 					)}
