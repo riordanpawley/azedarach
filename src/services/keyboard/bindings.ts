@@ -457,14 +457,6 @@ done
 		),
 	},
 	{
-		key: "v",
-		mode: "action",
-		description: "View dev server",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.devServerHandlers.attachDevServer())),
-		),
-	},
-	{
 		key: "S-r",
 		mode: "action",
 		description: "Resume session",
