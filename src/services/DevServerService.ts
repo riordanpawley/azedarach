@@ -33,10 +33,10 @@ const HEALTH_CHECK_INTERVAL = 5000
 const PORT_CHECK_TIMEOUT_MS = 1000
 
 /**
- * Check if a port is open by attempting a TCP connection.
+ * Check if a port is open on a specific host by attempting a TCP connection.
  * Returns true if connection succeeds, false otherwise.
  */
-const checkPortOpen = (port: number, host = "127.0.0.1"): Effect.Effect<boolean> =>
+const checkPortOpenOnHost = (port: number, host: string): Effect.Effect<boolean> =>
 	Effect.async<boolean>((resume) => {
 		const socket = Bun.connect({
 			hostname: host,
@@ -72,6 +72,16 @@ const checkPortOpen = (port: number, host = "127.0.0.1"): Effect.Effect<boolean>
 				resume(Effect.succeed(false))
 			})
 	})
+
+/**
+ * Check if a port is open on localhost (either IPv4 or IPv6).
+ * Checks both 127.0.0.1 and ::1 in parallel, returns true if either succeeds.
+ * This handles dev servers that bind to IPv6-only (like Bun's default).
+ */
+const checkPortOpen = (port: number): Effect.Effect<boolean> =>
+	Effect.all([checkPortOpenOnHost(port, "127.0.0.1"), checkPortOpenOnHost(port, "::1")], {
+		concurrency: "unbounded",
+	}).pipe(Effect.map(([ipv4, ipv6]) => ipv4 || ipv6))
 
 export type DevServerStatus = "idle" | "starting" | "running" | "stopped" | "error"
 
