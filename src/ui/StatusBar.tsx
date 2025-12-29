@@ -50,8 +50,6 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "c", action: "Create" },
 		{ key: "Tab", action: "View" },
 		{ key: "r", action: "Refresh" },
-		{ key: "a", action: "VC" },
-		{ key: ":", action: "Cmd" },
 		{ key: "C-d/u", action: "Page" },
 		{ key: "q", action: "Quit" },
 	],
@@ -86,10 +84,6 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 	search: [
 		{ key: "Enter", action: "Confirm" },
 		{ key: "Esc", action: "Clear" },
-	],
-	command: [
-		{ key: "Enter", action: "Send" },
-		{ key: "Esc", action: "Cancel" },
 	],
 	sort: [
 		{ key: "s", action: "Session" },
@@ -167,8 +161,6 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.teal
 			case "filter":
 				return theme.lavender
-			case "command":
-				return theme.pink
 			case "mergeSelect":
 				return theme.flamingo
 			default:
@@ -193,8 +185,6 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SRT"
 			case "filter":
 				return "FLT"
-			case "command":
-				return "CMD"
 			case "mergeSelect":
 				return "MRG"
 			default:
