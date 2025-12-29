@@ -38,6 +38,7 @@ export type OverlayType =
 	| { readonly _tag: "projectSelector" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 	| { readonly _tag: "devServerMenu"; readonly beadId: string; readonly mode: "toggle" | "attach" }
+	| { readonly _tag: "planning" }
 
 /**
  * Hook for managing overlay stack
@@ -114,6 +115,10 @@ export function useOverlays() {
 				push(overlay)
 			},
 
+			showPlanning: () => {
+				push({ _tag: "planning" })
+			},
+
 			dismiss: () => {
 				pop()
 			},
@@ -137,6 +142,7 @@ export function useOverlays() {
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
 			showingDiffViewer: currentOverlay?._tag === "diffViewer",
 			showingDevServerMenu: currentOverlay?._tag === "devServerMenu",
+			showingPlanning: currentOverlay?._tag === "planning",
 		}),
 		[currentOverlay],
 	)

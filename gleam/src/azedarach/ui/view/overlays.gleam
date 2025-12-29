@@ -1,0 +1,759 @@
+// Overlay views - action menu, filter, help, etc.
+
+import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/set
+import gleam/string
+import azedarach/config
+import azedarach/domain/session
+import azedarach/domain/task
+import azedarach/services/image
+import azedarach/ui/model.{type Model, type Overlay}
+import azedarach/ui/theme
+import azedarach/ui/textfield
+import azedarach/ui/view/utils.{
+  type Node, bold_text, bordered_box, dim_text, hbox, styled_text, text, vbox,
+}
+
+pub fn render(overlay: Overlay, model: Model) -> Node {
+  case overlay {
+    model.ActionMenu -> render_action_menu(model)
+    model.SortMenu -> render_sort_menu(model)
+    model.FilterMenu -> render_filter_menu(model)
+    model.StatusFilterMenu -> render_status_filter_menu(model)
+    model.PriorityFilterMenu -> render_priority_filter_menu(model)
+    model.TypeFilterMenu -> render_type_filter_menu(model)
+    model.SessionFilterMenu -> render_session_filter_menu(model)
+    model.HelpOverlay -> render_help(model)
+    model.SettingsOverlay(focus_index) -> render_settings(focus_index, model)
+    model.DiagnosticsOverlay -> render_diagnostics(model)
+    model.LogsViewer -> render_logs(model)
+    model.ProjectSelector -> render_project_selector(model)
+    model.DetailPanel(bead_id) -> render_detail_panel(bead_id, model)
+    model.ImageAttach(bead_id) -> render_image_attach(bead_id, model)
+    model.ImageList(bead_id) -> render_image_list(bead_id, model)
+    model.ImagePreview(path) -> render_image_preview(path, model)
+    model.DevServerMenu(bead_id) -> render_dev_server_menu(bead_id, model)
+    model.DiffViewer(bead_id) -> render_diff_viewer(bead_id, model)
+    model.MergeChoice(bead_id, behind, merge_in_progress) -> render_merge_choice(bead_id, behind, merge_in_progress, model)
+    model.ConfirmDialog(action) -> render_confirm(action, model)
+    model.PlanningOverlay(state) -> render_planning(state, model)
+  }
+}
+
+fn render_action_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  // Build git actions based on workflow mode
+  let git_actions = case model.config.git.workflow_mode {
+    config.Local -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (merge to " <> model.config.git.base_branch <> ")"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+    config.Origin -> [
+      #("u", "Update from " <> model.config.git.base_branch),
+      #("c", "Complete (create PR)"),
+      #("f", "Show diff"),
+      #("d", "Delete/cleanup"),
+    ]
+  }
+
+  let items = [
+    #("Session", [
+      #("s", "Start session"),
+      #("S", "Start+work"),
+      #("!", "Start yolo"),
+      #("a", "Attach"),
+      #("p", "Pause"),
+      #("R", "Resume"),
+      #("x", "Stop"),
+    ]),
+    #("Dev Server", [
+      #("r", "Toggle server"),
+      #("v", "View server"),
+      #("^r", "Restart"),
+    ]),
+    #("Git", git_actions),
+    #("Task", [
+      #("h", "Move left"),
+      #("l", "Move right"),
+    ]),
+  ]
+
+  let sections =
+    list.map(items, fn(section) {
+      let #(title, entries) = section
+      let entry_elements =
+        list.map(entries, fn(entry) {
+          let #(key, desc) = entry
+          hbox([
+            styled_text(" " <> key <> " ", colors.yellow),
+            text(desc),
+          ])
+        })
+      vbox([bold_text(title, colors.mauve), ..entry_elements])
+    })
+
+  overlay_box("Actions", sections, model)
+}
+
+fn render_sort_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("s", "Session status", model.sort_by == model.SortBySession),
+    #("p", "Priority", model.sort_by == model.SortByPriority),
+    #("u", "Updated", model.sort_by == model.SortByUpdated),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, active) = item
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  overlay_box("Sort", entries, model)
+}
+
+fn render_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let status_count = set.size(model.status_filter)
+  let priority_count = set.size(model.priority_filter)
+  let type_count = set.size(model.type_filter)
+  let session_count = set.size(model.session_filter)
+
+  let items = [
+    #("s", "Status", status_count),
+    #("p", "Priority", priority_count),
+    #("t", "Type", type_count),
+    #("S", "Session state", session_count),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, count) = item
+      let count_text = case count {
+        0 -> ""
+        n -> " (" <> int.to_string(n) <> ")"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        text(desc),
+        styled_text(count_text, colors.green),
+        styled_text(" →", colors.subtext0),
+      ])
+    })
+
+  let extra = [
+    hbox([
+      styled_text(" e ", colors.yellow),
+      text("Hide epic children"),
+      styled_text(
+        case model.hide_epic_children {
+          True -> " ●"
+          False -> ""
+        },
+        colors.green,
+      ),
+    ]),
+    hbox([styled_text(" c ", colors.yellow), text("Clear all")]),
+  ]
+
+  overlay_box("Filter", list.append(entries, extra), model)
+}
+
+fn render_status_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("o", "Open", task.Open),
+    #("i", "In Progress", task.InProgress),
+    #("r", "Review", task.Review),
+    #("d", "Done", task.Done),
+    #("b", "Blocked", task.Blocked),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, status) = item
+      let active = set.contains(model.status_filter, status)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Status", list.append(entries, footer), model)
+}
+
+fn render_priority_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("1", "P1 (Critical)", task.P1),
+    #("2", "P2 (High)", task.P2),
+    #("3", "P3 (Medium)", task.P3),
+    #("4", "P4 (Low)", task.P4),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, priority) = item
+      let active = set.contains(model.priority_filter, priority)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Priority", list.append(entries, footer), model)
+}
+
+fn render_type_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("t", "Task", task.TaskType),
+    #("b", "Bug", task.Bug),
+    #("e", "Epic", task.Epic),
+    #("f", "Feature", task.Feature),
+    #("c", "Chore", task.Chore),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, issue_type) = item
+      let active = set.contains(model.type_filter, issue_type)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Type", list.append(entries, footer), model)
+}
+
+fn render_session_filter_menu(model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    #("i", "Idle", session.Idle),
+    #("b", "Busy", session.Busy),
+    #("w", "Waiting", session.Waiting),
+    #("d", "Done", session.Done),
+    #("e", "Error", session.Error),
+    #("p", "Paused", session.Paused),
+  ]
+
+  let entries =
+    list.map(items, fn(item) {
+      let #(key, desc, state) = item
+      let active = set.contains(model.session_filter, state)
+      let indicator = case active {
+        True -> "●"
+        False -> "○"
+      }
+      hbox([
+        styled_text(" " <> key <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        text(desc),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("Esc: back  q: close"),
+  ]
+
+  overlay_box("Filter › Session", list.append(entries, footer), model)
+}
+
+fn render_help(model: Model) -> Node {
+  let colors = model.colors
+
+  let sections = [
+    #("Navigation", [
+      "h/j/k/l or arrows  Move cursor",
+      "Ctrl+Shift+d/u     Page down/up",
+      "Enter              View details",
+      "q                  Quit",
+    ]),
+    #("Modes", [
+      "Space              Action menu",
+      "/                  Search",
+      "f                  Filter",
+      ",                  Sort",
+      "v                  Select mode",
+      "g                  Goto mode",
+    ]),
+    #("Goto (g+)", [
+      "g                  First in column",
+      "e                  Last in column",
+      "h/l                First/last column",
+      "p                  Project selector",
+      "w                  Jump labels",
+    ]),
+    #("Quick", [
+      "c                  Create bead",
+      "C                  Create with Claude",
+      "s                  Settings",
+      "d                  Diagnostics",
+      "?                  This help",
+      "R                  Refresh",
+    ]),
+  ]
+
+  let section_elements =
+    list.map(sections, fn(section) {
+      let #(title, lines) = section
+      vbox([
+        bold_text(title, colors.mauve),
+        ..list.map(lines, fn(line) { dim_text("  " <> line) })
+      ])
+    })
+
+  overlay_box("Help", section_elements, model)
+}
+
+fn render_settings(focus_index: Int, model: Model) -> Node {
+  let colors = model.colors
+  let settings = config.editable_settings()
+
+  let entries =
+    list.index_map(settings, fn(setting, idx) {
+      let is_focused = idx == focus_index
+      let value = { setting.get_value }(model.config)
+      let value_str = config.setting_value_to_string(value)
+
+      let indicator = case is_focused {
+        True -> ">"
+        False -> " "
+      }
+
+      let label_color = case is_focused {
+        True -> colors.yellow
+        False -> colors.subtext0
+      }
+      let value_color = case is_focused {
+        True -> colors.green
+        False -> colors.text
+      }
+
+      hbox([
+        styled_text(indicator <> " ", colors.yellow),
+        styled_text(setting.label <> ": ", label_color),
+        styled_text(value_str, value_color),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("j/k: navigate • Space/Enter: toggle • Esc: close"),
+  ]
+
+  overlay_box("Settings", list.append(entries, footer), model)
+}
+
+fn render_diagnostics(model: Model) -> Node {
+  let colors = model.colors
+
+  let stats = [
+    #("Tasks", int.to_string(list.length(model.tasks))),
+    #("Active sessions", int.to_string(dict.size(model.sessions))),
+    #("Dev servers", int.to_string(dict.size(model.dev_servers))),
+    #("Terminal size", int.to_string(model.terminal_size.0) <> "x" <> int.to_string(model.terminal_size.1)),
+  ]
+
+  let entries =
+    list.map(stats, fn(stat) {
+      let #(label, value) = stat
+      hbox([
+        styled_text(label <> ": ", colors.subtext0),
+        styled_text(value, colors.green),
+      ])
+    })
+
+  overlay_box("Diagnostics", entries, model)
+}
+
+fn render_logs(model: Model) -> Node {
+  // Placeholder - would show actual logs
+  overlay_box("Logs", [dim_text("(no logs)")], model)
+}
+
+fn render_project_selector(model: Model) -> Node {
+  let colors = model.colors
+
+  let projects =
+    list.index_map(model.projects, fn(project, idx) {
+      let is_current = Some(project.path) == model.current_project
+      let indicator = case is_current {
+        True -> "●"
+        False -> " "
+      }
+      hbox([
+        styled_text(" " <> int.to_string(idx + 1) <> " ", colors.yellow),
+        styled_text(indicator <> " ", colors.green),
+        styled_text(project.name, colors.text),
+        dim_text(" " <> project.path),
+      ])
+    })
+
+  let footer = [
+    text(""),
+    dim_text("1-9: select • Esc: close"),
+  ]
+
+  case list.is_empty(projects) {
+    True -> overlay_box("Projects", [dim_text("(no projects found)")], model)
+    False -> overlay_box("Select Project", list.append(projects, footer), model)
+  }
+}
+
+fn render_detail_panel(bead_id: String, model: Model) -> Node {
+  let colors = model.colors
+
+  // Find task
+  case list.find(model.tasks, fn(t) { t.id == bead_id }) {
+    Ok(task) -> {
+      let lines = [
+        hbox([styled_text("ID: ", colors.subtext0), text(task.id)]),
+        hbox([styled_text("Title: ", colors.subtext0), text(task.title)]),
+        hbox([styled_text("Status: ", colors.subtext0), text(task.status_display(task.status))]),
+        hbox([styled_text("Priority: ", colors.subtext0), text(task.priority_display(task.priority))]),
+        hbox([styled_text("Type: ", colors.subtext0), text(task.issue_type_to_string(task.issue_type))]),
+        text(""),
+        bold_text("Description:", colors.mauve),
+        dim_text(task.description),
+      ]
+
+      // Add design notes if present
+      let with_notes = case task.design {
+        Some(design) -> list.append(lines, [
+          text(""),
+          bold_text("Design Notes:", colors.mauve),
+          dim_text(design),
+        ])
+        None -> lines
+      }
+
+      overlay_box(bead_id, with_notes, model)
+    }
+    Error(_) -> overlay_box(bead_id, [dim_text("(not found)")], model)
+  }
+}
+
+fn render_image_attach(bead_id: String, model: Model) -> Node {
+  let colors = model.colors
+
+  let items = [
+    hbox([styled_text(" p/v ", colors.yellow), text("Paste from clipboard")]),
+    hbox([styled_text(" f ", colors.yellow), text("Enter file path")]),
+    hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")]),
+  ]
+
+  overlay_box("Attach Image to " <> bead_id, items, model)
+}
+
+fn render_image_list(bead_id: String, model: Model) -> Node {
+  let colors = model.colors
+
+  // Get attachments for this bead
+  let attachments = case image.list(bead_id) {
+    Ok(list) -> list
+    Error(_) -> []
+  }
+
+  case list.is_empty(attachments) {
+    True -> overlay_box("Images for " <> bead_id, [dim_text("(no images attached)")], model)
+    False -> {
+      let entries =
+        list.index_map(attachments, fn(attachment, idx) {
+          let key = int.to_string(idx + 1)
+          hbox([
+            styled_text(" " <> key <> " ", colors.yellow),
+            text(attachment.filename),
+            dim_text(" (" <> attachment.original_path <> ")"),
+          ])
+        })
+
+      let footer = [
+        text(""),
+        dim_text("1-9: open • Shift+1-9: delete • a: attach • Esc: close"),
+      ]
+
+      overlay_box("Images for " <> bead_id, list.append(entries, footer), model)
+    }
+  }
+}
+
+fn render_image_preview(_path: String, model: Model) -> Node {
+  overlay_box("Image Preview", [dim_text("(preview not available in terminal)")], model)
+}
+
+fn render_dev_server_menu(bead_id: String, model: Model) -> Node {
+  // Show configured servers
+  let servers = model.config.dev_server.servers
+  let entries =
+    list.map(servers, fn(s) {
+      hbox([
+        styled_text(s.name, model.colors.text),
+        dim_text(" - " <> s.command),
+      ])
+    })
+
+  overlay_box("Dev Servers for " <> bead_id, entries, model)
+}
+
+fn render_diff_viewer(_bead_id: String, model: Model) -> Node {
+  overlay_box("Diff", [dim_text("(loading diff...)")], model)
+}
+
+fn render_merge_choice(_bead_id: String, behind: Int, merge_in_progress: Bool, model: Model) -> Node {
+  let colors = model.colors
+
+  let status_text = case merge_in_progress, behind {
+    True, _ -> "Merge in progress (conflicts detected)"
+    False, n -> int.to_string(n) <> " commits behind main"
+  }
+
+  let prompt_text = case merge_in_progress {
+    True -> "Resolve conflicts or abort the merge?"
+    False -> "Merge main into your branch before attaching?"
+  }
+
+  let header_items = [
+    text(status_text),
+    text(""),
+    text(prompt_text),
+    text(""),
+  ]
+
+  // Only show "Merge & Attach" if no merge in progress
+  let merge_item = case merge_in_progress {
+    False -> [hbox([styled_text(" m ", colors.yellow), text("Merge & Attach")])]
+    True -> []
+  }
+
+  // "Skip & Attach" becomes just "Attach" when merge in progress
+  let attach_item = case merge_in_progress {
+    True -> [hbox([styled_text(" s ", colors.yellow), text("Attach (keep conflicts)")])]
+    False -> [hbox([styled_text(" s ", colors.yellow), text("Skip & Attach")])]
+  }
+
+  // Only show "Abort Merge" if merge in progress
+  let abort_item = case merge_in_progress {
+    True -> [hbox([styled_text(" a ", colors.red), text("Abort Merge")])]
+    False -> []
+  }
+
+  let footer = [hbox([styled_text(" Esc ", colors.subtext0), text("Cancel")])]
+
+  let items = list.flatten([header_items, merge_item, attach_item, abort_item, footer])
+
+  let title = case merge_in_progress {
+    True -> "⚠ Merge Conflicts"
+    False -> "↓ Branch Behind main"
+  }
+
+  overlay_box(title, items, model)
+}
+
+fn render_confirm(action: model.PendingAction, model: Model) -> Node {
+  let colors = model.colors
+
+  let #(title, description) = case action {
+    model.DeleteWorktreeAction(id) -> #(
+      "Cleanup " <> id <> "?",
+      "This will: kill session, delete worktree, delete branch",
+    )
+    model.DeleteBeadAction(id) -> #(
+      "Delete " <> id <> "?",
+      "This will permanently delete the bead",
+    )
+    model.StopSessionAction(id) -> #(
+      "Stop session " <> id <> "?",
+      "This will kill the tmux session",
+    )
+    model.DeleteImageAction(_bead_id, attachment_id) -> #(
+      "Delete image?",
+      "This will permanently delete the image: " <> attachment_id,
+    )
+  }
+
+  let items = [
+    text(description),
+    text(""),
+    hbox([styled_text(" y ", colors.yellow), text("Confirm")]),
+    hbox([styled_text(" n/Esc ", colors.subtext0), text("Cancel")]),
+  ]
+
+  overlay_box(title, items, model)
+}
+
+fn render_planning(state: model.PlanningOverlayState, model: Model) -> Node {
+  let colors = model.colors
+
+  case state {
+    model.PlanningInput(field) -> {
+      // Render text field with cursor
+      let #(before, cursor_char, after) = textfield.split_at_cursor(field)
+
+      // Build input line with cursor highlight
+      let input_line = hbox([
+        text(before),
+        // Highlight cursor position with inverted colors
+        styled_text(
+          case cursor_char {
+            Some(c) -> c
+            None -> "_"
+          },
+          colors.yellow,
+        ),
+        text(after),
+      ])
+
+      let items = [
+        text("Describe the feature you want to build:"),
+        text(""),
+        input_line,
+        text(""),
+        dim_text("Enter: generate plan • Esc: cancel"),
+        text(""),
+        dim_text("Editing: Alt+←/→ word nav • Alt+Backspace delete word • Ctrl+U clear"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningGenerating(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Generating plan...", colors.yellow),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningReviewing(desc, pass, max_passes) -> {
+      let progress = "[" <> int.to_string(pass) <> "/" <> int.to_string(max_passes) <> "]"
+
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        hbox([
+          styled_text("Reviewing plan... ", colors.yellow),
+          styled_text(progress, colors.green),
+        ]),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningCreatingBeads(desc) -> {
+      let items = [
+        text("Description: " <> string.slice(desc, 0, 50) <> case string.length(desc) > 50 {
+          True -> "..."
+          False -> ""
+        }),
+        text(""),
+        styled_text("Creating beads...", colors.green),
+        text(""),
+        dim_text("a: attach to session • Esc: cancel"),
+      ]
+
+      overlay_box("Planning", items, model)
+    }
+
+    model.PlanningComplete(ids) -> {
+      let count = list.length(ids)
+      let id_items = list.map(ids, fn(id) { text("  • " <> id) })
+      let items = list.flatten([
+        [styled_text("Created " <> int.to_string(count) <> " beads:", colors.green)],
+        [text("")],
+        id_items,
+        [text("")],
+        [dim_text("Enter/Esc: close")],
+      ])
+
+      overlay_box("Planning Complete", items, model)
+    }
+
+    model.PlanningError(message) -> {
+      let items = [
+        styled_text("Error:", colors.red),
+        text(""),
+        text(message),
+        text(""),
+        dim_text("Enter/Esc: close"),
+      ]
+
+      overlay_box("Planning Failed", items, model)
+    }
+  }
+}
+
+// Helper to create overlay box
+fn overlay_box(title: String, content: List(Node), model: Model) -> Node {
+  let colors = model.colors
+  let sem = theme.semantic(colors)
+
+  bordered_box(
+    [bold_text(title, colors.mauve), text(""), ..content],
+    sem.border_focused,
+  )
+}
