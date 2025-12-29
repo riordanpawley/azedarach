@@ -16,13 +16,10 @@ import {
 } from "../../services/EditorService.js"
 import {
 	activeFilterFieldAtom,
-	clearCommandAtom,
 	clearFiltersAtom,
 	clearSearchAtom,
-	commandInputAtom,
 	cycleSortAtom,
 	enterActionAtom,
-	enterCommandAtom,
 	enterFilterAtom,
 	enterGotoAtom,
 	enterJumpAtom,
@@ -38,7 +35,6 @@ import {
 	setPendingJumpKeyAtom,
 	sortConfigAtom,
 	toggleSelectionAtom,
-	updateCommandAtom,
 	updateSearchAtom,
 } from "../atoms.js"
 import type { JumpTarget } from "../types.js"
@@ -73,7 +69,6 @@ export function useEditorMode() {
 	// Derived atoms (selectedIdsAtom, etc.) now return plain values, not Result
 	const selectedIds = useAtomValue(selectedIdsAtom)
 	const searchQuery = useAtomValue(searchQueryAtom)
-	const commandInput = useAtomValue(commandInputAtom)
 	const activeFilterField = useAtomValue(activeFilterFieldAtom)
 
 	// Unwrap mode Result with default
@@ -100,9 +95,6 @@ export function useEditorMode() {
 	const [, enterSearch] = useAtom(enterSearchAtom, { mode: "promise" })
 	const [, updateSearch] = useAtom(updateSearchAtom, { mode: "promise" })
 	const [, clearSearch] = useAtom(clearSearchAtom, { mode: "promise" })
-	const [, enterCommand] = useAtom(enterCommandAtom, { mode: "promise" })
-	const [, updateCommand] = useAtom(updateCommandAtom, { mode: "promise" })
-	const [, clearCommand] = useAtom(clearCommandAtom, { mode: "promise" })
 	const [, exitToNormal] = useAtom(exitToNormalAtom, { mode: "promise" })
 	const [, enterSort] = useAtom(enterSortAtom, { mode: "promise" })
 	const [, cycleSort] = useAtom(cycleSortAtom, { mode: "promise" })
@@ -119,7 +111,6 @@ export function useEditorMode() {
 			isJump: mode._tag === "goto" && mode.gotoSubMode === "jump",
 			isAction: mode._tag === "action",
 			isSearch: mode._tag === "search",
-			isCommand: mode._tag === "command",
 			isSort: mode._tag === "sort",
 			isFilter: mode._tag === "filter",
 			isOrchestrate: mode._tag === "orchestrate",
@@ -178,18 +169,6 @@ export function useEditorMode() {
 				clearSearch()
 			},
 
-			enterCommand: () => {
-				enterCommand()
-			},
-
-			updateCommand: (input: string) => {
-				updateCommand(input)
-			},
-
-			clearCommand: () => {
-				clearCommand()
-			},
-
 			exitToNormal: () => {
 				exitToNormal()
 			},
@@ -221,9 +200,6 @@ export function useEditorMode() {
 			enterSearch,
 			updateSearch,
 			clearSearch,
-			enterCommand,
-			updateCommand,
-			clearCommand,
 			exitToNormal,
 			enterSort,
 			cycleSort,
@@ -237,7 +213,6 @@ export function useEditorMode() {
 		mode,
 		selectedIds,
 		searchQuery,
-		commandInput,
 		pendingJumpKey,
 		jumpLabels,
 		sortConfig,

@@ -85,7 +85,6 @@ export const HelpOverlay = () => {
 				<KeyLine keys="," description="Enter sort mode" />
 				<KeyLine keys="f" description="Enter filter mode" />
 				<KeyLine keys="/" description="Enter search mode" />
-				<KeyLine keys=":" description="Enter command mode (VC REPL)" />
 				<text> </text>
 
 				{/* Select mode section */}

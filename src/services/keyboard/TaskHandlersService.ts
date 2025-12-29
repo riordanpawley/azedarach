@@ -6,7 +6,6 @@
  * - Create bead (c)
  * - Delete bead (D)
  * - Move task between columns (h/l in action mode)
- * - Toggle VC auto-pilot (a in normal mode)
  *
  * Converted from factory pattern to Effect.Service layer.
  */
@@ -15,7 +14,6 @@ import { Effect } from "effect"
 import { BeadEditorService } from "../../core/BeadEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { VCService } from "../../core/VCService.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
@@ -38,7 +36,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			BeadsClient.Default,
 			BeadEditorService.Default,
 			PRWorkflow.Default,
-			VCService.Default,
 			MutationQueue.Default,
 		],
 
@@ -52,7 +49,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const beadsClient = yield* BeadsClient
 			const beadEditor = yield* BeadEditorService
 			const prWorkflow = yield* PRWorkflow
-			const vc = yield* VCService
 			const mutationQueue = yield* MutationQueue
 
 			const doDeleteBead = (taskId: string, hasSession: boolean) =>
@@ -230,22 +226,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 				})
 
-			const toggleVC = () =>
-				vc.toggleAutoPilot().pipe(
-					Effect.tap((status) => {
-						const message =
-							status.status === "running" ? "VC auto-pilot started" : "VC auto-pilot stopped"
-						return toast.show("success", message)
-					}),
-					Effect.catchAll(helpers.showErrorToast("Failed to toggle VC")),
-				)
-
 			return {
 				editBead,
 				createBead,
 				deleteBead,
 				moveTasksToColumn,
-				toggleVC,
 			}
 		}),
 	},
