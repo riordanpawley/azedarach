@@ -2,14 +2,12 @@
  * DevServerHandlersService - Keyboard handlers for dev server actions
  *
  * Provides action handlers for dev server operations:
- * - Toggle dev server (Space+r)
+ * - Toggle dev server (Space+r) - opens unified overlay if multiple servers
  * - Restart dev server (Space+Ctrl+r)
- * - Attach to dev server (Space+v)
  */
 
-import { Effect, HashMap } from "effect"
+import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
-import { TmuxService } from "../../core/TmuxService.js"
 import { DevServerService } from "../DevServerService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ProjectService } from "../ProjectService.js"
@@ -24,7 +22,6 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			ProjectService.Default,
 			ToastService.Default,
 			KeyboardHelpersService.Default,
-			TmuxService.Default,
 			OverlayService.Default,
 			AppConfig.Default,
 		],
@@ -33,15 +30,14 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 			const projectService = yield* ProjectService
 			const toast = yield* ToastService
 			const helpers = yield* KeyboardHelpersService
-			const tmux = yield* TmuxService
 			const overlay = yield* OverlayService
 			const appConfig = yield* AppConfig
 
 			/**
 			 * Toggle dev server for the currently selected bead
 			 *
-			 * If multiple servers are defined, shows a menu.
-			 * Otherwise toggles the default server.
+			 * If multiple servers are defined, shows a unified overlay.
+			 * Otherwise toggles the default server directly.
 			 */
 			const toggleDevServer = () =>
 				Effect.gen(function* () {
@@ -65,8 +61,10 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					const serverNames = config?.servers ? Object.keys(config.servers) : ["default"]
 
 					if (serverNames.length > 1) {
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "toggle" })
+						// Multiple servers: show unified overlay
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
 					} else {
+						// Single server: toggle directly
 						const serverName = serverNames[0]
 						yield* devServer.toggle(task.id, project.path, serverName).pipe(
 							Effect.tap((state) =>
@@ -94,6 +92,9 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 			/**
 			 * Restart dev server for the currently selected bead
+			 *
+			 * If multiple servers, shows unified overlay.
+			 * Otherwise restarts the default server directly.
 			 */
 			const restartDevServer = () =>
 				Effect.gen(function* () {
@@ -117,8 +118,10 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					const serverNames = config?.servers ? Object.keys(config.servers) : ["default"]
 
 					if (serverNames.length > 1) {
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "toggle" })
+						// Multiple servers: show unified overlay (user can toggle from there)
+						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
 					} else {
+						// Single server: restart directly
 						const serverName = serverNames[0]
 						const state = yield* devServer.getStatus(task.id, serverName)
 
@@ -151,54 +154,9 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 					}
 				})
 
-			/**
-			 * Attach to a dev server tmux session
-			 */
-			const attachDevServer = () =>
-				Effect.gen(function* () {
-					const task = yield* helpers.getActionTargetTask()
-					if (!task) {
-						yield* toast.show("error", "No task selected")
-						return
-					}
-
-					const beadServers = yield* devServer.getBeadServers(task.id)
-					const runningCount = HashMap.size(
-						HashMap.filter(beadServers, (s) => s.status === "running" || s.status === "starting"),
-					)
-
-					if (runningCount === 0) {
-						yield* toast.show("error", "No dev server running. Start one with Space+r")
-						return
-					}
-
-					if (runningCount > 1) {
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id, mode: "attach" })
-					} else {
-						const server = Array.from(HashMap.values(beadServers)).find(
-							(s) => s.status === "running" || s.status === "starting",
-						)
-						if (!server?.tmuxSession) {
-							yield* toast.show("error", "Dev server session not found")
-							return
-						}
-
-						yield* tmux
-							.switchClient(server.tmuxSession)
-							.pipe(
-								Effect.catchAll((err) =>
-									err._tag === "SessionNotFoundError"
-										? toast.show("error", `Session not found: ${err.session}`)
-										: toast.show("error", `tmux error: ${err.message}`),
-								),
-							)
-					}
-				})
-
 			return {
 				toggleDevServer,
 				restartDevServer,
-				attachDevServer,
 			}
 		}),
 	},
