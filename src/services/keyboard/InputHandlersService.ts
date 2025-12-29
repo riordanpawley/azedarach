@@ -847,6 +847,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return "filter"
 						case "orchestrate":
 							return "orchestrate"
+						case "mergeSelect":
+							return "mergeSelect"
 					}
 				})
 

@@ -29,6 +29,7 @@ import type { BeadsError } from "../../core/BeadsClient.js"
  * - sort: Sort menu
  * - filter: Filter menu for status/priority/type/session filtering
  * - orchestrate: Epic orchestration mode for managing child tasks
+ * - mergeSelect: Selecting target bead to merge source into
  * - *: Universal (matches any mode)
  */
 export type KeyMode =
@@ -43,6 +44,7 @@ export type KeyMode =
 	| "sort"
 	| "filter"
 	| "orchestrate"
+	| "mergeSelect"
 	| "*"
 
 // ============================================================================

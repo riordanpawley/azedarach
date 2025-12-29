@@ -38,6 +38,9 @@ export const theme = {
 	sky: "#89dceb",
 	sapphire: "#74c7ec",
 	lavender: "#b4befe",
+	flamingo: "#f2cdcd",
+	rosewater: "#f5e0dc",
+	maroon: "#eba0ac",
 } as const
 
 export type ThemeColor = keyof typeof theme

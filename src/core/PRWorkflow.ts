@@ -529,6 +529,47 @@ export interface PRWorkflowService {
 		BeadsError | NotFoundError | ParseError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Merge one bead's branch into another bead's branch
+	 *
+	 * This allows consolidating work from bead A into bead B without going through main.
+	 * Useful when you realize exploratory work in A belongs with other work in B.
+	 *
+	 * Workflow:
+	 * 1. Validate source bead has commits
+	 * 2. Ensure target bead has a branch/worktree (create if needed)
+	 * 3. Fetch source branch
+	 * 4. Check for conflicts using git merge-tree
+	 * 5. If conflicts: start merge in target worktree, spawn Claude to resolve
+	 * 6. If clean: merge source into target
+	 * 7. Sync beads
+	 * 8. Close source bead
+	 *
+	 * @example
+	 * ```ts
+	 * yield* prWorkflow.mergeBeadIntoBead({
+	 *   sourceBeadId: "az-05y",
+	 *   targetBeadId: "az-06z",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * ```
+	 */
+	readonly mergeBeadIntoBead: (options: {
+		sourceBeadId: string
+		targetBeadId: string
+		projectPath: string
+	}) => Effect.Effect<
+		void,
+		| PRError
+		| MergeConflictError
+		| GitError
+		| NotAGitRepoError
+		| BeadsError
+		| NotFoundError
+		| TmuxError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -1881,6 +1922,209 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						workflowMode === "origin" ? `origin/${gitConfig.baseBranch}` : gitConfig.baseBranch
 
 					return { baseBranch, parentEpic: undefined }
+				}),
+
+			mergeBeadIntoBead: (options: {
+				sourceBeadId: string
+				targetBeadId: string
+				projectPath: string
+			}) =>
+				Effect.gen(function* () {
+					const { sourceBeadId, targetBeadId, projectPath } = options
+
+					// Validate source and target are different
+					if (sourceBeadId === targetBeadId) {
+						return yield* Effect.fail(
+							new PRError({
+								message: "Cannot merge bead into itself",
+								beadId: sourceBeadId,
+							}),
+						)
+					}
+
+					// Get source bead info
+					const sourceBead = yield* beadsClient.show(sourceBeadId)
+
+					// Validate target bead exists (will throw NotFoundError if not)
+					yield* beadsClient.show(targetBeadId)
+
+					// Check if source has a worktree/branch
+					const sourceWorktree = yield* worktreeManager.get({ beadId: sourceBeadId, projectPath })
+					if (!sourceWorktree) {
+						return yield* Effect.fail(
+							new PRError({
+								message: `No worktree found for source bead ${sourceBeadId}`,
+								beadId: sourceBeadId,
+							}),
+						)
+					}
+
+					// Commit any uncommitted changes in source worktree
+					yield* runGit(["add", "-A"], sourceWorktree.path).pipe(
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Failed to stage changes in source: ${e.message}`),
+						),
+					)
+					yield* runGit(
+						["commit", "-m", `Work in progress: ${sourceBeadId}: ${sourceBead.title}`],
+						sourceWorktree.path,
+					).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
+
+					// Ensure target has a worktree (create if needed)
+					let targetWorktree = yield* worktreeManager.get({ beadId: targetBeadId, projectPath })
+					if (!targetWorktree) {
+						yield* Effect.log(`Creating worktree for target bead ${targetBeadId}`)
+						targetWorktree = yield* worktreeManager.create({
+							beadId: targetBeadId,
+							projectPath,
+						})
+					}
+
+					// Fetch source branch into target worktree
+					// We use the project path since that's where the git repo is
+					yield* runGit(["fetch", ".", sourceBeadId], targetWorktree.path).pipe(
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Failed to fetch source branch: ${e.message}`).pipe(
+								Effect.map(() => undefined),
+							),
+						),
+					)
+
+					// Check for conflicts using git merge-tree (in-memory, safe)
+					const mergeTreeResult = yield* Effect.gen(function* () {
+						const command = Command.make(
+							"git",
+							"merge-tree",
+							"--write-tree",
+							"--name-only",
+							"HEAD",
+							sourceBeadId,
+						).pipe(Command.workingDirectory(targetWorktree.path))
+
+						const exitCode = yield* Command.exitCode(command).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+							),
+						)
+
+						if (exitCode === 0) {
+							return { hasConflicts: false, conflictingFiles: [] as string[] }
+						}
+
+						// Get conflicting files
+						const output = yield* runGit(
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", sourceBeadId],
+							targetWorktree.path,
+						).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+									Effect.map(() => ""),
+								),
+							),
+						)
+
+						const lines = output.trim().split("\n")
+						const conflictingFiles = lines
+							.slice(1)
+							.filter((f) => f.length > 0)
+							// Filter OUT .beads/ files - we handle those separately
+							.filter((f) => !f.startsWith(".beads/"))
+
+						return {
+							hasConflicts: conflictingFiles.length > 0,
+							conflictingFiles,
+						}
+					})
+
+					// If there are conflicts, ask Claude to resolve
+					if (mergeTreeResult.hasConflicts) {
+						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+						// Start merge in target worktree so Claude can resolve
+						yield* runGit(
+							["merge", sourceBeadId, "-m", `Merge ${sourceBeadId} into ${targetBeadId}`],
+							targetWorktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+
+						const resolvePrompt = `There are merge conflicts when merging ${sourceBeadId} into ${targetBeadId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+
+						// Start Claude session in a new "merge" window within the target's session
+						const windowName = "merge"
+						const sessionName = getBeadSessionName(targetBeadId)
+
+						yield* worktreeSession.ensureWindow(sessionName, windowName, {
+							cwd: targetWorktree.path,
+							command: `claude -p "${resolvePrompt}"`,
+						})
+
+						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetBeadId} to resolve. Retry merge after resolution.`
+
+						return yield* Effect.fail(
+							new MergeConflictError({
+								beadId: sourceBeadId,
+								branch: sourceBeadId,
+								message,
+							}),
+						)
+					}
+
+					// No conflicts - do the merge
+					const mergeMessage = `Merge ${sourceBeadId}: ${sourceBead.title}`
+					yield* runGit(
+						["merge", sourceBeadId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+						targetWorktree.path,
+					).pipe(
+						Effect.mapError((e) => {
+							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
+								return new MergeConflictError({
+									beadId: sourceBeadId,
+									branch: sourceBeadId,
+									message: `Merge conflict. Resolve manually in ${targetBeadId} worktree`,
+								})
+							}
+							return new GitError({
+								message: `Merge failed: ${e.message}`,
+								command: `git merge ${sourceBeadId} --no-ff`,
+								stderr: e.stderr,
+							})
+						}),
+					)
+
+					// Sync beads after merge
+					yield* withSyncLock(
+						Effect.gen(function* () {
+							yield* beadsClient
+								.syncImportOnly(targetWorktree.path)
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to import beads after merge: ${e}`),
+									),
+								)
+
+							yield* beadsClient
+								.sync(targetWorktree.path)
+								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
+						}),
+					)
+
+					// Close source bead
+					yield* beadsClient.update(sourceBeadId, { status: "closed" }).pipe(
+						Effect.tap(() =>
+							Effect.log(`Closed source bead ${sourceBeadId} after merging into ${targetBeadId}`),
+						),
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Failed to close source bead ${sourceBeadId}: ${e}`),
+						),
+					)
+
+					// Sync the closed status
+					yield* withSyncLock(
+						beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+					)
+
+					yield* Effect.log(
+						`Successfully merged ${sourceBeadId} into ${targetBeadId}. Source bead closed.`,
+					)
 				}),
 		}
 	}),
