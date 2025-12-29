@@ -243,7 +243,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 						"x-api-key": apiKey,
 						"anthropic-version": "2023-06-01",
 					}),
-					HttpClientRequest.jsonBody({
+					HttpClientRequest.bodyUnsafeJson({
 						model: "claude-sonnet-4-20250514",
 						max_tokens: 8192,
 						messages: [
@@ -256,22 +256,29 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 				)
 
 				const response = yield* httpClient.execute(request).pipe(
-					Effect.flatMap((res) =>
-						res.status >= 200 && res.status < 300
-							? res.json
-							: Effect.fail(
-									new AIResponseError({
-										message: `API request failed with status ${res.status}`,
-										statusCode: res.status,
-									}),
+					Effect.flatMap((res) => {
+						if (res.status >= 200 && res.status < 300) {
+							return res.json.pipe(
+								Effect.mapError(
+									(e) =>
+										new AIResponseError({
+											message: `Failed to parse response: ${String(e)}`,
+										}),
 								),
-					),
-					Effect.mapError((e) =>
-						e._tag === "AIResponseError"
-							? e
-							: new AIResponseError({
-									message: `API request failed: ${String(e)}`,
-								}),
+							)
+						}
+						return Effect.fail(
+							new AIResponseError({
+								message: `API request failed with status ${res.status}`,
+								statusCode: res.status,
+							}),
+						)
+					}),
+					Effect.mapError(
+						(e) =>
+							new AIResponseError({
+								message: `API request failed: ${String(e)}`,
+							}),
 					),
 				)
 
@@ -357,7 +364,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 
 				yield* SubscriptionRef.update(state, (s) => ({
 					...s,
-					status: "reviewing",
+					status: "reviewing" as const,
 					currentPlan: plan,
 				}))
 
@@ -384,7 +391,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 			feedback: ReviewFeedback,
 		): Effect.Effect<Plan, PlanningError | AIResponseError> =>
 			Effect.gen(function* () {
-				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "refining" }))
+				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "refining" as const }))
 
 				const prompt = REFINEMENT_PROMPT.replace(
 					"{FEEDBACK}",
@@ -398,9 +405,9 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 		/**
 		 * Create beads from the finalized plan
 		 */
-		const createBeadsFromPlan = (plan: Plan): Effect.Effect<ReadonlyArray<Issue>, PlanningError> =>
+		const createBeadsFromPlan = (plan: Plan) =>
 			Effect.gen(function* () {
-				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "creating_beads" }))
+				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "creating_beads" as const }))
 
 				const createdBeads: Issue[] = []
 				const idMapping = new Map<string, string>() // Map temp IDs to real bead IDs
@@ -555,7 +562,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 
 				yield* SubscriptionRef.update(state, (s) => ({
 					...s,
-					status: "complete",
+					status: "complete" as const,
 					createdBeads,
 				}))
 
@@ -565,9 +572,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 		/**
 		 * Run the complete planning workflow
 		 */
-		const runPlanningWorkflow = (
-			featureDescription: string,
-		): Effect.Effect<ReadonlyArray<Issue>, PlanningError | AIResponseError> =>
+		const runPlanningWorkflow = (featureDescription: string) =>
 			Effect.gen(function* () {
 				// 1. Generate initial plan
 				let plan = yield* generatePlan(featureDescription)
@@ -608,7 +613,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					Effect.gen(function* () {
 						yield* SubscriptionRef.update(state, (s) => ({
 							...s,
-							status: "error",
+							status: "error" as const,
 							error: String(error),
 						}))
 						return yield* Effect.fail(error)

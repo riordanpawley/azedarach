@@ -2,7 +2,7 @@ import { Args, Command, Options } from "@effect/cli"
 import { FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Console, Effect, Layer, Option, Schema } from "effect"
-import { AppConfigConfig } from "../config/AppConfig.js"
+import { AppConfig } from "../config/AppConfig.js"
 import {
 	getBeadSessionName,
 	getWorktreePath,
@@ -75,16 +75,17 @@ const devStartHandler = (args: {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
 
-		const appConfigLayer = AppConfigConfig.Default(cwd, undefined)
 		const tmuxLayer = TmuxService.Default
-		const fullLayer = Layer.merge(appConfigLayer, Layer.merge(tmuxLayer, BunContext.layer))
+		const fullLayer = Layer.provideMerge(
+			Layer.mergeAll(AppConfig.Default, tmuxLayer),
+			BunContext.layer,
+		)
 
 		const result = yield* Effect.gen(function* () {
 			const tmux = yield* TmuxService
 			const fs = yield* FileSystem.FileSystem
 			const pathService = yield* Path.Path
-			const configModule = yield* Effect.promise(() => import("../config/index.js"))
-			const appConfig = yield* configModule.AppConfig
+			const appConfig = yield* AppConfig
 
 			const worktreePath = getWorktreePath(cwd, args.beadId)
 
