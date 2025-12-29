@@ -58,18 +58,6 @@ export const searchQueryAtom = Atom.readable((get) => {
 })
 
 /**
- * Command input atom - derived from modeAtom
- *
- * Usage: const commandInput = useAtomValue(commandInputAtom)
- */
-export const commandInputAtom = Atom.readable((get) => {
-	const modeResult = get(modeAtom)
-	if (!Result.isSuccess(modeResult)) return ""
-	const mode = modeResult.value
-	return mode._tag === "command" ? mode.input : ""
-})
-
-/**
  * Sort configuration atom - subscribes to EditorService sortConfig changes
  *
  * Usage: const sortConfig = useAtomValue(sortConfigAtom)
@@ -223,45 +211,6 @@ export const clearSearchAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* EditorService
 		yield* editor.clearSearch()
-	}).pipe(Effect.catchAll(Effect.logError)),
-)
-
-/**
- * Enter command mode
- *
- * Usage: const [, enterCommand] = useAtom(enterCommandAtom, { mode: "promise" })
- *        await enterCommand()
- */
-export const enterCommandAtom = appRuntime.fn(() =>
-	Effect.gen(function* () {
-		const editor = yield* EditorService
-		yield* editor.enterCommand()
-	}).pipe(Effect.catchAll(Effect.logError)),
-)
-
-/**
- * Update command input
- *
- * Usage: const [, updateCommand] = useAtom(updateCommandAtom, { mode: "promise" })
- *        await updateCommand("new command")
- */
-export const updateCommandAtom = appRuntime.fn((input: string) =>
-	Effect.gen(function* () {
-		const editor = yield* EditorService
-		yield* editor.updateCommand(input)
-	}).pipe(Effect.catchAll(Effect.logError)),
-)
-
-/**
- * Clear command and return to normal mode
- *
- * Usage: const [, clearCommand] = useAtom(clearCommandAtom, { mode: "promise" })
- *        await clearCommand()
- */
-export const clearCommandAtom = appRuntime.fn(() =>
-	Effect.gen(function* () {
-		const editor = yield* EditorService
-		yield* editor.clearCommand()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

@@ -39,7 +39,6 @@ export type KeyMode =
 	| "goto-pending"
 	| "goto-jump"
 	| "search"
-	| "command"
 	| "overlay"
 	| "sort"
 	| "filter"
