@@ -16,6 +16,7 @@ import { getBeadSessionName } from "../core/paths.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { launchTUI } from "../ui/launch.js"
+import { devCommand } from "./dev-server.js"
 
 // ============================================================================
 // Shared Options
@@ -156,7 +157,9 @@ const startHandler = (args: {
 		yield* PlatformCommand.exitCode(claimCommand).pipe(
 			Effect.tap(() => {
 				if (args.verbose) {
-					return Console.log(`Claimed bead ${args.issueId} with assignee ${session.tmuxSessionName}`)
+					return Console.log(
+						`Claimed bead ${args.issueId} with assignee ${session.tmuxSessionName}`,
+					)
 				}
 				return Effect.void
 			}),
@@ -947,9 +950,7 @@ const gateCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		fix: Options.boolean("fix").pipe(
-			Options.withDescription("Auto-fix lint issues"),
-		),
+		fix: Options.boolean("fix").pipe(Options.withDescription("Auto-fix lint issues")),
 	},
 	gateHandler,
 ).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
@@ -1343,6 +1344,7 @@ const cli = az.pipe(
 		statusCommand,
 		syncCommand,
 		gateCommand,
+		devCommand,
 		// Internal/advanced commands
 		notifyCommand,
 		hooksCommand,
