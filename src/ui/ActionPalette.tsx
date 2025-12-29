@@ -84,6 +84,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return true
 			case "i": // Image attach - always available
 				return true
+			case "H": // Helix editor - always available
+				return true
 			case "h": // Move left - always available
 			case "l": // Move right - always available
 				return true
@@ -183,6 +185,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Task actions */}
+				<ActionLine keyName="H" description="helix" />
 				<ActionLine keyName="i" description="image" />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
