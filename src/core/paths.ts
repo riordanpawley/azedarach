@@ -13,6 +13,7 @@ export const WINDOW_NAMES = {
 	CODE: "code",
 	DEV: "dev",
 	CHAT: "chat",
+	HX: "hx",
 	BACKGROUND: "background",
 } as const
 

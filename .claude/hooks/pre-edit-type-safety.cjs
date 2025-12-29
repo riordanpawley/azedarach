@@ -27,7 +27,9 @@ const TYPE_CASTING_PATTERNS = [
   {
     // Type casting: `as SomeType`
     // EXCLUDE: `type X as Y` (export type alias syntax)
-    regex: /(?<!type\s+[A-Z][a-zA-Z0-9_]*\s+)\bas\s+([A-Z][a-zA-Z0-9_]*)/g,
+    // EXCLUDE: `as const` (const assertion - valid TS pattern)
+    // The negative lookbehind (?<!...) excludes certain patterns
+    regex: /(?<!type\s+[A-Z][a-zA-Z0-9_]*\s+)\bas\s+(?!const\b)([A-Z][a-zA-Z0-9_]*)/g,
     name: "Type casting with 'as'",
     severity: "CRITICAL",
   },

@@ -881,6 +881,19 @@ Opens **difftastic side-by-side diff** in a tmux popup showing all changes since
 
 **Use case:** Review Claude's changes before merging to main.
 
+### Editor Actions
+
+| Sequence | Action | Available When |
+|----------|--------|----------------|
+| `Space` `H` | Open Helix editor | Always (creates worktree if needed) |
+
+Opens Helix in a dedicated "hx" tmux window for the selected task. If no worktree exists, creates one first. This is useful for:
+- Manual code exploration alongside Claude
+- Quick edits when Claude is busy
+- Pair-programming with Claude (Helix in one window, Claude in another)
+
+After starting Helix, use `Space` `a` to attach to the tmux session.
+
 ### Movement Actions
 
 | Sequence | Action | Description |

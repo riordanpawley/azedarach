@@ -7,6 +7,7 @@
  * - Attach external (a) / Attach inline (A)
  * - Pause (p) / Resume (r)
  * - Stop (x)
+ * - Start Helix editor (H)
  *
  * Converted from factory pattern to Effect.Service layer.
  */
@@ -17,9 +18,10 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { WINDOW_NAMES } from "../../core/paths.js"
+import { getWorktreePath, WINDOW_NAMES } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
+import { WorktreeManager } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -41,6 +43,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			ImageAttachmentService.Default,
 			TmuxService.Default,
 			WorktreeSessionService.Default,
+			WorktreeManager.Default,
 			AppConfig.Default,
 			PRWorkflow.Default,
 			OverlayService.Default,
@@ -55,6 +58,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
 			const worktreeSession = yield* WorktreeSessionService
+			const worktreeManager = yield* WorktreeManager
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
@@ -334,9 +338,10 @@ What would you like to discuss?`
 					yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
 				}).pipe(
 					Effect.catchAll((error) => {
+						const errorObj = error && typeof error === "object" ? error : {}
 						const msg =
-							error && typeof error === "object" && "_tag" in error
-								? String((error as { message?: string }).message || error)
+							"_tag" in errorObj
+								? String("message" in errorObj ? errorObj.message : error)
 								: String(error)
 						return Effect.gen(function* () {
 							yield* Effect.logError(`Attach external: ${msg}`, { error })
@@ -391,11 +396,12 @@ What would you like to discuss?`
 							Effect.tap(() => doAttach(task.id)),
 							Effect.catchAll((error) => {
 								// MergeConflictError means Claude was started to resolve
+								const errorObj = error && typeof error === "object" ? error : {}
 								const msg =
-									error && typeof error === "object" && "_tag" in error
-										? error._tag === "MergeConflictError"
-											? String((error as { message?: string }).message || "Conflicts detected")
-											: String((error as { message?: string }).message || error)
+									"_tag" in errorObj
+										? errorObj._tag === "MergeConflictError"
+											? String("message" in errorObj ? errorObj.message : "Conflicts detected")
+											: String("message" in errorObj ? errorObj.message : error)
 										: String(error)
 								return Effect.gen(function* () {
 									yield* Effect.logError(`Merge failed: ${msg}`, { error })
@@ -507,6 +513,75 @@ What would you like to discuss?`
 					)
 				})
 
+			/**
+			 * Start Helix editor in a tmux window (Space+H)
+			 *
+			 * Opens Helix editor in a dedicated "hx" window within the bead's tmux session.
+			 * If no session exists, creates the worktree and session first.
+			 *
+			 * Unlike Claude sessions, this is always available - works for both idle
+			 * and running tasks. For idle tasks, creates the worktree/session without
+			 * starting Claude.
+			 */
+			const startHelixSession = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					const projectPath = yield* helpers.getProjectPath()
+					const sessionConfig = yield* appConfig.getSessionConfig()
+					const worktreeConfig = yield* appConfig.getWorktreeConfig()
+					const shell = sessionConfig.shell
+					const sessionName = task.id
+
+					// Check if session already exists
+					const hasSession = yield* tmux.hasSession(sessionName)
+
+					if (!hasSession) {
+						// No session - create worktree and session first
+						yield* toast.show("info", `Creating worktree for ${task.id}...`)
+
+						// Create worktree (idempotent - returns existing if present)
+						const worktree = yield* worktreeManager
+							.create({
+								beadId: task.id,
+								projectPath,
+							})
+							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))
+
+						if (!worktree) return
+
+						// Create tmux session with init commands (same as ClaudeSessionManager)
+						yield* worktreeSession
+							.getOrCreateSession(task.id, {
+								worktreePath: worktree.path,
+								projectPath,
+								initCommands: worktreeConfig.initCommands,
+								tmuxPrefix: sessionConfig.tmuxPrefix,
+							})
+							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create session")))
+					}
+
+					// Get worktree path for the helix command
+					const worktreePath = getWorktreePath(projectPath, task.id)
+
+					// Create or switch to the "hx" window with Helix running
+					// Uses interactive shell wrapper so direnv loads and Helix has proper env
+					const helixCommand = `${shell} -i -c 'hx .; exec ${shell}'`
+
+					yield* worktreeSession
+						.ensureWindow(sessionName, WINDOW_NAMES.HX, {
+							command: helixCommand,
+							cwd: worktreePath,
+						})
+						.pipe(
+							Effect.tap(() =>
+								toast.show("success", `Helix ready for ${task.id} - press Space+a to attach`),
+							),
+							Effect.catchAll(helpers.showErrorToast("Failed to open Helix")),
+						)
+				})
+
 			// ================================================================
 			// Public API
 			// ================================================================
@@ -521,6 +596,7 @@ What would you like to discuss?`
 				pauseSession,
 				resumeSession,
 				stopSession,
+				startHelixSession,
 			}
 		}),
 	},

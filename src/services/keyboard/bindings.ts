@@ -570,6 +570,14 @@ done
 			}
 		}),
 	},
+	{
+		key: "S-h",
+		mode: "action",
+		description: "Open Helix editor",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
+		),
+	},
 
 	// ========================================================================
 	// Goto-Pending Mode (after pressing 'g')
