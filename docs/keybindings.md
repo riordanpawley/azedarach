@@ -58,7 +58,6 @@ The default mode for navigation and basic actions.
 | `p` | Open planning | AI-powered planning workflow |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
-| `a` | Toggle VC auto-pilot | Start/stop VC executor |
 | `s` | Show settings | Opens interactive settings overlay |
 | `?` | Show help | Press any key to dismiss |
 | `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
@@ -521,7 +520,7 @@ Press `:` to enter command mode for sending commands to the VC REPL.
 
 ### How Command Mode Works
 
-- **VC must be running**: The VC auto-pilot must be active (toggle with `a` key)
+- **VC must be running**: The VC auto-pilot must be active (start manually via tmux)
 - **Natural language**: Commands are conversational (e.g., "What's ready to work on?")
 - **Sent to REPL**: The command is sent directly to the VC tmux session
 - **Feedback**: A toast notification confirms when the command is sent
@@ -529,7 +528,7 @@ Press `:` to enter command mode for sending commands to the VC REPL.
 
 ### Example
 
-1. Press `a` to start VC auto-pilot (if not already running)
+1. Start VC auto-pilot manually if not already running
 2. Press `:` to enter command mode
 3. Type `Let's continue working`
 4. Press `Enter` to send the command to VC
