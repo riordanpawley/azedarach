@@ -50,8 +50,6 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "c", action: "Create" },
 		{ key: "Tab", action: "View" },
 		{ key: "r", action: "Refresh" },
-		{ key: "a", action: "VC" },
-		{ key: ":", action: "Cmd" },
 		{ key: "C-d/u", action: "Page" },
 		{ key: "q", action: "Quit" },
 	],
