@@ -427,28 +427,14 @@ done
 	{
 		key: "r",
 		mode: "action",
-		description: "Toggle dev server / Resume orphaned session",
+		description: "Toggle dev server",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(
-				Effect.tap(() =>
-					// Check if this is an orphaned worktree - if so, resume session
-					// Otherwise, toggle dev server
-					Effect.gen(function* () {
-						const task = yield* bc.helpers.getActionTargetTask()
-						if (!task) return
-
-						// Orphaned worktree: hasWorktree && sessionState === "idle"
-						if (task.hasWorktree && task.sessionState === "idle") {
-							yield* bc.sessionHandlers.resumeOrphanedSession()
-						} else {
-							yield* bc.devServerHandlers.toggleDevServer()
-						}
-					}),
-				),
+				Effect.tap(() => bc.devServerHandlers.toggleDevServer()),
 				Effect.catchAll((e) =>
 					Effect.gen(function* () {
-						yield* Effect.logError("Dev server toggle / resume failed", e)
-						yield* bc.toast.show("error", `Error: ${String(e)}`)
+						yield* Effect.logError("Dev server toggle failed", e)
+						yield* bc.toast.show("error", `Dev server error: ${String(e)}`)
 					}),
 				),
 			),
