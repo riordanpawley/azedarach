@@ -72,7 +72,7 @@ export type FilterSessionState =
 /**
  * Filter field categories
  */
-export type FilterField = "status" | "priority" | "type" | "session"
+export type FilterField = "status" | "priority" | "type" | "session" | "age"
 
 /**
  * Filter configuration for filtering tasks
@@ -84,6 +84,12 @@ export interface FilterConfig {
 	readonly type: ReadonlySet<IssueType>
 	readonly session: ReadonlySet<FilterSessionState>
 	readonly hideEpicSubtasks: boolean
+	/**
+	 * Filter to tasks not updated in N days.
+	 * null means no age filter.
+	 * A value of 7 means "show tasks not updated in the last 7 days"
+	 */
+	readonly updatedDaysAgo: number | null
 }
 
 /**
@@ -95,6 +101,7 @@ export const DEFAULT_FILTER_CONFIG: FilterConfig = Data.struct({
 	type: new Set<IssueType>(),
 	session: new Set<FilterSessionState>(),
 	hideEpicSubtasks: true,
+	updatedDaysAgo: null,
 })
 
 /**
@@ -244,6 +251,39 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 						selectedIds: has
 							? m.selectedIds.filter((id) => id !== taskId)
 							: [...m.selectedIds, taskId],
+					})
+				}),
+
+			/**
+			 * Select all tasks by their IDs.
+			 * Used by the % keybinding to select all visible tasks.
+			 * If not in select mode, enters select mode first.
+			 */
+			selectAll: (taskIds: ReadonlyArray<string>) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					// If not in select mode, enter it with all tasks selected
+					if (m._tag !== "select") {
+						return Data.struct({
+							_tag: "select" as const,
+							selectedIds: [...taskIds],
+						})
+					}
+					// If already in select mode, replace selection with all tasks
+					return Data.struct({
+						_tag: "select" as const,
+						selectedIds: [...taskIds],
+					})
+				}),
+
+			/**
+			 * Clear all selections in select mode.
+			 */
+			clearSelection: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "select") return m
+					return Data.struct({
+						_tag: "select" as const,
+						selectedIds: [],
 					})
 				}),
 
@@ -448,6 +488,17 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				),
 
 			/**
+			 * Set age filter in days.
+			 * Tasks not updated in N days will be shown.
+			 * Pass null to clear the age filter.
+			 */
+			setAgeFilter: (days: number | null) =>
+				SubscriptionRef.update(
+					filterConfig,
+					(config): FilterConfig => Data.struct({ ...config, updatedDaysAgo: days }),
+				),
+
+			/**
 			 * Clear all filters
 			 */
 			clearFilters: () => SubscriptionRef.set(filterConfig, DEFAULT_FILTER_CONFIG),
@@ -473,6 +524,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					if (config.priority.size > 0) count++
 					if (config.type.size > 0) count++
 					if (config.session.size > 0) count++
+					if (config.updatedDaysAgo !== null) count++
 					return count
 				}),
 
@@ -486,7 +538,8 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 						config.status.size > 0 ||
 						config.priority.size > 0 ||
 						config.type.size > 0 ||
-						config.session.size > 0
+						config.session.size > 0 ||
+						config.updatedDaysAgo !== null
 					)
 				}),
 

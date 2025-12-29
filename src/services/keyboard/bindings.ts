@@ -163,6 +163,17 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.editor.enterSelect(),
 	},
 	{
+		key: "S-5",
+		mode: "normal",
+		description: "Select all visible tasks",
+		action: Effect.gen(function* () {
+			const allTasks = yield* bc.board.getTasks()
+			const allIds = allTasks.map((t) => t.id)
+			yield* bc.editor.selectAll(allIds)
+			yield* bc.toast.show("info", `Selected ${allIds.length} tasks`)
+		}),
+	},
+	{
 		key: "space",
 		mode: "normal",
 		description: "Enter action mode",
@@ -633,6 +644,23 @@ done
 		description: "Exit select mode",
 		action: bc.editor.exitSelect(),
 	},
+	{
+		key: "S-5",
+		mode: "select",
+		description: "Select all visible tasks",
+		action: Effect.gen(function* () {
+			const allTasks = yield* bc.board.getTasks()
+			const allIds = allTasks.map((t) => t.id)
+			yield* bc.editor.selectAll(allIds)
+			yield* bc.toast.show("info", `Selected ${allIds.length} tasks`)
+		}),
+	},
+	{
+		key: "S-a",
+		mode: "select",
+		description: "Clear all selections",
+		action: bc.editor.clearSelection(),
+	},
 
 	// ========================================================================
 	// Sort Mode
@@ -830,6 +858,44 @@ done
 		mode: "filter",
 		description: "Toggle paused session",
 		action: bc.editor.toggleFilterSession("paused"),
+	},
+
+	// --- Age Filter (filter mode, 'a' submenu) ---
+	{
+		key: "1",
+		mode: "filter",
+		description: "Filter to tasks >1 day old",
+		action: Effect.gen(function* () {
+			yield* bc.editor.setAgeFilter(1)
+			yield* bc.toast.show("info", "Filtering to tasks >1 day old")
+		}),
+	},
+	{
+		key: "7",
+		mode: "filter",
+		description: "Filter to tasks >7 days old",
+		action: Effect.gen(function* () {
+			yield* bc.editor.setAgeFilter(7)
+			yield* bc.toast.show("info", "Filtering to tasks >7 days old")
+		}),
+	},
+	{
+		key: "3",
+		mode: "filter",
+		description: "Filter to tasks >30 days old",
+		action: Effect.gen(function* () {
+			yield* bc.editor.setAgeFilter(30)
+			yield* bc.toast.show("info", "Filtering to tasks >30 days old")
+		}),
+	},
+	{
+		key: "0",
+		mode: "filter",
+		description: "Clear age filter",
+		action: Effect.gen(function* () {
+			yield* bc.editor.setAgeFilter(null)
+			yield* bc.toast.show("info", "Age filter cleared")
+		}),
 	},
 
 	// ========================================================================

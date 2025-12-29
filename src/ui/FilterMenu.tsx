@@ -31,6 +31,8 @@ const getFieldName = (field: FilterField): string => {
 			return "Type"
 		case "session":
 			return "Session"
+		case "age":
+			return "Age"
 	}
 }
 

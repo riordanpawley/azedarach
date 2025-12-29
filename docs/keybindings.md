@@ -467,17 +467,41 @@ Labels use these home row keys: `a s d f g h j k l ;`
 
 ## Select Mode
 
-Press `v` to enter select mode for multi-task operations.
+Press `v` to enter select mode for multi-task operations. You can also press `%` from normal mode to immediately select all visible tasks.
 
 | Key | Action | Notes |
 |-----|--------|-------|
 | `Space` | Toggle selection | Add/remove current task |
+| `%` | Select all | Select all visible tasks |
+| `A` | Clear selections | Deselect all tasks |
 | `h/j/k/l` | Navigate | Selections persist |
 | `Esc` | Exit + clear | Clears all selections |
 
 ### Visual Feedback
 
 Selected tasks are highlighted with a different background color. The status bar shows the selection count.
+
+### Bulk Operations with Selections
+
+When you have multiple tasks selected, action mode commands apply to all selected tasks:
+
+1. Press `%` to select all visible tasks (or `v` then manually select)
+2. Use filter mode (`f`) to narrow down the selection
+3. Press `Space` to enter action mode
+4. Run bulk commands:
+   - `Space` `x`: Stop all selected sessions
+   - `Space` `d`: Cleanup all selected worktrees (shows choice dialog)
+   - `Space` `h/l`: Move all selected tasks left/right
+
+### Bulk Cleanup Dialog
+
+When cleaning up multiple worktrees (`Space` `d` with selections), a choice dialog appears:
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `w` | Worktrees only | Delete worktrees but keep beads open |
+| `f` | Full cleanup | Delete worktrees AND close beads |
+| `Esc` | Cancel | Return without cleanup |
 
 ## Search Mode
 
@@ -607,6 +631,17 @@ When `S` is pressed, these keys toggle session state filters (uppercase):
 | `X` | Error | Toggle showing errored sessions |
 | `P` | Paused | Toggle showing paused sessions |
 
+### Age Filter
+
+Filter tasks by how recently they were updated. Useful for finding stale tasks for cleanup:
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `1` | >1 day old | Show tasks not updated in the last day |
+| `7` | >7 days old | Show tasks not updated in the last week |
+| `3` | >30 days old | Show tasks not updated in the last month |
+| `0` | Clear age filter | Remove age filter |
+
 ### How Filter Mode Works
 
 - **Multiple values within a field**: OR logic (e.g., `open OR blocked`)
@@ -642,6 +677,17 @@ When `S` is pressed, these keys toggle session state filters (uppercase):
 1. Press `f` to enter filter mode
 2. Press `c` to clear all filters
 3. All tasks are visible again
+```
+
+**Bulk cleanup stale worktrees (full workflow):**
+```
+1. Press `f` to enter filter mode
+2. Press `7` to filter to tasks not updated in 7+ days
+3. Press `Esc` to exit filter mode
+4. Press `%` to select all visible (stale) tasks
+5. Press `Space` `d` to initiate cleanup
+6. Press `w` for worktrees only, or `f` for full cleanup
+7. All selected worktrees are cleaned up in parallel
 ```
 
 ### Combining with Search Mode

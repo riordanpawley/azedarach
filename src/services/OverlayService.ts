@@ -35,6 +35,12 @@ export type Overlay =
 			readonly onMerge: AnyEffect
 			readonly onSkip: AnyEffect
 	  }
+	| {
+			readonly _tag: "bulkCleanup"
+			readonly taskIds: ReadonlyArray<string>
+			readonly onWorktreeOnly: AnyEffect
+			readonly onFullCleanup: AnyEffect
+	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }

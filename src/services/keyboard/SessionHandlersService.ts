@@ -522,32 +522,52 @@ What would you like to discuss?`
 			/**
 			 * Stop session action (Space+x)
 			 *
-			 * Stops a running Claude session and cleans up resources.
+			 * Stops running Claude session(s) and cleans up resources.
+			 * Supports bulk operations when multiple tasks are selected.
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
 			 */
 			const stopSession = () =>
 				Effect.gen(function* () {
-					const task = yield* helpers.getActionTargetTask()
-					if (!task) return
+					const tasks = yield* helpers.getActionTargetTasks()
+					if (tasks.length === 0) return
 
-					// Check if task has an operation in progress
-					const isBusy = yield* helpers.checkBusy(task.id)
-					if (isBusy) return
+					// Filter to tasks with active sessions
+					const tasksWithSessions = tasks.filter((t) => t.sessionState !== "idle")
 
-					if (task.sessionState === "idle") {
-						yield* toast.show("error", "No session to stop")
+					if (tasksWithSessions.length === 0) {
+						yield* toast.show("error", "No sessions to stop")
 						return
 					}
 
-					yield* helpers.withQueue(
-						task.id,
-						"stop",
-						sessionManager.stop(task.id).pipe(
-							Effect.tap(() => toast.show("success", `Stopped session for ${task.id}`)),
-							Effect.catchAll(helpers.showErrorToast("Failed to stop")),
+					// Stop all sessions in parallel
+					yield* Effect.all(
+						tasksWithSessions.map((task) =>
+							Effect.gen(function* () {
+								// Check if task has an operation in progress
+								const isBusy = yield* helpers.checkBusy(task.id)
+								if (isBusy) return
+
+								yield* helpers.withQueue(
+									task.id,
+									"stop",
+									sessionManager.stop(task.id).pipe(
+										Effect.tap(() =>
+											tasksWithSessions.length === 1
+												? toast.show("success", `Stopped session for ${task.id}`)
+												: Effect.void,
+										),
+										Effect.catchAll(helpers.showErrorToast(`Failed to stop ${task.id}`)),
+									),
+								)
+							}),
 						),
+						{ concurrency: "unbounded" },
 					)
+
+					if (tasksWithSessions.length > 1) {
+						yield* toast.show("success", `Stopped ${tasksWithSessions.length} sessions`)
+					}
 				})
 
 			/**
