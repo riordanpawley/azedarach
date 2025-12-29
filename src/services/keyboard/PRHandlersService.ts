@@ -487,10 +487,23 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-				const effectiveBaseBranch = yield* appConfig.getEffectiveBaseBranch()
-
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
+
+				// Get effective base branch (epic branch for children, main for others)
+				const { baseBranch: effectiveBaseBranch } = yield* prWorkflow
+					.getEffectiveBaseBranchForBead({
+						beadId: task.id,
+						projectPath,
+					})
+					.pipe(
+						Effect.catchAll(() =>
+							// Fallback to global base branch on error
+							appConfig
+								.getEffectiveBaseBranch()
+								.pipe(Effect.map((baseBranch) => ({ baseBranch, parentEpic: undefined }))),
+						),
+					)
 
 				// Compute worktree path using centralized function
 				const worktreePath = getWorktreePath(projectPath, task.id)
