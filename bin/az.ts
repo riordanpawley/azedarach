@@ -27,6 +27,7 @@ const CLI_SUBCOMMANDS = new Set([
 	"status",
 	"sync",
 	"gate",
+	"dev",
 	"notify",
 	"hooks",
 	"project",
