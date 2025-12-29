@@ -500,6 +500,35 @@ export interface PRWorkflowService {
 	readonly getPRComments: (
 		options: GetPRCommentsOptions,
 	) => Effect.Effect<readonly PRComment[], PRError | GHCLIError, CommandExecutor.CommandExecutor>
+
+	/**
+	 * Get the effective base branch for a bead
+	 *
+	 * Returns the parent epic's branch if the bead is a child of an epic,
+	 * otherwise returns the standard base branch (main or origin/main depending on workflowMode).
+	 *
+	 * This enables epic-consolidated PRs where child tasks target the epic branch
+	 * instead of main, allowing all child work to be merged into the epic first,
+	 * then a single epic PR goes to main.
+	 *
+	 * @example
+	 * ```ts
+	 * const baseBranch = yield* prWorkflow.getEffectiveBaseBranchForBead({
+	 *   beadId: "az-task",
+	 *   projectPath: "/Users/user/project"
+	 * })
+	 * // Returns "az-epic" if az-task is child of az-epic
+	 * // Returns "main" or "origin/main" otherwise
+	 * ```
+	 */
+	readonly getEffectiveBaseBranchForBead: (options: {
+		beadId: string
+		projectPath: string
+	}) => Effect.Effect<
+		{ baseBranch: string; parentEpic: Issue | undefined },
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -683,7 +712,6 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const offlineService = yield* OfflineService
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
-		const getEffectiveBaseBranch = () => appConfig.getEffectiveBaseBranch()
 
 		/**
 		 * Execute an effect with exclusive beads sync lock.
@@ -707,11 +735,39 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					Option.isSome(lockOption) ? fileLockManager.releaseLock(lockOption.value) : Effect.void,
 			)
 
+		/**
+		 * Internal helper to get effective base branch for a bead.
+		 * Uses parent epic branch if child of epic, otherwise uses configured base branch.
+		 */
+		const getBeadBaseBranch = (
+			beadId: string,
+			explicitBaseBranch?: string,
+		): Effect.Effect<
+			{ baseBranch: string; parentEpic: Issue | undefined },
+			BeadsError | NotFoundError | ParseError,
+			CommandExecutor.CommandExecutor
+		> =>
+			Effect.gen(function* () {
+				if (explicitBaseBranch) {
+					return { baseBranch: explicitBaseBranch, parentEpic: undefined }
+				}
+				const gitConfig = yield* getGitConfig()
+				const parentEpic = yield* beadsClient.getParentEpic(beadId)
+				if (parentEpic) {
+					// Child of epic: target the epic branch
+					return { baseBranch: parentEpic.id, parentEpic }
+				}
+				// No parent epic: use the standard base branch
+				return { baseBranch: gitConfig.baseBranch, parentEpic: undefined }
+			})
+
 		return {
 			createPR: (options: CreatePROptions) =>
 				Effect.gen(function* () {
-					const gitConfig = yield* getGitConfig()
-					const { beadId, projectPath, draft = true, baseBranch = gitConfig.baseBranch } = options
+					const { beadId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
+
+					// Determine effective base branch (epic branch for children, main otherwise)
+					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId, explicitBaseBranch)
 
 					// Check if PR creation is enabled (config + network)
 					const prStatus = yield* offlineService.isPREnabled()
@@ -726,6 +782,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// Get bead info for PR title/body
 					const bead = yield* beadsClient.show(beadId)
+
+					// Log context for debugging
+					if (parentEpic) {
+						yield* Effect.log(`Creating PR for ${beadId} targeting epic branch ${parentEpic.id}`)
+					}
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -876,7 +937,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						closeBead = false,
 						keepWorktree = true,
 					} = options
-					const baseBranch = gitConfig.baseBranch
+
+					// Determine effective base branch (epic branch for children, main for epics/standalone)
+					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId)
+
+					// Log context for debugging
+					if (parentEpic) {
+						yield* Effect.log(`Merging ${beadId} into epic branch ${parentEpic.id} (not main)`)
+					}
 
 					// Get bead info for merge commit message
 					const bead = yield* beadsClient.show(beadId)
@@ -1172,13 +1240,38 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// 11. Close bead issue
+					// 11. Close bead issue (and children if epic merging to main)
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
 							.pipe(
 								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${beadId}: ${e}`)),
 							)
+
+						// If this is an epic being merged to main (not to another epic branch),
+						// also close all its child tasks
+						if (bead.issue_type === "epic" && !parentEpic) {
+							const children = yield* beadsClient
+								.getEpicChildren(beadId)
+								.pipe(Effect.catchAll(() => Effect.succeed([])))
+
+							for (const child of children) {
+								if (child.status !== "closed") {
+									yield* beadsClient.update(child.id, { status: "closed" }).pipe(
+										Effect.tap(() =>
+											Effect.log(`Closed child task ${child.id} as part of epic merge`),
+										),
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to close child ${child.id}: ${e}`),
+										),
+									)
+								}
+							}
+
+							if (children.length > 0) {
+								yield* Effect.log(`Closed ${children.length} child task(s) for epic ${beadId}`)
+							}
+						}
 
 						yield* withSyncLock(
 							beadsClient
@@ -1211,7 +1304,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
-					const effectiveBaseBranch = yield* getEffectiveBaseBranch()
+					const { baseBranch: effectiveBaseBranch } = yield* getBeadBaseBranch(beadId)
 
 					// Use git merge-tree to perform an actual 3-way merge in memory
 					// This detects real line-level conflicts, not just file overlap
@@ -1377,8 +1470,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			updateFromBase: (options: UpdateFromBaseOptions) =>
 				Effect.gen(function* () {
 					const gitConfig = yield* getGitConfig()
-					const { beadId, projectPath, baseBranch = gitConfig.baseBranch } = options
-					const effectiveBaseBranch = yield* getEffectiveBaseBranch()
+					const { beadId, projectPath, baseBranch: explicitBaseBranch } = options
+
+					// Determine effective base branch (epic branch for children, main for epics/standalone)
+					const { baseBranch } = yield* getBeadBaseBranch(beadId, explicitBaseBranch)
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
@@ -1414,7 +1509,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"merge-tree",
 							"--write-tree",
 							"--name-only",
-							effectiveBaseBranch,
+							baseBranch,
 							beadId,
 						).pipe(Command.workingDirectory(worktree.path))
 
@@ -1430,14 +1525,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							[
-								"merge-tree",
-								"--write-tree",
-								"--name-only",
-								"--no-messages",
-								effectiveBaseBranch,
-								beadId,
-							],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
 							worktree.path,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -1770,6 +1858,29 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					yield* Effect.log(`Successfully merged ${baseBranch} into ${beadId}`)
+				}),
+
+			getEffectiveBaseBranchForBead: (options: { beadId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { beadId } = options
+					const gitConfig = yield* getGitConfig()
+					const workflowMode = yield* appConfig.getWorkflowMode()
+
+					// Check if this bead has a parent epic
+					const parentEpic = yield* beadsClient.getParentEpic(beadId)
+
+					if (parentEpic) {
+						// Child of epic: target the epic branch
+						// In origin mode, we still use the epic branch directly (not origin/epic)
+						// because the epic branch is a feature branch, not the base branch
+						return { baseBranch: parentEpic.id, parentEpic }
+					}
+
+					// No parent epic: use the standard base branch
+					const baseBranch =
+						workflowMode === "origin" ? `origin/${gitConfig.baseBranch}` : gitConfig.baseBranch
+
+					return { baseBranch, parentEpic: undefined }
 				}),
 		}
 	}),
