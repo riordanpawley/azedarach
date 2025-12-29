@@ -38,6 +38,8 @@ export interface CompactViewProps {
 	terminalHeight?: number
 	/** Whether action mode is active (selected row gets prominent indicator) */
 	isActionMode?: boolean
+	/** Source bead ID when in merge select mode (highlighted differently) */
+	mergeSelectSourceId?: string
 }
 
 /**
@@ -114,6 +116,8 @@ interface CompactRowProps {
 	isActionMode?: boolean
 	jumpLabel?: string
 	pendingJumpKey?: string | null
+	/** Whether this task is the source bead in merge select mode */
+	isMergeSource?: boolean
 }
 
 const CompactRow = (props: CompactRowProps) => {
@@ -139,17 +143,26 @@ const CompactRow = (props: CompactRowProps) => {
 
 	// Background color based on selection state
 	const getBackgroundColor = () => {
+		if (props.isMergeSource) return theme.surface1 // Merge source highlight
 		if (isActionSelected) return theme.surface1 // More prominent when action menu open
 		if (props.isMultiSelected) return theme.surface1
 		if (props.isSelected) return theme.surface0
 		return undefined
 	}
 
-	// Selection indicator: » when action mode, > when selected, space otherwise
+	// Selection indicator: ⊕ when merge source, » when action mode, › when selected
 	const getSelectionIndicator = () => {
+		if (props.isMergeSource) return "⊕"
 		if (isActionSelected) return "»"
 		if (props.isSelected) return "›"
 		return " "
+	}
+
+	// Indicator color
+	const getIndicatorColor = () => {
+		if (props.isMergeSource) return theme.flamingo
+		if (isActionSelected) return theme.mauve
+		return theme.lavender
 	}
 
 	// Truncate title to fit in available space
@@ -167,8 +180,8 @@ const CompactRow = (props: CompactRowProps) => {
 			paddingLeft={1}
 			paddingRight={1}
 		>
-			{/* Selection indicator (shows » when action menu open, › when selected) */}
-			<text fg={isActionSelected ? theme.mauve : theme.lavender}>{getSelectionIndicator()}</text>
+			{/* Selection indicator (shows ⊕ when merge source, » when action menu open, › when selected) */}
+			<text fg={getIndicatorColor()}>{getSelectionIndicator()}</text>
 
 			{/* Jump label (if in jump mode) */}
 			{props.jumpLabel && <text fg={theme.mauve}>{props.jumpLabel}</text>}
@@ -301,6 +314,7 @@ export const CompactView = (props: CompactViewProps) => {
 					isActionMode={props.isActionMode}
 					jumpLabel={taskJumpLabels?.get(task.id)}
 					pendingJumpKey={props.pendingJumpKey}
+					isMergeSource={props.mergeSelectSourceId === task.id}
 				/>
 			))}
 

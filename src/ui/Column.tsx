@@ -19,6 +19,8 @@ export interface ColumnProps {
 	maxVisible?: number
 	/** Whether action mode is active (selected card gets prominent border) */
 	isActionMode?: boolean
+	/** Source bead ID when in merge select mode (highlighted differently) */
+	mergeSelectSourceId?: string
 }
 
 /**
@@ -90,6 +92,7 @@ export const Column = (props: ColumnProps) => {
 						isActionMode={props.isActionMode}
 						jumpLabel={props.taskJumpLabels?.get(task.id)}
 						pendingJumpKey={props.pendingJumpKey}
+						isMergeSource={props.mergeSelectSourceId === task.id}
 					/>
 				))}
 			</box>

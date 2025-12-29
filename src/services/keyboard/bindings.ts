@@ -570,6 +570,12 @@ done
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startHelixSession())),
 		),
 	},
+	{
+		key: "b",
+		mode: "action",
+		description: "Merge bead into...",
+		action: Effect.suspend(() => bc.prHandlers.enterMergeSelect()),
+	},
 
 	// ========================================================================
 	// Goto-Pending Mode (after pressing 'g')
@@ -971,5 +977,75 @@ done
 		action: bc.orchestrateHandlers
 			.enterFromDetail()
 			.pipe(Effect.catchAll(Effect.logError), Effect.asVoid),
+	},
+
+	// ========================================================================
+	// Merge Select Mode - Select target bead to merge into
+	// ========================================================================
+	{
+		key: "j",
+		mode: "mergeSelect",
+		description: "Move down",
+		action: bc.nav.move("down"),
+	},
+	{
+		key: "k",
+		mode: "mergeSelect",
+		description: "Move up",
+		action: bc.nav.move("up"),
+	},
+	{
+		key: "h",
+		mode: "mergeSelect",
+		description: "Move left",
+		action: bc.nav.move("left"),
+	},
+	{
+		key: "l",
+		mode: "mergeSelect",
+		description: "Move right",
+		action: bc.nav.move("right"),
+	},
+	{
+		key: "down",
+		mode: "mergeSelect",
+		description: "Move down",
+		action: bc.nav.move("down"),
+	},
+	{
+		key: "up",
+		mode: "mergeSelect",
+		description: "Move up",
+		action: bc.nav.move("up"),
+	},
+	{
+		key: "left",
+		mode: "mergeSelect",
+		description: "Move left",
+		action: bc.nav.move("left"),
+	},
+	{
+		key: "right",
+		mode: "mergeSelect",
+		description: "Move right",
+		action: bc.nav.move("right"),
+	},
+	{
+		key: "space",
+		mode: "mergeSelect",
+		description: "Confirm merge",
+		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
+	},
+	{
+		key: "return",
+		mode: "mergeSelect",
+		description: "Confirm merge",
+		action: Effect.suspend(() => bc.prHandlers.confirmMergeSelect()),
+	},
+	{
+		key: "escape",
+		mode: "mergeSelect",
+		description: "Cancel",
+		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),
 	},
 ]

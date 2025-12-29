@@ -780,6 +780,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
+| `Space` `b` | Merge bead into... | Worktree exists (merge into another bead) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 
 #### Update from Main (Space+u)
@@ -864,6 +865,56 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 - You want to resolve conflicts manually instead
 
 **Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
+
+#### Merge Bead Into... (Space+b)
+
+Merges one bead's work into another bead's branch without going through main or creating a PR. This is useful when you have exploratory work in bead A that you realize belongs with other work in bead B.
+
+**How it works:**
+
+1. Select the source bead (must have a worktree with commits)
+2. Press `Space` `b` to enter **merge select mode**
+3. The source bead is highlighted with a distinct border (flamingo color)
+4. Navigate to the target bead using `h/j/k/l`
+5. Press `Space` or `Enter` to confirm the merge
+6. Press `Esc` to cancel
+
+**Merge behavior:**
+
+- Source bead's commits are merged INTO the target bead's branch
+- If target has no worktree yet, one is created automatically
+- Conflicts are handled the same as other merges (Claude session for resolution)
+- After successful merge, the source bead is **closed**
+- Source worktree is kept (for reference or manual cleanup later)
+
+**Visual feedback:**
+
+- **Status bar**: Shows "MRG" mode label with keybinding hints
+- **Source bead**: Highlighted with flamingo-colored border
+- **Toast notifications**: Progress and result messages
+
+**Use cases:**
+
+- Consolidating exploratory work into a main feature bead
+- Combining related tasks that were started separately
+- Moving completed work from one bead to another
+
+**Example workflow:**
+
+```
+1. Work on bead A (exploratory fix)
+2. Realize the fix belongs with bead B (main feature)
+3. Select bead A, press Space+b
+4. Navigate to bead B, press Space
+5. Bead A's work is now in bead B, and A is closed
+6. Continue working on bead B with all the changes
+```
+
+**Requirements:**
+
+- Source bead must have a worktree (has commits to merge)
+- Target bead must exist in the tracker (worktree is created if needed)
+- Cannot merge a bead into itself
 
 #### Show Diff (Space+f)
 
