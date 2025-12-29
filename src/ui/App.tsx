@@ -310,7 +310,7 @@ export const App = () => {
 			{showingProjectSelector && <ProjectSelector />}
 
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
-				<DevServerMenu beadId={currentOverlay.beadId} mode={currentOverlay.mode} />
+				<DevServerMenu beadId={currentOverlay.beadId} />
 			)}
 
 			{/* Diagnostics overlay */}
