@@ -38,7 +38,7 @@ export type Overlay =
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
-	| { readonly _tag: "devServerMenu"; readonly beadId: string; readonly mode: "toggle" | "attach" }
+	| { readonly _tag: "devServerMenu"; readonly beadId: string }
 	| { readonly _tag: "planning" }
 
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
