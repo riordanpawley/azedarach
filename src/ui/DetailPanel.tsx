@@ -11,7 +11,13 @@ import type { ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { DependencyRef } from "../core/BeadsClient.js"
 import { formatElapsedMs } from "../services/ClockService.js"
-import { currentAttachmentsAtom, detailScrollAtom, epicChildrenAtom } from "./atoms.js"
+import {
+	currentAttachmentsAtom,
+	detailScrollAtom,
+	drillDownChildDetailsAtom,
+	epicChildrenAtom,
+	taskPhaseInfoAtom,
+} from "./atoms.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
@@ -26,12 +32,17 @@ export interface DetailPanelProps {
 const ATTR_BOLD = 1
 
 /**
+ * Status type for dependency visualization
+ */
+type DependencyStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
+
+/**
  * Get status indicator for a child task
  * ○ = open
  * ● = in_progress or blocked
  * ✓ = closed
  */
-const getChildStatusIndicator = (child: DependencyRef): string => {
+const getChildStatusIndicator = (child: { status: DependencyStatus }): string => {
 	if (child.status === "closed") return "✓"
 	if (child.status === "open") return "○"
 	return "●"
@@ -40,7 +51,7 @@ const getChildStatusIndicator = (child: DependencyRef): string => {
 /**
  * Get status color for a child task
  */
-const getChildStatusColor = (status: DependencyRef["status"]): string => {
+const getChildStatusColor = (status: DependencyStatus): string => {
 	switch (status) {
 		case "open":
 			return theme.blue
@@ -128,6 +139,32 @@ export const DetailPanel = (props: DetailPanelProps) => {
 			setEpicChildren([])
 		}
 	}, [isEpic, fetchEpicChildren])
+
+	// Get phase info to show blockers (only relevant in drill-down mode)
+	const phaseInfo = useAtomValue(taskPhaseInfoAtom(props.task.id))
+	const childDetailsResult = useAtomValue(drillDownChildDetailsAtom)
+
+	// Build blocker information
+	const blockerInfo = useMemo(() => {
+		if (!phaseInfo || phaseInfo.blockedBy.length === 0) {
+			return []
+		}
+
+		if (!Result.isSuccess(childDetailsResult)) {
+			// Fall back to just IDs if details not available
+			return phaseInfo.blockedBy.map((id) => ({ id, title: id, status: "open" as const }))
+		}
+
+		const childDetails = childDetailsResult.value
+		return phaseInfo.blockedBy.map((blockerId) => {
+			const blocker = childDetails.get(blockerId)
+			return {
+				id: blockerId,
+				title: blocker?.title ?? blockerId,
+				status: blocker?.status ?? ("open" as const),
+			}
+		})
+	}, [phaseInfo, childDetailsResult])
 
 	// Priority label like P1, P2, P3, P4
 	const priorityLabel = `P${props.task.priority}`
@@ -345,6 +382,22 @@ export const DetailPanel = (props: DetailPanelProps) => {
 								</text>
 							))}
 							<text fg={theme.subtext0}>{"  Press 'o' to orchestrate parallel workers"}</text>
+							<text> </text>
+						</box>
+					)}
+
+					{/* Blocked By - shown when task has blockers in drill-down mode */}
+					{blockerInfo.length > 0 && (
+						<box flexDirection="column">
+							<text fg={theme.red} attributes={ATTR_BOLD}>
+								{`⊘ Blocked By (${blockerInfo.length}):`}
+							</text>
+							{blockerInfo.map((blocker) => (
+								<text key={blocker.id} fg={getChildStatusColor(blocker.status)}>
+									{`  ${blocker.id}  ${getChildStatusIndicator(blocker)}  ${blocker.title}`}
+								</text>
+							))}
+							<text fg={theme.subtext0}>{"  Complete these tasks first to unblock this one"}</text>
 							<text> </text>
 						</box>
 					)}

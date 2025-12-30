@@ -70,6 +70,8 @@ export interface TaskCardProps {
 	attachmentCount?: number
 	/** Whether this task is the source bead in merge select mode */
 	isMergeSource?: boolean
+	/** Whether this task is blocked by other tasks (phase > 1 in drill-down) */
+	isBlocked?: boolean
 }
 
 /**
@@ -267,7 +269,10 @@ export const TaskCard = (props: TaskCardProps) => {
 					<ElapsedTimer startedAt={props.task.sessionStartedAt} />
 				)}
 			</box>
-			<text fg={theme.text}>{truncateText(props.task.title, maxTitleWidth)}</text>
+			<text fg={props.isBlocked ? theme.overlay0 : theme.text}>
+				{props.isBlocked ? "⊘ " : ""}
+				{truncateText(props.task.title, maxTitleWidth - (props.isBlocked ? 2 : 0))}
+			</text>
 		</box>
 	)
 }
