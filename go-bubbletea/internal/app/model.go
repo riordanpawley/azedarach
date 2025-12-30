@@ -562,6 +562,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.EnterNormal()
 		// Reload beads to reflect changes
 		return m, m.loadBeadsCmd()
+
+	// Single task status result
+	case taskStatusResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to update task: %v", msg.err),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
+			Expires: time.Now().Add(2 * time.Second),
+		})
+		// Reload beads to reflect changes
+		return m, m.loadBeadsCmd()
 	}
 
 	return m, nil
@@ -1373,19 +1391,28 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Task actions
 	case "h":
-		// TODO: Move task left
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Move task left (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Move task left (to previous status)
+		if task.Status == domain.StatusOpen {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "Task is already in Open status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.moveTaskStatusCmd(task.ID, -1)
+
 	case "l":
-		// TODO: Move task right
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Move task right (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Move task right (to next status)
+		if task.Status == domain.StatusDone {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "Task is already in Done status",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.moveTaskStatusCmd(task.ID, 1)
 	case "e":
 		// TODO: Edit task
 		m.toasts = append(m.toasts, Toast{
@@ -1712,6 +1739,70 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		}
 
 		return bulkStatusResultMsg{updated: updated, failed: failed}
+	}
+}
+
+// Single task status result
+type taskStatusResultMsg struct {
+	taskID    string
+	newStatus domain.Status
+	err       error
+}
+
+// moveTaskStatusCmd moves a single task's status by delta
+func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		statusOrder := []domain.Status{
+			domain.StatusOpen,
+			domain.StatusInProgress,
+			domain.StatusBlocked,
+			domain.StatusDone,
+		}
+
+		// Find the task to get current status
+		var currentTask *domain.Task
+		for i := range m.tasks {
+			if m.tasks[i].ID == taskID {
+				currentTask = &m.tasks[i]
+				break
+			}
+		}
+
+		if currentTask == nil {
+			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("task not found")}
+		}
+
+		// Find current status index
+		currentIdx := -1
+		for i, s := range statusOrder {
+			if s == currentTask.Status {
+				currentIdx = i
+				break
+			}
+		}
+
+		if currentIdx == -1 {
+			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("invalid status")}
+		}
+
+		// Calculate new status
+		newIdx := currentIdx + delta
+		if newIdx < 0 || newIdx >= len(statusOrder) {
+			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("cannot move beyond status bounds")}
+		}
+
+		newStatus := statusOrder[newIdx]
+
+		// Update via beads client
+		err := m.beadsClient.Update(ctx, taskID, newStatus)
+		if err != nil {
+			return taskStatusResultMsg{taskID: taskID, err: err}
+		}
+
+		return taskStatusResultMsg{taskID: taskID, newStatus: newStatus}
 	}
 }
 
