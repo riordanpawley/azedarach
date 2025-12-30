@@ -2,19 +2,19 @@ package statusbar
 
 import (
 	"github.com/charmbracelet/lipgloss"
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // StatusBar represents the status bar at the bottom of the TUI
 type StatusBar struct {
-	mode   app.Mode
+	mode   types.Mode
 	width  int
 	styles *styles.Styles
 }
 
 // New creates a new StatusBar with the given mode, width, and styles
-func New(mode app.Mode, width int, styles *styles.Styles) StatusBar {
+func New(mode types.Mode, width int, styles *styles.Styles) StatusBar {
 	return StatusBar{
 		mode:   mode,
 		width:  width,

@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 func TestStatusBar_RenderNormalMode(t *testing.T) {
 	style := styles.New()
-	sb := New(app.ModeNormal, 80, style)
+	sb := New(types.ModeNormal, 80, style)
 
 	result := sb.Render()
 
@@ -33,7 +33,7 @@ func TestStatusBar_RenderNormalMode(t *testing.T) {
 
 func TestStatusBar_RenderSelectMode(t *testing.T) {
 	style := styles.New()
-	sb := New(app.ModeSelect, 80, style)
+	sb := New(types.ModeSelect, 80, style)
 
 	result := sb.Render()
 
@@ -53,7 +53,7 @@ func TestStatusBar_RenderSelectMode(t *testing.T) {
 
 func TestStatusBar_RenderSearchMode(t *testing.T) {
 	style := styles.New()
-	sb := New(app.ModeSearch, 80, style)
+	sb := New(types.ModeSearch, 80, style)
 
 	result := sb.Render()
 
@@ -70,7 +70,7 @@ func TestStatusBar_RenderSearchMode(t *testing.T) {
 
 func TestStatusBar_RenderGotoMode(t *testing.T) {
 	style := styles.New()
-	sb := New(app.ModeGoto, 80, style)
+	sb := New(types.ModeGoto, 80, style)
 
 	result := sb.Render()
 
@@ -90,7 +90,7 @@ func TestStatusBar_RenderGotoMode(t *testing.T) {
 
 func TestStatusBar_RenderActionMode(t *testing.T) {
 	style := styles.New()
-	sb := New(app.ModeAction, 80, style)
+	sb := New(types.ModeAction, 80, style)
 
 	result := sb.Render()
 
@@ -103,7 +103,7 @@ func TestStatusBar_RenderActionMode(t *testing.T) {
 func TestStatusBar_FillsWidth(t *testing.T) {
 	style := styles.New()
 	width := 100
-	sb := New(app.ModeNormal, width, style)
+	sb := New(types.ModeNormal, width, style)
 
 	result := sb.Render()
 
@@ -116,14 +116,14 @@ func TestStatusBar_FillsWidth(t *testing.T) {
 
 func TestGetHints_AllModes(t *testing.T) {
 	tests := []struct {
-		mode     app.Mode
+		mode     types.Mode
 		expected string
 	}{
-		{app.ModeNormal, "h/l: columns  j/k: tasks  Space: action  ?: help  q: quit"},
-		{app.ModeSelect, "Space: toggle  a: all  n: none  Esc: cancel"},
-		{app.ModeSearch, "Type to search  Enter: confirm  Esc: cancel"},
-		{app.ModeGoto, "g: top  e: end  h: first col  l: last col  Esc: cancel"},
-		{app.ModeAction, ""},
+		{types.ModeNormal, "h/l: columns  j/k: tasks  Space: action  ?: help  q: quit"},
+		{types.ModeSelect, "Space: toggle  a: all  n: none  Esc: cancel"},
+		{types.ModeSearch, "Type to search  Enter: confirm  Esc: cancel"},
+		{types.ModeGoto, "g: top  e: end  h: first col  l: last col  Esc: cancel"},
+		{types.ModeAction, ""},
 	}
 
 	for _, tt := range tests {

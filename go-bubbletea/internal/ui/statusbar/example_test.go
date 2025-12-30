@@ -3,7 +3,7 @@ package statusbar_test
 import (
 	"fmt"
 
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -13,7 +13,7 @@ func Example() {
 	style := styles.New()
 
 	// Create a status bar in normal mode
-	sb := statusbar.New(app.ModeNormal, 80, style)
+	sb := statusbar.New(types.ModeNormal, 80, style)
 
 	// Render it (output will include ANSI codes for styling)
 	rendered := sb.Render()
@@ -25,7 +25,7 @@ func Example() {
 
 // ExampleGetHints shows how to get hints for different modes
 func ExampleGetHints() {
-	normalHints := statusbar.GetHints(app.ModeNormal)
+	normalHints := statusbar.GetHints(types.ModeNormal)
 	fmt.Println(normalHints)
 	// Output: h/l: columns  j/k: tasks  Space: action  ?: help  q: quit
 }

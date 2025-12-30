@@ -13,6 +13,9 @@ func newTestModel() Model {
 	cfg := &config.Config{CLITool: "claude"}
 	m := New(cfg)
 
+	// Disable placeholder data for tests so we can control the tasks
+	m.usePlaceholder = false
+
 	// Add some test tasks
 	m.tasks = []domain.Task{
 		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
