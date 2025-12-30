@@ -561,6 +561,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									yield* board.saveToCache(currentProject.path)
 								}
 
+								// Exit epic drilldown before switching projects - drilldown state is project-specific
+								yield* nav.exitDrillDown()
+
 								yield* projectService.switchProject(project.name)
 								yield* overlay.pop()
 
