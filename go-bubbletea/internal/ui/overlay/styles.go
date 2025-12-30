@@ -25,6 +25,10 @@ type Styles struct {
 	Separator lipgloss.Style
 	// Footer is the style for overlay footer text
 	Footer lipgloss.Style
+	// MenuHeader is the style for menu section headers
+	MenuHeader lipgloss.Style
+	// MenuCount is the style for count indicators
+	MenuCount lipgloss.Style
 }
 
 // New creates a new Styles instance using the Catppuccin Macchiato theme
@@ -65,5 +69,12 @@ func New() *Styles {
 		Footer: lipgloss.NewStyle().
 			Foreground(styles.Subtext0).
 			MarginTop(1),
+
+		MenuHeader: lipgloss.NewStyle().
+			Foreground(styles.Subtext1).
+			Bold(true),
+
+		MenuCount: lipgloss.NewStyle().
+			Foreground(styles.Green),
 	}
 }

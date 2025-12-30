@@ -535,6 +535,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Open the PR creation overlay with branch info
 		prOverlay := overlay.NewPRCreateOverlay(msg.branch, "main", msg.beadID)
 		return m, tea.Batch(m.overlayStack.Push(prOverlay), prOverlay.Init())
+
+	// Bulk action messages
+	case overlay.BulkActionMsg:
+		m.overlayStack.Pop()
+		return m.handleBulkAction(msg)
+
+	// Bulk status result
+	case bulkStatusResultMsg:
+		if msg.updated > 0 {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Updated %d tasks", msg.updated),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		if msg.failed > 0 {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("%d tasks failed to update", msg.failed),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		// Clear selection and return to normal mode after bulk action
+		m.editor.ClearSelection()
+		m.editor.EnterNormal()
+		// Reload beads to reflect changes
+		return m, m.loadBeadsCmd()
 	}
 
 	return m, nil
@@ -840,8 +867,78 @@ func (m Model) handleActionMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleSelectMode processes keyboard input in select mode
 func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// TODO: Implement select mode handling
-	// For now, just allow escape to exit
+	columns := m.buildColumns()
+	task, _ := m.getCurrentTaskAndSession()
+
+	switch msg.String() {
+	// Navigation with selection toggle
+	case "j", "down":
+		// Toggle current task selection, then move down
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		m.nav.MoveDown(columns)
+		return m, nil
+
+	case "k", "up":
+		// Toggle current task selection, then move up
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		m.nav.MoveUp(columns)
+		return m, nil
+
+	// Horizontal movement (no selection toggle)
+	case "h", "left":
+		m.nav.MoveLeft(columns)
+		return m, nil
+
+	case "l", "right":
+		m.nav.MoveRight(columns)
+		return m, nil
+
+	// Toggle selection without moving
+	case " ":
+		if task != nil {
+			m.editor.ToggleSelection(task.ID)
+		}
+		return m, nil
+
+	// Select all in current column
+	case "a":
+		status := m.nav.GetCurrentStatus(columns)
+		for _, t := range m.tasks {
+			if t.Status == status {
+				m.editor.Select(t.ID)
+			}
+		}
+		return m, nil
+
+	// Select all visible tasks
+	case "A":
+		filteredTasks := m.editor.ApplyFilter(m.tasks)
+		m.editor.SelectAll(filteredTasks)
+		return m, nil
+
+	// Clear selection
+	case "x":
+		m.editor.ClearSelection()
+		return m, nil
+
+	// Bulk action menu for selected tasks
+	case "enter":
+		if m.editor.HasSelection() {
+			selectedIDs := m.editor.GetSelectedTasksList()
+			return m, m.overlayStack.Push(overlay.NewBulkActionMenu(selectedIDs, len(selectedIDs)))
+		}
+		return m, nil
+
+	// Exit select mode
+	case "esc":
+		m.editor.EnterNormal()
+		return m, nil
+	}
+
 	return m, nil
 }
 
@@ -1012,6 +1109,52 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
 	return m.nav.GetCurrentTask(columns)
+}
+
+// handleBulkAction handles bulk action menu selections
+func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) {
+	count := len(msg.SelectedIDs)
+	if count == 0 {
+		return m, nil
+	}
+
+	switch msg.Action {
+	case "h": // Move left (previous status)
+		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, -1)
+
+	case "l": // Move right (next status)
+		return m, m.bulkMoveStatusCmd(msg.SelectedIDs, 1)
+
+	case "o": // Set to Open
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusOpen)
+
+	case "i": // Set to In Progress
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusInProgress)
+
+	case "b": // Set to Blocked
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusBlocked)
+
+	case "D": // Set to Done
+		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
+
+	case "d": // Delete selected
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: fmt.Sprintf("Delete %d tasks (TODO)", count),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+	case "x": // Clear selection
+		m.editor.ClearSelection()
+		m.editor.EnterNormal()
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Selection cleared",
+			Expires: time.Now().Add(2 * time.Second),
+		})
+	}
+
+	return m, nil
 }
 
 // handleSelection handles overlay selection messages
@@ -1471,6 +1614,104 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 			worktree: worktree,
 			err:      err,
 		}
+	}
+}
+
+// Bulk status commands
+
+type bulkStatusResultMsg struct {
+	updated int
+	failed  int
+	err     error
+}
+
+// bulkMoveStatusCmd moves tasks by delta (-1 = left, +1 = right)
+func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		statusOrder := []domain.Status{
+			domain.StatusOpen,
+			domain.StatusInProgress,
+			domain.StatusBlocked,
+			domain.StatusDone,
+		}
+
+		updated := 0
+		failed := 0
+
+		for _, taskID := range taskIDs {
+			// Find the task to get current status
+			var currentTask *domain.Task
+			for i := range m.tasks {
+				if m.tasks[i].ID == taskID {
+					currentTask = &m.tasks[i]
+					break
+				}
+			}
+
+			if currentTask == nil {
+				failed++
+				continue
+			}
+
+			// Find current status index
+			currentIdx := -1
+			for i, s := range statusOrder {
+				if s == currentTask.Status {
+					currentIdx = i
+					break
+				}
+			}
+
+			if currentIdx == -1 {
+				failed++
+				continue
+			}
+
+			// Calculate new status
+			newIdx := currentIdx + delta
+			if newIdx < 0 || newIdx >= len(statusOrder) {
+				// Can't move beyond bounds
+				continue
+			}
+
+			newStatus := statusOrder[newIdx]
+
+			// Update via beads client
+			err := m.beadsClient.Update(ctx, taskID, newStatus)
+			if err != nil {
+				failed++
+				continue
+			}
+
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, failed: failed}
+	}
+}
+
+// bulkSetStatusCmd sets all selected tasks to a specific status
+func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updated := 0
+		failed := 0
+
+		for _, taskID := range taskIDs {
+			err := m.beadsClient.Update(ctx, taskID, status)
+			if err != nil {
+				failed++
+				continue
+			}
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, failed: failed}
 	}
 }
 
