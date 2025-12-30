@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
+	"github.com/riordanpawley/azedarach/internal/services/network"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
@@ -115,6 +116,11 @@ type Model struct {
 	sessionMonitor  *monitor.SessionMonitor
 	portAllocator   *devserver.PortAllocator
 
+	// Git services
+	gitClient      *git.Client
+	networkChecker *network.StatusChecker
+	isOnline       bool
+
 	// Logger
 	logger *slog.Logger
 
@@ -158,6 +164,12 @@ func New(cfg *config.Config) Model {
 	// Initialize port allocator (base port 3000)
 	portAllocator := devserver.NewPortAllocator(3000)
 
+	// Initialize git client (uses same runner as worktree manager)
+	gitClient := git.NewClient(gitRunner, logger)
+
+	// Initialize network checker
+	networkChecker := network.NewStatusChecker()
+
 	return Model{
 		tasks:           []domain.Task{},
 		sessions:        make(map[string]*domain.Session),
@@ -177,6 +189,9 @@ func New(cfg *config.Config) Model {
 		worktreeManager: worktreeManager,
 		sessionMonitor:  sessionMonitor,
 		portAllocator:   portAllocator,
+		gitClient:       gitClient,
+		networkChecker:  networkChecker,
+		isOnline:        true, // Optimistically assume online
 		logger:          logger,
 		usePlaceholder:  false, // Use real data from beads
 	}
@@ -277,6 +292,101 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Level:   ToastError,
 			Message: fmt.Sprintf("Session error: %s - %v", msg.beadID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+
+	case network.StatusMsg:
+		// Update online status
+		m.isOnline = msg.Online
+		m.logger.Debug("network status updated", "online", msg.Online)
+		return m, nil
+
+	case fetchAndMergeResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Merge failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		if msg.result.HasConflicts {
+			// Show conflict dialog
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Merge conflicts in %d files", len(msg.result.ConflictFiles)),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, m.overlayStack.Push(overlay.NewConflictDialog(msg.result.ConflictFiles))
+		}
+
+		// Successful merge
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: "Updated from main successfully",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case createPRResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to get branch info: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		// Show PR command in toast
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Run: %s", msg.cmd),
+			Expires: time.Now().Add(10 * time.Second),
+		})
+		return m, nil
+
+	case showDiffResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to get diff: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		// Show abbreviated diff in toast
+		diff := msg.diff
+		if len(diff) > 200 {
+			diff = diff[:200] + "..."
+		}
+		if diff == "" {
+			diff = "No changes"
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: diff,
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+
+	case abortMergeResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to abort merge: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: "Merge aborted successfully",
+			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
 	}
@@ -778,6 +888,20 @@ func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 
 // handleSelection handles overlay selection messages
 func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	// Handle special overlay-specific messages first (before popping overlay)
+	switch msg.Key {
+	case "abort", "claude", "manual":
+		// Conflict resolution messages - extract the value
+		if resolution, ok := msg.Value.(overlay.ConflictResolutionMsg); ok {
+			return m.handleConflictResolution(resolution)
+		}
+	case "merge":
+		// Merge target selection message
+		if mergeMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
+			return m.handleMergeTargetSelection(mergeMsg)
+		}
+	}
+
 	// Close the overlay first
 	m.overlayStack.Pop()
 
@@ -842,33 +966,48 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	// Git actions
 	case "u":
-		// TODO: Update from main
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Update from main (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Update from main
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.fetchAndMergeCmd(session.Worktree, "main")
+
 	case "m":
-		// TODO: Merge to main
+		// TODO: Merge to main (Phase 6)
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastInfo,
-			Message: "Merge to main (TODO)",
+			Message: "Merge to main (TODO - Phase 6)",
 			Expires: time.Now().Add(3 * time.Second),
 		})
+
 	case "P":
-		// TODO: Create PR
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Create PR (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Create PR
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.createPRCmd(session.Worktree, task.ID)
+
 	case "f":
-		// TODO: Show diff
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Show diff (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Show diff
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session - start session first",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.showDiffCmd(session.Worktree)
 
 	// Task actions
 	case "h":
@@ -986,4 +1125,161 @@ func (m *Model) expireToasts() {
 	}
 
 	m.toasts = filtered
+}
+
+// Git operation commands
+
+type fetchAndMergeResultMsg struct {
+	worktree string
+	result   *git.MergeResult
+	err      error
+}
+
+type createPRResultMsg struct {
+	beadID string
+	cmd    string
+	err    error
+}
+
+type showDiffResultMsg struct {
+	diff string
+	err  error
+}
+
+// fetchAndMergeCmd fetches and merges from the specified branch
+func (m Model) fetchAndMergeCmd(worktree, branch string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Fetch from origin
+		if err := m.gitClient.Fetch(ctx, worktree, "origin"); err != nil {
+			return fetchAndMergeResultMsg{
+				worktree: worktree,
+				err:      fmt.Errorf("fetch failed: %w", err),
+			}
+		}
+
+		// Merge origin/branch
+		result, err := m.gitClient.Merge(ctx, worktree, "origin/"+branch)
+		return fetchAndMergeResultMsg{
+			worktree: worktree,
+			result:   result,
+			err:      err,
+		}
+	}
+}
+
+// createPRCmd generates the gh pr create command
+func (m Model) createPRCmd(worktree, beadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Get current branch name
+		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
+		if err != nil {
+			return createPRResultMsg{
+				beadID: beadID,
+				err:    fmt.Errorf("failed to get current branch: %w", err),
+			}
+		}
+
+		// Generate gh pr create command
+		cmd := fmt.Sprintf("gh pr create --head %s --title \"[%s] ...\" --body \"...\"", branch, beadID)
+
+		return createPRResultMsg{
+			beadID: beadID,
+			cmd:    cmd,
+			err:    nil,
+		}
+	}
+}
+
+// showDiffCmd gets the diff stat for the worktree
+func (m Model) showDiffCmd(worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		diff, err := m.gitClient.DiffStat(ctx, worktree)
+		if err != nil {
+			return showDiffResultMsg{
+				err: fmt.Errorf("failed to get diff: %w", err),
+			}
+		}
+
+		return showDiffResultMsg{
+			diff: diff,
+			err:  nil,
+		}
+	}
+}
+
+// handleConflictResolution handles conflict resolution choices
+func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg) (tea.Model, tea.Cmd) {
+	// Close the overlay
+	m.overlayStack.Pop()
+
+	task, session := m.getCurrentTaskAndSession()
+	if task == nil || session == nil {
+		return m, nil
+	}
+
+	switch {
+	case resolution.Abort:
+		// Abort the merge
+		return m, m.abortMergeCmd(session.Worktree)
+
+	case resolution.OpenManually:
+		// Show instructions to open in editor
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Open conflicted files in your editor at: %s", session.Worktree),
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+
+	case resolution.ResolveWithClaude:
+		// Attach to tmux session for Claude to resolve
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Run: tmux attach-session -t %s (Claude can help resolve)", task.ID),
+			Expires: time.Now().Add(8 * time.Second),
+		})
+		return m, nil
+
+	default:
+		return m, nil
+	}
+}
+
+// handleMergeTargetSelection handles merge target selection
+func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
+	// Close the overlay
+	m.overlayStack.Pop()
+
+	// TODO: Implement merge workflow in Phase 6
+	m.toasts = append(m.toasts, Toast{
+		Level:   ToastInfo,
+		Message: fmt.Sprintf("Merge %s -> %s (TODO - Phase 6)", msg.SourceID, msg.TargetID),
+		Expires: time.Now().Add(3 * time.Second),
+	})
+
+	return m, nil
+}
+
+type abortMergeResultMsg struct {
+	worktree string
+	err      error
+}
+
+// abortMergeCmd aborts an ongoing merge
+func (m Model) abortMergeCmd(worktree string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		err := m.gitClient.AbortMerge(ctx, worktree)
+		return abortMergeResultMsg{
+			worktree: worktree,
+			err:      err,
+		}
+	}
 }
