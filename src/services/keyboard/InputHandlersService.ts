@@ -796,9 +796,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}> = []
 
 					// DEBUG: Log tasks per column
-					console.log(
-						"[computeJumpLabels] Tasks per column:",
-						filteredTasksByColumn.map((tasks, idx) => `col${idx}:${tasks.length}`).join(", "),
+					yield* Effect.log(
+						`[computeJumpLabels] Tasks per column: ${filteredTasksByColumn.map((tasks, idx) => `col${idx}:${tasks.length}`).join(", ")}`,
 					)
 
 					filteredTasksByColumn.forEach((tasks, colIdx) => {
@@ -812,9 +811,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					})
 
 					// DEBUG: Log total tasks and sample
-					console.log(
-						`[computeJumpLabels] Total tasks: ${allTasks.length}, sample:`,
-						allTasks.slice(0, 5),
+					yield* Effect.log(
+						`[computeJumpLabels] Total tasks: ${allTasks.length}, sample: ${JSON.stringify(allTasks.slice(0, 5))}`,
 					)
 
 					// Generate label strings and build the Record
