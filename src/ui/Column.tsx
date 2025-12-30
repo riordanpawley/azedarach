@@ -128,11 +128,20 @@ export const Column = (props: ColumnProps) => {
 		// Find selected task index
 		const selectedIdx = props.selectedTaskIndex ?? 0
 
-		// Calculate window to keep selection visible
-		let startTaskIdx = 0
-		if (selectedIdx >= max - 1) {
-			// Scroll so selection is near bottom of window
-			startTaskIdx = Math.min(selectedIdx - max + 2, taskItems.length - max)
+		// Calculate window to keep selection centered when possible
+		// This ensures the cursor is always visible regardless of navigation direction
+		const halfWindow = Math.floor(max / 2)
+		let startTaskIdx: number
+
+		if (selectedIdx <= halfWindow) {
+			// Near start - show from beginning
+			startTaskIdx = 0
+		} else if (selectedIdx >= taskItems.length - halfWindow) {
+			// Near end - show last `max` items
+			startTaskIdx = taskItems.length - max
+		} else {
+			// Center the selection in the viewport
+			startTaskIdx = selectedIdx - halfWindow
 		}
 		startTaskIdx = Math.max(0, startTaskIdx)
 		const endTaskIdx = startTaskIdx + max
