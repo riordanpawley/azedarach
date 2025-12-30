@@ -9,7 +9,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestNewListView(t *testing.T) {
+func TestNewCompactView(t *testing.T) {
 	tasks := []domain.Task{
 		{
 			ID:        "az-1",
@@ -22,7 +22,7 @@ func TestNewListView(t *testing.T) {
 		},
 	}
 
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	if lv == nil {
 		t.Fatal("Expected non-nil ListView")
@@ -47,7 +47,7 @@ func TestNewListView(t *testing.T) {
 
 func TestSetCursor(t *testing.T) {
 	tasks := createTestTasks(5)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	tests := []struct {
 		name     string
@@ -73,7 +73,7 @@ func TestSetCursor(t *testing.T) {
 
 func TestSetSelected(t *testing.T) {
 	tasks := createTestTasks(3)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	selected := map[string]bool{
 		"az-1": true,
@@ -96,7 +96,7 @@ func TestSetSelected(t *testing.T) {
 }
 
 func TestRenderEmpty(t *testing.T) {
-	lv := NewListView([]domain.Task{}, 80, 20)
+	lv := NewCompactView([]domain.Task{}, 80, 20)
 	output := lv.Render()
 
 	if !strings.Contains(output, "No tasks") {
@@ -106,7 +106,7 @@ func TestRenderEmpty(t *testing.T) {
 
 func TestRenderWithTasks(t *testing.T) {
 	tasks := createTestTasks(3)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 	output := lv.Render()
 
 	// Check header is present
@@ -137,7 +137,7 @@ func TestRenderWithTasks(t *testing.T) {
 
 func TestRenderCursor(t *testing.T) {
 	tasks := createTestTasks(3)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	// Set cursor to second task
 	lv.SetCursor(1)
@@ -165,7 +165,7 @@ func TestRenderCursor(t *testing.T) {
 
 func TestRenderSelection(t *testing.T) {
 	tasks := createTestTasks(3)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	// Select first and third tasks
 	lv.SetSelected(map[string]bool{
@@ -189,7 +189,7 @@ func TestRenderSelection(t *testing.T) {
 
 func TestRenderCursorAndSelection(t *testing.T) {
 	tasks := createTestTasks(3)
-	lv := NewListView(tasks, 80, 20)
+	lv := NewCompactView(tasks, 80, 20)
 
 	// Set cursor to first task and select it
 	lv.SetCursor(0)
@@ -268,7 +268,7 @@ func TestRenderStatusAbbreviations(t *testing.T) {
 				UpdatedAt: time.Now(),
 			}
 
-			lv := NewListView([]domain.Task{task}, 80, 20)
+			lv := NewCompactView([]domain.Task{task}, 80, 20)
 			output := lv.Render()
 
 			if !strings.Contains(output, tt.expected) {
@@ -293,7 +293,7 @@ func TestRenderPriority(t *testing.T) {
 				UpdatedAt: time.Now(),
 			}
 
-			lv := NewListView([]domain.Task{task}, 80, 20)
+			lv := NewCompactView([]domain.Task{task}, 80, 20)
 			output := lv.Render()
 
 			if !strings.Contains(output, pri.String()) {
@@ -328,7 +328,7 @@ func TestRenderSessionIcon(t *testing.T) {
 				UpdatedAt: time.Now(),
 			}
 
-			lv := NewListView([]domain.Task{task}, 80, 20)
+			lv := NewCompactView([]domain.Task{task}, 80, 20)
 			output := lv.Render()
 
 			icon := state.Icon()
