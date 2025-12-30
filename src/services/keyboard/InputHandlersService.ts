@@ -235,6 +235,47 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
+			 * Handle bulkCleanup overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled.
+			 *
+			 * w → execute onWorktreeOnly effect (cleanup worktrees, keep beads open)
+			 * f → execute onFullCleanup effect (cleanup worktrees AND close beads)
+			 * Escape → just pop overlay (cancel)
+			 */
+			const handleBulkCleanupInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "bulkCleanup") {
+						return false
+					}
+
+					// w for worktree-only cleanup
+					if (key === "w") {
+						yield* overlay.pop()
+						yield* currentOverlay.onWorktreeOnly
+						return true
+					}
+
+					// f for full cleanup (worktree + close bead)
+					if (key === "f") {
+						yield* overlay.pop()
+						yield* currentOverlay.onFullCleanup
+						return true
+					}
+
+					// Escape to cancel
+					if (key === "escape") {
+						yield* overlay.pop()
+						return true
+					}
+
+					// Consume all other keys while overlay is open
+					return true
+				})
+
+			/**
 			 * Handle detail overlay keyboard input for attachment navigation and scrolling
 			 *
 			 * @param key - The key that was pressed
@@ -816,6 +857,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleJumpInput,
 				handleConfirmInput,
 				handleMergeChoiceInput,
+				handleBulkCleanupInput,
 				handleDetailOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,
