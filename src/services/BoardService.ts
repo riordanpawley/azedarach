@@ -708,7 +708,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								return task
 							}
 							const worktreePath = getWorktreePath(projectPath, task.id)
-							const gitStatus = yield* checkGitStatus(worktreePath, baseBranch, showLineChanges)
+							// Use parent epic branch for children, otherwise config baseBranch
+							const effectiveBaseBranch = task.parentEpicId ?? baseBranch
+							const gitStatus = yield* checkGitStatus(
+								worktreePath,
+								effectiveBaseBranch,
+								showLineChanges,
+							)
 							return { ...task, ...gitStatus }
 						}),
 					),
