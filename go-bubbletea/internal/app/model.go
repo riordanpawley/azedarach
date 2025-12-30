@@ -2,6 +2,8 @@
 package app
 
 import (
+	"context"
+	"log/slog"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -9,10 +11,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
+	"github.com/riordanpawley/azedarach/internal/ui/toast"
 )
 
 // Re-export Mode type and constants for convenience
@@ -24,6 +28,17 @@ const (
 	ModeSearch = types.ModeSearch
 	ModeGoto   = types.ModeGoto
 	ModeAction = types.ModeAction
+)
+
+// Re-export Toast type and constants for convenience
+type Toast = types.Toast
+type ToastLevel = types.ToastLevel
+
+const (
+	ToastInfo    = types.ToastInfo
+	ToastSuccess = types.ToastSuccess
+	ToastWarning = types.ToastWarning
+	ToastError   = types.ToastError
 )
 
 // Cursor tracks the current position in the Kanban board
@@ -76,8 +91,12 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading bool
-	spinner spinner.Model
+	loading     bool
+	spinner     spinner.Model
+	lastRefresh time.Time
+
+	// Beads client
+	beadsClient *beads.Client
 
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
@@ -90,23 +109,6 @@ const (
 	SortBySession SortField = iota
 	SortByPriority
 	SortByUpdated
-)
-
-// Toast represents a notification message
-type Toast struct {
-	Level   ToastLevel
-	Message string
-	Expires time.Time
-}
-
-// ToastLevel indicates the severity of a toast
-type ToastLevel int
-
-const (
-	ToastInfo ToastLevel = iota
-	ToastSuccess
-	ToastWarning
-	ToastError
 )
 
 // Overlay represents the current modal overlay (if any)
@@ -122,6 +124,11 @@ func New(cfg *config.Config) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
 
+	// Initialize beads client
+	runner := &beads.ExecRunner{}
+	logger := slog.Default()
+	client := beads.NewClient(runner, logger)
+
 	return Model{
 		tasks:          []domain.Task{},
 		sessions:       make(map[string]*domain.Session),
@@ -136,17 +143,19 @@ func New(cfg *config.Config) Model {
 		toasts:         []Toast{},
 		styles:         styles.New(),
 		config:         cfg,
-		loading:        false, // Start with placeholder data immediately
+		loading:        true, // Start with loading state
 		spinner:        s,
-		usePlaceholder: true, // Use placeholder data for Phase 1
+		beadsClient:    client,
+		usePlaceholder: false, // Use real data from beads
 	}
 }
 
 // Init returns the initial command for the application
 func (m Model) Init() tea.Cmd {
-	// For Phase 1, no async commands needed - we use placeholder data
-	// Return spinner tick for future loading states
-	return m.spinner.Tick
+	return tea.Batch(
+		m.spinner.Tick,
+		m.loadBeadsCmd(),
+	)
 }
 
 // Update handles incoming messages and updates the model
@@ -170,9 +179,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case beadsLoadedMsg:
+		wasLoading := m.loading
 		m.tasks = msg.tasks
 		m.loading = false
-		return m, nil
+		m.lastRefresh = time.Now()
+		// Show success toast on first load
+		if wasLoading {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastSuccess,
+				Message: "Beads loaded",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		// Start periodic refresh
+		return m, tickEvery(2 * time.Second)
 
 	case beadsErrorMsg:
 		m.toasts = append(m.toasts, Toast{
@@ -181,12 +201,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(8 * time.Second),
 		})
 		m.loading = false
-		return m, nil
+		// Still schedule a refresh to retry
+		return m, tickEvery(5 * time.Second)
 
 	case tickMsg:
-		// Periodic refresh
+		// Expire old toasts and refresh beads
+		m.expireToasts()
 		return m, tea.Batch(
-			loadBeads,
+			m.loadBeadsCmd(),
 			tickEvery(2 * time.Second),
 		)
 	}
@@ -230,6 +252,16 @@ func (m Model) View() string {
 
 	// Compose the layout
 	view := lipgloss.JoinVertical(lipgloss.Left, boardView, statusBarView)
+
+	// Render toasts in bottom-right corner
+	if len(m.toasts) > 0 {
+		toastRenderer := toast.New(m.styles)
+		toastView := toastRenderer.Render(m.toasts, m.width)
+		if toastView != "" {
+			// Overlay toasts on top of the main view
+			view = lipgloss.JoinVertical(lipgloss.Left, view, toastView)
+		}
+	}
 
 	// If overlay is open, render it on top (TODO: implement overlay rendering)
 	if m.overlay != nil {
@@ -455,10 +487,18 @@ type tickMsg time.Time
 
 // Commands
 
-func loadBeads() tea.Msg {
-	// TODO: Call beads.ListAll()
-	// For now, return empty list
-	return beadsLoadedMsg{tasks: []domain.Task{}}
+// loadBeadsCmd returns a command that fetches beads from the CLI
+func (m Model) loadBeadsCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		tasks, err := m.beadsClient.List(ctx)
+		if err != nil {
+			return beadsErrorMsg{err: err}
+		}
+		return beadsLoadedMsg{tasks: tasks}
+	}
 }
 
 func tickEvery(d time.Duration) tea.Cmd {
