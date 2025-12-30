@@ -1008,6 +1008,18 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						yield* Effect.log(`Merging ${beadId} into epic branch ${parentEpic.id} (not main)`)
 					}
 
+					// If merging into a parent epic, we need to merge IN the epic's worktree
+					// because git won't let us checkout a branch that's in use by another worktree.
+					// If epic has no worktree, we can merge in main project as usual.
+					let mergeDir = projectPath
+					if (parentEpic) {
+						const epicWorktree = yield* worktreeManager.get({ beadId: parentEpic.id, projectPath })
+						if (epicWorktree) {
+							mergeDir = epicWorktree.path
+							yield* Effect.log(`Epic ${parentEpic.id} has worktree, merging in ${mergeDir}`)
+						}
+					}
+
 					// Get bead info for merge commit message
 					const bead = yield* beadsClient.show(beadId)
 
@@ -1051,7 +1063,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"--name-only",
 							baseBranch,
 							beadId,
-						).pipe(Command.workingDirectory(projectPath))
+						).pipe(Command.workingDirectory(mergeDir))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
 							Effect.catchAll((e) =>
@@ -1066,7 +1078,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Get conflicting files
 						const output = yield* runGit(
 							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
-							projectPath,
+							mergeDir,
 						).pipe(
 							Effect.catchAll((e) =>
 								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
@@ -1121,23 +1133,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 5. No code conflicts - safe to merge
-					// Switch to base branch in main repo
-					yield* runGit(["checkout", baseBranch], projectPath).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to checkout ${baseBranch}: ${e.message}`,
-									command: `git checkout ${baseBranch}`,
-								}),
-						),
-					)
+					// If merging in main project, checkout base branch first
+					// If merging in epic's worktree, branch is already checked out
+					if (mergeDir === projectPath) {
+						yield* runGit(["checkout", baseBranch], projectPath).pipe(
+							Effect.mapError(
+								(e) =>
+									new GitError({
+										message: `Failed to checkout ${baseBranch}: ${e.message}`,
+										command: `git checkout ${baseBranch}`,
+									}),
+							),
+						)
+					}
 
 					// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
-					// This ensures .beads/issues.jsonl from main is preserved during merge
+					// This ensures .beads/issues.jsonl from base branch is preserved during merge
 					const mergeMessage = `Merge ${beadId}: ${bead.title}`
 					yield* runGit(
 						["merge", beadId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
-						projectPath,
+						mergeDir,
 					).pipe(
 						Effect.mapError((e) => {
 							// If merge still fails, report conflict or error
@@ -1145,7 +1160,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								return new MergeConflictError({
 									beadId,
 									branch: beadId,
-									message: `Merge conflict. Resolve manually: git checkout main && git merge ${beadId}`,
+									message: `Merge conflict. Resolve manually: git checkout ${baseBranch} && git merge ${beadId}`,
 								})
 							}
 							return new GitError({
@@ -1162,7 +1177,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.gen(function* () {
 							// Import beads from the merged JSONL
 							yield* beadsClient
-								.syncImportOnly(projectPath)
+								.syncImportOnly(mergeDir)
 								.pipe(
 									Effect.catchAll((e) =>
 										Effect.logWarning(`Failed to import beads after merge: ${e}`),
@@ -1171,7 +1186,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							// Recover any tombstoned issues
 							yield* beadsClient
-								.recoverTombstones(projectPath)
+								.recoverTombstones(mergeDir)
 								.pipe(
 									Effect.catchAll((e) =>
 										Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
@@ -1180,7 +1195,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							// Full sync to commit any bead changes
 							yield* beadsClient
-								.sync(projectPath)
+								.sync(mergeDir)
 								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
 						}),
 					)
@@ -1204,7 +1219,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								Effect.gen(function* () {
 									for (const cmd of validateCommands) {
 										yield* Effect.log(`Running: ${cmd}`)
-										const result = yield* runShellCommand(cmd, projectPath)
+										const result = yield* runShellCommand(cmd, mergeDir)
 										if (!result.success) {
 											return { success: false, output: result.output, failedCommand: cmd }
 										}
@@ -1225,19 +1240,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									yield* Effect.log(
 										`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
 									)
-									yield* runShellCommand(fixCommand, projectPath)
+									yield* runShellCommand(fixCommand, mergeDir)
 
 									lastResult = yield* runValidation()
 									if (lastResult.success) {
 										yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
 
 										// Commit the fixes
-										yield* runGit(["add", "-A"], projectPath).pipe(
-											Effect.catchAll(() => Effect.void),
-										)
+										yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
 										yield* runGit(
 											["commit", "-m", `fix: auto-fix after merging ${beadId}`],
-											projectPath,
+											mergeDir,
 										).pipe(Effect.catchAll(() => Effect.void))
 
 										return
@@ -1249,10 +1262,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							yield* Effect.log("Validation still failing after auto-fix attempts")
 
 							// Commit any partial fixes
-							yield* runGit(["add", "-A"], projectPath).pipe(Effect.catchAll(() => Effect.void))
+							yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
 							yield* runGit(
 								["commit", "-m", `wip: partial fix after merging ${beadId}`],
-								projectPath,
+								mergeDir,
 							).pipe(Effect.catchAll(() => Effect.void))
 
 							// Start Claude session if configured
@@ -1337,7 +1350,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						yield* withSyncLock(
 							beadsClient
-								.sync(projectPath)
+								.sync(mergeDir)
 								.pipe(
 									Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
 								),
@@ -1348,7 +1361,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					if (pushToOrigin) {
 						const pushStatus = yield* offlineService.isGitPushEnabled()
 						if (pushStatus.enabled) {
-							yield* runGit(["push", "origin", baseBranch], projectPath).pipe(
+							yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
 								Effect.mapError(
 									(e) =>
 										new GitError({
