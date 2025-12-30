@@ -113,7 +113,8 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		/**
 		 * Update from base action (Space+u)
 		 *
-		 * Updates the worktree branch with latest changes from main.
+		 * Updates the worktree branch with latest changes from its base branch.
+		 * For epic children, the base is the parent epic's branch. For standalone tasks, it's main.
 		 * Useful for syncing before creating a PR or resolving conflicts.
 		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
@@ -136,18 +137,20 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Fetch fresh gitConfig to pick up changes from project switching
 				const gitConfig = yield* appConfig.getGitConfig()
+				// Use parent epic branch for children, otherwise config baseBranch
+				const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
 
 				yield* helpers.withQueue(
 					task.id,
 					"update",
 					Effect.gen(function* () {
-						yield* toast.show("info", `Updating from ${gitConfig.baseBranch}...`)
+						yield* toast.show("info", `Updating from ${effectiveBaseBranch}...`)
 
 						// Get current project path (from ProjectService or cwd fallback)
 						const projectPath = yield* helpers.getProjectPath()
 
 						yield* prWorkflow.updateFromBase({ beadId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", `Updated from ${gitConfig.baseBranch}`)),
+							Effect.tap(() => toast.show("success", `Updated from ${effectiveBaseBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
 						)
 					}),
@@ -158,7 +161,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Create PR action (Space+P)
 		 *
 		 * Creates a GitHub PR for the current task's worktree branch.
-		 * First updates from main to ensure the branch is synced and resolve any conflicts.
+		 * First updates from base (epic branch for children, main for others) to ensure the branch is synced and resolve any conflicts.
 		 * Requires a worktree (active session or orphaned worktree).
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Blocked if task already has an operation in progress.
@@ -189,12 +192,14 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Fetch fresh gitConfig to pick up changes from project switching
 				const gitConfig = yield* appConfig.getGitConfig()
+				// Use parent epic branch for children, otherwise config baseBranch
+				const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
 
 				// Update from base first to resolve any conflicts
-				yield* toast.show("info", `Syncing with ${gitConfig.baseBranch} before PR...`)
+				yield* toast.show("info", `Syncing with ${effectiveBaseBranch} before PR...`)
 				const updateResult = yield* prWorkflow
 					.updateFromBase({ beadId: task.id, projectPath })
 					.pipe(
