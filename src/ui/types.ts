@@ -226,12 +226,22 @@ export interface JumpTarget {
 	taskIndex: number
 }
 
+/** Default home row keys for QWERTY layout */
+export const DEFAULT_JUMP_LABEL_CHARS = "asdfjkl;"
+
 /**
  * Generate 2-char jump labels (aa, ab, ac... ba, bb, bc...)
- * Uses home row keys for ergonomics
+ *
+ * Uses configurable home row keys for ergonomics. Customize via
+ * `keyboard.jumpLabelChars` in .azedarach.json for your layout:
+ * - QWERTY: "asdfjkl;" (default)
+ * - Colemak: "cieahtsn"
+ * - Dvorak: "aoeuhtns"
+ *
+ * @param count - Number of labels to generate
+ * @param chars - Characters to use for labels (default: QWERTY home row)
  */
-export function generateJumpLabels(count: number): string[] {
-	const chars = "asdfjkl;" // Home row keys
+export function generateJumpLabels(count: number, chars = DEFAULT_JUMP_LABEL_CHARS): string[] {
 	const labels: string[] = []
 
 	for (let i = 0; i < chars.length && labels.length < count; i++) {

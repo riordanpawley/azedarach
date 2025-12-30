@@ -91,6 +91,9 @@ export interface AppConfigService {
 	/** Get devServer configuration section */
 	readonly getDevServerConfig: () => Effect.Effect<ResolvedConfig["devServer"]>
 
+	/** Get keyboard configuration section */
+	readonly getKeyboardConfig: () => Effect.Effect<ResolvedConfig["keyboard"]>
+
 	/** Get workflow mode ('local' or 'origin') */
 	readonly getWorkflowMode: () => Effect.Effect<ResolvedConfig["git"]["workflowMode"]>
 
@@ -444,6 +447,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getBeadsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.beads),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
+			getKeyboardConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.keyboard),
 			getWorkflowMode: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git.workflowMode),
 			getEffectiveBaseBranch: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) =>
