@@ -640,7 +640,7 @@ fn handle_message(
                         "There are merge conflicts in: "
                         <> string.join(files, ", ")
                         <> ". Please resolve these conflicts, then stage and commit the resolution."
-                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                      case tmux.send_keys(tmux_name <> ":merge", "claude \"" <> prompt <> "\"") {
                         Ok(_) -> {
                           case tmux.send_keys(tmux_name <> ":merge", "Enter") {
                             Ok(_) -> Nil
@@ -785,7 +785,7 @@ fn handle_message(
                       let prompt =
                         "There are merge conflicts. Please resolve: "
                         <> string.join(files, ", ")
-                      case tmux.send_keys(tmux_name <> ":merge", "claude -p \"" <> prompt <> "\"") {
+                      case tmux.send_keys(tmux_name <> ":merge", "claude \"" <> prompt <> "\"") {
                         Ok(_) -> {
                           case tmux.send_keys(tmux_name <> ":merge", "Enter") {
                             Ok(_) -> notify_ui(state, Toast("Conflicts detected. Claude resolving.", Warning))
@@ -1469,8 +1469,8 @@ fn build_start_work_command(
     <> " --design=\\\"...\\\"`\\n\\nGoal: Make this bead self-sufficient so any future session could pick it up without extra context."
 
   case yolo {
-    True -> "claude --dangerously-skip-permissions -p \"" <> prompt <> "\""
-    False -> "claude -p \"" <> prompt <> "\""
+    True -> "claude --dangerously-skip-permissions \"" <> prompt <> "\""
+    False -> "claude \"" <> prompt <> "\""
   }
 }
 
