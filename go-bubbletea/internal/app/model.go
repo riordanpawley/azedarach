@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
+	"github.com/riordanpawley/azedarach/internal/services/navigation"
 	"github.com/riordanpawley/azedarach/internal/services/network"
 	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -63,156 +64,8 @@ func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (stri
 	return a.client.CapturePane(ctx, sessionName, 100)
 }
 
-// Position represents a computed position in the board
-type Position struct {
-	Column int // 0=Open, 1=InProgress, 2=Blocked, 3=Done
-	Task   int // Index within the column
-	Valid  bool
-}
-
-// Cursor tracks the selected task by ID (survives filter/sort changes)
-type Cursor struct {
-	TaskID         string // Primary state: selected task ID
-	FallbackColumn int    // Column to use when TaskID not found
-}
-
-// FindPosition computes the position of the cursor's task in the given columns
-func (c *Cursor) FindPosition(columns []board.Column) Position {
-	if c.TaskID == "" {
-		// No task selected, use fallback column, first task
-		col := c.FallbackColumn
-		if col >= len(columns) {
-			col = 0
-		}
-		if col < len(columns) && len(columns[col].Tasks) > 0 {
-			return Position{Column: col, Task: 0, Valid: true}
-		}
-		return Position{Column: col, Task: 0, Valid: false}
-	}
-
-	// Search for the task by ID
-	for colIdx, col := range columns {
-		for taskIdx, task := range col.Tasks {
-			if task.ID == c.TaskID {
-				return Position{Column: colIdx, Task: taskIdx, Valid: true}
-			}
-		}
-	}
-
-	// Task not found (filtered out?), use fallback
-	col := c.FallbackColumn
-	if col >= len(columns) {
-		col = 0
-	}
-	if col < len(columns) && len(columns[col].Tasks) > 0 {
-		return Position{Column: col, Task: 0, Valid: true}
-	}
-	return Position{Column: col, Task: 0, Valid: false}
-}
-
-// SetTask updates the cursor to point to a specific task
-func (c *Cursor) SetTask(taskID string, column int) {
-	c.TaskID = taskID
-	c.FallbackColumn = column
-}
-
-// MoveVertical moves up or down within a column, returns new task ID
-func (c *Cursor) MoveVertical(columns []board.Column, delta int) string {
-	pos := c.FindPosition(columns)
-	if !pos.Valid || pos.Column >= len(columns) {
-		return c.TaskID
-	}
-
-	col := columns[pos.Column]
-	newIdx := pos.Task + delta
-
-	// Clamp to column bounds
-	if newIdx < 0 {
-		newIdx = 0
-	}
-	if newIdx >= len(col.Tasks) {
-		newIdx = len(col.Tasks) - 1
-	}
-
-	if newIdx >= 0 && newIdx < len(col.Tasks) {
-		c.TaskID = col.Tasks[newIdx].ID
-		c.FallbackColumn = pos.Column
-	}
-	return c.TaskID
-}
-
-// MoveHorizontal moves left or right to adjacent column
-func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
-	pos := c.FindPosition(columns)
-
-	newCol := pos.Column + delta
-	if newCol < 0 {
-		newCol = 0
-	}
-	if newCol >= len(columns) {
-		newCol = len(columns) - 1
-	}
-
-	c.FallbackColumn = newCol
-
-	// Try to select task at same row index, or last task if column is shorter
-	if newCol < len(columns) && len(columns[newCol].Tasks) > 0 {
-		taskIdx := pos.Task
-		if taskIdx >= len(columns[newCol].Tasks) {
-			taskIdx = len(columns[newCol].Tasks) - 1
-		}
-		c.TaskID = columns[newCol].Tasks[taskIdx].ID
-	} else {
-		c.TaskID = "" // No task in new column
-	}
-	return c.TaskID
-}
-
-// JumpToStart moves to first task in current column
-func (c *Cursor) JumpToStart(columns []board.Column) string {
-	pos := c.FindPosition(columns)
-	if pos.Column < len(columns) && len(columns[pos.Column].Tasks) > 0 {
-		c.TaskID = columns[pos.Column].Tasks[0].ID
-	}
-	return c.TaskID
-}
-
-// JumpToEnd moves to last task in current column
-func (c *Cursor) JumpToEnd(columns []board.Column) string {
-	pos := c.FindPosition(columns)
-	if pos.Column < len(columns) {
-		col := columns[pos.Column]
-		if len(col.Tasks) > 0 {
-			c.TaskID = col.Tasks[len(col.Tasks)-1].ID
-		}
-	}
-	return c.TaskID
-}
-
-// JumpToColumn moves to a specific column, keeping relative row position
-func (c *Cursor) JumpToColumn(columns []board.Column, colIdx int) string {
-	if colIdx < 0 {
-		colIdx = 0
-	}
-	if colIdx >= len(columns) {
-		colIdx = len(columns) - 1
-	}
-
-	pos := c.FindPosition(columns)
-	c.FallbackColumn = colIdx
-
-	if colIdx < len(columns) && len(columns[colIdx].Tasks) > 0 {
-		// Try to keep same row position, or clamp to column size
-		taskIdx := pos.Task
-		if taskIdx >= len(columns[colIdx].Tasks) {
-			taskIdx = len(columns[colIdx].Tasks) - 1
-		}
-		c.TaskID = columns[colIdx].Tasks[taskIdx].ID
-	} else {
-		c.TaskID = "" // No task in target column
-	}
-	return c.TaskID
-}
+// Re-export navigation types for compatibility
+type Position = navigation.Position
 
 // Model is the main application state
 type Model struct {
@@ -220,9 +73,9 @@ type Model struct {
 	tasks    []domain.Task
 	sessions map[string]*domain.Session
 
-	// Navigation
-	cursor Cursor
-	mode   Mode
+	// Navigation (using NavigationService)
+	nav  *navigation.Service
+	mode Mode
 
 	// Selection (for multi-select mode)
 	selectedTasks map[string]bool
@@ -356,7 +209,7 @@ func New(cfg *config.Config) Model {
 	return Model{
 		tasks:           []domain.Task{},
 		sessions:        make(map[string]*domain.Session),
-		cursor:          Cursor{}, // ID-based: will use FallbackColumn=0
+		nav:             navigation.NewService(),
 		mode:            ModeNormal,
 		selectedTasks:   make(map[string]bool),
 		overlayStack:    overlay.NewStack(),
@@ -582,19 +435,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Close overlay
 		m.overlayStack.Pop()
 
-		// Jump to selected task by flattening all tasks and finding the index
-		flatIndex := msg.TaskIndex
+		// Jump to selected task by flat index
 		columns := m.buildColumns()
-		currentIndex := 0
-		for colIdx, col := range columns {
-			for _, task := range col.Tasks {
-				if currentIndex == flatIndex {
-					m.cursor.SetTask(task.ID, colIdx)
-					return m, nil
-				}
-				currentIndex++
-			}
-		}
+		m.nav.JumpToTaskByIndex(columns, msg.TaskIndex)
 		return m, nil
 
 	case overlay.ProjectSelectedMsg:
@@ -719,7 +562,7 @@ func (m Model) View() string {
 	columns := m.buildColumns()
 
 	// Create cursor for board package using computed position
-	pos := m.cursor.FindPosition(columns)
+	pos := m.nav.GetPosition(columns)
 	cursor := board.Cursor{
 		Column: pos.Column,
 		Task:   pos.Task,
@@ -877,29 +720,29 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Vertical navigation
 	case "j", "down":
-		m.cursor.MoveVertical(columns, 1)
+		m.nav.MoveDown(columns)
 		return m, nil
 
 	case "k", "up":
-		m.cursor.MoveVertical(columns, -1)
+		m.nav.MoveUp(columns)
 		return m, nil
 
 	// Horizontal navigation
 	case "h", "left":
-		m.cursor.MoveHorizontal(columns, -1)
+		m.nav.MoveLeft(columns)
 		return m, nil
 
 	case "l", "right":
-		m.cursor.MoveHorizontal(columns, 1)
+		m.nav.MoveRight(columns)
 		return m, nil
 
 	// Half-page scroll
 	case "ctrl+d":
-		m.cursor.MoveVertical(columns, m.halfPage())
+		m.nav.HalfPageDown(columns, m.halfPage())
 		return m, nil
 
 	case "ctrl+u":
-		m.cursor.MoveVertical(columns, -m.halfPage())
+		m.nav.HalfPageUp(columns, m.halfPage())
 		return m, nil
 
 	// Mode switches
@@ -963,16 +806,16 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "g":
 		// Go to top of column
-		m.cursor.JumpToStart(columns)
+		m.nav.GotoTop(columns)
 	case "e":
 		// Go to end of column
-		m.cursor.JumpToEnd(columns)
+		m.nav.GotoBottom(columns)
 	case "h":
 		// Go to first column
-		m.cursor.JumpToColumn(columns, 0)
+		m.nav.GotoFirstColumn(columns)
 	case "l":
 		// Go to last column
-		m.cursor.JumpToColumn(columns, len(columns)-1)
+		m.nav.GotoLastColumn(columns)
 	case "w":
 		// Jump mode - quick navigation with labels
 		taskCount := 0
@@ -1145,18 +988,8 @@ func (m Model) currentColumn() []domain.Task {
 
 // columnStatus returns the status for the current column
 func (m Model) columnStatus() domain.Status {
-	statuses := []domain.Status{
-		domain.StatusOpen,
-		domain.StatusInProgress,
-		domain.StatusBlocked,
-		domain.StatusDone,
-	}
 	columns := m.buildColumns()
-	pos := m.cursor.FindPosition(columns)
-	if pos.Column < 0 || pos.Column >= len(statuses) {
-		return domain.StatusOpen
-	}
-	return statuses[pos.Column]
+	return m.nav.GetCurrentStatus(columns)
 }
 
 // tasksInColumn returns all tasks with the given status
@@ -1185,18 +1018,7 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 // getCurrentTaskAndSession returns the currently selected task and its session
 func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
-	pos := m.cursor.FindPosition(columns)
-	if !pos.Valid || pos.Column >= len(columns) {
-		return nil, nil
-	}
-
-	col := columns[pos.Column]
-	if pos.Task >= len(col.Tasks) {
-		return nil, nil
-	}
-
-	task := col.Tasks[pos.Task]
-	return &task, task.Session
+	return m.nav.GetCurrentTask(columns)
 }
 
 // handleSelection handles overlay selection messages
@@ -1236,16 +1058,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		// Epic drill-down: child task selected
 		m.overlayStack.Pop()
 		if childID, ok := msg.Value.(string); ok {
-			// Jump to the child task by ID - cursor will compute position
+			// Jump to the child task by ID
 			columns := m.buildColumns()
-			for colIdx, col := range columns {
-				for _, task := range col.Tasks {
-					if task.ID == childID {
-						m.cursor.SetTask(task.ID, colIdx)
-						return m, nil
-					}
-				}
-			}
+			m.nav.JumpToTaskByID(columns, childID)
 		}
 		return m, nil
 	case "set-default-success", "remove-success", "detect-success":
