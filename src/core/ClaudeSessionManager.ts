@@ -448,11 +448,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							autoCompact,
 						} = options
 
-						// Check if session already exists (idempotent)
+						// Check if session already exists AND is active (idempotent for active sessions)
+						// If a session exists but is "idle", it means the tmux process died but we still
+						// have a stale entry in memory. In that case, we should create a new session.
 						const sessions = yield* Ref.get(sessionsRef)
 						const existingSession = HashMap.get(sessions, beadId)
 
-						if (existingSession._tag === "Some") {
+						if (existingSession._tag === "Some" && existingSession.value.state !== "idle") {
 							return existingSession.value
 						}
 
