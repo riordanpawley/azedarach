@@ -313,6 +313,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		// Track active worktrees in memory for fast lookups
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
+		// TTL cache for worktree refresh - avoid repeated git worktree list calls
+		// The cache is per-project-path, so switching projects still refreshes
+		const WORKTREE_CACHE_TTL_MS = 2000
+		const cacheTimestampRef = yield* Ref.make<{ path: string; timestamp: number } | null>(null)
+
 		/**
 		 * Copy untracked files/directories to a new worktree
 		 *
@@ -569,11 +574,23 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			return pathService.join(parentDir, `${projectName}-${beadId}`)
 		}
 
-		// Helper to refresh worktrees cache
+		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
 		const refreshWorktrees = (
 			projectPath: string,
 		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
+				// Check if cache is still valid
+				const cacheEntry = yield* Ref.get(cacheTimestampRef)
+				const now = Date.now()
+				if (
+					cacheEntry &&
+					cacheEntry.path === projectPath &&
+					now - cacheEntry.timestamp < WORKTREE_CACHE_TTL_MS
+				) {
+					// Cache hit - skip git call
+					return
+				}
+
 				const isRepo = yield* isGitRepo(projectPath)
 				if (!isRepo) {
 					return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
@@ -588,6 +605,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				yield* Ref.set(worktreesRef, newMap)
+				yield* Ref.set(cacheTimestampRef, { path: projectPath, timestamp: now })
+			})
+
+		// Force refresh worktrees (bypass TTL cache)
+		const forceRefreshWorktrees = (
+			projectPath: string,
+		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Invalidate cache first
+				yield* Ref.set(cacheTimestampRef, null)
+				yield* refreshWorktrees(projectPath)
 			})
 
 		return {
@@ -649,7 +677,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// filesystem sync timing issues, especially on macOS APFS. We retry
 					// a few times with short delays to handle this race condition.
 					const findNewWorktree = Effect.gen(function* () {
-						yield* refreshWorktrees(projectPath)
+						yield* forceRefreshWorktrees(projectPath)
 						const updated = yield* Ref.get(worktreesRef)
 						const newWorktree = updated.get(beadId)
 
@@ -701,8 +729,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 
-					// Refresh cache
-					yield* refreshWorktrees(projectPath)
+					// Force refresh cache (mutation operation needs fresh data)
+					yield* forceRefreshWorktrees(projectPath)
 					const worktrees = yield* Ref.get(worktreesRef)
 					const worktree = worktrees.get(beadId)
 
@@ -714,8 +742,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// Remove worktree
 					yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
 
-					// Refresh cache
-					yield* refreshWorktrees(projectPath)
+					// Force refresh cache after removal
+					yield* forceRefreshWorktrees(projectPath)
 				}),
 
 			list: (projectPath: string) =>
