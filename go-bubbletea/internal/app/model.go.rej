@@ -1,0 +1,22 @@
+--- internal/app/model.go
++++ internal/app/model.go
+@@ -2107,11 +2107,16 @@ func (m Model) renderBoardView() string {
+ 		Task:   pos.Task,
+ 	}
+ 
++	// Compute phase data if showPhases is enabled
++	phaseData := make(map[string]phases.TaskPhaseInfo)
++	if m.editor.GetShowPhases() {
++		phaseData = m.computePhases()
++	}
++
+ 	// Render board (takes full height minus 1 for statusbar)
+-	// TODO: Implement phase data tracking
+ 	return board.Render(
+ 		columns,
+ 		cursor,
+ 		m.editor.GetSelectedTasks(),
+-		nil,   // phaseData - not yet implemented
+-		false, // showPhases - not yet enabled
++		phaseData,
++		m.editor.GetShowPhases(),
