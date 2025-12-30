@@ -295,13 +295,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		// Parent epic map cache - rarely changes, so cache for longer (30 seconds)
 		// This avoids the expensive batch bd show call on every refresh
+		// Now supports multiple projects for fast project switching
 		const PARENT_EPIC_CACHE_TTL_MS = 30000
-		interface ParentEpicCache {
-			readonly projectPath: string
+		interface ParentEpicCacheEntry {
 			readonly map: Map<string, string | undefined>
 			readonly timestamp: number
 		}
-		const parentEpicCacheRef = yield* Ref.make<ParentEpicCache | null>(null)
+		// Map from projectPath to cache entry (supports multiple projects)
+		const parentEpicCacheRef = yield* Ref.make<Map<string, ParentEpicCacheEntry>>(new Map())
 
 		/**
 		 * Get git status with caching
@@ -443,21 +444,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Get parent epic map (cached for 30s to avoid expensive bd show calls)
 				// This enables filtering epic children and using correct base branch for git diff
+				// Cache supports multiple projects for fast project switching
 				const batchStartTime = Date.now()
 				let parentEpicMap: Map<string, string | undefined>
 				let cacheStatus = "miss"
 
-				// Check if we have a valid cached parent epic map
-				const cachedParentEpics = yield* Ref.get(parentEpicCacheRef)
+				// Check if we have a valid cached parent epic map for this project
+				const allCachedParentEpics = yield* Ref.get(parentEpicCacheRef)
 				const now = Date.now()
 				const normalizedProjectPath = projectPath ?? ""
-				if (
-					cachedParentEpics &&
-					cachedParentEpics.projectPath === normalizedProjectPath &&
-					now - cachedParentEpics.timestamp < PARENT_EPIC_CACHE_TTL_MS
-				) {
+				const cachedEntry = allCachedParentEpics.get(normalizedProjectPath)
+
+				if (cachedEntry && now - cachedEntry.timestamp < PARENT_EPIC_CACHE_TTL_MS) {
 					// Cache hit - use cached map
-					parentEpicMap = cachedParentEpics.map
+					parentEpicMap = cachedEntry.map
 					cacheStatus = "hit"
 				} else {
 					// Cache miss - fetch fresh data
@@ -482,11 +482,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						}
 					}
 
-					// Cache the result
-					yield* Ref.set(parentEpicCacheRef, {
-						projectPath: normalizedProjectPath,
-						map: parentEpicMap,
-						timestamp: now,
+					// Cache the result (preserves cache for other projects)
+					yield* Ref.update(parentEpicCacheRef, (cache) => {
+						const newCache = new Map(cache)
+						newCache.set(normalizedProjectPath, { map: parentEpicMap, timestamp: now })
+						return newCache
 					})
 				}
 				yield* Effect.log(
