@@ -39,20 +39,23 @@ func TestBulkCleanupOverlay_Navigation(t *testing.T) {
 	initialCursor := overlay.cursor
 
 	// Test move down
-	overlay, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	if overlay.(*BulkCleanupOverlay).cursor != initialCursor+1 {
-		t.Errorf("Expected cursor to move down, got %d", overlay.(*BulkCleanupOverlay).cursor)
+	model, _ := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	overlay = model.(*BulkCleanupOverlay)
+	if overlay.cursor != initialCursor+1 {
+		t.Errorf("Expected cursor to move down, got %d", overlay.cursor)
 	}
 
 	// Test move up
-	overlay, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if overlay.(*BulkCleanupOverlay).cursor != initialCursor {
-		t.Errorf("Expected cursor to move up to initial position, got %d", overlay.(*BulkCleanupOverlay).cursor)
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	overlay = model.(*BulkCleanupOverlay)
+	if overlay.cursor != initialCursor {
+		t.Errorf("Expected cursor to move up to initial position, got %d", overlay.cursor)
 	}
 
 	// Test bounds - can't go below 0
-	overlay, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	if overlay.(*BulkCleanupOverlay).cursor < 0 {
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	overlay = model.(*BulkCleanupOverlay)
+	if overlay.cursor < 0 {
 		t.Error("Cursor should not go below 0")
 	}
 }
@@ -142,11 +145,22 @@ func TestBulkCleanupOverlay_ConfirmMode(t *testing.T) {
 	}
 
 	// Try again with 'y' to confirm
-	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}}) // Select again
+	// Category should still be selected after canceling confirm dialog
+	if !overlay.categories[0].Selected {
+		t.Fatal("First category should still be selected after canceling")
+	}
+
+	// Enter confirm mode again
+	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	overlay = model.(*BulkCleanupOverlay)
-	model, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyEnter}) // Enter confirm mode
-	overlay = model.(*BulkCleanupOverlay)
-	model, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) // Confirm
+
+	if !overlay.confirmMode {
+		t.Fatalf("Should be in confirm mode after pressing enter (selected=%v, destructive=%v)",
+			overlay.categories[0].Selected, overlay.categories[0].Destructive)
+	}
+
+	var cmd tea.Cmd
+	model, cmd = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) // Confirm
 
 	if cmd == nil {
 		t.Error("Should return cleanup command after 'y'")
