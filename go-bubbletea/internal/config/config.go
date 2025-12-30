@@ -146,17 +146,18 @@ func DefaultConfig() *Config {
 
 // LoadConfig loads configuration from project path with priority:
 // 1. CLI flags (not implemented yet)
-// 2. .azedarach.json in project root
+// 2. .azedarach.json in project root (with version migration support)
 // 3. package.json "azedarach" key
 // 4. Defaults
 func LoadConfig(projectPath string) (*Config, error) {
 	// Start with defaults
-	cfg := DefaultConfig()
+	defaultCfg := DefaultConfig()
 
-	// Try loading from .azedarach.json
+	// Try loading from .azedarach.json with version migration
 	azedarachPath := filepath.Join(projectPath, ".azedarach.json")
 	if data, err := os.ReadFile(azedarachPath); err == nil {
-		if err := json.Unmarshal(data, cfg); err != nil {
+		cfg, err := ParseVersionedConfig(data)
+		if err != nil {
 			return nil, fmt.Errorf("failed to parse .azedarach.json: %w", err)
 		}
 		return MergeWithDefaults(cfg), nil
@@ -166,21 +167,30 @@ func LoadConfig(projectPath string) (*Config, error) {
 	packagePath := filepath.Join(projectPath, "package.json")
 	if data, err := os.ReadFile(packagePath); err == nil {
 		var packageJSON struct {
-			Azedarach *Config `json:"azedarach"`
+			Azedarach json.RawMessage `json:"azedarach"`
 		}
 		if err := json.Unmarshal(data, &packageJSON); err == nil && packageJSON.Azedarach != nil {
-			// Merge package.json config with defaults
-			return MergeWithDefaults(packageJSON.Azedarach), nil
+			// Parse with version migration support
+			cfg, err := ParseVersionedConfig(packageJSON.Azedarach)
+			if err != nil {
+				// Fall back to direct parsing for backwards compat
+				var cfgDirect Config
+				if err := json.Unmarshal(packageJSON.Azedarach, &cfgDirect); err == nil {
+					return MergeWithDefaults(&cfgDirect), nil
+				}
+				return nil, fmt.Errorf("failed to parse package.json azedarach config: %w", err)
+			}
+			return MergeWithDefaults(cfg), nil
 		}
 	}
 
 	// Return defaults if no config files found
-	return cfg, nil
+	return defaultCfg, nil
 }
 
-// SaveConfig saves configuration to the specified path
+// SaveConfig saves configuration to the specified path with version information
 func SaveConfig(cfg *Config, path string) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := MarshalVersionedConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}

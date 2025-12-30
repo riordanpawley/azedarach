@@ -60,8 +60,8 @@ This matrix ensures no features are lost in the rewrite. Checked items are cover
 |---------|-----|--------|-------|
 | Kanban view (default) | - | ✅ Covered | 1 |
 | Compact/list view | `Tab` | ⚠️ Missing | 3 |
-| Epic drill-down | `Enter` on epic | ⚠️ Partial | 6 |
-| Epic progress bar | - | ⚠️ Missing | 6 |
+| Epic drill-down | `Enter` on epic | ✅ Covered | 6 |
+| Epic progress bar | - | ✅ Covered | 6 |
 | Force redraw | `Ctrl-l` | ⚠️ Missing | 1 |
 
 ## Session Management
