@@ -35,8 +35,8 @@ type ProjectSelector struct {
 type projectSelectorMode int
 
 const (
-	modeList projectSelectorMode = iota
-	modeActions
+	projectModeList projectSelectorMode = iota
+	projectModeActions
 )
 
 // NewProjectSelector creates a new project selector overlay
@@ -45,7 +45,7 @@ func NewProjectSelector(registry *config.ProjectsRegistry) *ProjectSelector {
 	return &ProjectSelector{
 		registry: registry,
 		cursor:   0,
-		mode:     modeList,
+		mode:     projectModeList,
 		styles:   s,
 	}
 }
@@ -63,7 +63,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			if m.mode == modeActions {
 				// Return to list mode
-				m.mode = modeList
+				m.mode = projectModeList
 				return m, nil
 			}
 			// Close overlay
@@ -78,7 +78,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if m.mode == modeList {
+			if m.mode == projectModeList {
 				// Select project
 				return m, m.selectProject()
 			} else {
@@ -87,19 +87,19 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "d":
-			if m.mode == modeList && len(m.registry.Projects) > 0 {
+			if m.mode == projectModeList && len(m.registry.Projects) > 0 {
 				// Set as default
 				return m, m.setAsDefault()
 			}
 
 		case "x":
-			if m.mode == modeList && len(m.registry.Projects) > 0 {
+			if m.mode == projectModeList && len(m.registry.Projects) > 0 {
 				// Remove project
 				return m, m.removeProject()
 			}
 
 		case "a":
-			if m.mode == modeList {
+			if m.mode == projectModeList {
 				// Add new project (open actions mode)
 				m.mode = modeActions
 				m.cursor = 0
@@ -107,7 +107,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "D":
-			if m.mode == modeList {
+			if m.mode == projectModeList {
 				// Detect from cwd
 				return m, m.detectAndAdd()
 			}

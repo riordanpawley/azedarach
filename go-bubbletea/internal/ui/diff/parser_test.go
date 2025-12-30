@@ -57,7 +57,7 @@ func TestParseUnifiedDiff_SingleFileModified(t *testing.T) {
 		t.Errorf("Expected new range +1,4, got +%d,%d", hunk.NewStart, hunk.NewCount)
 	}
 
-	expectedLines := 4 // 1 context + 1 context + 1 add + 1 context
+	expectedLines := 3 // 1 context + 1 add + 1 context (empty lines without prefix are skipped)
 	if len(hunk.Lines) != expectedLines {
 		t.Errorf("Expected %d lines, got %d", expectedLines, len(hunk.Lines))
 	}
