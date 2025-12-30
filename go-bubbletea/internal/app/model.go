@@ -121,6 +121,9 @@ type Model struct {
 	networkChecker *network.StatusChecker
 	isOnline       bool
 
+	// Project registry
+	projectRegistry *config.ProjectsRegistry
+
 	// Logger
 	logger *slog.Logger
 
@@ -170,6 +173,17 @@ func New(cfg *config.Config) Model {
 	// Initialize network checker
 	networkChecker := network.NewStatusChecker()
 
+	// Load project registry
+	registry, err := config.LoadProjectsRegistry()
+	if err != nil {
+		logger.Error("failed to load project registry", "error", err)
+		// Continue with empty registry
+		registry = &config.ProjectsRegistry{
+			Projects:       []config.Project{},
+			DefaultProject: "",
+		}
+	}
+
 	return Model{
 		tasks:           []domain.Task{},
 		sessions:        make(map[string]*domain.Session),
@@ -191,6 +205,7 @@ func New(cfg *config.Config) Model {
 		portAllocator:   portAllocator,
 		gitClient:       gitClient,
 		networkChecker:  networkChecker,
+		projectRegistry: registry,
 		isOnline:        true, // Optimistically assume online
 		logger:          logger,
 		usePlaceholder:  false, // Use real data from beads
@@ -389,6 +404,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
+
+	// Phase 6: Advanced features
+	case overlay.JumpSelectedMsg:
+		// Close overlay
+		m.overlayStack.Pop()
+
+		// Jump to selected task by flattening all tasks and finding the index
+		flatIndex := msg.TaskIndex
+		columns := m.buildColumns()
+		currentIndex := 0
+		for colIdx, col := range columns {
+			for taskIdx := range col.Tasks {
+				if currentIndex == flatIndex {
+					m.cursor.Column = colIdx
+					m.cursor.Task = taskIdx
+					return m, nil
+				}
+				currentIndex++
+			}
+		}
+		return m, nil
+
+	case overlay.ProjectSelectedMsg:
+		// Close overlay
+		m.overlayStack.Pop()
+
+		// Switch to selected project
+		m.currentProject = msg.Project.Name
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Switched to project: %s", msg.Project.Name),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+		// Reload beads for new project
+		return m, m.loadBeadsCmd()
+
+	case overlay.TaskCreatedMsg:
+		// Close overlay
+		m.overlayStack.Pop()
+
+		// Create task via beads client
+		return m, m.createTaskCmd(msg)
+
+	case taskCreatedResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to create task: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Task created: %s", msg.taskID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+		// Reload beads to show new task
+		return m, m.loadBeadsCmd()
 	}
 
 	return m, nil
@@ -642,6 +719,26 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "?": // Help
 		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
+
+	case "enter": // View task details or drill into epic
+		task, session := m.getCurrentTaskAndSession()
+		if task != nil {
+			if m.isCurrentTaskEpic() {
+				// Epic drill-down
+				children := m.getEpicChildren(task.ID)
+				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
+			} else {
+				// Regular task detail panel
+				return m, m.overlayStack.Push(overlay.NewDetailPanel(*task, session))
+			}
+		}
+		return m, nil
+
+	case "c": // Create task
+		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
+
+	case "s": // Settings
+		return m, m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
 	}
 
 	return m, nil
@@ -673,6 +770,16 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Go to last column
 		m.cursor.Column = len(columns) - 1
 		m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
+	case "w":
+		// Jump mode - quick navigation with labels
+		taskCount := 0
+		for _, col := range columns {
+			taskCount += len(col.Tasks)
+		}
+		return m, m.overlayStack.Push(overlay.NewJumpMode(taskCount))
+	case "p":
+		// Project selector
+		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))
 	}
 
 	return m, nil
@@ -900,6 +1007,62 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if mergeMsg, ok := msg.Value.(overlay.MergeTargetSelectedMsg); ok {
 			return m.handleMergeTargetSelection(mergeMsg)
 		}
+	case "projects":
+		// Settings -> Manage projects
+		m.overlayStack.Pop() // Close settings
+		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))
+	case "editor-error":
+		// Editor open error
+		m.overlayStack.Pop()
+		if err, ok := msg.Value.(error); ok {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Editor error: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+	case "editor-closed":
+		// Editor closed successfully
+		m.overlayStack.Pop()
+		return m, nil
+	case "select_child":
+		// Epic drill-down: child task selected
+		m.overlayStack.Pop()
+		if childID, ok := msg.Value.(string); ok {
+			// Find and jump to the child task
+			columns := m.buildColumns()
+			for colIdx, col := range columns {
+				for taskIdx, task := range col.Tasks {
+					if task.ID == childID {
+						m.cursor.Column = colIdx
+						m.cursor.Task = taskIdx
+						return m, nil
+					}
+				}
+			}
+		}
+		return m, nil
+	case "set-default-success", "remove-success", "detect-success":
+		// Project registry actions succeeded - just show success toast
+		if name, ok := msg.Value.(string); ok {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Project %s: %s", msg.Key[:len(msg.Key)-8], name), // Remove "-success"
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, nil
+	case "set-default-error", "remove-error", "add-error", "save-error", "detect-error":
+		// Project registry actions failed
+		if err, ok := msg.Value.(error); ok {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Error: %v", err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
 	}
 
 	// Close the overlay first
@@ -1280,6 +1443,59 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 		return abortMergeResultMsg{
 			worktree: worktree,
 			err:      err,
+		}
+	}
+}
+
+// Phase 6 helper methods
+
+// isCurrentTaskEpic returns true if the currently selected task is an epic
+func (m Model) isCurrentTaskEpic() bool {
+	task, _ := m.getCurrentTaskAndSession()
+	if task == nil {
+		return false
+	}
+	return task.Type == domain.TypeEpic
+}
+
+// getEpicChildren returns all tasks that are children of the given epic
+func (m Model) getEpicChildren(epicID string) []domain.Task {
+	var children []domain.Task
+	for _, task := range m.tasks {
+		if task.ParentID != nil && *task.ParentID == epicID {
+			children = append(children, task)
+		}
+	}
+	return children
+}
+
+type taskCreatedResultMsg struct {
+	taskID string
+	err    error
+}
+
+// createTaskCmd creates a new task via the beads client
+func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
+	return func() tea.Msg {
+		// TODO: Implement beads.Client.Create() method
+		// For now, return a placeholder success message
+		// This will need to be implemented when the Create method is added to beads client
+
+		// Expected implementation:
+		// ctx := context.Background()
+		// taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
+		//     Title:       msg.Title,
+		//     Description: msg.Description,
+		//     Type:        msg.Type,
+		//     Priority:    msg.Priority,
+		// })
+		// if err != nil {
+		//     return taskCreatedResultMsg{err: err}
+		// }
+		// return taskCreatedResultMsg{taskID: taskID}
+
+		return taskCreatedResultMsg{
+			err: fmt.Errorf("task creation not yet implemented - need to add Create() method to beads.Client"),
 		}
 	}
 }
