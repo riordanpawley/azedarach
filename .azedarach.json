@@ -1,19 +1,15 @@
 {
-	"cliTool": "opencode",
+	"$schema": 2,
+	"cliTool": "claude",
 	"worktree": {
 		"initCommands": ["direnv allow", "bun install", "bd sync"],
 		"continueOnFailure": true,
-		"parallel": false
+		"parallel": false,
+		"copyPaths": [".direnv", "node_modules", ".env.local"]
 	},
-	"git": {
-		"pushBranchOnCreate": true,
-		"remote": "origin",
-		"branchPrefix": "az-"
-	},
-	"session": {
-		"shell": "zsh",
-		"tmuxPrefix": "C-a"
-	},
+	"git": { "workflowMode": "local", "baseBranch": "main", "pushBranchOnCreate": true, "remote": "origin", "branchPrefix": "az-" },
+	"session": { "shell": "zsh", "tmuxPrefix": "C-a" },
+	"pr": { "enabled": false },
 	"merge": {
 		"validateCommands": ["bun run type-check"],
 		"fixCommand": "bun run fix",
