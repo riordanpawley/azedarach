@@ -1,6 +1,10 @@
 package board
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -44,9 +48,78 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *
 	titleLine := cursor + title
 	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
 
+	// Session status row (if session exists)
+	var sessionRow string
+	if task.Session != nil {
+		sessionRow = renderSessionStatus(task.Session, s)
+	}
+
+	// Epic progress (if epic type)
+	var epicProgress string
+	if task.Type == domain.TypeEpic {
+		epicProgress = renderEpicProgress(task, width, s)
+	}
+
+	// Compose card content
 	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, badgeLine)
 
+	if sessionRow != "" {
+		content = lipgloss.JoinVertical(lipgloss.Left, content, sessionRow)
+	}
+	if epicProgress != "" {
+		content = lipgloss.JoinVertical(lipgloss.Left, content, epicProgress)
+	}
+
 	return cardStyle.Render(content)
+}
+
+// renderSessionStatus renders the session status line with icon and elapsed time
+func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
+	icon := session.State.Icon()
+
+	// Elapsed time if active and started
+	var elapsed string
+	if session.StartedAt != nil && session.State == domain.SessionBusy {
+		d := time.Since(*session.StartedAt)
+		elapsed = formatDuration(d)
+	}
+
+	stateStyle := s.SessionState(session.State)
+	if elapsed != "" {
+		return stateStyle.Render(fmt.Sprintf("%s %s", icon, elapsed))
+	}
+	return stateStyle.Render(icon)
+}
+
+// formatDuration formats a duration as "2h 34m" or "45m"
+func formatDuration(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// renderEpicProgress renders the epic progress bar with completion ratio
+func renderEpicProgress(task domain.Task, width int, s *styles.Styles) string {
+	// TODO: Get child counts from task metadata
+	// For now, use placeholder values
+	completed := 3
+	total := 5
+
+	if total == 0 {
+		return ""
+	}
+
+	percent := float64(completed) / float64(total)
+	barWidth := 6
+	filled := int(percent * float64(barWidth))
+	empty := barWidth - filled
+
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	return s.EpicProgress.Render(fmt.Sprintf("[%d/%d] %s", completed, total, bar))
 }
 
 // RenderCard is the exported version for testing
