@@ -85,6 +85,13 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus {
 	hasWorktree?: boolean
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean
+	/**
+	 * Parent epic ID if this task is a child of an epic.
+	 * Used for:
+	 * - Filtering epic children from main board view (hideEpicSubtasks)
+	 * - Determining base branch for git diff (children diff against epic, not main)
+	 */
+	parentEpicId?: string
 }
 
 /**
