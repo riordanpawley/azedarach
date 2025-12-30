@@ -23,7 +23,7 @@ const (
 type ImageAttachOverlay struct {
 	beadID      string
 	service     *attachment.Service
-	mode        attachMode
+	mode        imageAttachMode
 	files       []attachment.Attachment
 	cursor      int
 	pathInput   textinput.Model
@@ -48,7 +48,7 @@ func NewImageAttachOverlay(beadID string, service *attachment.Service) *ImageAtt
 	return &ImageAttachOverlay{
 		beadID:      beadID,
 		service:     service,
-		mode:        modeList,
+		mode:        imageAttachModeList,
 		cursor:      0,
 		pathInput:   ti,
 		inputActive: false,
@@ -72,20 +72,20 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "esc", "q":
-			if i.mode == modePreview {
-				i.mode = modeList
+			if i.mode == imageAttachModePreview {
+				i.mode = imageAttachModeList
 				return i, nil
 			}
 			return i, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "j", "down":
-			if i.mode == modeList && len(i.files) > 0 {
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				i.cursor = min(i.cursor+1, len(i.files)-1)
 			}
 			return i, nil
 
 		case "k", "up":
-			if i.mode == modeList && len(i.files) > 0 {
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				i.cursor = max(0, i.cursor-1)
 			}
 			return i, nil
@@ -103,22 +103,22 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "o":
 			// Open in external viewer
-			if i.mode == modeList && len(i.files) > 0 {
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, i.openInViewer()
 			}
 			return i, nil
 
 		case "d":
 			// Delete attachment
-			if i.mode == modeList && len(i.files) > 0 {
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
 				return i, i.deleteAttachment()
 			}
 			return i, nil
 
 		case "enter":
 			// Preview attachment
-			if i.mode == modeList && len(i.files) > 0 {
-				i.mode = modePreview
+			if i.mode == imageAttachModeList && len(i.files) > 0 {
+				i.mode = imageAttachModePreview
 			}
 			return i, nil
 
@@ -193,9 +193,9 @@ func (i *ImageAttachOverlay) View() string {
 	}
 
 	switch i.mode {
-	case modeList:
+	case imageAttachModeList:
 		return i.renderList()
-	case modePreview:
+	case imageAttachModePreview:
 		return i.renderPreview()
 	default:
 		return i.renderList()
