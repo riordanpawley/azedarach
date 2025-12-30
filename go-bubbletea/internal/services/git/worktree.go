@@ -158,7 +158,7 @@ func (w *WorktreeManager) Exists(ctx context.Context, beadID string) (bool, erro
 //   HEAD def456
 //   branch refs/heads/az/bead-123
 func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
-	var worktrees []Worktree
+	worktrees := make([]Worktree, 0)
 
 	lines := strings.Split(output, "\n")
 	var currentPath string

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -411,8 +410,10 @@ func TestWorktreeManager_PathGeneration(t *testing.T) {
 					return "", nil
 				}
 				// Verify the path in 'worktree add' command
-				if len(args) > 0 && args[0] == "worktree" && args[1] == "add" {
-					actualPath := args[3]
+				// Command: git worktree add -b <branch> <path> <base>
+				// args[0]=worktree, args[1]=add, args[2]=-b, args[3]=branch, args[4]=path, args[5]=base
+				if len(args) > 4 && args[0] == "worktree" && args[1] == "add" {
+					actualPath := args[4]
 					if actualPath != tc.expectedPath {
 						t.Errorf("expected path %q, got %q", tc.expectedPath, actualPath)
 					}

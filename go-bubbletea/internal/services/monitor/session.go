@@ -15,6 +15,11 @@ type TmuxClient interface {
 	CapturePane(ctx context.Context, sessionName string) (string, error)
 }
 
+// ProgramSender defines the interface for sending messages to a Bubble Tea program
+type ProgramSender interface {
+	Send(msg tea.Msg)
+}
+
 // SessionMonitor monitors tmux sessions and detects state changes
 type SessionMonitor struct {
 	tmux     TmuxClient
@@ -46,7 +51,7 @@ func NewSessionMonitor(tmux TmuxClient) *SessionMonitor {
 
 // Start begins monitoring a session
 // Polls every 500ms and sends SessionStateMsg to the program when state changes
-func (m *SessionMonitor) Start(ctx context.Context, beadID string, program *tea.Program) {
+func (m *SessionMonitor) Start(ctx context.Context, beadID string, program ProgramSender) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -106,7 +111,7 @@ func (m *SessionMonitor) StopAll() {
 }
 
 // monitor is the main monitoring loop for a session
-func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program *tea.Program) {
+func (m *SessionMonitor) monitor(ctx context.Context, beadID string, program ProgramSender) {
 	defer m.wg.Done()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
