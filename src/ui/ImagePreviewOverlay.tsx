@@ -1,10 +1,10 @@
 /**
  * ImagePreviewOverlay component - displays an image preview in the terminal
  *
- * Uses terminal-image to render images using:
- * - Kitty graphics protocol (full resolution in Kitty, WezTerm)
- * - iTerm2 inline images protocol (full resolution in iTerm2)
- * - Unicode half-blocks with 24-bit color (fallback for all terminals)
+ * Uses terminal-image to render images using Unicode half-blocks (▀▄█) with
+ * 24-bit color. Native protocols (Kitty/iTerm2) are disabled because OpenTUI's
+ * text component renders character-by-character and can't passthrough raw
+ * terminal escape sequences.
  *
  * Note: Keyboard handling is in KeyboardService, this component just renders.
  */
