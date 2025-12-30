@@ -353,6 +353,26 @@ const BeadsConfigSchema = Schema.Struct({
 })
 
 /**
+ * Keyboard configuration
+ *
+ * Controls keyboard-related settings like jump label characters.
+ */
+const KeyboardConfigSchema = Schema.Struct({
+	/**
+	 * Characters to use for jump labels in goto-word mode (default: "asdfjkl;")
+	 *
+	 * Uses home row keys for ergonomics. Customize for your keyboard layout:
+	 * - QWERTY: "asdfjkl;"
+	 * - Colemak: "arstneio" or "cieahtsn"
+	 * - Dvorak: "aoeuhtns"
+	 *
+	 * 8 characters gives 64 possible labels (8×8), which is usually enough
+	 * for visible tasks across all columns.
+	 */
+	jumpLabelChars: Schema.optional(Schema.String),
+})
+
+/**
  * Network configuration
  *
  * Controls automatic network connectivity detection.
@@ -514,6 +534,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		notifications: current.notifications,
 		beads: current.beads,
 		network: current.network,
+		keyboard: current.keyboard,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -567,6 +588,9 @@ const RawConfigSchema = Schema.Struct({
 	/** Network connectivity configuration */
 	network: Schema.optional(NetworkConfigSchema),
 
+	/** Keyboard configuration */
+	keyboard: Schema.optional(KeyboardConfigSchema),
+
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -592,6 +616,7 @@ const CurrentConfigSchema = Schema.Struct({
 	notifications: Schema.optional(NotificationsConfigSchema),
 	beads: Schema.optional(BeadsConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
+	keyboard: Schema.optional(KeyboardConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -658,3 +683,6 @@ export type DevServerConfig = Schema.Schema.Type<typeof DevServerConfigSchema>
 
 /** Model config section type */
 export type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>
+
+/** Keyboard config section type */
+export type KeyboardConfig = Schema.Schema.Type<typeof KeyboardConfigSchema>
