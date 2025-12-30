@@ -414,7 +414,11 @@ What would you like to discuss?`
 						.checkBranchBehindBase({ beadId: task.id, projectPath })
 						.pipe(
 							Effect.catchAll(() =>
-								Effect.succeed({ behind: 0, ahead: 0, baseBranch: gitConfig.baseBranch }),
+								Effect.succeed({
+									behind: 0,
+									ahead: 0,
+									baseBranch: task.parentEpicId ?? gitConfig.baseBranch,
+								}),
 							),
 						)
 
