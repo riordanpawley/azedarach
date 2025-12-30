@@ -262,7 +262,7 @@ func TestDiffViewer_Close(t *testing.T) {
 			if tt.key == "esc" {
 				msg = tea.KeyMsg{Type: tea.KeyEsc}
 			} else {
-				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tt.key[0]}}
+				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(tt.key[0])}}
 			}
 
 			_, cmd := viewer.Update(msg)
