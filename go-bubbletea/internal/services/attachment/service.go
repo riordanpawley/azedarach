@@ -230,26 +230,26 @@ func generateID() string {
 
 // detectMimeType detects the MIME type from file data
 func detectMimeType(data []byte) string {
-	if len(data) < 12 {
+	if len(data) == 0 {
 		return "application/octet-stream"
 	}
 
-	// PNG signature
+	// PNG signature (8 bytes)
 	if len(data) >= 8 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
 		return "image/png"
 	}
 
-	// JPEG signature
+	// JPEG signature (3 bytes)
 	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
 		return "image/jpeg"
 	}
 
-	// GIF signature
-	if len(data) >= 6 && string(data[0:6]) == "GIF89a" || string(data[0:6]) == "GIF87a" {
+	// GIF signature (6 bytes)
+	if len(data) >= 6 && (string(data[0:6]) == "GIF89a" || string(data[0:6]) == "GIF87a") {
 		return "image/gif"
 	}
 
-	// WebP signature
+	// WebP signature (12 bytes)
 	if len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
 		return "image/webp"
 	}
