@@ -412,11 +412,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const loadTasks = () =>
 			Effect.gen(function* () {
+				const loadStartTime = Date.now()
 				const projectPath = yield* projectService.getCurrentPath()
 				const gitConfig = yield* appConfig.getGitConfig()
 				const { baseBranch, showLineChanges } = gitConfig
 
 				const issues = yield* beadsClient.list(undefined, projectPath)
+				yield* Effect.log(
+					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
+				)
 				const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined)
 				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
@@ -424,19 +428,33 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get optimistic mutations
 				const pendingMutations = yield* mutationQueue.getMutations()
 
-				// Fetch parent epics for tasks that have dependencies
+				// Fetch parent epics for tasks that have dependencies (BATCHED for performance)
 				// This enables filtering epic children and using correct base branch for git diff
+				// Instead of O(n) bd show calls, we batch all IDs into one call
 				const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
-				const parentEpicResults = yield* Effect.all(
-					issuesWithDeps.map((issue) =>
-						beadsClient.getParentEpic(issue.id, projectPath).pipe(
-							Effect.map((epic) => [issue.id, epic?.id] as const),
-							Effect.catchAll(() => Effect.succeed([issue.id, undefined] as const)),
-						),
-					),
-					{ concurrency: 4 },
+				const parentEpicMap = new Map<string, string | undefined>()
+				const batchStartTime = Date.now()
+
+				if (issuesWithDeps.length > 0) {
+					// Single batched call to get all issues with their dependencies
+					const issuesWithDepDetails = yield* beadsClient
+						.showMultiple(
+							issuesWithDeps.map((i) => i.id),
+							projectPath,
+						)
+						.pipe(Effect.catchAll(() => Effect.succeed([])))
+
+					// Extract parent epic IDs from dependencies
+					for (const issue of issuesWithDepDetails) {
+						const parentChildDep = issue.dependencies?.find(
+							(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
+						)
+						parentEpicMap.set(issue.id, parentChildDep?.id)
+					}
+				}
+				yield* Effect.log(
+					`loadTasks: ${issuesWithDeps.length} deps resolved in ${Date.now() - batchStartTime}ms`,
 				)
-				const parentEpicMap = new Map<string, string | undefined>(parentEpicResults)
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -516,6 +534,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)
 
+				yield* Effect.log(`loadTasks: Complete in ${Date.now() - loadStartTime}ms`)
 				return tasksWithSession
 			})
 
