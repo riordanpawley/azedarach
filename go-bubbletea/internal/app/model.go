@@ -63,10 +63,155 @@ func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (stri
 	return a.client.CapturePane(ctx, sessionName, 100)
 }
 
-// Cursor tracks the current position in the Kanban board
-type Cursor struct {
+// Position represents a computed position in the board
+type Position struct {
 	Column int // 0=Open, 1=InProgress, 2=Blocked, 3=Done
 	Task   int // Index within the column
+	Valid  bool
+}
+
+// Cursor tracks the selected task by ID (survives filter/sort changes)
+type Cursor struct {
+	TaskID         string // Primary state: selected task ID
+	FallbackColumn int    // Column to use when TaskID not found
+}
+
+// FindPosition computes the position of the cursor's task in the given columns
+func (c *Cursor) FindPosition(columns []board.Column) Position {
+	if c.TaskID == "" {
+		// No task selected, use fallback column, first task
+		col := c.FallbackColumn
+		if col >= len(columns) {
+			col = 0
+		}
+		if col < len(columns) && len(columns[col].Tasks) > 0 {
+			return Position{Column: col, Task: 0, Valid: true}
+		}
+		return Position{Column: col, Task: 0, Valid: false}
+	}
+
+	// Search for the task by ID
+	for colIdx, col := range columns {
+		for taskIdx, task := range col.Tasks {
+			if task.ID == c.TaskID {
+				return Position{Column: colIdx, Task: taskIdx, Valid: true}
+			}
+		}
+	}
+
+	// Task not found (filtered out?), use fallback
+	col := c.FallbackColumn
+	if col >= len(columns) {
+		col = 0
+	}
+	if col < len(columns) && len(columns[col].Tasks) > 0 {
+		return Position{Column: col, Task: 0, Valid: true}
+	}
+	return Position{Column: col, Task: 0, Valid: false}
+}
+
+// SetTask updates the cursor to point to a specific task
+func (c *Cursor) SetTask(taskID string, column int) {
+	c.TaskID = taskID
+	c.FallbackColumn = column
+}
+
+// MoveVertical moves up or down within a column, returns new task ID
+func (c *Cursor) MoveVertical(columns []board.Column, delta int) string {
+	pos := c.FindPosition(columns)
+	if !pos.Valid || pos.Column >= len(columns) {
+		return c.TaskID
+	}
+
+	col := columns[pos.Column]
+	newIdx := pos.Task + delta
+
+	// Clamp to column bounds
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	if newIdx >= len(col.Tasks) {
+		newIdx = len(col.Tasks) - 1
+	}
+
+	if newIdx >= 0 && newIdx < len(col.Tasks) {
+		c.TaskID = col.Tasks[newIdx].ID
+		c.FallbackColumn = pos.Column
+	}
+	return c.TaskID
+}
+
+// MoveHorizontal moves left or right to adjacent column
+func (c *Cursor) MoveHorizontal(columns []board.Column, delta int) string {
+	pos := c.FindPosition(columns)
+
+	newCol := pos.Column + delta
+	if newCol < 0 {
+		newCol = 0
+	}
+	if newCol >= len(columns) {
+		newCol = len(columns) - 1
+	}
+
+	c.FallbackColumn = newCol
+
+	// Try to select task at same row index, or last task if column is shorter
+	if newCol < len(columns) && len(columns[newCol].Tasks) > 0 {
+		taskIdx := pos.Task
+		if taskIdx >= len(columns[newCol].Tasks) {
+			taskIdx = len(columns[newCol].Tasks) - 1
+		}
+		c.TaskID = columns[newCol].Tasks[taskIdx].ID
+	} else {
+		c.TaskID = "" // No task in new column
+	}
+	return c.TaskID
+}
+
+// JumpToStart moves to first task in current column
+func (c *Cursor) JumpToStart(columns []board.Column) string {
+	pos := c.FindPosition(columns)
+	if pos.Column < len(columns) && len(columns[pos.Column].Tasks) > 0 {
+		c.TaskID = columns[pos.Column].Tasks[0].ID
+	}
+	return c.TaskID
+}
+
+// JumpToEnd moves to last task in current column
+func (c *Cursor) JumpToEnd(columns []board.Column) string {
+	pos := c.FindPosition(columns)
+	if pos.Column < len(columns) {
+		col := columns[pos.Column]
+		if len(col.Tasks) > 0 {
+			c.TaskID = col.Tasks[len(col.Tasks)-1].ID
+		}
+	}
+	return c.TaskID
+}
+
+// JumpToColumn moves to a specific column, keeping relative row position
+func (c *Cursor) JumpToColumn(columns []board.Column, colIdx int) string {
+	if colIdx < 0 {
+		colIdx = 0
+	}
+	if colIdx >= len(columns) {
+		colIdx = len(columns) - 1
+	}
+
+	pos := c.FindPosition(columns)
+	c.FallbackColumn = colIdx
+
+	if colIdx < len(columns) && len(columns[colIdx].Tasks) > 0 {
+		// Try to keep same row position, or clamp to column size
+		taskIdx := pos.Task
+		if taskIdx >= len(columns[colIdx].Tasks) {
+			taskIdx = len(columns[colIdx].Tasks) - 1
+		}
+		c.TaskID = columns[colIdx].Tasks[taskIdx].ID
+	} else {
+		c.TaskID = "" // No task in target column
+	}
+	return c.TaskID
 }
 
 // Model is the main application state
@@ -211,7 +356,7 @@ func New(cfg *config.Config) Model {
 	return Model{
 		tasks:           []domain.Task{},
 		sessions:        make(map[string]*domain.Session),
-		cursor:          Cursor{Column: 0, Task: 0},
+		cursor:          Cursor{}, // ID-based: will use FallbackColumn=0
 		mode:            ModeNormal,
 		selectedTasks:   make(map[string]bool),
 		overlayStack:    overlay.NewStack(),
@@ -442,10 +587,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		columns := m.buildColumns()
 		currentIndex := 0
 		for colIdx, col := range columns {
-			for taskIdx := range col.Tasks {
+			for _, task := range col.Tasks {
 				if currentIndex == flatIndex {
-					m.cursor.Column = colIdx
-					m.cursor.Task = taskIdx
+					m.cursor.SetTask(task.ID, colIdx)
 					return m, nil
 				}
 				currentIndex++
@@ -574,10 +718,11 @@ func (m Model) View() string {
 	// Build columns for the board
 	columns := m.buildColumns()
 
-	// Create cursor for board package
+	// Create cursor for board package using computed position
+	pos := m.cursor.FindPosition(columns)
 	cursor := board.Cursor{
-		Column: m.cursor.Column,
-		Task:   m.cursor.Task,
+		Column: pos.Column,
+		Task:   pos.Task,
 	}
 
 	// Render board (takes full height minus 1 for statusbar)
@@ -732,53 +877,29 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Vertical navigation
 	case "j", "down":
-		if m.cursor.Column < len(columns) {
-			col := columns[m.cursor.Column]
-			if len(col.Tasks) > 0 && m.cursor.Task < len(col.Tasks)-1 {
-				m.cursor.Task++
-			}
-		}
+		m.cursor.MoveVertical(columns, 1)
 		return m, nil
 
 	case "k", "up":
-		if m.cursor.Task > 0 {
-			m.cursor.Task--
-		}
+		m.cursor.MoveVertical(columns, -1)
 		return m, nil
 
 	// Horizontal navigation
 	case "h", "left":
-		if m.cursor.Column > 0 {
-			m.cursor.Column--
-			m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
-		}
+		m.cursor.MoveHorizontal(columns, -1)
 		return m, nil
 
 	case "l", "right":
-		if m.cursor.Column < len(columns)-1 {
-			m.cursor.Column++
-			m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
-		}
+		m.cursor.MoveHorizontal(columns, 1)
 		return m, nil
 
 	// Half-page scroll
 	case "ctrl+d":
-		if m.cursor.Column < len(columns) {
-			col := columns[m.cursor.Column]
-			if len(col.Tasks) > 0 {
-				m.cursor.Task += m.halfPage()
-				if m.cursor.Task >= len(col.Tasks) {
-					m.cursor.Task = len(col.Tasks) - 1
-				}
-			}
-		}
+		m.cursor.MoveVertical(columns, m.halfPage())
 		return m, nil
 
 	case "ctrl+u":
-		m.cursor.Task -= m.halfPage()
-		if m.cursor.Task < 0 {
-			m.cursor.Task = 0
-		}
+		m.cursor.MoveVertical(columns, -m.halfPage())
 		return m, nil
 
 	// Mode switches
@@ -842,23 +963,16 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "g":
 		// Go to top of column
-		m.cursor.Task = 0
+		m.cursor.JumpToStart(columns)
 	case "e":
 		// Go to end of column
-		if m.cursor.Column < len(columns) {
-			col := columns[m.cursor.Column]
-			if len(col.Tasks) > 0 {
-				m.cursor.Task = len(col.Tasks) - 1
-			}
-		}
+		m.cursor.JumpToEnd(columns)
 	case "h":
 		// Go to first column
-		m.cursor.Column = 0
-		m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
+		m.cursor.JumpToColumn(columns, 0)
 	case "l":
 		// Go to last column
-		m.cursor.Column = len(columns) - 1
-		m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
+		m.cursor.JumpToColumn(columns, len(columns)-1)
 	case "w":
 		// Jump mode - quick navigation with labels
 		taskCount := 0
@@ -1037,10 +1151,12 @@ func (m Model) columnStatus() domain.Status {
 		domain.StatusBlocked,
 		domain.StatusDone,
 	}
-	if m.cursor.Column < 0 || m.cursor.Column >= len(statuses) {
+	columns := m.buildColumns()
+	pos := m.cursor.FindPosition(columns)
+	if pos.Column < 0 || pos.Column >= len(statuses) {
 		return domain.StatusOpen
 	}
-	return statuses[m.cursor.Column]
+	return statuses[pos.Column]
 }
 
 // tasksInColumn returns all tasks with the given status
@@ -1069,16 +1185,17 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 // getCurrentTaskAndSession returns the currently selected task and its session
 func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
-	if m.cursor.Column < 0 || m.cursor.Column >= len(columns) {
+	pos := m.cursor.FindPosition(columns)
+	if !pos.Valid || pos.Column >= len(columns) {
 		return nil, nil
 	}
 
-	col := columns[m.cursor.Column]
-	if m.cursor.Task < 0 || m.cursor.Task >= len(col.Tasks) {
+	col := columns[pos.Column]
+	if pos.Task >= len(col.Tasks) {
 		return nil, nil
 	}
 
-	task := col.Tasks[m.cursor.Task]
+	task := col.Tasks[pos.Task]
 	return &task, task.Session
 }
 
@@ -1119,13 +1236,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		// Epic drill-down: child task selected
 		m.overlayStack.Pop()
 		if childID, ok := msg.Value.(string); ok {
-			// Find and jump to the child task
+			// Jump to the child task by ID - cursor will compute position
 			columns := m.buildColumns()
 			for colIdx, col := range columns {
-				for taskIdx, task := range col.Tasks {
+				for _, task := range col.Tasks {
 					if task.ID == childID {
-						m.cursor.Column = colIdx
-						m.cursor.Task = taskIdx
+						m.cursor.SetTask(task.ID, colIdx)
 						return m, nil
 					}
 				}
@@ -1338,38 +1454,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// clampTaskIndex returns the task index clamped to the current column's bounds
-func (m Model) clampTaskIndex() int {
-	col := m.currentColumn()
-	if len(col) == 0 {
-		return 0
-	}
-	if m.cursor.Task < 0 {
-		return 0
-	}
-	if m.cursor.Task >= len(col) {
-		return len(col) - 1
-	}
-	return m.cursor.Task
-}
-
-// clampTaskIndexForColumn returns the task index clamped to a specific column's bounds
-func (m Model) clampTaskIndexForColumn(columns []board.Column, colIndex int) int {
-	if colIndex < 0 || colIndex >= len(columns) {
-		return 0
-	}
-	col := columns[colIndex]
-	if len(col.Tasks) == 0 {
-		return 0
-	}
-	if m.cursor.Task < 0 {
-		return 0
-	}
-	if m.cursor.Task >= len(col.Tasks) {
-		return len(col.Tasks) - 1
-	}
-	return m.cursor.Task
-}
+// NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.
+// The ID-based Cursor now handles bounds clamping internally via
+// MoveVertical, MoveHorizontal, and FindPosition methods.
 
 // halfPage calculates half-page scroll distance based on terminal height
 func (m Model) halfPage() int {
