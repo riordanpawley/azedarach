@@ -106,7 +106,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="i" description="Attach image" />
 				<KeyLine keys="f" description="Show diff vs main" />
 				<KeyLine keys="P" description="Create PR" />
-				<KeyLine keys="m / M" description="Merge to main / Abort merge" />
+				<KeyLine keys="m / M" description="Merge / Abort merge" />
 				<KeyLine keys="b" description="Merge bead into another bead" />
 				<KeyLine keys="u" description="Update from main" />
 				<KeyLine keys="d / D" description="Delete worktree / Delete bead" />

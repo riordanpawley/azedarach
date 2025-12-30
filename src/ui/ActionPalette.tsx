@@ -80,7 +80,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle"
 			case "P": // Create PR - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
-			case "m": // Merge to main - only if session has worktree (not idle) OR orphaned worktree
+			case "m": // Merge - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "d": // Cleanup/Delete worktree - session exists OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree

@@ -542,9 +542,9 @@ done
 	{
 		key: "m",
 		mode: "action",
-		description: "Merge to main",
+		description: "Merge",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.mergeToMain())),
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.merge())),
 		),
 	},
 	{
