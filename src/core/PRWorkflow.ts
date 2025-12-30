@@ -1010,14 +1010,19 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// If merging into a parent epic, we need to merge IN the epic's worktree
 					// because git won't let us checkout a branch that's in use by another worktree.
-					// If epic has no worktree, we can merge in main project as usual.
+					// If epic has no worktree, create one first.
 					let mergeDir = projectPath
 					if (parentEpic) {
-						const epicWorktree = yield* worktreeManager.get({ beadId: parentEpic.id, projectPath })
-						if (epicWorktree) {
-							mergeDir = epicWorktree.path
-							yield* Effect.log(`Epic ${parentEpic.id} has worktree, merging in ${mergeDir}`)
+						let epicWorktree = yield* worktreeManager.get({ beadId: parentEpic.id, projectPath })
+						if (!epicWorktree) {
+							yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
+							epicWorktree = yield* worktreeManager.create({
+								beadId: parentEpic.id,
+								projectPath,
+							})
 						}
+						mergeDir = epicWorktree.path
+						yield* Effect.log(`Merging ${beadId} in epic worktree ${mergeDir}`)
 					}
 
 					// Get bead info for merge commit message
