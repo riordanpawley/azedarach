@@ -386,13 +386,30 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				let gitDeletions: number | undefined
 
 				if (showLineChanges) {
+					// Get merge-base first for consistent comparison with DiffService
+					const mergeBaseCommand = Command.make(
+						"git",
+						"-C",
+						worktreePath,
+						"merge-base",
+						baseBranch,
+						"HEAD",
+					).pipe(Command.string)
+
+					const mergeBase = yield* mergeBaseCommand.pipe(
+						Effect.map((output) => output.trim()),
+						Effect.catchAll(() => Effect.succeed(baseBranch)), // Fallback to branch name
+					)
+
+					// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
 					const diffCommand = Command.make(
 						"git",
 						"-C",
 						worktreePath,
 						"diff",
 						"--numstat",
-						`${baseBranch}...HEAD`,
+						mergeBase,
+						"HEAD",
 					).pipe(Command.string)
 
 					const diffStats = yield* diffCommand.pipe(
