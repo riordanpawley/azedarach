@@ -1020,6 +1020,92 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							})
 						}
 					}),
+
+				// ========================================================================
+				// Cleanup Methods (for issue close/compact)
+				// ========================================================================
+
+				/**
+				 * Delete all images for an issue.
+				 * Called when an issue is closed or compacted to prevent unbounded storage growth.
+				 * This removes the files, the issue directory, and the index entry.
+				 * Does NOT update bead notes (issue is already closed/compacted).
+				 *
+				 * @returns Number of images deleted, or 0 if no images existed
+				 */
+				cleanupImagesForIssue: (issueId: string) =>
+					Effect.gen(function* () {
+						const index = yield* readIndex()
+						const attachments = index[issueId]
+
+						// No attachments for this issue - nothing to clean up
+						if (!attachments || attachments.length === 0) {
+							return 0
+						}
+
+						const issueDir = yield* getIssueDir(issueId)
+						const count = attachments.length
+
+						// Remove the entire issue directory (faster than individual file deletion)
+						yield* fs
+							.remove(issueDir, { recursive: true })
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Failed to remove image directory ${issueDir}: ${error}`),
+								),
+							)
+
+						// Update index - remove the issue entry
+						const updatedIndex = Record.remove(index, issueId)
+						yield* writeIndex(updatedIndex)
+
+						// Clear reactive state if viewing this task
+						const current = yield* SubscriptionRef.get(currentAttachments)
+						if (current?.taskId === issueId) {
+							yield* SubscriptionRef.set(currentAttachments, null)
+						}
+
+						yield* Effect.log(`Cleaned up ${count} image(s) for closed issue ${issueId}`)
+
+						return count
+					}),
+
+				/**
+				 * Delete images for multiple issues at once.
+				 * Used for batch cleanup during compaction.
+				 *
+				 * @returns Total number of images deleted
+				 */
+				cleanupImagesForIssues: (issueIds: readonly string[]) =>
+					Effect.gen(function* () {
+						let totalDeleted = 0
+						for (const issueId of issueIds) {
+							const deleted = yield* Effect.gen(function* () {
+								const index = yield* readIndex()
+								const attachments = index[issueId]
+								if (!attachments || attachments.length === 0) return 0
+
+								const issueDir = yield* getIssueDir(issueId)
+								const count = attachments.length
+
+								yield* fs.remove(issueDir, { recursive: true }).pipe(Effect.ignore)
+
+								const updatedIndex = Record.remove(index, issueId)
+								yield* writeIndex(updatedIndex)
+
+								return count
+							})
+							totalDeleted += deleted
+						}
+
+						if (totalDeleted > 0) {
+							yield* Effect.log(
+								`Cleaned up ${totalDeleted} image(s) for ${issueIds.length} compacted issues`,
+							)
+						}
+
+						return totalDeleted
+					}),
 			}
 		}),
 	},
