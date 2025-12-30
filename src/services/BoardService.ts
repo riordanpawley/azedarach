@@ -128,6 +128,10 @@ const filterTasksByQuery = (tasks: TaskWithSession[], query: string): TaskWithSe
 	})
 }
 
+const isEpicChild = (task: TaskWithSession): boolean => {
+	return task.parentEpicId !== undefined
+}
+
 const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): TaskWithSession[] => {
 	return tasks.filter((task) => {
 		if (config.status.size > 0) {
@@ -171,8 +175,10 @@ const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): Task
 				return false
 			}
 		}
-		// NOTE: Epic children filtering happens in drillDownFilteredTasksAtom, not here.
-		// This allows drill-down mode to see epic children while main board hides them.
+		// Epic children are ALWAYS hidden on main board - only visible in drill-down
+		if (isEpicChild(task)) {
+			return false
+		}
 		// Age filter: show tasks not updated in N days
 		if (config.updatedDaysAgo !== null) {
 			const now = DateTime.unsafeNow()
