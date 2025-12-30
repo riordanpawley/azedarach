@@ -495,7 +495,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						// Create worktree (idempotent - returns existing if present)
-						// If this is a child of an epic, copy untracked files from the epic's worktree
+						// copyPaths are applied to ALL worktrees:
+						// - Epic children: copy from epic's worktree (epicWorktreePath)
+						// - Regular tasks: copy from main project (projectPath fallback)
 						const worktree = yield* worktreeManager.create({
 							beadId,
 							projectPath,
