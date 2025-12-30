@@ -267,6 +267,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * - User retries Space+m after Claude resolves
 		 * Requires a worktree (active session or orphaned worktree).
 		 * Blocked if task already has an operation in progress.
+		 *
+		 * Special case: In epic drilldown mode, Space+m is allowed even in origin workflow
+		 * because we're merging child→epic (not child→main). The epic→main PR is handled
+		 * separately via Space+P on the epic itself.
 		 */
 		const mergeToMain = () =>
 			Effect.gen(function* () {
@@ -274,7 +278,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				if (!task) return
 
 				const workflowMode = yield* appConfig.getWorkflowMode()
-				if (workflowMode === "origin") {
+				const drilldownEpicId = yield* nav.getDrillDownEpic()
+
+				// In origin mode, block merge UNLESS we're in epic drilldown
+				// (merging child→epic is allowed, only child→main requires PR)
+				if (workflowMode === "origin" && !drilldownEpicId) {
 					yield* toast.show(
 						"info",
 						"Direct merge disabled in origin workflow mode (use Space+P to create PR)",
