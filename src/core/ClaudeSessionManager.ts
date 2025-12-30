@@ -467,7 +467,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// 1. If explicit baseBranch passed, use it
 						// 2. If bead has a parent epic, use the epic branch
 						// 3. Otherwise, use the default (WorktreeManager uses current branch)
+						// Get worktree config early - we need copyPaths for worktree creation
+						const worktreeConfig = yield* appConfig.getWorktreeConfig()
+
 						let effectiveBaseBranch = explicitBaseBranch
+						let epicWorktreePath: string | undefined
 
 						if (!effectiveBaseBranch) {
 							// Check if this bead has a parent epic
@@ -476,31 +480,39 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							if (parentEpic) {
 								// Ensure epic branch exists by creating epic worktree if needed
 								// This is idempotent - if worktree already exists, it returns the existing one
-								yield* worktreeManager.create({
+								const epicWorktree = yield* worktreeManager.create({
 									beadId: parentEpic.id,
 									projectPath,
 									// Epic branches from main (no baseBranch = uses current branch)
+									// Epic gets copyPaths from config (copies from main project)
+									copyPaths: worktreeConfig.copyPaths,
 								})
 								// Use the epic branch as base for the child task
 								effectiveBaseBranch = parentEpic.id
+								epicWorktreePath = epicWorktree.path
 								yield* Effect.log(`Child task ${beadId} will branch from epic ${parentEpic.id}`)
 							}
 						}
 
 						// Create worktree (idempotent - returns existing if present)
+						// copyPaths are applied to ALL worktrees:
+						// - Epic children: copy from epic's worktree (epicWorktreePath)
+						// - Regular tasks: copy from main project (projectPath fallback)
 						const worktree = yield* worktreeManager.create({
 							beadId,
 							projectPath,
 							baseBranch: effectiveBaseBranch,
+							sourceWorktreePath: epicWorktreePath,
+							copyPaths: worktreeConfig.copyPaths,
 						})
 
 						// NOTE: .claude/ directory is git-tracked so it's already in the worktree.
 						// WorktreeManager.copyClaudeLocalSettings handles settings.local.json (gitignored).
 						// No additional copying needed here.
 
-						// Get session, worktree, CLI tool, and model config from current project
+						// Get session, CLI tool, and model config from current project
+						// Note: worktreeConfig was already fetched above for copyPaths
 						const sessionConfig = yield* appConfig.getSessionConfig()
-						const worktreeConfig = yield* appConfig.getWorktreeConfig()
 						const cliTool = yield* appConfig.getCliTool()
 						const modelConfig = yield* appConfig.getModelConfig()
 
