@@ -472,7 +472,7 @@ Press `v` to enter select mode for multi-task operations. You can also press `%`
 | Key | Action | Notes |
 |-----|--------|-------|
 | `Space` | Toggle selection | Add/remove current task |
-| `%` | Select all | Select all non-closed tasks (ignores filters) |
+| `%` | Select all | Select all tasks except tombstoned (ignores filters) |
 | `A` | Clear selections | Deselect all tasks |
 | `h/j/k/l` | Navigate | Selections persist |
 | `Esc` | Exit + clear | Clears all selections |
@@ -485,7 +485,7 @@ Selected tasks are highlighted with a different background color. The status bar
 
 When you have multiple tasks selected, action mode commands apply to all selected tasks:
 
-1. Press `%` to select all non-closed tasks (or `v` then manually select)
+1. Press `%` to select all tasks (or `v` then manually select)
 2. Use filter mode (`f`) to narrow down the selection
 3. Press `Space` to enter action mode
 4. Run bulk commands:
@@ -684,7 +684,7 @@ Filter tasks by how recently they were updated. Useful for finding stale tasks f
 1. Press `f` to enter filter mode
 2. Press `7` to filter to tasks not updated in 7+ days
 3. Press `Esc` to exit filter mode
-4. Press `%` to select all tasks (selects all non-closed, including hidden ones)
+4. Press `%` to select all tasks (includes closed, excludes tombstoned)
 5. Navigate and deselect any you want to keep (Space toggles)
 6. Press `Space` `d` to initiate cleanup
 7. Press `w` for worktrees only, or `f` for full cleanup
@@ -693,7 +693,7 @@ Filter tasks by how recently they were updated. Useful for finding stale tasks f
 
 **Alternative: Select then filter to review:**
 ```
-1. Press `%` to select all non-closed tasks
+1. Press `%` to select all tasks (excludes tombstoned only)
 2. Press `f` then `7` to filter view to stale tasks
 3. Review what's selected, deselect as needed
 4. Press `Space` `d` → `w` to cleanup worktrees

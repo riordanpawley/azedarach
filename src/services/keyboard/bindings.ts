@@ -165,13 +165,13 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "S-5",
 		mode: "normal",
-		description: "Select all tasks (excluding closed)",
+		description: "Select all tasks (excluding tombstoned)",
 		action: Effect.gen(function* () {
 			const allTasks = yield* bc.board.getTasks()
-			// Exclude closed (tombstoned) tasks
-			const nonClosedIds = allTasks.filter((t) => t.status !== "closed").map((t) => t.id)
-			yield* bc.editor.selectAll(nonClosedIds)
-			yield* bc.toast.show("info", `Selected ${nonClosedIds.length} tasks`)
+			// Exclude tombstoned (deleted) tasks only - closed tasks are included
+			const selectableIds = allTasks.filter((t) => t.status !== "tombstone").map((t) => t.id)
+			yield* bc.editor.selectAll(selectableIds)
+			yield* bc.toast.show("info", `Selected ${selectableIds.length} tasks`)
 		}),
 	},
 	{
@@ -648,13 +648,13 @@ done
 	{
 		key: "S-5",
 		mode: "select",
-		description: "Select all tasks (excluding closed)",
+		description: "Select all tasks (excluding tombstoned)",
 		action: Effect.gen(function* () {
 			const allTasks = yield* bc.board.getTasks()
-			// Exclude closed (tombstoned) tasks
-			const nonClosedIds = allTasks.filter((t) => t.status !== "closed").map((t) => t.id)
-			yield* bc.editor.selectAll(nonClosedIds)
-			yield* bc.toast.show("info", `Selected ${nonClosedIds.length} tasks`)
+			// Exclude tombstoned (deleted) tasks only - closed tasks are included
+			const selectableIds = allTasks.filter((t) => t.status !== "tombstone").map((t) => t.id)
+			yield* bc.editor.selectAll(selectableIds)
+			yield* bc.toast.show("info", `Selected ${selectableIds.length} tasks`)
 		}),
 	},
 	{
