@@ -17,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
+	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
@@ -74,18 +75,13 @@ type Model struct {
 	sessions map[string]*domain.Session
 
 	// Navigation (using NavigationService)
-	nav  *navigation.Service
-	mode Mode
+	nav *navigation.Service
 
-	// Selection (for multi-select mode)
-	selectedTasks map[string]bool
+	// Editor state (mode, filter, sort, selections)
+	editor *editor.Service
 
 	// UI state
 	overlayStack *overlay.Stack
-
-	// Filtering and sorting
-	filter *domain.Filter
-	sort   *domain.Sort
 
 	// Project
 	currentProject string
@@ -207,15 +203,12 @@ func New(cfg *config.Config) Model {
 	devServerMgr := devserver.NewManager(portAllocator, logger)
 
 	return Model{
-		tasks:           []domain.Task{},
-		sessions:        make(map[string]*domain.Session),
-		nav:             navigation.NewService(),
-		mode:            ModeNormal,
-		selectedTasks:   make(map[string]bool),
-		overlayStack:    overlay.NewStack(),
-		filter:          domain.NewFilter(),
-		sort:            &domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc},
-		toasts:          []Toast{},
+		tasks:        []domain.Task{},
+		sessions:     make(map[string]*domain.Session),
+		nav:          navigation.NewService(),
+		editor:       editor.NewService(),
+		overlayStack: overlay.NewStack(),
+		toasts:       []Toast{},
 		styles:          styles.New(),
 		config:          cfg,
 		loading:         true, // Start with loading state
@@ -274,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSelection(msg)
 
 	case overlay.SearchMsg:
-		m.filter.SearchQuery = msg.Query
+		m.editor.SetSearchQuery(msg.Query)
 		return m, nil
 
 	case beadsLoadedMsg:
@@ -572,14 +565,14 @@ func (m Model) View() string {
 	boardView := board.Render(
 		columns,
 		cursor,
-		m.selectedTasks,
+		m.editor.GetSelectedTasks(),
 		m.styles,
 		m.width,
 		m.height-1,
 	)
 
 	// Render status bar
-	sb := statusbar.New(m.mode, m.width, m.styles)
+	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	statusBarView := sb.Render()
 
 	// Compose the layout
@@ -655,7 +648,7 @@ func (m Model) buildColumns() []board.Column {
 	}
 
 	// Apply filter to tasks
-	filteredTasks := m.filter.Apply(m.tasks)
+	filteredTasks := m.editor.ApplyFilter(m.tasks)
 
 	// Build columns from filtered tasks
 	return []board.Column{
@@ -685,14 +678,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.overlayStack.Pop()
 			return m, nil
 		}
-		if m.mode != ModeNormal {
-			m.mode = ModeNormal
+		if !m.editor.IsNormal() {
+			m.editor.EnterNormal()
 			return m, nil
 		}
 	}
 
 	// Mode-specific handling
-	switch m.mode {
+	switch m.editor.GetMode() {
 	case ModeNormal:
 		return m.handleNormalMode(msg)
 	case ModeGoto:
@@ -747,7 +740,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Mode switches
 	case "g":
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		return m, nil
 
 	case " ": // Space - open action menu
@@ -761,13 +754,13 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
 
 	case "f": // Filter menu
-		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.filter))
+		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.editor.GetFilter()))
 
 	case ",": // Sort menu
-		return m, m.overlayStack.Push(overlay.NewSortMenu(m.sort))
+		return m, m.overlayStack.Push(overlay.NewSortMenu(m.editor.GetSort()))
 
 	case "v": // Visual select
-		m.mode = ModeSelect
+		m.editor.EnterSelect()
 		return m, nil
 
 	case "?": // Help
@@ -801,7 +794,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	// Always return to normal mode after processing
-	m.mode = ModeNormal
+	m.editor.EnterNormal()
 
 	switch msg.String() {
 	case "g":
@@ -1012,7 +1005,7 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 		}
 	}
 	// Apply sort
-	return m.sort.Apply(inColumn)
+	return m.editor.ApplySort(inColumn)
 }
 
 // getCurrentTaskAndSession returns the currently selected task and its session

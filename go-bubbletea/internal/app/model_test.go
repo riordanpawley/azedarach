@@ -299,19 +299,19 @@ func TestGotoMode(t *testing.T) {
 	}
 
 	t.Run("g enters goto mode", func(t *testing.T) {
-		m.mode = ModeNormal
+		m.editor.EnterNormal()
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 		newModel := result.(Model)
 
-		if newModel.mode != ModeGoto {
-			t.Errorf("Expected ModeGoto, got %v", newModel.mode)
+		if newModel.editor.GetMode() != ModeGoto {
+			t.Errorf("Expected ModeGoto, got %v", newModel.editor.GetMode())
 		}
 	})
 
 	t.Run("gg goes to top", func(t *testing.T) {
 		// Start at task 'e' (index 5) in Open column
 		m.nav.SelectTask("e", 0)
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 		newModel := result.(Model)
 
@@ -319,15 +319,15 @@ func TestGotoMode(t *testing.T) {
 		if pos.Task != 0 {
 			t.Errorf("Expected task index 0, got %d", pos.Task)
 		}
-		if newModel.mode != ModeNormal {
-			t.Errorf("Expected to return to ModeNormal, got %v", newModel.mode)
+		if !newModel.editor.IsNormal() {
+			t.Errorf("Expected to return to ModeNormal, got %v", newModel.editor.GetMode())
 		}
 	})
 
 	t.Run("ge goes to end", func(t *testing.T) {
 		// Start at first task in Open column
 		m.nav.SelectTask("az-1", 0)
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		col := m.currentColumn()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 		newModel := result.(Model)
@@ -341,7 +341,7 @@ func TestGotoMode(t *testing.T) {
 	t.Run("gh goes to first column", func(t *testing.T) {
 		// Start at task in Blocked column
 		m.nav.SelectTask("az-4", 2)
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
@@ -354,7 +354,7 @@ func TestGotoMode(t *testing.T) {
 	t.Run("gl goes to last column", func(t *testing.T) {
 		// Start at first task in Open column
 		m.nav.SelectTask("az-1", 0)
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
@@ -372,26 +372,26 @@ func TestModeTransitions(t *testing.T) {
 		modes := []Mode{ModeGoto, ModeSearch, ModeAction, ModeSelect}
 
 		for _, mode := range modes {
-			m.mode = mode
+			m.editor.SetMode(mode)
 			result, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
 			newModel := result.(Model)
 
-			if newModel.mode != ModeNormal {
-				t.Errorf("Expected ModeNormal after escape from %v, got %v", mode, newModel.mode)
+			if !newModel.editor.IsNormal() {
+				t.Errorf("Expected ModeNormal after escape from %v, got %v", mode, newModel.editor.GetMode())
 			}
 		}
 	})
 
 	t.Run("global keys work in all modes", func(t *testing.T) {
 		// Test ctrl+c (quit)
-		m.mode = ModeGoto
+		m.editor.EnterGoto()
 		_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
 		if cmd == nil {
 			t.Error("Expected quit command, got nil")
 		}
 
 		// Test ctrl+l (clear screen)
-		m.mode = ModeAction
+		m.editor.EnterAction()
 		_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlL})
 		if cmd == nil {
 			t.Error("Expected clear screen command, got nil")
