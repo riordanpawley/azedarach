@@ -135,13 +135,13 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.nav.move("right"),
 	},
 	{
-		key: "CS-d",
+		key: "C-d",
 		mode: "normal",
 		description: "Half page down",
 		action: bc.nav.halfPageDown(),
 	},
 	{
-		key: "CS-u",
+		key: "C-u",
 		mode: "normal",
 		description: "Half page up",
 		action: bc.nav.halfPageUp(),
