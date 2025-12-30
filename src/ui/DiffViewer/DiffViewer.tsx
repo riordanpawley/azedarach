@@ -1,6 +1,6 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import { useKeyboard } from "@opentui/react"
+import { useKeyboard, useTerminalDimensions } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
 import { appConfigAtom } from "../atoms/config.js"
 import { changedFilesAtom, showDiffPopupAtom } from "../atoms/diff.js"
@@ -33,7 +33,23 @@ interface DiffViewerState {
 	expandedDirs: Set<string>
 }
 
+// Chrome heights for maxVisible calculation
+// DiffViewer: header (2) + status bar (2) = 4
+// FilePicker: header (2) + separator (1) + scroll indicator (2) = 5
+// Dialog margin from 90% = ~2-3 lines on typical terminal
+const DIALOG_CHROME_HEIGHT = 11
+
 export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProps) => {
+	// Get terminal dimensions for dynamic sizing
+	const { height: terminalHeight } = useTerminalDimensions()
+
+	// Calculate max visible files based on terminal height
+	// Dialog is 90% of terminal, minus chrome for headers/status bars
+	const maxVisibleFiles = useMemo(() => {
+		const dialogHeight = Math.floor(terminalHeight * 0.9)
+		return Math.max(5, dialogHeight - DIALOG_CHROME_HEIGHT)
+	}, [terminalHeight])
+
 	// Atom hooks
 	const getChangedFiles = useAtomSet(changedFilesAtom, { mode: "promise" })
 	const showDiffPopup = useAtomSet(showDiffPopupAtom, { mode: "promise" })
@@ -453,6 +469,7 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 						filterText={state.filterText}
 						mode={state.viewMode}
 						focused={true}
+						maxVisible={maxVisibleFiles}
 						isSearching={isSearching}
 						treeNodes={flattenedTree}
 						jumpLabels={state.jumpLabels}
