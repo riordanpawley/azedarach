@@ -4,40 +4,26 @@ package app
 import (
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// Mode represents the current editing mode (Helix-style modal editing)
-type Mode int
+// Re-export Mode type and constants for convenience
+type Mode = types.Mode
 
 const (
-	ModeNormal Mode = iota
-	ModeSelect
-	ModeSearch
-	ModeGoto
-	ModeAction
+	ModeNormal = types.ModeNormal
+	ModeSelect = types.ModeSelect
+	ModeSearch = types.ModeSearch
+	ModeGoto   = types.ModeGoto
+	ModeAction = types.ModeAction
 )
-
-// String returns the string representation of the mode
-func (m Mode) String() string {
-	switch m {
-	case ModeNormal:
-		return "NORMAL"
-	case ModeSelect:
-		return "SELECT"
-	case ModeSearch:
-		return "SEARCH"
-	case ModeGoto:
-		return "GOTO"
-	case ModeAction:
-		return "ACTION"
-	default:
-		return "UNKNOWN"
-	}
-}
 
 // Cursor tracks the current position in the Kanban board
 type Cursor struct {
@@ -54,6 +40,9 @@ type Model struct {
 	// Navigation
 	cursor Cursor
 	mode   Mode
+
+	// Selection (for multi-select mode)
+	selectedTasks map[string]bool
 
 	// UI state
 	overlay    Overlay
@@ -87,6 +76,9 @@ type Model struct {
 
 	// Loading state
 	loading bool
+
+	// Use placeholder data in Phase 1
+	usePlaceholder bool
 }
 
 // SortField defines how tasks are sorted
@@ -128,6 +120,7 @@ func New(cfg *config.Config) Model {
 		sessions:       make(map[string]*domain.Session),
 		cursor:         Cursor{Column: 0, Task: 0},
 		mode:           ModeNormal,
+		selectedTasks:  make(map[string]bool),
 		statusFilter:   make(map[domain.Status]bool),
 		priorityFilter: make(map[domain.Priority]bool),
 		typeFilter:     make(map[domain.TaskType]bool),
@@ -136,16 +129,15 @@ func New(cfg *config.Config) Model {
 		toasts:         []Toast{},
 		styles:         styles.New(),
 		config:         cfg,
-		loading:        true,
+		loading:        false, // Start with placeholder data immediately
+		usePlaceholder: true,  // Use placeholder data for Phase 1
 	}
 }
 
 // Init returns the initial command for the application
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		loadBeads,
-		tickEvery(2 * time.Second),
-	)
+	// For Phase 1, no async commands needed - we use placeholder data
+	return nil
 }
 
 // Update handles incoming messages and updates the model
@@ -190,17 +182,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the current state as a string
 func (m Model) View() string {
-	// TODO: Implement full view rendering
-	// This is a placeholder that will be replaced with proper board rendering
-	if m.loading {
+	if m.width == 0 || m.height == 0 {
 		return "Loading..."
 	}
 
-	// Render board + status bar
-	// If overlay open, render overlay on top
-	return "Azedarach Go/Bubbletea - Press q to quit\n\n" +
-		"Tasks loaded: " + string(rune('0'+len(m.tasks))) + "\n" +
-		"Mode: Normal\n"
+	// Build columns for the board
+	columns := m.buildColumns()
+
+	// Create cursor for board package
+	cursor := board.Cursor{
+		Column: m.cursor.Column,
+		Task:   m.cursor.Task,
+	}
+
+	// Render board (takes full height minus 1 for statusbar)
+	boardView := board.Render(
+		columns,
+		cursor,
+		m.selectedTasks,
+		m.styles,
+		m.width,
+		m.height-1,
+	)
+
+	// Render status bar
+	sb := statusbar.New(m.mode, m.width, m.styles)
+	statusBarView := sb.Render()
+
+	// Compose the layout
+	view := lipgloss.JoinVertical(lipgloss.Left, boardView, statusBarView)
+
+	// If overlay is open, render it on top (TODO: implement overlay rendering)
+	if m.overlay != nil {
+		// TODO: Center overlay on screen
+		view = view + "\n" + m.overlay.View()
+	}
+
+	return view
+}
+
+// buildColumns converts tasks into board columns
+func (m Model) buildColumns() []board.Column {
+	// For Phase 1, use placeholder data
+	if m.usePlaceholder {
+		return board.CreatePlaceholderData()
+	}
+
+	// Build columns from actual tasks
+	return []board.Column{
+		{Title: "Open", Tasks: m.tasksInColumn(domain.StatusOpen)},
+		{Title: "In Progress", Tasks: m.tasksInColumn(domain.StatusInProgress)},
+		{Title: "Blocked", Tasks: m.tasksInColumn(domain.StatusBlocked)},
+		{Title: "Done", Tasks: m.tasksInColumn(domain.StatusDone)},
+	}
 }
 
 // handleKey processes keyboard input based on current mode
@@ -239,15 +273,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleNormalMode processes keyboard input in normal mode
 func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	columns := m.buildColumns()
+
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
 
 	// Vertical navigation
 	case "j", "down":
-		col := m.currentColumn()
-		if len(col) > 0 && m.cursor.Task < len(col)-1 {
-			m.cursor.Task++
+		if m.cursor.Column < len(columns) {
+			col := columns[m.cursor.Column]
+			if len(col.Tasks) > 0 && m.cursor.Task < len(col.Tasks)-1 {
+				m.cursor.Task++
+			}
 		}
 		return m, nil
 
@@ -261,24 +299,26 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h", "left":
 		if m.cursor.Column > 0 {
 			m.cursor.Column--
-			m.cursor.Task = m.clampTaskIndex()
+			m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
 		}
 		return m, nil
 
 	case "l", "right":
-		if m.cursor.Column < 3 {
+		if m.cursor.Column < len(columns)-1 {
 			m.cursor.Column++
-			m.cursor.Task = m.clampTaskIndex()
+			m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
 		}
 		return m, nil
 
 	// Half-page scroll
 	case "ctrl+d":
-		col := m.currentColumn()
-		if len(col) > 0 {
-			m.cursor.Task += m.halfPage()
-			if m.cursor.Task >= len(col) {
-				m.cursor.Task = len(col) - 1
+		if m.cursor.Column < len(columns) {
+			col := columns[m.cursor.Column]
+			if len(col.Tasks) > 0 {
+				m.cursor.Task += m.halfPage()
+				if m.cursor.Task >= len(col.Tasks) {
+					m.cursor.Task = len(col.Tasks) - 1
+				}
 			}
 		}
 		return m, nil
@@ -319,6 +359,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleGotoMode processes keyboard input in goto mode
 func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	columns := m.buildColumns()
 	// Always return to normal mode after processing
 	m.mode = ModeNormal
 
@@ -328,18 +369,20 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor.Task = 0
 	case "e":
 		// Go to end of column
-		col := m.currentColumn()
-		if len(col) > 0 {
-			m.cursor.Task = len(col) - 1
+		if m.cursor.Column < len(columns) {
+			col := columns[m.cursor.Column]
+			if len(col.Tasks) > 0 {
+				m.cursor.Task = len(col.Tasks) - 1
+			}
 		}
 	case "h":
 		// Go to first column
 		m.cursor.Column = 0
-		m.cursor.Task = m.clampTaskIndex()
+		m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
 	case "l":
 		// Go to last column
-		m.cursor.Column = 3
-		m.cursor.Task = m.clampTaskIndex()
+		m.cursor.Column = len(columns) - 1
+		m.cursor.Task = m.clampTaskIndexForColumn(columns, m.cursor.Column)
 	}
 
 	return m, nil
@@ -448,6 +491,24 @@ func (m Model) clampTaskIndex() int {
 	}
 	if m.cursor.Task >= len(col) {
 		return len(col) - 1
+	}
+	return m.cursor.Task
+}
+
+// clampTaskIndexForColumn returns the task index clamped to a specific column's bounds
+func (m Model) clampTaskIndexForColumn(columns []board.Column, colIndex int) int {
+	if colIndex < 0 || colIndex >= len(columns) {
+		return 0
+	}
+	col := columns[colIndex]
+	if len(col.Tasks) == 0 {
+		return 0
+	}
+	if m.cursor.Task < 0 {
+		return 0
+	}
+	if m.cursor.Task >= len(col.Tasks) {
+		return len(col.Tasks) - 1
 	}
 	return m.cursor.Task
 }

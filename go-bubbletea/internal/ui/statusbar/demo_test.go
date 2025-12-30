@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -18,12 +18,12 @@ func TestDemo_VisualOutput(t *testing.T) {
 	style := styles.New()
 	width := 80
 
-	modes := []app.Mode{
-		app.ModeNormal,
-		app.ModeSelect,
-		app.ModeSearch,
-		app.ModeGoto,
-		app.ModeAction,
+	modes := []types.Mode{
+		types.ModeNormal,
+		types.ModeSelect,
+		types.ModeSearch,
+		types.ModeGoto,
+		types.ModeAction,
 	}
 
 	fmt.Println("\n=== StatusBar Visual Demo ===")
