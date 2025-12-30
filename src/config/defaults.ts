@@ -173,6 +173,10 @@ export const DEFAULT_CONFIG = {
 			},
 		},
 	},
+	keyboard: {
+		/** Home row keys for QWERTY layout - customize for Colemak, Dvorak, etc. */
+		jumpLabelChars: "asdfjkl;",
+	},
 	projects: [],
 	defaultProject: undefined,
 } as const
@@ -278,6 +282,9 @@ export interface ResolvedConfig {
 			  >
 			| undefined
 	}
+	keyboard: {
+		jumpLabelChars: string
+	}
 	projects: ReadonlyArray<{
 		name: string
 		path: string
@@ -380,6 +387,9 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		devServer: {
 			portPattern: config.devServer?.portPattern ?? DEFAULT_CONFIG.devServer.portPattern,
 			servers: config.devServer?.servers ?? DEFAULT_CONFIG.devServer.servers,
+		},
+		keyboard: {
+			jumpLabelChars: config.keyboard?.jumpLabelChars ?? DEFAULT_CONFIG.keyboard.jumpLabelChars,
 		},
 	}
 }
