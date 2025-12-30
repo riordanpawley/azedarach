@@ -134,7 +134,11 @@ export type EditorMode =
 			readonly jumpLabels: Record.ReadonlyRecord<string, JumpTarget> | null
 			readonly pendingJumpKey: string | null
 	  }
-	| { readonly _tag: "action"; readonly targetTaskId: string | null }
+	| {
+			readonly _tag: "action"
+			readonly targetTaskId: string | null
+			readonly selectedIds: ReadonlyArray<string>
+	  }
 	| { readonly _tag: "search"; readonly query: string }
 	| { readonly _tag: "sort" }
 	| { readonly _tag: "filter"; readonly activeField: FilterField | null }
@@ -178,12 +182,14 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			getMode: () => SubscriptionRef.get(mode),
 
 			/**
-			 * Get currently selected task IDs (only in select mode)
+			 * Get currently selected task IDs (from select or action mode)
 			 */
 			getSelectedIds: (): Effect.Effect<ReadonlyArray<string>> =>
 				Effect.gen(function* () {
 					const m = yield* SubscriptionRef.get(mode)
-					return m._tag === "select" ? m.selectedIds : []
+					if (m._tag === "select") return m.selectedIds
+					if (m._tag === "action") return m.selectedIds
+					return []
 				}),
 
 			/**
@@ -348,9 +354,14 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * This ensures all action menu commands operate on the task that was
 			 * focused when Space was pressed, not the current cursor position.
 			 * Fixes race condition where cursor could move between Space and action key.
+			 * Preserves selectedIds from select mode so bulk actions work correctly.
 			 */
 			enterAction: (targetTaskId: string | null) =>
-				SubscriptionRef.set(mode, Data.struct({ _tag: "action" as const, targetTaskId })),
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					// Preserve selectedIds when entering action mode from select mode
+					const selectedIds = m._tag === "select" ? m.selectedIds : []
+					return Data.struct({ _tag: "action" as const, targetTaskId, selectedIds })
+				}),
 
 			/**
 			 * Get the target task ID from action mode.
