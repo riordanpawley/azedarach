@@ -428,6 +428,14 @@ What would you like to discuss?`
 						return
 					}
 
+					// If merge already in progress (MERGE_HEAD exists), skip merge choice
+					// and attach directly - user is likely resuming conflict resolution
+					if (task.hasMergeConflict) {
+						yield* toast.show("info", "Merge in progress - attaching directly")
+						yield* doAttach(task.id)
+						return
+					}
+
 					// Branch is behind - show merge choice dialog
 					const baseBranch = branchStatus.baseBranch
 					const message = `Merge ${baseBranch} into your branch before attaching?`
