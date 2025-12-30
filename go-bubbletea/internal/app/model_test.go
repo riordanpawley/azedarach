@@ -17,6 +17,10 @@ func newTestModel() Model {
 	m.usePlaceholder = false
 
 	// Add some test tasks
+	// Open column: az-1 (index 0), az-2 (index 1)
+	// InProgress column: az-3 (index 0)
+	// Blocked column: az-4 (index 0)
+	// Done column: az-5 (index 0)
 	m.tasks = []domain.Task{
 		{ID: "az-1", Title: "Task 1", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 		{ID: "az-2", Title: "Task 2", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeBug},
@@ -31,17 +35,25 @@ func newTestModel() Model {
 	return m
 }
 
+// Helper to get cursor position in a model
+func getCursorPosition(m Model) Position {
+	columns := m.buildColumns()
+	return m.cursor.FindPosition(columns)
+}
+
 func TestHelperMethods(t *testing.T) {
 	m := newTestModel()
 
 	t.Run("currentColumn", func(t *testing.T) {
-		m.cursor.Column = 0 // Open column
+		// Set cursor to task in Open column
+		m.cursor.SetTask("az-1", 0)
 		col := m.currentColumn()
 		if len(col) != 2 {
 			t.Errorf("Expected 2 tasks in Open column, got %d", len(col))
 		}
 
-		m.cursor.Column = 1 // In Progress column
+		// Set cursor to task in InProgress column
+		m.cursor.SetTask("az-3", 1)
 		col = m.currentColumn()
 		if len(col) != 1 {
 			t.Errorf("Expected 1 task in In Progress column, got %d", len(col))
@@ -60,26 +72,38 @@ func TestHelperMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("clampTaskIndex", func(t *testing.T) {
-		m.cursor.Column = 0 // Open column (2 tasks)
-		m.cursor.Task = 5
-		clamped := m.clampTaskIndex()
-		if clamped != 1 { // Should clamp to max index (1)
-			t.Errorf("Expected task index 1, got %d", clamped)
+	t.Run("Cursor.FindPosition", func(t *testing.T) {
+		columns := m.buildColumns()
+
+		// Test finding task by ID
+		m.cursor.SetTask("az-1", 0)
+		pos := m.cursor.FindPosition(columns)
+		if !pos.Valid {
+			t.Error("Expected valid position for az-1")
+		}
+		if pos.Column != 0 || pos.Task != 0 {
+			t.Errorf("Expected az-1 at (0,0), got (%d,%d)", pos.Column, pos.Task)
 		}
 
-		m.cursor.Task = -1
-		clamped = m.clampTaskIndex()
-		if clamped != 0 {
-			t.Errorf("Expected task index 0, got %d", clamped)
+		// Test finding second task in Open column
+		m.cursor.SetTask("az-2", 0)
+		pos = m.cursor.FindPosition(columns)
+		if pos.Column != 0 || pos.Task != 1 {
+			t.Errorf("Expected az-2 at (0,1), got (%d,%d)", pos.Column, pos.Task)
 		}
 
-		// Empty column
-		m.cursor.Column = 2 // Blocked column (1 task)
-		m.cursor.Task = 10
-		clamped = m.clampTaskIndex()
-		if clamped != 0 { // Should clamp to 0 (only one task)
-			t.Errorf("Expected task index 0, got %d", clamped)
+		// Test finding task in different column
+		m.cursor.SetTask("az-4", 2)
+		pos = m.cursor.FindPosition(columns)
+		if pos.Column != 2 || pos.Task != 0 {
+			t.Errorf("Expected az-4 at (2,0), got (%d,%d)", pos.Column, pos.Task)
+		}
+
+		// Test fallback when task not found
+		m.cursor.SetTask("nonexistent", 1)
+		pos = m.cursor.FindPosition(columns)
+		if pos.Column != 1 {
+			t.Errorf("Expected fallback to column 1, got %d", pos.Column)
 		}
 	})
 
@@ -103,76 +127,102 @@ func TestNormalModeNavigation(t *testing.T) {
 	m := newTestModel()
 
 	t.Run("vertical navigation - down", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column (az-1)
+		m.cursor.SetTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != 1 {
-			t.Errorf("Expected task index 1, got %d", newModel.cursor.Task)
+		pos := getCursorPosition(newModel)
+		if pos.Task != 1 {
+			t.Errorf("Expected task index 1, got %d", pos.Task)
+		}
+		if newModel.cursor.TaskID != "az-2" {
+			t.Errorf("Expected cursor on az-2, got %s", newModel.cursor.TaskID)
 		}
 	})
 
 	t.Run("vertical navigation - up", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 1}
+		// Start at second task in Open column (az-2)
+		m.cursor.SetTask("az-2", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != 0 {
-			t.Errorf("Expected task index 0, got %d", newModel.cursor.Task)
+		pos := getCursorPosition(newModel)
+		if pos.Task != 0 {
+			t.Errorf("Expected task index 0, got %d", pos.Task)
+		}
+		if newModel.cursor.TaskID != "az-1" {
+			t.Errorf("Expected cursor on az-1, got %s", newModel.cursor.TaskID)
 		}
 	})
 
 	t.Run("vertical navigation - up at boundary", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column (az-1)
+		m.cursor.SetTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != 0 {
-			t.Errorf("Expected task index to stay at 0, got %d", newModel.cursor.Task)
+		pos := getCursorPosition(newModel)
+		if pos.Task != 0 {
+			t.Errorf("Expected task index to stay at 0, got %d", pos.Task)
+		}
+		if newModel.cursor.TaskID != "az-1" {
+			t.Errorf("Expected cursor to stay on az-1, got %s", newModel.cursor.TaskID)
 		}
 	})
 
 	t.Run("horizontal navigation - right", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 1}
+		// Start at second task in Open column (az-2, index 1)
+		m.cursor.SetTask("az-2", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 1 {
-			t.Errorf("Expected column 1, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 1 {
+			t.Errorf("Expected column 1, got %d", pos.Column)
 		}
-		// Task index should be clamped
-		if newModel.cursor.Task > 0 {
-			t.Errorf("Expected task index to be clamped to 0, got %d", newModel.cursor.Task)
+		// InProgress column only has 1 task (az-3), so task index should be 0
+		if pos.Task != 0 {
+			t.Errorf("Expected task index to be clamped to 0, got %d", pos.Task)
+		}
+		if newModel.cursor.TaskID != "az-3" {
+			t.Errorf("Expected cursor on az-3, got %s", newModel.cursor.TaskID)
 		}
 	})
 
 	t.Run("horizontal navigation - left", func(t *testing.T) {
-		m.cursor = Cursor{Column: 1, Task: 0}
+		// Start at task in InProgress column (az-3)
+		m.cursor.SetTask("az-3", 1)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 0 {
-			t.Errorf("Expected column 0, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 0 {
+			t.Errorf("Expected column 0, got %d", pos.Column)
 		}
 	})
 
 	t.Run("horizontal navigation - left at boundary", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column (az-1)
+		m.cursor.SetTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 0 {
-			t.Errorf("Expected column to stay at 0, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 0 {
+			t.Errorf("Expected column to stay at 0, got %d", pos.Column)
 		}
 	})
 
 	t.Run("horizontal navigation - right at boundary", func(t *testing.T) {
-		m.cursor = Cursor{Column: 3, Task: 0}
+		// Start at task in Done column (az-5)
+		m.cursor.SetTask("az-5", 3)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 3 {
-			t.Errorf("Expected column to stay at 3, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 3 {
+			t.Errorf("Expected column to stay at 3, got %d", pos.Column)
 		}
 	})
 }
@@ -192,38 +242,44 @@ func TestHalfPageScroll(t *testing.T) {
 	}
 
 	t.Run("ctrl+d scrolls down", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column
+		m.cursor.SetTask("az-1", 0)
 		m.height = 24
-		initialTask := m.cursor.Task
+		initialPos := getCursorPosition(m)
 
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlD})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task <= initialTask {
-			t.Errorf("Expected task index to increase, got %d (was %d)", newModel.cursor.Task, initialTask)
+		newPos := getCursorPosition(newModel)
+		if newPos.Task <= initialPos.Task {
+			t.Errorf("Expected task index to increase, got %d (was %d)", newPos.Task, initialPos.Task)
 		}
 	})
 
 	t.Run("ctrl+u scrolls up", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 5}
+		// Start at task 'e' (index 5) in Open column
+		m.cursor.SetTask("e", 0)
 		m.height = 24
-		initialTask := m.cursor.Task
+		initialPos := getCursorPosition(m)
 
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlU})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task >= initialTask {
-			t.Errorf("Expected task index to decrease, got %d (was %d)", newModel.cursor.Task, initialTask)
+		newPos := getCursorPosition(newModel)
+		if newPos.Task >= initialPos.Task {
+			t.Errorf("Expected task index to decrease, got %d (was %d)", newPos.Task, initialPos.Task)
 		}
 	})
 
 	t.Run("ctrl+u at top stays at 0", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task
+		m.cursor.SetTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlU})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != 0 {
-			t.Errorf("Expected task index to stay at 0, got %d", newModel.cursor.Task)
+		newPos := getCursorPosition(newModel)
+		if newPos.Task != 0 {
+			t.Errorf("Expected task index to stay at 0, got %d", newPos.Task)
 		}
 	})
 }
@@ -253,13 +309,15 @@ func TestGotoMode(t *testing.T) {
 	})
 
 	t.Run("gg goes to top", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 5}
+		// Start at task 'e' (index 5) in Open column
+		m.cursor.SetTask("e", 0)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != 0 {
-			t.Errorf("Expected task index 0, got %d", newModel.cursor.Task)
+		pos := getCursorPosition(newModel)
+		if pos.Task != 0 {
+			t.Errorf("Expected task index 0, got %d", pos.Task)
 		}
 		if newModel.mode != ModeNormal {
 			t.Errorf("Expected to return to ModeNormal, got %v", newModel.mode)
@@ -267,36 +325,42 @@ func TestGotoMode(t *testing.T) {
 	})
 
 	t.Run("ge goes to end", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column
+		m.cursor.SetTask("az-1", 0)
 		m.mode = ModeGoto
 		col := m.currentColumn()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Task != len(col)-1 {
-			t.Errorf("Expected task index %d, got %d", len(col)-1, newModel.cursor.Task)
+		pos := getCursorPosition(newModel)
+		if pos.Task != len(col)-1 {
+			t.Errorf("Expected task index %d, got %d", len(col)-1, pos.Task)
 		}
 	})
 
 	t.Run("gh goes to first column", func(t *testing.T) {
-		m.cursor = Cursor{Column: 2, Task: 0}
+		// Start at task in Blocked column
+		m.cursor.SetTask("az-4", 2)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 0 {
-			t.Errorf("Expected column 0, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 0 {
+			t.Errorf("Expected column 0, got %d", pos.Column)
 		}
 	})
 
 	t.Run("gl goes to last column", func(t *testing.T) {
-		m.cursor = Cursor{Column: 0, Task: 0}
+		// Start at first task in Open column
+		m.cursor.SetTask("az-1", 0)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
-		if newModel.cursor.Column != 3 {
-			t.Errorf("Expected column 3, got %d", newModel.cursor.Column)
+		pos := getCursorPosition(newModel)
+		if pos.Column != 3 {
+			t.Errorf("Expected column 3, got %d", pos.Column)
 		}
 	})
 }
