@@ -32,12 +32,14 @@
         '';
 
         # Python environment for ELF dashboard
-        elfPython = pkgs.python312.withPackages (ps: with ps; [
-          fastapi
-          uvicorn
-          aiofiles
-          websockets
-        ]);
+        elfPython = pkgs.python312.withPackages (
+          ps: with ps; [
+            fastapi
+            uvicorn
+            aiofiles
+            websockets
+          ]
+        );
 
       in
       {
@@ -53,6 +55,7 @@
               vtsls
               biome
               viu # Terminal image viewer with Kitty graphics protocol support
+              go
 
               # ELF dependencies
               elfPython
