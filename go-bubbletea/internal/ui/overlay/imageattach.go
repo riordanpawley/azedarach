@@ -3,6 +3,7 @@ package overlay
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -446,18 +447,32 @@ func (i *ImageAttachOverlay) openInViewer() tea.Cmd {
 	}
 
 	file := i.files[i.cursor]
-	return tea.ExecProcess(tea.Exec{
-		Command: "open",
-		Args:    []string{file.Path},
-	}, func(err error) tea.Msg {
-		if err != nil {
+	return func() tea.Msg {
+		// Use xdg-open on Linux, open on macOS
+		var cmd string
+		if hasCommand("xdg-open") {
+			cmd = "xdg-open"
+		} else if hasCommand("open") {
+			cmd = "open"
+		} else {
+			return errorMsg{err: fmt.Errorf("no file opener found")}
+		}
+
+		ctx := context.Background()
+		execCmd := exec.CommandContext(ctx, cmd, file.Path)
+		if err := execCmd.Start(); err != nil {
 			return errorMsg{err}
 		}
 		return nil
-	})
+	}
 }
 
 // Helper functions
+
+func hasCommand(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
 
 func formatFileSize(size int64) string {
 	const (
