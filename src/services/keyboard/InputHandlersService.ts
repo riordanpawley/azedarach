@@ -756,10 +756,12 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				})
 
 			/**
-			 * Compute jump labels for all visible tasks
+			 * Compute jump labels for VISIBLE tasks only
 			 *
-			 * Generates 2-character labels (aa, ab, ac, ...) for each task on the board.
-			 * Used by the goto-jump mode for quick navigation.
+			 * Generates 2-character labels (aa, ab, ac, ...) for tasks visible in the
+			 * viewport. Only includes tasks within each column's visible window, not
+			 * all filtered tasks. This prevents exhausting the 64 available labels
+			 * on off-screen tasks.
 			 *
 			 * IMPORTANT: Must use the same filtered/sorted data that the board renders,
 			 * otherwise labels won't match visual positions.
@@ -783,42 +785,66 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					const drillDownChildIds = yield* SubscriptionRef.get(nav.drillDownChildIds)
 					const filteredTasksByColumn =
 						drillDownChildIds.size === 0
-							? tasksByColumn
+							? // When not in drill-down, hide epic children (matching drillDownFilteredTasksAtom)
+								tasksByColumn.map((column) =>
+									column.filter((task) => task.parentEpicId === undefined),
+								)
 							: tasksByColumn.map((column) =>
 									column.filter((task) => drillDownChildIds.has(task.id)),
 								)
 
-					// Flatten tasks with position info
-					const allTasks: Array<{
+					// Get current navigation position and compute maxVisible
+					const currentPos = yield* nav.getPosition()
+					const CHROME_HEIGHT = 9
+					const TASK_CARD_HEIGHT = 4
+					const rows = process.stdout.rows || 24
+					const maxVisible = Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
+
+					// Compute visible window for a column (mirrors Column.tsx logic)
+					const getVisibleWindow = (
+						taskCount: number,
+						selectedIdx: number,
+					): { startIdx: number; endIdx: number } => {
+						if (taskCount <= maxVisible) {
+							return { startIdx: 0, endIdx: taskCount }
+						}
+						let startIdx = 0
+						if (selectedIdx >= maxVisible - 1) {
+							startIdx = Math.min(selectedIdx - maxVisible + 2, taskCount - maxVisible)
+						}
+						startIdx = Math.max(0, startIdx)
+						return { startIdx, endIdx: startIdx + maxVisible }
+					}
+
+					// Collect only VISIBLE tasks from each column
+					const visibleTasks: Array<{
 						taskId: string
 						columnIndex: number
 						taskIndex: number
 					}> = []
 
-					// DEBUG: Log tasks per column
-					yield* Effect.log(
-						`[computeJumpLabels] Tasks per column: ${filteredTasksByColumn.map((tasks, idx) => `col${idx}:${tasks.length}`).join(", ")}`,
-					)
-
 					filteredTasksByColumn.forEach((tasks, colIdx) => {
-						tasks.forEach((task, taskIdx) => {
-							allTasks.push({
-								taskId: task.id,
-								columnIndex: colIdx,
-								taskIndex: taskIdx,
-							})
-						})
+						// For active column, use actual position; for others, default to 0
+						const selectedIdx = colIdx === currentPos.columnIndex ? currentPos.taskIndex : 0
+						const { startIdx, endIdx } = getVisibleWindow(tasks.length, selectedIdx)
+
+						// Only include tasks within the visible window
+						for (let taskIdx = startIdx; taskIdx < endIdx && taskIdx < tasks.length; taskIdx++) {
+							const task = tasks[taskIdx]
+							if (task) {
+								visibleTasks.push({
+									taskId: task.id,
+									columnIndex: colIdx,
+									taskIndex: taskIdx,
+								})
+							}
+						}
 					})
 
-					// DEBUG: Log total tasks and sample
-					yield* Effect.log(
-						`[computeJumpLabels] Total tasks: ${allTasks.length}, sample: ${JSON.stringify(allTasks.slice(0, 5))}`,
-					)
-
 					// Generate label strings and build the Record
-					const labels = generateJumpLabels(allTasks.length)
+					const labels = generateJumpLabels(visibleTasks.length)
 					return Record.fromEntries(
-						allTasks
+						visibleTasks
 							.map(({ taskId, columnIndex, taskIndex }, i) =>
 								labels[i] ? [labels[i]!, { taskId, columnIndex, taskIndex }] : null,
 							)
