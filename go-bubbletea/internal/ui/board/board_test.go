@@ -71,7 +71,7 @@ func TestRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Render(columns, tt.cursor, tt.selectedTasks, s, tt.width, tt.height)
+			got := Render(columns, tt.cursor, tt.selectedTasks, nil, false, s, tt.width, tt.height)
 
 			goldenFile := filepath.Join("testdata", tt.name+".golden")
 
@@ -171,7 +171,7 @@ func TestRenderCard(t *testing.T) {
 
 func TestRenderEmptyBoard(t *testing.T) {
 	s := styles.New()
-	got := Render([]Column{}, Cursor{}, make(map[string]bool), s, 120, 30)
+	got := Render([]Column{}, Cursor{}, make(map[string]bool), nil, false, s, 120, 30)
 
 	if got != "" {
 		t.Errorf("Render() with empty columns should return empty string, got: %q", got)
@@ -200,7 +200,7 @@ func TestCursorBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Should not panic
-			_ = Render(columns, tt.cursor, make(map[string]bool), s, 120, 30)
+			_ = Render(columns, tt.cursor, make(map[string]bool), nil, false, s, 120, 30)
 		})
 	}
 }

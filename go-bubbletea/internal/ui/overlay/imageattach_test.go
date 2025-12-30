@@ -143,7 +143,7 @@ func TestImageAttachOverlay_EscapeKey(t *testing.T) {
 	}
 }
 
-func TestImageAttachOverlay_PreviewMode(t *testing.T) {
+func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	service := attachment.NewService(tmpDir, logger)
@@ -155,18 +155,18 @@ func TestImageAttachOverlay_PreviewMode(t *testing.T) {
 		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
 	}
 
-	// Test enter to go to preview mode
+	// Test enter sends OpenImagePreviewMsg
 	msg := tea.KeyMsg{Type: tea.KeyEnter}
-	overlay.Update(msg)
-	if overlay.mode != imageAttachModePreview {
-		t.Errorf("expected mode to be imageAttachModePreview, got %v", overlay.mode)
+	_, cmd := overlay.Update(msg)
+	if cmd == nil {
+		t.Error("expected command to open image preview, got nil")
+		return
 	}
 
-	// Test escape to go back to list mode
-	msg = tea.KeyMsg{Type: tea.KeyEsc}
-	overlay.Update(msg)
-	if overlay.mode != imageAttachModeList {
-		t.Errorf("expected mode to be imageAttachModeList, got %v", overlay.mode)
+	// Execute the command and check the message type
+	resultMsg := cmd()
+	if _, ok := resultMsg.(OpenImagePreviewMsg); !ok {
+		t.Errorf("expected OpenImagePreviewMsg, got %T", resultMsg)
 	}
 }
 
