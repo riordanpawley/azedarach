@@ -165,12 +165,13 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "S-5",
 		mode: "normal",
-		description: "Select all visible tasks",
+		description: "Select all tasks (excluding closed)",
 		action: Effect.gen(function* () {
 			const allTasks = yield* bc.board.getTasks()
-			const allIds = allTasks.map((t) => t.id)
-			yield* bc.editor.selectAll(allIds)
-			yield* bc.toast.show("info", `Selected ${allIds.length} tasks`)
+			// Exclude closed (tombstoned) tasks
+			const nonClosedIds = allTasks.filter((t) => t.status !== "closed").map((t) => t.id)
+			yield* bc.editor.selectAll(nonClosedIds)
+			yield* bc.toast.show("info", `Selected ${nonClosedIds.length} tasks`)
 		}),
 	},
 	{
@@ -647,12 +648,13 @@ done
 	{
 		key: "S-5",
 		mode: "select",
-		description: "Select all visible tasks",
+		description: "Select all tasks (excluding closed)",
 		action: Effect.gen(function* () {
 			const allTasks = yield* bc.board.getTasks()
-			const allIds = allTasks.map((t) => t.id)
-			yield* bc.editor.selectAll(allIds)
-			yield* bc.toast.show("info", `Selected ${allIds.length} tasks`)
+			// Exclude closed (tombstoned) tasks
+			const nonClosedIds = allTasks.filter((t) => t.status !== "closed").map((t) => t.id)
+			yield* bc.editor.selectAll(nonClosedIds)
+			yield* bc.toast.show("info", `Selected ${nonClosedIds.length} tasks`)
 		}),
 	},
 	{
