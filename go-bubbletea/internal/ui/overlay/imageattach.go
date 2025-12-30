@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -392,7 +393,7 @@ type errorMsg struct {
 
 func (i *ImageAttachOverlay) loadAttachments() tea.Cmd {
 	return func() tea.Msg {
-		ctx := tea.Context(tea.Model(i))
+		ctx := context.Background()
 		files, err := i.service.List(ctx, i.beadID)
 		if err != nil {
 			return errorMsg{err}
@@ -403,7 +404,7 @@ func (i *ImageAttachOverlay) loadAttachments() tea.Cmd {
 
 func (i *ImageAttachOverlay) pasteFromClipboard() tea.Cmd {
 	return func() tea.Msg {
-		ctx := tea.Context(tea.Model(i))
+		ctx := context.Background()
 		attachment, err := i.service.AttachFromClipboard(ctx, i.beadID)
 		if err != nil {
 			return errorMsg{err}
@@ -414,7 +415,7 @@ func (i *ImageAttachOverlay) pasteFromClipboard() tea.Cmd {
 
 func (i *ImageAttachOverlay) attachFromFile(path string) tea.Cmd {
 	return func() tea.Msg {
-		ctx := tea.Context(tea.Model(i))
+		ctx := context.Background()
 		attachment, err := i.service.Attach(ctx, i.beadID, path)
 		if err != nil {
 			return errorMsg{err}
@@ -430,7 +431,7 @@ func (i *ImageAttachOverlay) deleteAttachment() tea.Cmd {
 
 	file := i.files[i.cursor]
 	return func() tea.Msg {
-		ctx := tea.Context(tea.Model(i))
+		ctx := context.Background()
 		err := i.service.Delete(ctx, i.beadID, file.ID)
 		if err != nil {
 			return errorMsg{err}
