@@ -948,6 +948,10 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 									width: maxWidth,
 									height: maxHeight,
 									preserveAspectRatio: true,
+									// Force ANSI block rendering instead of Kitty/iTerm2 native protocols.
+									// OpenTUI's text component renders character-by-character and doesn't
+									// support passthrough of raw terminal escape sequences for image protocols.
+									preferNativeRender: false,
 								}),
 							catch: (e) =>
 								new ImageAttachmentError({
