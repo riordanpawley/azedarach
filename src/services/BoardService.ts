@@ -212,8 +212,9 @@ const filterTasks = (
 // Cache Types
 // ============================================================================
 
-/** TTL for git status cache in milliseconds (2 seconds) */
-const GIT_STATUS_CACHE_TTL_MS = 2000
+/** TTL for git status cache in milliseconds (10 seconds)
+ * Must be longer than the 5-second polling interval so cache survives between polls */
+const GIT_STATUS_CACHE_TTL_MS = 10000
 
 /**
  * Cached git status entry with timestamp
@@ -316,7 +317,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				const now = Date.now()
 				const cache = yield* Ref.get(gitStatusCache)
-				const cached = cache.get(worktreePath)
+				// Include baseBranch in cache key since git diff results depend on it
+				const cacheKey = `${worktreePath}:${baseBranch}`
+				const cached = cache.get(cacheKey)
 
 				// Return cached value if still valid
 				if (cached && now - cached.timestamp < GIT_STATUS_CACHE_TTL_MS) {
@@ -334,7 +337,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Update cache
 				yield* Ref.update(gitStatusCache, (c) => {
 					const newCache = new Map(c)
-					newCache.set(worktreePath, { status: result, timestamp: now })
+					newCache.set(cacheKey, { status: result, timestamp: now })
 					return newCache
 				})
 
@@ -447,9 +450,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Check if we have a valid cached parent epic map
 				const cachedParentEpics = yield* Ref.get(parentEpicCacheRef)
 				const now = Date.now()
+				const normalizedProjectPath = projectPath ?? ""
 				if (
 					cachedParentEpics &&
-					cachedParentEpics.projectPath === projectPath &&
+					cachedParentEpics.projectPath === normalizedProjectPath &&
 					now - cachedParentEpics.timestamp < PARENT_EPIC_CACHE_TTL_MS
 				) {
 					// Cache hit - use cached map
@@ -480,7 +484,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					// Cache the result
 					yield* Ref.set(parentEpicCacheRef, {
-						projectPath: projectPath ?? "",
+						projectPath: normalizedProjectPath,
 						map: parentEpicMap,
 						timestamp: now,
 					})
