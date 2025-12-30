@@ -115,17 +115,22 @@ export {
 } from "./mode.js"
 // Navigation atoms
 export {
+	blockerTitlesAtom,
+	drillDownChildDetailsAtom,
 	drillDownChildIdsAtom,
 	drillDownEpicAtom,
+	drillDownPhasesAtom,
 	enterDrillDownAtom,
 	exitDrillDownAtom,
 	focusedTaskIdAtom,
 	getEpicChildrenAtom,
 	getEpicInfoAtom,
 	initializeNavigationAtom,
+	isTaskBlockedAtom,
 	jumpToAtom,
 	jumpToTaskAtom,
 	navigateAtom,
+	taskPhaseInfoAtom,
 } from "./navigation.js"
 // Network status atoms
 export { isOnlineAtom } from "./network.js"

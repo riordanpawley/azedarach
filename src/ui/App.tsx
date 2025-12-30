@@ -17,6 +17,7 @@ import {
 	createTaskAtom,
 	currentProjectAtom,
 	drillDownFilteredTasksAtom,
+	drillDownPhasesAtom,
 	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	handleKeyAtom,
@@ -159,6 +160,9 @@ export const App = () => {
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
+	// Dependency phases for drill-down mode
+	const phases = useAtomValue(drillDownPhasesAtom)
+
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
 
@@ -276,6 +280,7 @@ export const App = () => {
 					viewMode={viewMode}
 					isActionMode={isAction}
 					mergeSelectSourceId={mergeSelectSourceId}
+					phases={phases}
 				/>
 			</box>
 		)
