@@ -672,6 +672,12 @@ done
 		action: Effect.suspend(() => bc.helpers.toggleCurrentSelection()),
 	},
 	{
+		key: "5",
+		mode: "select",
+		description: "Toggle selection (alt)",
+		action: Effect.suspend(() => bc.helpers.toggleCurrentSelection()),
+	},
+	{
 		key: "v",
 		mode: "select",
 		description: "Exit select mode",

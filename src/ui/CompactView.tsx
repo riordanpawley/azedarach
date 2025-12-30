@@ -142,11 +142,12 @@ const CompactRow = (props: CompactRowProps) => {
 	const isActionSelected = props.isSelected && props.isActionMode
 
 	// Background color based on selection state
+	// Cursor (isSelected) takes priority over multi-select for visibility
 	const getBackgroundColor = () => {
 		if (props.isMergeSource) return theme.surface1 // Merge source highlight
 		if (isActionSelected) return theme.surface1 // More prominent when action menu open
+		if (props.isSelected) return theme.surface0 // Cursor takes priority
 		if (props.isMultiSelected) return theme.surface1
-		if (props.isSelected) return theme.surface0
 		return undefined
 	}
 

@@ -112,8 +112,10 @@ export const TaskCard = (props: TaskCardProps) => {
 		if (props.isMergeSource) return theme.flamingo
 		// Action mode selected card gets mauve (matches action palette)
 		if (props.isSelected && props.isActionMode) return theme.mauve
-		if (props.isMultiSelected) return theme.mauve
+		// Cursor on task (lavender) takes priority over multi-select (mauve)
+		// This ensures cursor is always visible even on selected tasks
 		if (props.isSelected) return theme.lavender
+		if (props.isMultiSelected) return theme.mauve
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
@@ -126,9 +128,10 @@ export const TaskCard = (props: TaskCardProps) => {
 	}
 
 	// Background color based on selection state
+	// Cursor (isSelected) takes priority over multi-select for visibility
 	const getBackgroundColor = () => {
-		if (props.isMultiSelected) return theme.surface1
 		if (props.isSelected) return theme.surface0
+		if (props.isMultiSelected) return theme.surface1
 		return undefined
 	}
 
