@@ -330,6 +330,23 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 			return
 		}
 
+		// Half-page scroll with Ctrl-d/u (like vim)
+		const PAGE_SCROLL_AMOUNT = 10 // Half page
+		if (event.ctrl && event.name === "d") {
+			setState((s) => ({
+				...s,
+				selectedIndex: Math.min(s.selectedIndex + PAGE_SCROLL_AMOUNT, itemCount - 1),
+			}))
+			return
+		}
+		if (event.ctrl && event.name === "u") {
+			setState((s) => ({
+				...s,
+				selectedIndex: Math.max(s.selectedIndex - PAGE_SCROLL_AMOUNT, 0),
+			}))
+			return
+		}
+
 		// Tree-specific navigation
 		if (state.viewMode === "tree") {
 			const selectedNode = getSelectedTreeNode()
@@ -414,7 +431,7 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 			alignItems="center"
 			justifyContent="center"
 		>
-			<box flexDirection="column" width="50%" height="80%" backgroundColor={theme.base}>
+			<box flexDirection="column" width="90%" height="90%" backgroundColor={theme.base}>
 				{/* Header */}
 				<box paddingLeft={1} paddingBottom={1}>
 					<text fg={theme.mauve}>
@@ -436,7 +453,6 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 						filterText={state.filterText}
 						mode={state.viewMode}
 						focused={true}
-						height={100}
 						isSearching={isSearching}
 						treeNodes={flattenedTree}
 						jumpLabels={state.jumpLabels}
@@ -485,6 +501,8 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 							<span> ±node </span>
 							<span fg={theme.blue}>-/+</span>
 							<span> ±all </span>
+							<span fg={theme.blue}>C-d/u</span>
+							<span> page </span>
 							<span fg={theme.blue}>gw</span>
 							<span> jump </span>
 							<span fg={theme.blue}>q</span>
@@ -496,6 +514,8 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 							<span> tree </span>
 							<span fg={theme.blue}>↑/↓</span>
 							<span> nav </span>
+							<span fg={theme.blue}>C-d/u</span>
+							<span> page </span>
 							<span fg={theme.blue}>/</span>
 							<span> search </span>
 							<span fg={theme.blue}>gw</span>

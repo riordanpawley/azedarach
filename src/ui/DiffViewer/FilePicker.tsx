@@ -7,7 +7,8 @@ interface FilePickerProps {
 	filterText: string
 	mode: PickerMode
 	focused: boolean
-	height: number
+	/** Maximum number of items to show at once (virtual scrolling) */
+	maxVisible?: number
 	isSearching?: boolean
 	// Tree mode props
 	treeNodes?: FlatTreeNode[]
@@ -162,13 +163,16 @@ const TreeItem = ({
 	)
 }
 
+/** Default number of visible items in the file picker */
+const DEFAULT_MAX_VISIBLE = 20
+
 export const FilePicker = ({
 	files,
 	selectedIndex,
 	filterText,
 	mode,
 	focused,
-	height,
+	maxVisible = DEFAULT_MAX_VISIBLE,
 	isSearching = false,
 	treeNodes = [],
 	jumpLabels = null,
@@ -178,21 +182,31 @@ export const FilePicker = ({
 	const isTreeMode = mode === "tree"
 	const itemCount = isTreeMode ? treeNodes.length : files.length
 
-	// Calculate visible range for scrolling
-	const visibleHeight = height - 4 // Account for header and footer
-	const startIndex = Math.max(
-		0,
-		Math.min(selectedIndex - Math.floor(visibleHeight / 2), itemCount - visibleHeight),
-	)
+	// Calculate visible range for virtual scrolling (like Column.tsx)
+	// Only render maxVisible items, keeping selection visible
+	const visibleCount = Math.min(maxVisible, itemCount)
+	let startIndex = 0
+
+	if (itemCount > maxVisible) {
+		// Scroll to keep selection centered when possible
+		if (selectedIndex >= maxVisible - 1) {
+			startIndex = Math.min(selectedIndex - maxVisible + 2, itemCount - maxVisible)
+		}
+		startIndex = Math.max(0, startIndex)
+	}
 
 	// Get visible items based on mode (computed separately to maintain types)
-	const visibleFiles = isTreeMode ? [] : files.slice(startIndex, startIndex + visibleHeight)
-	const visibleTreeNodes = isTreeMode ? treeNodes.slice(startIndex, startIndex + visibleHeight) : []
+	const visibleFiles = isTreeMode ? [] : files.slice(startIndex, startIndex + visibleCount)
+	const visibleTreeNodes = isTreeMode ? treeNodes.slice(startIndex, startIndex + visibleCount) : []
+
+	// Calculate hidden counts for scroll indicators
+	const hiddenBefore = startIndex
+	const hiddenAfter = Math.max(0, itemCount - startIndex - visibleCount)
 
 	return (
 		<box
 			flexDirection="column"
-			height={height}
+			flexGrow={1}
 			borderStyle="rounded"
 			border={true}
 			borderColor={focused ? theme.mauve : theme.surface2}
@@ -261,13 +275,17 @@ export const FilePicker = ({
 				)}
 			</box>
 
-			{/* Scroll indicator */}
-			{itemCount > visibleHeight && (
+			{/* Scroll indicator - shows position when there are hidden items */}
+			{(hiddenBefore > 0 || hiddenAfter > 0) && (
 				<>
 					<text fg={theme.surface2}>{"─".repeat(30)}</text>
 					<box paddingLeft={1} paddingRight={1}>
 						<text fg={theme.subtext0}>
-							{selectedIndex + 1}/{itemCount}
+							{hiddenBefore > 0 && <span>↑{hiddenBefore} </span>}
+							<span>
+								{selectedIndex + 1}/{itemCount}
+							</span>
+							{hiddenAfter > 0 && <span> ↓{hiddenAfter}</span>}
 						</text>
 					</box>
 				</>
