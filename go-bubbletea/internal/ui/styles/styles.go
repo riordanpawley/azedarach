@@ -1,6 +1,9 @@
 package styles
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/domain"
+)
 
 // Styles holds all the UI styles
 type Styles struct {
@@ -35,6 +38,23 @@ type Styles struct {
 	MenuItemDisabled lipgloss.Style
 	MenuKey          lipgloss.Style
 	Separator        lipgloss.Style
+
+	// Toasts
+	ToastInfo    lipgloss.Style
+	ToastSuccess lipgloss.Style
+	ToastWarning lipgloss.Style
+	ToastError   lipgloss.Style
+
+	// Session states
+	SessionBusy    lipgloss.Style
+	SessionWaiting lipgloss.Style
+	SessionDone    lipgloss.Style
+	SessionError   lipgloss.Style
+	SessionPaused  lipgloss.Style
+	SessionIdle    lipgloss.Style
+
+	// Epic progress
+	EpicProgress lipgloss.Style
 }
 
 // New creates a new Styles instance with Catppuccin Macchiato theme
@@ -143,5 +163,70 @@ func New() *Styles {
 
 		Separator: lipgloss.NewStyle().
 			Foreground(Surface1),
+
+		ToastInfo: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(Blue).
+			Foreground(Blue).
+			Padding(0, 1),
+
+		ToastSuccess: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(Green).
+			Foreground(Green).
+			Padding(0, 1),
+
+		ToastWarning: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(Yellow).
+			Foreground(Yellow).
+			Padding(0, 1),
+
+		ToastError: lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(Red).
+			Foreground(Red).
+			Padding(0, 1),
+
+		SessionBusy: lipgloss.NewStyle().
+			Foreground(Blue),
+
+		SessionWaiting: lipgloss.NewStyle().
+			Foreground(Yellow),
+
+		SessionDone: lipgloss.NewStyle().
+			Foreground(Green),
+
+		SessionError: lipgloss.NewStyle().
+			Foreground(Red),
+
+		SessionPaused: lipgloss.NewStyle().
+			Foreground(Overlay0),
+
+		SessionIdle: lipgloss.NewStyle().
+			Foreground(Subtext0),
+
+		EpicProgress: lipgloss.NewStyle().
+			Foreground(Subtext0),
+	}
+}
+
+// SessionState returns the appropriate style for a session state
+func (s *Styles) SessionState(state domain.SessionState) lipgloss.Style {
+	switch state {
+	case domain.SessionBusy:
+		return s.SessionBusy
+	case domain.SessionWaiting:
+		return s.SessionWaiting
+	case domain.SessionDone:
+		return s.SessionDone
+	case domain.SessionError:
+		return s.SessionError
+	case domain.SessionPaused:
+		return s.SessionPaused
+	case domain.SessionIdle:
+		return s.SessionIdle
+	default:
+		return s.SessionIdle
 	}
 }

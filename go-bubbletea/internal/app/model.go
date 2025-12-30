@@ -4,6 +4,7 @@ package app
 import (
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
@@ -76,6 +77,7 @@ type Model struct {
 
 	// Loading state
 	loading bool
+	spinner spinner.Model
 
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
@@ -115,6 +117,11 @@ type Overlay interface {
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
+	// Initialize spinner
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
+
 	return Model{
 		tasks:          []domain.Task{},
 		sessions:       make(map[string]*domain.Session),
@@ -130,14 +137,16 @@ func New(cfg *config.Config) Model {
 		styles:         styles.New(),
 		config:         cfg,
 		loading:        false, // Start with placeholder data immediately
-		usePlaceholder: true,  // Use placeholder data for Phase 1
+		spinner:        s,
+		usePlaceholder: true, // Use placeholder data for Phase 1
 	}
 }
 
 // Init returns the initial command for the application
 func (m Model) Init() tea.Cmd {
 	// For Phase 1, no async commands needed - we use placeholder data
-	return nil
+	// Return spinner tick for future loading states
+	return m.spinner.Tick
 }
 
 // Update handles incoming messages and updates the model
@@ -147,6 +156,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		// If overlay is open, route to overlay
@@ -184,6 +198,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
+	}
+
+	// Show loading spinner if loading
+	if m.loading {
+		return m.renderLoading()
 	}
 
 	// Build columns for the board
@@ -526,4 +545,40 @@ func (m Model) halfPage() int {
 		return 1
 	}
 	return half
+}
+
+// renderLoading renders a centered loading spinner with message
+func (m Model) renderLoading() string {
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		m.spinner.View(),
+		"Loading beads...",
+	)
+
+	return lipgloss.Place(
+		m.width,
+		m.height,
+		lipgloss.Center,
+		lipgloss.Center,
+		content,
+	)
+}
+
+// addToast adds a toast notification to the list
+func (m *Model) addToast(toast Toast) {
+	m.toasts = append(m.toasts, toast)
+}
+
+// expireToasts removes expired toasts from the list
+func (m *Model) expireToasts() {
+	now := time.Now()
+	filtered := make([]Toast, 0, len(m.toasts))
+
+	for _, toast := range m.toasts {
+		if toast.Expires.After(now) {
+			filtered = append(filtered, toast)
+		}
+	}
+
+	m.toasts = filtered
 }
