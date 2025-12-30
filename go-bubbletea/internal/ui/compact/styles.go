@@ -37,6 +37,13 @@ type Styles struct {
 	PriorityP3 lipgloss.Style
 	PriorityP4 lipgloss.Style
 
+	// Task type colors
+	TypeEpic    lipgloss.Style
+	TypeFeature lipgloss.Style
+	TypeBug     lipgloss.Style
+	TypeTask    lipgloss.Style
+	TypeChore   lipgloss.Style
+
 	// Indicators
 	Cursor   lipgloss.Style
 	Selected lipgloss.Style
@@ -123,6 +130,23 @@ func NewStyles() *Styles {
 
 		PriorityP4: lipgloss.NewStyle().
 			Foreground(styles.Overlay0),
+
+		// Task type colors
+		TypeEpic: lipgloss.NewStyle().
+			Foreground(styles.Mauve).
+			Bold(true),
+
+		TypeFeature: lipgloss.NewStyle().
+			Foreground(styles.Green),
+
+		TypeBug: lipgloss.NewStyle().
+			Foreground(styles.Red),
+
+		TypeTask: lipgloss.NewStyle().
+			Foreground(styles.Blue),
+
+		TypeChore: lipgloss.NewStyle().
+			Foreground(styles.Yellow),
 
 		// Indicators
 		Cursor: lipgloss.NewStyle().

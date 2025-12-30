@@ -40,6 +40,12 @@ type AttachmentActionMsg struct {
 	Attachment *attachment.Attachment
 }
 
+// OpenImagePreviewMsg is sent to open the image preview overlay
+type OpenImagePreviewMsg struct {
+	BeadID       string
+	InitialIndex int
+}
+
 // NewImageAttachOverlay creates a new image attachment overlay
 func NewImageAttachOverlay(beadID string, service *attachment.Service) *ImageAttachOverlay {
 	ti := textinput.New()
@@ -92,7 +98,7 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "p", "v":
+		case "v":
 			// Paste from clipboard
 			return i, i.pasteFromClipboard()
 
@@ -117,10 +123,15 @@ func (i *ImageAttachOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return i, nil
 
-		case "enter":
-			// Preview attachment
+		case "enter", "p":
+			// Open full image preview overlay
 			if i.mode == imageAttachModeList && len(i.files) > 0 {
-				i.mode = imageAttachModePreview
+				return i, func() tea.Msg {
+					return OpenImagePreviewMsg{
+						BeadID:       i.beadID,
+						InitialIndex: i.cursor,
+					}
+				}
 			}
 			return i, nil
 
