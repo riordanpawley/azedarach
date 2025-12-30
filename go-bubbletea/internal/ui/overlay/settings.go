@@ -438,3 +438,87 @@ func openConfigInEditor() tea.Cmd {
 		}
 	}
 }
+
+// NewSettingsOverlayWithEditor creates a settings overlay with editor service integration
+func NewSettingsOverlayWithEditor(editor interface {
+	GetShowPhases() bool
+	ToggleShowPhases()
+}) *SettingsOverlay {
+	items := []SettingItem{
+		{
+			Key:   "phases",
+			Label: "Show dependency phases",
+			Type:  SettingToggle,
+			Value: editor.GetShowPhases(),
+			OnChange: func(value any) {
+				editor.ToggleShowPhases()
+			},
+		},
+		{
+			Key:   "refresh",
+			Label: "Auto-refresh beads",
+			Type:  SettingToggle,
+			Value: true,
+			OnChange: func(value any) {
+				// TODO: Wire this to config
+			},
+		},
+		{
+			Key:   "compact",
+			Label: "Compact card view",
+			Type:  SettingToggle,
+			Value: false,
+			OnChange: func(value any) {
+				// TODO: Wire this to config
+			},
+		},
+		{
+			Key:   "theme",
+			Label: "Theme",
+			Type:  SettingChoice,
+			Value: "macchiato",
+			Choices: []string{
+				"latte",
+				"frappe",
+				"macchiato",
+				"mocha",
+			},
+			OnChange: func(value any) {
+				// TODO: Wire this to config
+			},
+		},
+		{
+			Key:      "",
+			Label:    "───────────────────",
+			Type:     SettingSeparator,
+			Value:    nil,
+			OnChange: nil,
+		},
+		{
+			Key:   "editor",
+			Label: "Open config in $EDITOR",
+			Type:  SettingAction,
+			Value: nil,
+			OnAction: func() tea.Cmd {
+				return openConfigInEditor()
+			},
+		},
+		{
+			Key:   "projects",
+			Label: "Manage projects",
+			Type:  SettingAction,
+			Value: nil,
+			OnAction: func() tea.Cmd {
+				// This will be handled by the app to open project selector
+				return func() tea.Msg {
+					return SelectionMsg{
+						Key:   "projects",
+						Value: nil,
+					}
+				}
+			},
+		},
+	}
+
+	return NewSettingsOverlay(items)
+}

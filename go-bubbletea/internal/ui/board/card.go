@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
 // renderCard renders a task card
-func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
+func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, phaseInfo *phases.TaskPhaseInfo, showPhases bool, s *styles.Styles) string {
 	// Choose card style based on state
 	cardStyle := s.Card
 	if isSelected {
@@ -30,6 +31,22 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *
 	// Type badge (first letter: T, B, F, E, C)
 	typeBadge := s.TypeBadge.Render(task.Type.Short())
 
+	// Phase badge (if enabled and phase info available)
+	var phaseBadge string
+	if showPhases && phaseInfo != nil {
+		phaseStyle := s.Card.Copy().
+			Foreground(styles.Blue).
+			Bold(true)
+		if phaseInfo.Phase == 0 {
+			// Phase 0 is ready (green)
+			phaseStyle = phaseStyle.Foreground(styles.Green)
+		} else if phaseInfo.Phase > 0 {
+			// Phase > 0 is blocked (yellow/orange)
+			phaseStyle = phaseStyle.Foreground(styles.Yellow)
+		}
+		phaseBadge = phaseStyle.Render(fmt.Sprintf("Φ%d", phaseInfo.Phase))
+	}
+
 	// Title - truncate if needed
 	// Account for padding (2), border (2), and some space for badges
 	maxTitleLen := width - 4
@@ -46,7 +63,12 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *
 
 	// Build the card content
 	titleLine := cursor + title
+
+	// Badge line: priority • type [• phase]
 	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
+	if phaseBadge != "" {
+		badgeLine = lipgloss.JoinHorizontal(lipgloss.Left, badgeLine, " • ", phaseBadge)
+	}
 
 	// Session status row (if session exists)
 	var sessionRow string
@@ -124,5 +146,5 @@ func renderEpicProgress(task domain.Task, width int, s *styles.Styles) string {
 
 // RenderCard is the exported version for testing
 func RenderCard(task domain.Task, isCursor bool, isSelected bool, width int, s *styles.Styles) string {
-	return renderCard(task, isCursor, isSelected, width, s)
+	return renderCard(task, isCursor, isSelected, width, nil, false, s)
 }

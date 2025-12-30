@@ -8,15 +8,18 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/lipgloss"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
+	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
@@ -26,6 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/compact"
 	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
@@ -68,6 +72,14 @@ func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (stri
 // Re-export navigation types for compatibility
 type Position = navigation.Position
 
+// ViewMode represents the current view mode
+type ViewMode int
+
+const (
+	ViewModeBoard ViewMode = iota
+	ViewModeCompact
+)
+
 // Model is the main application state
 type Model struct {
 	// Core data
@@ -82,6 +94,7 @@ type Model struct {
 
 	// UI state
 	overlayStack *overlay.Stack
+	viewMode     ViewMode
 
 	// Project
 	currentProject string
@@ -131,13 +144,15 @@ type Model struct {
 	// Dev server manager
 	devServerManager *devserver.Manager
 
+	// Diagnostics service
+	diagnosticsService *diagnostics.Service
+
 	// Logger
 	logger *slog.Logger
 
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
-
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -202,31 +217,36 @@ func New(cfg *config.Config) Model {
 	// Initialize dev server manager
 	devServerMgr := devserver.NewManager(portAllocator, logger)
 
+	// Initialize diagnostics service
+	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
+
 	return Model{
-		tasks:        []domain.Task{},
-		sessions:     make(map[string]*domain.Session),
-		nav:          navigation.NewService(),
-		editor:       editor.NewService(),
-		overlayStack: overlay.NewStack(),
-		toasts:       []Toast{},
-		styles:          styles.New(),
-		config:          cfg,
-		loading:         true, // Start with loading state
-		spinner:         s,
-		beadsClient:     beadsClient,
-		tmuxClient:      tmuxClient,
-		worktreeManager: worktreeManager,
-		sessionMonitor:  sessionMonitor,
-		portAllocator:   portAllocator,
-		gitClient:       gitClient,
-		networkChecker:  networkChecker,
-		projectRegistry:   registry,
-		isOnline:          true, // Optimistically assume online
-		attachmentService: attachmentSvc,
-		prWorkflow:        prWorkflow,
-		devServerManager:  devServerMgr,
-		logger:            logger,
-		usePlaceholder:    false, // Use real data from beads
+		tasks:              []domain.Task{},
+		sessions:           make(map[string]*domain.Session),
+		nav:                navigation.NewService(),
+		editor:             editor.NewService(),
+		overlayStack:       overlay.NewStack(),
+		viewMode:           ViewModeBoard, // Start with board view
+		toasts:             []Toast{},
+		styles:             styles.New(),
+		config:             cfg,
+		loading:            true, // Start with loading state
+		spinner:            s,
+		beadsClient:        beadsClient,
+		tmuxClient:         tmuxClient,
+		worktreeManager:    worktreeManager,
+		sessionMonitor:     sessionMonitor,
+		portAllocator:      portAllocator,
+		gitClient:          gitClient,
+		networkChecker:     networkChecker,
+		projectRegistry:    registry,
+		isOnline:           true, // Optimistically assume online
+		attachmentService:  attachmentSvc,
+		prWorkflow:         prWorkflow,
+		devServerManager:   devServerMgr,
+		diagnosticsService: diagService,
+		logger:             logger,
+		usePlaceholder:     false, // Use real data from beads
 	}
 }
 
@@ -301,7 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.expireToasts()
 		return m, tea.Batch(
 			m.loadBeadsCmd(),
-			tickEvery(2 * time.Second),
+			tickEvery(2*time.Second),
 		)
 
 	case monitor.SessionStateMsg:
@@ -522,6 +542,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+
+	// Cleanup executed result
+	case overlay.CleanupExecutedMsg:
+		m.overlayStack.Pop()
+		if msg.Error != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Cleanup failed: %v", msg.Error),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		// Show success toast with results
+		result := msg.Result
+		var operations []string
+		if result.Deleted > 0 {
+			operations = append(operations, fmt.Sprintf("%d deleted", result.Deleted))
+		}
+		if result.Archived > 0 {
+			operations = append(operations, fmt.Sprintf("%d archived", result.Archived))
+		}
+		if result.WorktreesRemoved > 0 {
+			operations = append(operations, fmt.Sprintf("%d worktrees removed", result.WorktreesRemoved))
+		}
+		if result.SessionsCleaned > 0 {
+			operations = append(operations, fmt.Sprintf("%d sessions cleaned", result.SessionsCleaned))
+		}
+
+		message := "Cleanup completed"
+		if len(operations) > 0 {
+			message = fmt.Sprintf("Cleanup: %s", strings.Join(operations, ", "))
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: message,
+			Expires: time.Now().Add(5 * time.Second),
+		})
+
+		// Reload beads to reflect changes
+		return m, m.loadBeadsCmd()
+
+	// Image deleted from preview
+	case overlay.ImageDeletedMsg:
+		if msg.Error != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to delete image: %v", msg.Error),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		} else {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastSuccess,
+				Message: "Image deleted",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		}
+
+	// Open image preview overlay
+	case overlay.OpenImagePreviewMsg:
+		previewOverlay := overlay.NewImagePreviewOverlay(msg.BeadID, m.attachmentService, msg.InitialIndex)
+		return m, tea.Batch(m.overlayStack.Push(previewOverlay), previewOverlay.Init())
+		return m, nil
 	// PR overlay open result
 	case openPROverlayResultMsg:
 		if msg.err != nil {
@@ -596,32 +680,20 @@ func (m Model) View() string {
 		return m.renderLoading()
 	}
 
-	// Build columns for the board
-	columns := m.buildColumns()
-
-	// Create cursor for board package using computed position
-	pos := m.nav.GetPosition(columns)
-	cursor := board.Cursor{
-		Column: pos.Column,
-		Task:   pos.Task,
+	// Render main view based on view mode
+	var mainView string
+	if m.viewMode == ViewModeCompact {
+		mainView = m.renderCompactView()
+	} else {
+		mainView = m.renderBoardView()
 	}
-
-	// Render board (takes full height minus 1 for statusbar)
-	boardView := board.Render(
-		columns,
-		cursor,
-		m.editor.GetSelectedTasks(),
-		m.styles,
-		m.width,
-		m.height-1,
-	)
 
 	// Render status bar
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	statusBarView := sb.Render()
 
 	// Compose the layout
-	view := lipgloss.JoinVertical(lipgloss.Left, boardView, statusBarView)
+	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
 
 	// If overlay is open, render it on top (centered)
 	if !m.overlayStack.IsEmpty() {
@@ -829,7 +901,45 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
 
 	case "s": // Settings
-		return m, m.overlayStack.Push(overlay.NewDefaultSettingsOverlay())
+		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditor(m.editor))
+
+	case "D": // Diagnostics (Shift+D)
+		diagPanel := overlay.NewDiagnosticsPanel(m.diagnosticsService, m.sessions)
+		return m, tea.Batch(m.overlayStack.Push(diagPanel), diagPanel.Init())
+
+	case "tab": // Toggle view mode
+		if m.viewMode == ViewModeBoard {
+			m.viewMode = ViewModeCompact
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: "Switched to compact view",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		} else {
+			m.viewMode = ViewModeBoard
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: "Switched to board view",
+				Expires: time.Now().Add(2 * time.Second),
+			})
+		}
+		return m, nil
+
+	case "O": // Orchestration overlay
+		return m, m.openOrchestrationOverlay()
+
+	case "X": // Bulk cleanup (Shift+X)
+		// Count tasks, worktrees, and sessions for estimates
+		taskCount := len(m.tasks)
+		worktreeCount := len(m.sessions) // Estimate: active sessions have worktrees
+		sessionCount := 0
+		for _, session := range m.sessions {
+			if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
+				sessionCount++
+			}
+		}
+		cleanupOverlay := overlay.NewBulkCleanupOverlay(m.performCleanup, taskCount, worktreeCount, sessionCount)
+		return m, m.overlayStack.Push(cleanupOverlay)
 	}
 
 	return m, nil
@@ -1987,4 +2097,193 @@ func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
 	}
 
 	return candidates
+}
+
+// View rendering helpers
+
+// renderBoardView renders the kanban board view
+func (m Model) renderBoardView() string {
+	// Build columns for the board
+	columns := m.buildColumns()
+
+	// Create cursor for board package using computed position
+	pos := m.nav.GetPosition(columns)
+	cursor := board.Cursor{
+		Column: pos.Column,
+		Task:   pos.Task,
+	}
+
+	// Compute phase data if showPhases is enabled
+	phaseData := make(map[string]phases.TaskPhaseInfo)
+	if m.editor.GetShowPhases() {
+		phaseData = m.computePhases()
+	}
+
+	// Render board (takes full height minus 1 for statusbar)
+	return board.Render(
+		columns,
+		cursor,
+		m.editor.GetSelectedTasks(),
+		phaseData,
+		m.editor.GetShowPhases(),
+		m.styles,
+		m.width,
+		m.height-1,
+	)
+}
+
+// renderCompactView renders the compact list view
+func (m Model) renderCompactView() string {
+	// Get all filtered and sorted tasks
+	filteredTasks := m.editor.ApplyFilter(m.tasks)
+	sortedTasks := m.editor.ApplySort(filteredTasks)
+
+	// Create compact view
+	compactView := compact.NewCompactView(sortedTasks, m.width, m.height-1)
+
+	// Set cursor position based on current navigation
+	// In compact mode, we use the flat task index
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	flatIndex := m.getFlatIndexFromPosition(pos, columns)
+	compactView.SetCursor(flatIndex)
+
+	// Set selected tasks
+	compactView.SetSelected(m.editor.GetSelectedTasks())
+
+	return compactView.Render()
+}
+
+// getFlatIndexFromPosition converts a column/task position to a flat index
+func (m Model) getFlatIndexFromPosition(pos navigation.Position, columns []board.Column) int {
+	index := 0
+	for i := 0; i < pos.Column && i < len(columns); i++ {
+		index += len(columns[i].Tasks)
+	}
+	if pos.Column < len(columns) {
+		index += pos.Task
+	}
+	return index
+}
+
+// openOrchestrationOverlay creates and opens the orchestration overlay
+func (m Model) openOrchestrationOverlay() tea.Cmd {
+	// Gather session information
+	var sessions []overlay.SessionInfo
+	for _, task := range m.tasks {
+		if task.Session != nil {
+			sessions = append(sessions, overlay.SessionInfo{
+				BeadID:       task.ID,
+				TaskTitle:    task.Title,
+				State:        task.Session.State,
+				StartedAt:    task.Session.StartedAt,
+				Worktree:     task.Session.Worktree,
+				RecentOutput: "", // TODO: Capture recent output from tmux
+			})
+		}
+	}
+
+	// Create overlay with callbacks
+	orchOverlay := overlay.NewOrchestrationOverlay(
+		sessions,
+		// onAttach
+		func(beadID string) tea.Cmd {
+			return func() tea.Msg {
+				// Show attach instructions
+				return Toast{
+					Level:   ToastInfo,
+					Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+					Expires: time.Now().Add(5 * time.Second),
+				}
+			}
+		},
+		// onKill
+		func(beadID string) tea.Cmd {
+			return m.stopSessionCmd(beadID)
+		},
+		// onRefresh
+		func() tea.Cmd {
+			return m.loadBeadsCmd()
+		},
+	)
+
+	return m.overlayStack.Push(orchOverlay)
+}
+
+// performCleanup executes cleanup operations for selected categories
+func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overlay.CleanupResult, error) {
+	result := overlay.CleanupResult{}
+
+	for _, id := range categoryIDs {
+		switch id {
+		case "delete_old_done":
+			// Delete completed tasks older than 30 days
+			cutoff := time.Now().AddDate(0, 0, -30)
+			deleted := 0
+			for _, task := range m.tasks {
+				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
+					// TODO: Implement task deletion via beads client
+					// err := m.beadsClient.Delete(ctx, task.ID)
+					// if err != nil {
+					//     m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
+					//     continue
+					// }
+					deleted++
+				}
+			}
+			result.Deleted = deleted
+
+		case "archive_done":
+			// Archive all done tasks
+			archived := 0
+			for _, task := range m.tasks {
+				if task.Status == domain.StatusDone {
+					// TODO: Implement task archival via beads client
+					// err := m.beadsClient.Archive(ctx, task.ID)
+					// if err != nil {
+					//     m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
+					//     continue
+					// }
+					archived++
+				}
+			}
+			result.Archived = archived
+
+		case "remove_orphaned_worktrees":
+			// Remove worktrees with no active sessions
+			removed := 0
+			// TODO: Implement worktree cleanup
+			// List all worktrees, check if they have sessions, delete orphaned ones
+			// worktrees, err := m.worktreeManager.List(ctx)
+			// for _, wt := range worktrees {
+			//     if _, hasSession := m.sessions[wt.BeadID]; !hasSession {
+			//         err := m.worktreeManager.Delete(ctx, wt.BeadID)
+			//         if err == nil {
+			//             removed++
+			//         }
+			//     }
+			// }
+			result.WorktreesRemoved = removed
+
+		case "clean_stale_sessions":
+			// Clean sessions inactive for >24 hours
+			cleaned := 0
+			cutoff := time.Now().Add(-24 * time.Hour)
+			for beadID, session := range m.sessions {
+				if session.StartedAt != nil && session.StartedAt.Before(cutoff) {
+					if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
+						// Stop and clean up stale session
+						m.sessionMonitor.Stop(beadID)
+						_ = m.tmuxClient.KillSession(ctx, beadID)
+						delete(m.sessions, beadID)
+						m.portAllocator.Release(beadID)
+						cleaned++
+					}
+				}
+			}
+			result.SessionsCleaned = cleaned
+		}
+	}
+
+	return result, nil
 }

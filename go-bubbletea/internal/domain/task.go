@@ -2,18 +2,35 @@ package domain
 
 import "time"
 
+// DependencyType represents the type of dependency relationship
+type DependencyType string
+
+const (
+	DependencyBlocks     DependencyType = "blocks"
+	DependencyBlockedBy  DependencyType = "blocked_by"
+	DependencyRelatedTo  DependencyType = "related_to"
+	DependencyParentChild DependencyType = "parent_child"
+)
+
+// Dependency represents a task dependency relationship
+type Dependency struct {
+	ID   string         `json:"id"`
+	Type DependencyType `json:"dependency_type"`
+}
+
 // Task represents a bead/issue
 type Task struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Status      Status    `json:"status"`
-	Priority    Priority  `json:"priority"`
-	Type        TaskType  `json:"type"`
-	ParentID    *string   `json:"parent_id,omitempty"`
-	Session     *Session  `json:"session,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string       `json:"id"`
+	Title        string       `json:"title"`
+	Description  string       `json:"description,omitempty"`
+	Status       Status       `json:"status"`
+	Priority     Priority     `json:"priority"`
+	Type         TaskType     `json:"type"`
+	ParentID     *string      `json:"parent_id,omitempty"`
+	Dependencies []Dependency `json:"dependencies,omitempty"`
+	Session      *Session     `json:"session,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 // Status represents task status

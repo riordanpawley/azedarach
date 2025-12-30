@@ -2,6 +2,7 @@ package board
 
 import (
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -10,6 +11,8 @@ func Render(
 	columns []Column,
 	cursor Cursor,
 	selectedTasks map[string]bool,
+	phaseData map[string]phases.TaskPhaseInfo,
+	showPhases bool,
 	s *styles.Styles,
 	width int,
 	height int,
@@ -40,6 +43,8 @@ func Render(
 			cursorTask,
 			isActive,
 			selectedTasks,
+			phaseData,
+			showPhases,
 			columnWidth,
 			height-1,
 			s,
