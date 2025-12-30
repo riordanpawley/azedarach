@@ -13,6 +13,7 @@
  */
 
 import { Effect, Stream, SubscriptionRef } from "effect"
+import type { Issue } from "../core/BeadsClient.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService } from "./EditorService.js"
@@ -62,6 +63,10 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 		// Children IDs for drill-down filtering (populated when entering drill-down)
 		const drillDownChildIds = yield* SubscriptionRef.make<ReadonlySet<string>>(new Set())
+
+		// Full Issue objects for children (needed for dependency phase computation)
+		// Map from child ID to full Issue with dependencies array
+		const drillDownChildDetails = yield* SubscriptionRef.make<ReadonlyMap<string, Issue>>(new Map())
 
 		// Remember cursor position before entering drill-down (for restoration)
 		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
@@ -189,6 +194,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			followTaskId,
 			drillDownEpic,
 			drillDownChildIds,
+			drillDownChildDetails,
 
 			/**
 			 * Get current position of focused task
@@ -493,8 +499,13 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			 *
 			 * @param epicId - The epic ID to drill into
 			 * @param childIds - Set of child task IDs for filtering
+			 * @param childDetails - Optional map of child ID to full Issue (for phase computation)
 			 */
-			enterDrillDown: (epicId: string, childIds: ReadonlySet<string>): Effect.Effect<void> =>
+			enterDrillDown: (
+				epicId: string,
+				childIds: ReadonlySet<string>,
+				childDetails?: ReadonlyMap<string, Issue>,
+			): Effect.Effect<void> =>
 				Effect.gen(function* () {
 					// Save current cursor position for restoration
 					const currentId = yield* SubscriptionRef.get(focusedTaskId)
@@ -502,6 +513,9 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 					// Store children IDs for filtering
 					yield* SubscriptionRef.set(drillDownChildIds, childIds)
+
+					// Store child details for phase computation (if provided)
+					yield* SubscriptionRef.set(drillDownChildDetails, childDetails ?? new Map())
 
 					// Enter drill-down mode
 					yield* SubscriptionRef.set(drillDownEpic, epicId)
@@ -524,8 +538,9 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					}
 					yield* SubscriptionRef.set(savedFocusedTaskId, null)
 
-					// Clear children IDs
+					// Clear children IDs and details
 					yield* SubscriptionRef.set(drillDownChildIds, new Set())
+					yield* SubscriptionRef.set(drillDownChildDetails, new Map())
 
 					// Exit drill-down mode
 					yield* SubscriptionRef.set(drillDownEpic, null)

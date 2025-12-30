@@ -7,6 +7,7 @@
  */
 import type { Record as R } from "effect"
 import { useMemo } from "react"
+import type { PhaseComputationResult } from "../core/dependencyPhases.js"
 import { Column } from "./Column.js"
 import { CompactView } from "./CompactView.js"
 import type { JumpTarget, TaskWithSession, ViewMode } from "./types.js"
@@ -26,6 +27,8 @@ export interface BoardProps {
 	isActionMode?: boolean
 	/** Source bead ID when in merge select mode (highlighted differently) */
 	mergeSelectSourceId?: string
+	/** Phase computation result for dependency visualization (drill-down mode only) */
+	phases?: PhaseComputationResult
 }
 
 /**
@@ -108,6 +111,7 @@ export const Board = (props: BoardProps) => {
 						maxVisible={props.terminalHeight}
 						isActionMode={props.isActionMode}
 						mergeSelectSourceId={props.mergeSelectSourceId}
+						phases={props.phases}
 					/>
 				)
 			})}

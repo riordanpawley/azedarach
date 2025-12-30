@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect"
-import type { BeadsClient } from "../../core/BeadsClient.js"
+import type { BeadsClient, Issue } from "../../core/BeadsClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
@@ -262,13 +262,34 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			// Get selected task to check if it's an epic
 			const task = yield* bc.helpers.getSelectedTask()
 			if (task && task.issue_type === "epic") {
-				// Fetch epic children
+				// Fetch epic children (DependencyRef array)
 				const children = yield* bc.beadsClient
 					.getEpicChildren(task.id)
 					.pipe(Effect.catchAll(() => Effect.succeed([])))
 				const childIds = new Set(children.map((c: { id: string }) => c.id))
-				// Enter drill-down mode for the epic with children
-				yield* bc.nav.enterDrillDown(task.id, childIds)
+
+				// Fetch full Issue objects for each child (needed for phase computation)
+				// Parallel fetch with error tolerance
+				const childDetailResults = yield* Effect.all(
+					children.map((child: { id: string }) =>
+						bc.beadsClient
+							.show(child.id)
+							.pipe(Effect.map((issue) => [child.id, issue] as const))
+							.pipe(Effect.catchAll(() => Effect.succeed(null))),
+					),
+					{ concurrency: "unbounded" },
+				)
+
+				// Build map from successful fetches
+				const childDetails = new Map<string, Issue>()
+				for (const result of childDetailResults) {
+					if (result !== null) {
+						childDetails.set(result[0], result[1])
+					}
+				}
+
+				// Enter drill-down mode for the epic with children and details
+				yield* bc.nav.enterDrillDown(task.id, childIds, childDetails)
 			} else {
 				// Normal detail view for non-epics
 				yield* bc.helpers.openCurrentDetail()
