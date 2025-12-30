@@ -179,7 +179,8 @@ const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): Task
 				return false
 			}
 		}
-		if (config.hideEpicSubtasks && isEpicChild(task)) {
+		// Epic children are ALWAYS hidden on main board - only visible in drill-down
+		if (isEpicChild(task)) {
 			return false
 		}
 		// Age filter: show tasks not updated in N days

@@ -751,13 +751,6 @@ done
 		description: "Clear all filters",
 		action: bc.editor.clearFilters().pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
-	// Toggle epic subtasks
-	{
-		key: "e",
-		mode: "filter",
-		description: "Toggle hide epic subtasks",
-		action: bc.editor.toggleHideEpicSubtasks(),
-	},
 	// Priority toggles (0-4)
 	{
 		key: "0",
