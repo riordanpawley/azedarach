@@ -61,7 +61,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
-			if m.mode == modeActions {
+			if m.mode == projectModeActions {
 				// Return to list mode
 				m.mode = projectModeList
 				return m, nil
@@ -101,7 +101,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "a":
 			if m.mode == projectModeList {
 				// Add new project (open actions mode)
-				m.mode = modeActions
+				m.mode = projectModeActions
 				m.cursor = 0
 				return m, nil
 			}
@@ -119,7 +119,7 @@ func (m *ProjectSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the project selector
 func (m *ProjectSelector) View() string {
-	if m.mode == modeActions {
+	if m.mode == projectModeActions {
 		return m.viewActions()
 	}
 	return m.viewList()
@@ -192,7 +192,7 @@ func (m *ProjectSelector) viewActions() string {
 
 // Title returns the overlay title
 func (m *ProjectSelector) Title() string {
-	if m.mode == modeActions {
+	if m.mode == projectModeActions {
 		return "Add Project"
 	}
 	return "Projects"
@@ -200,7 +200,7 @@ func (m *ProjectSelector) Title() string {
 
 // Size returns the overlay dimensions
 func (m *ProjectSelector) Size() (width, height int) {
-	if m.mode == modeActions {
+	if m.mode == projectModeActions {
 		return 50, 10
 	}
 
@@ -229,7 +229,7 @@ func (m *ProjectSelector) moveCursorUp() {
 
 // getMaxCursor returns the maximum cursor position
 func (m *ProjectSelector) getMaxCursor() int {
-	if m.mode == modeActions {
+	if m.mode == projectModeActions {
 		return 2 // 3 actions (0, 1, 2)
 	}
 	if len(m.registry.Projects) == 0 {
@@ -368,11 +368,11 @@ func (m *ProjectSelector) executeAction() tea.Cmd {
 		}
 	case 1:
 		// Detect from current directory
-		m.mode = modeList
+		m.mode = projectModeList
 		return m.detectAndAdd()
 	case 2:
 		// Cancel
-		m.mode = modeList
+		m.mode = projectModeList
 		return nil
 	}
 	return nil
