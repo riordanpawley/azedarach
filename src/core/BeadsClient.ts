@@ -140,6 +140,22 @@ export interface BeadsClientService {
 	>
 
 	/**
+	 * Show details for multiple issues in a single call
+	 *
+	 * More efficient than calling show() multiple times when you need
+	 * details for several issues at once. Returns all found issues.
+	 *
+	 * @example
+	 * ```ts
+	 * BeadsClient.showMultiple(["az-05y", "az-06z", "az-07a"])
+	 * ```
+	 */
+	readonly showMultiple: (
+		ids: readonly string[],
+		cwd?: string,
+	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+
+	/**
 	 * Update issue fields
 	 *
 	 * @example
@@ -528,6 +544,19 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 
 					return issue
+				}),
+
+			showMultiple: (ids: readonly string[], cwd?: string) =>
+				Effect.gen(function* () {
+					if (ids.length === 0) return []
+
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					// bd show accepts multiple IDs: bd show id1 id2 id3 --json
+					const output = yield* runBd(["show", ...ids], effectiveCwd)
+
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					// Filter out tombstone (deleted) issues
+					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
 				}),
 
 			update: (
