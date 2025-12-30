@@ -1123,7 +1123,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude -p "${resolvePrompt}"`,
+							command: `claude "${resolvePrompt}"`,
 						})
 
 						const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
@@ -1645,7 +1645,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude -p "${resolvePrompt}"`,
+							command: `claude "${resolvePrompt}"`,
 						})
 
 						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
@@ -1902,7 +1902,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude -p "${resolvePrompt}"`,
+							command: `claude "${resolvePrompt}"`,
 						})
 
 						const message = `Merge conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry attach after resolution.`
@@ -2093,7 +2093,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: targetWorktree.path,
-							command: `claude -p "${resolvePrompt}"`,
+							command: `claude "${resolvePrompt}"`,
 						})
 
 						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetBeadId} to resolve. Retry merge after resolution.`
