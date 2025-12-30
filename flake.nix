@@ -32,12 +32,14 @@
         '';
 
         # Python environment for ELF dashboard
-        elfPython = pkgs.python312.withPackages (ps: with ps; [
-          fastapi
-          uvicorn
-          aiofiles
-          websockets
-        ]);
+        elfPython = pkgs.python312.withPackages (
+          ps: with ps; [
+            fastapi
+            uvicorn
+            aiofiles
+            websockets
+          ]
+        );
 
       in
       {
@@ -52,6 +54,7 @@
               corepackEnable
               vtsls
               biome
+              go
 
               # ELF dependencies
               elfPython
