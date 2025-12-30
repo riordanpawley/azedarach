@@ -233,7 +233,7 @@ func (p *PRCreateOverlay) renderDraftToggle() string {
 	return fmt.Sprintf("%s %s", checkbox, label)
 }
 
-// submit creates a PRCreatedMsg and closes the overlay
+// submit creates a PRCreatedMsg
 func (p *PRCreateOverlay) submit() tea.Cmd {
 	// Validate title is not empty
 	title := strings.TrimSpace(p.title.Value())
@@ -241,19 +241,16 @@ func (p *PRCreateOverlay) submit() tea.Cmd {
 		return nil // Don't submit if title is empty
 	}
 
-	return tea.Batch(
-		func() tea.Msg {
-			return PRCreatedMsg{
-				Title:      title,
-				Body:       strings.TrimSpace(p.body.Value()),
-				Branch:     p.branch,
-				BaseBranch: p.baseBranch,
-				Draft:      p.draft,
-				BeadID:     p.beadID,
-			}
-		},
-		func() tea.Msg { return CloseOverlayMsg{} },
-	)
+	return func() tea.Msg {
+		return PRCreatedMsg{
+			Title:      title,
+			Body:       strings.TrimSpace(p.body.Value()),
+			Branch:     p.branch,
+			BaseBranch: p.baseBranch,
+			Draft:      p.draft,
+			BeadID:     p.beadID,
+		}
+	}
 }
 
 // Title returns the overlay title

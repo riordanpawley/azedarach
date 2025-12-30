@@ -4,13 +4,17 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// ConflictDialog displays merge conflicts and resolution options
-type ConflictDialog struct {
-	files  []string
-	cursor int
-	styles *Styles
+// ConflictOverlay displays merge conflicts and resolution options
+type ConflictOverlay struct {
+	files                []string
+	cursor               int
+	onResolveWithClaude  func() tea.Cmd
+	onAbort              func() tea.Cmd
+	overlayStyles        *Styles
 }
 
 // ConflictResolutionMsg is sent when the user chooses a resolution method
@@ -20,22 +24,33 @@ type ConflictResolutionMsg struct {
 	OpenManually      bool
 }
 
-// NewConflictDialog creates a new conflict resolution dialog
-func NewConflictDialog(files []string) *ConflictDialog {
-	return &ConflictDialog{
-		files:  files,
-		cursor: 0,
-		styles: New(),
+// NewConflictOverlay creates a new conflict resolution overlay
+func NewConflictOverlay(
+	files []string,
+	onResolveWithClaude func() tea.Cmd,
+	onAbort func() tea.Cmd,
+) *ConflictOverlay {
+	return &ConflictOverlay{
+		files:               files,
+		cursor:              0,
+		onResolveWithClaude: onResolveWithClaude,
+		onAbort:             onAbort,
+		overlayStyles:       New(),
 	}
 }
 
-// Init initializes the dialog
-func (c *ConflictDialog) Init() tea.Cmd {
+// NewConflictDialog creates a new conflict resolution dialog (deprecated, use NewConflictOverlay)
+func NewConflictDialog(files []string) *ConflictOverlay {
+	return NewConflictOverlay(files, nil, nil)
+}
+
+// Init initializes the overlay
+func (c *ConflictOverlay) Init() tea.Cmd {
 	return nil
 }
 
 // Update handles messages
-func (c *ConflictDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (c *ConflictOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -45,6 +60,9 @@ func (c *ConflictDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "c", "C":
 			// Resolve with Claude
+			if c.onResolveWithClaude != nil {
+				return c, c.onResolveWithClaude()
+			}
 			return c, func() tea.Msg {
 				return SelectionMsg{
 					Key: "claude",
@@ -56,6 +74,9 @@ func (c *ConflictDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "a", "A":
 			// Abort merge
+			if c.onAbort != nil {
+				return c, c.onAbort()
+			}
 			return c, func() tea.Msg {
 				return SelectionMsg{
 					Key: "abort",
@@ -93,30 +114,35 @@ func (c *ConflictDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, nil
 }
 
-// View renders the dialog
-func (c *ConflictDialog) View() string {
+// View renders the overlay
+func (c *ConflictOverlay) View() string {
 	var b strings.Builder
 
-	// Header message
-	header := c.styles.MenuItem.Bold(true).Render("Merge conflicts detected!")
+	// Header message with warning color
+	headerStyle := lipgloss.NewStyle().
+		Foreground(styles.Red).
+		Bold(true)
+	header := headerStyle.Render("⚠ Merge conflicts detected!")
 	b.WriteString(header)
 	b.WriteString("\n\n")
 
 	// Conflicted files list
 	if len(c.files) > 0 {
-		filesLabel := c.styles.MenuItem.Foreground(c.styles.MenuKey.GetForeground()).Render("Conflicted files:")
+		filesLabel := lipgloss.NewStyle().
+			Foreground(styles.Yellow).
+			Bold(true).
+			Render("Conflicted files:")
 		b.WriteString(filesLabel)
 		b.WriteString("\n")
 
 		for i, file := range c.files {
 			prefix := "  "
+			fileStyle := c.overlayStyles.MenuItem
 			if i == c.cursor {
-				prefix = "▸ "
+				prefix = lipgloss.NewStyle().Foreground(styles.Blue).Render("▸ ")
+				fileStyle = c.overlayStyles.MenuItemActive
 			}
-			line := prefix + c.styles.MenuItem.Render(file)
-			if i == c.cursor {
-				line = c.styles.MenuItemActive.Render(prefix + file)
-			}
+			line := prefix + fileStyle.Render(file)
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -124,47 +150,52 @@ func (c *ConflictDialog) View() string {
 	}
 
 	// Resolution options
-	b.WriteString(c.styles.Separator.Render("───────────────────────────────"))
+	b.WriteString(c.overlayStyles.Separator.Render("───────────────────────────────"))
 	b.WriteString("\n")
 
 	options := []struct {
 		key   string
 		label string
 		desc  string
+		color lipgloss.Color
 	}{
-		{"c", "Resolve with Claude", "Use Claude Code to resolve conflicts"},
-		{"o", "Open manually", "Open files in your editor"},
-		{"a", "Abort merge", "Cancel the merge operation"},
+		{"c", "Resolve with Claude", "Use Claude Code to resolve conflicts", styles.Green},
+		{"o", "Open manually", "Open files in your editor", styles.Blue},
+		{"a", "Abort merge", "Cancel the merge operation", styles.Red},
 	}
 
 	for _, opt := range options {
-		line := c.styles.MenuKey.Render("["+opt.key+"]") + " " +
-			c.styles.MenuItem.Bold(true).Render(opt.label) + " " +
-			c.styles.Footer.Render("- "+opt.desc)
+		keyStyle := lipgloss.NewStyle().Foreground(opt.color).Bold(true)
+		labelStyle := c.overlayStyles.MenuItem.Bold(true)
+		descStyle := c.overlayStyles.Footer
+
+		line := keyStyle.Render("["+opt.key+"]") + " " +
+			labelStyle.Render(opt.label) + " " +
+			descStyle.Render("- "+opt.desc)
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
 	// Footer hint
 	b.WriteString("\n")
-	footer := c.styles.Footer.Render("j/k: Navigate • Esc: Close")
+	footer := c.overlayStyles.Footer.Render("j/k: navigate • Esc: close")
 	b.WriteString(footer)
 
 	return b.String()
 }
 
-// Title returns the dialog title
-func (c *ConflictDialog) Title() string {
+// Title returns the overlay title
+func (c *ConflictOverlay) Title() string {
 	return "Merge Conflicts"
 }
 
-// Size returns the dialog dimensions
-func (c *ConflictDialog) Size() (width, height int) {
+// Size returns the overlay dimensions
+func (c *ConflictOverlay) Size() (width, height int) {
 	// Width: enough for file paths and options
-	// Height: header + files + options + footer + padding
+	// Height: header + files + separator + options + footer + padding
 	fileLines := len(c.files)
 	if fileLines > 10 {
 		fileLines = 10 // Cap at 10 visible files
 	}
-	return 70, 8 + fileLines + 5 // header(2) + files + separator(1) + options(3) + footer(2)
+	return 70, 8 + fileLines // header(2) + files + separator(1) + options(3) + footer(2)
 }
