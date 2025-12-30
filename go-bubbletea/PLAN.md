@@ -11,9 +11,30 @@
 | [Project Structure](docs/03-project-structure.md) | Directory layout, library choices, configuration |
 | [Go Best Practices](docs/04-go-best-practices.md) | DI, context, errors, concurrency, testing |
 | [Bubbletea Patterns](docs/05-bubbletea-patterns.md) | Nested models, commands, navigation, performance |
-| [Implementation Phases](docs/06-implementation-phases.md) | 6-phase roadmap with acceptance criteria |
+| [Implementation Phases](docs/06-implementation-phases.md) | Phase index with progress tracking |
 | [Feature Matrix](docs/07-feature-matrix.md) | TypeScript→Go parity tracking (~100 features) |
 | [Technical Deep Dive](docs/08-technical-deep-dive.md) | Challenges, solutions, testing, migration |
+
+## Implementation Phases
+
+| Phase | Focus | Status | Document |
+|-------|-------|--------|----------|
+| **1** | Core Framework | 🔲 | [phases/phase-1-core.md](docs/phases/phase-1-core.md) |
+| **2** | Beads Integration | 🔲 | [phases/phase-2-beads.md](docs/phases/phase-2-beads.md) |
+| **3** | Overlays & Filters | 🔲 | [phases/phase-3-overlays.md](docs/phases/phase-3-overlays.md) |
+| **4** | Session Management | 🔲 | [phases/phase-4-sessions.md](docs/phases/phase-4-sessions.md) |
+| **5** | Git Operations | 🔲 | [phases/phase-5-git.md](docs/phases/phase-5-git.md) |
+| **6** | Advanced Features | 🔲 | [phases/phase-6-advanced.md](docs/phases/phase-6-advanced.md) |
+
+**Legend**: 🔲 Not Started | 🟡 In Progress | ✅ Complete
+
+```
+Phase 1 (Core)       →  Phase 2 (Beads)      →  Phase 3 (Overlays)
+     ↓                                                ↓
+Phase 4 (Sessions)  ←──────────────────────→  Phase 5 (Git)
+                              ↓
+                    Phase 6 (Advanced Features)
+```
 
 ## Executive Summary
 
@@ -37,29 +58,6 @@ This rewrite explores Go + [Bubbletea](https://github.com/charmbracelet/bubblete
 | Fault Tolerance | Supervision trees | Manual error handling |
 | Type System | Strong, functional | Strong, structural |
 | Pattern Matching | Native | Type switches |
-
-## Implementation Roadmap
-
-```
-Phase 1 (Core)       →  Phase 2 (Beads)      →  Phase 3 (Overlays)
-     ↓                                                ↓
-Phase 4 (Sessions)  ←──────────────────────→  Phase 5 (Git)
-                              ↓
-                    Phase 6 (Advanced Features)
-```
-
-### Phase Summary
-
-| Phase | Focus | Key Deliverables |
-|-------|-------|------------------|
-| **1** | Core Framework | TEA loop, navigation, styling, StatusBar |
-| **2** | Beads Integration | CLI client, cards, refresh, toasts |
-| **3** | Overlays & Filters | Action/filter/sort menus, search, select mode |
-| **4** | Session Management | tmux, worktrees, state detection, dev servers |
-| **5** | Git Operations | Merge, PR, diff, conflict resolution |
-| **6** | Advanced Features | Epic drill-down, jump labels, multi-project |
-
-See [Implementation Phases](docs/06-implementation-phases.md) for detailed checklists.
 
 ## Feature Parity Status
 
@@ -138,20 +136,27 @@ See [Bubbletea Patterns](docs/05-bubbletea-patterns.md) and [Go Best Practices](
 
 ```
 go-bubbletea/
-├── PLAN.md              # This file (index)
-├── ARCHITECTURE.md      # System diagrams
-├── QUICK_REFERENCE.md   # Bubbletea cheat sheet
-├── docs/                # Detailed documentation
+├── PLAN.md                     # This file (index)
+├── ARCHITECTURE.md             # System diagrams
+├── QUICK_REFERENCE.md          # Bubbletea cheat sheet
+├── docs/
 │   ├── 01-overview.md
 │   ├── 02-architecture.md
 │   ├── 03-project-structure.md
 │   ├── 04-go-best-practices.md
 │   ├── 05-bubbletea-patterns.md
-│   ├── 06-implementation-phases.md
+│   ├── 06-implementation-phases.md  # Phase index
 │   ├── 07-feature-matrix.md
-│   └── 08-technical-deep-dive.md
-├── cmd/azedarach/       # Entry point stub
-├── internal/            # Implementation (to be built)
+│   ├── 08-technical-deep-dive.md
+│   └── phases/                 # Individual phase plans
+│       ├── phase-1-core.md
+│       ├── phase-2-beads.md
+│       ├── phase-3-overlays.md
+│       ├── phase-4-sessions.md
+│       ├── phase-5-git.md
+│       └── phase-6-advanced.md
+├── cmd/azedarach/              # Entry point stub
+├── internal/                   # Implementation (to be built)
 ├── go.mod
 └── go.sum
 ```
