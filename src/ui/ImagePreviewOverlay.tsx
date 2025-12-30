@@ -1,12 +1,15 @@
 /**
- * ImagePreviewOverlay component - displays an image preview in the terminal
+ * ImagePreviewOverlay component - DEPRECATED
  *
- * Uses terminal-image to render images using Unicode half-blocks (▀▄█) with
- * 24-bit color. Native protocols (Kitty/iTerm2) are disabled because OpenTUI's
- * text component renders character-by-character and can't passthrough raw
- * terminal escape sequences.
+ * This component is no longer used for image preview. Images are now displayed
+ * using viu in a tmux popup (see ImageAttachmentService.openPreview), which
+ * supports Kitty graphics protocol for high-quality rendering.
  *
- * Note: Keyboard handling is in KeyboardService, this component just renders.
+ * OpenTUI's text component renders character-by-character and strips ANSI
+ * escape sequences, making it incompatible with terminal image protocols.
+ * The tmux popup approach bypasses OpenTUI entirely.
+ *
+ * This component remains in case we need fallback error display.
  */
 
 import { Result } from "@effect-atom/atom"

@@ -54,6 +54,7 @@
               corepackEnable
               vtsls
               biome
+              viu # Terminal image viewer with Kitty graphics protocol support
               go
 
               # ELF dependencies

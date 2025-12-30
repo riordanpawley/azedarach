@@ -895,7 +895,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 
 				/**
 				 * Open preview for the currently selected attachment.
-				 * Renders the image to terminal-compatible text and stores in previewState.
+				 * Uses viu in a tmux popup to display the image with native Kitty graphics.
+				 * This bypasses OpenTUI entirely since it can't handle ANSI escape sequences.
 				 */
 				openPreview: () =>
 					Effect.gen(function* () {
@@ -912,80 +913,66 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						// Set loading state
-						yield* SubscriptionRef.set(previewState, {
-							taskId: current.taskId,
-							attachmentId: attachment.id,
-							filename: attachment.filename,
-							renderedImage: null,
-							isLoading: true,
-							error: null,
-						})
-
 						// Get full file path
 						const issueDir = yield* getIssueDir(current.taskId)
 						const filePath = path.join(issueDir, attachment.filename)
 
-						// Import terminal-image dynamically and render
-						const { default: terminalImage } = yield* Effect.tryPromise({
-							try: () => import("terminal-image"),
-							catch: (e) =>
+						// Check if viu is available
+						const viuCheck = yield* Command.make("which", "viu").pipe(
+							Command.exitCode,
+							Effect.catchAll(() => Effect.succeed(1)),
+						)
+
+						if (viuCheck !== 0) {
+							return yield* Effect.fail(
 								new ImageAttachmentError({
-									message: `Failed to load terminal-image: ${e}`,
+									message:
+										"viu not installed. Add 'viu' to ~/nix/darwin.nix brews and run darwin-rebuild.",
 								}),
-						})
+							)
+						}
 
-						// Get terminal dimensions for sizing (leave room for borders and info)
-						const termCols = process.stdout.columns || 80
-						const termRows = process.stdout.rows || 24
-						// Reserve space for borders (4 cols), header (2 rows), footer (3 rows)
-						const maxWidth = Math.max(20, termCols - 10)
-						const maxHeight = Math.max(10, termRows - 10)
+						// Build the navigation info
+						const navInfo =
+							current.attachments.length > 1
+								? ` (${current.selectedIndex + 1}/${current.attachments.length})`
+								: ""
 
-						const rendered = yield* Effect.tryPromise({
-							try: () =>
-								terminalImage.file(filePath, {
-									width: maxWidth,
-									height: maxHeight,
-									preserveAspectRatio: true,
-									// Force ANSI block rendering instead of Kitty/iTerm2 native protocols.
-									// OpenTUI's text component renders character-by-character and doesn't
-									// support passthrough of raw terminal escape sequences for image protocols.
-									preferNativeRender: false,
-								}),
-							catch: (e) =>
-								new ImageAttachmentError({
-									message: `Failed to render image: ${e}`,
-								}),
-						})
+						// Use tmux display-popup to show the image with viu
+						// viu uses Kitty graphics protocol when available for high quality
+						const popupTitle = ` 📷 ${attachment.filename}${navInfo} `
 
-						// Store rendered result
-						yield* SubscriptionRef.set(previewState, {
-							taskId: current.taskId,
-							attachmentId: attachment.id,
-							filename: attachment.filename,
-							renderedImage: rendered,
-							isLoading: false,
-							error: null,
-						})
+						// The popup command: show image with viu, then wait for keypress
+						// Using bash -c to chain commands properly
+						const popupCmd = `viu "${filePath}" && echo "" && echo "Press any key to close..." && read -n 1`
+
+						yield* Command.make(
+							"tmux",
+							"display-popup",
+							"-E", // Close popup when command exits
+							"-w",
+							"90%",
+							"-h",
+							"90%",
+							"-T",
+							popupTitle,
+							"--",
+							"bash",
+							"-c",
+							popupCmd,
+						).pipe(
+							Command.exitCode,
+							Effect.catchAll((error) =>
+								Effect.fail(
+									new ImageAttachmentError({
+										message: `Failed to open image popup: ${error}`,
+									}),
+								),
+							),
+						)
 
 						return attachment
-					}).pipe(
-						Effect.catchAll((error) =>
-							Effect.gen(function* () {
-								const msg =
-									error && typeof error === "object" && "message" in error
-										? String(error.message)
-										: String(error)
-								yield* SubscriptionRef.update(previewState, (s) => ({
-									...s,
-									isLoading: false,
-									error: msg,
-								}))
-								return yield* Effect.fail(error)
-							}),
-						),
-					),
+					}),
 
 				/**
 				 * Close the image preview and clear state
