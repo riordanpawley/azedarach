@@ -89,6 +89,9 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 			yield* board.saveToCache(currentProject.path)
 		}
 
+		// Exit epic drilldown before switching projects - drilldown state is project-specific
+		yield* navigation.exitDrillDown()
+
 		yield* projectService.switchProject(projectName)
 
 		const newProject = yield* SubscriptionRef.get(projectService.currentProject)
