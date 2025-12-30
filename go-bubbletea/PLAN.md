@@ -97,138 +97,920 @@ Both Gleam/Shore and Go/Bubbletea use TEA:
 ```
 go-bubbletea/
 ├── cmd/
-│   └── azedarach/
-│       └── main.go           # Entry point
+│   └── az/
+│       └── main.go           # Entry point + CLI commands
 ├── internal/
 │   ├── app/
 │   │   ├── model.go          # Main TEA model
-│   │   ├── update.go         # Message handlers
-│   │   ├── view.go           # Rendering
-│   │   └── keybindings.go    # Key mappings
+│   │   ├── update.go         # Message handlers (by mode)
+│   │   ├── view.go           # View composition
+│   │   ├── keybindings.go    # Key mappings + help text
+│   │   └── messages.go       # All message types
 │   ├── ui/
-│   │   ├── board.go          # Kanban board component
-│   │   ├── card.go           # Task card component
-│   │   ├── statusbar.go      # Status bar
+│   │   ├── board/
+│   │   │   ├── board.go      # Kanban board layout
+│   │   │   ├── column.go     # Single column
+│   │   │   └── card.go       # Task card
+│   │   ├── compact/
+│   │   │   └── list.go       # Compact list view
 │   │   ├── overlay/
+│   │   │   ├── stack.go      # Overlay stack manager
 │   │   │   ├── action.go     # Action menu
-│   │   │   ├── filter.go     # Filter menu
+│   │   │   ├── filter.go     # Filter menu + sub-menus
+│   │   │   ├── sort.go       # Sort menu
+│   │   │   ├── search.go     # Search input
 │   │   │   ├── help.go       # Help overlay
-│   │   │   └── detail.go     # Detail panel
-│   │   └── styles.go         # Lip Gloss styles
+│   │   │   ├── detail.go     # Detail panel
+│   │   │   ├── settings.go   # Settings overlay
+│   │   │   ├── confirm.go    # Confirm dialog
+│   │   │   ├── project.go    # Project selector
+│   │   │   └── planning.go   # Planning workflow
+│   │   ├── statusbar.go      # Status bar
+│   │   ├── toast.go          # Toast notifications
+│   │   └── styles/
+│   │       ├── theme.go      # Catppuccin colors
+│   │       └── styles.go     # Component styles
 │   ├── domain/
 │   │   ├── task.go           # Task/Bead types
-│   │   ├── session.go        # Session state
-│   │   └── project.go        # Project types
+│   │   ├── session.go        # Session state machine
+│   │   ├── project.go        # Project types
+│   │   ├── filter.go         # Filter state
+│   │   └── sort.go           # Sort state
 │   ├── services/
 │   │   ├── beads/
-│   │   │   └── client.go     # bd CLI wrapper
+│   │   │   ├── client.go     # bd CLI wrapper
+│   │   │   └── parser.go     # JSON parsing
 │   │   ├── tmux/
-│   │   │   └── client.go     # tmux operations
+│   │   │   ├── client.go     # tmux operations
+│   │   │   ├── session.go    # Session management
+│   │   │   └── bindings.go   # Global keybinding registration
 │   │   ├── git/
-│   │   │   └── client.go     # git/worktree operations
-│   │   └── monitor/
-│   │       └── session.go    # Session state polling
+│   │   │   ├── client.go     # git operations
+│   │   │   ├── worktree.go   # Worktree lifecycle
+│   │   │   └── diff.go       # Difftastic integration
+│   │   ├── claude/
+│   │   │   └── session.go    # Claude session spawning
+│   │   ├── devserver/
+│   │   │   ├── manager.go    # Dev server lifecycle
+│   │   │   └── ports.go      # Port allocation
+│   │   ├── monitor/
+│   │   │   ├── session.go    # Session state polling
+│   │   │   └── patterns.go   # State detection regex
+│   │   ├── clipboard/
+│   │   │   └── clipboard.go  # Cross-platform clipboard
+│   │   ├── image/
+│   │   │   └── attach.go     # Image attachment handling
+│   │   └── network/
+│   │       └── status.go     # Network connectivity check
 │   └── config/
-│       └── config.go         # Configuration loading
+│       ├── config.go         # Configuration types + loading
+│       ├── projects.go       # Global projects registry
+│       └── defaults.go       # Default values
+├── pkg/
+│   └── option/
+│       └── option.go         # Option[T] type for Go
+├── testdata/                  # Golden files for snapshot tests
 ├── go.mod
 ├── go.sum
 ├── Makefile
-└── PLAN.md
+├── .goreleaser.yaml          # Release automation
+├── PLAN.md
+├── ARCHITECTURE.md
+└── QUICK_REFERENCE.md
 ```
 
-## Implementation Phases
+## Go-Specific Library Choices
 
-### Phase 1: Core Framework (Week 1)
+| Feature | Library | Notes |
+|---------|---------|-------|
+| TUI Framework | `charmbracelet/bubbletea` | Core TEA loop |
+| Components | `charmbracelet/bubbles` | textinput, viewport, list, spinner, progress |
+| Styling | `charmbracelet/lipgloss` | Terminal styling |
+| CLI Parsing | `spf13/cobra` | Subcommands (project add/list/etc) |
+| Config Loading | `spf13/viper` | JSON/YAML config with env overrides |
+| JSON | `encoding/json` | Standard library sufficient |
+| Clipboard | `atotto/clipboard` | Cross-platform (macOS pbcopy, Linux xclip/wl-copy) |
+| Image Render | `charmbracelet/x/term` + raw ANSI | Kitty/iTerm2 protocols |
+| Logging | `charmbracelet/log` | Styled logging to file |
+| Testing | `stretchr/testify` | Assertions + mocks |
+| Golden Tests | `sebdah/goldie` | Snapshot testing for views |
+
+### Clipboard Cross-Platform Strategy
+
+```go
+// internal/services/clipboard/clipboard.go
+package clipboard
+
+import (
+    "os/exec"
+    "runtime"
+)
+
+// ReadImage reads image data from clipboard
+func ReadImage() ([]byte, error) {
+    switch runtime.GOOS {
+    case "darwin":
+        // macOS: Use osascript to get clipboard as PNG
+        return exec.Command("osascript", "-e",
+            `set png to (the clipboard as «class PNGf»)
+             return png`).Output()
+    case "linux":
+        // Try wl-paste (Wayland) first, then xclip (X11)
+        if out, err := exec.Command("wl-paste", "-t", "image/png").Output(); err == nil {
+            return out, nil
+        }
+        return exec.Command("xclip", "-selection", "clipboard", "-t", "image/png", "-o").Output()
+    default:
+        return nil, fmt.Errorf("clipboard not supported on %s", runtime.GOOS)
+    }
+}
+```
+
+### Image Terminal Rendering Strategy
+
+```go
+// For terminals supporting Kitty graphics protocol (Kitty, WezTerm)
+// Fall back to Unicode half-blocks for others
+
+import "github.com/charmbracelet/x/term"
+
+func RenderImage(path string, width, height int) string {
+    info := term.GetTerminalInfo()
+
+    switch {
+    case info.KittyGraphics:
+        return renderKittyImage(path, width, height)
+    case info.ITerm2:
+        return renderITerm2Image(path, width, height)
+    default:
+        // Unicode half-blocks fallback
+        return renderBlocksImage(path, width, height)
+    }
+}
+```
+
+## Error Handling Patterns
+
+### Typed Errors
+
+```go
+// internal/domain/errors.go
+package domain
+
+import "fmt"
+
+// BeadsError for beads CLI failures
+type BeadsError struct {
+    Op      string // "list", "create", "update"
+    BeadID  string // optional
+    Message string
+    Err     error
+}
+
+func (e *BeadsError) Error() string {
+    if e.BeadID != "" {
+        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+    }
+    return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+}
+
+func (e *BeadsError) Unwrap() error { return e.Err }
+
+// TmuxError for tmux failures
+type TmuxError struct {
+    Op      string
+    Session string
+    Err     error
+}
+
+// GitError for git/worktree failures
+type GitError struct {
+    Op       string
+    Worktree string
+    Err      error
+}
+```
+
+### Error Flow to UI
+
+```go
+// Errors become toast notifications
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+    switch msg := msg.(type) {
+    case errorMsg:
+        m.toasts = append(m.toasts, Toast{
+            Level:     ToastError,
+            Message:   formatError(msg.err),
+            ExpiresAt: time.Now().Add(8 * time.Second),
+        })
+        return m, nil
+    }
+    // ...
+}
+
+func formatError(err error) string {
+    switch e := err.(type) {
+    case *domain.BeadsError:
+        return fmt.Sprintf("Beads %s failed: %s", e.Op, e.Message)
+    case *domain.TmuxError:
+        return fmt.Sprintf("tmux error: %s", e.Err)
+    case *domain.GitError:
+        return fmt.Sprintf("Git %s failed: %s", e.Op, e.Err)
+    default:
+        return err.Error()
+    }
+}
+```
+
+## Configuration Schema
+
+### `.azedarach.json` (Project-level)
+
+```go
+// internal/config/config.go
+type Config struct {
+    CLITool  string        `json:"cliTool"`  // "claude" | "opencode"
+    Session  SessionConfig `json:"session"`
+    Git      GitConfig     `json:"git"`
+    PR       PRConfig      `json:"pr"`
+    DevServer DevServerConfig `json:"devServer"`
+    Notifications NotifyConfig `json:"notifications"`
+    Network  NetworkConfig `json:"network"`
+    Beads    BeadsConfig   `json:"beads"`
+    StateDetection StateConfig `json:"stateDetection"`
+}
+
+type SessionConfig struct {
+    DangerouslySkipPermissions bool   `json:"dangerouslySkipPermissions"`
+    Shell                      string `json:"shell"` // default: $SHELL or "zsh"
+}
+
+type GitConfig struct {
+    PushBranchOnCreate bool `json:"pushBranchOnCreate"`
+    PushEnabled        bool `json:"pushEnabled"`
+    FetchEnabled       bool `json:"fetchEnabled"`
+    ShowLineChanges    bool `json:"showLineChanges"`
+    BaseBranch         string `json:"baseBranch"` // default: "main"
+}
+
+type PRConfig struct {
+    Enabled   bool `json:"enabled"`
+    AutoDraft bool `json:"autoDraft"`
+    AutoMerge bool `json:"autoMerge"`
+}
+
+type DevServerConfig struct {
+    Command string                     `json:"command"` // default: "bun run dev"
+    Ports   map[string]PortConfig      `json:"ports"`
+}
+
+type PortConfig struct {
+    Default int      `json:"default"`
+    Aliases []string `json:"aliases"` // env var names
+}
+```
+
+### `~/.config/azedarach/projects.json` (Global)
+
+```go
+// internal/config/projects.go
+type ProjectsRegistry struct {
+    Projects       []Project `json:"projects"`
+    DefaultProject string    `json:"defaultProject"`
+}
+
+type Project struct {
+    Name string `json:"name"`
+    Path string `json:"path"`
+}
+
+func LoadProjectsRegistry() (*ProjectsRegistry, error) {
+    home, _ := os.UserHomeDir()
+    path := filepath.Join(home, ".config", "azedarach", "projects.json")
+    // ...
+}
+```
+
+## Implementation Phases (Detailed)
+
+### Phase 1: Core Framework
 
 **Goal**: Basic TEA loop with navigation
 
-- [ ] Project setup (go.mod, dependencies)
+**Deliverables**:
+- [ ] Project setup (go.mod, Makefile, .goreleaser.yaml)
 - [ ] Main model struct with cursor, mode, basic state
-- [ ] Basic keybinding handling (hjkl navigation)
+- [ ] Basic keybinding handling (hjkl + arrows navigation)
+- [ ] Half-page scroll (`Ctrl-Shift-d/u`)
+- [ ] Force redraw (`Ctrl-l`)
 - [ ] Static 4-column Kanban board rendering
 - [ ] Lip Gloss theme (Catppuccin Macchiato)
+- [ ] StatusBar with mode indicator + keybinding hints
+- [ ] Quit (`q`, `Ctrl-c`)
 
-**Files**:
-- `cmd/azedarach/main.go`
-- `internal/app/model.go`
-- `internal/app/update.go`
-- `internal/app/view.go`
-- `internal/ui/board.go`
-- `internal/ui/styles.go`
+**Acceptance Criteria**:
+- `go build` produces working binary
+- Navigate between columns with h/l
+- Navigate within columns with j/k
+- StatusBar shows current mode
+- Half-page scroll works in tall columns
 
-### Phase 2: Beads Integration (Week 2)
+**Dependencies**: None
+
+**Testing**:
+- Unit: None (pure UI)
+- Golden: Board rendering snapshots
+- Manual: Navigation feel
+
+---
+
+### Phase 2: Beads Integration
 
 **Goal**: Load and display real bead data
 
-- [ ] Domain types (Task, Session, Project)
-- [ ] Beads CLI client (list, search, ready)
+**Deliverables**:
+- [ ] Domain types (Task, Session, DevServer, Project)
+- [ ] Beads CLI client (list, search, ready, create, update, close)
+- [ ] JSON parsing with proper error handling
 - [ ] Async loading with `tea.Cmd`
-- [ ] Task cards with status/priority/type
-- [ ] Periodic refresh (tea.Tick)
-- [ ] Toast notifications
+- [ ] Task cards with status/priority/type badges
+- [ ] Elapsed timer on cards (session duration)
+- [ ] Periodic refresh (tea.Tick every 2s)
+- [ ] Toast notifications (info, success, warning, error)
+- [ ] Loading spinner during initial load
+- [ ] Connection status indicator placeholder
 
-**Files**:
-- `internal/domain/*.go`
-- `internal/services/beads/client.go`
-- `internal/ui/card.go`
+**Acceptance Criteria**:
+- Board shows real beads from `bd list`
+- Cards show correct status colors
+- Priority badges (P0-P4) visible
+- Toasts appear and auto-dismiss
+- Periodic refresh doesn't flicker
 
-### Phase 3: Overlays & Filters (Week 3)
+**Dependencies**: Phase 1
+
+**Testing**:
+- Unit: Beads client parsing, filter logic
+- Golden: Card rendering with various states
+- Integration: Mock `bd` CLI responses
+
+---
+
+### Phase 3: Overlays & Filters
 
 **Goal**: Modal overlays and filtering
 
-- [ ] Overlay stack system
-- [ ] Action menu (Space)
-- [ ] Filter menu (f) with sub-menus
-- [ ] Sort menu (,)
-- [ ] Help overlay (?)
-- [ ] Search input (/)
-- [ ] Status/priority/type/session filters
+**Deliverables**:
+- [ ] Overlay stack system (push/pop)
+- [ ] Action menu (`Space`) with available actions
+- [ ] Filter menu (`f`) with sub-menus:
+  - Status (`f` `s`): o/i/b/d toggles
+  - Priority (`f` `p`): 0-4 toggles
+  - Type (`f` `t`): B/F/T/E/C toggles
+  - Session (`f` `S`): I/U/W/D/X/P toggles
+  - Hide epic children (`f` `e`)
+  - Age filter (`f` `1/7/3/0`)
+  - Clear all (`f` `c`)
+- [ ] Sort menu (`,`):
+  - Sort by session (`,` `s`)
+  - Sort by priority (`,` `p`)
+  - Sort by updated (`,` `u`)
+  - Toggle direction (repeat key)
+- [ ] Help overlay (`?`)
+- [ ] Search input (`/`) with live filtering
+- [ ] Select mode (`v`) with visual highlighting
+- [ ] Select all (`%`) and clear (`A`)
+- [ ] Goto mode (`g`):
+  - Column top (`g` `g`)
+  - Column bottom (`g` `e`)
+  - First/last column (`g` `h`/`l`)
+- [ ] Compact/list view toggle (`Tab`)
+- [ ] Move task left/right (`Space` `h/l`)
+- [ ] StatusBar selection count
 
-**Files**:
-- `internal/ui/overlay/*.go`
-- `internal/app/keybindings.go`
+**Acceptance Criteria**:
+- All overlays render centered with proper styling
+- Filter combinations work (AND between types, OR within)
+- Search is case-insensitive, matches title + ID
+- Selected tasks visually distinct
+- Compact view shows all tasks in priority order
 
-### Phase 4: Session Management (Week 4)
+**Dependencies**: Phase 2
+
+**Testing**:
+- Unit: Filter logic, sort comparisons
+- Golden: All overlay renderings
+- Manual: Mode transitions feel snappy
+
+---
+
+### Phase 4: Session Management
 
 **Goal**: Spawn and manage Claude sessions
 
-- [ ] tmux client (create, attach, send keys, capture)
-- [ ] Worktree management (create, delete)
+**Deliverables**:
+- [ ] tmux client (new-session, attach, send-keys, capture-pane, kill-session)
+- [ ] Worktree management (create, delete, list)
 - [ ] Session state detection (polling + pattern matching)
-- [ ] Start/stop/pause/resume session
-- [ ] Session monitor goroutine
-- [ ] Dev server management
+- [ ] Session actions:
+  - Start session (`Space` `s`)
+  - Start + work (`Space` `S`)
+  - Start yolo (`Space` `!`)
+  - Attach (`Space` `a`)
+  - Pause (`Space` `p`)
+  - Resume (`Space` `R`)
+  - Stop (`Space` `x`)
+- [ ] Dev server management:
+  - Toggle (`Space` `r`)
+  - View (`Space` `v`)
+  - Restart (`Space` `Ctrl+r`)
+  - Port allocation with conflict resolution
+  - StatusBar port indicator
+  - Dev server menu overlay
+- [ ] Delete worktree/cleanup (`Space` `d`)
+- [ ] Confirm dialog for destructive actions
+- [ ] Bulk cleanup dialog (worktrees only / full)
+- [ ] Bulk stop sessions
+- [ ] Register tmux global bindings:
+  - `Ctrl-a Ctrl-a`: Return to az
+  - `Ctrl-a Tab`: Toggle Claude/Dev
+- [ ] Session monitor goroutine (500ms polling)
 
-**Files**:
-- `internal/services/tmux/client.go`
-- `internal/services/git/worktree.go`
-- `internal/services/monitor/session.go`
+**Acceptance Criteria**:
+- `Space+s` creates worktree + tmux session + launches claude
+- Session state updates within 1s of change
+- `Space+a` attaches to correct session
+- Port allocation avoids conflicts
+- Cleanup removes worktree and closes bead (if selected)
 
-### Phase 5: Git Operations (Week 5)
+**Dependencies**: Phase 3 (for confirm dialog, bulk operations)
+
+**Testing**:
+- Unit: State pattern matching, port allocation
+- Integration: Mock tmux/git commands
+- Manual: Full session lifecycle
+
+---
+
+### Phase 5: Git Operations
 
 **Goal**: Git workflow support
 
-- [ ] Git client (merge, diff, branch operations)
-- [ ] Update from main / merge to main
-- [ ] PR creation (gh CLI)
-- [ ] Conflict detection and resolution workflow
+**Deliverables**:
+- [ ] Git client (status, fetch, merge, diff, branch, push)
+- [ ] Update from main (`Space` `u`)
+- [ ] Merge to main (`Space` `m`) with conflict detection
+- [ ] Create PR (`Space` `P`) via `gh` CLI
+- [ ] Show diff with difftastic (`Space` `f`)
+- [ ] Abort merge (`Space` `M`)
+- [ ] Merge bead into... (`Space` `b`) with merge select mode
+- [ ] Refresh git stats (`r`)
 - [ ] Merge choice dialog
+- [ ] Network status detection
+- [ ] Offline mode / graceful degradation
+- [ ] Connection status in StatusBar
 
-**Files**:
-- `internal/services/git/client.go`
-- `internal/ui/overlay/merge.go`
+**Acceptance Criteria**:
+- Merge detects conflicts and shows affected files
+- Conflict resolution starts Claude session automatically
+- PR creation syncs with main first
+- Diff viewer shows side-by-side difftastic output
+- Offline mode disables push/fetch gracefully
 
-### Phase 6: Advanced Features (Week 6)
+**Dependencies**: Phase 4 (session management for conflict resolution)
+
+**Testing**:
+- Unit: Git output parsing
+- Integration: Mock git/gh commands
+- Manual: Full merge workflow
+
+---
+
+### Phase 6: Advanced Features
 
 **Goal**: Full feature parity
 
-- [ ] Epic drill-down view
-- [ ] Image attachments (clipboard, file)
-- [ ] Multi-project support
-- [ ] Detail panel with editing
-- [ ] Settings overlay
-- [ ] Diagnostics view
+**Deliverables**:
+- [ ] Epic drill-down view:
+  - Enter on epic shows only children
+  - Progress bar (closed/total)
+  - Back navigation (`q`/`Esc`)
+- [ ] Jump labels (`g` `w`):
+  - 2-char labels from home row
+  - Type label to jump
+- [ ] Multi-project support:
+  - Project selector overlay (`g` `p`)
+  - Project auto-detection from cwd
+  - CLI: `az project add/list/remove/switch`
+- [ ] Create/edit beads:
+  - Manual create (`c`) via $EDITOR
+  - Claude create (`C`) with prompt overlay
+  - Manual edit (`Space` `e`)
+  - Claude edit (`Space` `E`)
+- [ ] Open Helix editor (`Space` `H`)
+- [ ] Chat with Haiku (`Space` `c`)
+- [ ] Image attachments:
+  - Attach overlay (`Space` `i`)
+  - Paste from clipboard (`p`/`v`)
+  - Attach from file path (`f`)
+  - Preview in terminal
+  - Open in external viewer (`o`)
+  - Navigate/delete in detail panel
+- [ ] Detail panel:
+  - Scrollable description
+  - Attachment list
+  - Edit actions
+- [ ] Settings overlay (`s`):
+  - All toggleable settings
+  - Edit in $EDITOR option
+- [ ] Diagnostics overlay
+- [ ] Logs viewer (`L`)
 - [ ] Planning workflow integration
+
+**Acceptance Criteria**:
+- Epic drill-down filters to children only
+- Jump labels work across visible tasks
+- Project switch refreshes board
+- Image preview works in major terminals
+- Settings persist to `.azedarach.json`
+
+**Dependencies**: All previous phases
+
+**Testing**:
+- Unit: Jump label generation, image detection
+- Golden: Epic header, settings overlay
+- Manual: Full workflow testing
+
+## Phase Dependencies Graph
+
+```
+Phase 1 (Core)
+    │
+    ▼
+Phase 2 (Beads)
+    │
+    ▼
+Phase 3 (Overlays) ─────────────────┐
+    │                               │
+    ▼                               ▼
+Phase 4 (Sessions) ──────────► Phase 5 (Git)
+    │                               │
+    └───────────────┬───────────────┘
+                    ▼
+              Phase 6 (Advanced)
+```
+
+## Technical Challenges & Solutions
+
+### 1. Session State Detection
+
+**Challenge**: Detecting Claude session state (busy/waiting/done/error) from tmux output.
+
+**Solution**: Regex pattern matching on captured pane content:
+
+```go
+var statePatterns = map[SessionState][]*regexp.Regexp{
+    StateWaiting: {
+        regexp.MustCompile(`\[y/n\]`),
+        regexp.MustCompile(`Do you want to`),
+        regexp.MustCompile(`AskUserQuestion`),
+        regexp.MustCompile(`Press Enter`),
+        regexp.MustCompile(`\? \[Y/n\]`),
+    },
+    StateDone: {
+        regexp.MustCompile(`Task completed`),
+        regexp.MustCompile(`Successfully completed`),
+        regexp.MustCompile(`✓.*done`),
+    },
+    StateError: {
+        regexp.MustCompile(`Error:`),
+        regexp.MustCompile(`Exception:`),
+        regexp.MustCompile(`FATAL`),
+        regexp.MustCompile(`panic:`),
+    },
+}
+
+func DetectState(output string) SessionState {
+    // Check last 100 lines only (performance)
+    lines := strings.Split(output, "\n")
+    if len(lines) > 100 {
+        lines = lines[len(lines)-100:]
+    }
+    recent := strings.Join(lines, "\n")
+
+    for state, patterns := range statePatterns {
+        for _, p := range patterns {
+            if p.MatchString(recent) {
+                return state
+            }
+        }
+    }
+    if strings.TrimSpace(recent) != "" {
+        return StateBusy
+    }
+    return StateIdle
+}
+```
+
+### 2. Port Allocation for Dev Servers
+
+**Challenge**: Multiple dev servers need unique ports without conflicts.
+
+**Solution**: Track allocated ports, find next available:
+
+```go
+type PortAllocator struct {
+    mu        sync.Mutex
+    allocated map[int]string // port -> beadID
+    basePort  int
+}
+
+func (p *PortAllocator) Allocate(beadID string, config PortConfig) (int, error) {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+
+    // Check if already allocated
+    for port, id := range p.allocated {
+        if id == beadID {
+            return port, nil
+        }
+    }
+
+    // Find next available port
+    port := config.Default
+    for {
+        if _, used := p.allocated[port]; !used {
+            if isPortAvailable(port) {
+                p.allocated[port] = beadID
+                return port, nil
+            }
+        }
+        port++
+        if port > config.Default+100 {
+            return 0, fmt.Errorf("no available ports in range %d-%d", config.Default, port)
+        }
+    }
+}
+
+func isPortAvailable(port int) bool {
+    ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+    if err != nil {
+        return false
+    }
+    ln.Close()
+    return true
+}
+```
+
+### 3. Jump Labels Generation
+
+**Challenge**: Generate unique 2-char labels for visible tasks using home row.
+
+**Solution**: Generate labels from alphabet, assign to visible tasks:
+
+```go
+var homeRow = []rune("asdfghjkl;")
+
+func GenerateLabels(count int) []string {
+    labels := make([]string, 0, count)
+
+    // Single char first (a, s, d, ...)
+    for _, c := range homeRow {
+        if len(labels) >= count {
+            break
+        }
+        labels = append(labels, string(c))
+    }
+
+    // Then double char (aa, as, ad, ...)
+    for _, c1 := range homeRow {
+        for _, c2 := range homeRow {
+            if len(labels) >= count {
+                return labels
+            }
+            labels = append(labels, string([]rune{c1, c2}))
+        }
+    }
+
+    return labels
+}
+```
+
+### 4. Overlay Stack
+
+**Challenge**: Multiple overlays can stack (e.g., filter menu inside action menu).
+
+**Solution**: Stack-based overlay management:
+
+```go
+type OverlayStack struct {
+    stack []Overlay
+}
+
+func (s *OverlayStack) Push(o Overlay) {
+    s.stack = append(s.stack, o)
+}
+
+func (s *OverlayStack) Pop() Overlay {
+    if len(s.stack) == 0 {
+        return nil
+    }
+    o := s.stack[len(s.stack)-1]
+    s.stack = s.stack[:len(s.stack)-1]
+    return o
+}
+
+func (s *OverlayStack) Current() Overlay {
+    if len(s.stack) == 0 {
+        return nil
+    }
+    return s.stack[len(s.stack)-1]
+}
+
+// In view, render topmost overlay
+func (m Model) View() string {
+    base := m.renderBoard()
+    if overlay := m.overlays.Current(); overlay != nil {
+        return renderOverlayOn(base, overlay.View(), m.width, m.height)
+    }
+    return base
+}
+```
+
+### 5. Network Status Detection
+
+**Challenge**: Detect network connectivity without blocking UI.
+
+**Solution**: Background goroutine with periodic checks:
+
+```go
+func (m *Model) startNetworkMonitor(program *tea.Program) {
+    go func() {
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
+
+        for range ticker.C {
+            online := checkConnectivity()
+            program.Send(networkStatusMsg{online: online})
+        }
+    }()
+}
+
+func checkConnectivity() bool {
+    // Try to reach GitHub API (or similar reliable endpoint)
+    client := &http.Client{Timeout: 5 * time.Second}
+    resp, err := client.Head("https://api.github.com")
+    if err != nil {
+        return false
+    }
+    resp.Body.Close()
+    return resp.StatusCode == 200
+}
+```
+
+## Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Startup time | < 100ms | Cold start to first render |
+| Binary size | < 15MB | Single static binary |
+| Memory usage | < 50MB | With 100+ tasks loaded |
+| Refresh rate | 60 FPS | Smooth scrolling |
+| State detection | < 500ms | From Claude output to UI update |
+| Beads refresh | < 200ms | `bd list` round trip |
+
+### Optimization Strategies
+
+1. **Lazy rendering**: Only render visible cards, not entire column
+2. **Debounced refresh**: Don't re-fetch beads on every tick if nothing changed
+3. **Cached styles**: Pre-compute Lip Gloss styles, don't recreate per render
+4. **Parallel I/O**: Fetch beads and session states concurrently
+5. **Incremental updates**: Only update changed cards, not full board
+
+## Migration Strategy
+
+### Running Both Versions
+
+During development, both TypeScript and Go versions can coexist:
+
+```bash
+# TypeScript version (current)
+bun run dev          # or: az (if installed globally)
+
+# Go version (new)
+go run ./cmd/az      # or: az-go (different binary name)
+```
+
+### Shared Configuration
+
+Both versions read the same config files:
+- `.azedarach.json` - Project config
+- `~/.config/azedarach/projects.json` - Global projects
+
+### Shared State
+
+Both versions interact with:
+- `.beads/` directory - Bead tracker data
+- tmux sessions - Named consistently (`az-{beadId}`)
+- Git worktrees - Same naming convention
+
+### Feature Flag for Transition
+
+```bash
+# Set preferred version globally
+export AZ_RUNTIME=go  # or: ts
+
+# az wrapper script detects and launches correct version
+```
+
+### Gradual Rollout Plan
+
+1. **Alpha**: Go version usable for basic workflows (Phase 1-3)
+2. **Beta**: Session management works (Phase 4-5)
+3. **RC**: Full feature parity (Phase 6)
+4. **GA**: Go becomes default, TS deprecated
+
+## Testing Strategy (Detailed)
+
+### Unit Tests
+
+```go
+// internal/domain/filter_test.go
+func TestFilterTasks(t *testing.T) {
+    tasks := []Task{
+        {ID: "az-1", Status: StatusOpen, Priority: P1},
+        {ID: "az-2", Status: StatusInProgress, Priority: P2},
+        {ID: "az-3", Status: StatusOpen, Priority: P1},
+    }
+
+    filter := Filter{
+        Status:   map[Status]bool{StatusOpen: true},
+        Priority: map[Priority]bool{P1: true},
+    }
+
+    result := filter.Apply(tasks)
+    assert.Len(t, result, 2)
+    assert.Equal(t, "az-1", result[0].ID)
+    assert.Equal(t, "az-3", result[1].ID)
+}
+```
+
+### Golden/Snapshot Tests
+
+```go
+// internal/ui/board/board_test.go
+func TestBoardRendering(t *testing.T) {
+    board := NewBoard(testTasks, testStyles)
+    board.SetSize(80, 24)
+    board.SetCursor(1, 2) // Column 1, Task 2
+
+    output := board.View()
+
+    golden.Assert(t, output, "board_with_cursor.golden")
+}
+```
+
+### Integration Tests
+
+```go
+// internal/services/beads/client_test.go
+func TestBeadsClient(t *testing.T) {
+    // Mock bd CLI
+    execCommand = fakeExecCommand
+    defer func() { execCommand = exec.Command }()
+
+    client := NewClient()
+    tasks, err := client.List()
+
+    assert.NoError(t, err)
+    assert.Len(t, tasks, 3)
+}
+
+func fakeExecCommand(name string, args ...string) *exec.Cmd {
+    // Return mock data based on args
+}
+```
+
+### Manual Test Checklist
+
+```markdown
+## Phase 1 Smoke Test
+- [ ] `go build && ./bin/az` starts without error
+- [ ] hjkl navigation works
+- [ ] Arrow keys work
+- [ ] Half-page scroll works in tall column
+- [ ] `q` quits cleanly
+- [ ] StatusBar shows mode
+
+## Phase 2 Smoke Test
+- [ ] Board loads real beads
+- [ ] Cards show correct colors
+- [ ] Priority badges visible
+- [ ] Toast appears on error
+- [ ] Periodic refresh works (edit bead externally, see update)
+
+... (continue for each phase)
+```
 
 ## Code Examples
 
