@@ -409,10 +409,14 @@ What would you like to discuss?`
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
 
-					// Check if branch is behind main
+					// Check if branch is behind its base branch (epic branch for children, main for others)
 					const branchStatus = yield* prWorkflow
-						.checkBranchBehindMain({ beadId: task.id, projectPath })
-						.pipe(Effect.catchAll(() => Effect.succeed({ behind: 0, ahead: 0 })))
+						.checkBranchBehindBase({ beadId: task.id, projectPath })
+						.pipe(
+							Effect.catchAll(() =>
+								Effect.succeed({ behind: 0, ahead: 0, baseBranch: gitConfig.baseBranch }),
+							),
+						)
 
 					// If not behind, just attach directly
 					if (branchStatus.behind === 0) {
@@ -421,13 +425,13 @@ What would you like to discuss?`
 					}
 
 					// Branch is behind - show merge choice dialog
-					const baseBranch = gitConfig.baseBranch
+					const baseBranch = branchStatus.baseBranch
 					const message = `Merge ${baseBranch} into your branch before attaching?`
 
 					// Define the merge action (merge base branch, then attach)
 					const onMerge = Effect.gen(function* () {
 						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
-						yield* prWorkflow.mergeMainIntoBranch({ beadId: task.id, projectPath }).pipe(
+						yield* prWorkflow.mergeBaseIntoBranch({ beadId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
 							Effect.tap(() => boardService.refresh()),
 							Effect.tap(() => doAttach(task.id)),

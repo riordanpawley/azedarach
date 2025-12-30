@@ -1741,22 +1741,24 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			/**
-			 * Check if a worktree branch is behind the base branch
+			 * Check if a worktree branch is behind its base branch
 			 *
-			 * Uses git rev-list to count commits between HEAD and the configured base branch.
-			 * Returns { behind, ahead } so caller can show informative message.
+			 * Uses git rev-list to count commits between HEAD and the base branch.
+			 * For epic children, the base branch is the parent epic's branch.
+			 * Returns { behind, ahead, baseBranch } so caller can show informative message.
 			 */
-			checkBranchBehindMain: (options: { beadId: string; projectPath: string }) =>
+			checkBranchBehindBase: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
-					const gitConfig = yield* getGitConfig()
-					const baseBranch = gitConfig.baseBranch
+
+					// Get effective base branch (parent epic for children, main for others)
+					const { baseBranch } = yield* getBeadBaseBranch(beadId)
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
 					if (!worktree) {
 						// No worktree = not behind (task has no session)
-						return { behind: 0, ahead: 0 }
+						return { behind: 0, ahead: 0, baseBranch }
 					}
 
 					// Count commits branch is behind base branch
@@ -1779,22 +1781,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						Effect.catchAll(() => Effect.succeed(0)),
 					)
 
-					return { behind: behindOutput, ahead: aheadOutput }
+					return { behind: behindOutput, ahead: aheadOutput, baseBranch }
 				}),
 
 			/**
 			 * Merge base branch into a worktree branch
 			 *
 			 * Auto-stashes uncommitted changes, merges base branch, pops stash.
+			 * For epic children, merges the parent epic's branch instead of main.
 			 * If conflicts, spawns Claude session to resolve them.
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
 			 */
-			mergeMainIntoBranch: (options: { beadId: string; projectPath: string }) =>
+			mergeBaseIntoBranch: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 					const gitConfig = yield* getGitConfig()
-					const baseBranch = gitConfig.baseBranch
+
+					// Get effective base branch (parent epic for children, main for others)
+					const { baseBranch } = yield* getBeadBaseBranch(beadId)
 
 					// Get worktree info
 					const worktree = yield* worktreeManager.get({ beadId, projectPath })
