@@ -3,7 +3,9 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -12,6 +14,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/devserver"
+	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/monitor"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
@@ -41,6 +47,16 @@ const (
 	ToastWarning = types.ToastWarning
 	ToastError   = types.ToastError
 )
+
+// tmuxAdapter adapts tmux.Client to satisfy monitor.TmuxClient interface
+type tmuxAdapter struct {
+	client *tmux.Client
+}
+
+func (a *tmuxAdapter) CapturePane(ctx context.Context, sessionName string) (string, error) {
+	// Capture last 100 lines by default
+	return a.client.CapturePane(ctx, sessionName, 100)
+}
 
 // Cursor tracks the current position in the Kanban board
 type Cursor struct {
@@ -93,6 +109,15 @@ type Model struct {
 	// Beads client
 	beadsClient *beads.Client
 
+	// Session management services
+	tmuxClient      *tmux.Client
+	worktreeManager *git.WorktreeManager
+	sessionMonitor  *monitor.SessionMonitor
+	portAllocator   *devserver.PortAllocator
+
+	// Logger
+	logger *slog.Logger
+
 	// Use placeholder data in Phase 1
 	usePlaceholder bool
 }
@@ -105,30 +130,55 @@ func New(cfg *config.Config) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(styles.Blue)
 
-	// Initialize beads client
-	runner := &beads.ExecRunner{}
+	// Initialize logger
 	logger := slog.Default()
-	client := beads.NewClient(runner, logger)
+
+	// Initialize beads client
+	beadsRunner := &beads.ExecRunner{}
+	beadsClient := beads.NewClient(beadsRunner, logger)
+
+	// Initialize tmux client
+	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, logger)
+
+	// Initialize git worktree manager
+	// Get current working directory as repo directory
+	repoDir, err := os.Getwd()
+	if err != nil {
+		logger.Error("failed to get current directory", "error", err)
+		repoDir = "."
+	}
+	gitRunner := git.NewExecRunner(repoDir)
+	worktreeManager := git.NewWorktreeManager(gitRunner, repoDir, logger)
+
+	// Initialize session monitor with tmux adapter
+	adapter := &tmuxAdapter{client: tmuxClient}
+	sessionMonitor := monitor.NewSessionMonitor(adapter)
+
+	// Initialize port allocator (base port 3000)
+	portAllocator := devserver.NewPortAllocator(3000)
 
 	return Model{
-		tasks:         []domain.Task{},
-		sessions:      make(map[string]*domain.Session),
-		cursor:        Cursor{Column: 0, Task: 0},
-		mode:          ModeNormal,
-		selectedTasks: make(map[string]bool),
-		overlayStack:  overlay.NewStack(),
-		filter:        domain.NewFilter(),
-		sort: &domain.Sort{
-			Field: domain.SortBySession,
-			Order: domain.SortAsc,
-		},
-		toasts:         []Toast{},
-		styles:         styles.New(),
-		config:         cfg,
-		loading:        true, // Start with loading state
-		spinner:        s,
-		beadsClient:    client,
-		usePlaceholder: false, // Use real data from beads
+		tasks:           []domain.Task{},
+		sessions:        make(map[string]*domain.Session),
+		cursor:          Cursor{Column: 0, Task: 0},
+		mode:            ModeNormal,
+		selectedTasks:   make(map[string]bool),
+		overlayStack:    overlay.NewStack(),
+		filter:          domain.NewFilter(),
+		sort:            &domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc},
+		toasts:          []Toast{},
+		styles:          styles.New(),
+		config:          cfg,
+		loading:         true, // Start with loading state
+		spinner:         s,
+		beadsClient:     beadsClient,
+		tmuxClient:      tmuxClient,
+		worktreeManager: worktreeManager,
+		sessionMonitor:  sessionMonitor,
+		portAllocator:   portAllocator,
+		logger:          logger,
+		usePlaceholder:  false, // Use real data from beads
 	}
 }
 
@@ -205,6 +255,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loadBeadsCmd(),
 			tickEvery(2 * time.Second),
 		)
+
+	case monitor.SessionStateMsg:
+		// Update session state from monitor
+		if session, ok := m.sessions[msg.BeadID]; ok {
+			session.State = msg.State
+			m.logger.Debug("session state updated", "beadID", msg.BeadID, "state", msg.State)
+		}
+		return m, nil
+
+	case sessionStartedMsg:
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Session started: %s", msg.beadID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case sessionErrorMsg:
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastError,
+			Message: fmt.Sprintf("Session error: %s - %v", msg.beadID, msg.err),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
 	}
 
 	return m, nil
@@ -333,6 +407,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global keys (work in any mode)
 	switch msg.String() {
 	case "ctrl+c":
+		// Cleanup before quitting
+		m.sessionMonitor.StopAll()
 		return m, tea.Quit
 	case "ctrl+l":
 		// Force redraw
@@ -374,6 +450,8 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q":
+		// Cleanup before quitting
+		m.sessionMonitor.StopAll()
 		return m, tea.Quit
 
 	// Vertical navigation
@@ -529,6 +607,16 @@ type beadsErrorMsg struct {
 
 type tickMsg time.Time
 
+type sessionStartedMsg struct {
+	beadID       string
+	worktreePath string
+}
+
+type sessionErrorMsg struct {
+	beadID string
+	err    error
+}
+
 // Commands
 
 // loadBeadsCmd returns a command that fetches beads from the CLI
@@ -549,6 +637,83 @@ func tickEvery(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// startSessionCmd creates a worktree, tmux session, and starts monitoring
+func (m Model) startSessionCmd(beadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Create worktree for the task
+		baseBranch := "main" // TODO: Make configurable
+		worktree, err := m.worktreeManager.Create(ctx, beadID, baseBranch)
+		if err != nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create worktree: %w", err)}
+		}
+
+		// Create tmux session
+		err = m.tmuxClient.NewSession(ctx, beadID, worktree.Path)
+		if err != nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+		}
+
+		// Send Claude command to session
+		claudeCmd := "claude" // TODO: Make configurable or add more context
+		err = m.tmuxClient.SendKeys(ctx, beadID, claudeCmd)
+		if err != nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to send keys: %w", err)}
+		}
+
+		// Create session record
+		now := time.Now()
+		session := &domain.Session{
+			BeadID:    beadID,
+			State:     domain.SessionBusy,
+			StartedAt: &now,
+			Worktree:  worktree.Path,
+		}
+		m.sessions[beadID] = session
+
+		// Start monitoring the session
+		// Note: We need a way to pass the tea.Program to the monitor
+		// For now, we'll skip this and implement it properly later
+		// m.sessionMonitor.Start(ctx, beadID, program)
+
+		return sessionStartedMsg{beadID: beadID, worktreePath: worktree.Path}
+	}
+}
+
+// stopSessionCmd stops the tmux session, monitoring, and optionally cleans up worktree
+func (m Model) stopSessionCmd(beadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Stop monitoring
+		m.sessionMonitor.Stop(beadID)
+
+		// Kill tmux session
+		err := m.tmuxClient.KillSession(ctx, beadID)
+		if err != nil {
+			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to kill tmux session: %w", err)}
+		}
+
+		// Remove session record
+		delete(m.sessions, beadID)
+
+		// Release port if allocated
+		m.portAllocator.Release(beadID)
+
+		// TODO: Optionally delete worktree (should probably ask user first)
+		// err = m.worktreeManager.Delete(ctx, beadID)
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Session stopped: %s", beadID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+		return nil
+	}
 }
 
 // Helper methods
@@ -616,16 +781,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Close the overlay first
 	m.overlayStack.Pop()
 
+	task, session := m.getCurrentTaskAndSession()
+	if task == nil {
+		return m, nil
+	}
+
 	// Handle the selection based on key
 	switch msg.Key {
 	// Session actions
 	case "s":
-		// TODO: Start session
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Start session (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Start session
+		return m, m.startSessionCmd(task.ID)
 	case "S":
 		// TODO: Start session + work
 		m.toasts = append(m.toasts, Toast{
@@ -634,12 +800,20 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 	case "a":
-		// TODO: Attach to session
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Attach to session (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Attach to session
+		if session != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", task.ID),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		} else {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
 	case "p":
 		// TODO: Pause session
 		m.toasts = append(m.toasts, Toast{
@@ -648,12 +822,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 	case "x":
-		// TODO: Stop session
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Stop session (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Stop session
+		if session != nil {
+			return m, m.stopSessionCmd(task.ID)
+		} else {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
 	case "R":
 		// TODO: Resume session
 		m.toasts = append(m.toasts, Toast{
