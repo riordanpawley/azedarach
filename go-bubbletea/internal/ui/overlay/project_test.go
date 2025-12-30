@@ -30,8 +30,8 @@ func TestNewProjectSelector(t *testing.T) {
 		t.Errorf("expected cursor at 0, got %d", selector.cursor)
 	}
 
-	if selector.mode != modeList {
-		t.Errorf("expected mode to be modeList, got %d", selector.mode)
+	if selector.mode != projectModeList {
+		t.Errorf("expected mode to be projectModeList, got %d", selector.mode)
 	}
 }
 
@@ -46,7 +46,7 @@ func TestProjectSelector_Title(t *testing.T) {
 	}
 
 	// Test actions mode
-	selector.mode = modeActions
+	selector.mode = projectModeActions
 	title = selector.Title()
 	if title != "Add Project" {
 		t.Errorf("expected title 'Add Project', got %s", title)
@@ -73,7 +73,7 @@ func TestProjectSelector_Size(t *testing.T) {
 	}
 
 	// Test actions mode
-	selector.mode = modeActions
+	selector.mode = projectModeActions
 	width, height = selector.Size()
 	if width <= 0 {
 		t.Errorf("expected positive width, got %d", width)
@@ -305,11 +305,11 @@ func TestProjectSelector_EscapeKey(t *testing.T) {
 	}
 
 	// Test escape in actions mode
-	selector.mode = modeActions
+	selector.mode = projectModeActions
 	_, cmd = selector.Update(msg)
 
 	// Should return to list mode, not close
-	if selector.mode != modeList {
+	if selector.mode != projectModeList {
 		t.Error("expected to return to list mode")
 	}
 }
@@ -345,7 +345,7 @@ func TestProjectSelector_ActionMode(t *testing.T) {
 	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}
 	selector.Update(msg)
 
-	if selector.mode != modeActions {
+	if selector.mode != projectModeActions {
 		t.Error("expected to enter actions mode")
 	}
 
@@ -406,7 +406,7 @@ func TestProjectSelector_View_WithProjects(t *testing.T) {
 func TestProjectSelector_View_ActionsMode(t *testing.T) {
 	registry := &config.ProjectsRegistry{}
 	selector := NewProjectSelector(registry)
-	selector.mode = modeActions
+	selector.mode = projectModeActions
 
 	view := selector.View()
 
@@ -451,10 +451,10 @@ func TestProjectSelector_GetMaxCursor(t *testing.T) {
 		mode           projectSelectorMode
 		expectedMax    int
 	}{
-		{"empty list mode", 0, modeList, 0},
-		{"one project list mode", 1, modeList, 0},
-		{"three projects list mode", 3, modeList, 2},
-		{"actions mode", 0, modeActions, 2},
+		{"empty list mode", 0, projectModeList, 0},
+		{"one project list mode", 1, projectModeList, 0},
+		{"three projects list mode", 3, projectModeList, 2},
+		{"actions mode", 0, projectModeActions, 2},
 	}
 
 	for _, tt := range tests {

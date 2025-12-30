@@ -1,18 +1,32 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
+
+// MergeTarget represents a target that can be merged into
+type MergeTarget struct {
+	ID          string        // "main" or task ID
+	Label       string        // Display label
+	IsMain      bool          // Whether this is the main branch
+	Status      domain.Status // Task status (if not main)
+	HasWorktree bool          // Whether this target has a worktree
+}
 
 // MergeSelectOverlay allows selecting a merge target task
 type MergeSelectOverlay struct {
-	sourceTask domain.Task
-	candidates []domain.Task
+	source     *domain.Task  // The bead being merged FROM
+	candidates []MergeTarget // Beads that can be merged INTO (including main)
 	cursor     int
-	styles     *Styles
+	onMerge    func(targetID string) tea.Cmd
+	onCancel   func() tea.Cmd
+	overlayStyles     *Styles
 }
 
 // MergeTargetSelectedMsg is sent when a merge target is selected
@@ -22,12 +36,19 @@ type MergeTargetSelectedMsg struct {
 }
 
 // NewMergeSelectOverlay creates a new merge target selection overlay
-func NewMergeSelectOverlay(sourceTask domain.Task, candidates []domain.Task) *MergeSelectOverlay {
+func NewMergeSelectOverlay(
+	source *domain.Task,
+	candidates []MergeTarget,
+	onMerge func(targetID string) tea.Cmd,
+	onCancel func() tea.Cmd,
+) *MergeSelectOverlay {
 	return &MergeSelectOverlay{
-		sourceTask: sourceTask,
+		source:     source,
 		candidates: candidates,
 		cursor:     0,
-		styles:     New(),
+		onMerge:    onMerge,
+		onCancel:   onCancel,
+		overlayStyles:     New(),
 	}
 }
 
@@ -42,36 +63,21 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "q":
-			// Cancel merge selection
+			if m.onCancel != nil {
+				return m, m.onCancel()
+			}
 			return m, func() tea.Msg { return CloseOverlayMsg{} }
 
 		case "j", "down":
-			if m.cursor < len(m.candidates)-1 {
-				m.cursor++
-			}
+			m.moveCursorDown()
 			return m, nil
 
 		case "k", "up":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.moveCursorUp()
 			return m, nil
 
 		case "enter":
-			// Select current candidate
-			if m.cursor >= 0 && m.cursor < len(m.candidates) {
-				target := m.candidates[m.cursor]
-				return m, func() tea.Msg {
-					return SelectionMsg{
-						Key: "merge",
-						Value: MergeTargetSelectedMsg{
-							SourceID: m.sourceTask.ID,
-							TargetID: target.ID,
-						},
-					}
-				}
-			}
-			return m, nil
+			return m, m.selectCurrent()
 		}
 	}
 
@@ -82,101 +88,123 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *MergeSelectOverlay) View() string {
 	var b strings.Builder
 
-	// Source task header
-	header := m.styles.MenuItem.Bold(true).Render("Merge from:")
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	sourceInfo := m.formatTask(m.sourceTask, false)
-	b.WriteString("  " + sourceInfo)
+	// Header showing source bead
+	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID))
+	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")
 
-	// Target selection
-	targetHeader := m.styles.MenuItem.Bold(true).Render("Select merge target:")
-	b.WriteString(targetHeader)
-	b.WriteString("\n")
-
+	// List of candidates
 	if len(m.candidates) == 0 {
-		noTasks := m.styles.MenuItemDisabled.Render("  No eligible tasks found")
-		b.WriteString(noTasks)
+		noTasks := m.overlayStyles.MenuItemDisabled.Render("No eligible merge targets found")
+		b.WriteString("  " + noTasks)
 		b.WriteString("\n")
 	} else {
-		for i, task := range m.candidates {
-			selected := i == m.cursor
-			taskInfo := m.formatTask(task, selected)
-			b.WriteString(taskInfo)
+		for i, candidate := range m.candidates {
+			line := m.renderCandidate(candidate, i == m.cursor)
+			b.WriteString(line)
 			b.WriteString("\n")
 		}
 	}
 
-	// Footer
+	// Footer with help text
 	b.WriteString("\n")
-	footer := m.styles.Footer.Render("j/k: Navigate • Enter: Select • Esc: Cancel")
-	b.WriteString(footer)
+	footer := "j/k: navigate • Enter: select • Esc: cancel"
+	b.WriteString(m.overlayStyles.Footer.Render(footer))
 
 	return b.String()
 }
 
-// formatTask formats a task for display
-func (m *MergeSelectOverlay) formatTask(task domain.Task, selected bool) string {
+// renderCandidate renders a single merge target candidate
+func (m *MergeSelectOverlay) renderCandidate(target MergeTarget, isActive bool) string {
 	var parts []string
 
 	// Cursor indicator
-	if selected {
-		parts = append(parts, m.styles.MenuItemActive.Render("▸"))
-	} else {
-		parts = append(parts, " ")
+	cursor := "  "
+	if isActive {
+		cursor = lipgloss.NewStyle().Foreground(styles.Blue).Render("▸ ")
 	}
+	parts = append(parts, cursor)
 
-	// Task type and ID
-	typeStyle := m.styles.MenuKey
-	if selected {
-		typeStyle = m.styles.MenuItemActive
+	// Main branch gets special rendering
+	if target.IsMain {
+		label := "main"
+		if isActive {
+			label = m.overlayStyles.MenuItemActive.Render(label)
+		} else {
+			label = lipgloss.NewStyle().
+				Foreground(styles.Green).
+				Bold(true).
+				Render(label)
+		}
+		parts = append(parts, label)
+		parts = append(parts, m.overlayStyles.MenuItemDisabled.Render("(main branch)"))
+		return strings.Join(parts, "")
 	}
-	parts = append(parts, typeStyle.Render("["+task.Type.Short()+"]"))
 
 	// Task ID
-	idStyle := m.styles.MenuItem
-	if selected {
-		idStyle = m.styles.MenuItemActive
+	idStyle := m.overlayStyles.MenuKey
+	if isActive {
+		idStyle = lipgloss.NewStyle().Foreground(styles.Yellow).Bold(true)
 	}
-	parts = append(parts, idStyle.Render(task.ID))
+	parts = append(parts, idStyle.Render(target.ID))
 
-	// Task title
-	titleStyle := m.styles.MenuItem
-	if selected {
-		titleStyle = m.styles.MenuItemActive.Bold(true)
+	// Status indicator with color
+	statusColor := styles.StatusColors[target.Status.String()]
+	statusStyle := lipgloss.NewStyle().Foreground(statusColor)
+	statusText := fmt.Sprintf("[%s]", target.Status)
+	parts = append(parts, statusStyle.Render(statusText))
+
+	// Label (task title)
+	labelStyle := m.overlayStyles.MenuItem
+	if isActive {
+		labelStyle = m.overlayStyles.MenuItemActive
 	}
-	parts = append(parts, titleStyle.Render(task.Title))
+	parts = append(parts, labelStyle.Render(target.Label))
 
-	// Status badge
-	statusBadge := m.formatStatus(task.Status, selected)
-	parts = append(parts, statusBadge)
+	// Worktree indicator
+	if !target.HasWorktree {
+		parts = append(parts, m.overlayStyles.MenuItemDisabled.Render("(no worktree)"))
+	}
 
 	return strings.Join(parts, " ")
 }
 
-// formatStatus formats a status badge
-func (m *MergeSelectOverlay) formatStatus(status domain.Status, selected bool) string {
-	var color = m.styles.MenuItem.GetForeground()
+// moveCursorDown moves the cursor to the next candidate
+func (m *MergeSelectOverlay) moveCursorDown() {
+	if len(m.candidates) == 0 {
+		return
+	}
+	m.cursor = (m.cursor + 1) % len(m.candidates)
+}
 
-	switch status {
-	case domain.StatusOpen:
-		color = m.styles.Footer.GetForeground()
-	case domain.StatusInProgress:
-		color = m.styles.MenuKey.GetForeground()
-	case domain.StatusBlocked:
-		color = m.styles.MenuItemDisabled.GetForeground()
-	case domain.StatusDone:
-		color = m.styles.MenuItemActive.GetForeground()
+// moveCursorUp moves the cursor to the previous candidate
+func (m *MergeSelectOverlay) moveCursorUp() {
+	if len(m.candidates) == 0 {
+		return
+	}
+	m.cursor = (m.cursor - 1 + len(m.candidates)) % len(m.candidates)
+}
+
+// selectCurrent selects the current candidate
+func (m *MergeSelectOverlay) selectCurrent() tea.Cmd {
+	if m.cursor < 0 || m.cursor >= len(m.candidates) {
+		return nil
 	}
 
-	style := m.styles.MenuItem.Foreground(color)
-	if selected {
-		style = style.Bold(true)
+	target := m.candidates[m.cursor]
+	if m.onMerge != nil {
+		return m.onMerge(target.ID)
 	}
 
-	return style.Render("(" + string(status) + ")")
+	return func() tea.Msg {
+		return SelectionMsg{
+			Key: "merge",
+			Value: MergeTargetSelectedMsg{
+				SourceID: m.source.ID,
+				TargetID: target.ID,
+			},
+		}
+	}
 }
 
 // Title returns the overlay title
@@ -186,11 +214,14 @@ func (m *MergeSelectOverlay) Title() string {
 
 // Size returns the overlay dimensions
 func (m *MergeSelectOverlay) Size() (width, height int) {
-	// Width: enough for full task info
-	// Height: header + source + candidates + footer + padding
+	// Width: enough for the longest line
+	// Height: header + candidates + footer + padding
 	candidateLines := len(m.candidates)
+	if candidateLines == 0 {
+		candidateLines = 1 // "No eligible merge targets" message
+	}
 	if candidateLines > 15 {
 		candidateLines = 15 // Cap visible candidates
 	}
-	return 80, 6 + candidateLines // header(2) + source(2) + target header(1) + candidates + footer(2)
+	return 60, 4 + candidateLines // header(2) + candidates + footer(2)
 }

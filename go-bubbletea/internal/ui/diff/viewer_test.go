@@ -54,12 +54,12 @@ func TestDiffViewer_LoadDiffMsg(t *testing.T) {
 +line2
 `
 
-	msg := loadDiffMsg{output: diffOutput, err: nil}
+	msg := LoadDiffMsg{Output: diffOutput, Err: nil}
 	updatedModel, _ := viewer.Update(msg)
 	viewer = updatedModel.(*DiffViewer)
 
 	if viewer.loading {
-		t.Error("Expected loading to be false after loadDiffMsg")
+		t.Error("Expected loading to be false after LoadDiffMsg")
 	}
 
 	if len(viewer.files) != 1 {

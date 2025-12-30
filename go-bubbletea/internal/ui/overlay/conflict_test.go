@@ -31,17 +31,17 @@ func TestConflictDialog_Size(t *testing.T) {
 		{
 			name:           "no files",
 			files:          []string{},
-			expectedHeight: 13, // 8 + 0 + 5
+			expectedHeight: 8, // header(2) + separator(1) + options(3) + footer(2)
 		},
 		{
 			name:           "few files",
 			files:          []string{"file1.go", "file2.go", "file3.go"},
-			expectedHeight: 16, // 8 + 3 + 5
+			expectedHeight: 11, // 8 + 3 files
 		},
 		{
 			name:           "many files capped at 10",
 			files:          make([]string, 20),
-			expectedHeight: 23, // 8 + 10 + 5
+			expectedHeight: 18, // 8 + 10 files (capped)
 		},
 	}
 
@@ -62,30 +62,30 @@ func TestConflictDialog_Navigation(t *testing.T) {
 
 	// Move down
 	m, _ := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 1, dialog.cursor)
 
 	m, _ = dialog.Update(tea.KeyMsg{Type: tea.KeyDown})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 2, dialog.cursor)
 
 	// Can't go past end
 	m, _ = dialog.Update(tea.KeyMsg{Type: tea.KeyDown})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 2, dialog.cursor)
 
 	// Move up
 	m, _ = dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 1, dialog.cursor)
 
 	m, _ = dialog.Update(tea.KeyMsg{Type: tea.KeyUp})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 0, dialog.cursor)
 
 	// Can't go past start
 	m, _ = dialog.Update(tea.KeyMsg{Type: tea.KeyUp})
-	dialog = m.(*ConflictDialog)
+	dialog = m.(*ConflictOverlay)
 	assert.Equal(t, 0, dialog.cursor)
 }
 
@@ -171,7 +171,7 @@ func TestConflictDialog_View(t *testing.T) {
 	assert.Contains(t, view, "Open manually")
 	assert.Contains(t, view, "[a]")
 	assert.Contains(t, view, "Abort merge")
-	assert.Contains(t, view, "j/k: Navigate")
+	assert.Contains(t, view, "j/k: navigate")
 }
 
 func TestConflictDialog_Init(t *testing.T) {

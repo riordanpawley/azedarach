@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -13,14 +14,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/network"
+	"github.com/riordanpawley/azedarach/internal/services/pr"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/diff"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -124,6 +128,15 @@ type Model struct {
 	// Project registry
 	projectRegistry *config.ProjectsRegistry
 
+	// Image attachment service
+	attachmentService *attachment.Service
+
+	// PR workflow service
+	prWorkflow *pr.PRWorkflow
+
+	// Dev server manager
+	devServerManager *devserver.Manager
+
 	// Logger
 	logger *slog.Logger
 
@@ -184,6 +197,17 @@ func New(cfg *config.Config) Model {
 		}
 	}
 
+	// Initialize attachment service
+	beadsPath := filepath.Join(repoDir, ".beads")
+	attachmentSvc := attachment.NewService(beadsPath, logger)
+
+	// Initialize PR workflow
+	prRunner := &pr.ExecRunner{}
+	prWorkflow := pr.NewPRWorkflow(prRunner, logger)
+
+	// Initialize dev server manager
+	devServerMgr := devserver.NewManager(portAllocator, logger)
+
 	return Model{
 		tasks:           []domain.Task{},
 		sessions:        make(map[string]*domain.Session),
@@ -205,10 +229,13 @@ func New(cfg *config.Config) Model {
 		portAllocator:   portAllocator,
 		gitClient:       gitClient,
 		networkChecker:  networkChecker,
-		projectRegistry: registry,
-		isOnline:        true, // Optimistically assume online
-		logger:          logger,
-		usePlaceholder:  false, // Use real data from beads
+		projectRegistry:   registry,
+		isOnline:          true, // Optimistically assume online
+		attachmentService: attachmentSvc,
+		prWorkflow:        prWorkflow,
+		devServerManager:  devServerMgr,
+		logger:            logger,
+		usePlaceholder:    false, // Use real data from beads
 	}
 }
 
@@ -466,6 +493,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reload beads to show new task
 		return m, m.loadBeadsCmd()
+
+	// PR creation overlay messages
+	case overlay.PRCreatedMsg:
+		m.overlayStack.Pop()
+		return m, m.createPRWithOverlayCmd(msg)
+
+	case prCreatedResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to create PR: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("PR created: %s", msg.url),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+
+	// Diff viewer messages
+	case diff.LoadDiffMsg:
+		// Route to diff viewer overlay if open
+		if !m.overlayStack.IsEmpty() {
+			if viewer, ok := m.overlayStack.Current().(*diff.DiffViewer); ok {
+				newModel, cmd := viewer.Update(msg)
+				// Update the overlay in the stack
+				if newViewer, ok := newModel.(*diff.DiffViewer); ok {
+					m.overlayStack.Pop()
+					m.overlayStack.Push(newViewer)
+				}
+				return m, cmd
+			}
+		}
+		return m, nil
+
+	// Image attachment messages
+	case overlay.AttachmentActionMsg:
+		if msg.Action == "attached" {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastSuccess,
+				Message: fmt.Sprintf("Image attached: %s", msg.Attachment.Filename),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+		}
+		return m, nil
+
+	// PR overlay open result
+	case openPROverlayResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to get branch: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		// Open the PR creation overlay with branch info
+		prOverlay := overlay.NewPRCreateOverlay(msg.branch, "main", msg.beadID)
+		return m, tea.Batch(m.overlayStack.Push(prOverlay), prOverlay.Init())
 	}
 
 	return m, nil
@@ -1149,7 +1238,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		})
 
 	case "P":
-		// Create PR
+		// Create PR (with overlay)
 		if session == nil {
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastWarning,
@@ -1158,10 +1247,11 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.createPRCmd(session.Worktree, task.ID)
+		// Get current branch name and open PR creation overlay
+		return m, m.openPROverlayCmd(session.Worktree, task.ID)
 
 	case "f":
-		// Show diff
+		// Show diff viewer
 		if session == nil {
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastWarning,
@@ -1170,7 +1260,49 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.showDiffCmd(session.Worktree)
+		// Open diff viewer overlay
+		viewer := diff.NewDiffViewer(session.Worktree)
+		cmd := m.overlayStack.Push(viewer)
+		return m, tea.Batch(cmd, viewer.LoadDiff(context.Background(), m.gitClient))
+
+	case "i":
+		// Image attachments
+		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
+		return m, tea.Batch(m.overlayStack.Push(attachOverlay), attachOverlay.Init())
+
+	case "r":
+		// Dev server menu
+		servers := m.getDevServerInfo()
+		devOverlay := overlay.NewDevServerOverlay(
+			servers,
+			task.ID,
+			func(serverID string) tea.Cmd { return m.toggleDevServer(serverID) },
+			func(serverID string) tea.Cmd { return m.viewDevServer(serverID) },
+			func(serverID string) tea.Cmd { return m.restartDevServer(serverID) },
+			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+		)
+		return m, m.overlayStack.Push(devOverlay)
+
+	case "b":
+		// Merge bead into... (merge select mode)
+		candidates := m.getMergeCandidates(task)
+		mergeOverlay := overlay.NewMergeSelectOverlay(
+			task,
+			candidates,
+			func(targetID string) tea.Cmd {
+				return func() tea.Msg {
+					return overlay.SelectionMsg{
+						Key: "merge",
+						Value: overlay.MergeTargetSelectedMsg{
+							SourceID: task.ID,
+							TargetID: targetID,
+						},
+					}
+				}
+			},
+			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
+		)
+		return m, m.overlayStack.Push(mergeOverlay)
 
 	// Task actions
 	case "h":
@@ -1498,4 +1630,134 @@ func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			err: fmt.Errorf("task creation not yet implemented - need to add Create() method to beads.Client"),
 		}
 	}
+}
+
+// PR creation with overlay
+
+type prCreatedResultMsg struct {
+	url string
+	err error
+}
+
+type openPROverlayResultMsg struct {
+	branch string
+	beadID string
+	err    error
+}
+
+// openPROverlayCmd gets the current branch and opens the PR creation overlay
+func (m Model) openPROverlayCmd(worktree, beadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
+		if err != nil {
+			return openPROverlayResultMsg{err: err}
+		}
+		return openPROverlayResultMsg{branch: branch, beadID: beadID}
+	}
+}
+
+// createPRWithOverlayCmd creates a PR using the pr workflow service
+func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		result, err := m.prWorkflow.Create(ctx, pr.CreatePRParams{
+			Title:      msg.Title,
+			Body:       msg.Body,
+			Branch:     msg.Branch,
+			BaseBranch: msg.BaseBranch,
+			Draft:      msg.Draft,
+			BeadID:     msg.BeadID,
+		})
+		if err != nil {
+			return prCreatedResultMsg{err: err}
+		}
+
+		return prCreatedResultMsg{url: result.URL}
+	}
+}
+
+// Dev server helpers
+
+func (m Model) getDevServerInfo() []overlay.DevServerInfo {
+	if m.devServerManager == nil {
+		return nil
+	}
+
+	servers := m.devServerManager.List()
+	info := make([]overlay.DevServerInfo, 0, len(servers))
+	for _, srv := range servers {
+		info = append(info, overlay.DevServerInfo{
+			ID:     srv.ID,
+			Name:   srv.Name,
+			Port:   srv.Port,
+			Status: srv.Status,
+			Uptime: srv.Uptime,
+		})
+	}
+	return info
+}
+
+func (m Model) toggleDevServer(serverID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.devServerManager.Toggle(ctx, serverID); err != nil {
+			return sessionErrorMsg{beadID: serverID, err: err}
+		}
+		return nil
+	}
+}
+
+func (m Model) viewDevServer(serverID string) tea.Cmd {
+	return func() tea.Msg {
+		// For now, show a toast with instructions
+		return Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Run: tmux attach-session -t devserver-%s", serverID),
+			Expires: time.Now().Add(5 * time.Second),
+		}
+	}
+}
+
+func (m Model) restartDevServer(serverID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if err := m.devServerManager.Restart(ctx, serverID); err != nil {
+			return sessionErrorMsg{beadID: serverID, err: err}
+		}
+		return nil
+	}
+}
+
+// Merge helpers
+
+func (m Model) getMergeCandidates(source *domain.Task) []overlay.MergeTarget {
+	candidates := []overlay.MergeTarget{
+		{
+			ID:     "main",
+			Label:  "main branch",
+			IsMain: true,
+		},
+	}
+
+	// Add sibling tasks that have worktrees
+	for _, task := range m.tasks {
+		if task.ID == source.ID {
+			continue
+		}
+
+		// Check if task has an active session (and thus a worktree)
+		_, hasSession := m.sessions[task.ID]
+
+		candidates = append(candidates, overlay.MergeTarget{
+			ID:          task.ID,
+			Label:       task.Title,
+			IsMain:      false,
+			Status:      task.Status,
+			HasWorktree: hasSession,
+		})
+	}
+
+	return candidates
 }

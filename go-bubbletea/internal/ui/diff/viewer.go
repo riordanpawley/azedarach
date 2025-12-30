@@ -43,17 +43,17 @@ func NewDiffViewer(worktree string) *DiffViewer {
 	}
 }
 
-// loadDiffMsg is sent when diff loading completes
-type loadDiffMsg struct {
-	output string
-	err    error
+// LoadDiffMsg is sent when diff loading completes
+type LoadDiffMsg struct {
+	Output string
+	Err    error
 }
 
 // LoadDiff loads the git diff for the worktree
 func (d *DiffViewer) LoadDiff(ctx context.Context, gitClient *git.Client) tea.Cmd {
 	return func() tea.Msg {
 		output, err := gitClient.Diff(ctx, d.worktree)
-		return loadDiffMsg{output: output, err: err}
+		return LoadDiffMsg{Output: output, Err: err}
 	}
 }
 
@@ -66,15 +66,15 @@ func (d *DiffViewer) Init() tea.Cmd {
 // Update handles messages
 func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case loadDiffMsg:
+	case LoadDiffMsg:
 		d.loading = false
-		if msg.err != nil {
-			d.err = msg.err
+		if msg.Err != nil {
+			d.err = msg.Err
 			return d, nil
 		}
 
-		d.diffOutput = msg.output
-		d.files = ParseUnifiedDiff(msg.output)
+		d.diffOutput = msg.Output
+		d.files = ParseUnifiedDiff(msg.Output)
 		return d, nil
 
 	case tea.KeyMsg:
