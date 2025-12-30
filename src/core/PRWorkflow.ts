@@ -22,6 +22,7 @@ import {
 } from "./BeadsClient.js"
 import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
 import { FileLockManager } from "./FileLockManager.js"
+import { ImageAttachmentService } from "./ImageAttachmentService.js"
 import { getBeadSessionName } from "./paths.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
@@ -762,6 +763,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		FileLockManager.Default,
 		AppConfig.Default,
 		OfflineService.Default,
+		ImageAttachmentService.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -772,6 +774,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const fileLockManager = yield* FileLockManager
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
+		const imageAttachmentService = yield* ImageAttachmentService
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
 
@@ -970,6 +973,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					if (closeBead) {
 						yield* beadsClient
 							.update(beadId, { status: "closed" })
+							.pipe(Effect.catchAll(() => Effect.void))
+
+						// Clean up images for the closed bead (temporary debugging images)
+						// This prevents unbounded growth of .beads/images/ directory
+						yield* imageAttachmentService
+							.cleanupImagesForIssue(beadId)
 							.pipe(Effect.catchAll(() => Effect.void))
 
 						// Sync the closed status to JSONL and commit it
@@ -1328,6 +1337,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${beadId}: ${e}`)),
 							)
 
+						// Clean up images for the closed bead (temporary debugging images)
+						yield* imageAttachmentService
+							.cleanupImagesForIssue(beadId)
+							.pipe(Effect.catchAll(() => Effect.void))
+
 						// If this is an epic being merged to main (not to another epic branch),
 						// also close all its child tasks
 						if (bead.issue_type === "epic" && !parentEpic) {
@@ -1345,6 +1359,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 											Effect.logWarning(`Failed to close child ${child.id}: ${e}`),
 										),
 									)
+									// Clean up images for each closed child
+									yield* imageAttachmentService
+										.cleanupImagesForIssue(child.id)
+										.pipe(Effect.catchAll(() => Effect.void))
 								}
 							}
 
@@ -2160,6 +2178,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							Effect.logWarning(`Failed to close source bead ${sourceBeadId}: ${e}`),
 						),
 					)
+
+					// Clean up images for the closed source bead
+					yield* imageAttachmentService
+						.cleanupImagesForIssue(sourceBeadId)
+						.pipe(Effect.catchAll(() => Effect.void))
 
 					// Sync the closed status
 					yield* withSyncLock(
