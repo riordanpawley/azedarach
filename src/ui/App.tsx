@@ -16,6 +16,7 @@ import {
 	claudeCreateSessionAtom,
 	createTaskAtom,
 	currentProjectAtom,
+	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
 	focusedBeadPrimaryDevServerAtom,
@@ -162,6 +163,14 @@ export const App = () => {
 
 	// Dependency phases for drill-down mode
 	const phases = useAtomValue(drillDownPhasesAtom)
+
+	// Drilldown epic ID (when viewing inside an epic)
+	// Convert null to undefined for cleaner prop typing
+	const drillDownEpicId =
+		useAtomValue(
+			drillDownEpicAtom,
+			Result.getOrElse(() => null),
+		) ?? undefined
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
@@ -340,6 +349,7 @@ export const App = () => {
 					devServerStatus={displayDevServer.status}
 					devServerPort={displayDevServer.port}
 					workflowMode={workflowMode}
+					drillDownEpicId={drillDownEpicId}
 				/>
 			)}
 

@@ -570,6 +570,27 @@ export interface PRWorkflowService {
 		| TmuxError,
 		CommandExecutor.CommandExecutor
 	>
+
+	/**
+	 * Get the target branch for a bead's merge/PR operations.
+	 *
+	 * For epic children: returns the parent epic's branch
+	 * For standalone tasks/epics: returns the configured base branch (usually "main")
+	 *
+	 * @example
+	 * ```ts
+	 * const { targetBranch, isEpicChild } = yield* prWorkflow.getTargetBranch(beadId)
+	 * // targetBranch: "main" or "az-epic-123"
+	 * // isEpicChild: true if merging to parent epic
+	 * ```
+	 */
+	readonly getTargetBranch: (
+		beadId: string,
+	) => Effect.Effect<
+		{ targetBranch: string; isEpicChild: boolean },
+		BeadsError | NotFoundError | ParseError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 // ============================================================================
@@ -2125,6 +2146,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					yield* Effect.log(
 						`Successfully merged ${sourceBeadId} into ${targetBeadId}. Source bead closed.`,
 					)
+				}),
+
+			getTargetBranch: (beadId: string) =>
+				Effect.gen(function* () {
+					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId)
+					return {
+						targetBranch: baseBranch,
+						isEpicChild: parentEpic !== undefined,
+					}
 				}),
 		}
 	}),
