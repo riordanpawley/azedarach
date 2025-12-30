@@ -228,7 +228,6 @@ func (d *DiffViewer) renderFiles() string {
 			path = fmt.Sprintf("%s → %s", file.OldPath, file.Path)
 		}
 
-		stats := fmt.Sprintf("+%d -%d", file.Additions, file.Deletions)
 		statsRendered := lipgloss.JoinHorizontal(
 			lipgloss.Left,
 			d.styles.FileStatsAdd.Render(fmt.Sprintf("+%d", file.Additions)),

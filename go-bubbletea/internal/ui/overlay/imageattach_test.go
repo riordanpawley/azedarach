@@ -25,8 +25,8 @@ func TestNewImageAttachOverlay(t *testing.T) {
 		t.Errorf("expected bead_id to be az-123, got %s", overlay.beadID)
 	}
 
-	if overlay.mode != modeList {
-		t.Errorf("expected mode to be modeList, got %v", overlay.mode)
+	if overlay.mode != imageAttachModeList {
+		t.Errorf("expected mode to be imageAttachModeList, got %v", overlay.mode)
 	}
 
 	if overlay.cursor != 0 {
@@ -158,15 +158,15 @@ func TestImageAttachOverlay_PreviewMode(t *testing.T) {
 	// Test enter to go to preview mode
 	msg := tea.KeyMsg{Type: tea.KeyEnter}
 	overlay.Update(msg)
-	if overlay.mode != modePreview {
-		t.Errorf("expected mode to be modePreview, got %v", overlay.mode)
+	if overlay.mode != imageAttachModePreview {
+		t.Errorf("expected mode to be imageAttachModePreview, got %v", overlay.mode)
 	}
 
 	// Test escape to go back to list mode
 	msg = tea.KeyMsg{Type: tea.KeyEsc}
 	overlay.Update(msg)
-	if overlay.mode != modeList {
-		t.Errorf("expected mode to be modeList, got %v", overlay.mode)
+	if overlay.mode != imageAttachModeList {
+		t.Errorf("expected mode to be imageAttachModeList, got %v", overlay.mode)
 	}
 }
 
