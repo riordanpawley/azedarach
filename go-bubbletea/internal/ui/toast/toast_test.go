@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 	"github.com/stretchr/testify/assert"
 )
@@ -13,7 +13,7 @@ import (
 func TestToastRenderer_Render_Empty(t *testing.T) {
 	renderer := New(styles.New())
 
-	result := renderer.Render([]app.Toast{}, 80)
+	result := renderer.Render([]types.Toast{}, 80)
 
 	assert.Equal(t, "", result, "Empty toast list should return empty string")
 }
@@ -21,9 +21,9 @@ func TestToastRenderer_Render_Empty(t *testing.T) {
 func TestToastRenderer_Render_SingleToast(t *testing.T) {
 	renderer := New(styles.New())
 
-	toasts := []app.Toast{
+	toasts := []types.Toast{
 		{
-			Level:   app.ToastInfo,
+			Level:   types.ToastInfo,
 			Message: "Test message",
 			Expires: time.Now().Add(5 * time.Second),
 		},
@@ -38,19 +38,19 @@ func TestToastRenderer_Render_SingleToast(t *testing.T) {
 func TestToastRenderer_Render_MultipleToasts(t *testing.T) {
 	renderer := New(styles.New())
 
-	toasts := []app.Toast{
+	toasts := []types.Toast{
 		{
-			Level:   app.ToastInfo,
+			Level:   types.ToastInfo,
 			Message: "First toast",
 			Expires: time.Now().Add(5 * time.Second),
 		},
 		{
-			Level:   app.ToastSuccess,
+			Level:   types.ToastSuccess,
 			Message: "Second toast",
 			Expires: time.Now().Add(5 * time.Second),
 		},
 		{
-			Level:   app.ToastError,
+			Level:   types.ToastError,
 			Message: "Third toast",
 			Expires: time.Now().Add(5 * time.Second),
 		},
@@ -73,17 +73,17 @@ func TestToastRenderer_Render_DifferentLevels(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		level app.ToastLevel
+		level types.ToastLevel
 	}{
-		{"Info", app.ToastInfo},
-		{"Success", app.ToastSuccess},
-		{"Warning", app.ToastWarning},
-		{"Error", app.ToastError},
+		{"Info", types.ToastInfo},
+		{"Success", types.ToastSuccess},
+		{"Warning", types.ToastWarning},
+		{"Error", types.ToastError},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toasts := []app.Toast{
+			toasts := []types.Toast{
 				{
 					Level:   tt.level,
 					Message: "Test " + tt.name,
@@ -104,12 +104,12 @@ func TestToastRenderer_styleForLevel(t *testing.T) {
 
 	tests := []struct {
 		name  string
-		level app.ToastLevel
+		level types.ToastLevel
 	}{
-		{"Info returns ToastInfo style", app.ToastInfo},
-		{"Success returns ToastSuccess style", app.ToastSuccess},
-		{"Warning returns ToastWarning style", app.ToastWarning},
-		{"Error returns ToastError style", app.ToastError},
+		{"Info returns ToastInfo style", types.ToastInfo},
+		{"Success returns ToastSuccess style", types.ToastSuccess},
+		{"Warning returns ToastWarning style", types.ToastWarning},
+		{"Error returns ToastError style", types.ToastError},
 	}
 
 	for _, tt := range tests {

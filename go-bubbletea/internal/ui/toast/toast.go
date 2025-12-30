@@ -2,7 +2,7 @@ package toast
 
 import (
 	"github.com/charmbracelet/lipgloss"
-	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -20,7 +20,7 @@ func New(styles *styles.Styles) *ToastRenderer {
 
 // Render renders a stack of toasts in the bottom-right corner
 // Returns empty string if no toasts to display
-func (r *ToastRenderer) Render(toasts []app.Toast, width int) string {
+func (r *ToastRenderer) Render(toasts []types.Toast, width int) string {
 	if len(toasts) == 0 {
 		return ""
 	}
@@ -41,13 +41,13 @@ func (r *ToastRenderer) Render(toasts []app.Toast, width int) string {
 }
 
 // styleForLevel returns the appropriate style for a toast level
-func (r *ToastRenderer) styleForLevel(level app.ToastLevel) lipgloss.Style {
+func (r *ToastRenderer) styleForLevel(level types.ToastLevel) lipgloss.Style {
 	switch level {
-	case app.ToastSuccess:
+	case types.ToastSuccess:
 		return r.styles.ToastSuccess
-	case app.ToastWarning:
+	case types.ToastWarning:
 		return r.styles.ToastWarning
-	case app.ToastError:
+	case types.ToastError:
 		return r.styles.ToastError
 	default:
 		return r.styles.ToastInfo
