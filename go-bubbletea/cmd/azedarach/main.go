@@ -17,13 +17,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/app"
+	"github.com/riordanpawley/azedarach/internal/config"
 )
 
 func main() {
 	// TODO: Parse CLI arguments
-	// TODO: Load configuration from .azedarach.json
+	// Load configuration
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
 
-	model := app.NewModel()
+	model := app.New(cfg)
 	program := tea.NewProgram(
 		model,
 		tea.WithAltScreen(),       // Use alternate screen buffer
