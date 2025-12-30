@@ -83,7 +83,6 @@ export interface FilterConfig {
 	readonly priority: ReadonlySet<number>
 	readonly type: ReadonlySet<IssueType>
 	readonly session: ReadonlySet<FilterSessionState>
-	readonly hideEpicSubtasks: boolean
 	/**
 	 * Filter to tasks not updated in N days.
 	 * null means no age filter.
@@ -100,7 +99,6 @@ export const DEFAULT_FILTER_CONFIG: FilterConfig = Data.struct({
 	priority: new Set<number>(),
 	type: new Set<IssueType>(),
 	session: new Set<FilterSessionState>(),
-	hideEpicSubtasks: true,
 	updatedDaysAgo: null,
 })
 
@@ -473,19 +471,6 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					}
 					return Data.struct({ ...config, session: newSet })
 				}),
-
-			/**
-			 * Toggle hideEpicSubtasks setting
-			 */
-			toggleHideEpicSubtasks: () =>
-				SubscriptionRef.update(
-					filterConfig,
-					(config): FilterConfig =>
-						Data.struct({
-							...config,
-							hideEpicSubtasks: !config.hideEpicSubtasks,
-						}),
-				),
 
 			/**
 			 * Set age filter in days.

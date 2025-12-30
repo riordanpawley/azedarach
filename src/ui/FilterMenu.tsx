@@ -306,19 +306,6 @@ export const FilterMenu = (props: FilterMenuProps) => {
 				{renderSubMenu()}
 
 				<text fg={theme.surface1}>{"─────────"}</text>
-
-				{/* Epic subtasks toggle */}
-				<box flexDirection="row" gap={1}>
-					<text fg={theme.mauve}>e</text>
-					<text fg={config.hideEpicSubtasks ? theme.green : theme.subtext0}>
-						{config.hideEpicSubtasks ? "●" : "○"}
-					</text>
-					<text fg={config.hideEpicSubtasks ? theme.green : theme.subtext0}>
-						Hide epic children
-					</text>
-				</box>
-
-				<text fg={theme.surface1}>{"─────────"}</text>
 				<box flexDirection="row" gap={1}>
 					<text fg={theme.overlay0}>c</text>
 					<text fg={theme.subtext0}>clear all</text>
