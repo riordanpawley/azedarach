@@ -645,6 +645,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const grouped = groupTasksByColumn(loadedTasks)
 				yield* SubscriptionRef.set(tasksByColumn, grouped)
 				yield* updateFilteredTasks()
+				yield* Effect.log(
+					`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+				)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
 		const requestRefresh = () =>
