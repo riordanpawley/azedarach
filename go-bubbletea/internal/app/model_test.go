@@ -38,7 +38,7 @@ func newTestModel() Model {
 // Helper to get cursor position in a model
 func getCursorPosition(m Model) Position {
 	columns := m.buildColumns()
-	return m.cursor.FindPosition(columns)
+	return m.nav.GetPosition(columns)
 }
 
 func TestHelperMethods(t *testing.T) {
@@ -46,14 +46,14 @@ func TestHelperMethods(t *testing.T) {
 
 	t.Run("currentColumn", func(t *testing.T) {
 		// Set cursor to task in Open column
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		col := m.currentColumn()
 		if len(col) != 2 {
 			t.Errorf("Expected 2 tasks in Open column, got %d", len(col))
 		}
 
 		// Set cursor to task in InProgress column
-		m.cursor.SetTask("az-3", 1)
+		m.nav.SelectTask("az-3", 1)
 		col = m.currentColumn()
 		if len(col) != 1 {
 			t.Errorf("Expected 1 task in In Progress column, got %d", len(col))
@@ -72,12 +72,12 @@ func TestHelperMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("Cursor.FindPosition", func(t *testing.T) {
+	t.Run("NavigationService.GetPosition", func(t *testing.T) {
 		columns := m.buildColumns()
 
 		// Test finding task by ID
-		m.cursor.SetTask("az-1", 0)
-		pos := m.cursor.FindPosition(columns)
+		m.nav.SelectTask("az-1", 0)
+		pos := m.nav.GetPosition(columns)
 		if !pos.Valid {
 			t.Error("Expected valid position for az-1")
 		}
@@ -86,22 +86,22 @@ func TestHelperMethods(t *testing.T) {
 		}
 
 		// Test finding second task in Open column
-		m.cursor.SetTask("az-2", 0)
-		pos = m.cursor.FindPosition(columns)
+		m.nav.SelectTask("az-2", 0)
+		pos = m.nav.GetPosition(columns)
 		if pos.Column != 0 || pos.Task != 1 {
 			t.Errorf("Expected az-2 at (0,1), got (%d,%d)", pos.Column, pos.Task)
 		}
 
 		// Test finding task in different column
-		m.cursor.SetTask("az-4", 2)
-		pos = m.cursor.FindPosition(columns)
+		m.nav.SelectTask("az-4", 2)
+		pos = m.nav.GetPosition(columns)
 		if pos.Column != 2 || pos.Task != 0 {
 			t.Errorf("Expected az-4 at (2,0), got (%d,%d)", pos.Column, pos.Task)
 		}
 
 		// Test fallback when task not found
-		m.cursor.SetTask("nonexistent", 1)
-		pos = m.cursor.FindPosition(columns)
+		m.nav.SelectTask("nonexistent", 1)
+		pos = m.nav.GetPosition(columns)
 		if pos.Column != 1 {
 			t.Errorf("Expected fallback to column 1, got %d", pos.Column)
 		}
@@ -128,7 +128,7 @@ func TestNormalModeNavigation(t *testing.T) {
 
 	t.Run("vertical navigation - down", func(t *testing.T) {
 		// Start at first task in Open column (az-1)
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 		newModel := result.(Model)
 
@@ -136,14 +136,14 @@ func TestNormalModeNavigation(t *testing.T) {
 		if pos.Task != 1 {
 			t.Errorf("Expected task index 1, got %d", pos.Task)
 		}
-		if newModel.cursor.TaskID != "az-2" {
-			t.Errorf("Expected cursor on az-2, got %s", newModel.cursor.TaskID)
+		if newModel.nav.GetCursor().TaskID != "az-2" {
+			t.Errorf("Expected cursor on az-2, got %s", newModel.nav.GetCursor().TaskID)
 		}
 	})
 
 	t.Run("vertical navigation - up", func(t *testing.T) {
 		// Start at second task in Open column (az-2)
-		m.cursor.SetTask("az-2", 0)
+		m.nav.SelectTask("az-2", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 		newModel := result.(Model)
 
@@ -151,14 +151,14 @@ func TestNormalModeNavigation(t *testing.T) {
 		if pos.Task != 0 {
 			t.Errorf("Expected task index 0, got %d", pos.Task)
 		}
-		if newModel.cursor.TaskID != "az-1" {
-			t.Errorf("Expected cursor on az-1, got %s", newModel.cursor.TaskID)
+		if newModel.nav.GetCursor().TaskID != "az-1" {
+			t.Errorf("Expected cursor on az-1, got %s", newModel.nav.GetCursor().TaskID)
 		}
 	})
 
 	t.Run("vertical navigation - up at boundary", func(t *testing.T) {
 		// Start at first task in Open column (az-1)
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 		newModel := result.(Model)
 
@@ -166,14 +166,14 @@ func TestNormalModeNavigation(t *testing.T) {
 		if pos.Task != 0 {
 			t.Errorf("Expected task index to stay at 0, got %d", pos.Task)
 		}
-		if newModel.cursor.TaskID != "az-1" {
-			t.Errorf("Expected cursor to stay on az-1, got %s", newModel.cursor.TaskID)
+		if newModel.nav.GetCursor().TaskID != "az-1" {
+			t.Errorf("Expected cursor to stay on az-1, got %s", newModel.nav.GetCursor().TaskID)
 		}
 	})
 
 	t.Run("horizontal navigation - right", func(t *testing.T) {
 		// Start at second task in Open column (az-2, index 1)
-		m.cursor.SetTask("az-2", 0)
+		m.nav.SelectTask("az-2", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
@@ -185,14 +185,14 @@ func TestNormalModeNavigation(t *testing.T) {
 		if pos.Task != 0 {
 			t.Errorf("Expected task index to be clamped to 0, got %d", pos.Task)
 		}
-		if newModel.cursor.TaskID != "az-3" {
-			t.Errorf("Expected cursor on az-3, got %s", newModel.cursor.TaskID)
+		if newModel.nav.GetCursor().TaskID != "az-3" {
+			t.Errorf("Expected cursor on az-3, got %s", newModel.nav.GetCursor().TaskID)
 		}
 	})
 
 	t.Run("horizontal navigation - left", func(t *testing.T) {
 		// Start at task in InProgress column (az-3)
-		m.cursor.SetTask("az-3", 1)
+		m.nav.SelectTask("az-3", 1)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
@@ -204,7 +204,7 @@ func TestNormalModeNavigation(t *testing.T) {
 
 	t.Run("horizontal navigation - left at boundary", func(t *testing.T) {
 		// Start at first task in Open column (az-1)
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
 
@@ -216,7 +216,7 @@ func TestNormalModeNavigation(t *testing.T) {
 
 	t.Run("horizontal navigation - right at boundary", func(t *testing.T) {
 		// Start at task in Done column (az-5)
-		m.cursor.SetTask("az-5", 3)
+		m.nav.SelectTask("az-5", 3)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
 
@@ -243,7 +243,7 @@ func TestHalfPageScroll(t *testing.T) {
 
 	t.Run("ctrl+d scrolls down", func(t *testing.T) {
 		// Start at first task in Open column
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		m.height = 24
 		initialPos := getCursorPosition(m)
 
@@ -258,7 +258,7 @@ func TestHalfPageScroll(t *testing.T) {
 
 	t.Run("ctrl+u scrolls up", func(t *testing.T) {
 		// Start at task 'e' (index 5) in Open column
-		m.cursor.SetTask("e", 0)
+		m.nav.SelectTask("e", 0)
 		m.height = 24
 		initialPos := getCursorPosition(m)
 
@@ -273,7 +273,7 @@ func TestHalfPageScroll(t *testing.T) {
 
 	t.Run("ctrl+u at top stays at 0", func(t *testing.T) {
 		// Start at first task
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyCtrlU})
 		newModel := result.(Model)
 
@@ -310,7 +310,7 @@ func TestGotoMode(t *testing.T) {
 
 	t.Run("gg goes to top", func(t *testing.T) {
 		// Start at task 'e' (index 5) in Open column
-		m.cursor.SetTask("e", 0)
+		m.nav.SelectTask("e", 0)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 		newModel := result.(Model)
@@ -326,7 +326,7 @@ func TestGotoMode(t *testing.T) {
 
 	t.Run("ge goes to end", func(t *testing.T) {
 		// Start at first task in Open column
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		m.mode = ModeGoto
 		col := m.currentColumn()
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
@@ -340,7 +340,7 @@ func TestGotoMode(t *testing.T) {
 
 	t.Run("gh goes to first column", func(t *testing.T) {
 		// Start at task in Blocked column
-		m.cursor.SetTask("az-4", 2)
+		m.nav.SelectTask("az-4", 2)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 		newModel := result.(Model)
@@ -353,7 +353,7 @@ func TestGotoMode(t *testing.T) {
 
 	t.Run("gl goes to last column", func(t *testing.T) {
 		// Start at first task in Open column
-		m.cursor.SetTask("az-1", 0)
+		m.nav.SelectTask("az-1", 0)
 		m.mode = ModeGoto
 		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
 		newModel := result.(Model)
