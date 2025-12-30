@@ -48,6 +48,18 @@ export const Column = (props: ColumnProps) => {
 	const headerColor = columnColors[props.status as keyof typeof columnColors] || theme.blue
 	const maxVisible = props.maxVisible ?? 5
 
+	// DEBUG: Log jump label state for each column
+	if (props.taskJumpLabels) {
+		const sampleLabels = props.tasks.slice(0, 3).map((t) => ({
+			id: t.id,
+			label: props.taskJumpLabels?.get(t.id),
+		}))
+		console.log(
+			`[Column ${props.title}] taskJumpLabels size: ${props.taskJumpLabels.size}, samples:`,
+			sampleLabels,
+		)
+	}
+
 	// Combined header text to avoid multi-text rendering issues
 	const headerText = `${props.title} (${taskCount})`
 
