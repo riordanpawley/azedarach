@@ -7,12 +7,26 @@ Extracted from Gleam rewrite planning docs. The Gleam rewrite is discontinued, b
 The Gleam planning identified several architectural issues with the TypeScript app:
 - **45 Effect services** is excessive for what the app does
 - **Three-layer state management** (SubscriptionRef + Atoms + React) adds complexity
-- **No single source of truth** - state scattered across services
-- **Missing fault tolerance** - no supervision/auto-recovery patterns
+
+### Already Implemented ✓
+
+Many key insights from the Gleam planning are **already in the TypeScript app**:
+
+| Insight | Status | Location |
+|---------|--------|----------|
+| State hierarchy (tmux as source of truth) | ✓ Done | `WorktreeSessionService` stores `azOptions`, `ClaudeSessionManager.listActive()` does orphan recovery |
+| Init commands run once | ✓ Done | Uses `@az_init_done` marker in tmux session options |
+| Start+work prompt (ask first, design notes) | ✓ Done | `SessionHandlersService.ts:147-176` |
+| Image attachment paths in prompt | ✓ Done | `SessionHandlersService.ts:169-176` |
+| Worktree continuation context | ✓ Done | `SessionHandlersService.ts:158-165` |
+| Merge choice UX (branch behind) | ✓ Done | `SessionHandlersService.ts:404-462` |
+| Session persistence | ✓ Done | `.azedarach/sessions.json` |
+
+### Remaining Opportunities
 
 ---
 
-## 1. Service Consolidation (HIGH PRIORITY)
+## 1. Service Consolidation (MEDIUM PRIORITY)
 
 **Current state**: 45 Effect services across `src/services/` and `src/core/`.
 
@@ -40,7 +54,7 @@ The Gleam planning identified several architectural issues with the TypeScript a
 
 ---
 
-## 2. State Hierarchy: Tmux as Source of Truth
+## 2. State Hierarchy: Tmux as Source of Truth ✓ IMPLEMENTED
 
 **Gleam design**:
 ```
@@ -58,11 +72,11 @@ Priority 3: FILES (Last Resort)
   - Only via bd CLI for bead data
 ```
 
-### Action Items
-
-- [ ] Add app restart state reconstruction from tmux
-- [ ] Document which state lives where
-- [ ] Consider making session state derived from tmux polling rather than maintained separately
+**TypeScript implementation:**
+- `WorktreeSessionService` stores `azOptions: { worktreePath, projectPath }` in tmux session
+- `ClaudeSessionManager.listActive()` (lines 843-911) recovers orphaned sessions from tmux
+- `TmuxSessionMonitor` polls tmux for session state
+- `.azedarach/sessions.json` for persistence across app restarts
 
 ---
 
@@ -90,7 +104,7 @@ Don't add more "modes" - add InputStates or Overlays instead.
 
 ---
 
-## 4. Merge Conflict UX Improvements
+## 4. Merge Conflict UX Improvements ✓ PARTIALLY IMPLEMENTED
 
 **Gleam design** (from `docs/gleam/merge-conflict-ux.md`):
 
@@ -99,15 +113,19 @@ Don't add more "modes" - add InputStates or Overlays instead.
 3. Spawn Claude in dedicated "merge" window with resolve prompt
 4. Filter out `.beads/` conflicts (handled by `bd sync`)
 
-### Action Items
+**TypeScript implementation:**
+- ✓ MergeChoice overlay exists (`SessionHandlersService.ts:404-462`)
+- ✓ Checks `branchStatus.behind` before attach
+- ✓ Options: Merge & Attach / Skip & Attach / Cancel
 
-- [ ] Implement `git merge-tree` check before merge operations
-- [ ] Add MergeChoice overlay for branch-behind scenarios
-- [ ] Spawn conflict resolution Claude in separate tmux window
+### Remaining Action Items
+
+- [ ] Add `git merge-tree --write-tree` for in-memory conflict detection before merge
+- [ ] Filter out `.beads/` conflicts (handled by `bd sync`)
 
 ---
 
-## 5. Start+Work Prompt Structure
+## 5. Start+Work Prompt Structure ✓ IMPLEMENTED
 
 **Gleam design** (from `docs/gleam/start-work-prompt.md`):
 
@@ -127,33 +145,28 @@ Attached images (use Read tool to view):
 /path/to/.beads/images/{bead-id}/abc123.png
 ```
 
-### Key Improvements Over Current
+**TypeScript implementation:** Already has this exact prompt! See `SessionHandlersService.ts:147-176`:
 
-- Tells Claude to **ask questions first** before implementing
-- Uses `bd show` instead of embedding all context in prompt
-- Instructs Claude to **update the bead** with design notes
-- Includes image attachment paths explicitly
-
-### Action Items
-
-- [ ] Audit current start+work prompt format
-- [ ] Add "ask questions first" directive
-- [ ] Add "update design notes" instruction
-- [ ] Include image paths when attachments exist
+- ✓ "work on bead {id} ({type}): {title}"
+- ✓ "Run `bd show` to see full description"
+- ✓ "If ANYTHING is unclear, ASK ME questions before proceeding"
+- ✓ "update the bead with your implementation plan using `bd update {id} --design=...`"
+- ✓ "Goal: Make this bead self-sufficient"
+- ✓ Image attachment paths included (lines 169-176)
+- ✓ Worktree continuation context for resumed work (lines 158-165)
 
 ---
 
-## 6. Init Commands: Run Once Per Session
+## 6. Init Commands: Run Once Per Session ✓ IMPLEMENTED
 
 **Gleam design**: Init commands (direnv, bun install, bd sync) run **only once** when tmux session is first created. Marked with `@az_init_done` tmux variable.
 
-**Current TS behavior**: Unclear if init commands re-run on attach.
+**TypeScript implementation:** Already uses `@az_init_done` marker! See `WorktreeSessionService.ts:257-265`:
 
-### Action Items
-
-- [ ] Verify init commands don't re-run on session attach
-- [ ] Add marker variable to tmux session
-- [ ] Document init command lifecycle
+- ✓ Sends init commands sequentially via `tmux.sendKeys()`
+- ✓ Sets `@az_init_done` marker after completion
+- ✓ New windows wait for marker before running commands (lines 316-317)
+- ✓ Shell ready detection with `@az_shell_ready` marker
 
 ---
 
@@ -301,20 +314,26 @@ If 3 crashes in 60 seconds:
 
 ## Implementation Priority
 
-### Phase 1: Quick Wins
-1. Start+work prompt improvements (ask first, design notes)
-2. Merge conflict detection with `git merge-tree`
+### Already Done ✓
+- Start+work prompt improvements
+- State hierarchy with tmux source of truth
+- Init command lifecycle with markers
+- Merge choice UX
+
+### Remaining Work
+
+**Quick Wins:**
+1. `git merge-tree` for in-memory conflict detection
+2. Background task windows close on success
 3. Polling interval consolidation
 
-### Phase 2: Architecture
-4. Service consolidation audit
-5. State hierarchy documentation
-6. Init command lifecycle verification
+**Architecture:**
+4. Service consolidation audit (45 → 10-15)
+5. Feature scope audit (deprecate unused features)
 
-### Phase 3: Robustness
-7. Background task window lifecycle
-8. Fault tolerance patterns
-9. Feature scope audit
+**Robustness:**
+6. Fault tolerance patterns (crash counting, "unknown" state)
+7. Session state ranking (Waiting > Busy > Error)
 
 ---
 
