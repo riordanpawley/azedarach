@@ -128,9 +128,12 @@ const filterTasksByQuery = (tasks: TaskWithSession[], query: string): TaskWithSe
 	})
 }
 
+/**
+ * Check if a task is an epic child.
+ * Uses the parentEpicId field populated during loadTasks().
+ */
 const isEpicChild = (task: TaskWithSession): boolean => {
-	if (!task.dependencies) return false
-	return task.dependencies.some((dep) => dep.dependency_type === "parent-child")
+	return task.parentEpicId !== undefined
 }
 
 const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): TaskWithSession[] => {
@@ -411,6 +414,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get optimistic mutations
 				const pendingMutations = yield* mutationQueue.getMutations()
 
+				// Fetch parent epics for tasks that have dependencies
+				// This enables filtering epic children and using correct base branch for git diff
+				const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
+				const parentEpicResults = yield* Effect.all(
+					issuesWithDeps.map((issue) =>
+						beadsClient.getParentEpic(issue.id, projectPath).pipe(
+							Effect.map((epic) => [issue.id, epic?.id] as const),
+							Effect.catchAll(() => Effect.succeed([issue.id, undefined] as const)),
+						),
+					),
+					{ concurrency: 4 },
+				)
+				const parentEpicMap = new Map<string, string | undefined>(parentEpicResults)
+
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
 						Effect.gen(function* () {
@@ -418,6 +435,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
 							const sessionState = session?.state ?? "idle"
+
+							// Get parent epic ID (if this is an epic child)
+							const parentEpicId = parentEpicMap.get(issue.id)
 
 							// Check if worktree exists for this task (even if no session running)
 							const hasWorktree = projectPath
@@ -431,10 +451,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							// Fetch git status if there's an active session OR if worktree exists
 							if ((sessionState !== "idle" || hasWorktree) && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
+								// Use parent epic branch as base for children, otherwise use config baseBranch
+								// This ensures children show line changes relative to epic, not main
+								const effectiveBaseBranch = parentEpicId ?? baseBranch
 								// Use cached git status to avoid redundant git commands
 								const cachedStatus = yield* getCachedGitStatus(
 									worktreePath,
-									baseBranch,
+									effectiveBaseBranch,
 									showLineChanges,
 								)
 								hasMergeConflict = cachedStatus.hasMergeConflict
@@ -451,6 +474,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								sessionState,
 								hasWorktree: hasWorktree || undefined,
 								hasMergeConflict,
+								parentEpicId,
 								...gitStatus,
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
