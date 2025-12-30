@@ -175,15 +175,24 @@ export const viewModeAtom = appRuntime.subscriptionRef(
 export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 	// Get the child IDs for filtering
 	const childIdsResult = get(drillDownChildIdsAtom)
-	if (!Result.isSuccess(childIdsResult)) return []
+	if (!Result.isSuccess(childIdsResult)) {
+		// Debug: log when childIds is not ready
+		console.log("[drillDownFilteredTasksAtom] childIds not ready:", childIdsResult._tag)
+		return []
+	}
 
 	const childIds = childIdsResult.value
 
 	// Get the filtered tasks
 	const tasksResult = get(filteredTasksByColumnAtom)
-	if (!Result.isSuccess(tasksResult)) return []
+	if (!Result.isSuccess(tasksResult)) {
+		// Debug: log when tasks is not ready
+		console.log("[drillDownFilteredTasksAtom] tasks not ready:", tasksResult._tag)
+		return []
+	}
 
 	const tasksByColumn = tasksResult.value
+	console.log("[drillDownFilteredTasksAtom] Got", tasksByColumn.flat().length, "tasks")
 
 	// If no drill-down active (empty childIds), return all tasks
 	if (childIds.size === 0) {
