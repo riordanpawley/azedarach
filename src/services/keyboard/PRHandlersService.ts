@@ -280,9 +280,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const workflowMode = yield* appConfig.getWorkflowMode()
 				const drilldownEpicId = yield* nav.getDrillDownEpic()
 
-				// In origin mode, block merge UNLESS we're in epic drilldown
-				// (merging child→epic is allowed, only child→main requires PR)
-				if (workflowMode === "origin" && !drilldownEpicId) {
+				// In origin mode, block merge UNLESS:
+				// - We're in epic drilldown (viewing inside an epic), OR
+				// - The task is an epic child (merges to parent epic, not main)
+				// Child→epic merges are allowed; only standalone task→main requires PR
+				const isEpicChild = task.parentEpicId !== undefined
+				if (workflowMode === "origin" && !drilldownEpicId && !isEpicChild) {
 					yield* toast.show(
 						"info",
 						"Direct merge disabled in origin workflow mode (use Space+P to create PR)",

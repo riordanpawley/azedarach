@@ -18,6 +18,8 @@ export interface ActionPaletteProps {
 	devServerPort?: number
 	/** Workflow mode: 'local' hides PR action, 'origin' hides merge action */
 	workflowMode?: WorkflowMode
+	/** Current drilldown epic ID (when viewing inside an epic) */
+	drillDownEpicId?: string
 }
 
 const _ATTR_BOLD = 1
@@ -49,6 +51,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const devServerStatus = props.devServerStatus ?? "idle"
 	const devServerPort = props.devServerPort
 	const workflowMode = props.workflowMode ?? "origin"
+	const drillDownEpicId = props.drillDownEpicId
+	const parentEpicId = props.task?.parentEpicId
 
 	// Check if this is an orphaned worktree (worktree exists but no session)
 	const isOrphanedWorktree = hasWorktree && sessionState === "idle"
@@ -114,7 +118,10 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 	// Full availability check: state + queue busyness + network + workflow mode
 	const isAvailable = (action: string): boolean => {
-		if (action === "m" && workflowMode === "origin") return false
+		// Merge is blocked in origin mode UNLESS task is epic child or in drilldown
+		// (epic children merge to parent epic, not main - so they're allowed)
+		if (action === "m" && workflowMode === "origin" && !parentEpicId && !drillDownEpicId)
+			return false
 		if (action === "P" && workflowMode === "local") return false
 
 		// If task is busy with a queued operation, block queued actions
