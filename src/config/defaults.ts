@@ -108,6 +108,7 @@ export const DEFAULT_CONFIG = {
 		env: {} satisfies Record<string, string>,
 		continueOnFailure: true,
 		parallel: false,
+		copyPaths: [".direnv"] satisfies string[],
 	},
 	git: {
 		pushBranchOnCreate: true,
@@ -212,6 +213,7 @@ export interface ResolvedConfig {
 		env: Readonly<Record<string, string>>
 		continueOnFailure: boolean
 		parallel: boolean
+		copyPaths: readonly string[]
 	}
 	git: {
 		pushBranchOnCreate: boolean
@@ -318,6 +320,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			continueOnFailure:
 				config.worktree?.continueOnFailure ?? DEFAULT_CONFIG.worktree.continueOnFailure,
 			parallel: config.worktree?.parallel ?? DEFAULT_CONFIG.worktree.parallel,
+			copyPaths: config.worktree?.copyPaths ?? DEFAULT_CONFIG.worktree.copyPaths,
 		},
 		session: {
 			command: config.session?.command ?? DEFAULT_CONFIG.session.command,
