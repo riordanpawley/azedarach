@@ -128,10 +128,6 @@ const filterTasksByQuery = (tasks: TaskWithSession[], query: string): TaskWithSe
 	})
 }
 
-/**
- * Check if a task is an epic child.
- * Uses the parentEpicId field populated during loadTasks().
- */
 const isEpicChild = (task: TaskWithSession): boolean => {
 	return task.parentEpicId !== undefined
 }
