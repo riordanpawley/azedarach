@@ -15,5 +15,8 @@
 		"fixCommand": "bun run fix",
 		"maxFixAttempts": 2,
 		"startClaudeOnFailure": true
+	},
+	"keyboard": {
+		"jumpLabelChars": "cieahtsn"
 	}
 }

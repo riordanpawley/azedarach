@@ -1,9 +1,11 @@
-import { useAtomSet } from "@effect-atom/atom-react"
+import { Result } from "@effect-atom/atom"
+import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useEffect, useMemo, useState } from "react"
+import { appConfigAtom } from "../atoms/config.js"
 import { changedFilesAtom, showDiffPopupAtom } from "../atoms/diff.js"
 import { theme } from "../theme.js"
-import { generateJumpLabels } from "../types.js"
+import { DEFAULT_JUMP_LABEL_CHARS, generateJumpLabels } from "../types.js"
 import { FilePicker } from "./FilePicker.js"
 import { buildFileTree, flattenTree, getAllDirectoryPaths, getParentPath } from "./fileTree.js"
 import type { ChangedFile, PickerMode } from "./types.js"
@@ -35,6 +37,12 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 	// Atom hooks
 	const getChangedFiles = useAtomSet(changedFilesAtom, { mode: "promise" })
 	const showDiffPopup = useAtomSet(showDiffPopupAtom, { mode: "promise" })
+
+	// Get configured jump label characters
+	const configResult = useAtomValue(appConfigAtom)
+	const jumpLabelChars = Result.isSuccess(configResult)
+		? configResult.value.keyboard.jumpLabelChars
+		: DEFAULT_JUMP_LABEL_CHARS
 
 	// Component state
 	const [state, setState] = useState<DiffViewerState>({
@@ -135,8 +143,8 @@ export const DiffViewer = ({ worktreePath, baseBranch, onClose }: DiffViewerProp
 
 	// Jump label helpers
 	const enterJumpMode = () => {
-		// Generate labels for all visible items
-		const labels = generateJumpLabels(itemCount)
+		// Generate labels for all visible items using configured characters
+		const labels = generateJumpLabels(itemCount, jumpLabelChars)
 		const labelMap = new Map<number, string>()
 		labels.forEach((label, index) => {
 			if (index < itemCount) {

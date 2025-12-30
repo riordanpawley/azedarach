@@ -16,6 +16,7 @@
  */
 
 import { Effect, Record, SubscriptionRef } from "effect"
+import { AppConfig } from "../../config/index.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { generateJumpLabels } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
@@ -54,6 +55,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			ProjectStateService.Default,
 			ViewService.Default,
 			SettingsService.Default,
+			AppConfig.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -68,6 +70,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const projectState = yield* ProjectStateService
 			const view = yield* ViewService
 			const settings = yield* SettingsService
+			const appConfig = yield* AppConfig
 
 			// ================================================================
 			// Input Handler Methods
@@ -841,8 +844,12 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						}
 					})
 
+					// Get configured jump label characters
+					const keyboardConfig = yield* appConfig.getKeyboardConfig()
+					const jumpLabelChars = keyboardConfig.jumpLabelChars
+
 					// Generate label strings and build the Record
-					const labels = generateJumpLabels(visibleTasks.length)
+					const labels = generateJumpLabels(visibleTasks.length, jumpLabelChars)
 					return Record.fromEntries(
 						visibleTasks
 							.map(({ taskId, columnIndex, taskIndex }, i) =>
