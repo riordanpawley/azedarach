@@ -256,14 +256,14 @@ func TestImageAttachOverlay_View(t *testing.T) {
 	}
 
 	// Test view in preview mode
-	overlay.mode = modePreview
+	overlay.mode = imageAttachModePreview
 	view = overlay.View()
 	if view == "" {
 		t.Error("expected non-empty view")
 	}
 
 	// Test view in input mode
-	overlay.mode = modeList
+	overlay.mode = imageAttachModeList
 	overlay.inputActive = true
 	view = overlay.View()
 	if view == "" {
