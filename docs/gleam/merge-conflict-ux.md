@@ -255,7 +255,7 @@ pub fn merge_main_into_branch(
 
       // Spawn Claude in merge window
       tmux.new_window(bead_id <> "-az", "merge")
-      tmux.send_keys(bead_id <> "-az:merge", "claude -p \"" <> prompt <> "\"", True)
+      tmux.send_keys(bead_id <> "-az:merge", "claude \"" <> prompt <> "\"", True)
 
       // Return error with info
       Error(MergeConflictError(

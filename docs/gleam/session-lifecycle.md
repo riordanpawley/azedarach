@@ -135,11 +135,11 @@ From any state except IDLE:
 │   tmux send-keys -t {session}:0 "claude" Enter                              │
 │                                                                              │
 │   For Space+S (start+work), add initial prompt:                             │
-│   tmux send-keys -t {session}:0 "claude -p '{prompt}'" Enter                │
+│   tmux send-keys -t {session}:0 "claude '{prompt}'" Enter                   │
 │                                                                              │
 │   For Space+! (yolo), add dangerous flag:                                   │
 │   tmux send-keys -t {session}:0 "claude --dangerously-skip-permissions \    │
-│       -p '{prompt}'" Enter                                                  │
+│       '{prompt}'" Enter                                                     │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                         │
