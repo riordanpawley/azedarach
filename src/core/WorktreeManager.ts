@@ -44,6 +44,22 @@ export interface CreateWorktreeOptions {
 	readonly beadId: string
 	readonly baseBranch?: string
 	readonly projectPath: string
+	/**
+	 * Source worktree to copy untracked files from.
+	 *
+	 * When creating a child task of an epic, this should be the epic's worktree path.
+	 * If not provided, falls back to projectPath.
+	 */
+	readonly sourceWorktreePath?: string
+	/**
+	 * Paths to copy from source worktree to new worktree.
+	 *
+	 * Each path is relative to the worktree root. Both files and directories are supported.
+	 * Missing paths are silently skipped.
+	 *
+	 * @example ["node_modules", ".env.local", ".direnv"]
+	 */
+	readonly copyPaths?: readonly string[]
 }
 
 // ============================================================================
@@ -298,34 +314,66 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
 
 		/**
-		 * Copy .direnv directory to a new worktree
+		 * Copy untracked files/directories to a new worktree
 		 *
-		 * The .direnv directory contains Nix flake evaluation caches. Since it's
-		 * gitignored, it's not copied when git creates a worktree, forcing each
-		 * new worktree to re-evaluate the flake from scratch. Copying this directory
-		 * saves significant startup time.
+		 * Copies paths specified in the copyPaths config from the source worktree
+		 * to the target worktree. This allows sharing untracked files like:
+		 * - .direnv (Nix flake evaluation cache)
+		 * - node_modules (dependencies)
+		 * - .env.local (environment config)
+		 * - vendor (Go/PHP dependencies)
+		 *
+		 * Missing paths are silently skipped. Errors are logged but don't fail
+		 * worktree creation.
 		 */
-		const copyDirenvCache = (
-			sourceProjectPath: string,
+		const copyUntrackedFiles = (
+			sourceWorktreePath: string,
 			targetWorktreePath: string,
+			copyPaths: readonly string[],
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
-				const sourceDirenv = pathService.join(sourceProjectPath, ".direnv")
-				const targetDirenv = pathService.join(targetWorktreePath, ".direnv")
-
-				// Check if source .direnv exists
-				const sourceExists = yield* fs.exists(sourceDirenv)
-				if (!sourceExists) {
-					yield* Effect.logDebug("No .direnv directory to copy")
+				if (copyPaths.length === 0) {
+					yield* Effect.logDebug("No paths configured to copy")
 					return
 				}
 
-				// Copy entire directory recursively
-				yield* fs.copy(sourceDirenv, targetDirenv)
-				yield* Effect.log("Copied .direnv cache to worktree")
+				yield* Effect.logDebug(
+					`Copying untracked files from ${sourceWorktreePath}: ${copyPaths.join(", ")}`,
+				)
+
+				// Copy each path, logging success/failure individually
+				yield* Effect.forEach(
+					copyPaths,
+					(relativePath) =>
+						Effect.gen(function* () {
+							const sourcePath = pathService.join(sourceWorktreePath, relativePath)
+							const targetPath = pathService.join(targetWorktreePath, relativePath)
+
+							// Check if source exists
+							const sourceExists = yield* fs.exists(sourcePath)
+							if (!sourceExists) {
+								yield* Effect.logDebug(`Skipping ${relativePath}: source does not exist`)
+								return
+							}
+
+							// Ensure parent directory exists
+							const targetParent = pathService.dirname(targetPath)
+							yield* fs.makeDirectory(targetParent, { recursive: true }).pipe(Effect.ignore)
+
+							// Copy file or directory
+							yield* fs.copy(sourcePath, targetPath)
+							yield* Effect.log(`Copied ${relativePath} to worktree`)
+						}).pipe(
+							// Don't fail on individual path copy errors
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Failed to copy ${relativePath}: ${error}`),
+							),
+						),
+					{ concurrency: "unbounded" },
+				)
 			}).pipe(
-				// Don't fail worktree creation if .direnv copy fails - just log and continue
-				Effect.catchAll((error) => Effect.logWarning(`Failed to copy .direnv cache: ${error}`)),
+				// Don't fail worktree creation if copy fails
+				Effect.catchAll((error) => Effect.logWarning(`Failed to copy untracked files: ${error}`)),
 			)
 
 		/**
@@ -545,7 +593,12 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		return {
 			create: (options: CreateWorktreeOptions) =>
 				Effect.gen(function* () {
-					const { beadId, baseBranch, projectPath } = options
+					const { beadId, baseBranch, projectPath, sourceWorktreePath, copyPaths } = options
+
+					// Determine effective source for copying untracked files
+					// If sourceWorktreePath is provided (e.g., epic worktree), use that
+					// Otherwise fall back to the main project path
+					const effectiveSourcePath = sourceWorktreePath ?? projectPath
 
 					// Check if git repo
 					const isRepo = yield* isGitRepo(projectPath)
@@ -582,10 +635,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					}
 
 					// Copy Claude's local settings and inject hook configuration
-					yield* copyClaudeLocalSettings(projectPath, worktreePath, beadId)
+					// Use effectiveSourcePath so child tasks inherit settings from epic worktree
+					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, beadId)
 
-					// Copy .direnv cache to avoid Nix flake re-evaluation
-					yield* copyDirenvCache(projectPath, worktreePath)
+					// Copy configured untracked files from source to new worktree
+					// Default copyPaths includes [".direnv"] for Nix flake cache
+					// When copyPaths is provided, it overrides the default (caller should include .direnv if needed)
+					const effectiveCopyPaths = copyPaths ?? [".direnv"]
+					yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
 
 					// Refresh cache and look for the new worktree with retry logic.
 					// Git worktree list can sometimes miss newly created worktrees due to

@@ -95,6 +95,20 @@ const WorktreeConfigSchema = Schema.Struct({
 
 	/** Run init commands in parallel instead of sequentially (default: false) */
 	parallel: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Paths to copy from source worktree to new worktree (default: [".direnv"])
+	 *
+	 * When creating a worktree for a child task of an epic, these paths are copied
+	 * from the epic's worktree to the child worktree. This allows sharing untracked
+	 * files like node_modules, .env.local, .direnv cache, etc.
+	 *
+	 * Each path is relative to the worktree root. Both files and directories are supported.
+	 * Missing paths are silently skipped.
+	 *
+	 * @example ["node_modules", ".env.local", ".direnv", "vendor"]
+	 */
+	copyPaths: Schema.optional(Schema.Array(Schema.String)),
 })
 
 /**
