@@ -86,6 +86,33 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 				})
 
 			/**
+			 * Get all target tasks for bulk operations.
+			 *
+			 * If there are selected IDs (from select mode), returns those tasks.
+			 * Otherwise falls back to the single action target task.
+			 *
+			 * This enables handlers to support both single-task and multi-task operations
+			 * with the same code path.
+			 */
+			const getActionTargetTasks = (): Effect.Effect<ReadonlyArray<TaskWithSession>> =>
+				Effect.gen(function* () {
+					// Check if we have selected IDs from select mode
+					const selectedIds = yield* editor.getSelectedIds()
+
+					if (selectedIds.length > 0) {
+						const allTasks = yield* board.getTasks()
+						// Return tasks in the order they were selected
+						return selectedIds
+							.map((id) => allTasks.find((t) => t.id === id))
+							.filter((t): t is TaskWithSession => t !== undefined)
+					}
+
+					// Fallback to single task
+					const singleTask = yield* getActionTargetTask()
+					return singleTask ? [singleTask] : []
+				})
+
+			/**
 			 * Get current cursor column index (0-3)
 			 */
 			const getColumnIndex = (): Effect.Effect<number> =>
@@ -219,6 +246,7 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 			return {
 				getSelectedTask,
 				getActionTargetTask,
+				getActionTargetTasks,
 				getColumnIndex,
 				getProjectPath,
 				showErrorToast,

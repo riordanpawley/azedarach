@@ -29,6 +29,7 @@ import {
 	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
+import { BulkCleanupOverlay } from "./BulkCleanupOverlay.js"
 import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
@@ -74,6 +75,7 @@ export const App = () => {
 		showingImagePreview,
 		showingConfirm,
 		showingMergeChoice,
+		showingBulkCleanup,
 		showingDiagnostics,
 		showingProjectSelector,
 		showingDiffViewer,
@@ -379,6 +381,9 @@ export const App = () => {
 
 			{/* Merge choice overlay */}
 			{showingMergeChoice && <MergeChoiceOverlay />}
+
+			{/* Bulk cleanup overlay */}
+			{showingBulkCleanup && <BulkCleanupOverlay />}
 
 			{/* Planning overlay */}
 			{showingPlanning && <PlanningOverlay onClose={dismissOverlay} />}

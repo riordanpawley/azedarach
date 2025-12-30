@@ -179,6 +179,16 @@ const applyFilterConfig = (tasks: TaskWithSession[], config: FilterConfig): Task
 		if (config.hideEpicSubtasks && isEpicChild(task)) {
 			return false
 		}
+		// Age filter: show tasks not updated in N days
+		if (config.updatedDaysAgo !== null) {
+			const now = DateTime.unsafeNow()
+			const taskUpdated = DateTime.unsafeMake(task.updated_at)
+			const daysSinceUpdate = DateTime.distance(taskUpdated, now) / (1000 * 60 * 60 * 24)
+			// Show only tasks where daysSinceUpdate >= config.updatedDaysAgo
+			if (daysSinceUpdate < config.updatedDaysAgo) {
+				return false
+			}
+		}
 		return true
 	})
 }
