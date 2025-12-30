@@ -311,12 +311,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const pathService = yield* Path.Path
 
 		// Track active worktrees in memory for fast lookups
-		const worktreesRef = yield* Ref.make<Map<string, Worktree>>(new Map())
+		// Now supports multiple projects: projectPath -> (beadId -> Worktree)
+		const worktreesRef = yield* Ref.make<Map<string, Map<string, Worktree>>>(new Map())
 
 		// TTL cache for worktree refresh - avoid repeated git worktree list calls
-		// The cache is per-project-path, so switching projects still refreshes
+		// Supports multiple projects for fast project switching
 		const WORKTREE_CACHE_TTL_MS = 2000
-		const cacheTimestampRef = yield* Ref.make<{ path: string; timestamp: number } | null>(null)
+		// Map from projectPath to timestamp
+		const cacheTimestampRef = yield* Ref.make<Map<string, number>>(new Map())
 
 		/**
 		 * Copy untracked files/directories to a new worktree
@@ -575,18 +577,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		}
 
 		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
+		// Now supports multiple projects - each project has its own cache entry
 		const refreshWorktrees = (
 			projectPath: string,
 		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				// Check if cache is still valid
-				const cacheEntry = yield* Ref.get(cacheTimestampRef)
+				// Check if cache is still valid for this project
+				const timestamps = yield* Ref.get(cacheTimestampRef)
 				const now = Date.now()
-				if (
-					cacheEntry &&
-					cacheEntry.path === projectPath &&
-					now - cacheEntry.timestamp < WORKTREE_CACHE_TTL_MS
-				) {
+				const cachedTimestamp = timestamps.get(projectPath)
+
+				if (cachedTimestamp && now - cachedTimestamp < WORKTREE_CACHE_TTL_MS) {
 					// Cache hit - skip git call
 					return
 				}
@@ -604,17 +605,30 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					newMap.set(wt.beadId, wt)
 				}
 
-				yield* Ref.set(worktreesRef, newMap)
-				yield* Ref.set(cacheTimestampRef, { path: projectPath, timestamp: now })
+				// Update cache for this project (preserves other projects)
+				yield* Ref.update(worktreesRef, (cache) => {
+					const newCache = new Map(cache)
+					newCache.set(projectPath, newMap)
+					return newCache
+				})
+				yield* Ref.update(cacheTimestampRef, (cache) => {
+					const newCache = new Map(cache)
+					newCache.set(projectPath, now)
+					return newCache
+				})
 			})
 
-		// Force refresh worktrees (bypass TTL cache)
+		// Force refresh worktrees (bypass TTL cache for this project only)
 		const forceRefreshWorktrees = (
 			projectPath: string,
 		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				// Invalidate cache first
-				yield* Ref.set(cacheTimestampRef, null)
+				// Invalidate cache for this project only
+				yield* Ref.update(cacheTimestampRef, (cache) => {
+					const newCache = new Map(cache)
+					newCache.delete(projectPath)
+					return newCache
+				})
 				yield* refreshWorktrees(projectPath)
 			})
 
@@ -639,8 +653,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					// Refresh cache and check if already exists
 					yield* refreshWorktrees(projectPath)
-					const existing = yield* Ref.get(worktreesRef)
-					const existingWorktree = existing.get(beadId)
+					const allWorktrees = yield* Ref.get(worktreesRef)
+					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+					const existingWorktree = projectWorktrees.get(beadId)
 
 					if (existingWorktree) {
 						// Idempotent: worktree already exists
@@ -678,15 +693,16 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					// a few times with short delays to handle this race condition.
 					const findNewWorktree = Effect.gen(function* () {
 						yield* forceRefreshWorktrees(projectPath)
-						const updated = yield* Ref.get(worktreesRef)
-						const newWorktree = updated.get(beadId)
+						const allUpdated = yield* Ref.get(worktreesRef)
+						const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+						const newWorktree = projectUpdated.get(beadId)
 
 						if (!newWorktree) {
-							const foundBeadIds = Array.from(updated.keys())
+							const foundBeadIds = Array.from(projectUpdated.keys())
 							return yield* Effect.fail({
 								_tag: "NotFound" as const,
 								foundBeadIds,
-								cacheSize: updated.size,
+								cacheSize: projectUpdated.size,
 							})
 						}
 						return newWorktree
@@ -731,8 +747,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					// Force refresh cache (mutation operation needs fresh data)
 					yield* forceRefreshWorktrees(projectPath)
-					const worktrees = yield* Ref.get(worktreesRef)
-					const worktree = worktrees.get(beadId)
+					const allWorktrees = yield* Ref.get(worktreesRef)
+					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+					const worktree = projectWorktrees.get(beadId)
 
 					if (!worktree) {
 						// Safe no-op if doesn't exist
@@ -749,24 +766,27 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			list: (projectPath: string) =>
 				Effect.gen(function* () {
 					yield* refreshWorktrees(projectPath)
-					const worktrees = yield* Ref.get(worktreesRef)
-					return Array.from(worktrees.values())
+					const allWorktrees = yield* Ref.get(worktreesRef)
+					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+					return Array.from(projectWorktrees.values())
 				}),
 
 			exists: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 					yield* refreshWorktrees(projectPath)
-					const worktrees = yield* Ref.get(worktreesRef)
-					return worktrees.has(beadId)
+					const allWorktrees = yield* Ref.get(worktreesRef)
+					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+					return projectWorktrees.has(beadId)
 				}),
 
 			get: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
 					const { beadId, projectPath } = options
 					yield* refreshWorktrees(projectPath)
-					const worktrees = yield* Ref.get(worktreesRef)
-					return worktrees.get(beadId) || null
+					const allWorktrees = yield* Ref.get(worktreesRef)
+					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+					return projectWorktrees.get(beadId) || null
 				}),
 
 			mergeClaudeLocalSettings,
