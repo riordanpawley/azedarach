@@ -8,6 +8,7 @@ import { Atom, Result } from "@effect-atom/atom"
 import { Effect, Stream, Subscribable, SubscriptionRef } from "effect"
 import { BoardService } from "../../services/BoardService.js"
 import { ViewService } from "../../services/ViewService.js"
+import { TASK_CARD_HEIGHT } from "../TaskCard.js"
 import { drillDownChildIdsAtom, drillDownEpicAtom } from "./navigation.js"
 import { appRuntime } from "./runtime.js"
 
@@ -221,8 +222,9 @@ export const totalTasksCountAtom = Atom.readable((get) => {
 
 export const maxVisibleTasksAtom = Atom.readable((get) => {
 	const drillDownEpicId = get(drillDownEpicAtom)
-	const CHROME_HEIGHT = 9
-	const TASK_CARD_HEIGHT = 4
+	// Chrome: StatusBar (3 rows with border) + Column header (1 row) + scroll indicators (2 rows max)
+	const CHROME_HEIGHT = 6
+	// TASK_CARD_HEIGHT imported from TaskCard.tsx to stay in sync
 	const rows = process.stdout.rows || 24
 	const baseMax = Math.max(1, Math.floor((rows - CHROME_HEIGHT) / TASK_CARD_HEIGHT))
 	return Result.isSuccess(drillDownEpicId) && drillDownEpicId.value ? baseMax - 1 : baseMax
