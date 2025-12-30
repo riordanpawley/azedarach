@@ -94,10 +94,14 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				// Apply drill-down filter if active
 				const childIds = yield* SubscriptionRef.get(drillDownChildIds)
 				if (childIds.size === 0) {
-					return tasksByColumn
+					// Main board: filter OUT epic children (same as board.ts drillDownFilteredTasksAtom)
+					// Epic children are hidden on main board, only visible in drill-down
+					return tasksByColumn.map((column) =>
+						column.filter((task) => task.parentEpicId === undefined),
+					)
 				}
 
-				// Filter each column to only include children
+				// Drill-down mode: filter to only include the epic's children
 				return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
 			})
 
