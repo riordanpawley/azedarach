@@ -471,11 +471,13 @@ Press `v` to enter select mode for multi-task operations. You can also press `%`
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Space` | Toggle selection | Add/remove current task |
-| `%` | Select all | Select all tasks except tombstoned (ignores filters) |
-| `A` | Clear selections | Deselect all tasks |
-| `h/j/k/l` | Navigate | Selections persist |
-| `Esc` | Exit + clear | Clears all selections |
+| `a` | Toggle selection | Add/remove current task from selection |
+| `A` | Select all in column | Add all tasks in current column to selection |
+| `%` | Select all | Select all tasks except tombstoned |
+| `Space` | Enter action mode | Apply actions to all selected tasks |
+| `h/j/k/l` | Navigate | Selections persist while navigating |
+| `v` | Exit select mode | Clears selections and returns to normal mode |
+| `Esc` | Exit + clear | Same as `v` |
 
 ### Visual Feedback
 
@@ -485,13 +487,15 @@ Selected tasks are highlighted with a different background color. The status bar
 
 When you have multiple tasks selected, action mode commands apply to all selected tasks:
 
-1. Press `%` to select all tasks (or `v` then manually select)
-2. Use filter mode (`f`) to narrow down the selection
+1. Press `v` to enter select mode
+2. Navigate with `h/j/k/l` and press `a` to toggle individual tasks
+   - Or press `A` to select all in current column
+   - Or press `%` to select all tasks
 3. Press `Space` to enter action mode
 4. Run bulk commands:
-   - `Space` `x`: Stop all selected sessions
-   - `Space` `d`: Cleanup all selected worktrees (shows choice dialog)
-   - `Space` `h/l`: Move all selected tasks left/right
+   - `x`: Stop all selected sessions
+   - `d`: Cleanup all selected worktrees (shows choice dialog)
+   - `h/l`: Move all selected tasks left/right
 
 ### Bulk Cleanup Dialog
 

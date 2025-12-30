@@ -274,6 +274,28 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				}),
 
 			/**
+			 * Add task IDs to the current selection (without replacing).
+			 * Used for "select all in column" to add column tasks to existing selection.
+			 * If not in select mode, enters select mode first.
+			 */
+			addToSelection: (taskIds: ReadonlyArray<string>) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "select") {
+						return Data.struct({
+							_tag: "select" as const,
+							selectedIds: [...taskIds],
+						})
+					}
+					// Merge with existing selection, avoiding duplicates
+					const existingSet = new Set(m.selectedIds)
+					const newIds = taskIds.filter((id) => !existingSet.has(id))
+					return Data.struct({
+						_tag: "select" as const,
+						selectedIds: [...m.selectedIds, ...newIds],
+					})
+				}),
+
+			/**
 			 * Clear all selections in select mode.
 			 */
 			clearSelection: () =>

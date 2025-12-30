@@ -657,6 +657,17 @@ done
 	{
 		key: "space",
 		mode: "select",
+		description: "Enter action mode",
+		// Same as normal mode: capture task ID and enter action mode
+		// Actions will operate on all selected tasks via getActionTargetTasks()
+		action: Effect.gen(function* () {
+			const taskId = yield* bc.nav.getFocusedTaskId()
+			yield* bc.editor.enterAction(taskId)
+		}),
+	},
+	{
+		key: "a",
+		mode: "select",
 		description: "Toggle selection",
 		action: Effect.suspend(() => bc.helpers.toggleCurrentSelection()),
 	},
@@ -681,8 +692,27 @@ done
 	{
 		key: "S-a",
 		mode: "select",
-		description: "Clear all selections",
-		action: bc.editor.clearSelection(),
+		description: "Select all in column",
+		action: Effect.gen(function* () {
+			// Get current position and filtered tasks
+			const pos = yield* bc.nav.getPosition()
+			const mode = yield* bc.editor.getMode()
+			const sortConfig = yield* bc.editor.getSortConfig()
+			const filterConfig = yield* bc.editor.getFilterConfig()
+			const searchQuery = mode._tag === "search" ? mode.query : ""
+
+			const tasksByColumn = yield* bc.board.getFilteredTasksByColumn(
+				searchQuery,
+				sortConfig,
+				filterConfig,
+			)
+
+			const columnTasks = tasksByColumn[pos.columnIndex] ?? []
+			// Exclude tombstoned tasks, add to current selection
+			const selectableIds = columnTasks.filter((t) => t.status !== "tombstone").map((t) => t.id)
+			yield* bc.editor.addToSelection(selectableIds)
+			yield* bc.toast.show("info", `Added ${selectableIds.length} tasks to selection`)
+		}),
 	},
 
 	// ========================================================================
