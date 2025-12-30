@@ -292,6 +292,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		// Git status cache to avoid redundant git commands
 		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
 
+		// Parent epic map cache - rarely changes, so cache for longer (30 seconds)
+		// This avoids the expensive batch bd show call on every refresh
+		const PARENT_EPIC_CACHE_TTL_MS = 30000
+		interface ParentEpicCache {
+			readonly projectPath: string
+			readonly map: Map<string, string | undefined>
+			readonly timestamp: number
+		}
+		const parentEpicCacheRef = yield* Ref.make<ParentEpicCache | null>(null)
+
 		/**
 		 * Get git status with caching
 		 *
@@ -428,33 +438,63 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get optimistic mutations
 				const pendingMutations = yield* mutationQueue.getMutations()
 
-				// Fetch parent epics for tasks that have dependencies (BATCHED for performance)
+				// Get parent epic map (cached for 30s to avoid expensive bd show calls)
 				// This enables filtering epic children and using correct base branch for git diff
-				// Instead of O(n) bd show calls, we batch all IDs into one call
-				const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
-				const parentEpicMap = new Map<string, string | undefined>()
 				const batchStartTime = Date.now()
+				let parentEpicMap: Map<string, string | undefined>
+				let cacheStatus = "miss"
 
-				if (issuesWithDeps.length > 0) {
-					// Single batched call to get all issues with their dependencies
-					const issuesWithDepDetails = yield* beadsClient
-						.showMultiple(
-							issuesWithDeps.map((i) => i.id),
-							projectPath,
-						)
-						.pipe(Effect.catchAll(() => Effect.succeed([])))
+				// Check if we have a valid cached parent epic map
+				const cachedParentEpics = yield* Ref.get(parentEpicCacheRef)
+				const now = Date.now()
+				if (
+					cachedParentEpics &&
+					cachedParentEpics.projectPath === projectPath &&
+					now - cachedParentEpics.timestamp < PARENT_EPIC_CACHE_TTL_MS
+				) {
+					// Cache hit - use cached map
+					parentEpicMap = cachedParentEpics.map
+					cacheStatus = "hit"
+				} else {
+					// Cache miss - fetch fresh data
+					parentEpicMap = new Map<string, string | undefined>()
+					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
 
-					// Extract parent epic IDs from dependencies
-					for (const issue of issuesWithDepDetails) {
-						const parentChildDep = issue.dependencies?.find(
-							(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
-						)
-						parentEpicMap.set(issue.id, parentChildDep?.id)
+					if (issuesWithDeps.length > 0) {
+						// Single batched call to get all issues with their dependencies
+						const issuesWithDepDetails = yield* beadsClient
+							.showMultiple(
+								issuesWithDeps.map((i) => i.id),
+								projectPath,
+							)
+							.pipe(Effect.catchAll(() => Effect.succeed([])))
+
+						// Extract parent epic IDs from dependencies
+						for (const issue of issuesWithDepDetails) {
+							const parentChildDep = issue.dependencies?.find(
+								(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
+							)
+							parentEpicMap.set(issue.id, parentChildDep?.id)
+						}
 					}
+
+					// Cache the result
+					yield* Ref.set(parentEpicCacheRef, {
+						projectPath: projectPath ?? "",
+						map: parentEpicMap,
+						timestamp: now,
+					})
 				}
 				yield* Effect.log(
-					`loadTasks: ${issuesWithDeps.length} deps resolved in ${Date.now() - batchStartTime}ms`,
+					`loadTasks: deps resolved in ${Date.now() - batchStartTime}ms (cache ${cacheStatus})`,
 				)
+
+				// Get all worktrees ONCE upfront instead of per-issue exists() calls
+				// This eliminates 331 Effect operations → 1 operation
+				const worktreeList = projectPath
+					? yield* worktreeManager.list(projectPath).pipe(Effect.catchAll(() => Effect.succeed([])))
+					: []
+				const worktreeBeadIds = new Set(worktreeList.map((wt) => wt.beadId))
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -467,12 +507,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							// Get parent epic ID (if this is an epic child)
 							const parentEpicId = parentEpicMap.get(issue.id)
 
-							// Check if worktree exists for this task (even if no session running)
-							const hasWorktree = projectPath
-								? yield* worktreeManager
-										.exists({ beadId: issue.id, projectPath })
-										.pipe(Effect.catchAll(() => Effect.succeed(false)))
-								: false
+							// Check if worktree exists (using pre-fetched Set - instant lookup)
+							const hasWorktree = worktreeBeadIds.has(issue.id)
 
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
