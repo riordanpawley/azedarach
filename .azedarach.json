@@ -7,7 +7,13 @@
 		"parallel": false,
 		"copyPaths": [".direnv", "node_modules", ".env.local"]
 	},
-	"git": { "workflowMode": "local", "baseBranch": "main", "pushBranchOnCreate": true, "remote": "origin", "branchPrefix": "az-" },
+	"git": {
+		"workflowMode": "local",
+		"baseBranch": "main",
+		"pushBranchOnCreate": true,
+		"remote": "origin",
+		"branchPrefix": "az-"
+	},
 	"session": { "shell": "zsh", "tmuxPrefix": "C-a" },
 	"pr": { "enabled": false },
 	"merge": {
