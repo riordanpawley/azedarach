@@ -64,21 +64,21 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Execute the actual merge operation (called directly or via confirm)
 		 *
 		 * Queued to prevent race conditions with other operations on the same task.
-		 * Internal helper used by mergeToMain.
+		 * Internal helper used by merge.
 		 */
-		const doMergeToMain = (beadId: string) =>
+		const doMerge = (beadId: string, targetBranch: string) =>
 			helpers.withQueue(
 				beadId,
 				"merge",
 				Effect.gen(function* () {
-					yield* toast.show("info", `Merging ${beadId} to main...`)
+					yield* toast.show("info", `Merging ${beadId} into ${targetBranch}...`)
 
 					// Get current project path (from ProjectService or cwd fallback)
 					const projectPath = yield* helpers.getProjectPath()
 
 					yield* prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
 						Effect.tap(() => board.refresh()),
-						Effect.tap(() => toast.show("success", `Merged ${beadId} to main`)),
+						Effect.tap(() => toast.show("success", `Merged ${beadId} into ${targetBranch}`)),
 						Effect.catchAll(helpers.showErrorToast("Merge failed")),
 					)
 				}),
@@ -254,7 +254,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			})
 
 		/**
-		 * Merge worktree to main action (Space+m)
+		 * Merge worktree to base branch action (Space+m)
 		 *
 		 * Performs safety checks before merge:
 		 * 1. Check for uncommitted changes (autostash can cause hard-to-recover conflicts)
@@ -272,7 +272,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * because we're merging child→epic (not child→main). The epic→main PR is handled
 		 * separately via Space+P on the epic itself.
 		 */
-		const mergeToMain = () =>
+		const merge = () =>
 			Effect.gen(function* () {
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
@@ -305,6 +305,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Get current project path (from ProjectService or cwd fallback)
 				const projectPath = yield* helpers.getProjectPath()
+
+				// Get target branch (epic branch for children, main otherwise)
+				const { targetBranch } = yield* prWorkflow
+					.getTargetBranch(task.id)
+					.pipe(Effect.catchAll(() => Effect.succeed({ targetBranch: "main", isEpicChild: false })))
 
 				// Check for uncommitted changes in worktree BEFORE merge
 				// With merge.autostash=true, uncommitted changes get stashed before merge
@@ -343,7 +348,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* overlay.push({
 						_tag: "confirm",
 						message,
-						onConfirm: doMergeToMain(task.id),
+						onConfirm: doMerge(task.id, targetBranch),
 					})
 					return
 				}
@@ -391,11 +396,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* overlay.push({
 						_tag: "confirm",
 						message,
-						onConfirm: doMergeToMain(task.id),
+						onConfirm: doMerge(task.id, targetBranch),
 					})
 				} else {
 					// No conflicts detected, proceed directly
-					yield* doMergeToMain(task.id)
+					yield* doMerge(task.id, targetBranch)
 				}
 			})
 
@@ -699,12 +704,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		return {
 			createPR,
 			updateFromBase,
-			mergeToMain,
+			merge,
 			cleanup,
 			abortMerge,
 			showDiff,
-			// Expose doMergeToMain for direct calls if needed
-			doMergeToMain,
+			// Expose doMerge for direct calls if needed
+			doMerge,
 			// Merge select mode
 			enterMergeSelect,
 			confirmMergeSelect,
