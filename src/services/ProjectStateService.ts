@@ -53,21 +53,22 @@ const SortConfigSchema = Schema.Struct({
  */
 const FilterConfigSchema = Schema.transform(
 	// From (encoded/JSON form with arrays)
+	// hideEpicSubtasks is optional for backwards compatibility with old state files
 	Schema.Struct({
 		status: Schema.Array(IssueStatusLiteral),
 		priority: Schema.Array(Schema.Number),
 		type: Schema.Array(IssueTypeLiteral),
 		session: Schema.Array(SessionStateLiteral),
-		hideEpicSubtasks: Schema.Boolean,
+		hideEpicSubtasks: Schema.optional(Schema.Boolean),
 		updatedDaysAgo: Schema.NullOr(Schema.Number),
 	}),
 	// To (runtime form with Sets matching FilterConfig interface)
+	// hideEpicSubtasks removed - epic children are always hidden on main board
 	Schema.Struct({
 		status: Schema.ReadonlySetFromSelf(IssueStatusLiteral),
 		priority: Schema.ReadonlySetFromSelf(Schema.Number),
 		type: Schema.ReadonlySetFromSelf(IssueTypeLiteral),
 		session: Schema.ReadonlySetFromSelf(SessionStateLiteral),
-		hideEpicSubtasks: Schema.Boolean,
 		updatedDaysAgo: Schema.NullOr(Schema.Number),
 	}),
 	{
@@ -78,7 +79,6 @@ const FilterConfigSchema = Schema.transform(
 				priority: new Set(encoded.priority),
 				type: new Set(encoded.type),
 				session: new Set(encoded.session),
-				hideEpicSubtasks: encoded.hideEpicSubtasks,
 				updatedDaysAgo: encoded.updatedDaysAgo,
 			}),
 		encode: (decoded) => ({
@@ -86,7 +86,6 @@ const FilterConfigSchema = Schema.transform(
 			priority: [...decoded.priority],
 			type: [...decoded.type],
 			session: [...decoded.session],
-			hideEpicSubtasks: decoded.hideEpicSubtasks,
 			updatedDaysAgo: decoded.updatedDaysAgo,
 		}),
 	},

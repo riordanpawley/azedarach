@@ -194,12 +194,13 @@ export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 	const tasksByColumn = tasksResult.value
 	console.log("[drillDownFilteredTasksAtom] Got", tasksByColumn.flat().length, "tasks")
 
-	// If no drill-down active (empty childIds), return all tasks
+	// If no drill-down active (empty childIds), show main board view
+	// Epic children are hidden on main board - only visible in drill-down
 	if (childIds.size === 0) {
-		return tasksByColumn
+		return tasksByColumn.map((column) => column.filter((task) => task.parentEpicId === undefined))
 	}
 
-	// Filter each column to only include children
+	// In drill-down mode: filter each column to only include the epic's children
 	return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
 })
 

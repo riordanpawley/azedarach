@@ -88,7 +88,7 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus {
 	/**
 	 * Parent epic ID if this task is a child of an epic.
 	 * Used for:
-	 * - Filtering epic children from main board view (hideEpicSubtasks)
+	 * - Filtering epic children from main board view (always hidden, only in drill-down)
 	 * - Determining base branch for git diff (children diff against epic, not main)
 	 */
 	parentEpicId?: string
