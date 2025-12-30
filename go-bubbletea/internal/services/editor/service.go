@@ -24,6 +24,7 @@ type Service struct {
 	filter        *domain.Filter
 	sort          *domain.Sort
 	selectedTasks map[string]bool
+	showPhases    bool // Show dependency phase indicators
 }
 
 // NewService creates a new editor service with defaults
@@ -36,6 +37,7 @@ func NewService() *Service {
 			Order: domain.SortAsc,
 		},
 		selectedTasks: make(map[string]bool),
+		showPhases:    false, // Disabled by default
 	}
 }
 
@@ -301,4 +303,21 @@ func (s *Service) FilterAndSortByStatus(tasks []domain.Task, status domain.Statu
 		}
 	}
 	return s.sort.Apply(inStatus)
+}
+
+// Phase visualization management
+
+// GetShowPhases returns whether phase indicators should be shown
+func (s *Service) GetShowPhases() bool {
+	return s.showPhases
+}
+
+// SetShowPhases sets whether phase indicators should be shown
+func (s *Service) SetShowPhases(show bool) {
+	s.showPhases = show
+}
+
+// ToggleShowPhases toggles the phase indicator display
+func (s *Service) ToggleShowPhases() {
+	s.showPhases = !s.showPhases
 }

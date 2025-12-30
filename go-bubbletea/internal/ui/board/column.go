@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
@@ -15,6 +16,8 @@ func renderColumn(
 	cursorTask int,
 	isActive bool,
 	selectedTasks map[string]bool,
+	phaseData map[string]phases.TaskPhaseInfo,
+	showPhases bool,
 	width int,
 	height int,
 	s *styles.Styles,
@@ -39,7 +42,14 @@ func renderColumn(
 	for i, task := range tasks {
 		isCursor := isActive && i == cursorTask
 		isSelected := selectedTasks[task.ID]
-		cardStrings = append(cardStrings, renderCard(task, isCursor, isSelected, cardWidth, s))
+
+		// Get phase info for this task if available
+		var phaseInfo *phases.TaskPhaseInfo
+		if info, exists := phaseData[task.ID]; exists {
+			phaseInfo = &info
+		}
+
+		cardStrings = append(cardStrings, renderCard(task, isCursor, isSelected, cardWidth, phaseInfo, showPhases, s))
 	}
 
 	// Handle empty column
