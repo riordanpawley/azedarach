@@ -13,7 +13,7 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Data, Deferred, Duration, Effect, HashMap, SubscriptionRef } from "effect"
+import { Cause, Data, Deferred, Duration, Effect, Exit, HashMap, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Type Definitions
@@ -162,16 +162,23 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					// 2. Gets cleaned up when the app shuts down (not a daemon)
 					yield* Effect.forkIn(
 						Effect.gen(function* () {
-							// Run the actual effect
-							const result = yield* Effect.either(next.effect)
+							// Run the actual effect with Effect.exit to capture ALL outcomes
+							// Effect.either only catches expected failures, NOT defects (thrown exceptions)
+							// Effect.exit captures: success, failure, AND defects
+							const result = yield* Effect.exit(next.effect)
 
-							// Complete the deferred
-							if (result._tag === "Right") {
-								yield* Deferred.succeed(next.deferred, undefined)
-							} else {
-								// Command failed - still resolve deferred (caller can handle via the effect)
-								yield* Deferred.succeed(next.deferred, undefined)
+							// Log defects for debugging - these would otherwise silently crash the fiber
+							if (Exit.isFailure(result) && Cause.isDie(result.cause)) {
+								yield* Effect.logError("Command failed with defect (unexpected error)", {
+									taskId,
+									label: next.label,
+									cause: Cause.pretty(result.cause),
+								})
 							}
+
+							// Complete the deferred - always succeeds regardless of effect outcome
+							// Caller handles errors within their effect via catchAll
+							yield* Deferred.succeed(next.deferred, undefined)
 
 							// Clear running and process next
 							yield* SubscriptionRef.update(stateRef, (s) => {
