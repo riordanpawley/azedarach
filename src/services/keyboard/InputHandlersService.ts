@@ -375,8 +375,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						// Check if there's a selected attachment
 						const selected = yield* imageAttachment.getSelectedAttachment()
 						if (selected) {
-							// Open preview and load the image
-							yield* overlay.push({ _tag: "imagePreview", taskId })
+							// Open preview in tmux popup (blocking - no overlay needed)
+							// The popup uses viu with Kitty graphics protocol for high quality
 							yield* imageAttachment.openPreview().pipe(
 								Effect.catchAll((error) => {
 									const msg =
