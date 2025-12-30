@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/board"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 	"github.com/riordanpawley/azedarach/internal/ui/statusbar"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 	"github.com/riordanpawley/azedarach/internal/ui/toast"
@@ -61,17 +62,11 @@ type Model struct {
 	selectedTasks map[string]bool
 
 	// UI state
-	overlay    Overlay
-	searchText string
+	overlayStack *overlay.Stack
 
-	// Filters
-	statusFilter   map[domain.Status]bool
-	priorityFilter map[domain.Priority]bool
-	typeFilter     map[domain.TaskType]bool
-	sessionFilter  map[domain.SessionState]bool
-
-	// Sorting
-	sortBy SortField
+	// Filtering and sorting
+	filter *domain.Filter
+	sort   *domain.Sort
 
 	// Project
 	currentProject string
@@ -102,20 +97,6 @@ type Model struct {
 	usePlaceholder bool
 }
 
-// SortField defines how tasks are sorted
-type SortField int
-
-const (
-	SortBySession SortField = iota
-	SortByPriority
-	SortByUpdated
-)
-
-// Overlay represents the current modal overlay (if any)
-type Overlay interface {
-	Update(msg tea.Msg) (Overlay, tea.Cmd)
-	View() string
-}
 
 // New creates a new application model with the given config
 func New(cfg *config.Config) Model {
@@ -130,16 +111,17 @@ func New(cfg *config.Config) Model {
 	client := beads.NewClient(runner, logger)
 
 	return Model{
-		tasks:          []domain.Task{},
-		sessions:       make(map[string]*domain.Session),
-		cursor:         Cursor{Column: 0, Task: 0},
-		mode:           ModeNormal,
-		selectedTasks:  make(map[string]bool),
-		statusFilter:   make(map[domain.Status]bool),
-		priorityFilter: make(map[domain.Priority]bool),
-		typeFilter:     make(map[domain.TaskType]bool),
-		sessionFilter:  make(map[domain.SessionState]bool),
-		sortBy:         SortBySession,
+		tasks:         []domain.Task{},
+		sessions:      make(map[string]*domain.Session),
+		cursor:        Cursor{Column: 0, Task: 0},
+		mode:          ModeNormal,
+		selectedTasks: make(map[string]bool),
+		overlayStack:  overlay.NewStack(),
+		filter:        domain.NewFilter(),
+		sort: &domain.Sort{
+			Field: domain.SortBySession,
+			Order: domain.SortAsc,
+		},
 		toasts:         []Toast{},
 		styles:         styles.New(),
 		config:         cfg,
@@ -172,11 +154,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
-		// If overlay is open, route to overlay
-		if m.overlay != nil {
-			return m.updateOverlay(msg)
+		// If overlay is open, route to overlay stack
+		if !m.overlayStack.IsEmpty() {
+			return m.handleOverlayKey(msg)
 		}
 		return m.handleKey(msg)
+
+	// Overlay messages
+	case overlay.CloseOverlayMsg:
+		m.overlayStack.Pop()
+		return m, nil
+
+	case overlay.SelectionMsg:
+		return m.handleSelection(msg)
+
+	case overlay.SearchMsg:
+		m.filter.SearchQuery = msg.Query
+		return m, nil
 
 	case beadsLoadedMsg:
 		wasLoading := m.loading
@@ -253,6 +247,55 @@ func (m Model) View() string {
 	// Compose the layout
 	view := lipgloss.JoinVertical(lipgloss.Left, boardView, statusBarView)
 
+	// If overlay is open, render it on top (centered)
+	if !m.overlayStack.IsEmpty() {
+		current := m.overlayStack.Current()
+		overlayView := current.View()
+
+		// Get overlay size for proper centering
+		overlayWidth, overlayHeight := current.Size()
+
+		// If width is 0, it means full width (like search bar)
+		if overlayWidth == 0 {
+			// Full-width overlay (search bar at bottom)
+			view = lipgloss.JoinVertical(lipgloss.Left, view, overlayView)
+		} else {
+			// Centered modal overlay with border and title
+			title := current.Title()
+			if title != "" {
+				titleView := m.styles.OverlayTitle.Render(title)
+				overlayView = lipgloss.JoinVertical(lipgloss.Left, titleView, overlayView)
+			}
+			overlayView = m.styles.Overlay.
+				Width(overlayWidth).
+				Height(overlayHeight).
+				Render(overlayView)
+
+			// Center the overlay on screen
+			centeredOverlay := lipgloss.Place(
+				m.width,
+				m.height,
+				lipgloss.Center,
+				lipgloss.Center,
+				overlayView,
+			)
+
+			// Overlay on top of main view
+			view = lipgloss.Place(
+				m.width,
+				m.height,
+				lipgloss.Left,
+				lipgloss.Top,
+				view,
+			)
+
+			// Combine base and overlay
+			// Note: This is a simple overlay - for true transparency we'd need
+			// more complex rendering, but this works for modal overlays
+			view = lipgloss.JoinVertical(lipgloss.Left, view, centeredOverlay)
+		}
+	}
+
 	// Render toasts in bottom-right corner
 	if len(m.toasts) > 0 {
 		toastRenderer := toast.New(m.styles)
@@ -263,28 +306,25 @@ func (m Model) View() string {
 		}
 	}
 
-	// If overlay is open, render it on top (TODO: implement overlay rendering)
-	if m.overlay != nil {
-		// TODO: Center overlay on screen
-		view = view + "\n" + m.overlay.View()
-	}
-
 	return view
 }
 
-// buildColumns converts tasks into board columns
+// buildColumns converts tasks into board columns, applying filter and sort
 func (m Model) buildColumns() []board.Column {
 	// For Phase 1, use placeholder data
 	if m.usePlaceholder {
 		return board.CreatePlaceholderData()
 	}
 
-	// Build columns from actual tasks
+	// Apply filter to tasks
+	filteredTasks := m.filter.Apply(m.tasks)
+
+	// Build columns from filtered tasks
 	return []board.Column{
-		{Title: "Open", Tasks: m.tasksInColumn(domain.StatusOpen)},
-		{Title: "In Progress", Tasks: m.tasksInColumn(domain.StatusInProgress)},
-		{Title: "Blocked", Tasks: m.tasksInColumn(domain.StatusBlocked)},
-		{Title: "Done", Tasks: m.tasksInColumn(domain.StatusDone)},
+		{Title: "Open", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusOpen)},
+		{Title: "In Progress", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInProgress)},
+		{Title: "Blocked", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusBlocked)},
+		{Title: "Done", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusDone)},
 	}
 }
 
@@ -299,10 +339,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	}
 
-	// Escape exits non-normal modes
-	if msg.String() == "esc" && m.mode != ModeNormal {
-		m.mode = ModeNormal
-		return m, nil
+	// Escape closes overlay or exits non-normal modes
+	if msg.String() == "esc" {
+		if !m.overlayStack.IsEmpty() {
+			m.overlayStack.Pop()
+			return m, nil
+		}
+		if m.mode != ModeNormal {
+			m.mode = ModeNormal
+			return m, nil
+		}
 	}
 
 	// Mode-specific handling
@@ -387,22 +433,27 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case " ": // Space - open action menu
-		m.mode = ModeAction
-		// TODO: Open action overlay
+		task, session := m.getCurrentTaskAndSession()
+		if task != nil {
+			return m, m.overlayStack.Push(overlay.NewActionMenu(*task, session))
+		}
 		return m, nil
 
 	case "/": // Search
-		m.mode = ModeSearch
-		// TODO: Open search input
-		return m, nil
+		return m, m.overlayStack.Push(overlay.NewSearchOverlay())
+
+	case "f": // Filter menu
+		return m, m.overlayStack.Push(overlay.NewFilterMenu(m.filter))
+
+	case ",": // Sort menu
+		return m, m.overlayStack.Push(overlay.NewSortMenu(m.sort))
 
 	case "v": // Visual select
 		m.mode = ModeSelect
 		return m, nil
 
 	case "?": // Help
-		// TODO: Open help overlay
-		return m, nil
+		return m, m.overlayStack.Push(overlay.NewHelpOverlay())
 	}
 
 	return m, nil
@@ -460,16 +511,9 @@ func (m Model) handleSelectMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateOverlay routes messages to the current overlay
-func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "esc" {
-		m.overlay = nil
-		m.mode = ModeNormal
-		return m, nil
-	}
-
-	var cmd tea.Cmd
-	m.overlay, cmd = m.overlay.Update(msg)
+// handleOverlayKey routes keyboard messages to the overlay stack
+func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cmd := m.overlayStack.Update(msg)
 	return m, cmd
 }
 
@@ -537,6 +581,149 @@ func (m Model) tasksInColumn(status domain.Status) []domain.Task {
 		}
 	}
 	return filtered
+}
+
+// sortTasksInColumn returns sorted tasks with the given status from a filtered list
+func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Status) []domain.Task {
+	var inColumn []domain.Task
+	for _, task := range filteredTasks {
+		if task.Status == status {
+			inColumn = append(inColumn, task)
+		}
+	}
+	// Apply sort
+	return m.sort.Apply(inColumn)
+}
+
+// getCurrentTaskAndSession returns the currently selected task and its session
+func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
+	columns := m.buildColumns()
+	if m.cursor.Column < 0 || m.cursor.Column >= len(columns) {
+		return nil, nil
+	}
+
+	col := columns[m.cursor.Column]
+	if m.cursor.Task < 0 || m.cursor.Task >= len(col.Tasks) {
+		return nil, nil
+	}
+
+	task := col.Tasks[m.cursor.Task]
+	return &task, task.Session
+}
+
+// handleSelection handles overlay selection messages
+func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
+	// Close the overlay first
+	m.overlayStack.Pop()
+
+	// Handle the selection based on key
+	switch msg.Key {
+	// Session actions
+	case "s":
+		// TODO: Start session
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Start session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "S":
+		// TODO: Start session + work
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Start session + work (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "a":
+		// TODO: Attach to session
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Attach to session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "p":
+		// TODO: Pause session
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Pause session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "x":
+		// TODO: Stop session
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Stop session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "R":
+		// TODO: Resume session
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Resume session (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+	// Git actions
+	case "u":
+		// TODO: Update from main
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Update from main (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "m":
+		// TODO: Merge to main
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Merge to main (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "P":
+		// TODO: Create PR
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Create PR (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "f":
+		// TODO: Show diff
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Show diff (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+
+	// Task actions
+	case "h":
+		// TODO: Move task left
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Move task left (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "l":
+		// TODO: Move task right
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Move task right (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "e":
+		// TODO: Edit task
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Edit task (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	case "d":
+		// TODO: Delete task
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: "Delete task (TODO)",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+	}
+
+	return m, nil
 }
 
 // clampTaskIndex returns the task index clamped to the current column's bounds
