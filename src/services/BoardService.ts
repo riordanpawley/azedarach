@@ -212,8 +212,9 @@ const filterTasks = (
 // Cache Types
 // ============================================================================
 
-/** TTL for git status cache in milliseconds (2 seconds) */
-const GIT_STATUS_CACHE_TTL_MS = 2000
+/** TTL for git status cache in milliseconds (10 seconds)
+ * Must be longer than the 5-second polling interval so cache survives between polls */
+const GIT_STATUS_CACHE_TTL_MS = 10000
 
 /**
  * Cached git status entry with timestamp
