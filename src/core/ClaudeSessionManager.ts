@@ -900,9 +900,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
 						const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
-						// Build command with --resume flag
+						// Build command with -c flag to continue conversation
 						const commandWithOptions = toolDef.buildCommand({
-							resume: true, // Key difference from start() - resume conversation
+							continueConversation: true, // Key difference from start() - continue where we left off
 							model: effectiveModel,
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})
