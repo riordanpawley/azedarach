@@ -12,6 +12,7 @@ import {
 	CONFLICT_INDICATOR,
 	DEV_SERVER_INDICATOR,
 	PHASE_INDICATORS,
+	PR_INDICATORS,
 	SESSION_INDICATORS,
 	WORKTREE_INDICATOR,
 } from "./types.js"
@@ -204,6 +205,14 @@ export const TaskCard = (props: TaskCardProps) => {
 		// This indicates there's existing work that can be resumed or cleaned up
 		if (props.task.hasWorktree && props.task.sessionState === "idle") {
 			line += ` ${WORKTREE_INDICATOR}`
+		}
+		// Show PR indicator when task has an associated PR
+		// State-specific icons: 🔗 open, 📝 draft, ✅ merged, 🚫 closed
+		if (props.task.hasPR) {
+			const prIndicator = props.task.prState
+				? PR_INDICATORS[props.task.prState]
+				: PR_INDICATORS.unknown
+			line += ` ${prIndicator}`
 		}
 		// Show conflict indicator when worktree has active merge conflict (e.g., "🔵 ⚔️")
 		if (props.task.hasMergeConflict) {

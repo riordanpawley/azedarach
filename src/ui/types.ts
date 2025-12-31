@@ -75,12 +75,58 @@ export interface GitStatus {
 }
 
 /**
+ * PR information parsed from notes field and enriched by gh CLI polling
+ */
+export interface PRInfo {
+	/** Whether a PR exists (fast check from notes field containing "PR: https://...") */
+	hasPR: boolean
+	/** PR URL extracted from notes field */
+	prUrl?: string
+	/** PR number extracted from URL (e.g., 123 from .../pull/123) */
+	prNumber?: number
+	/** PR state from gh CLI polling (undefined = not yet polled or offline) */
+	prState?: PRState
+}
+
+/**
+ * Parse PR info from notes field
+ *
+ * The notes field may contain "PR: https://github.com/.../pull/123" after
+ * a PR is created via Space+P. This extracts the URL and PR number.
+ *
+ * @example
+ * parsePRInfo("PR: https://github.com/org/repo/pull/42")
+ * // => { hasPR: true, prUrl: "https://github.com/org/repo/pull/42", prNumber: 42 }
+ *
+ * parsePRInfo("Some other notes")
+ * // => { hasPR: false }
+ */
+export const parsePRInfo = (notes: string | undefined): Partial<PRInfo> => {
+	if (!notes) return {}
+
+	// Match "PR: <url>" pattern - URL can be anywhere in notes
+	const prUrlMatch = notes.match(/PR:\s*(https:\/\/[^\s]+\/pull\/\d+)/)
+	if (!prUrlMatch) return {}
+
+	const prUrl = prUrlMatch[1]
+	// Extract PR number from URL
+	const prNumberMatch = prUrl?.match(/\/pull\/(\d+)/)
+	const prNumber = prNumberMatch ? Number.parseInt(prNumberMatch[1]!, 10) : undefined
+
+	return {
+		hasPR: true,
+		prUrl,
+		prNumber,
+	}
+}
+
+/**
  * Task with session state and optional metrics
  *
  * Extends Issue with session tracking. Metrics are only populated
  * when the session is active (not idle).
  */
-export interface TaskWithSession extends Issue, SessionMetrics, GitStatus {
+export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Partial<PRInfo> {
 	sessionState: SessionState
 	/** Whether a git worktree exists for this task (even if no session is running) */
 	hasWorktree?: boolean
@@ -138,6 +184,31 @@ export const CONFLICT_INDICATOR = "⚔️"
  * showing as small icon with vertical lines (||).
  */
 export const DEV_SERVER_INDICATOR = "💻"
+
+/**
+ * PR state from gh CLI polling
+ *
+ * - open: PR is open and awaiting review/merge
+ * - draft: PR is a draft (not ready for review)
+ * - merged: PR was merged successfully
+ * - closed: PR was closed without merging
+ */
+export type PRState = "open" | "draft" | "merged" | "closed"
+
+/**
+ * PR state indicators for TaskCard header
+ *
+ * Displayed when a task has an associated PR. State is determined by:
+ * 1. Fast: Parse notes field for "PR: https://..." (gives hasPR=true)
+ * 2. Accurate: Poll gh CLI for actual state (open/draft/merged/closed)
+ */
+export const PR_INDICATORS: Record<PRState | "unknown", string> = {
+	open: "🔗", // Link = open PR awaiting review
+	draft: "📝", // Draft = not ready for review
+	merged: "✅", // Merged successfully
+	closed: "🚫", // Closed without merging
+	unknown: "🔗", // Fallback when we have URL but gh CLI hasn't responded yet
+}
 
 /**
  * Worktree indicator shown when a git worktree exists but no session is running
