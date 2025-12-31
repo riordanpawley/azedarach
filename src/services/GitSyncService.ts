@@ -187,6 +187,8 @@ export class GitSyncService extends Effect.Service<GitSyncService>()("GitSyncSer
 		 * Show notification overlay if we should notify
 		 *
 		 * Called internally when commitsBehind changes.
+		 * If a gitPull overlay is already showing, update it with new count.
+		 * If another overlay is open, skip (don't interrupt user).
 		 */
 		const maybeShowNotification = (currentBehind: number) =>
 			Effect.gen(function* () {
@@ -196,37 +198,60 @@ export class GitSyncService extends Effect.Service<GitSyncService>()("GitSyncSer
 					return
 				}
 
-				// Check if we should notify (more commits than last notified)
+				// Nothing to notify about
+				if (currentBehind <= 0) {
+					return
+				}
+
+				const gitConfig = yield* appConfig.getGitConfig()
+				const { baseBranch, remote } = gitConfig
+
+				// Create the pull effect (captures currentBehind at creation time)
+				const createPullEffect = (count: number) =>
+					Effect.gen(function* () {
+						yield* pull()
+						yield* toast.show("success", `Pulled ${count} commits from ${remote}/${baseBranch}`)
+					}).pipe(Effect.catchAll((e) => toast.show("error", `Pull failed: ${e}`)))
+
+				// Check current overlay state
+				const currentOverlay = yield* overlay.current()
+
+				if (currentOverlay?._tag === "gitPull") {
+					// Already showing gitPull - update it if count changed
+					if (currentOverlay.commitsBehind !== currentBehind) {
+						yield* overlay.pop()
+						yield* overlay.push({
+							_tag: "gitPull",
+							commitsBehind: currentBehind,
+							baseBranch,
+							remote,
+							onConfirm: createPullEffect(currentBehind),
+						})
+					}
+					return
+				}
+
+				if (currentOverlay) {
+					// Some other overlay is open - don't interrupt
+					return
+				}
+
+				// No overlay open - check if we should notify (more commits than last notified)
 				const lastNotified = yield* Ref.get(lastNotifiedCount)
-				if (currentBehind <= 0 || currentBehind <= lastNotified) {
+				if (currentBehind <= lastNotified) {
 					return
 				}
 
 				// Mark as notified immediately to prevent duplicate popups
 				yield* Ref.set(lastNotifiedCount, currentBehind)
 
-				const gitConfig = yield* appConfig.getGitConfig()
-				const { baseBranch, remote } = gitConfig
-
-				// Create the pull effect
-				const pullEffect = Effect.gen(function* () {
-					yield* pull()
-					yield* toast.show(
-						"success",
-						`Pulled ${currentBehind} commits from ${remote}/${baseBranch}`,
-					)
-				}).pipe(Effect.catchAll((e) => toast.show("error", `Pull failed: ${e}`)))
-
-				// Push the confirm overlay
-				const message =
-					currentBehind === 1
-						? `${remote}/${baseBranch} has 1 new commit. Pull now?`
-						: `${remote}/${baseBranch} has ${currentBehind} new commits. Pull now?`
-
+				// Push the gitPull overlay
 				yield* overlay.push({
-					_tag: "confirm",
-					message,
-					onConfirm: pullEffect,
+					_tag: "gitPull",
+					commitsBehind: currentBehind,
+					baseBranch,
+					remote,
+					onConfirm: createPullEffect(currentBehind),
 				})
 			}).pipe(Effect.catchAll(Effect.logError))
 
