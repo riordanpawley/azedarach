@@ -27,11 +27,12 @@ import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import { emptyRecord } from "../lib/empty.js"
-import type { ColumnStatus, GitStatus, TaskWithSession } from "../ui/types.js"
-import { COLUMNS } from "../ui/types.js"
+import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
+import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
 import { MutationQueue } from "./MutationQueue.js"
+import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 
 // ============================================================================
@@ -252,6 +253,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		AppConfig.Default,
 		MutationQueue.Default,
 		WorktreeManager.Default,
+		PRStateService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const beadsClient = yield* BeadsClient
@@ -263,6 +265,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const appConfig = yield* AppConfig
 		const mutationQueue = yield* MutationQueue
 		const worktreeManager = yield* WorktreeManager
+		const prStateService = yield* PRStateService
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
@@ -588,6 +591,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								}
 							}
 
+							// Parse PR info from notes field (fast, local-only)
+							const prInfo = parsePRInfo(issue.notes)
+
 							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
@@ -595,6 +601,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								hasMergeConflict,
 								parentEpicId,
 								...gitStatus,
+								...prInfo, // hasPR, prUrl, prNumber from notes field
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
 									: undefined,
@@ -625,8 +632,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)
 
+				// Enrich tasks with PR state from gh CLI (batch fetch, cached)
+				const tasksWithPRs = tasksWithSession.filter((t) => t.hasPR && t.prUrl)
+				let prStateMap = new Map<string, PRState>()
+				if (tasksWithPRs.length > 0 && projectPath) {
+					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, beadId: t.id }))
+					prStateMap = yield* prStateService
+						.getPRStates(prInfos, projectPath)
+						.pipe(Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())))
+					yield* Effect.log(
+						`loadTasks: Fetched ${prStateMap.size}/${tasksWithPRs.length} PR states from gh CLI`,
+					)
+				}
+
+				// Merge PR states into tasks
+				const tasksWithPRState = tasksWithSession.map((task) => {
+					const prState = prStateMap.get(task.id)
+					return prState ? { ...task, prState } : task
+				})
+
 				// Debug: count tasks with parentEpicId set
-				const tasksWithEpicParent = tasksWithSession.filter((t) => t.parentEpicId !== undefined)
+				const tasksWithEpicParent = tasksWithPRState.filter((t) => t.parentEpicId !== undefined)
 				if (tasksWithEpicParent.length > 0) {
 					yield* Effect.logWarning(
 						`loadTasks: ${tasksWithEpicParent.length} tasks have parentEpicId (will be hidden on main board). Sample: ${JSON.stringify(tasksWithEpicParent.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })))}`,
@@ -634,7 +660,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 
 				// Debug: count by status
-				const statusCounts = tasksWithSession.reduce(
+				const statusCounts = tasksWithPRState.reduce(
 					(acc, t) => {
 						acc[t.status] = (acc[t.status] || 0) + 1
 						return acc
@@ -642,9 +668,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					{} as Record<string, number>,
 				)
 				yield* Effect.log(
-					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${tasksWithSession.length}, by status: ${JSON.stringify(statusCounts)}`,
+					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${tasksWithPRState.length}, by status: ${JSON.stringify(statusCounts)}`,
 				)
-				return tasksWithSession
+				return tasksWithPRState
 			})
 
 		const groupTasksByColumn = (
