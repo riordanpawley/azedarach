@@ -622,7 +622,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)
 
-				yield* Effect.log(`loadTasks: Complete in ${Date.now() - loadStartTime}ms`)
+				// Debug: count tasks with parentEpicId set
+				const tasksWithEpicParent = tasksWithSession.filter((t) => t.parentEpicId !== undefined)
+				if (tasksWithEpicParent.length > 0) {
+					yield* Effect.logWarning(
+						`loadTasks: ${tasksWithEpicParent.length} tasks have parentEpicId (will be hidden on main board). Sample: ${JSON.stringify(tasksWithEpicParent.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })))}`,
+					)
+				}
+
+				// Debug: count by status
+				const statusCounts = tasksWithSession.reduce(
+					(acc, t) => {
+						acc[t.status] = (acc[t.status] || 0) + 1
+						return acc
+					},
+					{} as Record<string, number>,
+				)
+				yield* Effect.log(
+					`loadTasks: Complete in ${Date.now() - loadStartTime}ms. Total: ${tasksWithSession.length}, by status: ${JSON.stringify(statusCounts)}`,
+				)
 				return tasksWithSession
 			})
 
