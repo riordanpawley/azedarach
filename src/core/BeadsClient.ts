@@ -585,8 +585,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			list: (filters?: { status?: string; priority?: number; type?: string }, cwd?: string) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					// --limit 0 means no limit - fetch ALL issues (default is 50)
-					const args: string[] = ["list", "--limit", "0"]
+					// --limit 0 = no limit (default is 50)
+					// --all = include closed issues (despite help text, closed are excluded by default)
+					const args: string[] = ["list", "--limit", "0", "--all"]
 
 					if (filters?.status) {
 						args.push("--status", filters.status)
