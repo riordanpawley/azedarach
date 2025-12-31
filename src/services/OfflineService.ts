@@ -45,15 +45,16 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 
 		yield* diagnostics.trackService("OfflineService", "Offline mode decision service")
 
-		const gitConfig = yield* appConfig.getGitConfig()
-		const prConfig = yield* appConfig.getPRConfig()
-		const beadsConfig = yield* appConfig.getBeadsConfig()
+		// NOTE: Config is fetched fresh on each check to pick up changes from project switching.
+		// Do NOT capture config at construction time - it becomes stale.
 
 		/**
 		 * Helper to check if operation is enabled based on config + network
+		 * Fetches config fresh each time to handle project switching via gp.
 		 */
-		const checkEnabled = (configEnabled: boolean): Effect.Effect<EnabledStatus> =>
+		const checkEnabled = (getConfigEnabled: Effect.Effect<boolean>): Effect.Effect<EnabledStatus> =>
 			Effect.gen(function* () {
+				const configEnabled = yield* getConfigEnabled
 				const online = yield* SubscriptionRef.get(network.isOnline)
 
 				if (!configEnabled && !online) {
@@ -76,7 +77,8 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 			 * - git.pushEnabled is false in config
 			 * - Network is offline
 			 */
-			isGitPushEnabled: (): Effect.Effect<EnabledStatus> => checkEnabled(gitConfig.pushEnabled),
+			isGitPushEnabled: (): Effect.Effect<EnabledStatus> =>
+				checkEnabled(Effect.map(appConfig.getGitConfig(), (c) => c.pushEnabled)),
 
 			/**
 			 * Check if git fetch/pull operations are enabled
@@ -85,7 +87,8 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 			 * - git.fetchEnabled is false in config
 			 * - Network is offline
 			 */
-			isGitFetchEnabled: (): Effect.Effect<EnabledStatus> => checkEnabled(gitConfig.fetchEnabled),
+			isGitFetchEnabled: (): Effect.Effect<EnabledStatus> =>
+				checkEnabled(Effect.map(appConfig.getGitConfig(), (c) => c.fetchEnabled)),
 
 			/**
 			 * Check if PR creation is enabled
@@ -94,7 +97,8 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 			 * - pr.enabled is false in config
 			 * - Network is offline
 			 */
-			isPREnabled: (): Effect.Effect<EnabledStatus> => checkEnabled(prConfig.enabled),
+			isPREnabled: (): Effect.Effect<EnabledStatus> =>
+				checkEnabled(Effect.map(appConfig.getPRConfig(), (c) => c.enabled)),
 
 			/**
 			 * Check if beads sync is enabled
@@ -103,7 +107,8 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 			 * - beads.syncEnabled is false in config
 			 * - Network is offline
 			 */
-			isBeadsSyncEnabled: (): Effect.Effect<EnabledStatus> => checkEnabled(beadsConfig.syncEnabled),
+			isBeadsSyncEnabled: (): Effect.Effect<EnabledStatus> =>
+				checkEnabled(Effect.map(appConfig.getBeadsConfig(), (c) => c.syncEnabled)),
 
 			/**
 			 * Get descriptive message for why an operation is disabled
