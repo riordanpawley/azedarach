@@ -395,6 +395,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					)
 
 					// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
+					// Excludes .beads/ directory - users care about code changes, not beads metadata
 					const diffCommand = Command.make(
 						"git",
 						"-C",
@@ -403,6 +404,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						"--numstat",
 						mergeBase,
 						"HEAD",
+						"--",
+						":^.beads",
 					).pipe(Command.string)
 
 					const diffStats = yield* diffCommand.pipe(
