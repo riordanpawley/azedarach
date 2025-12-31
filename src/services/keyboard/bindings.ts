@@ -334,6 +334,9 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const projectPath = yield* bc.helpers.getProjectPath()
 			const logFile = `${projectPath}/az.log`
 			// Shell wrapper providing menu with view/edit/quit options
+			// Note: We use bash intentionally because this script uses bash-specific syntax
+			// (`read -rsn1`, `case` statement). These utility popups don't need the user's
+			// shell environment - they just run simple scripts.
 			const wrapperScript = `
 while true; do
   clear
