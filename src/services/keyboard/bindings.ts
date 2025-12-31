@@ -321,6 +321,18 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		action: bc.board.refreshGitStats(),
 	},
 	{
+		key: "S-r",
+		mode: "normal",
+		description: "Recover crashed session",
+		action: Effect.suspend(() => bc.sessionHandlers.recoverCrashedSession()),
+	},
+	{
+		key: "C-r",
+		mode: "normal",
+		description: "Recover all crashed sessions",
+		action: Effect.suspend(() => bc.sessionHandlers.recoverAllCrashedSessions()),
+	},
+	{
 		key: "p",
 		mode: "normal",
 		description: "Open planning workflow",

@@ -11,6 +11,7 @@ import {
 	type AzedarachConfig,
 	type CliTool,
 	CURRENT_CONFIG_VERSION,
+	type SessionRecoveryMode,
 	type WorkflowMode,
 } from "./schema.js"
 
@@ -177,6 +178,16 @@ export const DEFAULT_CONFIG = {
 		/** Home row keys for QWERTY layout - customize for Colemak, Dvorak, etc. */
 		jumpLabelChars: "asdfjkl;",
 	},
+	sessionRecovery: {
+		/**
+		 * Auto-recovery is the default - crashed sessions are automatically respawned
+		 * on startup using `claude --resume` to continue the conversation.
+		 * Set to "manual" to show crashed sessions in UI and recover with R key.
+		 */
+		mode: "auto" as SessionRecoveryMode,
+		/** Delay before auto-recovery starts (ms) - gives UI time to render */
+		autoRecoveryDelayMs: 2000,
+	},
 	projects: [],
 	defaultProject: undefined,
 } as const
@@ -285,6 +296,10 @@ export interface ResolvedConfig {
 	keyboard: {
 		jumpLabelChars: string
 	}
+	sessionRecovery: {
+		mode: SessionRecoveryMode
+		autoRecoveryDelayMs: number
+	}
 	projects: ReadonlyArray<{
 		name: string
 		path: string
@@ -390,6 +405,12 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 		},
 		keyboard: {
 			jumpLabelChars: config.keyboard?.jumpLabelChars ?? DEFAULT_CONFIG.keyboard.jumpLabelChars,
+		},
+		sessionRecovery: {
+			mode: config.sessionRecovery?.mode ?? DEFAULT_CONFIG.sessionRecovery.mode,
+			autoRecoveryDelayMs:
+				config.sessionRecovery?.autoRecoveryDelayMs ??
+				DEFAULT_CONFIG.sessionRecovery.autoRecoveryDelayMs,
 		},
 	}
 }

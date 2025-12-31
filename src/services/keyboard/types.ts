@@ -67,9 +67,16 @@ export type KeybindingDeps = CommandExecutor.CommandExecutor
  * - An array of KeyMode strings: matches any of those modes
  * - "*": matches any mode (lowest priority)
  */
+/**
+ * Common error types that keybinding actions may produce.
+ * Actions handle their own errors internally via toast notifications,
+ * so this is effectively `unknown` at the boundary.
+ */
+export type KeybindingError = BeadsError | unknown
+
 export interface Keybinding {
 	readonly key: string
 	readonly mode: KeyMode | ReadonlyArray<KeyMode>
 	readonly description: string
-	readonly action: Effect.Effect<void, BeadsError, KeybindingDeps>
+	readonly action: Effect.Effect<void, KeybindingError, KeybindingDeps>
 }

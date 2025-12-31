@@ -41,6 +41,13 @@ export interface BuildCommandOptions {
 	readonly dangerouslySkipPermissions?: boolean
 	/** Session settings object (Claude: --settings) */
 	readonly sessionSettings?: Record<string, unknown>
+	/**
+	 * Resume the most recent conversation (Claude: --resume)
+	 *
+	 * Used when recovering crashed sessions - continues from where
+	 * the conversation left off before the tmux session died.
+	 */
+	readonly resume?: boolean
 }
 
 /**
@@ -102,6 +109,11 @@ const claudeToolDefinition: CliToolDefinition = {
 
 	buildCommand: (options) => {
 		const parts: string[] = ["claude"]
+
+		// --resume must come before other flags to resume the most recent conversation
+		if (options.resume) {
+			parts.push("--resume")
+		}
 
 		if (options.model) {
 			parts.push(`--model ${options.model}`)

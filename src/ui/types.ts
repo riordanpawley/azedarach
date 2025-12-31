@@ -16,6 +16,7 @@ export type SessionState =
 	| "error" // Task failed
 	| "paused" // Session paused
 	| "warning" // Session started but with issues (e.g., initCommands failed)
+	| "crashed" // Session was running but tmux died (e.g., computer restart)
 
 /**
  * Agent workflow phase
@@ -119,6 +120,7 @@ export const SESSION_INDICATORS: Record<SessionState, string> = {
 	error: "❌",
 	paused: "⏸️",
 	warning: "⚠️",
+	crashed: "💀", // Skull = session died (tmux killed, computer restart)
 }
 
 /**
