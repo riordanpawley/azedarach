@@ -943,9 +943,12 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						const popupTitle = ` 📷 ${attachment.filename}${navInfo} `
 
 						// The popup command: show image with viu, then wait for keypress
-						// Using bash -c to chain commands properly
-						const popupCmd = `viu "${filePath}" && echo "" && echo "Press any key to close..." && read -n 1`
+						// Use semicolons (not &&) so read always runs even if viu fails
+						// Use -rsn1 flags: raw mode, silent, single char (matches working log viewer)
+						const popupCmd = `viu "${filePath}"; echo ""; echo "Press any key to close..."; read -rsn1`
 
+						// Use TmuxService-style approach: pass entire command as single string
+						// This ensures proper command parsing by tmux display-popup
 						yield* Command.make(
 							"tmux",
 							"display-popup",
@@ -956,10 +959,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							"90%",
 							"-T",
 							popupTitle,
-							"--",
-							"bash",
-							"-c",
-							popupCmd,
+							`bash -c '${popupCmd}'`,
 						).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
