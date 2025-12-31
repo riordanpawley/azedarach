@@ -4,6 +4,7 @@
 
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
+import { usePaste } from "./hooks/usePaste.js"
 import { theme } from "./theme.js"
 
 export interface CreateTaskPromptProps {
@@ -88,6 +89,13 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 			} else if (event.name === "right" || event.name === "l") {
 				setPriorityIndex((prev) => (prev + 1) % PRIORITIES.length)
 			}
+		}
+	})
+
+	// Handle paste events (Cmd+V, bracketed paste) - only when title field is focused
+	usePaste((event) => {
+		if (focusedField === "title") {
+			setTitle((prev) => prev + event.text)
 		}
 	})
 

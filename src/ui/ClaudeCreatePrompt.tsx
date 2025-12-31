@@ -9,6 +9,7 @@ import { useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
 import { appConfigAtom } from "./atoms/index.js"
+import { usePaste } from "./hooks/usePaste.js"
 import { theme } from "./theme.js"
 
 export interface ClaudeCreatePromptProps {
@@ -98,6 +99,11 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				setDescription((prev) => prev + event.sequence)
 			}
 		}
+	})
+
+	// Handle paste events (Cmd+V, bracketed paste)
+	usePaste((event) => {
+		setDescription((prev) => prev + event.text)
 	})
 
 	const modalWidth = 70

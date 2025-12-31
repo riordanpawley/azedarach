@@ -7,4 +7,5 @@
 export { useEditorMode } from "./useEditorMode.js"
 export { useNavigation } from "./useNavigation.js"
 export { useOverlays } from "./useOverlays.js"
+export { usePaste } from "./usePaste.js"
 export { useToasts } from "./useToasts.js"
