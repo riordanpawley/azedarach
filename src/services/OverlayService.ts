@@ -28,6 +28,13 @@ export type Overlay =
 	| { readonly _tag: "imagePreview"; readonly taskId: string }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }
 	| {
+			readonly _tag: "gitPull"
+			readonly commitsBehind: number
+			readonly baseBranch: string
+			readonly remote: string
+			readonly onConfirm: AnyEffect
+	  }
+	| {
 			readonly _tag: "mergeChoice"
 			readonly message: string
 			readonly commitsBehind: number

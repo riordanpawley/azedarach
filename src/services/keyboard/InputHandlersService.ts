@@ -168,12 +168,15 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const handleConfirmInput = (key: string) =>
 				Effect.gen(function* () {
 					const currentOverlay = yield* overlay.current()
-					if (currentOverlay?._tag !== "confirm") {
+					// Handle both confirm and gitPull overlays (same y/n behavior)
+					if (currentOverlay?._tag !== "confirm" && currentOverlay?._tag !== "gitPull") {
 						return false
 					}
 
 					// DIAGNOSTIC: Log all keys received while confirm is open (az-f3iw)
-					yield* Effect.log(`[confirm:key] Received key="${key}" while confirm overlay is open`)
+					yield* Effect.log(
+						`[confirm:key] Received key="${key}" while ${currentOverlay._tag} overlay is open`,
+					)
 
 					// y or Enter to confirm
 					if (key === "y" || key === "return") {
