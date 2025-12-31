@@ -111,7 +111,7 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 		 * Get list of changed files vs base branch
 		 *
 		 * Uses merge-base to show changes since branch diverged from base.
-		 * Includes all files (including .beads/) for file picker display.
+		 * Excludes .beads/ directory - users care about code changes, not beads metadata.
 		 */
 		const getChangedFiles = (
 			worktreePath: string,
@@ -122,10 +122,16 @@ export class DiffService extends Effect.Service<DiffService>()("DiffService", {
 
 				// Compare merge-base to HEAD (all commits since branch diverged)
 				// Without HEAD, git diff compares to working tree which may be empty
-				// Includes .beads/ - file picker shows all changes, "all diff" view filters
-				const command = Command.make("git", "diff", "--name-status", mergeBase, "HEAD").pipe(
-					Command.workingDirectory(worktreePath),
-				)
+				// Excludes .beads/ - users care about code changes, not beads metadata
+				const command = Command.make(
+					"git",
+					"diff",
+					"--name-status",
+					mergeBase,
+					"HEAD",
+					"--",
+					":^.beads",
+				).pipe(Command.workingDirectory(worktreePath))
 
 				const output = yield* Command.string(command).pipe(
 					Effect.mapError((error) => {

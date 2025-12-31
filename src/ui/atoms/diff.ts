@@ -81,9 +81,9 @@ export const showDiffPopupAtom = appRuntime.fn(
 				// All files: stat summary first, then difftastic side-by-side
 				// Shows quick overview of what changed before detailed diff
 				command =
-					`git diff ${mergeBase} --stat --color=always -- ':!.beads' && echo "" && ` +
+					`git diff ${mergeBase} --stat --color=always -- ':^.beads' && echo "" && ` +
 					`DFT_COLOR=always GIT_EXTERNAL_DIFF="difft --display=side-by-side" ` +
-					`git diff ${mergeBase} -- ':!.beads' | less -RS`
+					`git diff ${mergeBase} -- ':^.beads' | less -RS`
 				title = " All Changes "
 			}
 
