@@ -50,6 +50,8 @@ export {
 export type { DiagnosticsState } from "./diagnostics.js"
 // Diagnostics atoms
 export { diagnosticsAtom } from "./diagnostics.js"
+// Git sync atoms (origin mode fetch/pull)
+export { commitsBehindAtom, fetchAndCheckAtom, isFetchingAtom, pullAtom } from "./gitSync.js"
 export type { ImageAttachment } from "./image.js"
 // Image attachment atoms
 export {
