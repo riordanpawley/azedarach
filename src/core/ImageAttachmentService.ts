@@ -944,7 +944,9 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 
 						// The popup command: show image with viu, then wait for keypress
 						// Use semicolons (not &&) so read always runs even if viu fails
-						// Use -rsn1 flags: raw mode, silent, single char (matches working log viewer)
+						// Note: We use bash here intentionally because `read -rsn1` is bash-specific syntax
+						// (zsh uses `read -rsk1`, fish is completely different). These utility popups
+						// don't need the user's shell environment - they just run simple scripts.
 						const popupCmd = `viu "${filePath}"; echo ""; echo "Press any key to close..."; read -rsn1`
 
 						// Use TmuxService-style approach: pass entire command as single string
