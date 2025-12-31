@@ -15,7 +15,7 @@
  * - network.checkHost: Host to check (default: "github.com")
  */
 
-import { Duration, Effect, Schedule, SubscriptionRef } from "effect"
+import { Duration, Effect, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
@@ -101,30 +101,36 @@ export class NetworkService extends Effect.Service<NetworkService>()("NetworkSer
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
-		const networkConfig = yield* appConfig.getNetworkConfig()
+
+		// NOTE: Config is fetched fresh on each check to pick up changes from project switching.
+		// Do NOT capture config at construction time - it becomes stale.
+		const initialConfig = yield* appConfig.getNetworkConfig()
 
 		yield* diagnostics.trackService(
 			"NetworkService",
-			`Connectivity monitor (${networkConfig.autoDetect ? `checking ${networkConfig.checkHost} every ${networkConfig.checkIntervalSeconds}s` : "disabled"})`,
+			`Connectivity monitor (${initialConfig.autoDetect ? `checking ${initialConfig.checkHost} every ${initialConfig.checkIntervalSeconds}s` : "disabled"})`,
 		)
 
 		// Current network status - starts optimistically online
 		const isOnline = yield* SubscriptionRef.make(true)
 
-		// Only start polling if autoDetect is enabled
-		if (networkConfig.autoDetect) {
+		// Only start polling if autoDetect was enabled at startup
+		// (changing autoDetect requires restart)
+		if (initialConfig.autoDetect) {
 			// Check immediately on startup
-			const initialStatus = yield* checkConnectivity(networkConfig.checkHost)
+			const initialStatus = yield* checkConnectivity(initialConfig.checkHost)
 			yield* SubscriptionRef.set(isOnline, initialStatus)
 
-			// Then poll at the configured interval
-			yield* Effect.scheduleForked(
-				Schedule.spaced(Duration.seconds(networkConfig.checkIntervalSeconds)),
-			)(
-				Effect.flatMap(checkConnectivity(networkConfig.checkHost), (status) =>
-					SubscriptionRef.set(isOnline, status),
-				),
-			)
+			// Recursive polling loop that fetches fresh config each iteration
+			// This allows checkHost and checkIntervalSeconds to change with project switching
+			const pollLoop: Effect.Effect<never> = Effect.gen(function* () {
+				const config = yield* appConfig.getNetworkConfig()
+				yield* Effect.sleep(Duration.seconds(config.checkIntervalSeconds))
+				const status = yield* checkConnectivity(config.checkHost)
+				yield* SubscriptionRef.set(isOnline, status)
+			}).pipe(Effect.forever)
+
+			yield* Effect.forkScoped(pollLoop)
 		}
 
 		return {
@@ -144,10 +150,12 @@ export class NetworkService extends Effect.Service<NetworkService>()("NetworkSer
 			 * Force a connectivity check right now
 			 *
 			 * Useful when the user wants to retry after coming online.
+			 * Fetches fresh config to pick up changes from project switching.
 			 */
 			checkNow: (): Effect.Effect<boolean> =>
 				Effect.gen(function* () {
-					const status = yield* checkConnectivity(networkConfig.checkHost)
+					const config = yield* appConfig.getNetworkConfig()
+					const status = yield* checkConnectivity(config.checkHost)
 					yield* SubscriptionRef.set(isOnline, status)
 					return status
 				}),
