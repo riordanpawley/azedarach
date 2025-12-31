@@ -63,6 +63,7 @@
               biome
               viu # Terminal image viewer with Kitty graphics protocol support
               go
+              git-lfs # Large file storage for bead images
 
               # ELF dependencies
               elfPython
