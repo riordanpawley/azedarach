@@ -50,12 +50,14 @@ const getSessionSortValue = (state: TaskWithSession["sessionState"]): number => 
 			return 3
 		case "paused":
 			return 4
+		case "crashed":
+			return 5 // Show crashed prominently - needs attention
 		case "done":
-			return 5
-		case "error":
 			return 6
-		case "idle":
+		case "error":
 			return 7
+		case "idle":
+			return 8
 		default:
 			return 99
 	}
@@ -445,6 +447,44 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 				const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined)
 				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
+
+				// Auto-recovery of crashed sessions (if enabled)
+				const crashedSessions = activeSessions.filter((s) => s.state === "crashed")
+				if (crashedSessions.length > 0) {
+					const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
+
+					if (recoveryConfig.mode === "auto") {
+						yield* Effect.log(
+							`Auto-recovering ${crashedSessions.length} crashed session(s) in ${recoveryConfig.autoRecoveryDelayMs}ms...`,
+						)
+
+						// Fork recovery to run in background after delay
+						// This lets the UI render immediately while recovery happens
+						yield* Effect.fork(
+							Effect.gen(function* () {
+								yield* Effect.sleep(recoveryConfig.autoRecoveryDelayMs)
+
+								for (const session of crashedSessions) {
+									yield* sessionManager.recoverSession(session.beadId).pipe(
+										Effect.tap(() => Effect.log(`Auto-recovered session for ${session.beadId}`)),
+										Effect.catchAll((error) =>
+											Effect.log(`Failed to auto-recover ${session.beadId}: ${error._tag}`),
+										),
+									)
+								}
+
+								yield* Effect.log(
+									`Auto-recovery complete: ${crashedSessions.length} session(s) processed`,
+								)
+							}),
+						)
+					} else {
+						yield* Effect.log(
+							`${crashedSessions.length} crashed session(s) detected. Manual recovery mode - use R to recover.`,
+						)
+					}
+				}
+
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
 				// Get optimistic mutations

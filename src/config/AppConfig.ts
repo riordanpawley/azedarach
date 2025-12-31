@@ -94,6 +94,9 @@ export interface AppConfigService {
 	/** Get keyboard configuration section */
 	readonly getKeyboardConfig: () => Effect.Effect<ResolvedConfig["keyboard"]>
 
+	/** Get session recovery configuration section */
+	readonly getSessionRecoveryConfig: () => Effect.Effect<ResolvedConfig["sessionRecovery"]>
+
 	/** Get workflow mode ('local' or 'origin') */
 	readonly getWorkflowMode: () => Effect.Effect<ResolvedConfig["git"]["workflowMode"]>
 
@@ -448,6 +451,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
 			getKeyboardConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.keyboard),
+			getSessionRecoveryConfig: () =>
+				Effect.map(SubscriptionRef.get(configRef), (c) => c.sessionRecovery),
 			getWorkflowMode: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git.workflowMode),
 			getEffectiveBaseBranch: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) =>

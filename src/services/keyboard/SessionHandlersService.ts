@@ -655,6 +655,63 @@ What would you like to discuss?`
 						)
 				})
 
+			/**
+			 * Recover crashed session (r in normal mode)
+			 *
+			 * Recovers a crashed session for the selected task.
+			 * Only valid when session state is "crashed".
+			 * Uses `claude --resume` to continue the conversation.
+			 */
+			const recoverCrashedSession = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					if (task.sessionState !== "crashed") {
+						yield* toast.show("error", `Cannot recover: task is ${task.sessionState}`)
+						return
+					}
+
+					yield* toast.show("info", `Recovering session for ${task.id}...`)
+
+					yield* sessionManager.recoverSession(task.id).pipe(
+						Effect.tap(() => toast.show("success", `Recovered session for ${task.id}`)),
+						Effect.tap(() => boardService.refresh()),
+						Effect.catchAll(helpers.showErrorToast("Failed to recover")),
+					)
+				})
+
+			/**
+			 * Recover all crashed sessions (Shift+R in normal mode)
+			 *
+			 * Recovers all crashed sessions.
+			 */
+			const recoverAllCrashedSessions = () =>
+				Effect.gen(function* () {
+					const allTasks = yield* boardService.getTasks()
+					const crashedTasks = allTasks.filter((t) => t.sessionState === "crashed")
+
+					if (crashedTasks.length === 0) {
+						yield* toast.show("info", "No crashed sessions to recover")
+						return
+					}
+
+					yield* toast.show("info", `Recovering ${crashedTasks.length} crashed session(s)...`)
+
+					let recovered = 0
+					for (const task of crashedTasks) {
+						yield* sessionManager.recoverSession(task.id).pipe(
+							Effect.tap(() => {
+								recovered++
+							}),
+							Effect.catchAll((error) => Effect.log(`Failed to recover ${task.id}: ${error._tag}`)),
+						)
+					}
+
+					yield* boardService.refresh()
+					yield* toast.show("success", `Recovered ${recovered}/${crashedTasks.length} sessions`)
+				})
+
 			// ================================================================
 			// Public API
 			// ================================================================
@@ -670,6 +727,8 @@ What would you like to discuss?`
 				resumeSession,
 				stopSession,
 				startHelixSession,
+				recoverCrashedSession,
+				recoverAllCrashedSessions,
 			}
 		}),
 	},

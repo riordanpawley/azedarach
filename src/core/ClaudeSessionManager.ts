@@ -68,6 +68,7 @@ const SessionStateSchema = Schema.Literal(
 	"error",
 	"paused",
 	"warning",
+	"crashed",
 )
 
 /**
@@ -239,6 +240,25 @@ export interface ClaudeSessionManagerService {
 	 * ```
 	 */
 	readonly resume: (beadId: string) => Effect.Effect<void, SessionError | InvalidStateError, never>
+
+	/**
+	 * Recover a crashed session
+	 *
+	 * Respawns a session whose tmux died (e.g., computer restart).
+	 * Uses `claude --resume` to continue the conversation where it left off.
+	 *
+	 * @example
+	 * ```ts
+	 * ClaudeSessionManager.recoverSession("az-05y")
+	 * ```
+	 */
+	readonly recoverSession: (
+		beadId: string,
+	) => Effect.Effect<
+		Session,
+		SessionNotFoundError | InvalidStateError | TmuxError | SessionError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Get current state for a session
@@ -830,6 +850,108 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* publishStateChange(beadId, "paused", "busy")
 					}),
 
+				recoverSession: (beadId: string) =>
+					Effect.gen(function* () {
+						const sessions = yield* Ref.get(sessionsRef)
+						const sessionOpt = HashMap.get(sessions, beadId)
+
+						if (sessionOpt._tag === "None") {
+							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+						}
+
+						const session = sessionOpt.value
+
+						// Verify session is crashed
+						if (session.state !== "crashed") {
+							return yield* Effect.fail(
+								new InvalidStateError({
+									beadId,
+									currentState: session.state,
+									expectedState: "crashed",
+									operation: "recoverSession",
+								}),
+							)
+						}
+
+						yield* Effect.log(`Recovering crashed session for ${beadId}`)
+
+						// Verify worktree still exists
+						const worktreeExists = yield* worktreeManager
+							.exists({ beadId, projectPath: session.projectPath })
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+
+						if (!worktreeExists) {
+							return yield* Effect.fail(
+								new SessionError({
+									message: `Worktree no longer exists at ${session.worktreePath}. Cannot recover session.`,
+									beadId,
+								}),
+							)
+						}
+
+						// Get config for session setup
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const worktreeConfig = yield* appConfig.getWorktreeConfig()
+						const cliTool = yield* appConfig.getCliTool()
+						const modelConfig = yield* appConfig.getModelConfig()
+
+						// Get tool definition and model
+						const toolDef = getToolDefinition(cliTool)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+						// Build command with -c flag to continue conversation
+						const commandWithOptions = toolDef.buildCommand({
+							continueConversation: true, // Key difference from start() - continue where we left off
+							model: effectiveModel,
+							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+						})
+
+						const tmuxSessionName = getBeadSessionName(beadId)
+						const { tmuxPrefix, backgroundTasks } = sessionConfig
+
+						// Get initCommands: merge worktree config + tool-specific init commands
+						const toolInitCommands = toolDef.getInitCommands()
+						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
+
+						// Create new tmux session in the existing worktree
+						yield* worktreeSession.getOrCreateSession(beadId, {
+							worktreePath: session.worktreePath,
+							projectPath: session.projectPath,
+							initCommands,
+							tmuxPrefix,
+							backgroundTasks,
+						})
+
+						// Create the code window with resumed Claude
+						yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.CODE, {
+							command: commandWithOptions,
+							cwd: session.worktreePath,
+						})
+
+						// Update session state from crashed to initializing
+						const recoveredSession: Session = {
+							...session,
+							state: "initializing",
+							startedAt: yield* DateTime.now, // Reset start time for recovered session
+						}
+
+						yield* Ref.update(sessionsRef, (sessions) =>
+							HashMap.set(sessions, beadId, recoveredSession),
+						)
+
+						// Persist to disk
+						const allSessions = yield* Ref.get(sessionsRef)
+						yield* persistSessions(allSessions)
+
+						// Publish state change
+						yield* publishStateChange(beadId, "crashed", "initializing")
+
+						yield* Effect.log(`Successfully recovered session for ${beadId}`)
+
+						return recoveredSession
+					}),
+
 				getState: (beadId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
@@ -864,6 +986,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const worktreeByBeadId = HashMap.fromIterable(
 							worktrees.map((wt) => [wt.beadId, wt] as const),
 						)
+
+						// Build set of running tmux session names for crash detection
+						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
 
 						for (const tmuxSession of tmuxSessions) {
 							const parsed = parseSessionName(tmuxSession.name)
@@ -903,6 +1028,43 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								}
 								yield* Ref.update(sessionsRef, (sessions) =>
 									HashMap.set(sessions, beadId, orphanedSession),
+								)
+							}
+						}
+
+						// Detect crashed sessions: persisted sessions whose tmux died
+						// States that indicate an active tmux session should exist:
+						const activeStates: Set<SessionState> = new Set([
+							"initializing",
+							"busy",
+							"waiting",
+							"paused",
+							"warning",
+						])
+
+						for (const [beadId, persisted] of HashMap.entries(persistedSessions)) {
+							// Skip if already recovered from tmux (handled above)
+							if (HashMap.has(inMemorySessions, beadId)) continue
+
+							// Check if this session was active but tmux died
+							if (
+								activeStates.has(persisted.state) &&
+								!runningTmuxNames.has(persisted.tmuxSessionName)
+							) {
+								yield* Effect.log(
+									`Detected crashed session for ${beadId} (was ${persisted.state}, tmux gone)`,
+								)
+
+								const crashedSession: Session = {
+									beadId,
+									worktreePath: persisted.worktreePath,
+									tmuxSessionName: persisted.tmuxSessionName,
+									state: "crashed",
+									startedAt: persisted.startedAt,
+									projectPath: persisted.projectPath,
+								}
+								yield* Ref.update(sessionsRef, (sessions) =>
+									HashMap.set(sessions, beadId, crashedSession),
 								)
 							}
 						}

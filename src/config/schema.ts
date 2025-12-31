@@ -398,6 +398,40 @@ const NetworkConfigSchema = Schema.Struct({
 })
 
 /**
+ * Session recovery mode
+ *
+ * - 'auto': Automatically recover crashed sessions on startup (default)
+ * - 'manual': Show crashed sessions in UI, user triggers recovery with R key
+ */
+export const SessionRecoveryModeSchema = Schema.Literal("auto", "manual")
+export type SessionRecoveryMode = Schema.Schema.Type<typeof SessionRecoveryModeSchema>
+
+/**
+ * Session recovery configuration
+ *
+ * Controls how sessions are recovered after computer restart or tmux crash.
+ * Sessions are detected as "crashed" when they exist in persisted state but
+ * not in running tmux sessions.
+ */
+const SessionRecoveryConfigSchema = Schema.Struct({
+	/**
+	 * Recovery mode (default: "auto")
+	 *
+	 * - "auto": Automatically respawn crashed sessions on startup
+	 * - "manual": Show crashed sessions in UI, recover with R/Shift+R keys
+	 */
+	mode: Schema.optional(SessionRecoveryModeSchema),
+
+	/**
+	 * Delay in milliseconds before auto-recovery starts (default: 2000)
+	 *
+	 * Gives time for UI to render so user sees what's being recovered.
+	 * Only applies when mode is "auto".
+	 */
+	autoRecoveryDelayMs: Schema.optional(Schema.Number),
+})
+
+/**
  * Project configuration
  *
  * Defines a project that can be managed by Azedarach.
@@ -535,6 +569,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		beads: current.beads,
 		network: current.network,
 		keyboard: current.keyboard,
+		sessionRecovery: current.sessionRecovery,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -591,6 +626,9 @@ const RawConfigSchema = Schema.Struct({
 	/** Keyboard configuration */
 	keyboard: Schema.optional(KeyboardConfigSchema),
 
+	/** Session recovery configuration */
+	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
+
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -617,6 +655,7 @@ const CurrentConfigSchema = Schema.Struct({
 	beads: Schema.optional(BeadsConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
+	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -686,3 +725,6 @@ export type ModelConfig = Schema.Schema.Type<typeof ModelConfigSchema>
 
 /** Keyboard config section type */
 export type KeyboardConfig = Schema.Schema.Type<typeof KeyboardConfigSchema>
+
+/** Session recovery config section type */
+export type SessionRecoveryConfig = Schema.Schema.Type<typeof SessionRecoveryConfigSchema>
