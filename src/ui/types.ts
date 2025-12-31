@@ -94,21 +94,27 @@ export interface PRInfo {
  * The notes field may contain "PR: https://github.com/.../pull/123" after
  * a PR is created via Space+P. This extracts the URL and PR number.
  *
+ * If multiple PRs exist in notes, returns the LAST (most recent) one.
+ *
  * @example
  * parsePRInfo("PR: https://github.com/org/repo/pull/42")
  * // => { hasPR: true, prUrl: "https://github.com/org/repo/pull/42", prNumber: 42 }
  *
+ * parsePRInfo("PR: https://github.com/org/repo/pull/1\nPR: https://github.com/org/repo/pull/99")
+ * // => { hasPR: true, prUrl: "https://github.com/org/repo/pull/99", prNumber: 99 }
+ *
  * parsePRInfo("Some other notes")
- * // => { hasPR: false }
+ * // => {}
  */
 export const parsePRInfo = (notes: string | undefined): Partial<PRInfo> => {
 	if (!notes) return {}
 
-	// Match "PR: <url>" pattern - URL can be anywhere in notes
-	const prUrlMatch = notes.match(/PR:\s*(https:\/\/[^\s]+\/pull\/\d+)/)
-	if (!prUrlMatch) return {}
+	// Match all "PR: <url>" patterns and take the last (most recent)
+	const matches = [...notes.matchAll(/PR:\s*(https:\/\/[^\s]+\/pull\/\d+)/g)]
+	if (matches.length === 0) return {}
 
-	const prUrl = prUrlMatch[1]
+	const lastMatch = matches[matches.length - 1]!
+	const prUrl = lastMatch[1]
 	// Extract PR number from URL
 	const prNumberMatch = prUrl?.match(/\/pull\/(\d+)/)
 	const prNumber = prNumberMatch ? Number.parseInt(prNumberMatch[1]!, 10) : undefined
