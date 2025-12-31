@@ -75,10 +75,34 @@ const buildNotifyCommand = (event: string, beadId: string, azNotifyPath?: string
 }
 
 /**
+ * Permissions to auto-grant in spawned worktree sessions
+ *
+ * These permissions are injected into settings.local.json so Claude sessions
+ * can work smoothly without manual approval prompts for common operations.
+ */
+export const WORKTREE_PERMISSIONS = {
+	permissions: {
+		allow: [
+			// View images attached to beads
+			"Read(//**/.beads/images/**)",
+			// Use beads CLI for issue management
+			"Bash(bd:*)",
+			// Use az CLI for session control (dev server, notify, etc.)
+			"Bash(az:*)",
+		],
+	},
+}
+
+/**
  * Generate Claude Code hook configuration for session state detection
  *
  * Creates hooks that call `az-notify.sh` when Claude enters specific states.
  * This enables authoritative state detection from Claude's native hook system.
+ *
+ * Also injects essential permissions for:
+ * - Viewing bead-attached images (.beads/images/**)
+ * - Using the beads CLI (bd:*)
+ * - Using the az CLI (az:*)
  *
  * Hook events:
  * - UserPromptSubmit - User sends a prompt (busy detection)
@@ -90,9 +114,10 @@ const buildNotifyCommand = (event: string, beadId: string, azNotifyPath?: string
  *
  * @param beadId - The bead ID to associate with this session
  * @param azNotifyPath - Optional absolute path to az-notify.sh (auto-detected if not provided)
- * @returns Hook configuration object to merge into settings.local.json
+ * @returns Hook and permission configuration object to merge into settings.local.json
  */
 export const generateHookConfig = (beadId: string, azNotifyPath?: string) => ({
+	...WORKTREE_PERMISSIONS,
 	hooks: {
 		UserPromptSubmit: [
 			{
