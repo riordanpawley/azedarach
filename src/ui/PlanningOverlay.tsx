@@ -16,6 +16,7 @@ import { useKeyboard } from "@opentui/react"
 import { useCallback, useState } from "react"
 import type { Plan, PlanningState, ReviewFeedback } from "../core/PlanningService.js"
 import { planningStateAtom, resetPlanningAtom, runPlanningAtom } from "./atoms/planning.js"
+import { usePaste } from "./hooks/usePaste.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -199,6 +200,11 @@ const InputPhase = ({
 				setDescription(description + printable)
 			}
 		}
+	})
+
+	// Handle paste events (Cmd+V, bracketed paste)
+	usePaste((event) => {
+		setDescription(description + event.text)
 	})
 
 	return (
