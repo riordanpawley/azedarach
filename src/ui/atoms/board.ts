@@ -193,11 +193,24 @@ export const drillDownFilteredTasksAtom = Atom.readable((get) => {
 	}
 
 	const tasksByColumn = tasksResult.value
-	console.log("[drillDownFilteredTasksAtom] Got", tasksByColumn.flat().length, "tasks")
+	const flatTasks = tasksByColumn.flat()
+	console.log("[drillDownFilteredTasksAtom] Got", flatTasks.length, "tasks")
 
 	// If no drill-down active (empty childIds), show main board view
 	// Epic children are hidden on main board - only visible in drill-down
 	if (childIds.size === 0) {
+		const tasksWithEpic = flatTasks.filter((task) => task.parentEpicId !== undefined)
+		if (tasksWithEpic.length > 0) {
+			console.log(
+				"[drillDownFilteredTasksAtom] WARNING: Filtering out",
+				tasksWithEpic.length,
+				"tasks with parentEpicId:",
+			)
+			console.log(
+				"  Sample:",
+				tasksWithEpic.slice(0, 3).map((t) => ({ id: t.id, parentEpicId: t.parentEpicId })),
+			)
+		}
 		return tasksByColumn.map((column) => column.filter((task) => task.parentEpicId === undefined))
 	}
 

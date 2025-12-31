@@ -13,6 +13,11 @@
       url = "github:Spacehunterz/Emergent-Learning-Framework_ELF";
       flake = false;
     };
+
+    beads = {
+      url = "github:steveyegge/beads";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -20,6 +25,7 @@
       nixpkgs,
       flake-utils,
       elf,
+      beads,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -48,6 +54,7 @@
         devShells = {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
+              beads.packages.${system}.default
               gh
               bun
               nodejs_22

@@ -19,6 +19,7 @@ import {
 	type Issue,
 	type NotFoundError,
 	type ParseError,
+	type SyncRequiredError,
 } from "./BeadsClient.js"
 import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
 import { FileLockManager } from "./FileLockManager.js"
@@ -809,7 +810,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			explicitBaseBranch?: string,
 		): Effect.Effect<
 			{ baseBranch: string; parentEpic: Issue | undefined },
-			BeadsError | NotFoundError | ParseError,
+			BeadsError | NotFoundError | ParseError | SyncRequiredError,
 			CommandExecutor.CommandExecutor
 		> =>
 			Effect.gen(function* () {

@@ -93,6 +93,15 @@ export class ParseError extends Data.TaggedError("ParseError")<{
 	readonly output: string
 }> {}
 
+/**
+ * Error when beads database is out of sync with JSONL file.
+ * This happens after git pull or when another worktree modifies issues.
+ * Can be auto-recovered by running `bd sync --import-only`.
+ */
+export class SyncRequiredError extends Data.TaggedError("SyncRequiredError")<{
+	readonly message: string
+}> {}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -120,7 +129,11 @@ export interface BeadsClientService {
 			type?: string
 		},
 		cwd?: string,
-	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		Issue[],
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Show details for a single issue
@@ -135,7 +148,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		Issue,
-		BeadsError | NotFoundError | ParseError,
+		BeadsError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -153,7 +166,11 @@ export interface BeadsClientService {
 	readonly showMultiple: (
 		ids: readonly string[],
 		cwd?: string,
-	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		Issue[],
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Update issue fields
@@ -182,7 +199,7 @@ export interface BeadsClientService {
 			labels?: string[]
 		},
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Close an issue with optional reason
@@ -196,7 +213,7 @@ export interface BeadsClientService {
 		id: string,
 		reason?: string,
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Sync beads database (push/pull)
@@ -210,7 +227,11 @@ export interface BeadsClientService {
 	 */
 	readonly sync: (
 		cwd?: string,
-	) => Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		SyncResult,
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Import-only sync - re-imports beads from JSONL into database without git operations.
@@ -218,7 +239,11 @@ export interface BeadsClientService {
 	 */
 	readonly syncImportOnly: (
 		cwd?: string,
-	) => Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		SyncResult,
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Recover tombstoned issues from JSONL.
@@ -241,7 +266,11 @@ export interface BeadsClientService {
 	 */
 	readonly ready: (
 		cwd?: string,
-	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		Issue[],
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Search issues by query string
@@ -254,7 +283,11 @@ export interface BeadsClientService {
 	readonly search: (
 		query: string,
 		cwd?: string,
-	) => Effect.Effect<Issue[], BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<
+		Issue[],
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Create a new issue
@@ -280,7 +313,11 @@ export interface BeadsClientService {
 		estimate?: number
 		labels?: string[]
 		cwd?: string
-	}) => Effect.Effect<Issue, BeadsError | ParseError, CommandExecutor.CommandExecutor>
+	}) => Effect.Effect<
+		Issue,
+		BeadsError | ParseError | SyncRequiredError,
+		CommandExecutor.CommandExecutor
+	>
 
 	/**
 	 * Delete an issue entirely
@@ -293,7 +330,7 @@ export interface BeadsClientService {
 	readonly delete: (
 		id: string,
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get children of an epic (issues with parent-child dependency)
@@ -309,7 +346,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		DependencyRef[],
-		BeadsError | NotFoundError | ParseError,
+		BeadsError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -328,7 +365,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		{ epic: Issue; children: ReadonlyArray<DependencyRef> },
-		BeadsError | NotFoundError | ParseError,
+		BeadsError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -352,7 +389,7 @@ export interface BeadsClientService {
 		dependsOnId: string,
 		type?: "blocks" | "related" | "parent-child" | "discovered-from",
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get the parent epic of an issue, if it has one
@@ -373,7 +410,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		Issue | undefined,
-		BeadsError | NotFoundError | ParseError,
+		BeadsError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 }
@@ -383,12 +420,20 @@ export interface BeadsClientService {
 // ============================================================================
 
 /**
+ * Check if error message indicates database sync is required
+ */
+const isSyncRequiredError = (message: string): boolean =>
+	message.includes("Database out of sync") ||
+	message.includes("Run 'bd sync --import-only'") ||
+	message.includes("bd sync --import-only")
+
+/**
  * Execute a bd command and return stdout as string
  */
 const runBd = (
 	args: readonly string[],
 	cwd?: string,
-): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
 		// Always add --json flag for structured output
 		const allArgs = [...args, "--json"]
@@ -400,6 +445,14 @@ const runBd = (
 		const result = yield* Command.string(command).pipe(
 			Effect.mapError((error) => {
 				const stderr = "stderr" in error ? String(error.stderr) : String(error)
+
+				// Detect sync required errors specifically
+				if (isSyncRequiredError(stderr)) {
+					return new SyncRequiredError({
+						message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+					})
+				}
+
 				return new BeadsError({
 					message: `bd command failed: ${stderr}`,
 					command: `bd ${allArgs.join(" ")}`,
@@ -407,6 +460,31 @@ const runBd = (
 				})
 			}),
 		)
+
+		// Check for empty output - bd daemon can return exit 0 with empty stdout on sync errors
+		const trimmed = result.trim()
+		if (!trimmed || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
+			// Output is empty or doesn't look like JSON - check if it's a sync error message
+			if (isSyncRequiredError(trimmed)) {
+				yield* Effect.log(`bd returned sync error in stdout, triggering auto-recovery`)
+				return yield* Effect.fail(
+					new SyncRequiredError({
+						message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+					}),
+				)
+			}
+			// If not a sync error, fail with descriptive error
+			if (!trimmed) {
+				yield* Effect.logWarning(`bd command returned empty output: bd ${allArgs.join(" ")}`)
+				return yield* Effect.fail(
+					new BeadsError({
+						message: "bd command returned empty output",
+						command: `bd ${allArgs.join(" ")}`,
+						stderr: "",
+					}),
+				)
+			}
+		}
 
 		return result
 	})
@@ -887,8 +965,11 @@ export const list = (
 		type?: string
 	},
 	cwd?: string,
-): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd))
+): Effect.Effect<
+	Issue[],
+	BeadsError | ParseError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd))
 
 /**
  * Get a single issue by ID
@@ -898,7 +979,7 @@ export const show = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue,
-	BeadsError | NotFoundError | ParseError,
+	BeadsError | NotFoundError | ParseError | SyncRequiredError,
 	BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.show(id, cwd))
 
@@ -920,8 +1001,11 @@ export const update = (
 		labels?: string[]
 	},
 	cwd?: string,
-): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.update(id, fields, cwd))
+): Effect.Effect<
+	void,
+	BeadsError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.update(id, fields, cwd))
 
 /**
  * Close an issue
@@ -930,8 +1014,11 @@ export const close = (
 	id: string,
 	reason?: string,
 	cwd?: string,
-): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.close(id, reason, cwd))
+): Effect.Effect<
+	void,
+	BeadsError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.close(id, reason, cwd))
 
 /**
  * Sync beads database
@@ -940,7 +1027,7 @@ export const sync = (
 	cwd?: string,
 ): Effect.Effect<
 	SyncResult,
-	BeadsError | ParseError,
+	BeadsError | ParseError | SyncRequiredError,
 	BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.sync(cwd))
 
@@ -949,8 +1036,11 @@ export const sync = (
  */
 export const ready = (
 	cwd?: string,
-): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.ready(cwd))
+): Effect.Effect<
+	Issue[],
+	BeadsError | ParseError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.ready(cwd))
 
 /**
  * Search issues
@@ -958,8 +1048,11 @@ export const ready = (
 export const search = (
 	query: string,
 	cwd?: string,
-): Effect.Effect<Issue[], BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.search(query, cwd))
+): Effect.Effect<
+	Issue[],
+	BeadsError | ParseError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.search(query, cwd))
 
 /**
  * Create a new issue
@@ -975,8 +1068,11 @@ export const create = (params: {
 	estimate?: number
 	labels?: string[]
 	cwd?: string
-}): Effect.Effect<Issue, BeadsError | ParseError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.create(params))
+}): Effect.Effect<
+	Issue,
+	BeadsError | ParseError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.create(params))
 
 /**
  * Delete an issue
@@ -984,8 +1080,11 @@ export const create = (params: {
 export const deleteIssue = (
 	id: string,
 	cwd?: string,
-): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.delete(id, cwd))
+): Effect.Effect<
+	void,
+	BeadsError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.delete(id, cwd))
 
 /**
  * Get an epic with its child tasks
@@ -995,7 +1094,7 @@ export const getEpicWithChildren = (
 	cwd?: string,
 ): Effect.Effect<
 	{ epic: Issue; children: ReadonlyArray<DependencyRef> },
-	BeadsError | NotFoundError | ParseError,
+	BeadsError | NotFoundError | ParseError | SyncRequiredError,
 	BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.getEpicWithChildren(epicId, cwd))
 
@@ -1007,8 +1106,11 @@ export const addDependency = (
 	dependsOnId: string,
 	type?: "blocks" | "related" | "parent-child" | "discovered-from",
 	cwd?: string,
-): Effect.Effect<void, BeadsError, BeadsClient | CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(BeadsClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
+): Effect.Effect<
+	void,
+	BeadsError | SyncRequiredError,
+	BeadsClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(BeadsClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
 
 /**
  * Get the parent epic of an issue, if it has one
@@ -1018,6 +1120,6 @@ export const getParentEpic = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue | undefined,
-	BeadsError | NotFoundError | ParseError,
+	BeadsError | NotFoundError | ParseError | SyncRequiredError,
 	BeadsClient | CommandExecutor.CommandExecutor
 > => Effect.flatMap(BeadsClient, (client) => client.getParentEpic(issueId, cwd))

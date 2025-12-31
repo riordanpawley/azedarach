@@ -21,7 +21,7 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { BeadsClient } from "../core/BeadsClient.js"
+import { BeadsClient, type SyncRequiredError } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
@@ -698,6 +698,38 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
+		/**
+		 * Refresh with auto-recovery for database sync errors.
+		 *
+		 * If the beads database is out of sync with JSONL (common after git pull
+		 * or when another worktree modifies issues), this will:
+		 * 1. Detect the SyncRequiredError
+		 * 2. Auto-run 'bd sync --import-only' to re-import JSONL
+		 * 3. Retry the refresh
+		 */
+		const refreshWithRecovery = () =>
+			refresh().pipe(
+				Effect.catchIf(
+					(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
+					() =>
+						Effect.gen(function* () {
+							yield* Effect.log(
+								"Beads database out of sync, auto-recovering with 'bd sync --import-only'...",
+							)
+							const projectPath = yield* projectService.getCurrentPath()
+							yield* beadsClient
+								.syncImportOnly(projectPath ?? undefined)
+								.pipe(
+									Effect.catchAll((syncError) =>
+										Effect.logError("Auto-sync recovery failed", String(syncError)),
+									),
+								)
+							yield* Effect.log("Auto-sync complete, retrying refresh...")
+							yield* refresh()
+						}),
+				),
+			)
+
 		const requestRefresh = () =>
 			Effect.gen(function* () {
 				const existingFiber = yield* Ref.get(debounceFiberRef)
@@ -707,7 +739,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
 				const fiber = yield* Effect.gen(function* () {
 					yield* Effect.sleep("500 millis")
-					yield* refresh().pipe(
+					yield* refreshWithRecovery().pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logError("BoardService debounced refresh failed", Cause.pretty(cause)).pipe(
 								Effect.asVoid,
@@ -766,7 +798,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		yield* refresh().pipe(
+		yield* refreshWithRecovery().pipe(
 			Effect.catchAllCause((cause) =>
 				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
 					Effect.asVoid,
@@ -778,7 +810,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		// This ensures data stays current even if event-driven refresh misses something
 		const backgroundPollingFiber = yield* Effect.forkScoped(
 			Effect.repeat(Schedule.spaced("5 seconds"))(
-				refresh().pipe(
+				refreshWithRecovery().pipe(
 					Effect.catchAllCause((cause) =>
 						Effect.logError("BoardService background refresh failed", Cause.pretty(cause)).pipe(
 							Effect.asVoid,
