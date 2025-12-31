@@ -20,23 +20,81 @@ import { AppConfig } from "../config/AppConfig.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
 /**
- * Check connectivity by attempting HTTP HEAD to the configured host
+ * Check connectivity by attempting to reach the configured host
  *
- * Uses a 5-second timeout to avoid blocking on slow networks.
+ * Strategy:
+ * 1. Try HEAD request first (lightweight, no body transfer)
+ * 2. If HEAD fails, fallback to GET (some servers block HEAD)
+ * 3. Consider online if we get ANY response (even error codes like 403)
+ *    because that means the network path works
+ *
+ * Uses a 10-second timeout to handle slower connections.
  * Returns true if reachable, false otherwise.
  */
+
+/** Result of a single connectivity attempt */
+type ConnectivityResult =
+	| { readonly online: true }
+	| { readonly online: false; readonly error: string }
+
 const checkConnectivity = (host: string): Effect.Effect<boolean> =>
-	Effect.tryPromise({
-		try: () =>
-			fetch(`https://${host}`, {
-				method: "HEAD",
-				signal: AbortSignal.timeout(5000),
+	Effect.gen(function* () {
+		const url = `https://${host}`
+		const timeout = 10000 // 10 seconds
+
+		// Try HEAD first (lightweight)
+		const headResult: ConnectivityResult = yield* Effect.tryPromise({
+			try: () =>
+				fetch(url, {
+					method: "HEAD",
+					signal: AbortSignal.timeout(timeout),
+				}),
+			catch: (e) => e,
+		}).pipe(
+			Effect.map((): ConnectivityResult => {
+				// Any response (even 4xx/5xx) means network is working
+				// The server responded, so we're online
+				return { online: true }
 			}),
-		catch: () => new Error("Network unreachable"),
-	}).pipe(
-		Effect.map(() => true),
-		Effect.orElse(() => Effect.succeed(false)),
-	)
+			Effect.catchAll(
+				(error): Effect.Effect<ConnectivityResult> =>
+					Effect.succeed({ online: false, error: String(error) }),
+			),
+		)
+
+		if (headResult.online) {
+			return true
+		}
+
+		// HEAD failed - try GET as fallback (some servers block HEAD)
+		const getResult: ConnectivityResult = yield* Effect.tryPromise({
+			try: () =>
+				fetch(url, {
+					method: "GET",
+					signal: AbortSignal.timeout(timeout),
+				}),
+			catch: (e) => e,
+		}).pipe(
+			Effect.map((): ConnectivityResult => {
+				// Any response means we're online
+				return { online: true }
+			}),
+			Effect.catchAll(
+				(error): Effect.Effect<ConnectivityResult> =>
+					Effect.succeed({ online: false, error: String(error) }),
+			),
+		)
+
+		if (getResult.online) {
+			return true
+		}
+
+		// Both failed - log for debugging
+		yield* Effect.logDebug(
+			`Connectivity check failed: HEAD error=${headResult.error}, GET error=${getResult.error}`,
+		)
+		return false
+	})
 
 export class NetworkService extends Effect.Service<NetworkService>()("NetworkService", {
 	dependencies: [DiagnosticsService.Default, AppConfig.Default],

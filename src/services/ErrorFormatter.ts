@@ -330,6 +330,37 @@ const ERROR_FORMATTERS: Record<
 		category: "pr",
 	}),
 
+	OfflineError: (error) => {
+		const operation = String(error.operation || "Operation")
+		const reason = error.reason as "config" | "offline" | "both" | undefined
+
+		switch (reason) {
+			case "config":
+				return {
+					message: `${operation} disabled in configuration`,
+					suggestion: "Try: Check .azedarach.json settings",
+					category: "pr",
+				}
+			case "offline":
+				return {
+					message: `${operation} unavailable (network offline)`,
+					suggestion: "Try: Check your internet connection and retry",
+					category: "pr",
+				}
+			case "both":
+				return {
+					message: `${operation} disabled (config + offline)`,
+					suggestion: "Try: Check both .azedarach.json settings and network connection",
+					category: "pr",
+				}
+			default:
+				return {
+					message: `${operation} unavailable`,
+					category: "pr",
+				}
+		}
+	},
+
 	// ─────────────────────────────────────────────────────────────────────────
 	// Session Errors
 	// ─────────────────────────────────────────────────────────────────────────
