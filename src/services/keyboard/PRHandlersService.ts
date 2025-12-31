@@ -241,15 +241,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						yield* prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
 							Effect.catchAll((error) => {
-								const msg =
-									error &&
-									typeof error === "object" &&
-									"_tag" in error &&
-									error._tag === "GHCLIError"
-										? String((error as { message: string }).message)
-										: `Failed to create PR: ${error}`
+								// Use formatForToast for consistent, user-friendly error messages
+								// This handles OfflineError, GHCLIError, GitError, and all other tagged errors
+								const msg = formatForToast(error)
 								return Effect.gen(function* () {
-									yield* Effect.logError(`Create PR: ${msg}`, { error })
+									yield* Effect.logError(`Create PR failed`, { error })
 									yield* toast.show("error", msg)
 								})
 							}),
