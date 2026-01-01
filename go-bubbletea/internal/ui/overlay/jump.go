@@ -12,8 +12,11 @@ import (
 // homeRow defines the home row keys for jump labels
 var homeRow = []rune{'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';'}
 
+// alphabet for double-char labels when we need more than 10
+var alphabet = []rune("abcdefghijklmnopqrstuvwxyz")
+
 // GenerateLabels generates jump labels for the given count
-// Uses single characters for first 10, then double characters
+// Uses single home row characters first, then double alpha characters
 func GenerateLabels(count int) []string {
 	if count <= 0 {
 		return []string{}
@@ -21,18 +24,19 @@ func GenerateLabels(count int) []string {
 
 	labels := make([]string, 0, count)
 
-	// Single character labels for first 10
+	// Single character labels using home row (fast access)
 	for i := 0; i < count && i < len(homeRow); i++ {
 		labels = append(labels, string(homeRow[i]))
 	}
 
-	// Double character labels after first 10
-	if count > len(homeRow) {
-		remaining := count - len(homeRow)
-		for i := 0; i < remaining; i++ {
-			first := i / len(homeRow)
-			second := i % len(homeRow)
-			label := string(homeRow[first]) + string(homeRow[second])
+	if len(labels) >= count {
+		return labels
+	}
+
+	// Double character labels using full alphabet (26*26 = 676 combinations)
+	for first := 0; first < len(alphabet) && len(labels) < count; first++ {
+		for second := 0; second < len(alphabet) && len(labels) < count; second++ {
+			label := string(alphabet[first]) + string(alphabet[second])
 			labels = append(labels, label)
 		}
 	}
@@ -236,14 +240,21 @@ func (j *JumpMode) hasLongerMatch() bool {
 	return false
 }
 
-// isHomeRowKey checks if a rune is in the home row
-func isHomeRowKey(r rune) bool {
+// isJumpKey checks if a rune is valid for jump labels (home row or alphabet)
+func isJumpKey(r rune) bool {
+	// Check home row (includes semicolon)
 	for _, hr := range homeRow {
 		if hr == r {
 			return true
 		}
 	}
-	return false
+	// Check full alphabet for double-char labels
+	return r >= 'a' && r <= 'z'
+}
+
+// isHomeRowKey is kept for backwards compatibility
+func isHomeRowKey(r rune) bool {
+	return isJumpKey(r)
 }
 
 // RenderLabel renders a jump label with styling

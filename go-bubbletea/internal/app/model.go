@@ -965,12 +965,26 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Go to last column
 		m.nav.GotoLastColumn(columns)
 	case "w":
-		// Jump mode - quick navigation with labels
-		taskCount := 0
-		for _, col := range columns {
-			taskCount += len(col.Tasks)
+		// Jump mode - quick navigation with labels for VISIBLE tasks only
+		// Calculate visible tasks per column based on screen height
+		// Card height is 6 lines (border + content), minus header and status bar
+		cardHeight := 6
+		availableHeight := m.height - 2 // status bar + column header
+		visiblePerColumn := availableHeight / cardHeight
+		if visiblePerColumn < 1 {
+			visiblePerColumn = 1
 		}
-		return m, m.overlayStack.Push(overlay.NewJumpMode(taskCount))
+
+		// Count visible tasks (capped by actual task count per column)
+		visibleCount := 0
+		for _, col := range columns {
+			colVisible := len(col.Tasks)
+			if colVisible > visiblePerColumn {
+				colVisible = visiblePerColumn
+			}
+			visibleCount += colVisible
+		}
+		return m, m.overlayStack.Push(overlay.NewJumpMode(visibleCount))
 	case "p":
 		// Project selector
 		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))

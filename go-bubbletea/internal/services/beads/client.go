@@ -22,11 +22,11 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	}
 }
 
-// List fetches all beads using `bd list --format=json`
+// List fetches all beads using `bd list --json`
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 	c.logger.Debug("fetching beads list")
 
-	out, err := c.runner.Run(ctx, "bd", "list", "--format=json")
+	out, err := c.runner.Run(ctx, "bd", "list", "--json")
 	if err != nil {
 		return nil, &domain.BeadsError{Op: "list", Err: err}
 	}
@@ -40,11 +40,11 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 	return tasks, nil
 }
 
-// Search queries beads using `bd search query --format=json`
+// Search queries beads using `bd search query --json`
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
 	c.logger.Debug("searching beads", "query", query)
 
-	out, err := c.runner.Run(ctx, "bd", "search", query, "--format=json")
+	out, err := c.runner.Run(ctx, "bd", "search", query, "--json")
 	if err != nil {
 		return nil, &domain.BeadsError{Op: "search", Message: query, Err: err}
 	}
@@ -58,11 +58,11 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 	return tasks, nil
 }
 
-// Ready fetches unblocked tasks using `bd ready --format=json`
+// Ready fetches unblocked tasks using `bd ready --json`
 func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 	c.logger.Debug("fetching ready beads")
 
-	out, err := c.runner.Run(ctx, "bd", "ready", "--format=json")
+	out, err := c.runner.Run(ctx, "bd", "ready", "--json")
 	if err != nil {
 		return nil, &domain.BeadsError{Op: "ready", Err: err}
 	}

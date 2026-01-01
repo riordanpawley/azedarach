@@ -21,11 +21,8 @@ func Render(
 		return ""
 	}
 
-	// Calculate column width
-	// 4 columns with gaps between them
-	gap := 1
-	totalGaps := (len(columns) - 1) * gap
-	columnWidth := (width - totalGaps) / len(columns)
+	// Calculate column width - 4 columns, evenly distributed
+	columnWidth := width / len(columns)
 
 	// Render each column
 	var columnStrings []string
@@ -36,7 +33,6 @@ func Render(
 			cursorTask = cursor.Task
 		}
 
-		// Subtract 1 from height to account for status bar
 		columnStr := renderColumn(
 			col.Title,
 			col.Tasks,
@@ -46,12 +42,15 @@ func Render(
 			phaseData,
 			showPhases,
 			columnWidth,
-			height-1,
+			height,
 			s,
 		)
-		columnStrings = append(columnStrings, columnStr)
+
+		// Force consistent width using lipgloss Width
+		sized := lipgloss.NewStyle().Width(columnWidth).Height(height).Render(columnStr)
+		columnStrings = append(columnStrings, sized)
 	}
 
-	// Join columns horizontally with gaps
+	// Join columns horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, columnStrings...)
 }

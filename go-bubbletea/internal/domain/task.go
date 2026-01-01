@@ -25,7 +25,7 @@ type Task struct {
 	Description  string       `json:"description,omitempty"`
 	Status       Status       `json:"status"`
 	Priority     Priority     `json:"priority"`
-	Type         TaskType     `json:"type"`
+	Type         TaskType     `json:"issue_type"`
 	ParentID     *string      `json:"parent_id,omitempty"`
 	Dependencies []Dependency `json:"dependencies,omitempty"`
 	Session      *Session     `json:"session,omitempty"`
@@ -40,7 +40,7 @@ const (
 	StatusOpen       Status = "open"
 	StatusInProgress Status = "in_progress"
 	StatusBlocked    Status = "blocked"
-	StatusDone       Status = "done"
+	StatusDone       Status = "closed"
 )
 
 // Column returns the kanban column index for this status
