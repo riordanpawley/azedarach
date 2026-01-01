@@ -551,6 +551,14 @@ done
 		),
 	},
 	{
+		key: "S-o",
+		mode: "action",
+		description: "Open PR",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.openPR())),
+		),
+	},
+	{
 		key: "d",
 		mode: "action",
 		description: "Cleanup worktree",

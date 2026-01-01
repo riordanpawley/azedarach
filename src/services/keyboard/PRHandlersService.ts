@@ -12,6 +12,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import { Command } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
@@ -698,6 +699,38 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				yield* toast.show("info", "Merge cancelled")
 			})
 
+		/**
+		 * Open PR action (Space+O)
+		 *
+		 * Opens the task's PR in the user's default browser using `gh pr view --web`.
+		 * Requires the task to have a PR (created via Space+P).
+		 */
+		const openPR = () =>
+			Effect.gen(function* () {
+				const task = yield* helpers.getActionTargetTask()
+				if (!task) return
+
+				// Check if task has a PR
+				if (!task.hasPR || !task.prNumber) {
+					yield* toast.show("error", `No PR for ${task.id} - create one first (P)`)
+					return
+				}
+
+				// Get project path for cwd context (gh needs to be in repo context)
+				const projectPath = yield* helpers.getProjectPath()
+
+				yield* toast.show("info", `Opening PR #${task.prNumber}...`)
+
+				// Use gh pr view --web to open in browser
+				const command = Command.make("gh", "pr", "view", String(task.prNumber), "--web").pipe(
+					Command.workingDirectory(projectPath),
+				)
+
+				yield* Command.exitCode(command).pipe(
+					Effect.catchAll(helpers.showErrorToast("Failed to open PR")),
+				)
+			})
+
 		// ================================================================
 		// Public API
 		// ================================================================
@@ -709,6 +742,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			cleanup,
 			abortMerge,
 			showDiff,
+			openPR,
 			// Expose doMerge for direct calls if needed
 			doMerge,
 			// Merge select mode
