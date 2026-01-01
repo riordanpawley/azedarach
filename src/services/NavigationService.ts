@@ -14,6 +14,8 @@
 
 import { Effect, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../core/BeadsClient.js"
+import { computeDependencyPhases } from "../core/dependencyPhases.js"
+import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService } from "./EditorService.js"
@@ -72,24 +74,37 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
 
 		/**
-		 * Get the filtered/sorted tasks by column using current search/sort/filter config
+		 * Sort tasks by phase within a column (for drill-down mode).
 		 *
-		 * When in drill-down mode, also filters to only the epic's children.
-		 * This ensures navigation operates on the same view that the user sees.
+		 * This matches the rendering order in Column.tsx which groups tasks by phase.
+		 * Tasks within the same phase maintain their relative order.
+		 */
+		const sortByPhase = (
+			tasks: TaskWithSession[],
+			phases: ReadonlyMap<string, { phase: number; blockedBy: readonly string[] }>,
+		): TaskWithSession[] => {
+			return [...tasks].sort((a, b) => {
+				const phaseA = phases.get(a.id)?.phase ?? 1
+				const phaseB = phases.get(b.id)?.phase ?? 1
+				return phaseA - phaseB
+			})
+		}
+
+		/**
+		 * Get the filtered/sorted tasks by column for navigation.
+		 *
+		 * IMPORTANT: Uses board.filteredTasksByColumn SubscriptionRef (same source as UI)
+		 * to ensure navigation and rendering always see the exact same task list.
+		 *
+		 * When in drill-down mode:
+		 * 1. Filters to only the epic's children
+		 * 2. Sorts by dependency phase (matching Column.tsx rendering order)
 		 */
 		const getFilteredTasksByColumn = () =>
 			Effect.gen(function* () {
-				const mode = yield* editor.getMode()
-				const sortConfig = yield* editor.getSortConfig()
-				const filterConfig = yield* editor.getFilterConfig()
-				const searchQuery = mode._tag === "search" ? mode.query : ""
-
-				// Get base filtered tasks
-				const tasksByColumn = yield* board.getFilteredTasksByColumn(
-					searchQuery,
-					sortConfig,
-					filterConfig,
-				)
+				// Use the same pre-computed SubscriptionRef that the UI uses
+				// This ensures navigation and rendering are always in sync
+				const tasksByColumn = yield* SubscriptionRef.get(board.filteredTasksByColumn)
 
 				// Apply drill-down filter if active
 				const childIds = yield* SubscriptionRef.get(drillDownChildIds)
@@ -102,7 +117,21 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				}
 
 				// Drill-down mode: filter to only include the epic's children
-				return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+				const filteredColumns = tasksByColumn.map((column) =>
+					column.filter((task) => childIds.has(task.id)),
+				)
+
+				// Get child details for phase computation
+				const childDetails = yield* SubscriptionRef.get(drillDownChildDetails)
+
+				// If we have child details, compute phases and sort by phase
+				// This matches Column.tsx rendering which groups tasks by phase
+				if (childDetails.size > 0) {
+					const phaseResult = computeDependencyPhases(childIds, childDetails)
+					return filteredColumns.map((column) => sortByPhase(column, phaseResult.phases))
+				}
+
+				return filteredColumns
 			})
 
 		/**
