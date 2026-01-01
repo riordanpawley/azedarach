@@ -14,6 +14,8 @@
 
 import { Effect, Stream, SubscriptionRef } from "effect"
 import type { Issue } from "../core/BeadsClient.js"
+import { computeDependencyPhases } from "../core/dependencyPhases.js"
+import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService } from "./EditorService.js"
@@ -72,13 +74,31 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
 
 		/**
+		 * Sort tasks by phase within a column (for drill-down mode).
+		 *
+		 * This matches the rendering order in Column.tsx which groups tasks by phase.
+		 * Tasks within the same phase maintain their relative order.
+		 */
+		const sortByPhase = (
+			tasks: TaskWithSession[],
+			phases: ReadonlyMap<string, { phase: number; blockedBy: readonly string[] }>,
+		): TaskWithSession[] => {
+			return [...tasks].sort((a, b) => {
+				const phaseA = phases.get(a.id)?.phase ?? 1
+				const phaseB = phases.get(b.id)?.phase ?? 1
+				return phaseA - phaseB
+			})
+		}
+
+		/**
 		 * Get the filtered/sorted tasks by column for navigation.
 		 *
 		 * IMPORTANT: Uses board.filteredTasksByColumn SubscriptionRef (same source as UI)
 		 * to ensure navigation and rendering always see the exact same task list.
-		 * This fixes the "cursor jumping" bug caused by using separate filter computations.
 		 *
-		 * When in drill-down mode, also filters to only the epic's children.
+		 * When in drill-down mode:
+		 * 1. Filters to only the epic's children
+		 * 2. Sorts by dependency phase (matching Column.tsx rendering order)
 		 */
 		const getFilteredTasksByColumn = () =>
 			Effect.gen(function* () {
@@ -97,7 +117,21 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				}
 
 				// Drill-down mode: filter to only include the epic's children
-				return tasksByColumn.map((column) => column.filter((task) => childIds.has(task.id)))
+				const filteredColumns = tasksByColumn.map((column) =>
+					column.filter((task) => childIds.has(task.id)),
+				)
+
+				// Get child details for phase computation
+				const childDetails = yield* SubscriptionRef.get(drillDownChildDetails)
+
+				// If we have child details, compute phases and sort by phase
+				// This matches Column.tsx rendering which groups tasks by phase
+				if (childDetails.size > 0) {
+					const phaseResult = computeDependencyPhases(childIds, childDetails)
+					return filteredColumns.map((column) => sortByPhase(column, phaseResult.phases))
+				}
+
+				return filteredColumns
 			})
 
 		/**
