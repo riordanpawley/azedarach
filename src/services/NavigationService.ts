@@ -13,7 +13,7 @@
  */
 
 import { Effect, Stream, SubscriptionRef } from "effect"
-import type { Issue } from "../core/BeadsClient.js"
+import { BeadsClient, type Issue } from "../core/BeadsClient.js"
 import { computeDependencyPhases } from "../core/dependencyPhases.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
@@ -42,13 +42,19 @@ export interface Position {
 // ============================================================================
 
 export class NavigationService extends Effect.Service<NavigationService>()("NavigationService", {
-	dependencies: [BoardService.Default, DiagnosticsService.Default, EditorService.Default],
+	dependencies: [
+		BoardService.Default,
+		DiagnosticsService.Default,
+		EditorService.Default,
+		BeadsClient.Default,
+	],
 
 	scoped: Effect.gen(function* () {
 		// Inject services
 		const board = yield* BoardService
 		const diagnostics = yield* DiagnosticsService
 		const editor = yield* EditorService
+		const beadsClient = yield* BeadsClient
 
 		// Register with diagnostics - tracks service health
 		yield* diagnostics.trackService("NavigationService", "Cursor navigation and focus management")
@@ -220,6 +226,87 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				),
 			),
 		)
+
+		/**
+		 * Core drill-down refresh logic.
+		 * Re-fetches epic children and updates state if new children found.
+		 */
+		const refreshDrillDownCore = (epicId: string) =>
+			Effect.gen(function* () {
+				// Fetch current epic children
+				const children = yield* beadsClient
+					.getEpicChildren(epicId)
+					.pipe(Effect.catchAll(() => Effect.succeed([])))
+
+				const newChildIds = new Set(children.map((c: { id: string }) => c.id))
+
+				// Get existing child IDs to check for new children
+				const existingChildIds = yield* SubscriptionRef.get(drillDownChildIds)
+
+				// Find new children (not in existing set)
+				const addedChildren = children.filter((c) => !existingChildIds.has(c.id))
+
+				if (addedChildren.length === 0) {
+					// No new children - nothing to update
+					return
+				}
+
+				yield* Effect.log(
+					`Drill-down refresh: found ${addedChildren.length} new child(ren) for epic ${epicId}`,
+				)
+
+				// Update child IDs set
+				yield* SubscriptionRef.set(drillDownChildIds, newChildIds)
+
+				// Fetch details for new children only (incremental)
+				const newDetailResults = yield* Effect.all(
+					addedChildren.map((child: { id: string }) =>
+						beadsClient
+							.show(child.id)
+							.pipe(Effect.map((issue) => [child.id, issue] as const))
+							.pipe(Effect.catchAll(() => Effect.succeed(null))),
+					),
+					{ concurrency: "unbounded" },
+				)
+
+				// Merge new details into existing map
+				const existingDetails = yield* SubscriptionRef.get(drillDownChildDetails)
+				const updatedDetails = new Map(existingDetails)
+				for (const result of newDetailResults) {
+					if (result !== null) {
+						updatedDetails.set(result[0], result[1])
+					}
+				}
+
+				yield* SubscriptionRef.set(drillDownChildDetails, updatedDetails)
+			})
+
+		// Watch for board task changes and refresh drill-down state when in drill-down mode
+		// This ensures newly added epic children appear without re-entering drill-down
+		const drillDownRefreshFiber = yield* Effect.forkScoped(
+			Stream.runForEach(board.tasks.changes, () =>
+				Effect.gen(function* () {
+					// Check if in drill-down mode
+					const epicId = yield* SubscriptionRef.get(drillDownEpic)
+					if (epicId === null) return
+
+					// Refresh drill-down with new children
+					yield* refreshDrillDownCore(epicId)
+				}).pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logDebug("NavigationService drill-down refresh failed", { cause }).pipe(
+							Effect.asVoid,
+						),
+					),
+				),
+			),
+		)
+		yield* diagnostics.registerFiber({
+			id: "nav-drilldown-refresh",
+			name: "Drill-Down Refresh",
+			description: "Refreshes drill-down children when board tasks change",
+			fiber: drillDownRefreshFiber,
+		})
 
 		return {
 			// Expose SubscriptionRefs for atom subscription
@@ -592,6 +679,23 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			 * Get current drill-down epic ID (if any)
 			 */
 			getDrillDownEpic: (): Effect.Effect<string | null> => SubscriptionRef.get(drillDownEpic),
+
+			/**
+			 * Refresh drill-down state with current epic children
+			 *
+			 * Called when board tasks update to detect newly added epic children.
+			 * Only updates if currently in drill-down mode.
+			 *
+			 * @param epicId - The epic ID to refresh (must match current drill-down epic)
+			 */
+			refreshDrillDown: (epicId: string) =>
+				Effect.gen(function* () {
+					// Only refresh if we're in drill-down for this epic
+					const currentEpic = yield* SubscriptionRef.get(drillDownEpic)
+					if (currentEpic !== epicId) return
+
+					yield* refreshDrillDownCore(epicId)
+				}),
 		}
 	}),
 }) {}
