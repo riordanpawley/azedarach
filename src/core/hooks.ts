@@ -40,6 +40,9 @@ const AZ_BINARY_PATH = `${BIN_PATH}/az.ts`
 /** Cached absolute path to the fast notify shell script */
 const AZ_NOTIFY_PATH = `${BIN_PATH}/az-notify.sh`
 
+/** Cached absolute path to the pre-compact hook script */
+const AZ_PRE_COMPACT_PATH = `${BIN_PATH}/az-pre-compact.sh`
+
 /**
  * Get the absolute path to the az CLI script
  *
@@ -58,6 +61,15 @@ export const getAzBinaryPath = (): string => AZ_BINARY_PATH
 export const getAzNotifyPath = (): string => AZ_NOTIFY_PATH
 
 /**
+ * Get the absolute path to the pre-compact hook script
+ *
+ * Returns the pre-computed path to bin/az-pre-compact.sh.
+ * This script outputs a reminder for Claude to update beads
+ * before context compaction.
+ */
+export const getAzPreCompactPath = (): string => AZ_PRE_COMPACT_PATH
+
+/**
  * Build the az notify command with proper path handling
  *
  * Uses the lightweight shell script (az-notify.sh) instead of the full
@@ -72,6 +84,29 @@ const buildNotifyCommand = (event: string, beadId: string, azNotifyPath?: string
 	const notifyPath = azNotifyPath ?? getAzNotifyPath()
 	// Use the shell script directly - no bun/node overhead
 	return `"${notifyPath}" ${event} ${beadId}`
+}
+
+/**
+ * Build the pre-compact command with proper path handling
+ *
+ * @param beadId - Bead ID for the session
+ * @param azPreCompactPath - Optional absolute path to az-pre-compact.sh (auto-detected if not provided)
+ */
+const buildPreCompactCommand = (beadId: string, azPreCompactPath?: string): string => {
+	const preCompactPath = azPreCompactPath ?? getAzPreCompactPath()
+	return `"${preCompactPath}" ${beadId}`
+}
+
+/**
+ * Options for hook configuration generation
+ */
+export interface HookConfigOptions {
+	/** Whether to include the PreCompact hook (default: true) */
+	preCompactEnabled?: boolean
+	/** Optional absolute path to az-notify.sh (auto-detected if not provided) */
+	azNotifyPath?: string
+	/** Optional absolute path to az-pre-compact.sh (auto-detected if not provided) */
+	azPreCompactPath?: string
 }
 
 /**
@@ -107,18 +142,21 @@ export const WORKTREE_PERMISSIONS = {
  * Hook events:
  * - UserPromptSubmit - User sends a prompt (busy detection)
  * - PreToolUse - Claude is about to use a tool (busy detection)
+ * - PreCompact - Before context compaction (optional, enabled by default)
  * - Notification (idle_prompt) - Claude is waiting for user input at the prompt
  * - PermissionRequest - Claude is waiting for permission approval
  * - Stop - Claude session stops (Ctrl+C, completion, etc.)
  * - SessionEnd - Claude session fully ends
  *
  * @param beadId - The bead ID to associate with this session
- * @param azNotifyPath - Optional absolute path to az-notify.sh (auto-detected if not provided)
+ * @param options - Optional configuration for hook generation
  * @returns Hook and permission configuration object to merge into settings.local.json
  */
-export const generateHookConfig = (beadId: string, azNotifyPath?: string) => ({
-	...WORKTREE_PERMISSIONS,
-	hooks: {
+export const generateHookConfig = (beadId: string, options: HookConfigOptions = {}) => {
+	const { preCompactEnabled = true, azNotifyPath, azPreCompactPath } = options
+
+	// Build the hooks object with required hooks
+	const hooks: Record<string, unknown[]> = {
 		UserPromptSubmit: [
 			{
 				// Fires immediately when user sends a prompt - instant "busy" detection
@@ -184,8 +222,29 @@ export const generateHookConfig = (beadId: string, azNotifyPath?: string) => ({
 				],
 			},
 		],
-	},
-})
+	}
+
+	// Add PreCompact hook if enabled
+	if (preCompactEnabled) {
+		hooks.PreCompact = [
+			{
+				// Fires before context compaction - outputs reminder to update beads
+				// This ensures session progress is preserved before context is lost
+				hooks: [
+					{
+						type: "command",
+						command: buildPreCompactCommand(beadId, azPreCompactPath),
+					},
+				],
+			},
+		]
+	}
+
+	return {
+		...WORKTREE_PERMISSIONS,
+		hooks,
+	}
+}
 
 /**
  * Type guard to check if value is a plain object (not array)

@@ -188,6 +188,16 @@ export const DEFAULT_CONFIG = {
 		/** Delay before auto-recovery starts (ms) - gives UI time to render */
 		autoRecoveryDelayMs: 2000,
 	},
+	hooks: {
+		preCompact: {
+			/**
+			 * PreCompact hook is enabled by default.
+			 * Updates the bead with session progress before context compaction,
+			 * ensuring work-in-progress survives auto-compaction.
+			 */
+			enabled: true,
+		},
+	},
 	projects: [],
 	defaultProject: undefined,
 } as const
@@ -300,6 +310,11 @@ export interface ResolvedConfig {
 		mode: SessionRecoveryMode
 		autoRecoveryDelayMs: number
 	}
+	hooks: {
+		preCompact: {
+			enabled: boolean
+		}
+	}
 	projects: ReadonlyArray<{
 		name: string
 		path: string
@@ -411,6 +426,11 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			autoRecoveryDelayMs:
 				config.sessionRecovery?.autoRecoveryDelayMs ??
 				DEFAULT_CONFIG.sessionRecovery.autoRecoveryDelayMs,
+		},
+		hooks: {
+			preCompact: {
+				enabled: config.hooks?.preCompact?.enabled ?? DEFAULT_CONFIG.hooks.preCompact.enabled,
+			},
 		},
 	}
 }
