@@ -407,6 +407,34 @@ export const SessionRecoveryModeSchema = Schema.Literal("auto", "manual")
 export type SessionRecoveryMode = Schema.Schema.Type<typeof SessionRecoveryModeSchema>
 
 /**
+ * Hooks configuration
+ *
+ * Controls which Claude Code hooks are injected into spawned worktree sessions.
+ * These hooks enable session state detection and context preservation.
+ */
+const HooksConfigSchema = Schema.Struct({
+	/**
+	 * PreCompact hook configuration
+	 *
+	 * The PreCompact hook fires before Claude compacts its context window.
+	 * When enabled, it updates the bead with session progress so context
+	 * survives compaction.
+	 */
+	preCompact: Schema.optional(
+		Schema.Struct({
+			/**
+			 * Enable PreCompact hook (default: true)
+			 *
+			 * When true, injects a hook that updates the bead with session
+			 * progress before context compaction. This ensures work-in-progress
+			 * is preserved even if auto-compact triggers unexpectedly.
+			 */
+			enabled: Schema.optional(Schema.Boolean),
+		}),
+	),
+})
+
+/**
  * Session recovery configuration
  *
  * Controls how sessions are recovered after computer restart or tmux crash.
@@ -570,6 +598,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		network: current.network,
 		keyboard: current.keyboard,
 		sessionRecovery: current.sessionRecovery,
+		hooks: current.hooks,
 		projects: current.projects,
 		defaultProject: current.defaultProject,
 	}
@@ -629,6 +658,9 @@ const RawConfigSchema = Schema.Struct({
 	/** Session recovery configuration */
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
 
+	/** Hooks configuration for spawned sessions */
+	hooks: Schema.optional(HooksConfigSchema),
+
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -656,6 +688,7 @@ const CurrentConfigSchema = Schema.Struct({
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
+	hooks: Schema.optional(HooksConfigSchema),
 	projects: Schema.optional(Schema.Array(ProjectConfigSchema)),
 	defaultProject: Schema.optional(Schema.String),
 })
@@ -728,3 +761,6 @@ export type KeyboardConfig = Schema.Schema.Type<typeof KeyboardConfigSchema>
 
 /** Session recovery config section type */
 export type SessionRecoveryConfig = Schema.Schema.Type<typeof SessionRecoveryConfigSchema>
+
+/** Hooks config section type */
+export type HooksConfig = Schema.Schema.Type<typeof HooksConfigSchema>
