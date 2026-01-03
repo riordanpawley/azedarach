@@ -189,17 +189,65 @@ func (c *Client) Checkout(ctx context.Context, worktree, branch string) error {
 	return nil
 }
 
+// RevListCount returns the number of commits between two references.
+// This is used by the GitSyncService to determine how far behind origin the local branch is.
+func (c *Client) RevListCount(ctx context.Context, worktree, revRange string) (int, error) {
+	c.logger.Debug("getting rev-list count", "worktree", worktree, "range", revRange)
+
+	output, err := c.runner.Run(ctx, "rev-list", "--count", revRange)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rev-list count: %w", err)
+	}
+
+	var count int
+	_, err = fmt.Sscanf(strings.TrimSpace(output), "%d", &count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse rev-list count: %w", err)
+	}
+
+	return count, nil
+}
+
+// Pull pulls updates from the remote repository.
+// This is used for updating the local base branch when origin mode is enabled.
+func (c *Client) Pull(ctx context.Context, worktree, remote, branch string) error {
+	c.logger.Info("pulling from remote", "worktree", worktree, "remote", remote, "branch", branch)
+
+	_, err := c.runner.Run(ctx, "pull", remote, branch)
+	if err != nil {
+		return fmt.Errorf("failed to pull from remote: %w", err)
+	}
+
+	c.logger.Info("pull completed successfully", "remote", remote, "branch", branch)
+	return nil
+}
+
+// FetchRef updates a local ref from a remote ref without switching branches.
+// This allows updating the base branch (e.g., main) while the user is working on a feature branch.
+func (c *Client) FetchRef(ctx context.Context, worktree, remote, refSpec string) error {
+	c.logger.Info("fetching ref", "worktree", worktree, "remote", remote, "refSpec", refSpec)
+
+	_, err := c.runner.Run(ctx, "fetch", remote, refSpec)
+	if err != nil {
+		return fmt.Errorf("failed to fetch ref: %w", err)
+	}
+
+	c.logger.Info("fetch ref completed successfully", "remote", remote, "refSpec", refSpec)
+	return nil
+}
+
 // parseGitStatus parses the output of 'git status --porcelain'.
 // The format is: XY PATH
 // Where X is the status of the index and Y is the status of the working tree.
 //
 // Examples:
-//   M  file.txt  - modified in index (staged)
-//    M file.txt  - modified in working tree (unstaged)
-//   A  file.txt  - added to index (staged)
-//   D  file.txt  - deleted from index (staged)
-//   ?? file.txt  - untracked file
-//   MM file.txt  - modified in both index and working tree
+//
+//	M  file.txt  - modified in index (staged)
+//	 M file.txt  - modified in working tree (unstaged)
+//	A  file.txt  - added to index (staged)
+//	D  file.txt  - deleted from index (staged)
+//	?? file.txt  - untracked file
+//	MM file.txt  - modified in both index and working tree
 func parseGitStatus(output string) *GitStatus {
 	status := &GitStatus{
 		Modified:  make([]string, 0),

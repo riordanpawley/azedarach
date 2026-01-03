@@ -130,6 +130,7 @@ type Model struct {
 
 	// Git services
 	gitClient      *git.Client
+	gitSyncService *git.GitSyncService
 	networkChecker *network.StatusChecker
 	isOnline       bool
 
@@ -190,11 +191,13 @@ func New(cfg *config.Config) Model {
 	// Initialize port allocator (base port 3000)
 	portAllocator := devserver.NewPortAllocator(3000)
 
+	// Initialize network checker
+	networkChecker := network.NewStatusChecker()
+
 	// Initialize git client (uses same runner as worktree manager)
 	gitClient := git.NewClient(gitRunner, logger)
 
-	// Initialize network checker
-	networkChecker := network.NewStatusChecker()
+	gitSyncService := git.NewGitSyncService(gitClient, networkChecker, cfg, repoDir, logger)
 
 	// Load project registry
 	registry, err := config.LoadProjectsRegistry()
@@ -239,6 +242,7 @@ func New(cfg *config.Config) Model {
 		sessionMonitor:     sessionMonitor,
 		portAllocator:      portAllocator,
 		gitClient:          gitClient,
+		gitSyncService:     gitSyncService,
 		networkChecker:     networkChecker,
 		projectRegistry:    registry,
 		isOnline:           true, // Optimistically assume online
@@ -256,6 +260,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
 		m.loadBeadsCmd(),
+		m.gitSyncService.FetchAndCheck(),
 	)
 }
 
@@ -285,6 +290,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case overlay.SelectionMsg:
+		if msg.Key == "git_pull" {
+			m.overlayStack.Pop()
+			return m, m.gitSyncService.Pull()
+		}
 		return m.handleSelection(msg)
 
 	case overlay.SearchMsg:
@@ -324,7 +333,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Expire old toasts and refresh beads
 		m.expireToasts()
-		return m, m.loadBeadsCmd()
+		return m, tea.Batch(
+			m.loadBeadsCmd(),
+			m.gitSyncService.FetchAndCheck(),
+		)
 
 	case monitor.SessionStateMsg:
 		// Update session state from monitor
@@ -354,6 +366,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update online status
 		m.isOnline = msg.Online
 		m.logger.Debug("network status updated", "online", msg.Online)
+		return m, nil
+
+	case git.GitSyncMsg:
+		if msg.Err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Git sync failed: %v", msg.Err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		if m.gitSyncService.ShouldNotify(msg.CommitsBehind) {
+			return m, m.overlayStack.Push(overlay.NewGitPullOverlay(msg.CommitsBehind))
+		}
 		return m, nil
 
 	case fetchAndMergeResultMsg:
