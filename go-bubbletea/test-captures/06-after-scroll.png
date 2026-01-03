@@ -1,0 +1,58 @@
+direnv: unloading
+[WARN] - (starship::context): Scanning current directory timed out.
+[WARN] - (starship::context): You can set scan_timeout in your config to a higher value to allow longer-running scans to keep executing.
+
+~
+󱞩 ./go-bubbletea/bin/az
+zsh: no such file or directory: ./go-bubbletea/bin/az
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩 k
+zsh: command not found: k
+
+~
+󱞩 l
+zsh: command not found: l
+
+~
+󱞩 h
+zsh: command not found: h
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩 j
+Error: There is no jj repo in "."
+
+~
+󱞩
+
+
+
+
+
+
+
+
+
+
+
+
