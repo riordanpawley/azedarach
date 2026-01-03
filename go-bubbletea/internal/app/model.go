@@ -7,15 +7,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/config"
-	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
@@ -541,7 +541,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
-
 
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
