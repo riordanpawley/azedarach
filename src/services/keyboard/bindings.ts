@@ -10,6 +10,7 @@ import type { BeadsClient, Issue } from "../../core/BeadsClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
+import type { GitSyncService } from "../GitSyncService.js"
 import type { NavigationService } from "../NavigationService.js"
 import type { OverlayService } from "../OverlayService.js"
 import type { SettingsService } from "../SettingsService.js"
@@ -54,6 +55,7 @@ export interface BindingContext {
 	tmux: TmuxService
 	beadsClient: BeadsClient
 	board: BoardService
+	gitSync: GitSyncService
 }
 
 // ============================================================================
@@ -318,7 +320,9 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "r",
 		mode: "normal",
 		description: "Refresh git stats",
-		action: bc.board.refreshGitStats(),
+		action: Effect.all([bc.board.refreshGitStats(), bc.gitSync.fetchAndCheck()], {
+			concurrency: "unbounded",
+		}).pipe(Effect.asVoid),
 	},
 	{
 		key: "S-r",
@@ -544,6 +548,14 @@ done
 		description: "Create PR",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.createPR())),
+		),
+	},
+	{
+		key: "S-o",
+		mode: "action",
+		description: "Open PR",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.openPR())),
 		),
 	},
 	{

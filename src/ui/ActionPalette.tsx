@@ -41,7 +41,7 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  * are dimmed and will show an error toast if pressed.
  */
 /** Actions that require network connectivity */
-const NETWORK_ACTIONS = new Set(["P", "m", "d"])
+const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
 
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
@@ -92,6 +92,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return true
 			case "i": // Image attach - always available
 				return true
+			case "O": // Open PR - only if task has a PR
+				return props.task?.hasPR === true
 			case "H": // Helix editor - only if worktree exists (active session or orphaned)
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "h": // Move left - always available
@@ -204,6 +206,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				<ActionLine keyName="u" description="update" />
 				<ActionLine keyName="f" description="diff" />
 				<ActionLine keyName="P" description="PR" />
+				<ActionLine keyName="O" description="open PR" />
 				<ActionLine keyName="m" description="merge" />
 				<ActionLine keyName="d" description="cleanup" />
 				<ActionLine keyName="D" description="delete" />

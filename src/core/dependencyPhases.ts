@@ -62,9 +62,16 @@ export const computeDependencyPhases = (
 		const issue = childDetails.get(childId)
 		if (!issue?.dependencies) continue
 
-		// Find blocking dependencies that are siblings
+		// Find blocking dependencies that are siblings AND not already closed
+		// Closed tasks are considered "resolved" and no longer block dependents
 		const siblingBlockers = issue.dependencies
-			.filter((dep) => dep.dependency_type === "blocks" && childIds.has(dep.id))
+			.filter((dep) => {
+				if (dep.dependency_type !== "blocks") return false
+				if (!childIds.has(dep.id)) return false
+				// Skip blockers that are already closed (work complete)
+				const blockerIssue = childDetails.get(dep.id)
+				return blockerIssue?.status !== "closed"
+			})
 			.map((dep) => dep.id)
 
 		blockers.set(childId, siblingBlockers)

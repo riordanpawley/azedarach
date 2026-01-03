@@ -28,6 +28,13 @@ export type OverlayType =
 			readonly onConfirm: AnyEffect
 	  }
 	| {
+			readonly _tag: "gitPull"
+			readonly commitsBehind: number
+			readonly baseBranch: string
+			readonly remote: string
+			readonly onConfirm: AnyEffect
+	  }
+	| {
 			readonly _tag: "mergeChoice"
 			readonly message: string
 			readonly commitsBehind: number
@@ -140,6 +147,7 @@ export function useOverlays() {
 			showingClaudeCreate: currentOverlay?._tag === "claudeCreate",
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
+			showingGitPull: currentOverlay?._tag === "gitPull",
 			showingMergeChoice: currentOverlay?._tag === "mergeChoice",
 			showingBulkCleanup: currentOverlay?._tag === "bulkCleanup",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",

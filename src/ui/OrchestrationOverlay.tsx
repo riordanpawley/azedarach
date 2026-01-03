@@ -35,14 +35,14 @@ const getStatusIndicator = (task: OrchestrationTask): string => {
 
 /**
  * Get selection indicator for a task
- * [✓] = selected
+ * [•] = selected
  * [ ] = not selected but selectable
  * [-] = not selectable
  */
 const getSelectionIndicator = (task: OrchestrationTask, isSelected: boolean): string => {
 	const isSpawnable = task.status === "open" && !task.hasSession
 	if (!isSpawnable) return "[-]"
-	return isSelected ? "[✓]" : "[ ]"
+	return isSelected ? "[•]" : "[ ]"
 }
 
 /**

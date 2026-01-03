@@ -40,6 +40,7 @@ import { DevServerMenu } from "./DevServerMenu.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { DiffViewer } from "./DiffViewer/index.js"
 import { FilterMenu } from "./FilterMenu.js"
+import { GitPullOverlay } from "./GitPullOverlay.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
 import { ImageAttachOverlay } from "./ImageAttachOverlay.js"
@@ -76,6 +77,7 @@ export const App = () => {
 		showingImageAttach,
 		showingImagePreview,
 		showingConfirm,
+		showingGitPull,
 		showingMergeChoice,
 		showingBulkCleanup,
 		showingDiagnostics,
@@ -393,6 +395,9 @@ export const App = () => {
 
 			{/* Confirm overlay */}
 			{showingConfirm && <ConfirmOverlay />}
+
+			{/* Git pull notification overlay */}
+			{showingGitPull && <GitPullOverlay />}
 
 			{/* Merge choice overlay */}
 			{showingMergeChoice && <MergeChoiceOverlay />}

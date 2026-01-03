@@ -801,6 +801,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | `Space` `u` | Update from main | Worktree exists (merge main into branch) |
 | `Space` `f` | Show diff | Worktree exists (difftastic side-by-side) |
 | `Space` `P` | Create PR | Worktree exists (push + gh pr create) |
+| `Space` `O` | Open PR | PR exists (opens in browser via `gh pr view --web`) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
 | `Space` `b` | Merge bead into... | Worktree exists (merge into another bead) |
@@ -844,6 +845,20 @@ Creating a PR now **automatically syncs with main first** to ensure your branch 
 5. Creates a GitHub PR using `gh pr create`
 
 This ensures PRs are always based on the latest main and reduces the chance of merge conflicts after review.
+
+#### Open PR (Space+O)
+
+Opens the task's existing PR in your default browser. This uses `gh pr view --web` to launch the GitHub PR page.
+
+**Requirements:**
+- The task must have a PR (created via `Space` `P`)
+- The PR URL must be stored in the task's notes field
+
+**Visual indicator:**
+- Tasks with PRs show a PR icon in their header line (🔗 open, 📝 draft, ✅ merged, 🚫 closed)
+- Only available (not dimmed) in Action Palette when `hasPR` is true
+
+**Use case:** Quick access to review comments, CI status, or merge the PR on GitHub.
 
 #### Merge to Main (Space+m)
 

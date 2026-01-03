@@ -489,8 +489,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// 1. If explicit baseBranch passed, use it
 						// 2. If bead has a parent epic, use the epic branch
 						// 3. Otherwise, use the default (WorktreeManager uses current branch)
-						// Get worktree config early - we need copyPaths for worktree creation
+						// Get worktree and hooks config early - we need copyPaths and preCompactEnabled for worktree creation
 						const worktreeConfig = yield* appConfig.getWorktreeConfig()
+						const hooksConfig = yield* appConfig.getHooksConfig()
 
 						let effectiveBaseBranch = explicitBaseBranch
 						let epicWorktreePath: string | undefined
@@ -508,6 +509,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									// Epic branches from main (no baseBranch = uses current branch)
 									// Epic gets copyPaths from config (copies from main project)
 									copyPaths: worktreeConfig.copyPaths,
+									preCompactEnabled: hooksConfig.preCompact.enabled,
 								})
 								// Use the epic branch as base for the child task
 								effectiveBaseBranch = parentEpic.id
@@ -526,6 +528,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							baseBranch: effectiveBaseBranch,
 							sourceWorktreePath: epicWorktreePath,
 							copyPaths: worktreeConfig.copyPaths,
+							preCompactEnabled: hooksConfig.preCompact.enabled,
 						})
 
 						// NOTE: .claude/ directory is git-tracked so it's already in the worktree.

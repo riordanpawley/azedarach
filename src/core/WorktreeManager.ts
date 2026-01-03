@@ -20,6 +20,7 @@ import {
 	extractMergeableSettings,
 	generateHookConfig,
 	generateWorktreeSkill,
+	type HookConfigOptions,
 } from "./hooks.js"
 
 // ============================================================================
@@ -60,6 +61,15 @@ export interface CreateWorktreeOptions {
 	 * @example ["node_modules", ".env.local", ".direnv"]
 	 */
 	readonly copyPaths?: readonly string[]
+	/**
+	 * Whether to enable the PreCompact hook for context preservation.
+	 *
+	 * When true (default), injects a hook that reminds Claude to update beads
+	 * before context compaction. This ensures work-in-progress is preserved.
+	 *
+	 * @default true
+	 */
+	readonly preCompactEnabled?: boolean
 }
 
 // ============================================================================
@@ -390,11 +400,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		 * which is globally gitignored and thus not copied when git creates a worktree.
 		 * This function copies that file and merges in hook configuration for session
 		 * state detection.
+		 *
+		 * @param sourceProjectPath - Path to the source project
+		 * @param targetWorktreePath - Path to the target worktree
+		 * @param beadId - Bead ID for the session
+		 * @param hookOptions - Optional hook configuration options
 		 */
 		const copyClaudeLocalSettings = (
 			sourceProjectPath: string,
 			targetWorktreePath: string,
 			beadId: string,
+			hookOptions: HookConfigOptions = {},
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
 				const sourceSettings = pathService.join(sourceProjectPath, ".claude", "settings.local.json")
@@ -421,7 +437,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				// Generate hook configuration for this bead
-				const hookConfig = generateHookConfig(beadId)
+				const hookConfig = generateHookConfig(beadId, hookOptions)
 
 				// Merge existing settings with hook configuration
 				const mergedSettings = deepMerge(existingSettings, hookConfig)
@@ -635,7 +651,14 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		return {
 			create: (options: CreateWorktreeOptions) =>
 				Effect.gen(function* () {
-					const { beadId, baseBranch, projectPath, sourceWorktreePath, copyPaths } = options
+					const {
+						beadId,
+						baseBranch,
+						projectPath,
+						sourceWorktreePath,
+						copyPaths,
+						preCompactEnabled,
+					} = options
 
 					// Determine effective source for copying untracked files
 					// If sourceWorktreePath is provided (e.g., epic worktree), use that
@@ -679,7 +702,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					// Copy Claude's local settings and inject hook configuration
 					// Use effectiveSourcePath so child tasks inherit settings from epic worktree
-					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, beadId)
+					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, beadId, {
+						preCompactEnabled,
+					})
 
 					// Copy configured untracked files from source to new worktree
 					// Default copyPaths includes [".direnv"] for Nix flake cache
