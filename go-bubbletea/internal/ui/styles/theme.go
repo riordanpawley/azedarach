@@ -49,5 +49,5 @@ var StatusColors = map[string]lipgloss.Color{
 	"open":        Blue,
 	"in_progress": Yellow,
 	"blocked":     Red,
-	"done":        Green,
+	"closed":      Green,
 }
