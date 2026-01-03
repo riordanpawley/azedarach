@@ -1,0 +1,45 @@
+/**
+ * @since 1.0.0
+ */
+import * as RpcServer from "@effect/rpc/RpcServer";
+import * as Layer from "effect/Layer";
+import * as MessageStorage from "./MessageStorage.js";
+import * as RunnerHealth from "./RunnerHealth.js";
+import * as Runners from "./Runners.js";
+import type * as RunnerStorage from "./RunnerStorage.js";
+import * as Sharding from "./Sharding.js";
+import { ShardingConfig } from "./ShardingConfig.js";
+/**
+ * @since 1.0.0
+ * @category Layers
+ */
+export declare const layerHandlers: Layer.Layer<import("@effect/rpc/Rpc").Handler<"Ping"> | import("@effect/rpc/Rpc").Handler<"Notify"> | import("@effect/rpc/Rpc").Handler<"Effect"> | import("@effect/rpc/Rpc").Handler<"Stream"> | import("@effect/rpc/Rpc").Handler<"Envelope">, never, MessageStorage.MessageStorage | Sharding.Sharding>;
+/**
+ * The `RunnerServer` recieves messages from other Runners and forwards them to the
+ * `Sharding` layer.
+ *
+ * It also responds to `Ping` requests.
+ *
+ * @since 1.0.0
+ * @category Layers
+ */
+export declare const layer: Layer.Layer<never, never, RpcServer.Protocol | Sharding.Sharding | MessageStorage.MessageStorage>;
+/**
+ * A `RunnerServer` layer that includes the `Runners` & `Sharding` clients.
+ *
+ * @since 1.0.0
+ * @category Layers
+ */
+export declare const layerWithClients: Layer.Layer<Sharding.Sharding | Runners.Runners, never, RpcServer.Protocol | ShardingConfig | Runners.RpcClientProtocol | MessageStorage.MessageStorage | RunnerStorage.RunnerStorage | RunnerHealth.RunnerHealth>;
+/**
+ * A `Runners` layer that is client only.
+ *
+ * It will not register with RunnerStorage and recieve shard assignments,
+ * so this layer can be used to embed a cluster client inside another effect
+ * application.
+ *
+ * @since 1.0.0
+ * @category Layers
+ */
+export declare const layerClientOnly: Layer.Layer<Sharding.Sharding | Runners.Runners, never, ShardingConfig | Runners.RpcClientProtocol | MessageStorage.MessageStorage | RunnerStorage.RunnerStorage>;
+//# sourceMappingURL=RunnerServer.d.ts.map
