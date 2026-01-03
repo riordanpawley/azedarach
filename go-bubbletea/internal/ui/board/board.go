@@ -6,6 +6,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
+const statusBarHeight = 1
+
 // Render renders the entire kanban board with 4 columns
 func Render(
 	columns []Column,
@@ -21,10 +23,8 @@ func Render(
 		return ""
 	}
 
-	// Calculate column width - 4 columns, evenly distributed
 	columnWidth := width / len(columns)
 
-	// Render each column
 	var columnStrings []string
 	for i, col := range columns {
 		isActive := i == cursor.Column
@@ -46,8 +46,7 @@ func Render(
 			s,
 		)
 
-		// Force consistent width using lipgloss Width
-		sized := lipgloss.NewStyle().Width(columnWidth).Height(height).Render(columnStr)
+		sized := lipgloss.NewStyle().Width(columnWidth).Render(columnStr)
 		columnStrings = append(columnStrings, sized)
 	}
 
