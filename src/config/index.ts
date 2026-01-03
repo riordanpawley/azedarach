@@ -22,6 +22,7 @@ export {
 	type AzedarachConfigInput,
 	AzedarachConfigSchema,
 	type DevServerConfig,
+	type HooksConfig,
 	type NotificationsConfig,
 	type PatternsConfig,
 	type PRConfig,
