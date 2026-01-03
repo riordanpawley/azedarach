@@ -54,7 +54,7 @@ func renderColumn(
 	vp := viewport.New(width, availableHeight)
 	vp.SetContent(cardContent.String())
 
-	if cursorTask < len(tasks) {
+	if cursorTask >= 0 && cursorTask < len(tasks) {
 		vp.GotoTop()
 		vp.LineDown(cursorTask)
 	}

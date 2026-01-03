@@ -743,13 +743,21 @@ func (m Model) View() string {
 		}
 	}
 
-	// Render toasts in bottom-right corner
+	// Render toasts in bottom-right corner as overlay
 	if len(m.toasts) > 0 {
 		toastRenderer := toast.New(m.styles)
 		toastView := toastRenderer.Render(m.toasts, m.width)
 		if toastView != "" {
+			// Position toasts absolutely in bottom-right corner
+			toastOverlay := lipgloss.Place(
+				m.width,
+				m.height,
+				lipgloss.Right,
+				lipgloss.Bottom,
+				toastView,
+			)
 			// Overlay toasts on top of the main view
-			view = lipgloss.JoinVertical(lipgloss.Left, view, toastView)
+			view = lipgloss.JoinVertical(lipgloss.Left, view, toastOverlay)
 		}
 	}
 
