@@ -294,6 +294,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayStack.Pop()
 			return m, m.gitSyncService.Pull()
 		}
+		if msg.Key == "merge_attach" {
+			m.overlayStack.Pop()
+			beadID := msg.Value.(string)
+			session := m.sessions[beadID]
+			return m, tea.Batch(
+				m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch),
+				func() tea.Msg {
+					return Toast{
+						Level:   ToastInfo,
+						Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+						Expires: time.Now().Add(5 * time.Second),
+					}
+				},
+			)
+		}
+		if msg.Key == "skip_attach" {
+			m.overlayStack.Pop()
+			beadID := msg.Value.(string)
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
 		return m.handleSelection(msg)
 
 	case overlay.SearchMsg:
@@ -612,67 +637,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload beads to reflect changes
 		return m, m.loadBeadsCmd()
 
-	// Image deleted from preview
-	case overlay.ImageDeletedMsg:
-		if msg.Error != nil {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to delete image: %v", msg.Error),
-				Expires: time.Now().Add(3 * time.Second),
-			})
-		} else {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastSuccess,
-				Message: "Image deleted",
-				Expires: time.Now().Add(2 * time.Second),
-			})
-		}
-
-	// Open image preview overlay
-	case overlay.OpenImagePreviewMsg:
-		previewOverlay := overlay.NewImagePreviewOverlay(msg.BeadID, m.attachmentService, msg.InitialIndex)
-		return m, tea.Batch(m.overlayStack.Push(previewOverlay), previewOverlay.Init())
-		return m, nil
-	// PR overlay open result
-	case openPROverlayResultMsg:
+	case branchBehindMsg:
 		if msg.err != nil {
+			m.logger.Warn("failed to check branch distance", "beadID", msg.beadID, "error", msg.err)
+			// Proceed to attach anyway if check fails
 			m.toasts = append(m.toasts, Toast{
-				Level:   ToastError,
-				Message: fmt.Sprintf("Failed to get branch: %v", msg.err),
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.beadID),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
 		}
-		// Open the PR creation overlay with branch info
-		prOverlay := overlay.NewPRCreateOverlay(msg.branch, "main", msg.beadID)
-		return m, tea.Batch(m.overlayStack.Push(prOverlay), prOverlay.Init())
 
-	// Bulk action messages
-	case overlay.BulkActionMsg:
-		m.overlayStack.Pop()
-		return m.handleBulkAction(msg)
+		if msg.commitsBehind > 0 {
+			// Show merge choice overlay
+			m.overlayStack.Push(overlay.NewMergeChoiceOverlay(msg.beadID, msg.commitsBehind, m.config.Git.BaseBranch))
+			return m, nil
+		}
 
-	// Bulk status result
-	case bulkStatusResultMsg:
-		if msg.updated > 0 {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastSuccess,
-				Message: fmt.Sprintf("Updated %d tasks", msg.updated),
-				Expires: time.Now().Add(3 * time.Second),
-			})
-		}
-		if msg.failed > 0 {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastWarning,
-				Message: fmt.Sprintf("%d tasks failed to update", msg.failed),
-				Expires: time.Now().Add(3 * time.Second),
-			})
-		}
-		// Clear selection and return to normal mode after bulk action
-		m.editor.ClearSelection()
-		m.editor.EnterNormal()
-		// Reload beads to reflect changes
-		return m, m.loadBeadsCmd()
+		// Not behind, attach directly
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastInfo,
+			Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.beadID),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
 
 	// Single task status result
 	case taskStatusResultMsg:
@@ -1422,11 +1411,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		// Attach to session
 		if session != nil {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastInfo,
-				Message: fmt.Sprintf("Run: tmux attach-session -t %s", task.ID),
-				Expires: time.Now().Add(5 * time.Second),
-			})
+			// Check if branch is behind main
+			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
 		} else {
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastWarning,
@@ -2064,7 +2050,38 @@ func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
 	}
 }
 
-// Dev server helpers
+type branchBehindMsg struct {
+	beadID        string
+	worktree      string
+	commitsBehind int
+	err           error
+}
+
+func (m Model) checkBranchBehindCmd(worktree, beadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		baseBranch := m.config.Git.BaseBranch
+		remote := "origin"
+
+		if err := m.gitClient.Fetch(ctx, worktree, remote); err != nil {
+			return branchBehindMsg{beadID: beadID, worktree: worktree, err: err}
+		}
+
+		revRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
+		count, err := m.gitClient.RevListCount(ctx, worktree, revRange)
+		if err != nil {
+			return branchBehindMsg{beadID: beadID, worktree: worktree, err: err}
+		}
+
+		return branchBehindMsg{
+			beadID:        beadID,
+			worktree:      worktree,
+			commitsBehind: count,
+		}
+	}
+}
 
 func (m Model) getDevServerInfo() []overlay.DevServerInfo {
 	if m.devServerManager == nil {
