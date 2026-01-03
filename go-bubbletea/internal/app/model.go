@@ -114,9 +114,10 @@ type Model struct {
 	config *config.Config
 
 	// Loading state
-	loading     bool
-	spinner     spinner.Model
-	lastRefresh time.Time
+	loading        bool
+	spinner        spinner.Model
+	lastRefresh    time.Time
+	hasRefreshLoop bool
 
 	// Beads client
 	beadsClient *beads.Client
@@ -303,8 +304,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
-		// Start periodic refresh
-		return m, tickEvery(2 * time.Second)
+		// Start periodic refresh only if not already running
+		if !m.hasRefreshLoop {
+			m.hasRefreshLoop = true
+			return m, tickEvery(2 * time.Second)
+		}
+		return m, nil
 
 	case beadsErrorMsg:
 		m.toasts = append(m.toasts, Toast{
@@ -319,10 +324,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Expire old toasts and refresh beads
 		m.expireToasts()
-		return m, tea.Batch(
-			m.loadBeadsCmd(),
-			tickEvery(2*time.Second),
-		)
+		return m, m.loadBeadsCmd()
 
 	case monitor.SessionStateMsg:
 		// Update session state from monitor

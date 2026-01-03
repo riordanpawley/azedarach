@@ -54,9 +54,18 @@ func renderColumn(
 	vp := viewport.New(width, availableHeight)
 	vp.SetContent(cardContent.String())
 
+	// Calculate viewport offset to keep cursor visible
+	// Each card is roughly cardHeight tall + 1 for newline
+	// But let's just use LineDown based on index for now
 	if cursorTask >= 0 && cursorTask < len(tasks) {
+		linesPerCard := cardHeight + 1
+		scrollLine := cursorTask * linesPerCard
+
+		// Ensure we don't scroll past content
 		vp.GotoTop()
-		vp.LineDown(cursorTask)
+		for i := 0; i < scrollLine; i++ {
+			vp.LineDown(1)
+		}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, vp.View())

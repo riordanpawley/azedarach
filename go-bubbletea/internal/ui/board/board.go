@@ -25,15 +25,15 @@ func Render(
 
 	columnWidth := width / len(columns)
 
-	var columnStrings []string
+	columnStrings := make([]string, len(columns))
 	for i, col := range columns {
 		isActive := i == cursor.Column
-		cursorTask := 0
+		cursorTask := -1
 		if isActive {
 			cursorTask = cursor.Task
 		}
 
-		columnStr := renderColumn(
+		columnStrings[i] = renderColumn(
 			col.Title,
 			col.Tasks,
 			cursorTask,
@@ -45,9 +45,6 @@ func Render(
 			height,
 			s,
 		)
-
-		sized := lipgloss.NewStyle().Width(columnWidth).Render(columnStr)
-		columnStrings = append(columnStrings, sized)
 	}
 
 	// Join columns horizontally
