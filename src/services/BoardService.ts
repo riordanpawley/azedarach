@@ -238,6 +238,19 @@ export interface ColumnInfo {
 	readonly status: string
 }
 
+/**
+ * Per-project board state
+ *
+ * Stores all board state for a specific project, allowing instant switching
+ * between projects without losing state.
+ */
+export interface PerProjectBoardState {
+	readonly tasks: ReadonlyArray<TaskWithSession>
+	readonly tasksByColumn: Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>
+	readonly filteredTasksByColumn: TaskWithSession[][]
+	readonly isLoading: boolean
+}
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -285,6 +298,118 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
+
+		// ====================================================================
+		// Per-Project State Management
+		// ====================================================================
+
+		/**
+		 * Per-project board state storage
+		 *
+		 * Maps projectPath to full board state, enabling instant project switching
+		 * without losing any state from the previous project.
+		 */
+		const perProjectState = yield* SubscriptionRef.make<Map<string, PerProjectBoardState>>(
+			new Map(),
+		)
+
+		/**
+		 * Currently active project path
+		 *
+		 * Used to route session state updates to the correct project's state.
+		 */
+		const currentProjectPath = yield* SubscriptionRef.make<string | null>(null)
+
+		/**
+		 * Get default empty board state for a new project
+		 */
+		const getDefaultBoardState = (): PerProjectBoardState => ({
+			tasks: [],
+			tasksByColumn: emptyRecord() as Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>,
+			filteredTasksByColumn: COLUMNS.map(() => []),
+			isLoading: false,
+		})
+
+		/**
+		 * Get or create per-project state for a given project path
+		 */
+		const getOrCreateProjectState = (projectPath: string) =>
+			Effect.gen(function* () {
+				const stateMap = yield* SubscriptionRef.get(perProjectState)
+				if (stateMap.has(projectPath)) {
+					return stateMap.get(projectPath)!
+				}
+				const newState = getDefaultBoardState()
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(projectPath, newState)
+					return copy
+				})
+				return newState
+			})
+
+		/**
+		 * Save current derived SubscriptionRef state to the per-project map
+		 */
+		const saveCurrentToMap = () =>
+			Effect.gen(function* () {
+				const path = yield* SubscriptionRef.get(currentProjectPath)
+				if (!path) return
+				const state: PerProjectBoardState = {
+					tasks: yield* SubscriptionRef.get(tasks),
+					tasksByColumn: yield* SubscriptionRef.get(tasksByColumn),
+					filteredTasksByColumn: yield* SubscriptionRef.get(filteredTasksByColumn),
+					isLoading: yield* SubscriptionRef.get(isLoading),
+				}
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(path, state)
+					return copy
+				})
+			})
+
+		/**
+		 * Sync derived SubscriptionRefs from a project's stored state
+		 */
+		const syncDerivedFromProject = (projectPath: string) =>
+			Effect.gen(function* () {
+				const state = yield* getOrCreateProjectState(projectPath)
+				yield* SubscriptionRef.set(tasks, state.tasks)
+				yield* SubscriptionRef.set(tasksByColumn, state.tasksByColumn)
+				yield* SubscriptionRef.set(filteredTasksByColumn, state.filteredTasksByColumn)
+				yield* SubscriptionRef.set(isLoading, state.isLoading)
+			})
+
+		/**
+		 * Update a specific project's task session state in the per-project map
+		 *
+		 * This is called by session state updates (from TmuxSessionMonitor) to ensure
+		 * session state changes are recorded in the correct project's state, even if
+		 * that project is not currently active.
+		 */
+		const updateProjectTaskSessionState = (
+			projectPath: string,
+			beadId: string,
+			sessionState: TaskWithSession["sessionState"],
+		) =>
+			Effect.gen(function* () {
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					const existing = copy.get(projectPath)
+					if (!existing) return copy // Project not loaded yet, skip
+
+					const updatedTasks = existing.tasks.map((t) =>
+						t.id === beadId ? { ...t, sessionState } : t,
+					)
+					const updatedTasksByColumn = groupTasksByColumn(updatedTasks)
+					copy.set(projectPath, {
+						...existing,
+						tasks: updatedTasks,
+						tasksByColumn: updatedTasksByColumn,
+					})
+					return copy
+				})
+			})
 
 		// Git status cache to avoid redundant git commands
 		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
@@ -722,16 +847,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* SubscriptionRef.set(isLoading, true)
 
 				// Capture project path at refresh START
-				const startProjectPath = yield* projectService.getCurrentPath()
+				const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
+
+				// Update currentProjectPath SubscriptionRef
+				yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
 
 				const loadedTasks = yield* loadTasks()
 
 				// Verify project hasn't changed during refresh (race condition guard)
 				// If project changed, discard results to avoid showing wrong project's data
-				const currentProjectPath = yield* projectService.getCurrentPath()
-				if (startProjectPath !== currentProjectPath) {
+				const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
+				if (startProjectPath !== activeProjectPath) {
 					yield* Effect.log(
-						`Refresh discarded: project changed from ${startProjectPath} to ${currentProjectPath}`,
+						`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
 					)
 					return
 				}
@@ -740,6 +868,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const grouped = groupTasksByColumn(loadedTasks)
 				yield* SubscriptionRef.set(tasksByColumn, grouped)
 				yield* updateFilteredTasks()
+
+				// Save to per-project map for fast switching
+				yield* saveCurrentToMap()
+
 				yield* Effect.log(
 					`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
 				)
@@ -978,25 +1110,54 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		/**
-		 * Switch to a new project with proper fiber management.
+		 * Switch to a new project with per-project state preservation.
 		 *
 		 * This method:
-		 * 1. Immediately loads cached data or clears the board (fast UI feedback)
-		 * 2. Spawns a scoped refresh fiber that lives for BoardService's lifetime
-		 * 3. Calls the onRefreshComplete callback after refresh (for state restoration)
+		 * 1. Saves the current project's state to the per-project map
+		 * 2. Loads the new project's cached state (instant UI feedback)
+		 * 3. Spawns a background refresh to get fresh data
+		 * 4. Calls the onRefreshComplete callback after refresh (for state restoration)
 		 *
-		 * @param projectPath - Path to the new project
+		 * @param newProjectPath - Path to the new project
 		 * @param onRefreshComplete - Callback effect to run after refresh completes (errors are caught and logged)
 		 * @returns Whether cached data was loaded (for toast messaging)
 		 */
 		const switchToProject = <E>(
-			projectPath: string,
+			newProjectPath: string,
 			onRefreshComplete: Effect.Effect<void, E, never>,
 		) =>
 			Effect.gen(function* () {
-				const cacheHit = yield* loadFromCache(projectPath)
-				if (!cacheHit) {
-					yield* clearBoard()
+				// Save current project state before switching
+				yield* saveCurrentToMap()
+
+				// Update the current project path
+				yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
+
+				// Try to load from per-project state map first (fast path)
+				const stateMap = yield* SubscriptionRef.get(perProjectState)
+				const cachedState = stateMap.get(newProjectPath)
+
+				let cacheHit = false
+				if (cachedState && cachedState.tasks.length > 0) {
+					// Clear git stats from cached tasks - they're stale and project-specific
+					const tasksWithClearedGitStats = cachedState.tasks.map((task) => ({
+						...task,
+						gitBehindCount: undefined,
+						hasUncommittedChanges: undefined,
+						gitAdditions: undefined,
+						gitDeletions: undefined,
+					}))
+					yield* SubscriptionRef.set(tasks, tasksWithClearedGitStats)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(tasksWithClearedGitStats))
+					yield* SubscriptionRef.set(filteredTasksByColumn, cachedState.filteredTasksByColumn)
+					cacheHit = true
+				} else {
+					// Fall back to legacy boardCache
+					const legacyCacheHit = yield* loadFromCache(newProjectPath)
+					if (!legacyCacheHit) {
+						yield* clearBoard()
+					}
+					cacheHit = legacyCacheHit
 				}
 
 				// Fork the refresh into the service's scope - not a daemon fiber
@@ -1021,6 +1182,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			filteredTasksByColumn,
 			isLoading,
 			isRefreshingGitStats,
+			currentProjectPath,
+			updateProjectTaskSessionState,
 			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => SubscriptionRef.get(tasks),
 			getTasksByColumn: (): Effect.Effect<
 				Record.ReadonlyRecord<string, ReadonlyArray<TaskWithSession>>

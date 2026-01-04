@@ -30,6 +30,21 @@ import { EditorService } from "./EditorService.js"
 export type Direction = "up" | "down" | "left" | "right"
 
 /**
+ * Per-project navigation state.
+ *
+ * When switching projects, navigation state (cursor, drill-down, etc.)
+ * is preserved per-project so users can resume exactly where they left off.
+ */
+export interface PerProjectNavigationState {
+	readonly focusedTaskId: string | null
+	readonly followTaskId: string | null
+	readonly drillDownEpic: string | null
+	readonly drillDownChildIds: ReadonlySet<string>
+	readonly drillDownChildDetails: ReadonlyMap<string, Issue>
+	readonly savedFocusedTaskId: string | null
+}
+
+/**
  * Position in the filtered view (computed from focusedTaskId)
  */
 export interface Position {
@@ -78,6 +93,70 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 
 		// Remember cursor position before entering drill-down (for restoration)
 		const savedFocusedTaskId = yield* SubscriptionRef.make<string | null>(null)
+
+		// Per-project state storage
+		const perProjectState = yield* SubscriptionRef.make<Map<string, PerProjectNavigationState>>(
+			new Map(),
+		)
+		const currentProjectPath = yield* SubscriptionRef.make<string | null>(null)
+
+		// Helper: default navigation state for a new project
+		const getDefaultNavState = (): PerProjectNavigationState => ({
+			focusedTaskId: null,
+			followTaskId: null,
+			drillDownEpic: null,
+			drillDownChildIds: new Set(),
+			drillDownChildDetails: new Map(),
+			savedFocusedTaskId: null,
+		})
+
+		// Helper: get or create project state from the map
+		const getOrCreateProjectState = (projectPath: string) =>
+			Effect.gen(function* () {
+				const stateMap = yield* SubscriptionRef.get(perProjectState)
+				if (stateMap.has(projectPath)) {
+					return stateMap.get(projectPath)!
+				}
+				const newState = getDefaultNavState()
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(projectPath, newState)
+					return copy
+				})
+				return newState
+			})
+
+		// Helper: save current derived refs to the per-project map
+		const saveCurrentToMap = () =>
+			Effect.gen(function* () {
+				const path = yield* SubscriptionRef.get(currentProjectPath)
+				if (!path) return
+				const state: PerProjectNavigationState = {
+					focusedTaskId: yield* SubscriptionRef.get(focusedTaskId),
+					followTaskId: yield* SubscriptionRef.get(followTaskId),
+					drillDownEpic: yield* SubscriptionRef.get(drillDownEpic),
+					drillDownChildIds: yield* SubscriptionRef.get(drillDownChildIds),
+					drillDownChildDetails: yield* SubscriptionRef.get(drillDownChildDetails),
+					savedFocusedTaskId: yield* SubscriptionRef.get(savedFocusedTaskId),
+				}
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(path, state)
+					return copy
+				})
+			})
+
+		// Helper: sync derived refs from a project's stored state
+		const syncDerivedFromProject = (projectPath: string) =>
+			Effect.gen(function* () {
+				const state = yield* getOrCreateProjectState(projectPath)
+				yield* SubscriptionRef.set(focusedTaskId, state.focusedTaskId)
+				yield* SubscriptionRef.set(followTaskId, state.followTaskId)
+				yield* SubscriptionRef.set(drillDownEpic, state.drillDownEpic)
+				yield* SubscriptionRef.set(drillDownChildIds, state.drillDownChildIds)
+				yield* SubscriptionRef.set(drillDownChildDetails, state.drillDownChildDetails)
+				yield* SubscriptionRef.set(savedFocusedTaskId, state.savedFocusedTaskId)
+			})
 
 		/**
 		 * Sort tasks by phase within a column (for drill-down mode).
@@ -315,6 +394,47 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 			drillDownEpic,
 			drillDownChildIds,
 			drillDownChildDetails,
+
+			// Per-project state storage (exposed for BoardService cleanup)
+			perProjectState,
+			currentProjectPath,
+
+			/**
+			 * Switch to a new project, preserving navigation state for the previous project.
+			 *
+			 * When switching projects:
+			 * 1. Saves current navigation state (cursor, drill-down, etc.) to the per-project map
+			 * 2. Updates currentProjectPath to the new project
+			 * 3. Restores navigation state for the new project (or initializes fresh state)
+			 *
+			 * If no saved state exists for the new project, initializes with clean state
+			 * (drill-down cleared, no follow mode, focus cleared).
+			 *
+			 * This ensures each project maintains independent navigation state.
+			 *
+			 * @param newProjectPath - The project path to switch to, or null to clear
+			 */
+			switchProject: (newProjectPath: string | null): Effect.Effect<void> =>
+				Effect.gen(function* () {
+					// Save current project state before switching
+					yield* saveCurrentToMap()
+
+					// Update current project path
+					yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
+
+					if (newProjectPath) {
+						// Restore navigation state for the new project (or initialize fresh)
+						yield* syncDerivedFromProject(newProjectPath)
+					} else {
+						// Clear all navigation state when no project is selected
+						yield* SubscriptionRef.set(drillDownEpic, null)
+						yield* SubscriptionRef.set(drillDownChildIds, new Set())
+						yield* SubscriptionRef.set(drillDownChildDetails, new Map())
+						yield* SubscriptionRef.set(savedFocusedTaskId, null)
+						yield* SubscriptionRef.set(followTaskId, null)
+						yield* SubscriptionRef.set(focusedTaskId, null)
+					}
+				}),
 
 			/**
 			 * Get current position of focused task
@@ -695,6 +815,21 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 					if (currentEpic !== epicId) return
 
 					yield* refreshDrillDownCore(epicId)
+				}),
+
+			// ========================================================================
+			// Project Switching
+			// ========================================================================
+
+			/**
+			 * Get current state for saving before project switch.
+			 * Returns the focused task ID (drill-down state is not persisted).
+			 * Used for disk persistence (cross-session state).
+			 */
+			getStateForSave: () =>
+				Effect.gen(function* () {
+					const taskId = yield* SubscriptionRef.get(focusedTaskId)
+					return { focusedTaskId: taskId }
 				}),
 		}
 	}),

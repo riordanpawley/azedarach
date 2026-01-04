@@ -56,11 +56,13 @@ export const projectsAtom = appRuntime.subscriptionRef(
 /**
  * Switch project atom - change the active project
  *
- * Saves the current project's UI state before switching, then restores
- * the new project's saved state after loading.
- *
- * Uses BoardService.switchToProject() which spawns a scoped fiber for the
- * background refresh, properly tied to the service's lifetime.
+ * Each service handles its own state save/restore via switchProject methods.
+ * This simplified flow:
+ * 1. Finds the target project
+ * 2. Saves current project state to disk (for persistence across restarts)
+ * 3. Calls switchProject on each service (clears project-specific state)
+ * 4. Switches ProjectService to new project
+ * 5. Loads new project board with state restoration callback
  *
  * Usage: const switchProject = useAtomSet(switchProjectAtom, { mode: "promise" })
  *        await switchProject("project-name")
@@ -75,53 +77,61 @@ export const switchProjectAtom = appRuntime.fn((projectName: string) =>
 		const view = yield* ViewService
 		const toast = yield* ToastService
 
-		// Get current project to save its state
-		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+		// Find the target project
+		const projects = yield* SubscriptionRef.get(projectService.projects)
+		const project = projects.find((p) => p.name === projectName)
+		if (!project) {
+			yield* toast.show("error", `Project not found: ${projectName}`)
+			return
+		}
 
+		// Save current project state to disk (for persistence across app restarts)
+		const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
 		if (currentProject) {
-			const focusedTaskId = yield* SubscriptionRef.get(navigation.focusedTaskId)
-			const filterConfig = yield* SubscriptionRef.get(editor.filterConfig)
-			const sortConfig = yield* SubscriptionRef.get(editor.sortConfig)
+			const navState = yield* navigation.getStateForSave()
+			const editorState = yield* editor.getStateForSave()
 			const viewMode = yield* SubscriptionRef.get(view.viewMode)
 
-			const state = buildProjectUIState(focusedTaskId, filterConfig, sortConfig, viewMode)
+			const state = buildProjectUIState(
+				navState.focusedTaskId,
+				editorState.filterConfig,
+				editorState.sortConfig,
+				viewMode,
+			)
 			yield* projectState.saveState(currentProject.path, state)
 			yield* board.saveToCache(currentProject.path)
 		}
 
-		// Exit epic drilldown before switching projects - drilldown state is project-specific
-		yield* navigation.exitDrillDown()
+		// Load saved state for new project (from disk)
+		const savedState = yield* projectState.loadState(project.path)
 
-		yield* projectService.switchProject(projectName)
+		// Switch each service to the new project
+		// EditorService uses internal per-project state map, so we just pass the path
+		// Then we apply the saved state from disk (if any) to initialize the project's state
+		yield* editor.switchProject(project.path)
 
-		const newProject = yield* SubscriptionRef.get(projectService.currentProject)
+		// Apply saved state from disk (overrides any defaults for first-time projects)
+		yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
 
-		if (!newProject) {
-			yield* board.clearBoard()
-			return
+		// Switch navigation to new project (uses internal per-project state map)
+		yield* navigation.switchProject(project.path)
+
+		// If we have a saved focus position from disk (cross-session persistence),
+		// apply it to override the in-memory state (which may be empty for new projects)
+		const savedFocusId = extractFocusedTaskId(savedState)
+		if (savedFocusId) {
+			yield* navigation.setFocusedTask(savedFocusId)
 		}
 
-		// Create the state restoration effect to run after refresh completes
-		const restoreState = Effect.gen(function* () {
-			const savedState = yield* projectState.loadState(newProject.path)
+		// Switch ProjectService to track new current project
+		yield* projectService.switchProject(projectName)
 
-			// Restore editor state (filters and sort)
-			yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
+		// Restore view mode
+		yield* view.setViewMode(extractViewMode(savedState))
 
-			// Restore view mode
-			yield* view.setViewMode(extractViewMode(savedState))
-
-			// Restore cursor position (navigation will validate if task still exists)
-			const savedFocusId = extractFocusedTaskId(savedState)
-			if (savedFocusId) {
-				yield* navigation.setFocusedTask(savedFocusId)
-			}
-
-			yield* toast.show("success", `Loaded: ${projectName}`)
-		}).pipe(Effect.catchAll((error) => toast.show("error", `Failed to load: ${error}`)))
-
-		// Use BoardService.switchToProject which spawns a properly scoped fiber
-		const { cacheHit } = yield* board.switchToProject(newProject.path, restoreState)
+		// Switch board with a callback to show success toast after refresh
+		const onRefreshComplete = toast.show("success", `Loaded: ${projectName}`)
+		const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
 
 		if (cacheHit) {
 			yield* toast.show("success", `Loaded: ${projectName}`)
