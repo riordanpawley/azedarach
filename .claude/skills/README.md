@@ -57,6 +57,19 @@ This directory implements an **auto-activating skills system** that combines:
 ### Workflow Skills
 Development workflow and process patterns:
 - **beads-tracking** - Issue tracking, resumability, multi-session work
+- **tdd-workflow** - Test-Driven Development with AI guardrails
+
+### Effect Skills (ts-opentui only)
+Effect framework patterns:
+- **effect-concurrency** - Fibers, forking, scheduling
+- **effect-errors** - Error handling patterns
+- **effect-resources** - Resource management
+- **effect-services** - Service construction patterns
+
+### Go Skills (go-bubbletea only)
+Go/Bubbletea patterns:
+- **go-concurrency** - Goroutines, channels, context
+- **bubbletea-patterns** - TEA architecture, Model-Update-View
 
 ## Configuration
 

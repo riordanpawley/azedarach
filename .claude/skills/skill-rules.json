@@ -93,6 +93,120 @@
 					"Never use raw npm/bun commands for dev servers - breaks TUI state"
 				]
 			}
+		},
+		{
+			"id": "tdd-workflow",
+			"name": "Test-Driven Development",
+			"path": ".claude/skills/workflow/tdd-workflow.skill.md",
+			"type": "workflow",
+			"priority": "high",
+			"confidence": {
+				"required": 0.65,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": ["*.test.ts", "*.test.tsx", "*.test.go"],
+				"contentPatterns": ["test(", "it(", "describe(", "Test"],
+				"keywords": [
+					"tdd",
+					"test driven",
+					"test first",
+					"red green refactor",
+					"write test",
+					"test coverage",
+					"unit test",
+					"integration test",
+					"assert",
+					"mock",
+					"flaky test"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Write tests BEFORE implementation",
+					"Run tests to verify failure (RED)",
+					"Write minimal implementation to pass (GREEN)",
+					"Never delete failing tests",
+					"Never trust AI-generated tests uncritically",
+					"Tests should specify behavior, not implementation"
+				]
+			}
+		},
+		{
+			"id": "go-concurrency",
+			"name": "Go Concurrency Patterns",
+			"path": ".claude/skills/go/go-concurrency.skill.md",
+			"type": "go",
+			"priority": "medium",
+			"confidence": {
+				"required": 0.6,
+				"suggested": 0.45
+			},
+			"triggers": {
+				"filePatterns": ["*.go", "go.mod", "go.sum"],
+				"contentPatterns": ["goroutine", "channel", "sync.", "WaitGroup", "context.Context"],
+				"keywords": [
+					"goroutine",
+					"go func",
+					"channel",
+					"chan",
+					"context",
+					"cancel",
+					"mutex",
+					"atomic",
+					"race condition",
+					"concurrent",
+					"parallel",
+					"worker pool",
+					"fan-in",
+					"fan-out"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Pass context.Context as first argument to I/O functions",
+					"Defer cancel() when creating contexts with timeout/deadline",
+					"Close channels from sender side only",
+					"Use WaitGroup to wait for goroutine groups",
+					"Use atomic operations for simple counters",
+					"Check context.Done() in long-running operations"
+				]
+			}
+		},
+		{
+			"id": "bubbletea-patterns",
+			"name": "Bubbletea Patterns",
+			"path": ".claude/skills/go/bubbletea-patterns.skill.md",
+			"type": "go",
+			"priority": "medium",
+			"confidence": {
+				"required": 0.6,
+				"suggested": 0.45
+			},
+			"triggers": {
+				"filePatterns": ["internal/app/*.go", "internal/ui/*.go"],
+				"contentPatterns": ["tea.Model", "tea.Msg", "tea.Cmd", "tea.View", "tea.Batch"],
+				"keywords": [
+					"bubbletea",
+					"model update view",
+					"tea.Cmd",
+					"tea.Msg",
+					"init()",
+					"update()",
+					"view()",
+					"bubbles",
+					"lip gloss"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Define styles once as package-level variables",
+					"Pass ALL messages to relevant sub-models",
+					"Use tea.Batch to combine multiple commands",
+					"Handle tea.WindowSizeMsg to respond to terminal resizes",
+					"Keep View() pure - no side effects",
+					"Use bubbles components for lists, inputs, viewports"
+				]
+			}
 		}
-	]
 }
