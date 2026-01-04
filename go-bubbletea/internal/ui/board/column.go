@@ -1,15 +1,18 @@
 package board
 
 import (
+	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
-// renderColumn renders a kanban column with header and task cards
+const cardHeight = 5
+
 func renderColumn(
 	title string,
 	tasks []domain.Task,
@@ -22,46 +25,48 @@ func renderColumn(
 	height int,
 	s *styles.Styles,
 ) string {
-	// Choose header style based on whether this column is active
 	headerStyle := s.ColumnHeader
 	if isActive {
 		headerStyle = s.ColumnHeaderActive
 	}
 
-	// Render header with title (e.g., "─ Open ─────")
-	headerText := "─ " + title + " "
-	remainingWidth := width - len(headerText) - 2 // Account for padding
-	if remainingWidth > 0 {
-		headerText += strings.Repeat("─", remainingWidth)
-	}
-	header := headerStyle.Render(headerText)
+	headerText := fmt.Sprintf("%s (%d)", title, len(tasks))
+	header := headerStyle.Width(width).Render(headerText)
 
-	// Render cards
-	var cardStrings []string
-	cardWidth := width - 4 // Account for column border and padding
+	availableHeight := height - 2
+
+	var cardContent strings.Builder
+	cardWidth := width - 2
+
 	for i, task := range tasks {
 		isCursor := isActive && i == cursorTask
 		isSelected := selectedTasks[task.ID]
 
-		// Get phase info for this task if available
 		var phaseInfo *phases.TaskPhaseInfo
 		if info, exists := phaseData[task.ID]; exists {
 			phaseInfo = &info
 		}
 
-		cardStrings = append(cardStrings, renderCard(task, isCursor, isSelected, cardWidth, phaseInfo, showPhases, s))
+		cardContent.WriteString(renderCard(task, isCursor, isSelected, cardWidth, phaseInfo, showPhases, s))
+		cardContent.WriteString("\n")
 	}
 
-	// Handle empty column
-	content := ""
-	if len(cardStrings) > 0 {
-		content = strings.Join(cardStrings, "\n")
+	vp := viewport.New(width, availableHeight)
+	vp.SetContent(cardContent.String())
+
+	// Calculate viewport offset to keep cursor visible
+	// Each card is roughly cardHeight tall + 1 for newline
+	// But let's just use LineDown based on index for now
+	if cursorTask >= 0 && cursorTask < len(tasks) {
+		linesPerCard := cardHeight + 1
+		scrollLine := cursorTask * linesPerCard
+
+		// Ensure we don't scroll past content
+		vp.GotoTop()
+		for i := 0; i < scrollLine; i++ {
+			vp.LineDown(1)
+		}
 	}
 
-	// Apply column style
-	columnStyle := s.Column.Width(width).Height(height)
-	columnContent := columnStyle.Render(content)
-
-	// Join header and column
-	return lipgloss.JoinVertical(lipgloss.Left, header, columnContent)
+	return lipgloss.JoinVertical(lipgloss.Left, header, vp.View())
 }

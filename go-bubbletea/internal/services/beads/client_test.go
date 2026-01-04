@@ -285,6 +285,69 @@ func TestClient_Close(t *testing.T) {
 	}
 }
 
+func TestClient_Create(t *testing.T) {
+	tests := []struct {
+		name    string
+		params  CreateTaskParams
+		output  string
+		runErr  error
+		wantID  string
+		wantErr bool
+	}{
+		{
+			name: "successful creation",
+			params: CreateTaskParams{
+				Title:    "New Task",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+			},
+			output: `{"id": "az-123", "title": "New Task"}`,
+			wantID: "az-123",
+		},
+		{
+			name: "successful creation with parent",
+			params: CreateTaskParams{
+				Title:    "Subtask",
+				Type:     domain.TypeTask,
+				Priority: domain.P2,
+				ParentID: stringPtr("az-1"),
+			},
+			output: `{"id": "az-124"}`,
+			wantID: "az-124",
+		},
+		{
+			name:    "runner error",
+			params:  CreateTaskParams{Title: "Fail"},
+			runErr:  errors.New("create failed"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &mockRunner{
+				output: []byte(tt.output),
+				err:    tt.runErr,
+			}
+			client := NewClient(runner, slog.Default())
+
+			id, err := client.Create(context.Background(), tt.params)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantID, id)
+		})
+	}
+}
+
+func stringPtr(s string) *string {
+	return &s
+}
+
 func TestClient_ErrorWrapping(t *testing.T) {
 	t.Run("list error contains op", func(t *testing.T) {
 		runner := &mockRunner{err: errors.New("cmd failed")}

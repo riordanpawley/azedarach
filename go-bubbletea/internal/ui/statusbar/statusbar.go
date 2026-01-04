@@ -24,7 +24,6 @@ func New(mode types.Mode, width int, styles *styles.Styles) StatusBar {
 
 // Render renders the status bar as a string
 func (sb StatusBar) Render() string {
-	// Mode badge
 	modeBadge := sb.styles.StatusMode.Render(" " + sb.mode.String() + " ")
 
 	// Keybinding hints

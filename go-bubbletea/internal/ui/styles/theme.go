@@ -2,37 +2,43 @@ package styles
 
 import "github.com/charmbracelet/lipgloss"
 
-// Catppuccin Macchiato palette
+// Catppuccin Mocha palette (matching TypeScript version)
 var (
 	// Base colors
-	Base     = lipgloss.Color("#24273a")
-	Mantle   = lipgloss.Color("#1e2030")
-	Crust    = lipgloss.Color("#181926")
-	Surface0 = lipgloss.Color("#363a4f")
-	Surface1 = lipgloss.Color("#494d64")
-	Surface2 = lipgloss.Color("#5b6078")
-	Overlay0 = lipgloss.Color("#6e738d")
-	Overlay1 = lipgloss.Color("#8087a2")
-	Overlay2 = lipgloss.Color("#939ab7")
-	Subtext0 = lipgloss.Color("#a5adcb")
-	Subtext1 = lipgloss.Color("#b8c0e0")
-	Text     = lipgloss.Color("#cad3f5")
+	Base   = lipgloss.Color("#1e1e2e")
+	Mantle = lipgloss.Color("#181825")
+	Crust  = lipgloss.Color("#11111b")
+
+	// Text colors
+	Text     = lipgloss.Color("#cdd6f4")
+	Subtext0 = lipgloss.Color("#a6adc8")
+	Subtext1 = lipgloss.Color("#bac2de")
+
+	// Overlay colors
+	Overlay0 = lipgloss.Color("#6c7086")
+	Overlay1 = lipgloss.Color("#7f849c")
+	Overlay2 = lipgloss.Color("#9399b2")
+
+	// Surface colors
+	Surface0 = lipgloss.Color("#313244")
+	Surface1 = lipgloss.Color("#45475a")
+	Surface2 = lipgloss.Color("#585b70")
 
 	// Accent colors
-	Rosewater = lipgloss.Color("#f4dbd6")
-	Flamingo  = lipgloss.Color("#f0c6c6")
-	Pink      = lipgloss.Color("#f5bde6")
-	Mauve     = lipgloss.Color("#c6a0f6")
-	Red       = lipgloss.Color("#ed8796")
-	Maroon    = lipgloss.Color("#ee99a0")
-	Peach     = lipgloss.Color("#f5a97f")
-	Yellow    = lipgloss.Color("#eed49f")
-	Green     = lipgloss.Color("#a6da95")
-	Teal      = lipgloss.Color("#8bd5ca")
-	Sky       = lipgloss.Color("#91d7e3")
-	Sapphire  = lipgloss.Color("#7dc4e4")
-	Blue      = lipgloss.Color("#8aadf4")
-	Lavender  = lipgloss.Color("#b7bdf8")
+	Red       = lipgloss.Color("#f38ba8")
+	Green     = lipgloss.Color("#a6e3a1")
+	Blue      = lipgloss.Color("#89b4fa")
+	Yellow    = lipgloss.Color("#f9e2af")
+	Peach     = lipgloss.Color("#fab387")
+	Mauve     = lipgloss.Color("#cba6f7")
+	Pink      = lipgloss.Color("#f5c2e7")
+	Teal      = lipgloss.Color("#94e2d5")
+	Sky       = lipgloss.Color("#89dceb")
+	Sapphire  = lipgloss.Color("#74c7ec")
+	Lavender  = lipgloss.Color("#b4befe")
+	Flamingo  = lipgloss.Color("#f2cdcd")
+	Rosewater = lipgloss.Color("#f5e0dc")
+	Maroon    = lipgloss.Color("#eba0ac")
 )
 
 // PriorityColors maps priority levels to colors
@@ -47,7 +53,7 @@ var PriorityColors = []lipgloss.Color{
 // StatusColors maps status to colors
 var StatusColors = map[string]lipgloss.Color{
 	"open":        Blue,
-	"in_progress": Yellow,
+	"in_progress": Mauve,
 	"blocked":     Red,
-	"done":        Green,
+	"closed":      Green,
 }

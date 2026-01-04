@@ -479,8 +479,12 @@ func TestDetectProjectFromCwd(t *testing.T) {
 		t.Fatalf("DetectProjectFromCwd() error = %v", err)
 	}
 
-	if project.Path != gitRepo {
-		t.Errorf("DetectProjectFromCwd() path = %s, want %s", project.Path, gitRepo)
+	// Compare evaluated paths to handle /private/var vs /var on macOS
+	evalProject, _ := filepath.EvalSymlinks(project.Path)
+	evalRepo, _ := filepath.EvalSymlinks(gitRepo)
+
+	if evalProject != evalRepo {
+		t.Errorf("DetectProjectFromCwd() path = %s, want %s", evalProject, evalRepo)
 	}
 
 	// Test from non-git directory

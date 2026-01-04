@@ -38,6 +38,9 @@ Thumbs.db
 .env.local
 .env*.local
 
+# OpenCode
+.opencode/
+
 # direnv (nix flake cache)
 .direnv/
 

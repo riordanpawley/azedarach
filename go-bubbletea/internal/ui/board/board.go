@@ -6,6 +6,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
+const statusBarHeight = 1
+
 // Render renders the entire kanban board with 4 columns
 func Render(
 	columns []Column,
@@ -21,23 +23,17 @@ func Render(
 		return ""
 	}
 
-	// Calculate column width
-	// 4 columns with gaps between them
-	gap := 1
-	totalGaps := (len(columns) - 1) * gap
-	columnWidth := (width - totalGaps) / len(columns)
+	columnWidth := width / len(columns)
 
-	// Render each column
-	var columnStrings []string
+	columnStrings := make([]string, len(columns))
 	for i, col := range columns {
 		isActive := i == cursor.Column
-		cursorTask := 0
+		cursorTask := -1
 		if isActive {
 			cursorTask = cursor.Task
 		}
 
-		// Subtract 1 from height to account for status bar
-		columnStr := renderColumn(
+		columnStrings[i] = renderColumn(
 			col.Title,
 			col.Tasks,
 			cursorTask,
@@ -46,12 +42,11 @@ func Render(
 			phaseData,
 			showPhases,
 			columnWidth,
-			height-1,
+			height,
 			s,
 		)
-		columnStrings = append(columnStrings, columnStr)
 	}
 
-	// Join columns horizontally with gaps
+	// Join columns horizontally
 	return lipgloss.JoinHorizontal(lipgloss.Top, columnStrings...)
 }

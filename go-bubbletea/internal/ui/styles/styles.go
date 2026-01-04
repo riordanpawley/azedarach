@@ -88,7 +88,7 @@ func New() *Styles {
 
 		CardActive: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(Blue).
+			BorderForeground(Lavender).
 			Padding(0, 1).
 			MarginBottom(1),
 

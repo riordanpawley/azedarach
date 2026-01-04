@@ -13,18 +13,22 @@ import (
 
 // TaskCreatedMsg is emitted when a new task is created
 type TaskCreatedMsg struct {
+	ID          string
 	Title       string
 	Description string
 	Type        domain.TaskType
 	Priority    domain.Priority
+	ParentID    *string
 }
 
 // CreateTaskOverlay provides a form to create a new task
 type CreateTaskOverlay struct {
+	id          string
 	title       textinput.Model
 	description textarea.Model
 	taskType    domain.TaskType
 	priority    domain.Priority
+	parentID    *string
 	focusIndex  int
 	styles      *Styles
 }
@@ -35,10 +39,40 @@ const (
 	focusType
 	focusPriority
 	focusSubmit
+	focusCount
 )
 
 // NewCreateTaskOverlay creates a new task creation overlay
 func NewCreateTaskOverlay() *CreateTaskOverlay {
+	return NewCreateTaskOverlayWithParent(nil)
+}
+
+func NewEditTaskOverlay(task domain.Task) *CreateTaskOverlay {
+	ti := textinput.New()
+	ti.SetValue(task.Title)
+	ti.Focus()
+	ti.CharLimit = 200
+	ti.Width = 60
+
+	ta := textarea.New()
+	ta.SetValue(task.Description)
+	ta.CharLimit = 2000
+	ta.SetWidth(60)
+	ta.SetHeight(5)
+
+	return &CreateTaskOverlay{
+		id:          task.ID,
+		title:       ti,
+		description: ta,
+		taskType:    task.Type,
+		priority:    task.Priority,
+		parentID:    task.ParentID,
+		focusIndex:  focusTitle,
+		styles:      New(),
+	}
+}
+
+func NewCreateTaskOverlayWithParent(parentID *string) *CreateTaskOverlay {
 	// Initialize title input
 	ti := textinput.New()
 	ti.Placeholder = "Task title..."
@@ -58,6 +92,7 @@ func NewCreateTaskOverlay() *CreateTaskOverlay {
 		description: ta,
 		taskType:    domain.TypeTask,
 		priority:    domain.P2,
+		parentID:    parentID,
 		focusIndex:  focusTitle,
 		styles:      New(),
 	}
@@ -85,9 +120,9 @@ func (c *CreateTaskOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab", "shift+tab":
 			// Tab through fields
 			if msg.String() == "tab" {
-				c.focusIndex = (c.focusIndex + 1) % 5
+				c.focusIndex = (c.focusIndex + 1) % focusCount
 			} else {
-				c.focusIndex = (c.focusIndex - 1 + 5) % 5
+				c.focusIndex = (c.focusIndex - 1 + focusCount) % focusCount
 			}
 
 			// Update focus
@@ -312,10 +347,12 @@ func (c *CreateTaskOverlay) submit() tea.Cmd {
 	return tea.Batch(
 		func() tea.Msg {
 			return TaskCreatedMsg{
+				ID:          c.id,
 				Title:       title,
 				Description: strings.TrimSpace(c.description.Value()),
 				Type:        c.taskType,
 				Priority:    c.priority,
+				ParentID:    c.parentID,
 			}
 		},
 		func() tea.Msg { return CloseOverlayMsg{} },
