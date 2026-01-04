@@ -364,10 +364,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case monitor.SessionStateMsg:
-		// Update session state from monitor
 		if session, ok := m.sessions[msg.BeadID]; ok {
+			oldState := session.State
 			session.State = msg.State
 			m.logger.Debug("session state updated", "beadID", msg.BeadID, "state", msg.State)
+
+			if oldState != msg.State && msg.State == domain.SessionWaiting {
+				fmt.Print("\a")
+				m.toasts = append(m.toasts, Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Session %s is waiting for input", msg.BeadID),
+					Expires: time.Now().Add(10 * time.Second),
+				})
+			}
 		}
 		return m, nil
 
@@ -406,6 +415,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.overlayStack.Push(overlay.NewGitPullOverlay(msg.CommitsBehind))
 		}
 		return m, nil
+
+	case mergeResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Merge failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		if msg.result.HasConflicts {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Merge conflicts: %s", strings.Join(msg.result.ConflictFiles, ", ")),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, m.overlayStack.Push(overlay.NewConflictDialog(msg.result.ConflictFiles))
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, m.loadBeadsCmd()
 
 	case fetchAndMergeResultMsg:
 		if msg.err != nil {
@@ -522,11 +557,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.loadBeadsCmd()
 
 	case overlay.TaskCreatedMsg:
-		// Close overlay
 		m.overlayStack.Pop()
-
-		// Create task via beads client
-		return m, m.createTaskCmd(msg)
+		return m, m.saveTaskCmd(msg)
 
 	case taskCreatedResultMsg:
 		if msg.err != nil {
@@ -663,7 +695,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
-	// Single task status result
+	case openPROverlayResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to get branch info: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.beadID))
+
+	case taskDeletedResultMsg:
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Failed to delete task: %v", msg.err),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Task %s deleted", msg.taskID),
+			Expires: time.Now().Add(2 * time.Second),
+		})
+		return m, m.loadBeadsCmd()
+
 	case taskStatusResultMsg:
 		if msg.err != nil {
 			m.toasts = append(m.toasts, Toast{
@@ -678,7 +736,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task moved to %s", msg.newStatus),
 			Expires: time.Now().Add(2 * time.Second),
 		})
-		// Reload beads to reflect changes
+
+		if msg.newStatus == domain.StatusDone {
+			if session, ok := m.sessions[msg.taskID]; ok {
+				return m, tea.Batch(
+					m.loadBeadsCmd(),
+					m.openPROverlayCmd(session.Worktree, msg.taskID),
+				)
+			}
+		}
+
+		return m, m.loadBeadsCmd()
+
+	case bulkStatusResultMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Bulk action failed: %v", msg.err),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Bulk action completed: %d updated, %d failed", msg.updated, msg.failed),
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		m.editor.ClearSelection()
+		m.editor.EnterNormal()
 		return m, m.loadBeadsCmd()
 	}
 
@@ -691,12 +778,10 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	// Show loading spinner if loading
 	if m.loading {
 		return m.renderLoading()
 	}
 
-	// Render main view based on view mode
 	var mainView string
 	if m.viewMode == ViewModeCompact {
 		mainView = m.renderCompactView()
@@ -704,27 +789,25 @@ func (m Model) View() string {
 		mainView = m.renderBoardView()
 	}
 
-	// Render status bar
 	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
 	statusBarView := sb.Render()
 
-	// Compose the layout
 	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
 
-	// If overlay is open, render it on top (centered)
 	if !m.overlayStack.IsEmpty() {
 		current := m.overlayStack.Current()
 		overlayView := current.View()
 
-		// Get overlay size for proper centering
 		overlayWidth, overlayHeight := current.Size()
 
-		// If width is 0, it means full width (like search bar)
 		if overlayWidth == 0 {
-			// Full-width overlay (search bar at bottom)
+			viewHeight := lipgloss.Height(view)
+			overlayHeight := lipgloss.Height(overlayView)
+			if viewHeight+overlayHeight > m.height {
+				view = lipgloss.NewStyle().MaxHeight(m.height - overlayHeight).Render(view)
+			}
 			view = lipgloss.JoinVertical(lipgloss.Left, view, overlayView)
 		} else {
-			// Centered modal overlay with border and title
 			title := current.Title()
 			if title != "" {
 				titleView := m.styles.OverlayTitle.Render(title)
@@ -735,7 +818,6 @@ func (m Model) View() string {
 				Height(overlayHeight).
 				Render(overlayView)
 
-			// Center the overlay on screen
 			centeredOverlay := lipgloss.Place(
 				m.width,
 				m.height,
@@ -744,28 +826,19 @@ func (m Model) View() string {
 				overlayView,
 			)
 
-			// Overlay on top of main view
-			view = lipgloss.Place(
-				m.width,
-				m.height,
-				lipgloss.Left,
-				lipgloss.Top,
-				view,
-			)
+			view = lipgloss.NewStyle().
+				MaxWidth(m.width).
+				MaxHeight(m.height).
+				Render(view)
 
-			// Combine base and overlay
-			// Note: This is a simple overlay - for true transparency we'd need
-			// more complex rendering, but this works for modal overlays
-			view = lipgloss.JoinVertical(lipgloss.Left, view, centeredOverlay)
+			return m.layer(view, centeredOverlay)
 		}
 	}
 
-	// Render toasts in bottom-right corner as overlay
 	if len(m.toasts) > 0 {
 		toastRenderer := toast.New(m.styles)
 		toastView := toastRenderer.Render(m.toasts, m.width)
 		if toastView != "" {
-			// Position toasts absolutely in bottom-right corner
 			toastOverlay := lipgloss.Place(
 				m.width,
 				m.height,
@@ -773,12 +846,35 @@ func (m Model) View() string {
 				lipgloss.Bottom,
 				toastView,
 			)
-			// Overlay toasts on top of the main view
-			view = lipgloss.JoinVertical(lipgloss.Left, view, toastOverlay)
+			return m.layer(view, toastOverlay)
 		}
 	}
 
 	return view
+}
+
+func (m Model) layer(bottom, top string) string {
+	bLines := strings.Split(lipgloss.NewStyle().Height(m.height).MaxHeight(m.height).Render(bottom), "\n")
+	tLines := strings.Split(lipgloss.NewStyle().Height(m.height).MaxHeight(m.height).Render(top), "\n")
+
+	res := make([]string, m.height)
+	for i := 0; i < m.height; i++ {
+		var b, t string
+		if i < len(bLines) {
+			b = bLines[i]
+		}
+		if i < len(tLines) {
+			t = tLines[i]
+		}
+
+		if strings.TrimSpace(t) == "" {
+			res[i] = b
+		} else {
+			res[i] = t
+		}
+	}
+
+	return strings.Join(res, "\n")
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort
@@ -922,7 +1018,12 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "c": // Create task
-		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlay())
+		task, _ := m.getCurrentTaskAndSession()
+		var parentID *string
+		if task != nil && task.Type == domain.TypeEpic {
+			parentID = &task.ID
+		}
+		return m, m.overlayStack.Push(overlay.NewCreateTaskOverlayWithParent(parentID))
 
 	case "s": // Settings
 		return m, m.overlayStack.Push(overlay.NewSettingsOverlayWithEditor(m.editor))
@@ -1304,11 +1405,10 @@ func (m Model) handleBulkAction(msg overlay.BulkActionMsg) (tea.Model, tea.Cmd) 
 		return m, m.bulkSetStatusCmd(msg.SelectedIDs, domain.StatusDone)
 
 	case "d": // Delete selected
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastWarning,
-			Message: fmt.Sprintf("Delete %d tasks (TODO)", count),
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		return m, m.bulkDeleteCmd(msg.SelectedIDs)
+
+	case "a":
+		return m, m.bulkArchiveCmd(msg.SelectedIDs)
 
 	case "x": // Clear selection
 		m.editor.ClearSelection()
@@ -1559,22 +1659,27 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.moveTaskStatusCmd(task.ID, 1)
 	case "e":
-		// TODO: Edit task
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Edit task (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		return m, m.overlayStack.Push(overlay.NewEditTaskOverlay(*task))
 	case "d":
-		// TODO: Delete task
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Delete task (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		return m, m.deleteTaskCmd(task.ID)
 	}
 
 	return m, nil
+}
+
+type taskDeletedResultMsg struct {
+	taskID string
+	err    error
+}
+
+func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.beadsClient.Delete(ctx, taskID)
+		return taskDeletedResultMsg{taskID: taskID, err: err}
+	}
 }
 
 // NOTE: clampTaskIndex and clampTaskIndexForColumn have been removed.
@@ -1758,17 +1863,77 @@ func (m Model) handleConflictResolution(resolution overlay.ConflictResolutionMsg
 
 // handleMergeTargetSelection handles merge target selection
 func (m Model) handleMergeTargetSelection(msg overlay.MergeTargetSelectedMsg) (tea.Model, tea.Cmd) {
-	// Close the overlay
 	m.overlayStack.Pop()
 
-	// TODO: Implement merge workflow in Phase 6
-	m.toasts = append(m.toasts, Toast{
-		Level:   ToastInfo,
-		Message: fmt.Sprintf("Merge %s -> %s (TODO - Phase 6)", msg.SourceID, msg.TargetID),
-		Expires: time.Now().Add(3 * time.Second),
-	})
+	sourceSession, hasSource := m.sessions[msg.SourceID]
+	if !hasSource {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastError,
+			Message: "Source session not found",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
 
-	return m, nil
+	if msg.TargetID == "main" {
+		return m, m.mergeToMainCmd(sourceSession.Worktree, msg.SourceID)
+	}
+
+	targetSession, hasTarget := m.sessions[msg.TargetID]
+	if !hasTarget {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastError,
+			Message: "Target session not found",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+	}
+
+	return m, m.mergeFeatureIntoFeatureCmd(sourceSession.Worktree, targetSession.Worktree, msg.SourceID, msg.TargetID)
+}
+
+type mergeResultMsg struct {
+	sourceID string
+	targetID string
+	result   *git.MergeResult
+	err      error
+}
+
+func (m Model) mergeToMainCmd(sourceWorktree, sourceID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		baseBranch := m.config.Git.BaseBranch
+
+		branch, err := m.gitClient.CurrentBranch(ctx, sourceWorktree)
+		if err != nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+		}
+
+		if err := m.gitClient.Fetch(ctx, ".", "origin"); err != nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+		}
+
+		if err := m.gitClient.Checkout(ctx, ".", baseBranch); err != nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: "main", err: err}
+		}
+
+		result, err := m.gitClient.Merge(ctx, ".", branch)
+		return mergeResultMsg{sourceID: sourceID, targetID: "main", result: result, err: err}
+	}
+}
+
+func (m Model) mergeFeatureIntoFeatureCmd(sourceWorktree, targetWorktree, sourceID, targetID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		sourceBranch, err := m.gitClient.CurrentBranch(ctx, sourceWorktree)
+		if err != nil {
+			return mergeResultMsg{sourceID: sourceID, targetID: targetID, err: err}
+		}
+
+		result, err := m.gitClient.Merge(ctx, targetWorktree, sourceBranch)
+		return mergeResultMsg{sourceID: sourceID, targetID: targetID, result: result, err: err}
+	}
 }
 
 type abortMergeResultMsg struct {
@@ -1865,6 +2030,48 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 	}
 }
 
+func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updated := 0
+		failed := 0
+
+		for _, taskID := range taskIDs {
+			err := m.beadsClient.Delete(ctx, taskID)
+			if err != nil {
+				failed++
+				continue
+			}
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, failed: failed}
+	}
+}
+
+func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		updated := 0
+		failed := 0
+
+		for _, taskID := range taskIDs {
+			err := m.beadsClient.Archive(ctx, taskID)
+			if err != nil {
+				failed++
+				continue
+			}
+			updated++
+		}
+
+		return bulkStatusResultMsg{updated: updated, failed: failed}
+	}
+}
+
 // bulkSetStatusCmd sets all selected tasks to a specific status
 func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd {
 	return func() tea.Msg {
@@ -1884,6 +2091,32 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		}
 
 		return bulkStatusResultMsg{updated: updated, failed: failed}
+	}
+}
+
+func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if msg.ID != "" {
+			err := m.beadsClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
+				Title:       msg.Title,
+				Description: msg.Description,
+				Type:        msg.Type,
+				Priority:    msg.Priority,
+			})
+			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
+		}
+
+		taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
+			Title:       msg.Title,
+			Description: msg.Description,
+			Type:        msg.Type,
+			Priority:    msg.Priority,
+			ParentID:    msg.ParentID,
+		})
+		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
 	}
 }
 
@@ -1974,34 +2207,13 @@ func (m Model) getEpicChildren(epicID string) []domain.Task {
 }
 
 type taskCreatedResultMsg struct {
-	taskID string
-	err    error
+	taskID   string
+	err      error
+	isUpdate bool
 }
 
-// createTaskCmd creates a new task via the beads client
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
-	return func() tea.Msg {
-		// TODO: Implement beads.Client.Create() method
-		// For now, return a placeholder success message
-		// This will need to be implemented when the Create method is added to beads client
-
-		// Expected implementation:
-		// ctx := context.Background()
-		// taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
-		//     Title:       msg.Title,
-		//     Description: msg.Description,
-		//     Type:        msg.Type,
-		//     Priority:    msg.Priority,
-		// })
-		// if err != nil {
-		//     return taskCreatedResultMsg{err: err}
-		// }
-		// return taskCreatedResultMsg{taskID: taskID}
-
-		return taskCreatedResultMsg{
-			err: fmt.Errorf("task creation not yet implemented - need to add Create() method to beads.Client"),
-		}
-	}
+	return m.saveTaskCmd(msg)
 }
 
 // PR creation with overlay
@@ -2283,33 +2495,29 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 	for _, id := range categoryIDs {
 		switch id {
 		case "delete_old_done":
-			// Delete completed tasks older than 30 days
 			cutoff := time.Now().AddDate(0, 0, -30)
 			deleted := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
-					// TODO: Implement task deletion via beads client
-					// err := m.beadsClient.Delete(ctx, task.ID)
-					// if err != nil {
-					//     m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
-					//     continue
-					// }
+					err := m.beadsClient.Delete(ctx, task.ID)
+					if err != nil {
+						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
+						continue
+					}
 					deleted++
 				}
 			}
 			result.Deleted = deleted
 
 		case "archive_done":
-			// Archive all done tasks
 			archived := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone {
-					// TODO: Implement task archival via beads client
-					// err := m.beadsClient.Archive(ctx, task.ID)
-					// if err != nil {
-					//     m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
-					//     continue
-					// }
+					err := m.beadsClient.Archive(ctx, task.ID)
+					if err != nil {
+						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
+						continue
+					}
 					archived++
 				}
 			}

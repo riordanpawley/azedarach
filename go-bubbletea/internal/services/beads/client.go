@@ -89,6 +89,50 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 	return nil
 }
 
+// CreateTaskParams contains parameters for creating a new task
+type CreateTaskParams struct {
+	Title       string
+	Description string
+	Type        domain.TaskType
+	Priority    domain.Priority
+	ParentID    *string
+}
+
+// Create creates a new task using `bd create "title" -t type -p priority --json`
+func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
+	c.logger.Debug("creating bead", "title", params.Title)
+
+	args := []string{"create", params.Title, "--json"}
+	args = append(args, "-t", string(params.Type))
+	args = append(args, "-p", string(rune('0'+params.Priority)))
+
+	if params.ParentID != nil {
+		args = append(args, "--parent", *params.ParentID)
+	}
+
+	out, err := c.runner.Run(ctx, "bd", args...)
+	if err != nil {
+		return "", &domain.BeadsError{Op: "create", Message: params.Title, Err: err}
+	}
+
+	// Response from bd create --json is the created task
+	var task domain.Task
+	if err := json.Unmarshal(out, &task); err != nil {
+		// If it's not a full task, it might just be the ID as a string
+		// Let's try to see if it's a simple JSON object with an id field
+		var idResult struct {
+			ID string `json:"id"`
+		}
+		if err2 := json.Unmarshal(out, &idResult); err2 == nil && idResult.ID != "" {
+			return idResult.ID, nil
+		}
+		return "", &domain.BeadsError{Op: "create", Message: "failed to parse JSON", Err: err}
+	}
+
+	c.logger.Debug("bead created", "id", task.ID)
+	return task.ID, nil
+}
+
 // Close marks a bead as complete using `bd close id --reason=reason`
 func (c *Client) Close(ctx context.Context, id string, reason string) error {
 	c.logger.Debug("closing bead", "id", id, "reason", reason)
@@ -104,5 +148,57 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
 	}
 
 	c.logger.Debug("bead closed", "id", id)
+	return nil
+}
+
+func (c *Client) Delete(ctx context.Context, id string) error {
+	c.logger.Debug("deleting bead", "id", id)
+
+	_, err := c.runner.Run(ctx, "bd", "delete", id)
+	if err != nil {
+		return &domain.BeadsError{Op: "delete", BeadID: id, Err: err}
+	}
+
+	c.logger.Debug("bead deleted", "id", id)
+	return nil
+}
+
+// Archive archives a bead using `bd archive id`
+func (c *Client) Archive(ctx context.Context, id string) error {
+	c.logger.Debug("archiving bead", "id", id)
+
+	_, err := c.runner.Run(ctx, "bd", "archive", id)
+	if err != nil {
+		return &domain.BeadsError{Op: "archive", BeadID: id, Err: err}
+	}
+
+	c.logger.Debug("bead archived", "id", id)
+	return nil
+}
+
+type UpdateTaskParams struct {
+	Title       string
+	Description string
+	Type        domain.TaskType
+	Priority    domain.Priority
+}
+
+func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
+	c.logger.Debug("updating bead details", "id", id)
+
+	args := []string{"update", id}
+	if params.Title != "" {
+		args = append(args, "--title="+params.Title)
+	}
+
+	args = append(args, "--type="+string(params.Type))
+	args = append(args, "--priority="+string(rune('0'+params.Priority)))
+
+	_, err := c.runner.Run(ctx, "bd", args...)
+	if err != nil {
+		return &domain.BeadsError{Op: "update-details", BeadID: id, Err: err}
+	}
+
+	c.logger.Debug("bead details updated", "id", id)
 	return nil
 }
