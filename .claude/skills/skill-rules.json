@@ -95,30 +95,29 @@
 			}
 		},
 		{
-			"id": "tdd-workflow",
-			"name": "Test-Driven Development",
-			"path": ".claude/skills/workflow/tdd-workflow.skill.md",
-			"type": "workflow",
+			"id": "effect-testing",
+			"name": "Effect Testing (TypeScript/Bun)",
+			"path": ".claude/skills/effect/effect-testing.skill.md",
+			"type": "effect",
 			"priority": "high",
 			"confidence": {
 				"required": 0.65,
 				"suggested": 0.5
 			},
 			"triggers": {
-				"filePatterns": ["*.test.ts", "*.test.tsx", "*.test.go"],
-				"contentPatterns": ["test(", "it(", "describe(", "Test"],
+				"filePatterns": ["*.test.ts", "*.test.tsx", "ts-opentui/**/*.ts"],
+				"contentPatterns": ["bun:test", "describe(", "it(", "expect(", "Effect.runPromise"],
 				"keywords": [
 					"tdd",
 					"test driven",
 					"test first",
-					"red green refactor",
-					"write test",
-					"test coverage",
+					"bun test",
+					"effect test",
+					"typescript test",
 					"unit test",
 					"integration test",
-					"assert",
-					"mock",
-					"flaky test"
+					"mock service",
+					"test layer"
 				]
 			},
 			"validation": {
@@ -128,7 +127,44 @@
 					"Write minimal implementation to pass (GREEN)",
 					"Never delete failing tests",
 					"Never trust AI-generated tests uncritically",
-					"Tests should specify behavior, not implementation"
+					"Use Effect test layers for dependency injection"
+				]
+			}
+		},
+		{
+			"id": "go-testing",
+			"name": "Go Testing (Bubbletea)",
+			"path": ".claude/skills/go/go-testing.skill.md",
+			"type": "go",
+			"priority": "high",
+			"confidence": {
+				"required": 0.65,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": ["*_test.go", "go-bubbletea/**/*.go"],
+				"contentPatterns": ["func Test", "t.Run(", "t.Errorf(", "testing.T"],
+				"keywords": [
+					"tdd",
+					"test driven",
+					"test first",
+					"go test",
+					"table driven",
+					"unit test",
+					"integration test",
+					"mock",
+					"race detector",
+					"coverage"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Write tests BEFORE implementation",
+					"Run tests to verify failure (RED)",
+					"Write minimal implementation to pass (GREEN)",
+					"Never delete failing tests",
+					"Never trust AI-generated tests uncritically",
+					"Use table-driven tests for multiple cases"
 				]
 			}
 		},
@@ -209,4 +245,5 @@
 				]
 			}
 		}
+	]
 }
