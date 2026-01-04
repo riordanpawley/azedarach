@@ -22,6 +22,18 @@ This directory implements an **auto-activating skills system** that combines:
 ├── README.md                    # This file
 ├── skill-rules.json             # Activation rules and configuration
 │
+├── effect/                      # Effect/TypeScript skills
+│   ├── effect-concurrency.skill.md
+│   ├── effect-errors.skill.md
+│   ├── effect-resources.skill.md
+│   ├── effect-services.skill.md
+│   └── effect-testing.skill.md  # TDD for TypeScript/Effect
+│
+├── go/                          # Go/Bubbletea skills
+│   ├── go-concurrency.skill.md
+│   ├── go-testing.skill.md      # TDD for Go
+│   └── bubbletea-patterns.skill.md
+│
 ├── workflow/                    # Workflow skills
 │   └── beads-tracking.skill.md  # Issue tracking workflow
 │
@@ -57,6 +69,20 @@ This directory implements an **auto-activating skills system** that combines:
 ### Workflow Skills
 Development workflow and process patterns:
 - **beads-tracking** - Issue tracking, resumability, multi-session work
+
+### Effect Skills (ts-opentui only)
+Effect framework and TypeScript patterns:
+- **effect-concurrency** - Fibers, forking, scheduling
+- **effect-errors** - Error handling patterns
+- **effect-resources** - Resource management
+- **effect-services** - Service construction patterns
+- **effect-testing** - TDD for TypeScript/Effect with Bun
+
+### Go Skills (go-bubbletea only)
+Go/Bubbletea patterns:
+- **go-concurrency** - Goroutines, channels, context
+- **go-testing** - TDD for Go with table-driven tests
+- **bubbletea-patterns** - TEA architecture, Model-Update-View
 
 ## Configuration
 

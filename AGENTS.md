@@ -12,25 +12,36 @@ Purpose: OpenCode entry point - references CLAUDE.md for full context
 
 ## Instructions Reference
 
-**See [CLAUDE.md](./CLAUDE.md) for comprehensive project instructions, critical rules, and architecture documentation.**
+**This repository has multiple implementations:**
+
+- **ts-opentui/** → [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
+- **go-bubbletea/** → [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
+
+Select the implementation based on user request or current working directory.
 
 This file provides a condensed reference for OpenCode sessions.
 
 ## Critical Rules (Quick Reference)
 
-1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any'.
+1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any' (ts-opentui only).
 2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed).
 3. **Beads Tracker**: Use `bd` CLI commands. `bd search` for discovery, `bd ready` for unblocked work. NEVER `bd list`.
-4. **Effect Patterns**: Services grab dependencies at layer construction, not via Effect.provide().
-5. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
+4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 
 ## Quick Commands
 
 ```bash
-# Development
+# ts-opentui (TypeScript/Bun)
+cd ts-opentui
 bun run dev                       # Start development TUI
 bun run type-check                # Full project check
 bun run build                     # Build the project
+
+# go-bubbletea (Go)
+cd go-bubbletea
+make build                        # Build Go binary
+make test                         # Run tests
+make run                          # Build and run
 
 # Search (modern tools)
 rg "pattern" --type ts            # Search content (NOT grep)
@@ -47,14 +58,26 @@ bd close <id>                     # Mark complete
 ## Architecture Quick Reference
 
 ```
-src/
-├── ui/           # OpenTUI + React components (Board, TaskCard, etc.)
-├── core/         # Effect services (SessionManager, TmuxService, etc.)
-├── services/     # Application services (Navigation, Editor, etc.)
-└── config/       # Configuration and schemas
+ts-opentui/
+├── src/
+│   ├── ui/           # OpenTUI + React components (Board, TaskCard, etc.)
+│   ├── core/         # Effect services (SessionManager, TmuxService, etc.)
+│   ├── services/     # Application services (Navigation, Editor, etc.)
+│   └── config/       # Configuration and schemas
+
+go-bubbletea/
+├── cmd/              # Main applications (minimal wiring)
+├── internal/         # Private code (app, services, types, ui)
+│   ├── app/          # Bubbletea application logic
+│   ├── services/     # Business logic (Beads, Tmux, Git)
+│   ├── types/        # Domain models
+│   └── ui/          # Bubbletea UI components
+└── docs/             # Documentation
 ```
 
-**Stack:** TypeScript, OpenTUI + React, Effect, tmux, Beads
+**Stacks:**
+- **ts-opentui**: TypeScript, OpenTUI + React, Effect, tmux, Beads
+- **go-bubbletea**: Go, Bubbletea, Lip Gloss, tmux, Beads
 
 ## Task Management
 

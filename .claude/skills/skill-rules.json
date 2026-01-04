@@ -93,6 +93,157 @@
 					"Never use raw npm/bun commands for dev servers - breaks TUI state"
 				]
 			}
+		},
+		{
+			"id": "effect-testing",
+			"name": "Effect Testing (TypeScript/Bun)",
+			"path": ".claude/skills/effect/effect-testing.skill.md",
+			"type": "effect",
+			"priority": "high",
+			"confidence": {
+				"required": 0.65,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": ["*.test.ts", "*.test.tsx", "ts-opentui/**/*.ts"],
+				"contentPatterns": ["bun:test", "describe(", "it(", "expect(", "Effect.runPromise"],
+				"keywords": [
+					"tdd",
+					"test driven",
+					"test first",
+					"bun test",
+					"effect test",
+					"typescript test",
+					"unit test",
+					"integration test",
+					"mock service",
+					"test layer"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Write tests BEFORE implementation",
+					"Run tests to verify failure (RED)",
+					"Write minimal implementation to pass (GREEN)",
+					"Never delete failing tests",
+					"Never trust AI-generated tests uncritically",
+					"Use Effect test layers for dependency injection"
+				]
+			}
+		},
+		{
+			"id": "go-testing",
+			"name": "Go Testing (Bubbletea)",
+			"path": ".claude/skills/go/go-testing.skill.md",
+			"type": "go",
+			"priority": "high",
+			"confidence": {
+				"required": 0.65,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": ["*_test.go", "go-bubbletea/**/*.go"],
+				"contentPatterns": ["func Test", "t.Run(", "t.Errorf(", "testing.T"],
+				"keywords": [
+					"tdd",
+					"test driven",
+					"test first",
+					"go test",
+					"table driven",
+					"unit test",
+					"integration test",
+					"mock",
+					"race detector",
+					"coverage"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Write tests BEFORE implementation",
+					"Run tests to verify failure (RED)",
+					"Write minimal implementation to pass (GREEN)",
+					"Never delete failing tests",
+					"Never trust AI-generated tests uncritically",
+					"Use table-driven tests for multiple cases"
+				]
+			}
+		},
+		{
+			"id": "go-concurrency",
+			"name": "Go Concurrency Patterns",
+			"path": ".claude/skills/go/go-concurrency.skill.md",
+			"type": "go",
+			"priority": "medium",
+			"confidence": {
+				"required": 0.6,
+				"suggested": 0.45
+			},
+			"triggers": {
+				"filePatterns": ["*.go", "go.mod", "go.sum"],
+				"contentPatterns": ["goroutine", "channel", "sync.", "WaitGroup", "context.Context"],
+				"keywords": [
+					"goroutine",
+					"go func",
+					"channel",
+					"chan",
+					"context",
+					"cancel",
+					"mutex",
+					"atomic",
+					"race condition",
+					"concurrent",
+					"parallel",
+					"worker pool",
+					"fan-in",
+					"fan-out"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Pass context.Context as first argument to I/O functions",
+					"Defer cancel() when creating contexts with timeout/deadline",
+					"Close channels from sender side only",
+					"Use WaitGroup to wait for goroutine groups",
+					"Use atomic operations for simple counters",
+					"Check context.Done() in long-running operations"
+				]
+			}
+		},
+		{
+			"id": "bubbletea-patterns",
+			"name": "Bubbletea Patterns",
+			"path": ".claude/skills/go/bubbletea-patterns.skill.md",
+			"type": "go",
+			"priority": "medium",
+			"confidence": {
+				"required": 0.6,
+				"suggested": 0.45
+			},
+			"triggers": {
+				"filePatterns": ["internal/app/*.go", "internal/ui/*.go"],
+				"contentPatterns": ["tea.Model", "tea.Msg", "tea.Cmd", "tea.View", "tea.Batch"],
+				"keywords": [
+					"bubbletea",
+					"model update view",
+					"tea.Cmd",
+					"tea.Msg",
+					"init()",
+					"update()",
+					"view()",
+					"bubbles",
+					"lip gloss"
+				]
+			},
+			"validation": {
+				"enforces": [
+					"Define styles once as package-level variables",
+					"Pass ALL messages to relevant sub-models",
+					"Use tea.Batch to combine multiple commands",
+					"Handle tea.WindowSizeMsg to respond to terminal resizes",
+					"Keep View() pure - no side effects",
+					"Use bubbles components for lists, inputs, viewports"
+				]
+			}
 		}
 	]
 }
