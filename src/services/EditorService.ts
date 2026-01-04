@@ -163,11 +163,104 @@ export const DEFAULT_SORT_CONFIG: SortConfig = Data.struct({
 	direction: "desc" as const,
 })
 
+/**
+ * Per-project editor state - stores mode, sort, and filter configuration
+ * for each project path to preserve state when switching projects
+ */
+export interface PerProjectEditorState {
+	readonly mode: EditorMode
+	readonly sortConfig: SortConfig
+	readonly filterConfig: FilterConfig
+}
+
 export class EditorService extends Effect.Service<EditorService>()("EditorService", {
 	effect: Effect.gen(function* () {
 		const mode = yield* SubscriptionRef.make<EditorMode>(Data.struct({ _tag: "normal" as const }))
 		const sortConfig = yield* SubscriptionRef.make<SortConfig>(DEFAULT_SORT_CONFIG)
 		const filterConfig = yield* SubscriptionRef.make<FilterConfig>(DEFAULT_FILTER_CONFIG)
+
+		// Per-project state storage
+		const perProjectState = yield* SubscriptionRef.make<Map<string, PerProjectEditorState>>(
+			new Map(),
+		)
+		const currentProjectPath = yield* SubscriptionRef.make<string | null>(null)
+
+		// Helper: get default state for a new project
+		const getDefaultState = (): PerProjectEditorState => ({
+			mode: { _tag: "normal" },
+			sortConfig: DEFAULT_SORT_CONFIG,
+			filterConfig: DEFAULT_FILTER_CONFIG,
+		})
+
+		// Helper: get or create project state in the map
+		const getOrCreateProjectState = (projectPath: string) =>
+			Effect.gen(function* () {
+				const stateMap = yield* SubscriptionRef.get(perProjectState)
+				if (stateMap.has(projectPath)) {
+					return stateMap.get(projectPath)!
+				}
+				const newState = getDefaultState()
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(projectPath, newState)
+					return copy
+				})
+				return newState
+			})
+
+		// Helper: save current derived state to the per-project map
+		const saveCurrentToMap = () =>
+			Effect.gen(function* () {
+				const path = yield* SubscriptionRef.get(currentProjectPath)
+				if (!path) return
+				const currentMode = yield* SubscriptionRef.get(mode)
+				const currentSort = yield* SubscriptionRef.get(sortConfig)
+				const currentFilter = yield* SubscriptionRef.get(filterConfig)
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					copy.set(path, {
+						mode: currentMode,
+						sortConfig: currentSort,
+						filterConfig: currentFilter,
+					})
+					return copy
+				})
+			})
+
+		// Helper: sync derived SubscriptionRefs from project state
+		const syncDerivedFromProject = (projectPath: string) =>
+			Effect.gen(function* () {
+				const state = yield* getOrCreateProjectState(projectPath)
+				yield* SubscriptionRef.set(mode, state.mode)
+				yield* SubscriptionRef.set(sortConfig, state.sortConfig)
+				yield* SubscriptionRef.set(filterConfig, state.filterConfig)
+			})
+
+		// Helper: update per-project map when sort config changes
+		const updateSortInMap = (newSort: SortConfig) =>
+			Effect.gen(function* () {
+				const path = yield* SubscriptionRef.get(currentProjectPath)
+				if (!path) return
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					const existing = copy.get(path) ?? getDefaultState()
+					copy.set(path, { ...existing, sortConfig: newSort })
+					return copy
+				})
+			})
+
+		// Helper: update per-project map when filter config changes
+		const updateFilterInMap = (newFilter: FilterConfig) =>
+			Effect.gen(function* () {
+				const path = yield* SubscriptionRef.get(currentProjectPath)
+				if (!path) return
+				yield* SubscriptionRef.update(perProjectState, (m) => {
+					const copy = new Map(m)
+					const existing = copy.get(path) ?? getDefaultState()
+					copy.set(path, { ...existing, filterConfig: newFilter })
+					return copy
+				})
+			})
 
 		return {
 			// Expose SubscriptionRef for atom subscription
@@ -407,7 +500,9 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 */
 			setSort: (field: SortField, direction: SortDirection) =>
 				Effect.gen(function* () {
-					yield* SubscriptionRef.set(sortConfig, Data.struct({ field, direction }))
+					const newSort = Data.struct({ field, direction })
+					yield* SubscriptionRef.set(sortConfig, newSort)
+					yield* updateSortInMap(newSort)
 					yield* SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const }))
 				}),
 
@@ -421,7 +516,9 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					const current = yield* SubscriptionRef.get(sortConfig)
 					const newDirection: SortDirection =
 						current.field === field ? (current.direction === "desc" ? "asc" : "desc") : "desc"
-					yield* SubscriptionRef.set(sortConfig, Data.struct({ field, direction: newDirection }))
+					const newSort = Data.struct({ field, direction: newDirection })
+					yield* SubscriptionRef.set(sortConfig, newSort)
+					yield* updateSortInMap(newSort)
 					yield* SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const }))
 				}),
 
@@ -453,56 +550,72 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Toggle a status filter value
 			 */
 			toggleFilterStatus: (status: IssueStatus) =>
-				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
-					const newSet = new Set(config.status)
-					if (newSet.has(status)) {
-						newSet.delete(status)
-					} else {
-						newSet.add(status)
-					}
-					return Data.struct({ ...config, status: newSet })
+				Effect.gen(function* () {
+					yield* SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+						const newSet = new Set(config.status)
+						if (newSet.has(status)) {
+							newSet.delete(status)
+						} else {
+							newSet.add(status)
+						}
+						return Data.struct({ ...config, status: newSet })
+					})
+					const newFilter = yield* SubscriptionRef.get(filterConfig)
+					yield* updateFilterInMap(newFilter)
 				}),
 
 			/**
 			 * Toggle a priority filter value
 			 */
 			toggleFilterPriority: (priority: number) =>
-				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
-					const newSet = new Set(config.priority)
-					if (newSet.has(priority)) {
-						newSet.delete(priority)
-					} else {
-						newSet.add(priority)
-					}
-					return Data.struct({ ...config, priority: newSet })
+				Effect.gen(function* () {
+					yield* SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+						const newSet = new Set(config.priority)
+						if (newSet.has(priority)) {
+							newSet.delete(priority)
+						} else {
+							newSet.add(priority)
+						}
+						return Data.struct({ ...config, priority: newSet })
+					})
+					const newFilter = yield* SubscriptionRef.get(filterConfig)
+					yield* updateFilterInMap(newFilter)
 				}),
 
 			/**
 			 * Toggle a type filter value
 			 */
 			toggleFilterType: (issueType: IssueType) =>
-				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
-					const newSet = new Set(config.type)
-					if (newSet.has(issueType)) {
-						newSet.delete(issueType)
-					} else {
-						newSet.add(issueType)
-					}
-					return Data.struct({ ...config, type: newSet })
+				Effect.gen(function* () {
+					yield* SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+						const newSet = new Set(config.type)
+						if (newSet.has(issueType)) {
+							newSet.delete(issueType)
+						} else {
+							newSet.add(issueType)
+						}
+						return Data.struct({ ...config, type: newSet })
+					})
+					const newFilter = yield* SubscriptionRef.get(filterConfig)
+					yield* updateFilterInMap(newFilter)
 				}),
 
 			/**
 			 * Toggle a session filter value
 			 */
 			toggleFilterSession: (session: FilterSessionState) =>
-				SubscriptionRef.update(filterConfig, (config): FilterConfig => {
-					const newSet = new Set(config.session)
-					if (newSet.has(session)) {
-						newSet.delete(session)
-					} else {
-						newSet.add(session)
-					}
-					return Data.struct({ ...config, session: newSet })
+				Effect.gen(function* () {
+					yield* SubscriptionRef.update(filterConfig, (config): FilterConfig => {
+						const newSet = new Set(config.session)
+						if (newSet.has(session)) {
+							newSet.delete(session)
+						} else {
+							newSet.add(session)
+						}
+						return Data.struct({ ...config, session: newSet })
+					})
+					const newFilter = yield* SubscriptionRef.get(filterConfig)
+					yield* updateFilterInMap(newFilter)
 				}),
 
 			/**
@@ -511,15 +624,23 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Pass null to clear the age filter.
 			 */
 			setAgeFilter: (days: number | null) =>
-				SubscriptionRef.update(
-					filterConfig,
-					(config): FilterConfig => Data.struct({ ...config, updatedDaysAgo: days }),
-				),
+				Effect.gen(function* () {
+					yield* SubscriptionRef.update(
+						filterConfig,
+						(config): FilterConfig => Data.struct({ ...config, updatedDaysAgo: days }),
+					)
+					const newFilter = yield* SubscriptionRef.get(filterConfig)
+					yield* updateFilterInMap(newFilter)
+				}),
 
 			/**
 			 * Clear all filters
 			 */
-			clearFilters: () => SubscriptionRef.set(filterConfig, DEFAULT_FILTER_CONFIG),
+			clearFilters: () =>
+				Effect.gen(function* () {
+					yield* SubscriptionRef.set(filterConfig, DEFAULT_FILTER_CONFIG)
+					yield* updateFilterInMap(DEFAULT_FILTER_CONFIG)
+				}),
 
 			/**
 			 * Restore sort and filter configuration from saved state
@@ -529,6 +650,8 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 				Effect.gen(function* () {
 					yield* SubscriptionRef.set(sortConfig, savedSort)
 					yield* SubscriptionRef.set(filterConfig, savedFilter)
+					yield* updateSortInMap(savedSort)
+					yield* updateFilterInMap(savedFilter)
 				}),
 
 			/**
@@ -694,6 +817,80 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Exit merge select mode and return to normal
 			 */
 			exitMergeSelect: () => SubscriptionRef.set(mode, Data.struct({ _tag: "normal" as const })),
+
+			// ========================================================================
+			// Project Switching
+			// ========================================================================
+
+			/**
+			 * Switch to a new project, saving current project's state and restoring the new project's state.
+			 *
+			 * This method:
+			 * 1. Saves the current project's mode, sort, and filter state to the internal Map
+			 * 2. Updates the current project path
+			 * 3. Restores the new project's saved state - either from the internal Map (in-session memory)
+			 *    or from explicitly provided saved state (from disk persistence)
+			 *
+			 * The internal Map preserves state per-project so switching back to a project within the
+			 * same session restores the exact UI state you had before. For persistence across app restarts,
+			 * the caller can pass savedSort and savedFilter loaded from disk.
+			 *
+			 * @param newProjectPath - The path of the project to switch to, or null to clear
+			 * @param savedSort - Optional sort config loaded from disk (overrides in-memory state)
+			 * @param savedFilter - Optional filter config loaded from disk (overrides in-memory state)
+			 */
+			switchProject: (
+				newProjectPath: string | null,
+				savedSort?: SortConfig,
+				savedFilter?: FilterConfig,
+			) =>
+				Effect.gen(function* () {
+					// Save current state before switching
+					yield* saveCurrentToMap()
+					// Update current project path
+					yield* SubscriptionRef.set(currentProjectPath, newProjectPath)
+					// Load new project's state
+					if (newProjectPath) {
+						// If explicit saved state provided (from disk), use that
+						if (savedSort !== undefined || savedFilter !== undefined) {
+							const state = yield* getOrCreateProjectState(newProjectPath)
+							const newState = {
+								mode: state.mode,
+								sortConfig: savedSort ?? state.sortConfig,
+								filterConfig: savedFilter ?? state.filterConfig,
+							}
+							// Update the map with restored state
+							yield* SubscriptionRef.update(perProjectState, (m) => {
+								const copy = new Map(m)
+								copy.set(newProjectPath, newState)
+								return copy
+							})
+							// Sync to derived refs
+							yield* SubscriptionRef.set(mode, newState.mode)
+							yield* SubscriptionRef.set(sortConfig, newState.sortConfig)
+							yield* SubscriptionRef.set(filterConfig, newState.filterConfig)
+						} else {
+							// Otherwise use in-memory state or defaults
+							yield* syncDerivedFromProject(newProjectPath)
+						}
+					}
+				}),
+
+			/**
+			 * Get the current project path
+			 */
+			getCurrentProjectPath: () => SubscriptionRef.get(currentProjectPath),
+
+			/**
+			 * Get current state for saving before project switch.
+			 * Returns sort and filter config (mode is not persisted).
+			 */
+			getStateForSave: () =>
+				Effect.gen(function* () {
+					const sort = yield* SubscriptionRef.get(sortConfig)
+					const filter = yield* SubscriptionRef.get(filterConfig)
+					return { sortConfig: sort, filterConfig: filter }
+				}),
 		}
 	}),
 }) {}
