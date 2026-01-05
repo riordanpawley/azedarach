@@ -131,6 +131,11 @@ const SessionConfigSchema = Schema.Struct({
 
 	/** Commands to run in background tmux windows when a session starts */
 	backgroundTasks: Schema.optional(Schema.Array(Schema.String)),
+
+	/**
+	 * Maximum number of concurrent sessions allowed (default: 10)
+	 */
+	maxSessions: Schema.optional(Schema.Number),
 })
 
 /**
