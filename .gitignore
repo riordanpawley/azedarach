@@ -54,3 +54,5 @@ yarn-error.log*
 coverage/
 .nyc_output/
 .beads/bd.sock.startlock
+.claude/skills/local
+.claude/settings.local.json
