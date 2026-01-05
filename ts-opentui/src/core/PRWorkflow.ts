@@ -12,6 +12,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { getToolDefinition } from "./CliToolRegistry.js"
 import { OfflineService } from "../services/OfflineService.js"
 import {
 	BeadsClient,
@@ -1127,13 +1128,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-						// Start Claude session in a new "merge" window within the same session
 						const windowName = "merge"
 						const sessionName = getBeadSessionName(beadId)
 
+						const cliTool = yield* appConfig.getCliTool()
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const modelConfig = yield* appConfig.getModelConfig()
+						const toolDef = getToolDefinition(cliTool)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+						const command = toolDef.buildCommand({
+							initialPrompt: resolvePrompt,
+							model: effectiveModel,
+							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+						})
+
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude "${resolvePrompt}"`,
+							command,
 						})
 
 						const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
@@ -1662,9 +1675,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const windowName = "merge"
 						const sessionName = getBeadSessionName(beadId)
 
+						const cliTool = yield* appConfig.getCliTool()
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const modelConfig = yield* appConfig.getModelConfig()
+						const toolDef = getToolDefinition(cliTool)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+						const command = toolDef.buildCommand({
+							initialPrompt: resolvePrompt,
+							model: effectiveModel,
+							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+						})
+
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude "${resolvePrompt}"`,
+							command,
 						})
 
 						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
@@ -1924,9 +1950,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const windowName = "merge"
 						const sessionName = getBeadSessionName(beadId)
 
+						const cliTool = yield* appConfig.getCliTool()
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const modelConfig = yield* appConfig.getModelConfig()
+						const toolDef = getToolDefinition(cliTool)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+						const command = toolDef.buildCommand({
+							initialPrompt: resolvePrompt,
+							model: effectiveModel,
+							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+						})
+
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: worktree.path,
-							command: `claude "${resolvePrompt}"`,
+							command,
 						})
 
 						const message = `Merge conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry attach after resolution.`
@@ -2115,9 +2154,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const windowName = "merge"
 						const sessionName = getBeadSessionName(targetBeadId)
 
+						const cliTool = yield* appConfig.getCliTool()
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const modelConfig = yield* appConfig.getModelConfig()
+						const toolDef = getToolDefinition(cliTool)
+						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+						const command = toolDef.buildCommand({
+							initialPrompt: resolvePrompt,
+							model: effectiveModel,
+							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+						})
+
 						yield* worktreeSession.ensureWindow(sessionName, windowName, {
 							cwd: targetWorktree.path,
-							command: `claude "${resolvePrompt}"`,
+							command,
 						})
 
 						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetBeadId} to resolve. Retry merge after resolution.`
