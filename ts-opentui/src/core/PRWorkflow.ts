@@ -12,7 +12,6 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { getToolDefinition } from "./CliToolRegistry.js"
 import { OfflineService } from "../services/OfflineService.js"
 import {
 	BeadsClient,
@@ -23,6 +22,7 @@ import {
 	type SyncRequiredError,
 } from "./BeadsClient.js"
 import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
+import { getToolDefinition } from "./CliToolRegistry.js"
 import { FileLockManager } from "./FileLockManager.js"
 import { ImageAttachmentService } from "./ImageAttachmentService.js"
 import { getBeadSessionName } from "./paths.js"

@@ -315,6 +315,19 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 				}).pipe(Effect.catchAll(() => Effect.succeed(""))),
 
 			/**
+			 * Set a window option
+			 *
+			 * @param target - tmux target (session:window)
+			 * @param key - option key
+			 * @param value - option value
+			 */
+			setWindowOption: (target: string, key: string, value: string) =>
+				runTmux(["set-window-option", "-t", target, key, value]).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+				),
+
+			/**
 			 * Set a user-defined option on a tmux session
 			 *
 			 * User options start with @ and are stored on the session itself.

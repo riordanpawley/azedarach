@@ -1,56 +1,54 @@
 {
-  "cliTool": "claude",
-  "git": {
-    "baseBranch": "main",
-    "workflowMode": "worktree",
-    "showLineChanges": true,
-    "defaultMergeStrategy": "merge"
-  },
-  "session": {
-    "shell": "zsh",
-    "timeoutMs": 30000,
-    "logDir": "~/.azedarach/logs",
-    "initCommands": [
-      "source ~/.zshrc"
-    ]
-  },
-  "pr": {
-    "draftByDefault": true,
-    "autoLink": true,
-    "notifyAfterCreate": true,
-    "createWithoutMerge": false
-  },
-  "merge": {
-    "strategy": "merge",
-    "autoMerge": false,
-    "compareWithOrigin": true
-  },
-  "notifications": {
-    "completedTask": true,
-    "failedTask": true,
-    "errorThreshold": 3
-  },
-  "beads": {
-    "path": ".beads",
-    "syncInterval": 300
-  },
-  "network": {
-    "checkInterval": 60,
-    "offlineTimeout": 300,
-    "retryAttempts": 3
-  },
-  "devServer": {
-    "basePort": 3000,
-    "maxPort": 3100,
-    "environments": {
-      "NODE_ENV": "development",
-      "DEBUG": "true"
-    }
-  },
-  "worktree": {
-    "basePath": "../",
-    "nameFormat": "{project}-{beadID}",
-    "autoCleanup": true,
-    "keepDays": 7
-  }
+	"cliTool": "claude",
+	"git": {
+		"baseBranch": "main",
+		"workflowMode": "worktree",
+		"showLineChanges": true,
+		"defaultMergeStrategy": "merge"
+	},
+	"session": {
+		"shell": "zsh",
+		"timeoutMs": 30000,
+		"logDir": "~/.azedarach/logs",
+		"initCommands": ["source ~/.zshrc"]
+	},
+	"pr": {
+		"draftByDefault": true,
+		"autoLink": true,
+		"notifyAfterCreate": true,
+		"createWithoutMerge": false
+	},
+	"merge": {
+		"strategy": "merge",
+		"autoMerge": false,
+		"compareWithOrigin": true
+	},
+	"notifications": {
+		"completedTask": true,
+		"failedTask": true,
+		"errorThreshold": 3
+	},
+	"beads": {
+		"path": ".beads",
+		"syncInterval": 300
+	},
+	"network": {
+		"checkInterval": 60,
+		"offlineTimeout": 300,
+		"retryAttempts": 3
+	},
+	"devServer": {
+		"basePort": 3000,
+		"maxPort": 3100,
+		"environments": {
+			"NODE_ENV": "development",
+			"DEBUG": "true"
+		}
+	},
+	"worktree": {
+		"basePath": "../",
+		"nameFormat": "{project}-{beadID}",
+		"autoCleanup": true,
+		"keepDays": 7
+	}
 }

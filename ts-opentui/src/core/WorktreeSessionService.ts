@@ -289,7 +289,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 												}
 											}
 
-											yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+											yield* tmux.sendKeys(target, task)
 										}),
 									{ concurrency: "unbounded" },
 								)
@@ -407,8 +408,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											}
 										}
 
-										// Run the background task command followed by exec $SHELL to keep it open
-										yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+										yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+
+										// Run the background task command
+										yield* tmux.sendKeys(target, task)
 									}),
 								{ concurrency: "unbounded" },
 							)
@@ -556,8 +559,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 										yield* tmux.sendKeys(target, initCmd)
 									}
 
-									// Run the background task command followed by exec $SHELL to keep it open
-									yield* tmux.sendKeys(target, `${task}; exec ${shell}`)
+									yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+
+									// Run the background task command
+									yield* tmux.sendKeys(target, task)
 								}),
 							{ concurrency: "unbounded" },
 						)
