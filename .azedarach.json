@@ -2,7 +2,7 @@
 	"$schema": 2,
 	"cliTool": "opencode",
 	"worktree": {
-		"initCommands": ["direnv allow", "bun install", "bd sync"],
+		"initCommands": ["direnv allow", "cd ts-opentui && bun install", "bd sync"],
 		"continueOnFailure": true,
 		"parallel": false,
 		"copyPaths": [".direnv", "./ts-opentui/node_modules", ".env.local"]
@@ -17,8 +17,8 @@
 	"session": { "shell": "zsh", "tmuxPrefix": "C-a" },
 	"pr": { "enabled": false },
 	"merge": {
-		"validateCommands": ["bun run type-check"],
-		"fixCommand": "bun run fix",
+		"validateCommands": ["cd ts-opentui && bun run type-check"],
+		"fixCommand": "cd ts-opentui && bun run fix",
 		"maxFixAttempts": 2,
 		"startClaudeOnFailure": true
 	},
