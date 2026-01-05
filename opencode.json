@@ -3,6 +3,8 @@
 	"instructions": ["CLAUDE.md"],
 	"plugin": ["opencode-beads", "oh-my-opencode"],
 	"theme": "tokyonight",
+	"disabled_providers": ["anthropic"],
+	
 	"permission": {
 		"bash": {
 			"rg * | head *": "allow",
