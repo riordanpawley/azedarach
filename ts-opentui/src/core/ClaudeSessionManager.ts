@@ -147,6 +147,15 @@ export class SessionExistsError extends Data.TaggedError("SessionExistsError")<{
 }> {}
 
 /**
+ * Error when maximum session limit is reached
+ */
+export class SessionLimitError extends Data.TaggedError("SessionLimitError")<{
+	readonly message: string
+	readonly limit: number
+	readonly current: number
+}> {}
+
+/**
  * Error when session is in invalid state for operation
  */
 export class InvalidStateError extends Data.TaggedError("InvalidStateError")<{
@@ -192,7 +201,8 @@ export interface ClaudeSessionManagerService {
 		| TmuxError
 		| BeadsError
 		| NotFoundError
-		| ParseError,
+		| ParseError
+		| SessionLimitError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -256,7 +266,7 @@ export interface ClaudeSessionManagerService {
 		beadId: string,
 	) => Effect.Effect<
 		Session,
-		SessionNotFoundError | InvalidStateError | TmuxError | SessionError,
+		SessionNotFoundError | InvalidStateError | TmuxError | SessionError | SessionLimitError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -476,6 +486,25 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						if (existingSession._tag === "Some" && existingSession.value.state !== "idle") {
 							return existingSession.value
+						}
+
+						// Check session limit
+						const configForLimit = yield* appConfig.getSessionConfig()
+						// Cast to any to access the new field since TS might not pick up the schema change immediately in this context
+						// In a real build, the schema change should propagate types correctly
+						const maxSessions = (configForLimit as any).maxSessions ?? 10
+						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
+							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
+						)
+
+						if (activeSessions >= maxSessions) {
+							return yield* Effect.fail(
+								new SessionLimitError({
+									message: `Cannot start new session: Maximum session limit (${maxSessions}) reached.`,
+									limit: maxSessions,
+									current: activeSessions,
+								}),
+							)
 						}
 
 						// Verify bead exists (will throw NotFoundError if not)
@@ -897,6 +926,22 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const worktreeConfig = yield* appConfig.getWorktreeConfig()
 						const cliTool = yield* appConfig.getCliTool()
 						const modelConfig = yield* appConfig.getModelConfig()
+
+						// Check session limit
+						const maxSessions = (sessionConfig as any).maxSessions ?? 10
+						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
+							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
+						)
+
+						if (activeSessions >= maxSessions) {
+							return yield* Effect.fail(
+								new SessionLimitError({
+									message: `Cannot recover session: Maximum session limit (${maxSessions}) reached.`,
+									limit: maxSessions,
+									current: activeSessions,
+								}),
+							)
+						}
 
 						// Get tool definition and model
 						const toolDef = getToolDefinition(cliTool)
