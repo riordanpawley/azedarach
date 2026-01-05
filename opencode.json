@@ -1,8 +1,11 @@
 {
 	"$schema": "https://opencode.ai/config.json",
-	"instructions": ["CLAUDE.md"],
-	"plugin": ["opencode-beads"],
-	"theme": "tokyonight",
+	"instructions": [
+		"CLAUDE.md",
+		"~/.config/opencode/plugin/shell-strategy/shell_strategy.md"
+	],
+	"plugin": ["opencode-beads", "@nick-vi/opencode-type-inject", "opencode-pty"],
+	"theme": "catppuccin-macchiato",
 	"disabled_providers": ["anthropic"],
 	"permission": {
 		"bash": {
