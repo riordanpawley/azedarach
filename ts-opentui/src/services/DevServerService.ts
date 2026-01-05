@@ -12,7 +12,6 @@ import {
 } from "effect"
 import { AppConfig } from "../config/index.js"
 import {
-	DEV_WINDOW_PREFIX,
 	getBeadSessionName,
 	getDevWindowName,
 	getWorktreePath,

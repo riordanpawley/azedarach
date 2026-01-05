@@ -371,7 +371,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		/**
 		 * Sync derived SubscriptionRefs from a project's stored state
 		 */
-		const syncDerivedFromProject = (projectPath: string) =>
+		const _syncDerivedFromProject = (projectPath: string) =>
 			Effect.gen(function* () {
 				const state = yield* getOrCreateProjectState(projectPath)
 				yield* SubscriptionRef.set(tasks, state.tasks)

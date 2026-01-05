@@ -1,1 +1,26 @@
-{"$schema":2,"cliTool":"opencode","worktree":{"initCommands":["direnv allow","bun install","bd sync"],"continueOnFailure":true,"parallel":false,"copyPaths":[".direnv","node_modules",".env.local"]},"git":{"pushBranchOnCreate":true,"remote":"origin","branchPrefix":"az-","baseBranch":"main","workflowMode":"local"},"session":{"shell":"zsh","tmuxPrefix":"C-a"},"pr":{"enabled":false},"merge":{"validateCommands":["bun run type-check"],"fixCommand":"bun run fix","maxFixAttempts":2,"startClaudeOnFailure":true},"keyboard":{"jumpLabelChars":"cieahtsn"}}
+{
+	"$schema": 2,
+	"cliTool": "opencode",
+	"worktree": {
+		"initCommands": ["direnv allow", "bun install", "bd sync"],
+		"continueOnFailure": true,
+		"parallel": false,
+		"copyPaths": [".direnv", "./ts-opentui/node_modules", ".env.local"]
+	},
+	"git": {
+		"pushBranchOnCreate": true,
+		"remote": "origin",
+		"branchPrefix": "az-",
+		"baseBranch": "main",
+		"workflowMode": "local"
+	},
+	"session": { "shell": "zsh", "tmuxPrefix": "C-a" },
+	"pr": { "enabled": false },
+	"merge": {
+		"validateCommands": ["bun run type-check"],
+		"fixCommand": "bun run fix",
+		"maxFixAttempts": 2,
+		"startClaudeOnFailure": true
+	},
+	"keyboard": { "jumpLabelChars": "cieahtsn" }
+}

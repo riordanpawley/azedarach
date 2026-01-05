@@ -29,8 +29,6 @@ const statusColor = (status: DevServerView["status"]) => {
 			return theme.yellow
 		case "error":
 			return theme.red
-		case "stopped":
-		case "idle":
 		default:
 			return theme.overlay0
 	}
