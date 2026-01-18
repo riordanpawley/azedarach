@@ -358,6 +358,77 @@ const BeadsConfigSchema = Schema.Struct({
 })
 
 /**
+ * Gastown agent runtime types
+ *
+ * Supported AI coding runtimes in Gastown ecosystem.
+ */
+export const GastownAgentRuntimeSchema = Schema.Literal(
+	"claude",
+	"codex",
+	"gemini",
+	"cursor",
+	"auggie",
+	"amp",
+)
+export type GastownAgentRuntime = Schema.Schema.Type<typeof GastownAgentRuntimeSchema>
+
+/**
+ * Gastown integration configuration
+ *
+ * Controls Gastown-specific features and orchestration.
+ * When enabled, Azedarach operates as a TUI frontend for Gastown's
+ * multi-agent orchestration system.
+ */
+const GastownConfigSchema = Schema.Struct({
+	/**
+	 * Enable Gastown integration (default: auto-detect)
+	 *
+	 * When true, uses `gt` CLI for orchestration instead of direct `bd` CLI.
+	 * Auto-detects if running in a Gastown town directory.
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Path to Gastown town directory
+	 *
+	 * If not set, auto-detects from environment (GASTOWN_TOWN_DIR) or
+	 * searches for .gastown directory in parent directories.
+	 */
+	townDir: Schema.optional(Schema.String),
+
+	/**
+	 * Default agent runtime for new sessions (default: "claude")
+	 *
+	 * Determines which AI coding tool to use when spawning sessions.
+	 * Can be overridden per-session in the UI.
+	 */
+	defaultAgent: Schema.optional(GastownAgentRuntimeSchema),
+
+	/**
+	 * Mayor session name
+	 *
+	 * If set, Azedarach will show special UI for the Mayor coordinator session.
+	 * The Mayor is used for high-level orchestration of multiple agents.
+	 */
+	mayorSession: Schema.optional(Schema.String),
+
+	/**
+	 * Enable convoy notifications (default: true)
+	 *
+	 * When true, shows notifications when convoy progress changes
+	 * (e.g., all beads in convoy completed).
+	 */
+	convoyNotifications: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Show rig names in task cards (default: true)
+	 *
+	 * In multi-rig towns, displays which rig each task belongs to.
+	 */
+	showRigNames: Schema.optional(Schema.Boolean),
+})
+
+/**
  * Keyboard configuration
  *
  * Controls keyboard-related settings like jump label characters.
@@ -654,6 +725,9 @@ const RawConfigSchema = Schema.Struct({
 	/** Beads issue tracker configuration */
 	beads: Schema.optional(BeadsConfigSchema),
 
+	/** Gastown multi-agent orchestration configuration */
+	gastown: Schema.optional(GastownConfigSchema),
+
 	/** Network connectivity configuration */
 	network: Schema.optional(NetworkConfigSchema),
 
@@ -690,6 +764,7 @@ const CurrentConfigSchema = Schema.Struct({
 	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 	beads: Schema.optional(BeadsConfigSchema),
+	gastown: Schema.optional(GastownConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
