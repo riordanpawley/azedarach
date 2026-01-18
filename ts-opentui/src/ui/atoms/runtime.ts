@@ -29,6 +29,8 @@ import { DevServerService } from "../../services/DevServerService.js"
 import { DiagnosticsService } from "../../services/DiagnosticsService.js"
 import { DiffService } from "../../services/DiffService.js"
 import { EditorService } from "../../services/EditorService.js"
+import { EnvironmentDetectionService } from "../../services/EnvironmentDetectionService.js"
+import { GastownClient } from "../../services/GastownClient.js"
 import { GitSyncService } from "../../services/GitSyncService.js"
 import { KeyboardService } from "../../services/KeyboardService.js"
 import { MutationQueue } from "../../services/MutationQueue.js"
@@ -81,6 +83,8 @@ export const appLayer = Layer.mergeAll(
 	DiffService.Default,
 	PlanningService.Default,
 	GitSyncService.Default,
+	EnvironmentDetectionService.Default,
+	GastownClient.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

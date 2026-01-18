@@ -50,6 +50,10 @@ export {
 export type { DiagnosticsState } from "./diagnostics.js"
 // Diagnostics atoms
 export { diagnosticsAtom } from "./diagnostics.js"
+// Diff comparison atoms
+export { closeDiffAtom, diffBeadAtom, diffStateAtom, openDiffAtom } from "./diff.js"
+// Environment detection atoms
+export { environmentInfoAtom, isGastownModeAtom, uiLabelsAtom } from "./environment.js"
 // Git sync atoms (origin mode fetch/pull)
 export { commitsBehindAtom, fetchAndCheckAtom, isFetchingAtom, pullAtom } from "./gitSync.js"
 export type { ImageAttachment } from "./image.js"
