@@ -46,12 +46,13 @@ const detectEnvironmentInfo = Effect.gen(function* () {
 	const pathService = yield* Path.Path
 
 	// 1. Check explicit config override
-	if (config.gastown.enabled !== undefined) {
-		if (config.gastown.enabled === false) {
-			return {
-				mode: "standalone" as const,
-			}
+	if (config.gastown.enabled === false) {
+		return {
+			mode: "standalone" as const,
 		}
+	}
+
+	if (config.gastown.enabled === true) {
 		// If explicitly enabled, use Gastown mode with configured town dir
 		return {
 			mode: "gastown" as const,

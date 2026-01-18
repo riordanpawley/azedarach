@@ -36,19 +36,33 @@ export interface AgentSessionInfo {
 /**
  * Parse convoy list output
  *
- * The `gt convoy list` command outputs:
- * ID       Name            Beads    Progress
- * hq-cv-1  Feature Auth    3        2/3
+ * The `gt convoy list` command outputs a table format:
+ * Header: ID       Name            Beads    Progress
+ * Data:   hq-cv-1  Feature Auth    3        2/3
+ *
+ * Parses the data rows and returns structured convoy information.
+ * Returns empty array if output is malformed or empty.
  */
 const parseConvoyList = (output: string): ConvoyInfo[] => {
 	const lines = output.trim().split("\n")
-	// Skip header line
+	if (lines.length < 2) {
+		// No data rows (only header or empty)
+		return []
+	}
+
+	// Skip header line, process data rows
 	const dataLines = lines.slice(1)
+
+	// Expected format: 4 columns minimum
+	const EXPECTED_COLUMNS = 4
 
 	return dataLines
 		.map((line) => {
 			const parts = line.trim().split(/\s+/)
-			if (parts.length < 4) return null
+			if (parts.length < EXPECTED_COLUMNS) {
+				// Malformed line, skip it
+				return null
+			}
 
 			const [id, name, total, progress] = parts
 			const [completed, totalStr] = progress.split("/").map(Number)
@@ -81,7 +95,12 @@ export class GastownClient extends Effect.Service<GastownClient>()("GastownClien
 		const runGtCommand = (args: string[]): Effect.Effect<string, Error> =>
 			Command.make("gt", ...args).pipe(
 				Command.string,
-				Effect.mapError((e) => new Error(`Gastown command failed: ${e}`)),
+				Effect.mapError(
+					(e) =>
+						new Error(
+							`Gastown command 'gt ${args.join(" ")}' failed: ${e.message || String(e)}`,
+						),
+				),
 			)
 
 		return {
