@@ -88,7 +88,15 @@ const detectEnvironmentInfo = Effect.gen(function* () {
 			return yield* checkPath(parent)
 		})
 
-	const detectedTownDir = yield* checkPath(cwd).pipe(Effect.orElseSucceed(() => undefined))
+	const detectedTownDir = yield* checkPath(cwd).pipe(
+		Effect.catchAll((error) =>
+			Effect.gen(function* () {
+				// Log the error for debugging but continue gracefully
+				yield* Effect.logDebug(`Failed to check for .gastown directory: ${error}`)
+				return undefined
+			}),
+		),
+	)
 
 	if (detectedTownDir) {
 		return {

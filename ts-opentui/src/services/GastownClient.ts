@@ -40,6 +40,12 @@ export interface AgentSessionInfo {
  * Header: ID       Name            Beads    Progress
  * Data:   hq-cv-1  Feature Auth    3        2/3
  *
+ * Columns:
+ * - ID: Convoy identifier
+ * - Name: Convoy display name (may contain spaces)
+ * - Beads: Total number of beads in convoy
+ * - Progress: Completed/Total format (e.g., "2/3")
+ *
  * Parses the data rows and returns structured convoy information.
  * Returns empty array if output is malformed or empty.
  */
@@ -53,26 +59,47 @@ const parseConvoyList = (output: string): ConvoyInfo[] => {
 	// Skip header line, process data rows
 	const dataLines = lines.slice(1)
 
-	// Expected format: 4 columns minimum
-	const EXPECTED_COLUMNS = 4
+	// Expected format: at least ID, Name, and Progress columns
+	const MIN_COLUMNS = 3
 
 	return dataLines
 		.map((line) => {
+			// Split on whitespace - this may break names with spaces
+			// TODO: Consider using fixed-width column parsing for robustness
 			const parts = line.trim().split(/\s+/)
-			if (parts.length < EXPECTED_COLUMNS) {
+			if (parts.length < MIN_COLUMNS) {
 				// Malformed line, skip it
 				return null
 			}
 
-			const [id, name, total, progress] = parts
-			const [completed, totalStr] = progress.split("/").map(Number)
+			const id = parts[0]
+			// Last part is progress (e.g., "2/3")
+			const progressStr = parts[parts.length - 1]
+			// Second-to-last is bead count (may be redundant with progress total)
+			const beadCount = parts[parts.length - 2]
+			// Everything in between is the name (may have spaces)
+			const name = parts.slice(1, parts.length - 2).join(" ")
 
+			// Parse progress string (e.g., "2/3" -> completed: 2, total: 3)
+			const progressMatch = progressStr.match(/^(\d+)\/(\d+)$/)
+			if (!progressMatch) {
+				// Invalid progress format, use bead count as total
+				return {
+					id,
+					name,
+					beadIds: [],
+					completed: 0,
+					total: Number(beadCount) || 0,
+				}
+			}
+
+			const [, completedStr, totalStr] = progressMatch
 			return {
 				id,
 				name,
 				beadIds: [], // Would need separate command to get full list
-				completed: completed || 0,
-				total: Number(totalStr) || Number(total) || 0,
+				completed: Number(completedStr) || 0,
+				total: Number(totalStr) || 0,
 			}
 		})
 		.filter((item): item is ConvoyInfo => item !== null)

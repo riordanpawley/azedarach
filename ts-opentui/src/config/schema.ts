@@ -360,7 +360,16 @@ const BeadsConfigSchema = Schema.Struct({
 /**
  * Gastown agent runtime types
  *
- * Supported AI coding runtimes in Gastown ecosystem.
+ * Supported AI coding runtimes in Gastown ecosystem:
+ * - `claude`: Claude Code by Anthropic (official CLI)
+ * - `codex`: OpenAI Codex CLI
+ * - `gemini`: Google Gemini coding assistant
+ * - `cursor`: Cursor AI editor integration
+ * - `auggie`: Auggie AI coding assistant
+ * - `amp`: Amp AI development tool
+ *
+ * Each runtime provides different capabilities and model options.
+ * See Gastown documentation for runtime-specific configuration.
  */
 export const GastownAgentRuntimeSchema = Schema.Literal(
 	"claude",
