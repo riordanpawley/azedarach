@@ -1,6 +1,6 @@
 # Azedarach
 
-> A TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> A TUI Kanban board for orchestrating parallel AI coding sessions with Beads task tracking
 
 Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Melia azedarach), whose seeds have been used for prayer beads for millennia.
 
@@ -8,29 +8,59 @@ Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Meli
 
 Azedarach is a terminal-based Kanban board that:
 - Displays tasks from any Beads-enabled project
-- Spawns Claude Code sessions in isolated git worktrees
+- Spawns AI coding sessions (Claude, Codex, etc.) in isolated git worktrees
 - Enables full parallelization of development work
 - Monitors session state (busy/waiting/done/error)
 - Auto-creates GitHub PRs when tasks complete
 - Allows manual intervention via terminal attachment
+- **Integrates with [Gastown](https://github.com/steveyegge/gastown)** for multi-agent orchestration
 
-The key insight: **Claude Code already handles all the hard parts** (permissions, tools, context, hooks). Azedarach is purely an orchestration layer that spawns Claude in the right place and monitors progress.
+The key insight: **AI coding tools already handle all the hard parts** (permissions, tools, context, hooks). Azedarach is purely an orchestration layer that spawns agents in the right place and monitors progress.
+
+> **🚀 Gastown Integration:** Azedarach can work standalone or as a visual TUI for Gastown's multi-agent orchestration. See [docs/gastown-integration.md](./docs/gastown-integration.md) for details.
 
 ## Goals
 
 1. **Parallel execution**: Work on multiple tasks simultaneously across isolated worktrees
 2. **Minimal friction**: Start a task with a single keypress
-3. **Full visibility**: See status of all running Claude sessions at a glance
+3. **Full visibility**: See status of all running AI sessions at a glance
 4. **Easy intervention**: Attach to any session for manual fixes
 5. **Automated workflow**: Sync beads, create PRs, notify on completion
-6. **Zero Claude config**: 100% inherit project's Claude configuration
+6. **Zero config**: 100% inherit project's AI tool configuration
+7. **Gastown compatibility**: Work seamlessly as a TUI frontend to Gastown
 
 ## Non-Goals
 
-- Managing Claude permissions (project's `.claude/settings.json` handles this)
-- Implementing custom Claude tools (project's MCP/skills handle this)
-- Replacing beads CLI (we wrap it, not replace it)
+- Managing AI tool permissions (project configs handle this)
+- Implementing custom AI tools (MCP/skills handle this)
+- Replacing beads or gt CLI (we complement them with visual interface)
 - IDE integration (this is terminal-native)
+
+---
+
+## Gastown Integration
+
+Azedarach integrates with [Gastown](https://github.com/steveyegge/gastown), a multi-agent orchestration system for AI coding tools. When running in a Gastown town, Azedarach automatically adapts its UI and commands:
+
+**Standalone Mode:**
+- Use `bd` CLI for task management
+- Spawn sessions directly with `claude`, `codex`, etc.
+- Traditional worktree model
+
+**Gastown Mode:**
+- Use `gt` CLI for orchestration (rigs, convoys, polecats)
+- Spawn sessions via `gt sling` with runtime selection
+- Integrates with Mayor for high-level coordination
+- Visual convoy management and progress tracking
+
+**Key Features in Gastown Mode:**
+- 🎩 **Mayor Dashboard**: Coordinate multiple agents from one view
+- 🚚 **Convoy Management**: Bundle related beads for parallel work
+- 🏗️ **Multi-Rig Support**: Navigate between projects in your town
+- 🔄 **Runtime Selection**: Choose Claude, Codex, Gemini, or Cursor per task
+- 📊 **Visual Progress**: See convoy status and dependencies at a glance
+
+For detailed integration information, see [docs/gastown-integration.md](./docs/gastown-integration.md).
 
 ---
 
@@ -213,22 +243,28 @@ Azedarach:
 
 ## System Requirements
 
-**Required:**
-- **For ts-opentui:**
-  - Bun >= 1.0 (required for OpenTUI's Zig FFI)
-  - Git >= 2.20 (worktree support)
-  - tmux >= 3.0
-  - gh CLI (authenticated)
-  - Beads (`bd` CLI installed and configured)
-  - Claude Code (`claude` CLI installed and authenticated)
+**Core Requirements (All Modes):**
+- Git >= 2.20 (worktree support)
+- tmux >= 3.0
+- Beads (`bd` CLI installed and configured)
 
-- **For go-bubbletea:**
-  - Go >= 1.21
-  - Git >= 2.20 (worktree support)
-  - tmux >= 3.0
-  - gh CLI (authenticated)
-  - Beads (`bd` CLI installed and configured)
-  - Claude Code (`claude` CLI installed and authenticated)
+**For ts-opentui Implementation:**
+- Bun >= 1.0 (required for OpenTUI's Zig FFI)
+- gh CLI (authenticated, for PR creation)
+
+**For go-bubbletea Implementation:**
+- Go >= 1.21
+- gh CLI (authenticated, for PR creation)
+
+**AI Runtimes (at least one):**
+- Claude Code (`claude` CLI) - Default
+- Codex (`codex` CLI)
+- Gemini (via appropriate CLI)
+- Cursor (via appropriate CLI)
+
+**Optional (Gastown Integration):**
+- Gastown (`gt` CLI installed) - Enables convoy management, multi-rig support, and advanced orchestration
+- See [Gastown installation guide](https://github.com/steveyegge/gastown#installation)
 
 ---
 
@@ -248,9 +284,13 @@ See [LICENSE](./LICENSE) for details.
 
 ## References
 
+**Core Dependencies:**
 - [Beads](https://github.com/steveyegge/beads) - Task tracking backend
 - [Beads Worktree Docs](https://github.com/steveyegge/beads/blob/main/docs/ADVANCED.md#git-worktrees)
-- [CCManager](https://github.com/kbwo/ccmanager) - Session management inspiration
-- [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel Claude orchestration
+- [Gastown](https://github.com/steveyegge/gastown) - Multi-agent orchestration system
 - [OpenTUI](https://github.com/sst/opentui) - React for CLI (ts-opentui)
 - [Bubbletea](https://github.com/charmbracelet/bubbletea) - TUI framework (go-bubbletea)
+
+**Inspiration:**
+- [CCManager](https://github.com/kbwo/ccmanager) - Session management
+- [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel AI orchestration

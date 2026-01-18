@@ -11,6 +11,7 @@ import {
 	type AzedarachConfig,
 	type CliTool,
 	CURRENT_CONFIG_VERSION,
+	type GastownAgentRuntime,
 	type SessionRecoveryMode,
 	type WorkflowMode,
 } from "./schema.js"
@@ -160,6 +161,20 @@ export const DEFAULT_CONFIG = {
 	beads: {
 		syncEnabled: true,
 	},
+	gastown: {
+		/**
+		 * Auto-detect Gastown environment by default
+		 * - Checks for .gastown directory in current or parent directories
+		 * - Checks GASTOWN_TOWN_DIR environment variable
+		 * - If detected, enables Gastown integration automatically
+		 */
+		enabled: undefined,
+		townDir: undefined,
+		defaultAgent: "claude",
+		mayorSession: undefined,
+		convoyNotifications: true,
+		showRigNames: true,
+	},
 	network: {
 		autoDetect: true,
 		checkIntervalSeconds: 30,
@@ -282,6 +297,14 @@ export interface ResolvedConfig {
 	}
 	beads: {
 		syncEnabled: boolean
+	}
+	gastown: {
+		enabled: boolean | undefined
+		townDir: string | undefined
+		defaultAgent: GastownAgentRuntime
+		mayorSession: string | undefined
+		convoyNotifications: boolean
+		showRigNames: boolean
 	}
 	network: {
 		autoDetect: boolean
