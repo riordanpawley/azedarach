@@ -14,18 +14,12 @@
       flake = false;
     };
 
-    beads = {
-      url = "github:steveyegge/beads";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
     {
       nixpkgs,
       flake-utils,
-      elf,
-      beads,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -36,17 +30,6 @@
           mkdir -p $out/bin
           ${pkgs.nodejs_22}/bin/corepack enable --install-directory $out/bin
         '';
-
-        # Python environment for ELF dashboard
-        elfPython = pkgs.python312.withPackages (
-          ps: with ps; [
-            fastapi
-            uvicorn
-            aiofiles
-            websockets
-          ]
-        );
-
       in
       {
         formatter = pkgs.alejandra;
@@ -54,7 +37,6 @@
         devShells = {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
-              beads.packages.${system}.default
               gh
               bun
               nodejs_22
@@ -64,25 +46,7 @@
               viu # Terminal image viewer with Kitty graphics protocol support
               go
               git-lfs # Large file storage for bead images
-
-              # ELF dependencies
-              elfPython
-              sqlite
             ];
-
-            # Make ELF source available
-            ELF_PATH = "${elf}";
-
-            shellHook = ''
-              # Auto-install ELF if not already installed
-              if [ ! -d "$HOME/.claude/emergent-learning" ]; then
-                echo "🧠 Installing Emergent Learning Framework (ELF)..."
-                # Non-interactive install: skip optional swarm (n) and dashboard (n)
-                echo -e "n\nn" | bash "$ELF_PATH/install.sh"
-                echo "✓ ELF installed! Start Claude sessions with 'check in'"
-                echo "  For full install with dashboard/swarm: bash \$ELF_PATH/install.sh"
-              fi
-            '';
           };
         };
       }
