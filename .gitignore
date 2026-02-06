@@ -56,3 +56,6 @@ coverage/
 .beads/bd.sock.startlock
 .claude/skills/local
 .claude/settings.local.json
+.codanna/index
+.fastembed_cache
+.beads/export-state/b02f4e6754393de9.json
