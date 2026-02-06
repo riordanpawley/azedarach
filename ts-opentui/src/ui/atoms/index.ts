@@ -183,6 +183,8 @@ export {
 	deleteBeadAtom,
 	editBeadAtom,
 	epicChildrenAtom,
+	forkCreateChildAtom,
+	forkCreateEpicAtom,
 	moveTaskAtom,
 	moveTasksAtom,
 } from "./task.js"

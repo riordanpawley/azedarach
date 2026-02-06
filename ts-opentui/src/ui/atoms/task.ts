@@ -100,6 +100,96 @@ export const createTaskAtom = appRuntime.fn(
 )
 
 /**
+ * Create a forked child task under a parent epic
+ */
+export const forkCreateChildAtom = appRuntime.fn(
+	({
+		parentEpicId,
+		sourceTaskId,
+		params,
+	}: {
+		parentEpicId: string
+		sourceTaskId: string
+		params: { title: string; type: string; priority: number }
+	}) =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			const board = yield* BoardService
+			const navigation = yield* NavigationService
+			const toast = yield* ToastService
+			const overlay = yield* OverlayService
+
+			yield* overlay.pop()
+
+			const issue = yield* client.create(params)
+			yield* client.update(issue.id, { parent: parentEpicId })
+
+			yield* board.requestRefresh()
+			yield* navigation.jumpToTask(issue.id)
+			yield* toast.show("success", `Forked ${issue.id} from ${sourceTaskId}`)
+
+			return issue
+		}).pipe(
+			Effect.catchAll((error) =>
+				Effect.gen(function* () {
+					yield* Effect.logError(error)
+					const toast = yield* ToastService
+					const board = yield* BoardService
+					const formatted = formatForToast(error)
+					yield* toast.show("error", `Fork failed: ${formatted}`)
+					yield* board.requestRefresh()
+					return "error" as const
+				}),
+			),
+		),
+)
+
+/**
+ * Create a new parent epic, reparent the source task, then prompt for child creation
+ */
+export const forkCreateEpicAtom = appRuntime.fn(
+	({
+		sourceTaskId,
+		params,
+	}: {
+		sourceTaskId: string
+		params: { title: string; type: string; priority: number }
+	}) =>
+		Effect.gen(function* () {
+			const client = yield* BeadsClient
+			const board = yield* BoardService
+			const toast = yield* ToastService
+			const overlay = yield* OverlayService
+
+			yield* overlay.pop()
+
+			const epic = yield* client.create({ ...params, type: "epic" })
+			yield* client.update(sourceTaskId, { parent: epic.id })
+			yield* board.requestRefresh()
+			yield* toast.show("success", `Created epic ${epic.id} and reparented ${sourceTaskId}`)
+
+			yield* overlay.push({
+				_tag: "create",
+				title: "Create Forked Task",
+				initial: { type: "task", priority: params.priority },
+				context: { _tag: "forkChild", parentEpicId: epic.id, sourceTaskId },
+			})
+		}).pipe(
+			Effect.catchAll((error) =>
+				Effect.gen(function* () {
+					yield* Effect.logError(error)
+					const toast = yield* ToastService
+					const board = yield* BoardService
+					const formatted = formatForToast(error)
+					yield* toast.show("error", `Fork failed: ${formatted}`)
+					yield* board.requestRefresh()
+					return "error" as const
+				}),
+			),
+		),
+)
+
+/**
  * Edit a bead in $EDITOR
  *
  * Opens the bead in $EDITOR as structured markdown, parses changes on save,

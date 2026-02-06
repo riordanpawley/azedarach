@@ -104,6 +104,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="h / l" description="Move task(s) left / right" />
 				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (Claude)" />
 				<KeyLine keys="i" description="Attach image" />
+				<KeyLine keys="F" description="Fork bead" />
 				<KeyLine keys="f" description="Show diff vs main" />
 				<KeyLine keys="P" description="Create PR" />
 				<KeyLine keys="m / M" description="Merge / Abort merge" />

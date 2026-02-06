@@ -10,6 +10,11 @@ import { theme } from "./theme.js"
 export interface CreateTaskPromptProps {
 	onSubmit: (params: { title: string; type: string; priority: number }) => void
 	onCancel: () => void
+	titleText?: string
+	initialTitle?: string
+	initialType?: string
+	initialPriority?: number
+	lockType?: boolean
 }
 
 const TASK_TYPES = ["task", "bug", "feature", "epic", "chore"] as const
@@ -23,9 +28,15 @@ const ATTR_BOLD = 1
  * Uses tab/shift-tab to cycle through fields, Enter to submit, Esc to cancel.
  */
 export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
-	const [title, setTitle] = useState("")
-	const [typeIndex, setTypeIndex] = useState(0) // default: task
-	const [priorityIndex, setPriorityIndex] = useState(1) // default: P2
+	const initialTypeIndex = props.initialType
+		? Math.max(0, TASK_TYPES.indexOf(props.initialType))
+		: 0
+	const initialPriorityIndex =
+		props.initialPriority !== undefined ? Math.max(0, PRIORITIES.indexOf(props.initialPriority)) : 1
+
+	const [title, setTitle] = useState(props.initialTitle ?? "")
+	const [typeIndex, setTypeIndex] = useState(initialTypeIndex)
+	const [priorityIndex, setPriorityIndex] = useState(initialPriorityIndex)
 	const [focusedField, setFocusedField] = useState<"title" | "type" | "priority">("title")
 
 	useKeyboard((event) => {
@@ -76,6 +87,9 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 				setTitle((prev) => prev + event.sequence)
 			}
 		} else if (field === "type") {
+			if (props.lockType) {
+				return
+			}
 			// Left/right arrows or h/l to cycle type
 			if (event.name === "left" || event.name === "h") {
 				setTypeIndex((prev) => (prev - 1 + TASK_TYPES.length) % TASK_TYPES.length)
@@ -101,6 +115,7 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 
 	const selectedType = TASK_TYPES[typeIndex]
 	const selectedPriority = PRIORITIES[priorityIndex]
+	const titleText = props.titleText ?? "Create New Task"
 
 	const modalWidth = 60
 
@@ -130,7 +145,8 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 				{/* Title */}
 				<box>
 					<text fg={theme.mauve} attributes={ATTR_BOLD}>
-						Create New Task{"\n"}
+						{titleText}
+						{"\n"}
 					</text>
 				</box>
 
@@ -144,11 +160,15 @@ export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
 				{/* Type selector */}
 				<box flexDirection="row" marginTop={1}>
 					<text fg={focusedField === "type" ? theme.yellow : theme.subtext0}>Type: </text>
-					{focusedField === "type" && <text fg={theme.subtext0}>{"< "}</text>}
+					{focusedField === "type" && !props.lockType && <text fg={theme.subtext0}>{"< "}</text>}
 					<text fg={theme.text} attributes={focusedField === "type" ? ATTR_BOLD : undefined}>
 						{selectedType}
 					</text>
-					{focusedField === "type" && <text fg={theme.subtext0}>{" >"}</text>}
+					{props.lockType ? (
+						<text fg={theme.overlay0}> (locked)</text>
+					) : (
+						focusedField === "type" && <text fg={theme.subtext0}>{" >"}</text>
+					)}
 				</box>
 
 				{/* Priority selector */}

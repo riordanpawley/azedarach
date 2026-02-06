@@ -21,6 +21,8 @@ import {
 	drillDownPhasesAtom,
 	focusedBeadPrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
+	forkCreateChildAtom,
+	forkCreateEpicAtom,
 	handleKeyAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
@@ -32,7 +34,7 @@ import {
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { BulkCleanupOverlay } from "./BulkCleanupOverlay.js"
-import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
+import type { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
@@ -40,6 +42,7 @@ import { DevServerMenu } from "./DevServerMenu.js"
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay.js"
 import { DiffViewer } from "./DiffViewer/index.js"
 import { FilterMenu } from "./FilterMenu.js"
+import { ForkOverlay } from "./ForkOverlay.js"
 import { GitPullOverlay } from "./GitPullOverlay.js"
 import { HelpOverlay } from "./HelpOverlay.js"
 import { useEditorMode, useNavigation, useOverlays, useToasts } from "./hooks/index.js"
@@ -80,6 +83,7 @@ export const App = () => {
 		showingGitPull,
 		showingMergeChoice,
 		showingBulkCleanup,
+		showingFork,
 		showingDiagnostics,
 		showingProjectSelector,
 		showingDiffViewer,
@@ -127,6 +131,8 @@ export const App = () => {
 	// Actions for prompts (these bypass keyboard handling)
 	// Full orchestration (dismiss, create, navigate, toast) happens in the atoms
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
+	const forkCreateChild = useAtomSet(forkCreateChildAtom, { mode: "promise" })
+	const forkCreateEpic = useAtomSet(forkCreateEpicAtom, { mode: "promise" })
 	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
 
 	const viewMode = useAtomValue(
@@ -370,12 +376,43 @@ export const App = () => {
 			{/* Create task prompt */}
 			{showingCreate && (
 				<CreateTaskPrompt
+					titleText={currentOverlay?._tag === "create" ? currentOverlay.title : undefined}
+					initialTitle={
+						currentOverlay?._tag === "create" ? currentOverlay.initial?.title : undefined
+					}
+					initialType={currentOverlay?._tag === "create" ? currentOverlay.initial?.type : undefined}
+					initialPriority={
+						currentOverlay?._tag === "create" ? currentOverlay.initial?.priority : undefined
+					}
+					lockType={currentOverlay?._tag === "create" ? currentOverlay.lockType : undefined}
 					onSubmit={(params) => {
-						createTask(params)
+						if (currentOverlay?._tag !== "create" || !currentOverlay.context) {
+							createTask(params)
+							return
+						}
+
+						switch (currentOverlay.context._tag) {
+							case "forkChild":
+								forkCreateChild({
+									parentEpicId: currentOverlay.context.parentEpicId,
+									sourceTaskId: currentOverlay.context.sourceTaskId,
+									params,
+								})
+								return
+							case "forkEpic":
+								forkCreateEpic({
+									sourceTaskId: currentOverlay.context.sourceTaskId,
+									params,
+								})
+								return
+						}
 					}}
 					onCancel={() => dismissOverlay()}
 				/>
 			)}
+
+			{/* Fork overlay */}
+			{showingFork && <ForkOverlay />}
 
 			{/* Claude create prompt */}
 			{showingClaudeCreate && (

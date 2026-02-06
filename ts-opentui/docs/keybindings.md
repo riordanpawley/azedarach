@@ -997,6 +997,12 @@ After starting Helix, use `Space` `a` to attach to the tmux session.
 | `Space` `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
 | `Space` `E` | Edit bead (Claude) | AI-assisted editing |
 
+### Fork Actions
+
+| Sequence | Action | Description |
+|----------|--------|-------------|
+| `Space` `F` | Fork bead | Creates epic/child structure (disabled for epics or epic children) |
+
 ### Attachment Actions
 
 | Sequence | Action | Description |

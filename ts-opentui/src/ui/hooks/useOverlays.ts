@@ -17,11 +17,33 @@ type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 export type OverlayType =
 	| { readonly _tag: "help" }
 	| { readonly _tag: "detail"; readonly taskId: string }
-	| { readonly _tag: "create" }
+	| {
+			readonly _tag: "create"
+			readonly title?: string
+			readonly initial?: {
+				readonly title?: string
+				readonly type?: string
+				readonly priority?: number
+			}
+			readonly lockType?: boolean
+			readonly context?:
+				| {
+						readonly _tag: "forkChild"
+						readonly parentEpicId: string
+						readonly sourceTaskId: string
+				  }
+				| { readonly _tag: "forkEpic"; readonly sourceTaskId: string }
+	  }
 	| { readonly _tag: "claudeCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "imagePreview"; readonly taskId: string }
+	| {
+			readonly _tag: "fork"
+			readonly sourceTaskId: string
+			readonly sourceTaskTitle: string
+			readonly blockedReason?: string
+	  }
 	| {
 			readonly _tag: "confirm"
 			readonly message: string
@@ -150,6 +172,7 @@ export function useOverlays() {
 			showingGitPull: currentOverlay?._tag === "gitPull",
 			showingMergeChoice: currentOverlay?._tag === "mergeChoice",
 			showingBulkCleanup: currentOverlay?._tag === "bulkCleanup",
+			showingFork: currentOverlay?._tag === "fork",
 			showingImageAttach: currentOverlay?._tag === "imageAttach",
 			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
