@@ -115,8 +115,8 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						.filter((child) => child.status !== "tombstone")
 						.map((child) => ({
 							id: child.id,
-							title: child.title,
-							status: child.status as "open" | "in_progress" | "blocked" | "closed",
+							title: child.title ?? "(untitled)",
+							status: (child.status ?? "open") as "open" | "in_progress" | "blocked" | "closed",
 							hasSession: activeSessionIds.has(child.id),
 						}))
 

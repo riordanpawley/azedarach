@@ -36,23 +36,26 @@ const ATTR_BOLD = 1
  */
 type DependencyStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 
+const resolveDependencyStatus = (status?: DependencyStatus): DependencyStatus => status ?? "open"
+
 /**
  * Get status indicator for a child task
  * ○ = open
  * ● = in_progress or blocked
  * ✓ = closed
  */
-const getChildStatusIndicator = (child: { status: DependencyStatus }): string => {
-	if (child.status === "closed") return "✓"
-	if (child.status === "open") return "○"
+const getChildStatusIndicator = (child: { status?: DependencyStatus }): string => {
+	const status = resolveDependencyStatus(child.status)
+	if (status === "closed") return "✓"
+	if (status === "open") return "○"
 	return "●"
 }
 
 /**
  * Get status color for a child task
  */
-const getChildStatusColor = (status: DependencyStatus): string => {
-	switch (status) {
+const getChildStatusColor = (status?: DependencyStatus): string => {
+	switch (resolveDependencyStatus(status)) {
 		case "open":
 			return theme.blue
 		case "in_progress":
@@ -378,7 +381,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							</text>
 							{epicChildren.map((child) => (
 								<text key={child.id} fg={getChildStatusColor(child.status)}>
-									{`  ${child.id}  ${getChildStatusIndicator(child)}  ${child.title}`}
+									{`  ${child.id}  ${getChildStatusIndicator(child)}  ${child.title ?? "(untitled)"}`}
 								</text>
 							))}
 							<text fg={theme.subtext0}>{"  Press 'o' to orchestrate parallel workers"}</text>
@@ -394,7 +397,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							</text>
 							{blockerInfo.map((blocker) => (
 								<text key={blocker.id} fg={getChildStatusColor(blocker.status)}>
-									{`  ${blocker.id}  ${getChildStatusIndicator(blocker)}  ${blocker.title}`}
+									{`  ${blocker.id}  ${getChildStatusIndicator(blocker)}  ${blocker.title ?? "(untitled)"}`}
 								</text>
 							))}
 							<text fg={theme.subtext0}>{"  Complete these tasks first to unblock this one"}</text>

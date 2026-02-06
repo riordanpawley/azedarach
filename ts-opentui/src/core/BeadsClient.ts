@@ -18,15 +18,31 @@ import { ProjectService } from "../services/ProjectService.js"
 /**
  * Dependency reference schema for issue dependencies/dependents
  */
+const DependencyTypeSchema = Schema.Literal("blocks", "related", "parent-child", "discovered-from")
+
 const DependencyRefSchema = Schema.Struct({
 	id: Schema.String,
-	title: Schema.String,
-	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
-	dependency_type: Schema.Literal("blocks", "related", "parent-child", "discovered-from"),
+	title: Schema.String.pipe(Schema.optional),
+	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone").pipe(
+		Schema.optional,
+	),
+	dependency_type: DependencyTypeSchema,
 	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore").pipe(Schema.optional),
 })
 
+const DependencyLinkSchema = Schema.Struct({
+	issue_id: Schema.String,
+	depends_on_id: Schema.String,
+	type: DependencyTypeSchema,
+	created_at: Schema.String.pipe(Schema.optional),
+	created_by: Schema.String.pipe(Schema.optional),
+})
+
+const DependencySchema = Schema.Union(DependencyRefSchema, DependencyLinkSchema)
+
 export type DependencyRef = Schema.Schema.Type<typeof DependencyRefSchema>
+type DependencyLink = Schema.Schema.Type<typeof DependencyLinkSchema>
+type Dependency = Schema.Schema.Type<typeof DependencySchema>
 
 /**
  * Issue schema matching bd --json output
@@ -49,11 +65,37 @@ const IssueSchema = Schema.Struct({
 	estimate: Schema.Number.pipe(Schema.optional),
 	dependent_count: Schema.Number.pipe(Schema.optional),
 	dependency_count: Schema.Number.pipe(Schema.optional),
-	dependents: Schema.Array(DependencyRefSchema).pipe(Schema.optional),
-	dependencies: Schema.Array(DependencyRefSchema).pipe(Schema.optional),
+	dependents: Schema.Array(DependencySchema).pipe(Schema.optional),
+	dependencies: Schema.Array(DependencySchema).pipe(Schema.optional),
 })
 
-export type Issue = Schema.Schema.Type<typeof IssueSchema>
+type IssueRaw = Schema.Schema.Type<typeof IssueSchema>
+
+export type Issue = Omit<IssueRaw, "dependents" | "dependencies"> & {
+	readonly dependents?: readonly DependencyRef[]
+	readonly dependencies?: readonly DependencyRef[]
+}
+
+const normalizeDependencies = (
+	deps: readonly Dependency[] | undefined,
+): readonly DependencyRef[] | undefined =>
+	deps?.map((dep) =>
+		"id" in dep
+			? dep
+			: {
+					id: dep.depends_on_id,
+					dependency_type: dep.type,
+				},
+	)
+
+const normalizeIssue = (issue: IssueRaw): Issue => ({
+	...issue,
+	dependents: normalizeDependencies(issue.dependents),
+	dependencies: normalizeDependencies(issue.dependencies),
+})
+
+const normalizeIssues = (issues: readonly IssueRaw[]): Issue[] =>
+	issues.map((issue) => normalizeIssue(issue))
 
 /**
  * Sync result schema
@@ -601,8 +643,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(args, effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
-					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
 			show: (id: string, cwd?: string) =>
@@ -612,12 +655,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 
-					if (parsed.length === 0) {
+					if (normalized.length === 0) {
 						return yield* Effect.fail(new NotFoundError({ issueId: id }))
 					}
 
-					const issue = parsed[0]!
+					const issue = normalized[0]!
 					// Tombstone issues are effectively deleted
 					if (issue.status === "tombstone") {
 						return yield* Effect.fail(new NotFoundError({ issueId: id }))
@@ -635,8 +679,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const output = yield* runBd(["show", ...ids], effectiveCwd)
 
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
-					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
 			update: (
@@ -770,8 +815,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["ready"], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
-					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
 			search: (query: string, cwd?: string) =>
@@ -779,8 +825,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["search", query], effectiveCwd)
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 					// Filter out tombstone (deleted) issues
-					return parsed.filter((issue) => issue.status !== "tombstone") as Issue[]
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
 			create: (params: {
@@ -828,7 +875,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const output = yield* runBd(args, effectiveCwd)
 
 					// bd create returns a single issue object (not an array)
-					return yield* parseJson(IssueSchema, output)
+					const parsed = yield* parseJson(IssueSchema, output)
+					return normalizeIssue(parsed)
 				}),
 
 			delete: (id: string, cwd?: string) =>
@@ -847,12 +895,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					// bd show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 
-					if (parsed.length === 0) {
+					if (normalized.length === 0) {
 						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 					}
 
-					const epic = parsed[0]!
+					const epic = normalized[0]!
 
 					// Filter dependents to only parent-child relationships
 					const children =
@@ -868,12 +917,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 
-					if (parsed.length === 0) {
+					if (normalized.length === 0) {
 						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 					}
 
-					const epic = parsed[0]!
+					const epic = normalized[0]!
 					// Tombstone issues are effectively deleted
 					if (epic.status === "tombstone") {
 						return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
@@ -910,21 +960,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					// bd show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
 
-					if (parsed.length === 0) {
+					if (normalized.length === 0) {
 						return yield* Effect.fail(new NotFoundError({ issueId }))
 					}
 
-					const issue = parsed[0]!
+					const issue = normalized[0]!
 
 					// Tombstone issues are effectively deleted
 					if (issue.status === "tombstone") {
 						return yield* Effect.fail(new NotFoundError({ issueId }))
 					}
 
-					// Find parent-child dependency where we depend on an epic
+					// Find parent-child dependency (epic relationship)
 					const parentChildDep = issue.dependencies?.find(
-						(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
+						(dep) => dep.dependency_type === "parent-child",
 					)
 
 					if (!parentChildDep) {
@@ -934,13 +985,18 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					// Fetch the full epic issue
 					const epicOutput = yield* runBd(["show", parentChildDep.id], effectiveCwd)
 					const epicParsed = yield* parseJson(Schema.Array(IssueSchema), epicOutput)
+					const epicNormalized = normalizeIssues(epicParsed)
 
-					if (epicParsed.length === 0 || epicParsed[0]!.status === "tombstone") {
+					if (
+						epicNormalized.length === 0 ||
+						epicNormalized[0]!.status === "tombstone" ||
+						epicNormalized[0]!.issue_type !== "epic"
+					) {
 						// Epic was deleted, treat as no parent
 						return undefined
 					}
 
-					return epicParsed[0]!
+					return epicNormalized[0]!
 				}),
 		}
 	}),

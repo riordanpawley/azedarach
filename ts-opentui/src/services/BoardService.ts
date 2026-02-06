@@ -641,6 +641,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				} else {
 					// Cache miss - fetch fresh data
 					parentEpicMap = new Map<string, string | undefined>()
+					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
 					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
 
 					if (issuesWithDeps.length > 0) {
@@ -655,9 +656,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						// Extract parent epic IDs from dependencies
 						for (const issue of issuesWithDepDetails) {
 							const parentChildDep = issue.dependencies?.find(
-								(dep) => dep.dependency_type === "parent-child" && dep.issue_type === "epic",
+								(dep) => dep.dependency_type === "parent-child",
 							)
-							parentEpicMap.set(issue.id, parentChildDep?.id)
+							let parentEpicId: string | undefined
+							if (parentChildDep) {
+								if (parentChildDep.issue_type === "epic") {
+									parentEpicId = parentChildDep.id
+								} else if (parentChildDep.issue_type === undefined) {
+									const parentIssue = issuesById.get(parentChildDep.id)
+									if (parentIssue?.issue_type === "epic") {
+										parentEpicId = parentChildDep.id
+									}
+								}
+							}
+							parentEpicMap.set(issue.id, parentEpicId)
 						}
 					}
 
