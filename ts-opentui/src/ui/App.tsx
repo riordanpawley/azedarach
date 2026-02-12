@@ -26,7 +26,6 @@ import {
 	handleKeyAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
-	maxVisibleTasksAtom,
 	sessionMonitorStarterAtom,
 	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
@@ -57,6 +56,7 @@ import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
+import { TASK_CARD_HEIGHT } from "./TaskCard.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -241,9 +241,6 @@ export const App = () => {
 	)
 	const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
 
-	// Terminal size
-	const maxVisibleTasks = useAtomValue(maxVisibleTasksAtom)
-
 	// Navigation hook (needs tasksByColumn)
 	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
@@ -258,13 +255,18 @@ export const App = () => {
 			Result.getOrElse(() => null),
 		) ?? undefined
 
+	// Recalculate max visible tasks from live terminal dimensions.
+	const CHROME_HEIGHT = 6
+	const terminalRows = process.stdout.rows || 24
+	const baseMaxVisibleTasks = Math.max(
+		1,
+		Math.floor((terminalRows - CHROME_HEIGHT) / TASK_CARD_HEIGHT),
+	)
+	const maxVisibleTasks = drillDownEpicId ? baseMaxVisibleTasks - 1 : baseMaxVisibleTasks
+
 	const visibleTaskIds = useMemo(() => {
 		if (viewMode === "compact") {
-			return computeCompactVisibleTaskIds(
-				tasksByColumn.flat(),
-				selectedTask?.id,
-				maxVisibleTasks,
-			)
+			return computeCompactVisibleTaskIds(tasksByColumn.flat(), selectedTask?.id, maxVisibleTasks)
 		}
 		return computeKanbanVisibleTaskIds(tasksByColumn, columnIndex, taskIndex, maxVisibleTasks)
 	}, [viewMode, tasksByColumn, selectedTask?.id, columnIndex, taskIndex, maxVisibleTasks])
@@ -277,12 +279,30 @@ export const App = () => {
 	const renderer = useRenderer()
 
 	useEffect(() => {
+		let lastRows = process.stdout.rows || 24
+		let lastColumns = process.stdout.columns || 80
+
 		const handleResize = () => {
+			lastRows = process.stdout.rows || 24
+			lastColumns = process.stdout.columns || 80
 			renderer.requestRender()
 		}
+
+		const reconcileTerminalSize = () => {
+			const nextRows = process.stdout.rows || 24
+			const nextColumns = process.stdout.columns || 80
+			if (nextRows !== lastRows || nextColumns !== lastColumns) {
+				lastRows = nextRows
+				lastColumns = nextColumns
+				renderer.requestRender()
+			}
+		}
+
 		process.stdout.on("resize", handleResize)
+		const interval = setInterval(reconcileTerminalSize, 500)
 		return () => {
 			process.stdout.off("resize", handleResize)
+			clearInterval(interval)
 		}
 	}, [renderer])
 
