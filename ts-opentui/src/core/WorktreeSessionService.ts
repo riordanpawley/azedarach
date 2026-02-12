@@ -28,6 +28,7 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, Option, Schedule } from "effect"
 import { AppConfig } from "../config/index.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { getBeadSessionName, getWorktreePath } from "./paths.js"
 import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
@@ -139,13 +140,14 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 // Service Implementation
 // ============================================================================
 
-export class WorktreeSessionService extends Effect.Service<WorktreeSessionService>()(
-	"WorktreeSessionService",
-	{
-		dependencies: [TmuxService.Default, AppConfig.Default],
-		effect: Effect.gen(function* () {
-			const tmux = yield* TmuxService
-			const appConfig = yield* AppConfig
+	export class WorktreeSessionService extends Effect.Service<WorktreeSessionService>()(
+		"WorktreeSessionService",
+		{
+			dependencies: [TmuxService.Default, AppConfig.Default, DiagnosticsService.Default],
+			effect: Effect.gen(function* () {
+				const tmux = yield* TmuxService
+				const appConfig = yield* AppConfig
+				const diagnostics = yield* DiagnosticsService
 
 			const waitForTmuxOption = (sessionName: string, optionKey: string, errorMessage: string) =>
 				Effect.retry(
@@ -212,10 +214,17 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					WorktreeSessionError | TmuxError | SessionNotFoundError | ShellNotReadyError,
 					CommandExecutor.CommandExecutor
 				> =>
-					Effect.gen(function* () {
-						const {
-							beadId,
-							projectPath,
+					diagnostics.measure(
+						{
+							source: "WorktreeSessionService",
+							name: "buildTmuxSessionFromBead",
+							thresholdMs: 500,
+							details: `beadId=${options.beadId}`,
+						},
+						Effect.gen(function* () {
+							const {
+								beadId,
+								projectPath,
 							windowName,
 							command,
 							cwd,
@@ -333,7 +342,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							target,
 							worktreePath,
 						}
-					}),
+					}).pipe(Effect.withSpan("tmux.buildSession")),
+				),
 
 				getOrCreateSession: (
 					beadId: string,
@@ -345,11 +355,18 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						backgroundTasks?: readonly string[]
 					},
 				) =>
-					Effect.gen(function* () {
-						const sessionName = beadId
-						const exists = yield* tmux.hasSession(sessionName)
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
+					diagnostics.measure(
+						{
+							source: "WorktreeSessionService",
+							name: "getOrCreateSession",
+							thresholdMs: 400,
+							details: `beadId=${beadId}`,
+						},
+						Effect.gen(function* () {
+							const sessionName = beadId
+							const exists = yield* tmux.hasSession(sessionName)
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const shell = sessionConfig.shell
 
 						if (!exists) {
 							yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
@@ -418,7 +435,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						}
 
 						return sessionName
-					}),
+					}).pipe(Effect.withSpan("tmux.getOrCreateSession")),
+				),
 
 				ensureWindow: (
 					sessionName: string,
@@ -429,10 +447,17 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						initCommands?: readonly string[]
 					},
 				) =>
-					Effect.gen(function* () {
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
-						const target = `${sessionName}:${windowName}`
+					diagnostics.measure(
+						{
+							source: "WorktreeSessionService",
+							name: "ensureWindow",
+							thresholdMs: 300,
+							details: `${sessionName}:${windowName}`,
+						},
+						Effect.gen(function* () {
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const shell = sessionConfig.shell
+							const target = `${sessionName}:${windowName}`
 
 						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
 
@@ -466,7 +491,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 						}
 
 						return target
-					}),
+					}).pipe(Effect.withSpan("tmux.ensureWindow")),
+				),
 
 				create: (
 					options: CreateWorktreeSessionOptions,
@@ -475,20 +501,27 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					WorktreeSessionError | TmuxError | SessionNotFoundError,
 					CommandExecutor.CommandExecutor
 				> =>
-					Effect.gen(function* () {
-						// Get session config for shell and tmuxPrefix defaults
-						const sessionConfig = yield* appConfig.getSessionConfig()
+					diagnostics.measure(
+						{
+							source: "WorktreeSessionService",
+							name: "createSession",
+							thresholdMs: 500,
+							details: `session=${options.sessionName}`,
+						},
+						Effect.gen(function* () {
+							// Get session config for shell and tmuxPrefix defaults
+							const sessionConfig = yield* appConfig.getSessionConfig()
 
-						const {
-							sessionName,
-							worktreePath,
-							projectPath,
-							command,
-							cwd = worktreePath,
-							tmuxPrefix = sessionConfig.tmuxPrefix,
-							initCommands = [],
-							backgroundTasks = [],
-						} = options
+							const {
+								sessionName,
+								worktreePath,
+								projectPath,
+								command,
+								cwd = worktreePath,
+								tmuxPrefix = sessionConfig.tmuxPrefix,
+								initCommands = [],
+								backgroundTasks = [],
+							} = options
 
 						// Get shell from config (for interactive mode)
 						const shell = sessionConfig.shell
@@ -571,7 +604,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							sessionName,
 							worktreePath,
 						}
-					}).pipe(
+					}).pipe(Effect.withSpan("tmux.createSession")),
+				).pipe(
 						Effect.mapError((e) => {
 							if (
 								e instanceof WorktreeSessionError ||

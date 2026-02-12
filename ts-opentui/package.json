@@ -16,7 +16,7 @@
 		"check": "biome check --write src bin",
 		"fix": "biome check --write .",
 		"prepare": "git config core.hooksPath .githooks",
-		"codanna:index": "codanna --config .codanna/settings.toml index",
+		"codanna:index": "cd .. && codanna --config .codanna/settings.toml index",
 		"postinstall": "if [ \"${CI:-}\" != \"true\" ]; then bun run codanna:index; fi"
 	},
 	"keywords": [
@@ -32,6 +32,7 @@
 		"@effect-atom/atom-react": "latest",
 		"@effect/cli": "latest",
 		"@effect/cluster": "^0.55.0",
+		"@effect/opentelemetry": "latest",
 		"@effect/platform": "latest",
 		"@effect/platform-bun": "latest",
 		"@opentui/core": "latest",

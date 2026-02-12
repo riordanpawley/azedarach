@@ -301,6 +301,56 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 				lastUpdated: new Date(),
 			}))
 
+		/**
+		 * Record a timing event when an operation is slow
+		 */
+		const logTiming = (options: {
+			source: string
+			name: string
+			durationMs: number
+			thresholdMs?: number
+			details?: string
+		}) =>
+			Effect.gen(function* () {
+				const threshold = options.thresholdMs ?? 250
+				if (options.durationMs < threshold) {
+					return
+				}
+				const message = `${options.name} ${options.durationMs}ms`
+				yield* logEvent({
+					severity: "info",
+					source: options.source,
+					message,
+					details: options.details,
+				})
+			})
+
+		/**
+		 * Measure an effect and emit a timing event when slow
+		 */
+		const measure = <A, E, R>(
+			options: {
+				source: string
+				name: string
+				thresholdMs?: number
+				details?: string
+			},
+			effect: Effect.Effect<A, E, R>,
+		) =>
+			Effect.gen(function* () {
+				const start = Date.now()
+				const result = yield* effect
+				const durationMs = Date.now() - start
+				yield* logTiming({
+					source: options.source,
+					name: options.name,
+					durationMs,
+					thresholdMs: options.thresholdMs,
+					details: options.details,
+				})
+				return result
+			})
+
 		return {
 			state: stateRef,
 			registerFiber,
@@ -312,6 +362,8 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			trackService,
 			logEvent,
 			clearEvents,
+			logTiming,
+			measure,
 		}
 	}),
 }) {}

@@ -155,32 +155,39 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
 
 		const listBeadSessions = () =>
-			Effect.gen(function* () {
-				const command = Command.make(
-					"tmux",
-					"list-sessions",
-					"-F",
-					"#{session_name}|#{session_created}",
-				)
+			diagnostics.measure(
+				{
+					source: "TmuxSessionMonitor",
+					name: "listSessions",
+					thresholdMs: 200,
+				},
+				Effect.gen(function* () {
+					const command = Command.make(
+						"tmux",
+						"list-sessions",
+						"-F",
+						"#{session_name}|#{session_created}",
+					)
 
-				const output = yield* Command.string(command).pipe(
-					Effect.catchAll(() => Effect.succeed("")),
-				)
+					const output = yield* Command.string(command).pipe(
+						Effect.catchAll(() => Effect.succeed("")),
+					)
 
-				return output
-					.split("\n")
-					.map((line) => line.trim())
-					.map((line) => {
-						const [name, createdStr] = line.split("|")
-						const parsed = parseSessionName(name ?? "")
-						return {
-							name: name ?? "",
-							createdAt: parseInt(createdStr ?? "0", 10) || 0,
-							parsed,
-						}
-					})
-					.filter((s) => s.parsed !== undefined && s.parsed.type === "bead")
-			})
+					return output
+						.split("\n")
+						.map((line) => line.trim())
+						.map((line) => {
+							const [name, createdStr] = line.split("|")
+							const parsed = parseSessionName(name ?? "")
+							return {
+								name: name ?? "",
+								createdAt: parseInt(createdStr ?? "0", 10) || 0,
+								parsed,
+							}
+						})
+						.filter((s) => s.parsed !== undefined && s.parsed.type === "bead")
+				}).pipe(Effect.withSpan("tmux.listSessions")),
+			)
 
 		/**
 		 * Get a tmux session option by name

@@ -14,6 +14,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Ref, Schedule, Schema, type Scope } from "effect"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import {
 	deepMerge,
 	deepMergeWithDedup,
@@ -314,11 +315,12 @@ const branchExists = (
  * ```
  */
 export class WorktreeManager extends Effect.Service<WorktreeManager>()("WorktreeManager", {
-	dependencies: [],
+	dependencies: [DiagnosticsService.Default],
 	effect: Effect.gen(function* () {
 		// Grab platform services at layer construction
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
+		const diagnostics = yield* DiagnosticsService
 
 		// Track active worktrees in memory for fast lookups
 		// Now supports multiple projects: projectPath -> (beadId -> Worktree)
@@ -597,42 +599,50 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const refreshWorktrees = (
 			projectPath: string,
 		): Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor> =>
-			Effect.gen(function* () {
-				// Check if cache is still valid for this project
-				const timestamps = yield* Ref.get(cacheTimestampRef)
-				const now = Date.now()
-				const cachedTimestamp = timestamps.get(projectPath)
+			diagnostics.measure(
+				{
+					source: "WorktreeManager",
+					name: "refreshWorktrees",
+					thresholdMs: 200,
+					details: projectPath,
+				},
+				Effect.gen(function* () {
+					// Check if cache is still valid for this project
+					const timestamps = yield* Ref.get(cacheTimestampRef)
+					const now = Date.now()
+					const cachedTimestamp = timestamps.get(projectPath)
 
-				if (cachedTimestamp && now - cachedTimestamp < WORKTREE_CACHE_TTL_MS) {
-					// Cache hit - skip git call
-					return
-				}
+					if (cachedTimestamp && now - cachedTimestamp < WORKTREE_CACHE_TTL_MS) {
+						// Cache hit - skip git call
+						return
+					}
 
-				const isRepo = yield* isGitRepo(projectPath)
-				if (!isRepo) {
-					return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-				}
+					const isRepo = yield* isGitRepo(projectPath)
+					if (!isRepo) {
+						return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+					}
 
-				const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
-				const worktrees = parseWorktreeList(output, projectPath)
+					const output = yield* runGit(["worktree", "list", "--porcelain"], projectPath)
+					const worktrees = parseWorktreeList(output, projectPath)
 
-				const newMap = new Map<string, Worktree>()
-				for (const wt of worktrees) {
-					newMap.set(wt.beadId, wt)
-				}
+					const newMap = new Map<string, Worktree>()
+					for (const wt of worktrees) {
+						newMap.set(wt.beadId, wt)
+					}
 
-				// Update cache for this project (preserves other projects)
-				yield* Ref.update(worktreesRef, (cache) => {
-					const newCache = new Map(cache)
-					newCache.set(projectPath, newMap)
-					return newCache
-				})
-				yield* Ref.update(cacheTimestampRef, (cache) => {
-					const newCache = new Map(cache)
-					newCache.set(projectPath, now)
-					return newCache
-				})
-			})
+					// Update cache for this project (preserves other projects)
+					yield* Ref.update(worktreesRef, (cache) => {
+						const newCache = new Map(cache)
+						newCache.set(projectPath, newMap)
+						return newCache
+					})
+					yield* Ref.update(cacheTimestampRef, (cache) => {
+						const newCache = new Map(cache)
+						newCache.set(projectPath, now)
+						return newCache
+					})
+				}).pipe(Effect.withSpan("worktree.refresh")),
+			)
 
 		// Force refresh worktrees (bypass TTL cache for this project only)
 		const forceRefreshWorktrees = (
@@ -650,15 +660,22 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 		return {
 			create: (options: CreateWorktreeOptions) =>
-				Effect.gen(function* () {
-					const {
-						beadId,
-						baseBranch,
-						projectPath,
-						sourceWorktreePath,
-						copyPaths,
-						preCompactEnabled,
-					} = options
+				diagnostics.measure(
+					{
+						source: "WorktreeManager",
+						name: "create",
+						thresholdMs: 500,
+						details: `beadId=${options.beadId}`,
+					},
+					Effect.gen(function* () {
+						const {
+							beadId,
+							baseBranch,
+							projectPath,
+							sourceWorktreePath,
+							copyPaths,
+							preCompactEnabled,
+						} = options
 
 					// Determine effective source for copying untracked files
 					// If sourceWorktreePath is provided (e.g., epic worktree), use that
@@ -764,7 +781,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					)
 
 					return result
-				}),
+				}).pipe(Effect.withSpan("worktree.create")),
+			),
 
 			remove: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {

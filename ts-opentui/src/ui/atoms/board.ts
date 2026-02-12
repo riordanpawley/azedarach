@@ -132,6 +132,16 @@ export const refreshGitStatsAtom = appRuntime.fn(() =>
 )
 
 /**
+ * Update visible task IDs for polling decisions
+ */
+export const setVisibleTaskIdsAtom = appRuntime.fn((taskIds: ReadonlyArray<string>) =>
+	Effect.gen(function* () {
+		const board = yield* BoardService
+		yield* board.setVisibleTaskIds(new Set(taskIds))
+	}).pipe(Effect.catchAll(Effect.logError)),
+)
+
+/**
  * Atom for currently selected task ID
  */
 export const selectedTaskIdAtom = Atom.make<string | undefined>(undefined)
