@@ -42,7 +42,9 @@ export const selectedIdsAtom = Atom.readable((get) => {
 	const modeResult = get(modeAtom)
 	if (!Result.isSuccess(modeResult)) return []
 	const mode = modeResult.value
-	return mode._tag === "select" ? mode.selectedIds : []
+	if (mode._tag === "select") return mode.selectedIds
+	if (mode._tag === "action") return mode.selectedIds
+	return []
 })
 
 /**
