@@ -19,6 +19,7 @@ export {
 	maxVisibleTasksAtom,
 	refreshBoardAtom,
 	refreshGitStatsAtom,
+	setVisibleTaskIdsAtom,
 	selectedTaskIdAtom,
 	totalTasksCountAtom,
 	viewModeAtom,

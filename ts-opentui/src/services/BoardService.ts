@@ -293,6 +293,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		>(emptyRecord())
 		const isLoading = yield* SubscriptionRef.make<boolean>(false)
 		const isRefreshingGitStats = yield* SubscriptionRef.make<boolean>(false)
+		const visibleTaskIds = yield* SubscriptionRef.make<ReadonlySet<string>>(new Set())
 		const filteredTasksByColumn = yield* SubscriptionRef.make<TaskWithSession[][]>(
 			COLUMNS.map(() => []),
 		)
@@ -476,94 +477,106 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		const checkGitStatus = (worktreePath: string, baseBranch: string, showLineChanges: boolean) =>
-			Effect.gen(function* () {
-				const behindCommand = Command.make(
-					"git",
-					"-C",
-					worktreePath,
-					"rev-list",
-					"--count",
-					`HEAD..${baseBranch}`,
-				).pipe(Command.string)
-
-				const behindCount = yield* behindCommand.pipe(
-					Effect.map((output) => {
-						const count = Number.parseInt(output.trim(), 10)
-						return Number.isNaN(count) ? 0 : count
-					}),
-					Effect.catchAll(() => Effect.succeed(0)),
-				)
-
-				const dirtyCommand = Command.make("git", "-C", worktreePath, "status", "--porcelain").pipe(
-					Command.string,
-				)
-
-				const hasUncommittedChanges = yield* dirtyCommand.pipe(
-					Effect.map((output) => output.trim().length > 0),
-					Effect.catchAll(() => Effect.succeed(false)),
-				)
-
-				let gitAdditions: number | undefined
-				let gitDeletions: number | undefined
-
-				if (showLineChanges) {
-					// Get merge-base first for consistent comparison with DiffService
-					const mergeBaseCommand = Command.make(
+			diagnostics.measure(
+				{
+					source: "BoardService",
+					name: "git.status",
+					thresholdMs: 300,
+					details: worktreePath,
+				},
+				Effect.gen(function* () {
+					const behindCommand = Command.make(
 						"git",
 						"-C",
 						worktreePath,
-						"merge-base",
-						baseBranch,
-						"HEAD",
+						"rev-list",
+						"--count",
+						`HEAD..${baseBranch}`,
 					).pipe(Command.string)
 
-					const mergeBase = yield* mergeBaseCommand.pipe(
-						Effect.map((output) => output.trim()),
-						Effect.catchAll(() => Effect.succeed(baseBranch)), // Fallback to branch name
-					)
-
-					// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
-					// Excludes .beads/ directory - users care about code changes, not beads metadata
-					const diffCommand = Command.make(
-						"git",
-						"-C",
-						worktreePath,
-						"diff",
-						"--numstat",
-						mergeBase,
-						"HEAD",
-						"--",
-						":^.beads",
-					).pipe(Command.string)
-
-					const diffStats = yield* diffCommand.pipe(
+					const behindCount = yield* behindCommand.pipe(
 						Effect.map((output) => {
-							let additions = 0
-							let deletions = 0
-							for (const line of output.trim().split("\n")) {
-								if (!line) continue
-								const parts = line.split("\t")
-								const add = Number.parseInt(parts[0] ?? "0", 10)
-								const del = Number.parseInt(parts[1] ?? "0", 10)
-								if (!Number.isNaN(add)) additions += add
-								if (!Number.isNaN(del)) deletions += del
-							}
-							return { additions, deletions }
+							const count = Number.parseInt(output.trim(), 10)
+							return Number.isNaN(count) ? 0 : count
 						}),
-						Effect.catchAll(() => Effect.succeed({ additions: 0, deletions: 0 })),
+						Effect.catchAll(() => Effect.succeed(0)),
 					)
 
-					gitAdditions = diffStats.additions
-					gitDeletions = diffStats.deletions
-				}
+					const dirtyCommand = Command.make(
+						"git",
+						"-C",
+						worktreePath,
+						"status",
+						"--porcelain",
+					).pipe(Command.string)
 
-				return {
-					gitBehindCount: behindCount > 0 ? behindCount : undefined,
-					hasUncommittedChanges: hasUncommittedChanges || undefined,
-					gitAdditions: gitAdditions !== undefined && gitAdditions > 0 ? gitAdditions : undefined,
-					gitDeletions: gitDeletions !== undefined && gitDeletions > 0 ? gitDeletions : undefined,
-				}
-			})
+					const hasUncommittedChanges = yield* dirtyCommand.pipe(
+						Effect.map((output) => output.trim().length > 0),
+						Effect.catchAll(() => Effect.succeed(false)),
+					)
+
+					let gitAdditions: number | undefined
+					let gitDeletions: number | undefined
+
+					if (showLineChanges) {
+						// Get merge-base first for consistent comparison with DiffService
+						const mergeBaseCommand = Command.make(
+							"git",
+							"-C",
+							worktreePath,
+							"merge-base",
+							baseBranch,
+							"HEAD",
+						).pipe(Command.string)
+
+						const mergeBase = yield* mergeBaseCommand.pipe(
+							Effect.map((output) => output.trim()),
+							Effect.catchAll(() => Effect.succeed(baseBranch)), // Fallback to branch name
+						)
+
+						// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
+						// Excludes .beads/ directory - users care about code changes, not beads metadata
+						const diffCommand = Command.make(
+							"git",
+							"-C",
+							worktreePath,
+							"diff",
+							"--numstat",
+							mergeBase,
+							"HEAD",
+							"--",
+							":^.beads",
+						).pipe(Command.string)
+
+						const diffStats = yield* diffCommand.pipe(
+							Effect.map((output) => {
+								let additions = 0
+								let deletions = 0
+								for (const line of output.trim().split("\n")) {
+									if (!line) continue
+									const parts = line.split("\t")
+									const add = Number.parseInt(parts[0] ?? "0", 10)
+									const del = Number.parseInt(parts[1] ?? "0", 10)
+									if (!Number.isNaN(add)) additions += add
+									if (!Number.isNaN(del)) deletions += del
+								}
+								return { additions, deletions }
+							}),
+							Effect.catchAll(() => Effect.succeed({ additions: 0, deletions: 0 })),
+						)
+
+						gitAdditions = diffStats.additions
+						gitDeletions = diffStats.deletions
+					}
+
+					return {
+						gitBehindCount: behindCount > 0 ? behindCount : undefined,
+						hasUncommittedChanges: hasUncommittedChanges || undefined,
+						gitAdditions: gitAdditions !== undefined && gitAdditions > 0 ? gitAdditions : undefined,
+						gitDeletions: gitDeletions !== undefined && gitDeletions > 0 ? gitDeletions : undefined,
+					}
+				}).pipe(Effect.withSpan("board.gitStatus")),
+			)
 
 		const loadTasks = () =>
 			Effect.gen(function* () {
@@ -571,12 +584,31 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const projectPath = yield* projectService.getCurrentPath()
 				const gitConfig = yield* appConfig.getGitConfig()
 				const { baseBranch, showLineChanges } = gitConfig
+				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
 
-				const issues = yield* beadsClient.list(undefined, projectPath)
+				const issues = yield* diagnostics.measure(
+					{
+						source: "BoardService",
+						name: "beads.list",
+						thresholdMs: 200,
+						details: projectPath ?? "default",
+					},
+					beadsClient.list(undefined, projectPath).pipe(Effect.withSpan("beads.list")),
+				)
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
 				)
-				const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined)
+				const activeSessions = yield* diagnostics.measure(
+					{
+						source: "BoardService",
+						name: "sessions.listActive",
+						thresholdMs: 150,
+						details: projectPath ?? "default",
+					},
+					sessionManager
+						.listActive(projectPath ?? undefined)
+						.pipe(Effect.withSpan("sessions.listActive")),
+				)
 				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
 
 				// Auto-recovery of crashed sessions (if enabled)
@@ -646,12 +678,24 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					if (issuesWithDeps.length > 0) {
 						// Single batched call to get all issues with their dependencies
-						const issuesWithDepDetails = yield* beadsClient
-							.showMultiple(
-								issuesWithDeps.map((i) => i.id),
-								projectPath,
+						const issuesWithDepDetails = yield* diagnostics
+							.measure(
+								{
+									source: "BoardService",
+									name: "beads.showMultiple",
+									thresholdMs: 200,
+									details: `count=${issuesWithDeps.length}`,
+								},
+								beadsClient
+									.showMultiple(
+										issuesWithDeps.map((i) => i.id),
+										projectPath,
+									)
+									.pipe(
+											Effect.withSpan("beads.showMultiple"),
+											Effect.catchAll(() => Effect.succeed([])),
+										),
 							)
-							.pipe(Effect.catchAll(() => Effect.succeed([])))
 
 						// Extract parent epic IDs from dependencies
 						for (const issue of issuesWithDepDetails) {
@@ -687,7 +731,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get all worktrees ONCE upfront instead of per-issue exists() calls
 				// This eliminates 331 Effect operations → 1 operation
 				const worktreeList = projectPath
-					? yield* worktreeManager.list(projectPath).pipe(Effect.catchAll(() => Effect.succeed([])))
+					? yield* diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "worktrees.list",
+								thresholdMs: 200,
+								details: projectPath,
+							},
+							worktreeManager
+								.list(projectPath)
+								.pipe(Effect.withSpan("worktrees.list"), Effect.catchAll(() => Effect.succeed([]))),
+						)
 					: []
 				const worktreeBeadIds = new Set(worktreeList.map((wt) => wt.beadId))
 
@@ -707,8 +761,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
-							// Fetch git status if there's an active session OR if worktree exists
-							if ((sessionState !== "idle" || hasWorktree) && projectPath) {
+							const isVisible = currentVisibleTaskIds.has(issue.id)
+							// Fetch git status only for visible tasks with active sessions or worktrees
+							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
 								const worktreePath = getWorktreePath(projectPath, issue.id)
 								// Use parent epic branch as base for children, otherwise use config baseBranch
 								// This ensures children show line changes relative to epic, not main
@@ -770,13 +825,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const tasksWithSession = tasksWithNullable.filter((t): t is TaskWithSession => t !== null)
 
 				// Enrich tasks with PR state from gh CLI (batch fetch, cached)
-				const tasksWithPRs = tasksWithSession.filter((t) => t.hasPR && t.prUrl)
+				const tasksWithPRs = tasksWithSession.filter(
+					(t) => t.hasPR && t.prUrl && currentVisibleTaskIds.has(t.id),
+				)
 				let prStateMap = new Map<string, PRState>()
 				if (tasksWithPRs.length > 0 && projectPath) {
 					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, beadId: t.id }))
-					prStateMap = yield* prStateService
-						.getPRStates(prInfos, projectPath)
-						.pipe(Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())))
+					prStateMap = yield* diagnostics
+						.measure(
+							{
+								source: "BoardService",
+								name: "prStates.get",
+								thresholdMs: 300,
+								details: `count=${tasksWithPRs.length}`,
+							},
+							prStateService
+								.getPRStates(prInfos, projectPath)
+								.pipe(
+									Effect.withSpan("prStates.get"),
+									Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())),
+								),
+						)
 					yield* Effect.log(
 						`loadTasks: Fetched ${prStateMap.size}/${tasksWithPRs.length} PR states from gh CLI`,
 					)
@@ -855,39 +924,55 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		const refresh = () =>
-			Effect.gen(function* () {
-				yield* SubscriptionRef.set(isLoading, true)
+			diagnostics
+				.measure(
+					{
+						source: "BoardService",
+						name: "refresh",
+						thresholdMs: 500,
+					},
+					Effect.gen(function* () {
+						yield* SubscriptionRef.set(isLoading, true)
 
-				// Capture project path at refresh START
-				const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
+						// Capture project path at refresh START
+						const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
 
-				// Update currentProjectPath SubscriptionRef
-				yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
+						// Update currentProjectPath SubscriptionRef
+						yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
 
-				const loadedTasks = yield* loadTasks()
+						const loadedTasks = yield* diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "loadTasks",
+								thresholdMs: 400,
+							},
+							loadTasks().pipe(Effect.withSpan("board.loadTasks")),
+						)
 
-				// Verify project hasn't changed during refresh (race condition guard)
-				// If project changed, discard results to avoid showing wrong project's data
-				const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
-				if (startProjectPath !== activeProjectPath) {
-					yield* Effect.log(
-						`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
-					)
-					return
-				}
+						// Verify project hasn't changed during refresh (race condition guard)
+						// If project changed, discard results to avoid showing wrong project's data
+						const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
+						if (startProjectPath !== activeProjectPath) {
+							yield* Effect.log(
+								`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
+							)
+							return
+						}
 
-				yield* SubscriptionRef.set(tasks, loadedTasks)
-				const grouped = groupTasksByColumn(loadedTasks)
-				yield* SubscriptionRef.set(tasksByColumn, grouped)
-				yield* updateFilteredTasks()
+						yield* SubscriptionRef.set(tasks, loadedTasks)
+						const grouped = groupTasksByColumn(loadedTasks)
+						yield* SubscriptionRef.set(tasksByColumn, grouped)
+						yield* updateFilteredTasks()
 
-				// Save to per-project map for fast switching
-				yield* saveCurrentToMap()
+						// Save to per-project map for fast switching
+						yield* saveCurrentToMap()
 
-				yield* Effect.log(
-					`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+						yield* Effect.log(
+							`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+						)
+					}).pipe(Effect.withSpan("board.refresh")),
 				)
-			}).pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
+				.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
 		/**
 		 * Refresh with auto-recovery for database sync errors.
@@ -961,11 +1046,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const gitConfig = yield* appConfig.getGitConfig()
 				const { baseBranch, showLineChanges } = gitConfig
 				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
 
 				// Update git stats for all tasks with active sessions
 				const updatedTasks = yield* Effect.all(
 					currentTasks.map((task) =>
 						Effect.gen(function* () {
+							if (!currentVisibleTaskIds.has(task.id)) {
+								return task
+							}
 							// Only refresh for tasks with active sessions (they have worktrees)
 							if (task.sessionState === "idle") {
 								return task
@@ -1099,6 +1188,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 			})
 
+		const setVisibleTaskIds = (taskIds: ReadonlySet<string>) =>
+			SubscriptionRef.set(visibleTaskIds, taskIds)
+
 		/**
 		 * Apply an optimistic move directly to in-memory state.
 		 * This provides instant UI feedback without waiting for refresh.
@@ -1195,6 +1287,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			isLoading,
 			isRefreshingGitStats,
 			currentProjectPath,
+			setVisibleTaskIds,
 			updateProjectTaskSessionState,
 			getTasks: (): Effect.Effect<ReadonlyArray<TaskWithSession>> => SubscriptionRef.get(tasks),
 			getTasksByColumn: (): Effect.Effect<

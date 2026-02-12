@@ -26,6 +26,7 @@ import {
 	isRefreshingGitStatsAtom,
 	maxVisibleTasksAtom,
 	sessionMonitorStarterAtom,
+	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
 	workflowModeAtom,
@@ -55,10 +56,86 @@ import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
+import type { TaskWithSession } from "./types.js"
+import { COLUMNS } from "./types.js"
 
 // ============================================================================
 // App Component
 // ============================================================================
+
+const computeKanbanVisibleTaskIds = (
+	tasksByColumn: TaskWithSession[][],
+	activeColumnIndex: number,
+	activeTaskIndex: number,
+	maxVisible: number,
+): string[] => {
+	const visibleIds: string[] = []
+	const windowSize = Math.max(1, maxVisible)
+
+	for (let colIndex = 0; colIndex < tasksByColumn.length; colIndex++) {
+		const columnTasks = tasksByColumn[colIndex] ?? []
+		if (columnTasks.length <= windowSize) {
+			visibleIds.push(...columnTasks.map((task) => task.id))
+			continue
+		}
+
+		const selectedIdx = colIndex === activeColumnIndex ? activeTaskIndex : 0
+		const halfWindow = Math.floor(windowSize / 2)
+		let startIdx = 0
+		if (selectedIdx <= halfWindow) {
+			startIdx = 0
+		} else if (selectedIdx >= columnTasks.length - halfWindow) {
+			startIdx = columnTasks.length - windowSize
+		} else {
+			startIdx = selectedIdx - halfWindow
+		}
+		startIdx = Math.max(0, startIdx)
+		const endIdx = Math.min(startIdx + windowSize, columnTasks.length)
+		for (let idx = startIdx; idx < endIdx; idx++) {
+			const task = columnTasks[idx]
+			if (task) visibleIds.push(task.id)
+		}
+	}
+
+	return visibleIds
+}
+
+const sortCompactTasks = (tasks: readonly TaskWithSession[]): TaskWithSession[] => {
+	const statusOrder = new Map<string, number>()
+	COLUMNS.forEach((col, idx) => {
+		statusOrder.set(col.status, idx)
+	})
+
+	return [...tasks].sort((a, b) => {
+		const statusDiff = (statusOrder.get(a.status) ?? 99) - (statusOrder.get(b.status) ?? 99)
+		if (statusDiff !== 0) return statusDiff
+		return a.priority - b.priority
+	})
+}
+
+const computeCompactVisibleTaskIds = (
+	tasks: readonly TaskWithSession[],
+	selectedTaskId: string | undefined,
+	maxVisible: number,
+): string[] => {
+	const windowSize = Math.max(1, maxVisible)
+	const sortedTasks = sortCompactTasks(tasks)
+
+	let selectedIndex = 0
+	if (selectedTaskId) {
+		const index = sortedTasks.findIndex((task) => task.id === selectedTaskId)
+		if (index >= 0) selectedIndex = index
+	}
+
+	let startIndex = 0
+	if (sortedTasks.length > windowSize) {
+		startIndex = Math.max(0, selectedIndex - Math.floor(windowSize / 2))
+		startIndex = Math.min(startIndex, sortedTasks.length - windowSize)
+	}
+
+	const endIndex = Math.min(startIndex + windowSize, sortedTasks.length)
+	return sortedTasks.slice(startIndex, endIndex).map((task) => task.id)
+}
 
 export const App = () => {
 	// ═══════════════════════════════════════════════════════════════════════════
@@ -156,6 +233,7 @@ export const App = () => {
 		isRefreshingGitStatsAtom,
 		Result.getOrElse(() => false),
 	)
+	const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
 
 	// Terminal size
 	const maxVisibleTasks = useAtomValue(maxVisibleTasksAtom)
@@ -173,6 +251,21 @@ export const App = () => {
 			drillDownEpicAtom,
 			Result.getOrElse(() => null),
 		) ?? undefined
+
+	const visibleTaskIds = useMemo(() => {
+		if (viewMode === "compact") {
+			return computeCompactVisibleTaskIds(
+				tasksByColumn.flat(),
+				selectedTask?.id,
+				maxVisibleTasks,
+			)
+		}
+		return computeKanbanVisibleTaskIds(tasksByColumn, columnIndex, taskIndex, maxVisibleTasks)
+	}, [viewMode, tasksByColumn, selectedTask?.id, columnIndex, taskIndex, maxVisibleTasks])
+
+	useEffect(() => {
+		setVisibleTaskIds(visibleTaskIds)
+	}, [setVisibleTaskIds, visibleTaskIds])
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
