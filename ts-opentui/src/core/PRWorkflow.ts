@@ -12,6 +12,7 @@
 import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import {
 	BeadsClient,
@@ -766,6 +767,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		AppConfig.Default,
 		OfflineService.Default,
 		ImageAttachmentService.Default,
+		DiagnosticsService.Default,
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
@@ -777,6 +779,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const appConfig = yield* AppConfig
 		const offlineService = yield* OfflineService
 		const imageAttachmentService = yield* ImageAttachmentService
+		const diagnostics = yield* DiagnosticsService
 		const getMergeConfig = () => appConfig.getMergeConfig()
 		const getGitConfig = () => appConfig.getGitConfig()
 
@@ -830,8 +833,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 		return {
 			createPR: (options: CreatePROptions) =>
-				Effect.gen(function* () {
-					const { beadId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
+				diagnostics.measure(
+					{
+						source: "PRWorkflow",
+						name: "createPR",
+						thresholdMs: 1000,
+						details: `beadId=${options.beadId}`,
+					},
+					Effect.gen(function* () {
+						const { beadId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
 
 					// Determine effective base branch (epic branch for children, main otherwise)
 					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId, explicitBaseBranch)
@@ -922,7 +932,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						draft,
 						branch: beadId,
 					}
-				}),
+				}).pipe(Effect.withSpan("pr.create")),
+			),
 
 			getPR: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
@@ -943,8 +954,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			cleanup: (options: CleanupOptions) =>
-				Effect.gen(function* () {
-					const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
+				diagnostics.measure(
+					{
+						source: "PRWorkflow",
+						name: "cleanup",
+						thresholdMs: 800,
+						details: `beadId=${options.beadId}`,
+					},
+					Effect.gen(function* () {
+						const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
 
 					// 1. Stop any running session (ignore errors)
 					// First try ClaudeSessionManager.stop (handles beads sync from worktree)
@@ -989,7 +1007,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
 						)
 					}
-				}),
+				}).pipe(Effect.withSpan("pr.cleanup")),
+			),
 
 			checkGHCLI: () =>
 				Effect.gen(function* () {
@@ -1001,8 +1020,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			mergeToMain: (options: MergeToMainOptions) =>
-				Effect.gen(function* () {
-					const gitConfig = yield* getGitConfig()
+				diagnostics.measure(
+					{
+						source: "PRWorkflow",
+						name: "mergeToMain",
+						thresholdMs: 1000,
+						details: `beadId=${options.beadId}`,
+					},
+					Effect.gen(function* () {
+						const gitConfig = yield* getGitConfig()
 					const {
 						beadId,
 						projectPath,
@@ -1411,7 +1437,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 						// Silently skip if offline/disabled - merge already succeeded locally
 					}
-				}),
+				}).pipe(Effect.withSpan("pr.mergeToMain")),
+			),
 
 			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
 				Effect.gen(function* () {
@@ -1580,8 +1607,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}),
 
 			updateFromBase: (options: UpdateFromBaseOptions) =>
-				Effect.gen(function* () {
-					const gitConfig = yield* getGitConfig()
+				diagnostics.measure(
+					{
+						source: "PRWorkflow",
+						name: "updateFromBase",
+						thresholdMs: 1000,
+						details: `beadId=${options.beadId}`,
+					},
+					Effect.gen(function* () {
+						const gitConfig = yield* getGitConfig()
 					const { beadId, projectPath, baseBranch: explicitBaseBranch } = options
 
 					// Determine effective base branch (epic branch for children, main for epics/standalone)
@@ -1723,7 +1757,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					yield* withSyncLock(
 						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
 					)
-				}),
+				}).pipe(Effect.withSpan("pr.updateFromBase")),
+			),
 
 			getPRComments: (options: GetPRCommentsOptions) =>
 				Effect.gen(function* () {
@@ -2031,8 +2066,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				targetBeadId: string
 				projectPath: string
 			}) =>
-				Effect.gen(function* () {
-					const { sourceBeadId, targetBeadId, projectPath } = options
+				diagnostics.measure(
+					{
+						source: "PRWorkflow",
+						name: "mergeBeadIntoBead",
+						thresholdMs: 1000,
+						details: `source=${options.sourceBeadId} target=${options.targetBeadId}`,
+					},
+					Effect.gen(function* () {
+						const { sourceBeadId, targetBeadId, projectPath } = options
 
 					// Validate source and target are different
 					if (sourceBeadId === targetBeadId) {
@@ -2245,7 +2287,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					yield* Effect.log(
 						`Successfully merged ${sourceBeadId} into ${targetBeadId}. Source bead closed.`,
 					)
-				}),
+				}).pipe(Effect.withSpan("pr.mergeBeadIntoBead")),
+			),
 
 			getTargetBranch: (beadId: string) =>
 				Effect.gen(function* () {

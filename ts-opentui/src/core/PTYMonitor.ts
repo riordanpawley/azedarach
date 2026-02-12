@@ -300,15 +300,22 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 * Poll all registered sessions
 		 */
 		const pollAll = () =>
-			Effect.gen(function* () {
-				const allMonitors = yield* Ref.get(monitors)
-				yield* Effect.all(
-					Array.from(HashMap.entries(allMonitors)).map(([beadId, monitor]) =>
-						pollSession(beadId, monitor),
-					),
-					{ concurrency: 4 },
-				)
-			})
+			diagnostics.measure(
+				{
+					source: "PTYMonitor",
+					name: "pollAll",
+					thresholdMs: 200,
+				},
+				Effect.gen(function* () {
+					const allMonitors = yield* Ref.get(monitors)
+					yield* Effect.all(
+						Array.from(HashMap.entries(allMonitors)).map(([beadId, monitor]) =>
+							pollSession(beadId, monitor),
+						),
+						{ concurrency: 4 },
+					)
+				}).pipe(Effect.withSpan("pty.pollAll")),
+			)
 
 		// ========================================================================
 		// Start Polling Loop

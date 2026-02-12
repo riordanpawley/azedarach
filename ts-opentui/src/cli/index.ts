@@ -11,9 +11,16 @@
  */
 
 import { Args, Command, Options } from "@effect/cli"
-import { FileSystem, Path, Command as PlatformCommand, PlatformLogger } from "@effect/platform"
+import { Otlp } from "@effect/opentelemetry"
+import {
+	Command as PlatformCommand,
+	FetchHttpClient,
+	FileSystem,
+	Path,
+	PlatformLogger,
+} from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Console, Effect, Layer, Logger, Option, SubscriptionRef } from "effect"
+import { Console, Duration, Effect, Layer, Logger, Option, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { BeadEditorService } from "../core/BeadEditorService.js"
@@ -63,6 +70,17 @@ import { devCommand } from "./dev-server.js"
  */
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az-cli.log", { flag: "a" }))
 
+const telemetryLayer =
+	process.env.AZ_OTEL === "1"
+		? Otlp.layerJson({
+				baseUrl: "http://localhost:4318",
+				metricsExportInterval: Duration.seconds(10),
+				resource: {
+					serviceName: "azedarach",
+				},
+			}).pipe(Layer.provide(FetchHttpClient.layer))
+		: Layer.empty
+
 const cliLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
@@ -99,6 +117,7 @@ const cliLayer = Layer.mergeAll(
 	PlanningService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+	Layer.provideMerge(telemetryLayer),
 	Layer.provideMerge(BunContext.layer),
 )
 
