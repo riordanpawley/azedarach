@@ -125,6 +125,7 @@ export const pushOverlayAtom = appRuntime.fn(
 					readonly _tag: "fork"
 					readonly sourceTaskId: string
 					readonly sourceTaskTitle: string
+					readonly parentEpicId?: string
 					readonly blockedReason?: string
 			  }
 			| {

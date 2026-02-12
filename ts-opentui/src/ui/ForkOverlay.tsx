@@ -4,6 +4,7 @@
  * Options:
  * - 1: Convert current bead to epic, then create child
  * - 2: Create new parent epic, reparent current, then create child
+ * - 3: Create sibling under existing parent epic
  * - Esc: Cancel
  *
  * Keyboard handling is in InputHandlersService.
@@ -24,9 +25,13 @@ export const ForkOverlay = () => {
 	const sourceTaskTitle = forkOverlay?.sourceTaskTitle ?? ""
 	const blockedReason = forkOverlay?.blockedReason
 	const isBlocked = Boolean(blockedReason)
+	const hasParentEpic = Boolean(forkOverlay?.parentEpicId)
 
 	const optionColor = isBlocked ? theme.overlay0 : theme.green
 	const optionAttrs = isBlocked ? ATTR_DIM : 0
+	const siblingEnabled = !isBlocked && hasParentEpic
+	const siblingColor = siblingEnabled ? theme.green : theme.overlay0
+	const siblingAttrs = siblingEnabled ? 0 : ATTR_DIM
 
 	const modalWidth = 64
 
@@ -89,6 +94,21 @@ export const ForkOverlay = () => {
 							: Create new parent epic
 						</text>
 					</box>
+					<box marginTop={0}>
+						<text fg={siblingColor} attributes={siblingAttrs}>
+							3
+						</text>
+						<text fg={theme.overlay0} attributes={siblingAttrs}>
+							: Create sibling under parent epic
+						</text>
+					</box>
+					{!hasParentEpic && (
+						<box marginTop={0}>
+							<text fg={theme.yellow} attributes={ATTR_DIM}>
+								No parent epic on this bead
+							</text>
+						</box>
+					)}
 					<box marginTop={0}>
 						<text fg={theme.red}>Esc</text>
 						<text fg={theme.overlay0}>: Cancel</text>

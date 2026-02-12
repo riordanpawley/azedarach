@@ -58,9 +58,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					return tasks.find((task) => task.id === taskId)
 				})
 
-			const isForkBlocked = (task: { issue_type: string; parentEpicId?: string }) =>
-				task.issue_type === "epic" || task.parentEpicId !== undefined
-
 			const handleForkError = (error: unknown) =>
 				Effect.gen(function* () {
 					const formatted = formatForToast(error)
@@ -248,15 +245,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
-					const blockedReason = isForkBlocked(task)
-						? "Forking within epics is disabled for now."
-						: undefined
-
 					yield* overlay.push({
 						_tag: "fork",
 						sourceTaskId: task.id,
 						sourceTaskTitle: task.title,
-						blockedReason,
+						parentEpicId: task.parentEpicId,
 					})
 				})
 
@@ -265,11 +258,6 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const task = yield* getTaskById(taskId)
 					if (!task) {
 						yield* toast.show("error", "Fork failed: task not found")
-						return
-					}
-
-					if (isForkBlocked(task)) {
-						yield* toast.show("warning", "Forking within epics is disabled for now")
 						return
 					}
 
@@ -295,17 +283,33 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						return
 					}
 
-					if (isForkBlocked(task)) {
-						yield* toast.show("warning", "Forking within epics is disabled for now")
-						return
-					}
-
 					yield* overlay.push({
 						_tag: "create",
 						title: "Create Parent Epic",
 						initial: { type: "epic", priority: task.priority },
 						lockType: true,
 						context: { _tag: "forkEpic", sourceTaskId: task.id },
+					})
+				}).pipe(Effect.catchAll(handleForkError))
+
+			const forkUnderParent = (taskId: string, parentEpicId: string) =>
+				Effect.gen(function* () {
+					const task = yield* getTaskById(taskId)
+					if (!task) {
+						yield* toast.show("error", "Fork failed: task not found")
+						return
+					}
+
+					if (!parentEpicId) {
+						yield* toast.show("warning", "No parent epic to fork under")
+						return
+					}
+
+					yield* overlay.push({
+						_tag: "create",
+						title: "Create Forked Task",
+						initial: { type: "task", priority: task.priority },
+						context: { _tag: "forkChild", parentEpicId, sourceTaskId: task.id },
 					})
 				}).pipe(Effect.catchAll(handleForkError))
 
@@ -317,6 +321,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 				forkBead,
 				forkFromCurrent,
 				forkWithNewEpic,
+				forkUnderParent,
 			}
 		}),
 	},

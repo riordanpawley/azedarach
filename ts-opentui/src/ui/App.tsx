@@ -34,7 +34,7 @@ import {
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { BulkCleanupOverlay } from "./BulkCleanupOverlay.js"
-import type { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
+import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"

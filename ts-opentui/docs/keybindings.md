@@ -1001,7 +1001,7 @@ After starting Helix, use `Space` `a` to attach to the tmux session.
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `Space` `F` | Fork bead | Creates epic/child structure (disabled for epics or epic children) |
+| `Space` `F` | Fork bead | Create child, new epic, or sibling fork |
 
 ### Attachment Actions
 

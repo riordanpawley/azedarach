@@ -46,6 +46,7 @@ export type Overlay =
 			readonly _tag: "fork"
 			readonly sourceTaskId: string
 			readonly sourceTaskTitle: string
+			readonly parentEpicId?: string
 			readonly blockedReason?: string
 	  }
 	| { readonly _tag: "confirm"; readonly message: string; readonly onConfirm: AnyEffect }

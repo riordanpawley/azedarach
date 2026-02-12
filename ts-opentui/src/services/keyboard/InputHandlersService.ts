@@ -251,6 +251,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 *
 			 * 1 → fork from current (convert to epic + create child)
 			 * 2 → create new parent epic then child
+			 * 3 → create sibling under existing parent epic
 			 * Escape → cancel
 			 */
 			const handleForkInput = (key: string) =>
@@ -267,7 +268,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
-					if (key === "1" || key === "2") {
+					if (key === "1" || key === "2" || key === "3") {
 						if (blockedReason) {
 							yield* toast.show("warning", blockedReason)
 							return true
@@ -278,8 +279,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							yield* taskHandlers.forkFromCurrent(currentOverlay.sourceTaskId)
 							return true
 						}
+						if (key === "2") {
+							yield* taskHandlers.forkWithNewEpic(currentOverlay.sourceTaskId)
+							return true
+						}
 
-						yield* taskHandlers.forkWithNewEpic(currentOverlay.sourceTaskId)
+						const parentEpicId = currentOverlay.parentEpicId
+						if (!parentEpicId) {
+							yield* toast.show("warning", "No parent epic to fork under")
+							return true
+						}
+
+						yield* taskHandlers.forkUnderParent(currentOverlay.sourceTaskId, parentEpicId)
 						return true
 					}
 

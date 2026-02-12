@@ -21,6 +21,9 @@ const TASK_TYPES = ["task", "bug", "feature", "epic", "chore"] as const
 const PRIORITIES = [1, 2, 3, 4] as const
 const ATTR_BOLD = 1
 
+const isTaskType = (value: string) => TASK_TYPES.some((type) => type === value)
+const isPriority = (value: number) => PRIORITIES.some((priority) => priority === value)
+
 /**
  * CreateTaskPrompt component
  *
@@ -28,11 +31,13 @@ const ATTR_BOLD = 1
  * Uses tab/shift-tab to cycle through fields, Enter to submit, Esc to cancel.
  */
 export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
-	const initialTypeIndex = props.initialType
-		? Math.max(0, TASK_TYPES.indexOf(props.initialType))
+	const initialTypeIndex = props.initialType && isTaskType(props.initialType)
+		? Math.max(0, TASK_TYPES.findIndex((type) => type === props.initialType))
 		: 0
 	const initialPriorityIndex =
-		props.initialPriority !== undefined ? Math.max(0, PRIORITIES.indexOf(props.initialPriority)) : 1
+		props.initialPriority !== undefined && isPriority(props.initialPriority)
+			? Math.max(0, PRIORITIES.findIndex((priority) => priority === props.initialPriority))
+			: 1
 
 	const [title, setTitle] = useState(props.initialTitle ?? "")
 	const [typeIndex, setTypeIndex] = useState(initialTypeIndex)
