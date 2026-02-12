@@ -571,7 +571,7 @@ done
 		mode: "action",
 		description: "Cleanup worktree",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.cleanup())),
+			bc.prHandlers.cleanup().pipe(Effect.ensuring(bc.editor.exitToNormal())),
 		),
 	},
 	{
@@ -611,7 +611,7 @@ done
 		mode: "action",
 		description: "Delete bead",
 		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.deleteBead())),
+			bc.taskHandlers.deleteBead().pipe(Effect.ensuring(bc.editor.exitToNormal())),
 		),
 	},
 	{
