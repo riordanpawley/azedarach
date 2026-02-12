@@ -35,6 +35,7 @@ import {
 import { SettingsService } from "../SettingsService.js"
 import { ToastService } from "../ToastService.js"
 import { ViewService } from "../ViewService.js"
+import { TaskHandlersService } from "./TaskHandlersService.js"
 import type { KeyMode } from "./types.js"
 
 // ============================================================================
@@ -56,6 +57,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			ViewService.Default,
 			SettingsService.Default,
 			AppConfig.Default,
+			TaskHandlersService.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -71,6 +73,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const view = yield* ViewService
 			const settings = yield* SettingsService
 			const appConfig = yield* AppConfig
+			const taskHandlers = yield* TaskHandlersService
 
 			// ================================================================
 			// Input Handler Methods
@@ -237,6 +240,60 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}
 
 					// Consume all other keys while overlay is open
+					return true
+				})
+
+			/**
+			 * Handle fork overlay keyboard input
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled
+			 *
+			 * 1 → fork from current (convert to epic + create child)
+			 * 2 → create new parent epic then child
+			 * 3 → create sibling under existing parent epic
+			 * Escape → cancel
+			 */
+			const handleForkInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "fork") {
+						return false
+					}
+
+					const blockedReason = currentOverlay.blockedReason
+
+					if (key === "escape") {
+						yield* overlay.pop()
+						return true
+					}
+
+					if (key === "1" || key === "2" || key === "3") {
+						if (blockedReason) {
+							yield* toast.show("warning", blockedReason)
+							return true
+						}
+
+						yield* overlay.pop()
+						if (key === "1") {
+							yield* taskHandlers.forkFromCurrent(currentOverlay.sourceTaskId)
+							return true
+						}
+						if (key === "2") {
+							yield* taskHandlers.forkWithNewEpic(currentOverlay.sourceTaskId)
+							return true
+						}
+
+						const parentEpicId = currentOverlay.parentEpicId
+						if (!parentEpicId) {
+							yield* toast.show("warning", "No parent epic to fork under")
+							return true
+						}
+
+						yield* taskHandlers.forkUnderParent(currentOverlay.sourceTaskId, parentEpicId)
+						return true
+					}
+
 					return true
 				})
 
@@ -896,6 +953,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleJumpInput,
 				handleConfirmInput,
 				handleMergeChoiceInput,
+				handleForkInput,
 				handleBulkCleanupInput,
 				handleDetailOverlayInput,
 				handleImageAttachInput,

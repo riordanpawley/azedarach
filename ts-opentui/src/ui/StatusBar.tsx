@@ -63,6 +63,7 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "R", action: "Resume" },
 		{ key: "x", action: "Stop" },
 		{ key: "e", action: "Edit" },
+		{ key: "F", action: "Fork" },
 		{ key: "P", action: "PR" },
 		{ key: "d", action: "Delete" },
 		{ key: "Esc", action: "Cancel" },

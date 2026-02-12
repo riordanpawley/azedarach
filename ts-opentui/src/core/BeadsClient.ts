@@ -233,12 +233,14 @@ export interface BeadsClientService {
 			notes?: string
 			priority?: number
 			title?: string
+			type?: string
 			description?: string
 			design?: string
 			acceptance?: string
 			assignee?: string
 			estimate?: number
 			labels?: string[]
+			parent?: string
 		},
 		cwd?: string,
 	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
@@ -691,12 +693,14 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					notes?: string
 					priority?: number
 					title?: string
+					type?: string
 					description?: string
 					design?: string
 					acceptance?: string
 					assignee?: string
 					estimate?: number
 					labels?: string[]
+					parent?: string
 				},
 				cwd?: string,
 			) =>
@@ -715,6 +719,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 					if (fields.title) {
 						args.push("--title", fields.title)
+					}
+					if (fields.type) {
+						args.push("--type", fields.type)
 					}
 					if (fields.description) {
 						args.push("--description", fields.description)
@@ -736,6 +743,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						for (const label of fields.labels) {
 							args.push("--set-labels", label)
 						}
+					}
+					if (fields.parent !== undefined) {
+						args.push("--parent", fields.parent)
 					}
 
 					yield* runBd(args, effectiveCwd)

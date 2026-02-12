@@ -103,6 +103,7 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 |--------------|--------|
 | `Space` `h` | Move selected task(s) to previous column |
 | `Space` `l` | Move selected task(s) to next column |
+| `Space` `F` | Fork bead into epic/child |
 | `Space` `a` | Attach to session (offers merge if behind main) |
 | `Space` `A` | Attach to session inline (not yet implemented) |
 

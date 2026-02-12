@@ -543,6 +543,14 @@ done
 		),
 	},
 	{
+		key: "S-f",
+		mode: "action",
+		description: "Fork bead",
+		action: Effect.suspend(() =>
+			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.forkBead())),
+		),
+	},
+	{
 		key: "S-p",
 		mode: "action",
 		description: "Create PR",

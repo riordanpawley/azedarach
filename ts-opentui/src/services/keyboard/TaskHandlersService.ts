@@ -17,6 +17,7 @@ import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
+import { formatForToast } from "../ErrorFormatter.js"
 import { type Mutation, MutationQueue } from "../MutationQueue.js"
 import { NavigationService } from "../NavigationService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -50,6 +51,19 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const beadEditor = yield* BeadEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
+
+			const getTaskById = (taskId: string) =>
+				Effect.gen(function* () {
+					const tasks = yield* board.getTasks()
+					return tasks.find((task) => task.id === taskId)
+				})
+
+			const handleForkError = (error: unknown) =>
+				Effect.gen(function* () {
+					const formatted = formatForToast(error)
+					yield* Effect.logError(`Fork failed: ${formatted}`, { error })
+					yield* toast.show("error", `Fork failed: ${formatted}`)
+				})
 
 			const doDeleteBead = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
@@ -226,11 +240,88 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 				})
 
+			const forkBead = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
+
+					yield* overlay.push({
+						_tag: "fork",
+						sourceTaskId: task.id,
+						sourceTaskTitle: task.title,
+						parentEpicId: task.parentEpicId,
+					})
+				})
+
+			const forkFromCurrent = (taskId: string) =>
+				Effect.gen(function* () {
+					const task = yield* getTaskById(taskId)
+					if (!task) {
+						yield* toast.show("error", "Fork failed: task not found")
+						return
+					}
+
+					if (task.issue_type !== "epic") {
+						yield* toast.show("info", `Converting ${task.id} to epic...`)
+						yield* beadsClient.update(task.id, { type: "epic" })
+						yield* board.requestRefresh()
+					}
+
+					yield* overlay.push({
+						_tag: "create",
+						title: "Create Forked Task",
+						initial: { type: "task", priority: task.priority },
+						context: { _tag: "forkChild", parentEpicId: task.id, sourceTaskId: task.id },
+					})
+				}).pipe(Effect.catchAll(handleForkError))
+
+			const forkWithNewEpic = (taskId: string) =>
+				Effect.gen(function* () {
+					const task = yield* getTaskById(taskId)
+					if (!task) {
+						yield* toast.show("error", "Fork failed: task not found")
+						return
+					}
+
+					yield* overlay.push({
+						_tag: "create",
+						title: "Create Parent Epic",
+						initial: { type: "epic", priority: task.priority },
+						lockType: true,
+						context: { _tag: "forkEpic", sourceTaskId: task.id },
+					})
+				}).pipe(Effect.catchAll(handleForkError))
+
+			const forkUnderParent = (taskId: string, parentEpicId: string) =>
+				Effect.gen(function* () {
+					const task = yield* getTaskById(taskId)
+					if (!task) {
+						yield* toast.show("error", "Fork failed: task not found")
+						return
+					}
+
+					if (!parentEpicId) {
+						yield* toast.show("warning", "No parent epic to fork under")
+						return
+					}
+
+					yield* overlay.push({
+						_tag: "create",
+						title: "Create Forked Task",
+						initial: { type: "task", priority: task.priority },
+						context: { _tag: "forkChild", parentEpicId, sourceTaskId: task.id },
+					})
+				}).pipe(Effect.catchAll(handleForkError))
+
 			return {
 				editBead,
 				createBead,
 				deleteBead,
 				moveTasksToColumn,
+				forkBead,
+				forkFromCurrent,
+				forkWithNewEpic,
+				forkUnderParent,
 			}
 		}),
 	},

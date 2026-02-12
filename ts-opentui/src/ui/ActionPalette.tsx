@@ -53,6 +53,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const workflowMode = props.workflowMode ?? "origin"
 	const drillDownEpicId = props.drillDownEpicId
 	const parentEpicId = props.task?.parentEpicId
+	const issueType = props.task?.issue_type
+	const isEpic = issueType === "epic"
 
 	// Check if this is an orphaned worktree (worktree exists but no session)
 	const isOrphanedWorktree = hasWorktree && sessionState === "idle"
@@ -92,6 +94,8 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return true
 			case "i": // Image attach - always available
 				return true
+			case "F": // Fork bead - only if not epic and not epic child
+				return props.task !== undefined && !isEpic && parentEpicId === undefined
 			case "O": // Open PR - only if task has a PR
 				return props.task?.hasPR === true
 			case "H": // Helix editor - only if worktree exists (active session or orphaned)
@@ -200,6 +204,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				{/* Task actions */}
 				<ActionLine keyName="H" description="helix" />
 				<ActionLine keyName="i" description="image" />
+				<ActionLine keyName="F" description="fork" />
 				<text fg={theme.surface1}>{"─────────"}</text>
 
 				{/* Git/PR */}
