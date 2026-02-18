@@ -61,6 +61,10 @@ export class ToastService extends Effect.Service<ToastService>()("ToastService",
 			// Methods
 			show: (type: Toast["type"], message: string) =>
 				Effect.gen(function* () {
+					if (type === "error") {
+						yield* Effect.logError(`Failure toast: ${message}`)
+					}
+
 					const toast: Toast = Data.struct({
 						id: crypto.randomUUID(),
 						type,
