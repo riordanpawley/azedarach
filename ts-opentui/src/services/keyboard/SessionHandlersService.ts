@@ -18,7 +18,12 @@ import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
-import { getWorktreePath, WINDOW_NAMES } from "../../core/paths.js"
+import {
+	getBeadSessionName,
+	getWorktreePath,
+	parseSessionName,
+	WINDOW_NAMES,
+} from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { WorktreeManager } from "../../core/WorktreeManager.js"
@@ -334,10 +339,9 @@ Note: You're running with ${chatModel} for fast, cheap discussion. When ready to
 What would you like to discuss?`
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 
-					const sessionName = task.id
-					const hasSession = yield* tmux.hasSession(sessionName)
+					const sessionName = yield* findAiSession(task.id)
 
-					if (!hasSession) {
+					if (!sessionName) {
 						yield* toast.show(
 							"error",
 							`No session for ${task.id} - press Space+s to start a session first`,
@@ -360,8 +364,21 @@ What would you like to discuss?`
 
 			const findAiSession = (beadId: string) =>
 				Effect.gen(function* () {
-					const hasSession = yield* tmux.hasSession(beadId)
-					return hasSession ? beadId : null
+					const canonicalSessionName = getBeadSessionName(beadId)
+					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
+					if (hasCanonicalSession) {
+						return canonicalSessionName
+					}
+
+					const sessions = yield* tmux.listSessions()
+					for (const session of sessions) {
+						const parsed = parseSessionName(session.name)
+						if (parsed?.type === "bead" && parsed.beadId === beadId) {
+							return session.name
+						}
+					}
+
+					return null
 				})
 
 			const doAttach = (beadId: string) =>
@@ -605,7 +622,8 @@ What would you like to discuss?`
 					const sessionConfig = yield* appConfig.getSessionConfig()
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
 					const shell = sessionConfig.shell
-					const sessionName = task.id
+					const existingSessionName = yield* findAiSession(task.id)
+					const sessionName = existingSessionName ?? getBeadSessionName(task.id)
 
 					// Check if session already exists
 					const hasSession = yield* tmux.hasSession(sessionName)

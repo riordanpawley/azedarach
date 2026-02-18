@@ -13,10 +13,10 @@
 import { Args, Command, Options } from "@effect/cli"
 import { Otlp } from "@effect/opentelemetry"
 import {
-	Command as PlatformCommand,
 	FetchHttpClient,
 	FileSystem,
 	Path,
+	Command as PlatformCommand,
 	PlatformLogger,
 } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
@@ -31,7 +31,7 @@ import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { getBeadSessionName } from "../core/paths.js"
+import { getBeadSessionName, parseSessionName } from "../core/paths.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -287,14 +287,8 @@ const attachHandler = (args: {
 			yield* Console.log(`Project: ${cwd}`)
 		}
 
-		// Check if session exists
-		const sessionName = getBeadSessionName(args.issueId)
-		const command = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
-		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
-			Effect.catchAll(() => Effect.succeed(1)),
-		)
-
-		if (exitCode !== 0) {
+		const sessionName = yield* findSessionByBeadId(args.issueId)
+		if (!sessionName) {
 			yield* Console.error(`No session found for ${args.issueId}`)
 			yield* Console.log(`Start a new session with: az start ${args.issueId}`)
 			return yield* Effect.fail(new Error(`Session not found: ${args.issueId}`))
@@ -344,14 +338,8 @@ const killHandler = (args: {
 
 		yield* Console.log(`Killing session for issue: ${args.issueId}`)
 
-		// Check if session exists
-		const sessionName = getBeadSessionName(args.issueId)
-		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
-		const exitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
-			Effect.catchAll(() => Effect.succeed(1)),
-		)
-
-		if (exitCode !== 0) {
+		const sessionName = yield* findSessionByBeadId(args.issueId)
+		if (!sessionName) {
 			yield* Console.log(`No session found for ${args.issueId}`)
 			return
 		}
@@ -405,14 +393,22 @@ const statusHandler = (args: {
 
 		for (const line of lines) {
 			const [name, _created, attached, status] = line.split("|")
-			// Only show sessions that look like bead IDs (contain a dash, short format)
-			if (name?.includes("-") && name.length < 20) {
+			if (!name) {
+				continue
+			}
+
+			const parsed = parseSessionName(name)
+			if (parsed?.type === "bead") {
 				sessionCount++
 				const statusDisplay = status || "unknown"
 				const attachedDisplay = attached === "attached" ? " (attached)" : ""
-				yield* Console.log(`  ${name} - ${statusDisplay.toUpperCase()}${attachedDisplay}`)
+				yield* Console.log(`  ${parsed.beadId} - ${statusDisplay.toUpperCase()}${attachedDisplay}`)
 
 				if (args.verbose) {
+					if (name !== parsed.beadId) {
+						yield* Console.log(`    Session: ${name}`)
+					}
+
 					// Get worktree path if available
 					const wtCommand = PlatformCommand.make(
 						"tmux",
@@ -488,20 +484,24 @@ const gateHandler = (args: {
 		yield* Console.log(`Running quality gates for: ${args.issueId}`)
 
 		// Find the worktree path for this task
-		const sessionName = getBeadSessionName(args.issueId)
-		const wtCommand = PlatformCommand.make(
-			"tmux",
-			"display-message",
-			"-t",
-			sessionName,
-			"-p",
-			"#{pane_current_path}",
-		)
+		const sessionName = yield* findSessionByBeadId(args.issueId)
+		let worktreePath = ""
 
-		let worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
-			Effect.map((s) => s.trim()),
-			Effect.catchAll(() => Effect.succeed("")),
-		)
+		if (sessionName) {
+			const wtCommand = PlatformCommand.make(
+				"tmux",
+				"display-message",
+				"-t",
+				sessionName,
+				"-p",
+				"#{pane_current_path}",
+			)
+
+			worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
+				Effect.map((s) => s.trim()),
+				Effect.catchAll(() => Effect.succeed("")),
+			)
+		}
 
 		// If no active session, try to find worktree by convention
 		if (!worktreePath) {
@@ -658,18 +658,47 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 	}
 }
 
+const listTmuxSessionNames = Effect.gen(function* () {
+	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
+	const output = yield* PlatformCommand.string(listCommand).pipe(
+		Effect.catchAll(() => Effect.succeed("")),
+	)
+
+	return output
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+})
+
+const findSessionByBeadId = (beadId: string) =>
+	Effect.gen(function* () {
+		const canonicalSessionName = getBeadSessionName(beadId)
+		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
+		const canonicalExitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
+			Effect.catchAll(() => Effect.succeed(1)),
+		)
+
+		if (canonicalExitCode === 0) {
+			return canonicalSessionName
+		}
+
+		const sessionNames = yield* listTmuxSessionNames
+		for (const sessionName of sessionNames) {
+			const parsed = parseSessionName(sessionName)
+			if (parsed?.type === "bead" && parsed.beadId === beadId) {
+				return sessionName
+			}
+		}
+
+		return null
+	})
+
 const findAiSessionByBeadId = (beadId: string) =>
 	Effect.gen(function* () {
 		yield* Console.log(`[DEBUG] findAiSessionByBeadId: beadId=${beadId}`)
 
-		const sessionName = getBeadSessionName(beadId)
-		yield* Console.log(`[DEBUG] Checking for session: ${sessionName}`)
-		const command = PlatformCommand.make("tmux", "has-session", "-t", sessionName)
-		const exitCode = yield* PlatformCommand.exitCode(command).pipe(
-			Effect.catchAll(() => Effect.succeed(1)),
-		)
-
-		if (exitCode === 0) {
+		const sessionName = yield* findSessionByBeadId(beadId)
+		if (sessionName) {
 			yield* Console.log(`[DEBUG] Found session: ${sessionName}`)
 			return sessionName
 		}

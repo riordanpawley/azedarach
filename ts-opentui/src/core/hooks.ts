@@ -8,6 +8,8 @@
  * (the Effect-based merge is in WorktreeManager which has the services).
  */
 
+import { getBeadSessionName } from "./paths.js"
+
 /**
  * Compute the absolute path to the project bin directory at module load time.
  *
@@ -82,8 +84,9 @@ export const getAzPreCompactPath = (): string => AZ_PRE_COMPACT_PATH
  */
 const buildNotifyCommand = (event: string, beadId: string, azNotifyPath?: string): string => {
 	const notifyPath = azNotifyPath ?? getAzNotifyPath()
+	const sessionName = getBeadSessionName(beadId)
 	// Use the shell script directly - no bun/node overhead
-	return `"${notifyPath}" ${event} ${beadId}`
+	return `"${notifyPath}" ${event} "${beadId}" "${sessionName}"`
 }
 
 /**
