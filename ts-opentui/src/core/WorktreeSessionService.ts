@@ -106,7 +106,7 @@ export interface BuildTmuxSessionFromBeadOptions {
  * Result of building a tmux session from a bead
  */
 export interface BuildTmuxSessionFromBeadResult {
-	/** The tmux session name (same as beadId) */
+	/** The tmux session name (canonical encoding of beadId) */
 	readonly sessionName: string
 	/** The tmux target (sessionName:windowName) */
 	readonly target: string
@@ -140,14 +140,14 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 // Service Implementation
 // ============================================================================
 
-	export class WorktreeSessionService extends Effect.Service<WorktreeSessionService>()(
-		"WorktreeSessionService",
-		{
-			dependencies: [TmuxService.Default, AppConfig.Default, DiagnosticsService.Default],
-			effect: Effect.gen(function* () {
-				const tmux = yield* TmuxService
-				const appConfig = yield* AppConfig
-				const diagnostics = yield* DiagnosticsService
+export class WorktreeSessionService extends Effect.Service<WorktreeSessionService>()(
+	"WorktreeSessionService",
+	{
+		dependencies: [TmuxService.Default, AppConfig.Default, DiagnosticsService.Default],
+		effect: Effect.gen(function* () {
+			const tmux = yield* TmuxService
+			const appConfig = yield* AppConfig
+			const diagnostics = yield* DiagnosticsService
 
 			const waitForTmuxOption = (sessionName: string, optionKey: string, errorMessage: string) =>
 				Effect.retry(
@@ -225,125 +225,125 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 							const {
 								beadId,
 								projectPath,
-							windowName,
-							command,
-							cwd,
-							initCommands,
-							tmuxPrefix,
-							backgroundTasks,
-						} = options
+								windowName,
+								command,
+								cwd,
+								initCommands,
+								tmuxPrefix,
+								backgroundTasks,
+							} = options
 
-						// Use canonical path functions instead of inline computation
-						const sessionName = getBeadSessionName(beadId)
-						const worktreePath = getWorktreePath(projectPath, beadId)
-						const effectiveCwd = cwd ?? worktreePath
+							// Use canonical path functions instead of inline computation
+							const sessionName = getBeadSessionName(beadId)
+							const worktreePath = getWorktreePath(projectPath, beadId)
+							const effectiveCwd = cwd ?? worktreePath
 
-						// Create or get the session
-						yield* Effect.gen(function* () {
-							const exists = yield* tmux.hasSession(sessionName)
+							// Create or get the session
+							yield* Effect.gen(function* () {
+								const exists = yield* tmux.hasSession(sessionName)
+								const sessionConfig = yield* appConfig.getSessionConfig()
+								const shell = sessionConfig.shell
+
+								if (!exists) {
+									yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
+									yield* tmux.newSession(sessionName, {
+										cwd: worktreePath,
+										command: `${shell} -i`,
+										prefix: tmuxPrefix ?? sessionConfig.tmuxPrefix,
+										azOptions: {
+											worktreePath,
+											projectPath,
+										},
+									})
+
+									yield* waitForShellReady(sessionName, "@az_shell_ready")
+
+									if (initCommands && initCommands.length > 0) {
+										for (const cmd of initCommands) {
+											yield* tmux.sendKeys(sessionName, cmd)
+										}
+									}
+
+									const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+									yield* tmux.sendKeys(sessionName, marker)
+
+									yield* waitForTmuxOption(
+										sessionName,
+										"@az_init_done",
+										`Init commands not complete for session ${sessionName}`,
+									)
+
+									// Spawn background tasks in separate windows
+									const tasks = backgroundTasks ?? []
+									yield* Effect.forEach(
+										tasks,
+										(task, i) =>
+											Effect.gen(function* () {
+												const taskWindowName = `task-${i + 1}`
+												yield* Effect.log(
+													`Spawning background task window: ${taskWindowName} (${task})`,
+												)
+
+												yield* tmux.newWindow(sessionName, taskWindowName, {
+													cwd: worktreePath,
+													command: `${shell} -i`,
+												})
+
+												const target = `${sessionName}:${taskWindowName}`
+												yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+												if (initCommands && initCommands.length > 0) {
+													for (const initCmd of initCommands) {
+														yield* tmux.sendKeys(target, initCmd)
+													}
+												}
+
+												yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+												yield* tmux.sendKeys(target, task)
+											}),
+										{ concurrency: "unbounded" },
+									)
+								}
+
+								return sessionName
+							})
+
+							// Ensure the window exists
+							const target = `${sessionName}:${windowName}`
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const shell = sessionConfig.shell
 
-							if (!exists) {
-								yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
-								yield* tmux.newSession(sessionName, {
-									cwd: worktreePath,
+							const windowExists = yield* tmux.hasWindow(sessionName, windowName)
+
+							if (!windowExists) {
+								yield* tmux.newWindow(sessionName, windowName, {
+									cwd: effectiveCwd,
 									command: `${shell} -i`,
-									prefix: tmuxPrefix ?? sessionConfig.tmuxPrefix,
-									azOptions: {
-										worktreePath,
-										projectPath,
-									},
 								})
 
-								yield* waitForShellReady(sessionName, "@az_shell_ready")
+								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
-								if (initCommands && initCommands.length > 0) {
-									for (const cmd of initCommands) {
-										yield* tmux.sendKeys(sessionName, cmd)
-									}
-								}
+								const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+								yield* tmux.sendKeys(target, waitCmd)
 
-								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
-								yield* tmux.sendKeys(sessionName, marker)
+								yield* Effect.log(`[buildTmuxSessionFromBead] Shell ready for ${target}`)
 
-								yield* waitForTmuxOption(
-									sessionName,
-									"@az_init_done",
-									`Init commands not complete for session ${sessionName}`,
+								yield* tmux.sendKeys(target, command)
+							} else {
+								yield* Effect.log(
+									`[buildTmuxSessionFromBead] Window ${target} exists, sending command`,
 								)
-
-								// Spawn background tasks in separate windows
-								const tasks = backgroundTasks ?? []
-								yield* Effect.forEach(
-									tasks,
-									(task, i) =>
-										Effect.gen(function* () {
-											const taskWindowName = `task-${i + 1}`
-											yield* Effect.log(
-												`Spawning background task window: ${taskWindowName} (${task})`,
-											)
-
-											yield* tmux.newWindow(sessionName, taskWindowName, {
-												cwd: worktreePath,
-												command: `${shell} -i`,
-											})
-
-											const target = `${sessionName}:${taskWindowName}`
-											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
-
-											if (initCommands && initCommands.length > 0) {
-												for (const initCmd of initCommands) {
-													yield* tmux.sendKeys(target, initCmd)
-												}
-											}
-
-											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
-											yield* tmux.sendKeys(target, task)
-										}),
-									{ concurrency: "unbounded" },
-								)
+								yield* tmux.selectWindow(sessionName, windowName)
+								yield* tmux.sendKeys(target, command)
 							}
 
-							return sessionName
-						})
-
-						// Ensure the window exists
-						const target = `${sessionName}:${windowName}`
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const shell = sessionConfig.shell
-
-						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
-
-						if (!windowExists) {
-							yield* tmux.newWindow(sessionName, windowName, {
-								cwd: effectiveCwd,
-								command: `${shell} -i`,
-							})
-
-							yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
-
-							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
-							yield* tmux.sendKeys(target, waitCmd)
-
-							yield* Effect.log(`[buildTmuxSessionFromBead] Shell ready for ${target}`)
-
-							yield* tmux.sendKeys(target, command)
-						} else {
-							yield* Effect.log(
-								`[buildTmuxSessionFromBead] Window ${target} exists, sending command`,
-							)
-							yield* tmux.selectWindow(sessionName, windowName)
-							yield* tmux.sendKeys(target, command)
-						}
-
-						return {
-							sessionName,
-							target,
-							worktreePath,
-						}
-					}).pipe(Effect.withSpan("tmux.buildSession")),
-				),
+							return {
+								sessionName,
+								target,
+								worktreePath,
+							}
+						}).pipe(Effect.withSpan("tmux.buildSession")),
+					),
 
 				getOrCreateSession: (
 					beadId: string,
@@ -363,80 +363,80 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 							details: `beadId=${beadId}`,
 						},
 						Effect.gen(function* () {
-							const sessionName = beadId
+							const sessionName = getBeadSessionName(beadId)
 							const exists = yield* tmux.hasSession(sessionName)
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const shell = sessionConfig.shell
 
-						if (!exists) {
-							yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
-							yield* tmux.newSession(sessionName, {
-								cwd: options.worktreePath,
-								command: `${shell} -i`,
-								prefix: options.tmuxPrefix ?? sessionConfig.tmuxPrefix,
-								azOptions: {
-									worktreePath: options.worktreePath,
-									projectPath: options.projectPath,
-								},
-							})
+							if (!exists) {
+								yield* Effect.log(`Creating tmux session for bead: ${sessionName}`)
+								yield* tmux.newSession(sessionName, {
+									cwd: options.worktreePath,
+									command: `${shell} -i`,
+									prefix: options.tmuxPrefix ?? sessionConfig.tmuxPrefix,
+									azOptions: {
+										worktreePath: options.worktreePath,
+										projectPath: options.projectPath,
+									},
+								})
 
-							yield* waitForShellReady(sessionName, "@az_shell_ready")
+								yield* waitForShellReady(sessionName, "@az_shell_ready")
 
-							if (options.initCommands && options.initCommands.length > 0) {
-								for (const cmd of options.initCommands) {
-									yield* tmux.sendKeys(sessionName, cmd)
+								if (options.initCommands && options.initCommands.length > 0) {
+									for (const cmd of options.initCommands) {
+										yield* tmux.sendKeys(sessionName, cmd)
+									}
 								}
+
+								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+								yield* tmux.sendKeys(sessionName, marker)
+
+								// Wait for init commands to complete before allowing window creation
+								// Wait up to 60 seconds (300 * 200ms)
+								yield* waitForTmuxOption(
+									sessionName,
+									"@az_init_done",
+									`Init commands not complete for session ${sessionName}`,
+								)
+
+								// Spawn background tasks in separate windows after init completes
+								// Run in parallel since each window is independent
+								const backgroundTasks = options.backgroundTasks ?? []
+								yield* Effect.forEach(
+									backgroundTasks,
+									(task, i) =>
+										Effect.gen(function* () {
+											const windowName = `task-${i + 1}`
+											yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+
+											// Create a new window for the background task
+											yield* tmux.newWindow(sessionName, windowName, {
+												cwd: options.worktreePath,
+												command: `${shell} -i`,
+											})
+
+											const target = `${sessionName}:${windowName}`
+											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+											// Run initCommands in the background window (environment setup)
+											if (options.initCommands && options.initCommands.length > 0) {
+												for (const initCmd of options.initCommands) {
+													yield* tmux.sendKeys(target, initCmd)
+												}
+											}
+
+											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+
+											// Run the background task command
+											yield* tmux.sendKeys(target, task)
+										}),
+									{ concurrency: "unbounded" },
+								)
 							}
 
-							const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
-							yield* tmux.sendKeys(sessionName, marker)
-
-							// Wait for init commands to complete before allowing window creation
-							// Wait up to 60 seconds (300 * 200ms)
-							yield* waitForTmuxOption(
-								sessionName,
-								"@az_init_done",
-								`Init commands not complete for session ${sessionName}`,
-							)
-
-							// Spawn background tasks in separate windows after init completes
-							// Run in parallel since each window is independent
-							const backgroundTasks = options.backgroundTasks ?? []
-							yield* Effect.forEach(
-								backgroundTasks,
-								(task, i) =>
-									Effect.gen(function* () {
-										const windowName = `task-${i + 1}`
-										yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
-
-										// Create a new window for the background task
-										yield* tmux.newWindow(sessionName, windowName, {
-											cwd: options.worktreePath,
-											command: `${shell} -i`,
-										})
-
-										const target = `${sessionName}:${windowName}`
-										yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
-
-										// Run initCommands in the background window (environment setup)
-										if (options.initCommands && options.initCommands.length > 0) {
-											for (const initCmd of options.initCommands) {
-												yield* tmux.sendKeys(target, initCmd)
-											}
-										}
-
-										yield* tmux.setWindowOption(target, "remain-on-exit", "off")
-
-										// Run the background task command
-										yield* tmux.sendKeys(target, task)
-									}),
-								{ concurrency: "unbounded" },
-							)
-						}
-
-						return sessionName
-					}).pipe(Effect.withSpan("tmux.getOrCreateSession")),
-				),
+							return sessionName
+						}).pipe(Effect.withSpan("tmux.getOrCreateSession")),
+					),
 
 				ensureWindow: (
 					sessionName: string,
@@ -459,40 +459,40 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 							const shell = sessionConfig.shell
 							const target = `${sessionName}:${windowName}`
 
-						const windowExists = yield* tmux.hasWindow(sessionName, windowName)
+							const windowExists = yield* tmux.hasWindow(sessionName, windowName)
 
-						if (!windowExists) {
-							yield* tmux.newWindow(sessionName, windowName, {
-								cwd: options.cwd,
-								command: `${shell} -i`,
-							})
+							if (!windowExists) {
+								yield* tmux.newWindow(sessionName, windowName, {
+									cwd: options.cwd,
+									command: `${shell} -i`,
+								})
 
-							yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
+								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
-							const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
-							yield* tmux.sendKeys(target, waitCmd)
+								const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+								yield* tmux.sendKeys(target, waitCmd)
 
-							yield* Effect.log(
-								`[ensureWindow] Shell ready for ${target}, waiting for init to finish`,
-							)
+								yield* Effect.log(
+									`[ensureWindow] Shell ready for ${target}, waiting for init to finish`,
+								)
 
-							if (options.initCommands && options.initCommands.length > 0) {
-								for (const cmd of options.initCommands) {
-									yield* tmux.sendKeys(target, cmd)
+								if (options.initCommands && options.initCommands.length > 0) {
+									for (const cmd of options.initCommands) {
+										yield* tmux.sendKeys(target, cmd)
+									}
 								}
+
+								yield* tmux.sendKeys(target, options.command)
+							} else {
+								// Session recovered but tool isn't running - send command to existing window
+								yield* Effect.log(`[ensureWindow] Window ${target} exists, sending command`)
+								yield* tmux.selectWindow(sessionName, windowName)
+								yield* tmux.sendKeys(target, options.command)
 							}
 
-							yield* tmux.sendKeys(target, options.command)
-						} else {
-							// Session recovered but tool isn't running - send command to existing window
-							yield* Effect.log(`[ensureWindow] Window ${target} exists, sending command`)
-							yield* tmux.selectWindow(sessionName, windowName)
-							yield* tmux.sendKeys(target, options.command)
-						}
-
-						return target
-					}).pipe(Effect.withSpan("tmux.ensureWindow")),
-				),
+							return target
+						}).pipe(Effect.withSpan("tmux.ensureWindow")),
+					),
 
 				create: (
 					options: CreateWorktreeSessionOptions,
@@ -501,126 +501,128 @@ export class ShellNotReadyError extends Data.TaggedError("ShellNotReadyError")<{
 					WorktreeSessionError | TmuxError | SessionNotFoundError,
 					CommandExecutor.CommandExecutor
 				> =>
-					diagnostics.measure(
-						{
-							source: "WorktreeSessionService",
-							name: "createSession",
-							thresholdMs: 500,
-							details: `session=${options.sessionName}`,
-						},
-						Effect.gen(function* () {
-							// Get session config for shell and tmuxPrefix defaults
-							const sessionConfig = yield* appConfig.getSessionConfig()
-
-							const {
-								sessionName,
-								worktreePath,
-								projectPath,
-								command,
-								cwd = worktreePath,
-								tmuxPrefix = sessionConfig.tmuxPrefix,
-								initCommands = [],
-								backgroundTasks = [],
-							} = options
-
-						// Get shell from config (for interactive mode)
-						const shell = sessionConfig.shell
-
-						yield* Effect.log(`Creating tmux session: ${sessionName}`)
-
-						// Create tmux session with an interactive shell
-						// The -i flag loads .zshrc/.bashrc which sets up direnv hooks
-						yield* tmux.newSession(sessionName, {
-							cwd,
-							command: `${shell} -i`,
-							prefix: tmuxPrefix,
-							// Store worktree and project paths in tmux session options
-							// Enables crash recovery - TmuxSessionMonitor can reconstruct state from tmux
-							azOptions: {
-								worktreePath,
-								projectPath,
+					diagnostics
+						.measure(
+							{
+								source: "WorktreeSessionService",
+								name: "createSession",
+								thresholdMs: 500,
+								details: `session=${options.sessionName}`,
 							},
-						})
+							Effect.gen(function* () {
+								// Get session config for shell and tmuxPrefix defaults
+								const sessionConfig = yield* appConfig.getSessionConfig()
 
-						// Give shell time to initialize
-						yield* Effect.sleep("300 millis")
+								const {
+									sessionName,
+									worktreePath,
+									projectPath,
+									command,
+									cwd = worktreePath,
+									tmuxPrefix = sessionConfig.tmuxPrefix,
+									initCommands = [],
+									backgroundTasks = [],
+								} = options
 
-						// Send each init command via send-keys
-						// Zsh queues them and executes in order, with prompt appearing
-						// after each - this triggers direnv hooks between commands
-						for (const initCmd of initCommands) {
-							yield* Effect.log(`Queuing init command: ${sessionName}:${initCmd}`)
-							yield* tmux.sendKeys(sessionName, initCmd)
-						}
+								// Get shell from config (for interactive mode)
+								const shell = sessionConfig.shell
 
-						// Signal init completion
-						// We send this to the shell so it runs AFTER initCommands complete
-						const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
-						yield* tmux.sendKeys(sessionName, marker)
+								yield* Effect.log(`Creating tmux session: ${sessionName}`)
 
-						// Send the main command last
-						yield* Effect.log(`Queuing main command: ${sessionName}:${command}`)
-						yield* tmux.sendKeys(sessionName, command)
+								// Create tmux session with an interactive shell
+								// The -i flag loads .zshrc/.bashrc which sets up direnv hooks
+								yield* tmux.newSession(sessionName, {
+									cwd,
+									command: `${shell} -i`,
+									prefix: tmuxPrefix,
+									// Store worktree and project paths in tmux session options
+									// Enables crash recovery - TmuxSessionMonitor can reconstruct state from tmux
+									azOptions: {
+										worktreePath,
+										projectPath,
+									},
+								})
 
-						// Spawn background tasks in separate windows
-						// Run in parallel since each window is independent
-						yield* Effect.forEach(
-							backgroundTasks,
-							(task, i) =>
-								Effect.gen(function* () {
-									const windowName = `task-${i + 1}`
-									yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
+								// Give shell time to initialize
+								yield* Effect.sleep("300 millis")
 
-									// Create a new window for the background task
-									yield* tmux.newWindow(sessionName, windowName, {
-										cwd,
-										command: `${shell} -i`,
-									})
+								// Send each init command via send-keys
+								// Zsh queues them and executes in order, with prompt appearing
+								// after each - this triggers direnv hooks between commands
+								for (const initCmd of initCommands) {
+									yield* Effect.log(`Queuing init command: ${sessionName}:${initCmd}`)
+									yield* tmux.sendKeys(sessionName, initCmd)
+								}
 
-									// Give shell time to initialize in the new window
-									yield* Effect.sleep("300 millis")
+								// Signal init completion
+								// We send this to the shell so it runs AFTER initCommands complete
+								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+								yield* tmux.sendKeys(sessionName, marker)
 
-									const target = `${sessionName}:${windowName}`
+								// Send the main command last
+								yield* Effect.log(`Queuing main command: ${sessionName}:${command}`)
+								yield* tmux.sendKeys(sessionName, command)
 
-									// Background tasks MUST wait for main session init to complete.
-									// We use a shell loop to wait for the @az_init_done option to be set.
-									const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
-									yield* tmux.sendKeys(target, waitCmd)
+								// Spawn background tasks in separate windows
+								// Run in parallel since each window is independent
+								yield* Effect.forEach(
+									backgroundTasks,
+									(task, i) =>
+										Effect.gen(function* () {
+											const windowName = `task-${i + 1}`
+											yield* Effect.log(`Spawning background task window: ${windowName} (${task})`)
 
-									// Run initCommands in the background window (environment only)
-									for (const initCmd of initCommands) {
-										yield* tmux.sendKeys(target, initCmd)
-									}
+											// Create a new window for the background task
+											yield* tmux.newWindow(sessionName, windowName, {
+												cwd,
+												command: `${shell} -i`,
+											})
 
-									yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+											// Give shell time to initialize in the new window
+											yield* Effect.sleep("300 millis")
 
-									// Run the background task command
-									yield* tmux.sendKeys(target, task)
-								}),
-							{ concurrency: "unbounded" },
+											const target = `${sessionName}:${windowName}`
+
+											// Background tasks MUST wait for main session init to complete.
+											// We use a shell loop to wait for the @az_init_done option to be set.
+											const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+											yield* tmux.sendKeys(target, waitCmd)
+
+											// Run initCommands in the background window (environment only)
+											for (const initCmd of initCommands) {
+												yield* tmux.sendKeys(target, initCmd)
+											}
+
+											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
+
+											// Run the background task command
+											yield* tmux.sendKeys(target, task)
+										}),
+									{ concurrency: "unbounded" },
+								)
+
+								return {
+									sessionName,
+									worktreePath,
+								}
+							}).pipe(Effect.withSpan("tmux.createSession")),
 						)
-
-						return {
-							sessionName,
-							worktreePath,
-						}
-					}).pipe(Effect.withSpan("tmux.createSession")),
-				).pipe(
-						Effect.mapError((e) => {
-							if (
-								e instanceof WorktreeSessionError ||
-								e instanceof TmuxError ||
-								e instanceof SessionNotFoundError
-							) {
-								return e
-							}
-							return new WorktreeSessionError({
-								message: String(e),
-								sessionName: options.sessionName,
-								worktreePath: options.worktreePath,
-							})
-						}),
-					),
+						.pipe(
+							Effect.mapError((e) => {
+								if (
+									e instanceof WorktreeSessionError ||
+									e instanceof TmuxError ||
+									e instanceof SessionNotFoundError
+								) {
+									return e
+								}
+								return new WorktreeSessionError({
+									message: String(e),
+									sessionName: options.sessionName,
+									worktreePath: options.worktreePath,
+								})
+							}),
+						),
 
 				/**
 				 * Check if a tmux session exists

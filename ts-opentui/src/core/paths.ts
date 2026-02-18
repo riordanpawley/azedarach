@@ -1,8 +1,8 @@
 /**
  * Pure path utility functions that don't require Path service
  *
- * Session naming convention: [beadId]
- * - Each bead has exactly one tmux session
+ * Session naming convention: canonical tmux-safe encoding of beadId
+ * - Each bead has exactly one tmux session (with backwards-compatible parsing)
  * - Windows within the session handle different concerns (code, dev, etc.)
  */
 
@@ -45,18 +45,50 @@ export function parseDevWindowName(windowName: string): string | undefined {
 	return undefined
 }
 
+const SESSION_ESCAPE_PREFIX = "_x"
+const SESSION_ESCAPE_SUFFIX = "_"
+const SAFE_SESSION_CHAR_PATTERN = /^[A-Za-z0-9-]$/
+
+const encodeSessionChar = (char: string): string => {
+	if (SAFE_SESSION_CHAR_PATTERN.test(char)) {
+		return char
+	}
+
+	const codepoint = char.codePointAt(0)
+	if (codepoint === undefined) {
+		return char
+	}
+
+	return `${SESSION_ESCAPE_PREFIX}${codepoint.toString(16)}${SESSION_ESCAPE_SUFFIX}`
+}
+
 /**
- * Generate tmux session name for a bead
+ * Generate canonical tmux session name for a bead.
  *
- * Returns exactly the beadId for consistent naming across:
- * - Session creation (WorktreeSessionService)
- * - Session monitoring (TmuxSessionMonitor)
- * - Hook notifications
- *
- * @param beadId - The bead ID
+ * Tmux session names must be shell-safe and cannot rely on raw bead IDs
+ * containing punctuation (for example, dots). We keep the mapping bijective
+ * by escaping unsupported characters as _x<hex>_ tokens.
  */
 export function getBeadSessionName(beadId: string): string {
-	return beadId
+	return [...beadId].map(encodeSessionChar).join("")
+}
+
+/**
+ * Decode a canonical tmux bead session name back to the original bead ID.
+ */
+export function decodeBeadSessionName(sessionName: string): string {
+	return sessionName.replace(/_x([0-9a-f]+)_/gi, (_full, hex: string) => {
+		const codepoint = Number.parseInt(hex, 16)
+		if (!Number.isFinite(codepoint)) {
+			return _full
+		}
+
+		try {
+			return String.fromCodePoint(codepoint)
+		} catch {
+			return _full
+		}
+	})
 }
 
 /**
@@ -69,6 +101,21 @@ export type SessionType = "bead"
  */
 export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
 
+const BEAD_ID_PATTERN = /^[A-Za-z0-9]+[.-][A-Za-z0-9._-]+$/
+
+const decodeLegacyNormalizedBeadId = (sessionName: string): string | undefined => {
+	if (sessionName.includes(".") || !sessionName.includes("_")) {
+		return undefined
+	}
+
+	const legacyDotBeadId = sessionName.replaceAll("_", ".")
+	if (BEAD_ID_PATTERN.test(legacyDotBeadId)) {
+		return legacyDotBeadId
+	}
+
+	return undefined
+}
+
 /**
  * Parse a session name to extract type and beadId
  *
@@ -77,10 +124,21 @@ export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
 export function parseSessionName(
 	sessionName: string,
 ): { type: SessionType; beadId: string } | undefined {
-	const beadIdPattern = /^[a-z]+-[a-z0-9]+$/i
+	const aiPrefix = AI_SESSION_PREFIXES.find((prefix) => sessionName.startsWith(prefix))
+	const withoutPrefix = aiPrefix ? sessionName.slice(aiPrefix.length) : sessionName
 
-	if (beadIdPattern.test(sessionName)) {
-		return { type: "bead", beadId: sessionName }
+	if (!withoutPrefix) {
+		return undefined
+	}
+
+	const beadId = decodeBeadSessionName(withoutPrefix)
+	const legacyNormalizedBeadId = decodeLegacyNormalizedBeadId(beadId)
+	if (legacyNormalizedBeadId) {
+		return { type: "bead", beadId: legacyNormalizedBeadId }
+	}
+
+	if (BEAD_ID_PATTERN.test(beadId)) {
+		return { type: "bead", beadId }
 	}
 
 	return undefined
