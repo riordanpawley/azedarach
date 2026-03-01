@@ -315,6 +315,31 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 				}).pipe(Effect.catchAll(() => Effect.succeed(""))),
 
 			/**
+			 * Get the foreground process running in the session's active pane
+			 *
+			 * Uses tmux's #{pane_current_command} to identify what process is in
+			 * the foreground. This provides ground-truth for state detection:
+			 * - "bash"/"zsh"/"sh"/"fish" → AI agent has finished (shell is foreground)
+			 * - "node"/"claude"/"npx"     → AI agent is actively running
+			 * - anything else             → AI agent launched a subprocess (still busy)
+			 *
+			 * @param session - tmux session name
+			 * @returns the process name, or null if unavailable
+			 */
+			getPaneCurrentCommand: (session: string) =>
+				Effect.gen(function* () {
+					const output = yield* runTmux([
+						"display-message",
+						"-t",
+						session,
+						"-p",
+						"#{pane_current_command}",
+					])
+					const cmd = output.trim()
+					return cmd.length > 0 ? cmd : null
+				}).pipe(Effect.catchAll(() => Effect.succeed(null as string | null))),
+
+			/**
 			 * Set a window option
 			 *
 			 * @param target - tmux target (session:window)

@@ -12,6 +12,7 @@
  */
 
 import { Data, Effect } from "effect"
+import { stripAnsi } from "../lib/ansi.js"
 
 // ============================================================================
 // Type Definitions
@@ -92,6 +93,22 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/choose.*option/i, // "Choose an option"
 			/enter.*number/i, // "Enter a number"
 			/type.*number.*select/i, // "Type a number to select"
+			// Grove-inspired patterns: bash confirmation and permission prompts
+			/Run this command\?/i,
+			/Execute\?/i,
+			/Ready to implement\?/i,
+			/Proceed with/i,
+			/Allow\s*(this|once|always)?\s*\?/i,
+			// Numbered selection indicator (❯ 1. Option)
+			/❯\s*\d+\./,
+			// Lettered option choices (Option A:, Option B:)
+			/Option\s+[A-Z]:/,
+			// Clarification and disambiguation requests
+			/Could you clarify/i,
+			/Which one (?:are you looking for|do you want)/i,
+			// Keyboard hint patterns seen in Claude permission dialogs
+			/Enter\s+to\s+confirm/i,
+			/Esc\s+to\s+cancel/i,
 		],
 	},
 	{
@@ -105,12 +122,26 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/EACCES/i,
 			/command not found/i,
 			/permission denied/i,
+			// Grove-inspired: visual error indicators and Rust-style errors
+			/[✗✘❌]\s/u,
+			/^error\[E\d+\]/im, // Rust compiler errors: "error[E0382]"
+			/panicked at/i, // Rust panics
+			/FAILED$/m, // Test runner failures
 		],
 	},
 	{
 		state: "done",
 		priority: 80,
-		patterns: [/Task completed/i, /Successfully/i, /Done\./i, /Finished/i, /All tasks complete/i],
+		patterns: [
+			/Task completed/i,
+			/Successfully/i,
+			/Done\./i,
+			/Finished/i,
+			/All tasks complete/i,
+			// Grove-inspired: visual completion checkmarks at line start
+			/^[✓✔☑✅]\s/mu,
+			/completed successfully/i,
+		],
 	},
 	// "busy" is detected when output is flowing but no higher-priority pattern matches
 	// "idle" is the default/initial state with no output
@@ -345,6 +376,8 @@ const matchesPattern = (chunk: string, patterns: readonly RegExp[]): boolean => 
  *
  * Returns the first matching state, or "busy" if output exists but no patterns match,
  * or null if the chunk is empty/whitespace only.
+ *
+ * Strips ANSI escape codes before matching to avoid false negatives from color codes.
  */
 const detectState = (chunk: string): SessionState | null => {
 	// Ignore empty or whitespace-only chunks
@@ -352,9 +385,12 @@ const detectState = (chunk: string): SessionState | null => {
 		return null
 	}
 
+	// Strip ANSI codes before pattern matching (Grove-inspired: clean output first)
+	const clean = stripAnsi(chunk)
+
 	// Check patterns in priority order
 	for (const { state, patterns } of STATE_PATTERNS) {
-		if (matchesPattern(chunk, patterns)) {
+		if (matchesPattern(clean, patterns)) {
 			return state
 		}
 	}
@@ -368,6 +404,8 @@ const detectState = (chunk: string): SessionState | null => {
  *
  * Returns the first matching phase, or null if no patterns match.
  * Unlike state detection, no fallback phase is assumed.
+ *
+ * Strips ANSI escape codes before matching.
  */
 const detectPhase = (chunk: string): AgentPhase | null => {
 	// Ignore empty or whitespace-only chunks
@@ -375,9 +413,12 @@ const detectPhase = (chunk: string): AgentPhase | null => {
 		return null
 	}
 
+	// Strip ANSI codes before pattern matching
+	const clean = stripAnsi(chunk)
+
 	// Check patterns in priority order
 	for (const { phase, patterns } of PHASE_PATTERNS) {
-		if (matchesPattern(chunk, patterns)) {
+		if (matchesPattern(clean, patterns)) {
 			return phase
 		}
 	}
