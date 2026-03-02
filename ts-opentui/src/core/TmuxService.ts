@@ -307,12 +307,67 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			capturePane: (session: string, lines?: number) =>
 				Effect.gen(function* () {
-					const args = ["capture-pane", "-t", session, "-p"]
+					const args = [
+						"capture-pane",
+						"-t",
+						session,
+						"-p",
+						"-e", // Preserve ANSI escape sequences (Grove: strip_ansi handles cleanup)
+						"-J", // Join wrapped lines (Grove: avoids patterns being split by terminal width)
+					]
 					if (lines !== undefined) {
 						args.push("-S", String(-Math.abs(lines)))
 					}
 					return yield* runTmux(args)
 				}).pipe(Effect.catchAll(() => Effect.succeed(""))),
+
+			/**
+			 * Get the foreground process running in the session's active pane
+			 *
+			 * Uses tmux's #{pane_current_command} to identify what process is in
+			 * the foreground. This provides ground-truth for state detection:
+			 * - "bash"/"zsh"/"sh"/"fish" → AI agent has finished (shell is foreground)
+			 * - "node"/"claude"/"npx"     → AI agent is actively running
+			 * - anything else             → AI agent launched a subprocess (still busy)
+			 *
+			 * @param session - tmux session name
+			 * @returns the process name, or null if unavailable
+			 */
+			getPaneCurrentCommand: (session: string) =>
+				Effect.gen(function* () {
+					const output = yield* runTmux([
+						"display-message",
+						"-t",
+						session,
+						"-p",
+						"#{pane_current_command}",
+					])
+					const cmd = output.trim()
+					return cmd.length > 0 ? cmd : null
+				}).pipe(Effect.catchAll(() => Effect.succeed(null as string | null))),
+
+			/**
+			 * Interrupt the current process and restart with a new command
+			 *
+			 * Grove-inspired: sends C-c to interrupt any running process, waits
+			 * briefly for graceful exit, then sends the new command. Used to restart
+			 * an AI agent session after it has finished or crashed.
+			 *
+			 * @param session - tmux session name
+			 * @param command - command to start after the interrupt
+			 */
+			respawnPane: (session: string, command: string) =>
+				Effect.gen(function* () {
+					// Send ctrl+c to interrupt whatever is currently running
+					yield* runTmux(["send-keys", "-t", session, "C-c"])
+					// Brief pause to allow the process to exit gracefully
+					yield* Effect.sleep("100 millis")
+					// Start the new command (with Enter to execute it)
+					yield* runTmux(["send-keys", "-t", session, command, "Enter"])
+				}).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+				),
 
 			/**
 			 * Set a window option
