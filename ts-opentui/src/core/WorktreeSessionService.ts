@@ -267,12 +267,6 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 									const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
 									yield* tmux.sendKeys(sessionName, marker)
 
-									yield* waitForTmuxOption(
-										sessionName,
-										"@az_init_done",
-										`Init commands not complete for session ${sessionName}`,
-									)
-
 									// Spawn background tasks in separate windows
 									const tasks = backgroundTasks ?? []
 									yield* Effect.forEach(
@@ -291,6 +285,9 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 												const target = `${sessionName}:${taskWindowName}`
 												yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+												const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+												yield* tmux.sendKeys(target, waitCmd)
 
 												if (initCommands && initCommands.length > 0) {
 													for (const initCmd of initCommands) {
@@ -391,16 +388,9 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
 								yield* tmux.sendKeys(sessionName, marker)
 
-								// Wait for init commands to complete before allowing window creation
-								// Wait up to 60 seconds (300 * 200ms)
-								yield* waitForTmuxOption(
-									sessionName,
-									"@az_init_done",
-									`Init commands not complete for session ${sessionName}`,
-								)
-
 								// Spawn background tasks in separate windows after init completes
-								// Run in parallel since each window is independent
+								// Each window waits on @az_init_done before running commands.
+								// This avoids host-side timeout failures for long init steps.
 								const backgroundTasks = options.backgroundTasks ?? []
 								yield* Effect.forEach(
 									backgroundTasks,
@@ -417,6 +407,9 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 											const target = `${sessionName}:${windowName}`
 											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
+
+											const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+											yield* tmux.sendKeys(target, waitCmd)
 
 											// Run initCommands in the background window (environment setup)
 											if (options.initCommands && options.initCommands.length > 0) {
