@@ -42,6 +42,13 @@ export interface ExtractedMetrics {
 	readonly agentPhase?: AgentPhase
 	/** Checklist progress: [completed, total] task counts from terminal output */
 	readonly checklistProgress?: readonly [number, number]
+	/**
+	 * Whether output changed since the previous poll.
+	 *
+	 * Inspired by Grove's per-agent `activity_history` VecDeque. Can be used
+	 * by the UI to render activity sparklines showing agent busyness over time.
+	 */
+	readonly hadActivity: boolean
 }
 
 /**
@@ -55,6 +62,15 @@ interface SessionMonitor {
 	readonly lastForegroundCmd: string | null
 	readonly lastStateFromHook: SessionState | null
 	readonly lastHookTime: number
+	/**
+	 * Count-based pending state debouncing — inspired by Grove's `pending_status` + `pending_status_count`.
+	 *
+	 * A state transition is only committed when the same candidate state has been
+	 * seen PENDING_STATE_THRESHOLD consecutive polls. This prevents jitter from
+	 * brief, transient pattern matches without waiting on wall-clock time.
+	 */
+	readonly pendingState: SessionState | null
+	readonly pendingCount: number
 }
 
 // ============================================================================
@@ -69,6 +85,15 @@ const CAPTURE_LINES = 50
 
 /** Time window during which hook signals take priority */
 const HOOK_PRIORITY_WINDOW_MS = 2000
+
+/**
+ * Consecutive poll count required before committing a non-critical state transition.
+ *
+ * Grove uses a similar pending_status_count mechanism. High-priority states
+ * ("waiting", "error") still apply immediately — only "done" and "busy"
+ * transitions require confirmation across multiple polls to avoid jitter.
+ */
+const PENDING_STATE_THRESHOLD = 2
 
 // ============================================================================
 // Metrics Extraction Helpers
@@ -319,6 +344,8 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					lastForegroundCmd: null,
 					lastStateFromHook: null,
 					lastHookTime: 0,
+					pendingState: null,
+					pendingCount: 0,
 				}
 				yield* Ref.update(monitors, (m) => HashMap.set(m, beadId, monitor))
 				yield* Effect.log(`PTYMonitor: Registered session ${beadId}`)
@@ -366,6 +393,10 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 * signal: if the AI agent is no longer the foreground process and a shell
 		 * has taken over, that is a strong indicator the agent has finished its
 		 * current task.
+		 *
+		 * State transitions require PENDING_STATE_THRESHOLD consecutive matching
+		 * polls before being committed (Grove's pending_status mechanism).
+		 * High-priority states ("waiting", "error") bypass this and apply immediately.
 		 */
 		const pollSession = (beadId: string, monitor: SessionMonitor) =>
 			Effect.gen(function* () {
@@ -376,20 +407,24 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				const foregroundCmd = yield* tmux.getPaneCurrentCommand(monitor.tmuxSessionName)
 				const foregroundKind = classifyForegroundProcess(foregroundCmd)
 
+				// Track whether output changed this poll (for activity sparkline)
+				const hadActivity = output !== monitor.lastOutput
+
 				// Skip output-based detection if output hasn't changed AND foreground process is the same
-				if (output === monitor.lastOutput && foregroundCmd === monitor.lastForegroundCmd) {
+				if (!hadActivity && foregroundCmd === monitor.lastForegroundCmd) {
 					return
 				}
 
 				// Run detection on new output
 				const { state: detectedState, phase: detectedPhase } = monitor.detector(output)
 
-				// Extract metrics (includes checklist progress)
+				// Extract metrics (includes checklist progress and activity flag)
 				const metrics: ExtractedMetrics = {
 					estimatedTokens: extractTokenCount(output),
 					recentOutput: extractRecentOutput(output),
 					agentPhase: detectedPhase ?? undefined,
 					checklistProgress: extractChecklistProgress(output),
+					hadActivity,
 				}
 
 				// Update metrics SubscriptionRef
@@ -398,6 +433,10 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				// State aggregation: respect hook priority window
 				const hookRecency = Date.now() - monitor.lastHookTime
 				const hookHasPriority = hookRecency < HOOK_PRIORITY_WINDOW_MS
+
+				// Pending state tracking for count-based debouncing
+				let newPendingState = monitor.pendingState
+				let newPendingCount = monitor.pendingCount
 
 				if (!hookHasPriority) {
 					// Get current state from ClaudeSessionManager
@@ -418,32 +457,69 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						yield* Effect.log(
 							`PTYMonitor: ${beadId} state ${currentState} → done (shell is foreground process)`,
 						)
+						newPendingState = null
+						newPendingCount = 0
 					} else if (detectedState) {
-						// Pattern-based detection (original logic)
-						const shouldUpdate =
-							(currentState === "idle" && detectedState === "busy") ||
-							(currentState === "initializing" &&
-								(detectedState === "error" ||
-									detectedState === "done" ||
-									detectedState === "busy")) ||
-							(currentState === "busy" &&
-								(detectedState === "error" || detectedState === "done"))
+						// High-priority states ("waiting", "error") bypass pending debouncing —
+						// apply immediately as they are actionable signals needing quick response
+						const isHighPriority = detectedState === "waiting" || detectedState === "error"
 
-						if (shouldUpdate) {
-							yield* sessionManager.updateState(beadId, detectedState)
-							yield* Effect.log(
-								`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY detected)`,
-							)
+						if (isHighPriority) {
+							const shouldUpdate =
+								(currentState === "initializing" || currentState === "busy") &&
+								(detectedState === "error" || detectedState === "waiting")
+
+							if (shouldUpdate || currentState !== detectedState) {
+								yield* sessionManager.updateState(beadId, detectedState)
+								yield* Effect.log(
+									`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY high-priority)`,
+								)
+							}
+							newPendingState = null
+							newPendingCount = 0
+						} else {
+							// Non-critical states: use count-based debouncing (Grove's pending_status_count)
+							// Only commit the transition after PENDING_STATE_THRESHOLD consecutive polls
+							const shouldUpdate =
+								(currentState === "idle" && detectedState === "busy") ||
+								(currentState === "initializing" &&
+									(detectedState === "done" || detectedState === "busy")) ||
+								(currentState === "busy" && detectedState === "done")
+
+							if (shouldUpdate) {
+								if (detectedState === monitor.pendingState) {
+									newPendingCount = monitor.pendingCount + 1
+								} else {
+									// New candidate state — start counting
+									newPendingState = detectedState
+									newPendingCount = 1
+								}
+
+								if (newPendingCount >= PENDING_STATE_THRESHOLD) {
+									yield* sessionManager.updateState(beadId, detectedState)
+									yield* Effect.log(
+										`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY, confirmed after ${newPendingCount} polls)`,
+									)
+									newPendingState = null
+									newPendingCount = 0
+								}
+							} else {
+								// State candidate doesn't apply — reset pending
+								newPendingState = null
+								newPendingCount = 0
+							}
 						}
 					}
 				}
 
-				// Update monitor state with new output and foreground command
+				// Update monitor state with new output, foreground command, and pending counts
 				yield* Ref.update(monitors, (m) =>
 					HashMap.set(m, beadId, {
 						...monitor,
 						lastOutput: output,
 						lastForegroundCmd: foregroundCmd,
+						pendingState: newPendingState,
+						pendingCount: newPendingCount,
 					}),
 				)
 			}).pipe(

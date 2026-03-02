@@ -68,6 +68,51 @@ export class StateDetectionError extends Data.TaggedError("StateDetectionError")
 // Configuration
 // ============================================================================
 
+// ============================================================================
+// Pre-compiled Pattern Constants
+// ============================================================================
+
+/**
+ * Braille spinner characters used by Claude Code, OpenCode, and many other
+ * terminal-based AI tools during active processing.
+ *
+ * Frames: ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ (10-frame braille animation)
+ * Plus: ◐◓◑◒ (quarter-circle spinner)
+ * And: ⣾⣽⣻⢿⡿⣟⣯⣷ (8-frame braille block animation)
+ *
+ * These characters are extremely reliable "busy" indicators — they only appear
+ * when an agent is actively running and animating its loading state.
+ */
+const BRAILLE_SPINNERS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒⣾⣽⣻⢿⡿⣟⣯⣷"
+
+/**
+ * Dingbat characters used by Claude Code as working-indicator prefixes.
+ *
+ * Claude Code shows messages like "✻ Sketching…", "✶ Thinking...", "❃ Analyzing…"
+ * when actively processing. The dingbat is a status bullet; the verb+ing+ellipsis
+ * combination uniquely identifies an active work status message.
+ *
+ * Sources: Claude Code source, empirical observation, Grove's WORKING_INDICATORS pattern.
+ */
+const WORKING_INDICATOR_DINGBATS =
+	"✢✣✤✥✦✧✨✩✪✫✬✭✮✯✰✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❄❅❆❇❈❉❊❋✡✥★☆"
+
+/**
+ * Regex that matches braille spinner characters in output.
+ * Used to detect actively running agents.
+ */
+const SPINNER_RE = new RegExp(`[${BRAILLE_SPINNERS}]`, "u")
+
+/**
+ * Regex that matches Claude Code working-indicator status messages.
+ * Pattern: dingbat + optional whitespace + verb-ing word + ellipsis characters
+ * e.g. "✻ Sketching…", "✶ Thinking...", "❃ Analyzing…"
+ */
+const WORKING_INDICATOR_RE = new RegExp(
+	`[${WORKING_INDICATOR_DINGBATS}]\\s*\\w+ing[.…]+`,
+	"u",
+)
+
 /**
  * Pattern definitions ordered by priority (highest to lowest)
  *
@@ -109,6 +154,11 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			// Keyboard hint patterns seen in Claude permission dialogs
 			/Enter\s+to\s+confirm/i,
 			/Esc\s+to\s+cancel/i,
+			// OpenCode-specific waiting patterns
+			/permission required/i, // OpenCode permission panel
+			/type your own answer/i, // OpenCode question panel (plan mode)
+			/esc dismiss/i, // OpenCode dismiss hint in question panel
+			/asked.*question/i, // OpenCode question panel header
 		],
 	},
 	{
@@ -130,6 +180,28 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 		],
 	},
 	{
+		// Explicit "busy" signals placed BETWEEN error and done.
+		//
+		// Grove's key insight: braille spinners and working indicators appear when the
+		// AI agent is actively processing. Checking them BEFORE "done" prevents false
+		// "done" detection when completion text (e.g., "All tests pass") sits in
+		// scrollback while spinners are visible in the most recent lines.
+		state: "busy",
+		priority: 85,
+		patterns: [
+			// Braille spinner characters (Claude Code, OpenCode, and other AI tools)
+			// These are extremely reliable — only appear while an agent is actively running
+			SPINNER_RE,
+			// Working indicator: dingbat + verb-ing + ellipsis
+			// e.g. "✻ Sketching…", "✶ Thinking...", "❃ Analyzing…"
+			WORKING_INDICATOR_RE,
+			// Claude Code tool execution: ⏺ + tool name (most reliable busy signal)
+			/⏺\s*(?:Read|Write|Edit|Bash|Glob|Grep|Task|WebFetch|WebSearch)/u,
+			// OpenCode progress animation: 4+ consecutive dots (e.g. "....  esc interrupt")
+			/\.{4,}/,
+		],
+	},
+	{
 		state: "done",
 		priority: 80,
 		patterns: [
@@ -143,7 +215,7 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/completed successfully/i,
 		],
 	},
-	// "busy" is detected when output is flowing but no higher-priority pattern matches
+	// "busy" is the final fallback when output is flowing but no pattern matches
 	// "idle" is the default/initial state with no output
 ]
 
@@ -219,6 +291,8 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/\bWrite\b.*tool/i,
 			/\bBash\b.*tool/i,
 			/\bRead\b.*tool/i,
+			// Claude Code tool execution: ⏺ + tool name (authoritative action signal)
+			/⏺\s*(?:Read|Write|Edit|Bash|Glob|Grep|Task|WebFetch|WebSearch)/u,
 			// File operations
 			/writing to/i,
 			/creating file/i,
@@ -232,6 +306,8 @@ const PHASE_PATTERNS: readonly PhasePattern[] = [
 			/ Fixing/i,
 			/refactoring/i,
 			/⏺/u,
+			// Working indicators (Claude Code "✻ Sketching…" style status messages)
+			WORKING_INDICATOR_RE,
 			// Command execution
 			/running command/i,
 			/executing/i,
