@@ -159,6 +159,12 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/type your own answer/i, // OpenCode question panel (plan mode)
 			/esc dismiss/i, // OpenCode dismiss hint in question panel
 			/asked.*question/i, // OpenCode question panel header
+			// Gemini-specific waiting patterns
+			/action\s+required/i, // Gemini "Action Required" banner
+			/waiting\s+for\s+confirmation/i, // Gemini confirmation dialog
+			/answer\s+questions/i, // Gemini question panel title
+			/enter\s+to\s+select.*esc\s+to\s+cancel/i, // Gemini keyboard hints in question panel
+			/^\s*\d+\.\s+.+\?$/m, // Gemini numbered questions ("   1. Do you want to...?")
 		],
 	},
 	{
@@ -199,6 +205,12 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 			/⏺\s*(?:Read|Write|Edit|Bash|Glob|Grep|Task|WebFetch|WebSearch)/u,
 			// OpenCode progress animation: 4+ consecutive dots (e.g. "....  esc interrupt")
 			/\.{4,}/,
+			// Imperative-verb active-voice lines at the start of a line.
+			// Grove's second TOOL_PATTERN: agent status lines like "Reading file...",
+			// "Building project...", "Installing dependencies..." are reliable busy indicators.
+			// Applied to the most recent captured output (last CAPTURE_LINES lines), so the risk
+			// of matching unrelated program output is bounded to the last few screen-fuls.
+			/^(?:reading|writing|editing|searching|running|executing|thinking|analyzing|processing|fetching|installing|building|compiling|testing)\b/im,
 		],
 	},
 	{

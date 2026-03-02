@@ -221,7 +221,13 @@ const extractChecklistProgress = (output: string): readonly [number, number] | u
 		else if (
 			checkPart.startsWith("○") ||
 			checkPart.startsWith("□") ||
-			checkPart.startsWith("☐")
+			checkPart.startsWith("☐") ||
+			// In-progress shapes (◼ ■ ▪ ●) — counted in total but not done.
+			// Grove's detect_checklist_claude_code includes these as pending/in-progress items.
+			checkPart.startsWith("◼") ||
+			checkPart.startsWith("■") ||
+			checkPart.startsWith("▪") ||
+			checkPart.startsWith("●")
 		) {
 			total++
 		}
@@ -459,6 +465,24 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						)
 						newPendingState = null
 						newPendingCount = 0
+					} else if (foregroundKind === "subprocess" && currentState === "idle") {
+						// Subprocess in foreground while idle means the agent spawned a child
+						// process (e.g. cargo build, git, python) — it is still busy.
+						// Grove's detect_status_other_process always returns Running for subprocess.
+						if (monitor.pendingState === "busy") {
+							newPendingCount = monitor.pendingCount + 1
+						} else {
+							newPendingState = "busy"
+							newPendingCount = 1
+						}
+						if (newPendingCount >= PENDING_STATE_THRESHOLD) {
+							yield* sessionManager.updateState(beadId, "busy")
+							yield* Effect.log(
+								`PTYMonitor: ${beadId} state idle → busy (subprocess '${foregroundCmd}' is foreground)`,
+							)
+							newPendingState = null
+							newPendingCount = 0
+						}
 					} else if (detectedState) {
 						// High-priority states ("waiting", "error") bypass pending debouncing —
 						// apply immediately as they are actionable signals needing quick response

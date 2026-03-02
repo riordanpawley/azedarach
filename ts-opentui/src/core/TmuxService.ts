@@ -307,7 +307,14 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			capturePane: (session: string, lines?: number) =>
 				Effect.gen(function* () {
-					const args = ["capture-pane", "-t", session, "-p"]
+					const args = [
+						"capture-pane",
+						"-t",
+						session,
+						"-p",
+						"-e", // Preserve ANSI escape sequences (Grove: strip_ansi handles cleanup)
+						"-J", // Join wrapped lines (Grove: avoids patterns being split by terminal width)
+					]
 					if (lines !== undefined) {
 						args.push("-S", String(-Math.abs(lines)))
 					}
@@ -338,6 +345,29 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					const cmd = output.trim()
 					return cmd.length > 0 ? cmd : null
 				}).pipe(Effect.catchAll(() => Effect.succeed(null as string | null))),
+
+			/**
+			 * Interrupt the current process and restart with a new command
+			 *
+			 * Grove-inspired: sends C-c to interrupt any running process, waits
+			 * briefly for graceful exit, then sends the new command. Used to restart
+			 * an AI agent session after it has finished or crashed.
+			 *
+			 * @param session - tmux session name
+			 * @param command - command to start after the interrupt
+			 */
+			respawnPane: (session: string, command: string) =>
+				Effect.gen(function* () {
+					// Send ctrl+c to interrupt whatever is currently running
+					yield* runTmux(["send-keys", "-t", session, "C-c"])
+					// Brief pause to allow the process to exit gracefully
+					yield* Effect.sleep("100 millis")
+					// Start the new command (with Enter to execute it)
+					yield* runTmux(["send-keys", "-t", session, command, "Enter"])
+				}).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+				),
 
 			/**
 			 * Set a window option
