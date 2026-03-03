@@ -35,7 +35,7 @@
           assets = {
             aarch64-darwin = {
               file = "br-v0.1.20-darwin_arm64.tar.gz";
-              hash = "sha256-XsHX710UcZxJ1zbBCChK2gHOy0BISpQT7OGgdJzvRC8=";
+              hash = "sha256-XsHW710UcZxJ1zbBCChK2gHOy0BISpQT7OGgdJzvRC8=";
             };
             x86_64-darwin = {
               file = "br-v0.1.20-darwin_amd64.tar.gz";
