@@ -15,20 +15,3 @@
 {"author":"riordan","created_at":"2025-12-17T15:10:29Z","id":15,"issue_id":"az-odr","text":"Adding Claude-assisted conflict resolution feature"}
 {"author":"riordan","created_at":"2025-12-20T15:46:23Z","id":16,"issue_id":"az-ulwr","text":"Bug fix needed - keyboard handler was bypassing the atom"}
 {"author":"riordan","created_at":"2025-12-18T05:53:56Z","id":17,"issue_id":"az-v0xk","text":"Design changed: chat now creates worktrees like Space+S. Need to verify changes."}
-{"author":"riordan","created_at":"2025-12-29T23:55:31Z","id":18,"issue_id":"az-4ghj","text":"Help overlay missing the 'b' keybinding for \"Merge bead into...\" - feature implemented but not discoverable"}
-{"author":"riordan","created_at":"2025-12-17T03:41:30Z","id":19,"issue_id":"az-5p5","text":"UI code exists but data pipeline is missing. SessionManager doesn't collect metrics, BoardService doesn't map them. Need: 1) Data source for context%, tokens 2) SessionManager collection 3) BoardService mapping"}
-{"author":"riordan","created_at":"2025-12-13T13:43:02Z","id":20,"issue_id":"az-65k","text":"Fix was reverted by linter/formatter. Need to re-apply the followTaskId fix."}
-{"author":"riordan","created_at":"2025-12-17T23:24:06Z","id":21,"issue_id":"az-76a","text":"Initial fix was incomplete - the real issue was in HookReceiver, not just StateDetector patterns"}
-{"author":"riordan","created_at":"2025-12-18T23:54:01Z","id":22,"issue_id":"az-7sr","text":"Adding az-bjp and az-lqb implementation"}
-{"author":"riordan","created_at":"2025-12-30T22:45:55Z","id":23,"issue_id":"az-a4s5","text":"Previous fix didn't work - OpenTUI strips ANSI codes. Implementing tmux popup with viu instead."}
-{"author":"riordan","created_at":"2025-12-18T02:46:19Z","id":24,"issue_id":"az-aa2","text":"Found bug: attachments not loading because keyboard handler bypassed atom with attachment loading logic"}
-{"author":"riordan","created_at":"2025-12-18T03:15:15Z","id":25,"issue_id":"az-dv9t","text":"May have misunderstood the issue - need to clarify if it's about hook failures"}
-{"author":"riordan","created_at":"2025-12-19T00:48:53Z","id":26,"issue_id":"az-dvsr","text":"Feature was designed but never implemented - no DevServerService exists in codebase"}
-{"author":"riordan","created_at":"2025-12-30T22:41:25Z","id":27,"issue_id":"az-jjht","text":"Additional fix needed - height calculation was also wrong"}
-{"author":"riordan","created_at":"2025-12-18T01:40:43Z","id":28,"issue_id":"az-k5a","text":"Implementing plan mode detection via PTY monitoring as requested"}
-{"author":"riordan","created_at":"2025-12-18T02:57:48Z","id":29,"issue_id":"az-kgq","text":"CLI add command still not working - immediately exits or opens TUI instead of adding project"}
-{"author":"riordan","created_at":"2025-12-18T02:47:29Z","id":30,"issue_id":"az-losz","text":"Extending fix to also rollback bead status"}
-{"author":"riordan","created_at":"2025-12-18T14:55:02Z","id":31,"issue_id":"az-m9vt","text":"Misunderstood task - need to implement automatic type-check/fix in the merge action code, not manually run it"}
-{"author":"riordan","created_at":"2025-12-17T15:10:29Z","id":32,"issue_id":"az-odr","text":"Adding Claude-assisted conflict resolution feature"}
-{"author":"riordan","created_at":"2025-12-20T15:46:23Z","id":33,"issue_id":"az-ulwr","text":"Bug fix needed - keyboard handler was bypassing the atom"}
-{"author":"riordan","created_at":"2025-12-18T05:53:56Z","id":34,"issue_id":"az-v0xk","text":"Design changed: chat now creates worktrees like Space+S. Need to verify changes."}
