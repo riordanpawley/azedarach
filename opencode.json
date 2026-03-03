@@ -50,7 +50,6 @@
       "bun run build": "allow",
       "bun *": "allow",
       "br *": "allow",
-      "bd *": "allow",
       "tmux *": "allow"
     }
   },
