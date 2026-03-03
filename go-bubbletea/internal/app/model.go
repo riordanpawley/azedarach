@@ -323,6 +323,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
+		m.reconcileCursorToVisibleTask()
 		return m, nil
 
 	case beadsLoadedMsg:
@@ -893,6 +894,24 @@ func (m Model) buildColumns() []board.Column {
 		{Title: "In Progress", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusInProgress)},
 		{Title: "Blocked", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusBlocked)},
 		{Title: "Done", Tasks: m.sortTasksInColumn(filteredTasks, domain.StatusDone)},
+	}
+}
+
+// reconcileCursorToVisibleTask ensures nav cursor task ID always points to a visible task.
+func (m *Model) reconcileCursorToVisibleTask() {
+	columns := m.buildColumns()
+	pos := m.nav.GetPosition(columns)
+	if !pos.Valid || pos.Column < 0 || pos.Column >= len(columns) {
+		return
+	}
+	if pos.Task < 0 || pos.Task >= len(columns[pos.Column].Tasks) {
+		return
+	}
+
+	visibleTaskID := columns[pos.Column].Tasks[pos.Task].ID
+	cursor := m.nav.GetCursor()
+	if cursor.TaskID != visibleTaskID || cursor.FallbackColumn != pos.Column {
+		m.nav.SelectTask(visibleTaskID, pos.Column)
 	}
 }
 
