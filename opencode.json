@@ -41,6 +41,7 @@
 			"bun run build *": "allow",
 			"bun run build": "allow",
 			"bun *": "allow",
+			"go *": "allow",
 			"bd *": "allow",
 			"tmux *": "allow"
 		}
