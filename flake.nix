@@ -30,23 +30,66 @@
           mkdir -p $out/bin
           ${pkgs.nodejs_22}/bin/corepack enable --install-directory $out/bin
         '';
+        brRelease = {
+          version = "0.1.20";
+          assets = {
+            aarch64-darwin = {
+              file = "br-v0.1.20-darwin_arm64.tar.gz";
+              hash = "sha256-cFoTq3yXK/+XRAZWYzIQyiyIzUnBCUpgB6mJg9c/ux0=";
+            };
+            x86_64-darwin = {
+              file = "br-v0.1.20-darwin_amd64.tar.gz";
+              hash = "sha256-tT8Qnj8ojSPSkYvJ3Pf6mZc1HXm/q2vlTKGLxB1QTVg=";
+            };
+            x86_64-linux = {
+              file = "br-v0.1.20-linux_amd64.tar.gz";
+              hash = "sha256-rvwu9rFseydfaJBjbBEFQMe8CB4gOh6KcGo3YgfR+d0=";
+            };
+            aarch64-linux = {
+              file = "br-v0.1.20-linux_arm64.tar.gz";
+              hash = "sha256-IImTFidLesQN5HfzMYo9Y5H3iFxs0b7HuhDoKDYCB/s=";
+            };
+          };
+        };
+        brAsset =
+          brRelease.assets.${system}
+            or (throw "Unsupported system for beads_rust br: ${system}");
+        br = pkgs.runCommandNoCC "br-${brRelease.version}" {
+          src = pkgs.fetchzip {
+            url = "https://github.com/Dicklesworthstone/beads_rust/releases/download/v${brRelease.version}/${brAsset.file}";
+            hash = brAsset.hash;
+            stripRoot = false;
+          };
+        } ''
+          mkdir -p "$out/bin"
+
+          br_bin="$(find "$src" -type f -name br | head -n1)"
+          if [ -z "$br_bin" ]; then
+            echo "Could not find br binary in release archive" >&2
+            exit 1
+          fi
+
+          install -m755 "$br_bin" "$out/bin/br"
+        '';
       in
       {
         formatter = pkgs.alejandra;
 
         devShells = {
           default = pkgs.mkShell {
-            buildInputs = with pkgs; [
-              gh
-              bun
-              nodejs_22
-              corepackEnable
-              vtsls
-              biome
-              viu # Terminal image viewer with Kitty graphics protocol support
-              go
-              git-lfs # Large file storage for bead images
-            ];
+            buildInputs =
+              (with pkgs; [
+                gh
+                bun
+                nodejs_22
+                corepackEnable
+                vtsls
+                biome
+                viu # Terminal image viewer with Kitty graphics protocol support
+                go
+                git-lfs # Large file storage for bead images
+              ])
+              ++ [ br ];
           };
         };
       }
