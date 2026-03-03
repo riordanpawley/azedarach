@@ -9,6 +9,8 @@ const (
 	SortBySession  SortField = "session"
 	SortByPriority SortField = "priority"
 	SortByUpdated  SortField = "updated"
+	SortByTitle    SortField = "title"
+	SortByID       SortField = "id"
 )
 
 // SortOrder represents sort direction
