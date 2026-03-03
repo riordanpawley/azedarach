@@ -1,0 +1,21 @@
+prefix_rule(pattern=["rg"], decision="allow")
+prefix_rule(pattern=["fd"], decision="allow")
+prefix_rule(pattern=["ls"], decision="allow")
+
+prefix_rule(pattern=["git", "log"], decision="allow")
+prefix_rule(pattern=["git", "status"], decision="allow")
+prefix_rule(pattern=["git", "diff"], decision="allow")
+prefix_rule(pattern=["git", "branch"], decision="allow")
+prefix_rule(pattern=["git", "add"], decision="allow")
+prefix_rule(pattern=["git", "commit"], decision="allow")
+prefix_rule(pattern=["git", "push"], decision="allow")
+
+# Project-scoped variants for worktree-style commands.
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach-az-i38x", "add"], decision="allow")
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach-az-i38x", "commit"], decision="allow")
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach-az-i38x", "push"], decision="allow")
+
+prefix_rule(pattern=["bun"], decision="allow")
+prefix_rule(pattern=["bd"], decision="allow")
+prefix_rule(pattern=["tmux"], decision="allow")
+prefix_rule(pattern=["go"], decision="allow")
