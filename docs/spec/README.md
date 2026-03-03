@@ -2,13 +2,13 @@
 
 This folder defines the canonical product specification for Azedarach.
 
-It is implementation-agnostic and intended to be sufficient for a future team to recreate Azedarach with the same behavior, interaction model, visual design intent, keybindings, and workflows.
+It is implementation-agnostic and intended to be sufficient for any conforming implementation of Azedarach with the same behavior, interaction model, visual design intent, keybindings, and workflows.
 
 ## Scope
 
 - Product: terminal-first Kanban orchestration tool for beads tasks and parallel AI sessions
 - Required client surface: terminal user interface (TUI)
-- Required behavior: modal keyboard workflow, board views, session lifecycle, git/pr workflows, and task management semantics
+- Required behavior: modal keyboard workflow, board views, session lifecycle, Git/PR workflows, and task management semantics
 - Excluded by design: specific language/runtime/framework decisions, internal module boundaries, storage engine internals
 
 ## Reading Order
@@ -22,6 +22,8 @@ It is implementation-agnostic and intended to be sufficient for a future team to
 7. [07-glossary.md](./07-glossary.md)
 8. [08-use-case-matrix.md](./08-use-case-matrix.md)
 9. [09-keybinding-reference-normative.md](./09-keybinding-reference-normative.md)
+10. [10-probe-schema-and-examples.md](./10-probe-schema-and-examples.md)
+11. [11-golden-workflow-transcripts.md](./11-golden-workflow-transcripts.md)
 
 ## Spec Structure
 
@@ -34,6 +36,8 @@ It is implementation-agnostic and intended to be sufficient for a future team to
 - `07`: canonical terms and definitions
 - `08`: detailed user/use-case catalog for implementers and QA
 - `09`: complete normative keybinding table and conflict policy
+- `10`: machine-readable probe schema and deterministic payload examples
+- `11`: canonical high-risk workflow transcripts for validation
 
 ## Normative Language
 
@@ -55,16 +59,17 @@ It is implementation-agnostic and intended to be sufficient for a future team to
 - Board views: Kanban and Compact list
 - Modal navigation: Normal, Action, Goto, Select, Search, Filter, Sort, and contextual overlays
 - Task operations: move status, edit, create, fork, filter, sort, search
+- Bulk-select ergonomics: invert-visible selection, in-mode clear, hidden-selection awareness, and frozen target previews for destructive actions
 - Epic workflows: child-board drill-down, progress header, and epic detail parity
 - Session workflows: start, start+work, yolo start, chat, attach, pause, resume, stop
 - Dev server workflows: toggle, view, restart, per-worktree ports
-- Git workflows: update from configured base branch, merge to base branch, abort merge, diff, merge bead into bead
+- Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge bead into bead
 - Branch-origin workflows: runtime choice between base branch and eligible upstream source branch
 - PR workflows: create PR, open PR, PR status indicators
 - Multi-project workflows: project registry, auto-detection, project selector
 - Attachment workflows: add, remove, preview, open external
 - Planning workflows: natural-language planning to epic+tasks+deps
-- Settings workflows: runtime toggles persisted to local config
+- Settings workflows: full UI-driven configuration persisted to JSON config with schema-backed editor support
 - Observability workflows: logs viewer, connection status, toast notifications
 - Startup/re-entry workflows: dependency health checks and context restore
 - Concurrency workflows: stale edit conflict handling and lock contention safety

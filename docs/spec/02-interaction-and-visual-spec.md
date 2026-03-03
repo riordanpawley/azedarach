@@ -85,12 +85,20 @@ The status bar MUST show active mode abbreviation.
 | `a` | toggle current card selection |
 | `A` | select all in current column |
 | `%` | select all visible non-tombstoned tasks |
+| `*` | invert selection for visible non-tombstoned tasks |
+| `x` | clear selection and remain in Select mode |
 | `h/j/k/l` | navigate while retaining selections |
 | `Space` | enter action mode for selected set |
 | `v` | exit select mode and clear selections |
 | `Esc` | exit select mode and clear selections |
 
 Selection count MUST be visible in status area when non-zero.
+
+Selection UX contract:
+
+- status area SHOULD show `selected total`, `visible selected`, and `hidden selected` counts when applicable
+- selection membership is ID-based and should remain stable across sort/refresh/filter changes unless explicit clear action is used
+- entering action mode from Select SHOULD show a compact target preview (count + scope) before destructive bulk actions
 
 ## 2.7 Search Mode (`/`)
 

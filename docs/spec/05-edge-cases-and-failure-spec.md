@@ -244,6 +244,24 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 - Required behavior:
   - apply valid transitions; report blocked items.
 
+### Case F-093: Hidden selection grows after filter/sort changes
+
+- Required behavior:
+  - keep selection deterministic by ID.
+  - expose hidden-selection count and provide explicit clear path.
+
+### Case F-094: Bulk target drift between preview and execution
+
+- Required behavior:
+  - freeze target IDs at execution start.
+  - report skipped/drifted IDs with reason codes.
+
+### Case F-095: Invert-visible selection on sparse mixed tombstoned data
+
+- Required behavior:
+  - invert only visible non-tombstoned IDs.
+  - preserve non-visible selected IDs unless explicitly cleared.
+
 ## 5.13 Safety Confirmation Requirements
 
 The following operations MUST include confirmation or explicit two-step UX:

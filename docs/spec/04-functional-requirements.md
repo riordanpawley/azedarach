@@ -65,6 +65,12 @@ This section is normative.
 - AZ-FR-0406: Exiting Select mode with `v` or `Esc` MUST clear selection.
 - AZ-FR-0407: Bulk-compatible actions MUST apply to selected set.
 - AZ-FR-0408: Bulk operations MUST report per-item failures.
+- AZ-FR-0409: `*` in Select mode MUST invert selection for visible non-tombstoned issues.
+- AZ-FR-0410: `x` in Select mode MUST clear all selected IDs while remaining in Select mode.
+- AZ-FR-0411: Selection membership MUST be ID-based and MUST reconcile deterministically across refresh/sort/filter changes.
+- AZ-FR-0412: When hidden selected items exist, status UI MUST expose explicit hidden-selection count.
+- AZ-FR-0413: Entering bulk destructive actions from Select mode MUST show target preview with selected-count and scope before confirmation.
+- AZ-FR-0414: Bulk execution target set MUST freeze at execute-time and MUST report drifted/skipped IDs if state changes before apply.
 
 ## 4.7 Search/Filter/Sort Requirements
 
@@ -148,6 +154,12 @@ This section is normative.
 - AZ-FR-1009: Merge to base branch SHOULD keep worktree active post-merge.
 - AZ-FR-1010: `Space b` MUST support merge source bead into target bead branch.
 - AZ-FR-1011: merge-bead flow MUST prevent self-merge.
+- AZ-FR-1012: The system MUST provide a bulk "bring up to date" operation across a selected issue set.
+- AZ-FR-1013: For each issue in bulk update, merge source MUST be resolved per policy (configured base branch or eligible parent/upstream branch when relation context applies).
+- AZ-FR-1014: Bulk update execution MUST use a FIFO work queue with bounded maximum concurrency.
+- AZ-FR-1015: When a bulk item hits merge conflicts and conflict-assistant policy is enabled, the system MUST trigger an automated conflict-resolution assistant attempt for that item.
+- AZ-FR-1016: If automated conflict resolution fails or exhausts allowed attempts, the item MUST remain in recoverable conflict state with explicit manual-resolution guidance.
+- AZ-FR-1017: Bulk update MUST continue processing remaining queued items after per-item failure and report per-item outcomes in completion summary.
 
 ## 4.13 PR Requirements
 

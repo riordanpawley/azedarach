@@ -10,7 +10,7 @@ The product value is not code generation itself, but high-throughput coordinatio
 - start isolated execution contexts
 - observe session state at a glance
 - intervene quickly when sessions stall
-- land work through git/pr workflows
+- land work through Git/PR workflows
 
 ## 1.2 Problem Space
 
@@ -41,6 +41,10 @@ Azedarach solves this by making the board the command center.
 ### O-04 Low Friction
 
 - Minimize command and mode depth for common actions.
+
+### O-05 Iterative UX Improvement
+
+- The product SHOULD preserve core workflow intent while improving known rough edges (especially bulk operations), provided safety and determinism contracts remain satisfied.
 
 ## 1.4 Primary Users
 
@@ -300,5 +304,5 @@ This section is complete when a reader can answer:
 
 - what Azedarach is for
 - who it serves
-- what must be preserved in any reimplementation
+- what must be preserved in any conforming implementation
 - where behavior boundaries and non-goals are

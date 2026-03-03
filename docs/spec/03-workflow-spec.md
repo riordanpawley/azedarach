@@ -117,6 +117,35 @@ If running:
 3. optionally spawn assistant session for conflict resolution
 4. provide abort path (`Space M`)
 
+### 3.6 Variant: Bulk Bring-Up-To-Date
+
+### Intent
+
+Update many issue branches in one run by merging the appropriate upstream source into each issue branch.
+
+### Source Resolution Policy
+
+For each queued issue item, source branch resolves as:
+
+1. configured base branch by default
+2. eligible parent/upstream-related branch when invoked from relation-aware context and policy allows
+
+### Main Path
+
+1. user chooses issue set (selection/filter scope) and invokes bulk bring-up-to-date action
+2. system creates FIFO queue of target issues in deterministic order
+3. queue executes with bounded max concurrency
+4. each item resolves source branch per policy and runs update merge flow
+5. per-item result is recorded as success/failed/conflict-resolved/conflict-unresolved
+6. completion summary shows per-item outcomes and next actions
+
+### Conflict Handling
+
+1. if conflict occurs on an item and conflict-assistant policy is enabled, enqueue automated conflict-resolution assistant attempt for that item
+2. if assistant resolves conflict, continue queue processing
+3. if assistant fails or allowed attempts are exhausted, keep item recoverable and emit manual-resolution guidance
+4. queue continues with remaining items regardless of individual failure
+
 ## 3.7 Create PR Workflow (`Space P`)
 
 ### Main Path
@@ -210,6 +239,30 @@ Move source branch work into target branch without routing through base branch.
   - worktrees only
   - full cleanup (worktrees + close issues)
   - cancel
+
+### 3.12 Refinement: Bulk Selection
+
+### Intent
+
+Make large multi-issue selection predictable before executing bulk actions.
+
+This section is normative for outcome quality; implementations MAY choose different interaction details as long as safety, determinism, and clarity requirements are satisfied.
+
+### Main Path
+
+1. user enters Select mode (`v`) and composes selection with `a`, `A`, `%`, `*`, and navigation
+2. status bar updates selected counts, including hidden selected count when filters/scope hide selected IDs
+3. user may clear without exiting Select mode (`x`) to restart selection quickly
+4. user enters Action mode (`Space`) for selected set
+5. for destructive bulk actions, system shows target preview (count + scope + notable exclusions)
+6. execution target set freezes at run start and operations apply against frozen IDs
+7. if drift occurs (deleted/invalid/now-ineligible IDs), summary reports skipped IDs and reasons
+
+### Guarantees
+
+- selection set is deterministic and ID-based across refresh/sort/filter changes
+- user can always distinguish visible vs hidden selected membership
+- destructive bulk actions are never applied to an ambiguous target set
 
 ## 3.13 Move Issue Left/Right Workflow (`Space h/l`)
 

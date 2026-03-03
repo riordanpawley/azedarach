@@ -630,6 +630,9 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-081: bulk move mixed-validity transitions reports partial success.
 - UC-EXT-082: bulk stop with rapidly changing session states remains deterministic.
 - UC-EXT-083: bulk cleanup interrupted by permission errors gives per-task results.
+- UC-EXT-084: invert visible selection preserves hidden selected IDs unless explicitly cleared.
+- UC-EXT-085: selection status clearly differentiates selected total, visible selected, and hidden selected.
+- UC-EXT-086: destructive bulk target preview reflects frozen execution set and reports drifted IDs.
 
 ### UX and Safety
 

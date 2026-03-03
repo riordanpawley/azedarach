@@ -10,6 +10,11 @@ This catalog defines validation scenarios for requirements in Section 04.
 - Expected Results
 - Requirement Links
 
+ID policy:
+
+- Scenario IDs are stable once published and MAY be non-contiguous.
+- Existing IDs MUST NOT be renumbered solely for ordering aesthetics.
+
 Automation-ready scenario fields (normative for E2E authoring):
 
 - Fixture Profile: canonical seed profile name and variant
@@ -56,6 +61,20 @@ Canonical fixture profile names:
 - Expected: full repaint with intact status bar and focus.
 - Links: AZ-FR-1901.
 
+### AZ-AT-2812 Board baseline rendering contract
+
+- Preconditions: fixture includes at least one issue per major status and one empty column case.
+- Steps: launch app; observe initial board; trigger manual refresh.
+- Expected: cards show ID/title/priority, focus anchor exists, empty columns remain stable, and loading state appears when data is unavailable.
+- Links: AZ-FR-0003, AZ-FR-0004, AZ-FR-0006, AZ-FR-0007, AZ-FR-0008, AZ-FR-0010, AZ-FR-0101.
+
+### AZ-AT-2813 Navigation reconciliation after refresh
+
+- Preconditions: overflowing column and active overlay open/close cycle.
+- Steps: navigate in long column, open/close transient overlay, trigger data refresh.
+- Expected: virtual-scroll navigation remains valid, focus resolves to an existing card after refresh, and overlay cycle does not corrupt focus.
+- Links: AZ-FR-0203, AZ-FR-0205, AZ-FR-0207.
+
 ## 6.3 Mode Acceptance
 
 ### AZ-AT-0101 Mode indicator updates
@@ -90,6 +109,12 @@ Canonical fixture profile names:
 - Expected: focus lands on target card.
 - Links: AZ-FR-0305..AZ-FR-0307.
 
+### AZ-AT-2814 Goto invalid-label safety and project selector
+
+- Steps: invoke `g w` and enter invalid label; invoke `g p` and select visible project option.
+- Expected: invalid goto input fails safely; project selector opens and selection applies to visible option set.
+- Links: AZ-FR-0308, AZ-FR-0309.
+
 ## 6.5 Selection and Bulk Acceptance
 
 ### AZ-AT-0301 Select mode toggle and clear
@@ -109,6 +134,34 @@ Canonical fixture profile names:
 - Steps: select multiple, `Space d`.
 - Expected: dialog offers worktrees-only/full/cancel options.
 - Links: AZ-FR-1202..AZ-FR-1204.
+
+### AZ-AT-0304 Invert-visible selection and clear-in-place
+
+- Preconditions: visible set includes selected and unselected issues; hidden selected IDs also exist.
+- Steps: enter Select mode, press `*`, then `x`.
+- Expected: `*` inverts only visible non-tombstoned selection membership; `x` clears selected IDs while remaining in Select mode.
+- Links: AZ-FR-0409, AZ-FR-0410.
+
+### AZ-AT-0305 Selection stability across refresh/sort/filter
+
+- Preconditions: active selection with mixed visible/hidden IDs.
+- Steps: change sort/filter, trigger refresh, then inspect selection status.
+- Expected: selection reconciles by ID deterministically; hidden selected count is shown explicitly.
+- Links: AZ-FR-0411, AZ-FR-0412.
+
+### AZ-AT-0306 Bulk destructive preview and frozen target set
+
+- Preconditions: selected set where at least one item changes eligibility before apply.
+- Steps: enter Action mode from Select, choose destructive bulk action, confirm.
+- Expected: preview shows selected count/scope before confirm; execution freezes target set; drifted/skipped IDs are reported with reasons.
+- Links: AZ-FR-0413, AZ-FR-0414.
+
+### AZ-AT-2815 Bulk partial failure reporting
+
+- Preconditions: select multiple issues where one targeted mutation is forced to fail.
+- Steps: execute bulk-compatible action.
+- Expected: successful items complete; failed item is explicitly reported with per-item context.
+- Links: AZ-FR-0408.
 
 ## 6.6 Search/Filter/Sort Acceptance
 
@@ -143,6 +196,12 @@ Canonical fixture profile names:
 - Steps: press `Tab` repeatedly.
 - Expected: view alternates KAN/LST while maintaining focused issue identity when possible.
 - Links: AZ-FR-0601..AZ-FR-0604.
+
+### AZ-AT-2816 Search/filter/sort parity across views
+
+- Steps: apply search/filter/sort in Kanban, toggle to Compact with `Tab`, then back.
+- Expected: equivalent result set and ordering semantics hold in both views.
+- Links: AZ-FR-0605.
 
 ## 6.8 Epic Acceptance
 
@@ -192,6 +251,13 @@ Canonical fixture profile names:
 - Expected: session transitions paused -> busy/idle -> stopped with correct indicators.
 - Links: AZ-FR-0811..AZ-FR-0814.
 
+### AZ-AT-2817 Session branch context and state detection
+
+- Preconditions: issue branch missing for one run; mixed tmux session states present for another run.
+- Steps: start session and inspect card indicators.
+- Expected: session start ensures issue branch context exists; detector maps and displays busy/waiting/done/error/paused accurately.
+- Links: AZ-FR-0806, AZ-FR-0815.
+
 ## 6.10 Dev Server Acceptance
 
 ### AZ-AT-0801 Toggle dev server
@@ -205,6 +271,13 @@ Canonical fixture profile names:
 - Steps: start server, `Space v`, then `Space Ctrl-r`.
 - Expected: viewer attach works; restart recovers server process.
 - Links: AZ-FR-0903, AZ-FR-0904.
+
+### AZ-AT-2818 Dev server execution context and collision handling
+
+- Preconditions: multiple active issue contexts and one forced dev-server startup failure.
+- Steps: start/toggle dev servers across issues.
+- Expected: server runs in issue-scoped context, ports avoid collisions, and startup failure includes actionable guidance.
+- Links: AZ-FR-0902, AZ-FR-0905, AZ-FR-0907.
 
 ## 6.11 Git and Merge Acceptance
 
@@ -233,6 +306,12 @@ Canonical fixture profile names:
 - Expected: confirmation appears; cancel preserves state.
 - Links: AZ-FR-1008.
 
+### AZ-AT-2819 Merge-to-base default context behavior
+
+- Steps: invoke `Space m` from default board context.
+- Expected: merge target is configured base branch by default context contract.
+- Links: AZ-FR-1007.
+
 ### AZ-AT-0905 Show diff
 
 - Steps: `Space f`.
@@ -244,6 +323,13 @@ Canonical fixture profile names:
 - Steps: source issue `Space b`, select target, confirm.
 - Expected: source changes merged to target branch, self-merge prevented.
 - Links: AZ-FR-1010, AZ-FR-1011.
+
+### AZ-AT-0907 Bulk bring-up-to-date with queued conflict assistant
+
+- Preconditions: selected issue set includes clean merges, conflicting merges, and at least one parent/upstream-sourced branch case.
+- Steps: invoke bulk bring-up-to-date for selected set with bounded concurrency > 1 and conflict-assistant policy enabled.
+- Expected: items process in FIFO queue order with bounded concurrent workers; each item resolves source branch per policy; conflicting items trigger automated conflict-resolution attempts; unresolved items remain recoverable with manual guidance; queue continues after per-item failure and ends with per-item summary.
+- Links: AZ-FR-1012, AZ-FR-1013, AZ-FR-1014, AZ-FR-1015, AZ-FR-1016, AZ-FR-1017.
 
 ## 6.12 PR Acceptance
 
@@ -285,6 +371,12 @@ Canonical fixture profile names:
 - Expected: AI-assisted flows open and can submit valid updates.
 - Links: AZ-FR-1304, AZ-FR-1306.
 
+### AZ-AT-2820 Cleanup entrypoint and schema-safe issue writes
+
+- Steps: invoke `Space d` for focused issue; run create/edit mutations including validation edge values.
+- Expected: cleanup action is available from action palette; edit/create writes preserve tracker schema validity.
+- Links: AZ-FR-1201, AZ-FR-1307.
+
 ## 6.14 Planning Acceptance
 
 ### AZ-AT-1201 Planning successful decomposition
@@ -319,19 +411,53 @@ Canonical fixture profile names:
 - Expected: preview works or degrades with message, external open works, deletion removes entry.
 - Links: AZ-FR-1606..AZ-FR-1608.
 
+### AZ-AT-2822 Attachment list selection navigation
+
+- Preconditions: focused issue has multiple attachments.
+- Steps: open detail and move selection with `j/k`.
+- Expected: attachment selection navigation updates deterministically.
+- Links: AZ-FR-1605.
+
 ## 6.16 Settings and Projects Acceptance
 
 ### AZ-AT-1401 Edit settings and persist
 
 - Steps: `s`, toggle value, close and reopen app.
 - Expected: setting persists and behavior reflects change.
-- Links: AZ-FR-1701..AZ-FR-1705.
+- Links: AZ-FR-1701..AZ-FR-1705, AZ-FR-1707.
+
+### AZ-AT-1403 UI-only complete configuration
+
+- Preconditions: profile with non-default values across all configurable domains.
+- Steps: reset config to defaults, then use settings UI only to apply full target profile.
+- Expected: resulting runtime behavior matches target profile with no mandatory direct file edits.
+- Links: AZ-FR-1708, AZ-FR-1709.
+
+### AZ-AT-1404 JSON schema autocomplete and validation support
+
+- Preconditions: open config JSON in schema-aware editor.
+- Steps: add known key, inspect autocomplete/type hints, then inject invalid value and run config reload.
+- Expected: known keys/values receive schema-driven completion/validation hints; invalid schema value surfaces actionable error.
+- Links: AZ-FR-1710, AZ-FR-1711.
 
 ### AZ-AT-1402 Project selector switching
 
 - Steps: `g p`, choose project.
 - Expected: board reloads against selected project context.
 - Links: AZ-FR-1802, AZ-FR-1803.
+
+### AZ-AT-2823 Multi-project registry persistence
+
+- Preconditions: registry has multiple projects and persisted metadata.
+- Steps: start app and switch projects via selector.
+- Expected: multi-project model is supported and registry metadata persists/reloads correctly.
+- Links: AZ-FR-1801, AZ-FR-1805.
+
+### AZ-AT-2824 Status/help/log and tmux discovery contract
+
+- Steps: open board, invoke help and logs overlays, run tmux discovery against known sessions.
+- Expected: status bar shows current mode, help/log overlays are accessible and dismissible, and tmux session naming/discovery contract resolves known sessions.
+- Links: AZ-FR-1902, AZ-FR-1905, AZ-FR-1906, AZ-FR-2001, AZ-FR-2002.
 
 ## 6.17 Failure Acceptance
 
@@ -352,6 +478,20 @@ Canonical fixture profile names:
 - Steps: inject malformed metadata, open detail panel.
 - Expected: unaffected attachments remain usable; repair hint shown.
 - Links: section 05 F-062.
+
+### AZ-AT-1504 Transient dependency retry and retry-exhausted guidance
+
+- Preconditions: inject transient external dependency failures for one operation that eventually succeeds and one that never succeeds.
+- Steps: execute both operations.
+- Expected: first operation auto-recovers through bounded exponential backoff; second stops at max attempts with explicit retry-exhausted guidance.
+- Links: AZ-FR-2206, AZ-FR-2207.
+
+### AZ-AT-2825 Safety, non-interactive shell behavior, and startup diagnostics
+
+- Preconditions: one destructive action path, one command requiring non-interactive-safe invocation, and environments with optional/mandatory dependency variance.
+- Steps: run representative operations.
+- Expected: destructive action requires explicit confirmation, shell path avoids interactive hangs, state-modifying operations remain idempotent where feasible, optional missing deps do not crash UI, and mandatory missing deps produce startup diagnostics.
+- Links: AZ-FR-2103, AZ-FR-2104, AZ-FR-2105, AZ-FR-2201, AZ-FR-2202.
 
 ## 6.18 Startup and Re-entry Acceptance
 
@@ -394,6 +534,13 @@ Canonical fixture profile names:
 - Expected: explicit lock feedback; no duplicate write; retry path available.
 - Links: AZ-FR-2806..AZ-FR-2808.
 
+### AZ-AT-2827 Refresh selection reconciliation and optimistic dependency/fork rollback
+
+- Preconditions: selected set includes items affected by refresh removal; dependency/fork mutation failures can be injected.
+- Steps: trigger refresh during active selections; run optimistic dependency and fork metadata mutations with forced failures.
+- Expected: selection/focus reconcile to existing IDs only, detail shows typed incoming/outgoing dependencies, dependency-intent mutations are preserved in planning/fork behavior, and optimistic dependency/fork mutations rollback cleanly on failure.
+- Links: AZ-FR-2805, AZ-FR-3409, AZ-FR-3703, AZ-FR-3805, AZ-FR-3806.
+
 ## 6.20 Terminal Compatibility Acceptance
 
 ### AZ-AT-1801 Narrow terminal usability
@@ -413,6 +560,13 @@ Canonical fixture profile names:
 - Steps: run terminal with minimal/no color support.
 - Expected: critical states understandable via textual cues.
 - Links: AZ-FR-2905.
+
+### AZ-AT-2826 Security/privacy redaction and ASCII-key operability
+
+- Preconditions: operations produce logs/toasts and issue has attachments.
+- Steps: execute sensitive operations, inspect outputs, and run primary workflows with ASCII keybindings only.
+- Expected: secrets are redacted from logs/toasts, unrelated credential files remain untouched, attachment storage remains project-local, command execution preserves explicit argument boundaries, and core workflows are fully operable with ASCII mappings.
+- Links: AZ-FR-2501, AZ-FR-2502, AZ-FR-2503, AZ-FR-2504, AZ-FR-2601.
 
 ## 6.21 Idempotence and Partial-Success Acceptance
 
@@ -541,6 +695,13 @@ Canonical fixture profile names:
 - Steps: trigger branch recreation path.
 - Expected: runtime origin chooser appears again for recreate flow.
 - Links: AZ-FR-3506.
+
+### AZ-AT-2821 Fork dependency persistence and origin chooser guidance
+
+- Preconditions: fork flow with eligible and non-eligible upstream sources.
+- Steps: invoke `Space F`, choose fork mode, choose origin source.
+- Expected: fork action exists, selected relationship persists in dependencies, runtime branch-origin chooser appears, and no-upstream case provides explicit fallback reason.
+- Links: AZ-FR-1401, AZ-FR-1403, AZ-FR-1404, AZ-FR-3505.
 
 ### AZ-AT-2304 Main board relationship chips and blocked signal
 
@@ -770,6 +931,34 @@ Canonical fixture profile names:
 - Expected: both assertion classes pass for merge/cleanup/session start/PR paths.
 - Links: AZ-FR-4110.
 
+### AZ-AT-2808 Initial interaction before full hydration
+
+- Preconditions: `scale` fixture with dataset larger than a single viewport.
+- Steps: launch app and immediately perform navigation and mode change inputs while additional rows/cards are still hydrating.
+- Expected: board accepts inputs and updates focus/mode without waiting for full dataset hydration.
+- Links: AZ-FR-2305.
+
+### AZ-AT-2809 Virtualized rendering responsiveness at scale
+
+- Preconditions: `scale` fixture with high-cardinality columns.
+- Steps: perform sustained scroll/navigation across long columns and toggle view (`Tab`) repeatedly.
+- Expected: no interaction lockups; navigation and view toggle remain responsive while traversing off-screen content.
+- Links: AZ-FR-2306.
+
+### AZ-AT-2810 Viewport-priority loading and monitoring
+
+- Preconditions: `scale` fixture with mixed tmux/git/PR indicator states distributed across viewport and off-screen rows.
+- Steps: open board, observe initial visible indicators, then jump/scroll to new viewport region.
+- Expected: initial visible-window data and indicators appear first; newly visible region converges quickly after viewport change without blocking interaction.
+- Links: AZ-FR-2307, AZ-FR-2308, AZ-FR-2310.
+
+### AZ-AT-2811 Deferred off-screen work does not block foreground interaction
+
+- Preconditions: `scale` fixture with intentional off-screen refresh backlog.
+- Steps: keep navigating, filtering, opening/closing overlays while backlog exists.
+- Expected: foreground interactions remain responsive; off-screen refresh proceeds opportunistically without mode or navigation stalls.
+- Links: AZ-FR-2309.
+
 ## 6.31 Minimum Release Gate
 
 A release candidate MUST pass:
@@ -784,4 +973,5 @@ A release candidate MUST pass:
 - optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2505
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
-- e2e meta scenarios AZ-AT-2801 through AZ-AT-2807
+- e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2827

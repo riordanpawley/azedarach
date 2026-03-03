@@ -63,6 +63,8 @@ This section is a full normative keybinding contract.
 | `a` | card focused | toggles selection for focused card |
 | `A` | column focused | selects all in current column |
 | `%` | any board state | selects all visible non-tombstoned |
+| `*` | select mode active | invert visible non-tombstoned selection |
+| `x` | select mode active | clear selection set and remain in SEL |
 | `h/j/k/l` | select mode active | navigates while keeping selection set |
 | `Space` | select mode active | enters action mode for selected set |
 | `v` | select mode active | clear selection + return NOR |
