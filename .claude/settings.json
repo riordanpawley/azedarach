@@ -1,47 +1,68 @@
 {
-	"initCommands": ["direnv allow"],
-	"permissions": {
-		"allow": [
-			"Read(//**/.beads/images/**)",
-			"Bash(bd:*)",
-			"mcp__plugin_beads_beads__*",
-			"mcp__effect-docs__*",
-			"Bash(rg:*)",
-			"Bash(fd:*)",
-			"Bash(git status)",
-			"Bash(git diff:*)",
-			"Bash(git log:*)",
-			"Bash(git add:*)",
-			"Bash(git commit:*)",
-			"Bash(git push:*)",
-			"Bash(pnpm:*)",
-			"Bash(npm:*)",
-			"Bash(gh:*)",
-			"Bash(bun run type-check:*)",
-			"Bash(bun run fix:*)"
-		],
-		"deny": []
-	},
-	"hooks": {
-		"UserPromptSubmit": [
-			{
-				"hooks": [
-					{
-						"type": "command",
-						"command": "node .claude/hooks/user-prompt-submit-orchestrator.cjs"
-					}
-				]
-			}
-		],
-		"PreToolUse": [
-			{
-				"hooks": [
-					{
-						"type": "command",
-						"command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/pre-edit-type-safety.cjs"
-					}
-				]
-			}
-		]
-	}
+  "initCommands": [
+    "direnv allow"
+  ],
+  "permissions": {
+    "allow": [
+      "Read(//**/.beads/images/**)",
+      "Bash(br:*)",
+      "mcp__effect-docs__*",
+      "Bash(rg:*)",
+      "Bash(fd:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(pnpm:*)",
+      "Bash(npm:*)",
+      "Bash(gh:*)",
+      "Bash(bun run type-check:*)",
+      "Bash(bun run fix:*)"
+    ],
+    "deny": []
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/user-prompt-submit-orchestrator.cjs"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/pre-edit-type-safety.cjs"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /.claude/hooks/br-hooks.cjs session-start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /.claude/hooks/br-hooks.cjs stop"
+          }
+        ]
+      }
+    ]
+  }
 }
