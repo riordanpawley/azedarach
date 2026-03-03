@@ -64,3 +64,5 @@ coverage/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+.beads/dolt-monitor.pid
+.beads/dolt-server.activity
