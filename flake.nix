@@ -35,19 +35,19 @@
           assets = {
             aarch64-darwin = {
               file = "br-v0.1.20-darwin_arm64.tar.gz";
-              hash = "sha256-cFoTq3yXK/+XRAZWYzIQyiyIzUnBCUpgB6mJg9c/ux0=";
+              hash = "sha256-XsHX710UcZxJ1zbBCChK2gHOy0BISpQT7OGgdJzvRC8=";
             };
             x86_64-darwin = {
               file = "br-v0.1.20-darwin_amd64.tar.gz";
-              hash = "sha256-tT8Qnj8ojSPSkYvJ3Pf6mZc1HXm/q2vlTKGLxB1QTVg=";
+              hash = "sha256-wB0NdFkETTRCby7PN8fktfbvOd7fRNQ/MRbkN/3eNF0=";
             };
             x86_64-linux = {
               file = "br-v0.1.20-linux_amd64.tar.gz";
-              hash = "sha256-rvwu9rFseydfaJBjbBEFQMe8CB4gOh6KcGo3YgfR+d0=";
+              hash = "sha256-mU5WDf0gFKTvVLXwo4A7jMVWnkxZ7QWHbeBNH385r1M=";
             };
             aarch64-linux = {
               file = "br-v0.1.20-linux_arm64.tar.gz";
-              hash = "sha256-IImTFidLesQN5HfzMYo9Y5H3iFxs0b7HuhDoKDYCB/s=";
+              hash = "sha256-FLH4hXpRaZUeyvX3+Kf0avBfvE5CooDoZ/8ImLC+rww=";
             };
           };
         };
