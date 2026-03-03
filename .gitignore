@@ -66,3 +66,4 @@ coverage/
 *.db
 .beads/dolt-monitor.pid
 .beads/dolt-server.activity
+.beads.bak
