@@ -1,9 +1,13 @@
 #!/usr/bin/env sh
-# --- BEGIN BEADS INTEGRATION v0.58.0 ---
-# This section is managed by beads. Do not remove these markers.
-if command -v bd >/dev/null 2>&1; then
-  export BD_GIT_HOOK=1
-  bd hooks run post-checkout "$@"
-  _bd_exit=$?; if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+# Migrated from bd hook shim to explicit br behavior.
+if [ "${3:-0}" = "1" ]; then
+  if [ ! -d .git/rebase-merge ] && [ ! -d .git/rebase-apply ]; then
+    if [ -d .beads ] && command -v br >/dev/null 2>&1; then
+      br sync --import-only >/dev/null 2>&1 || true
+      br doctor >/dev/null 2>&1 || true
+    fi
+  fi
 fi
-# --- END BEADS INTEGRATION ---
+
+
+exit 0
