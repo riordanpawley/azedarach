@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -257,6 +258,52 @@ func TestRenderCard_Cursor(t *testing.T) {
 	// Should contain cursor indicator
 	if !strings.Contains(stripped, "▶") {
 		t.Errorf("Card with cursor should contain cursor indicator, got: %s", stripped)
+	}
+}
+
+func TestRenderCard_HasConsistentHeightAcrossVariants(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-1 * time.Hour)
+
+	baseTask := domain.Task{
+		ID:       "az-base",
+		Title:    "Base task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+	}
+	withSession := baseTask
+	withSession.ID = "az-session"
+	withSession.Session = &domain.Session{
+		BeadID:    withSession.ID,
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
+	epic := baseTask
+	epic.ID = "az-epic"
+	epic.Type = domain.TypeEpic
+	epic.Title = "Epic task"
+	epicWithSession := epic
+	epicWithSession.ID = "az-epic-session"
+	epicWithSession.Session = &domain.Session{
+		BeadID:    epicWithSession.ID,
+		State:     domain.SessionBusy,
+		StartedAt: &startedAt,
+	}
+
+	rendered := []string{
+		RenderCard(baseTask, false, false, 30, s),
+		RenderCard(withSession, false, false, 30, s),
+		RenderCard(epic, false, false, 30, s),
+		RenderCard(epicWithSession, false, false, 30, s),
+	}
+
+	expectedHeight := lipgloss.Height(rendered[0])
+	for i := 1; i < len(rendered); i++ {
+		height := lipgloss.Height(rendered[i])
+		if height != expectedHeight {
+			t.Fatalf("card height mismatch at variant %d: got %d, want %d", i, height, expectedHeight)
+		}
 	}
 }
 

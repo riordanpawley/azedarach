@@ -83,20 +83,17 @@ func New() *Styles {
 		Card: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(Surface1).
-			Padding(0, 1).
-			MarginBottom(1),
+			Padding(0, 1),
 
 		CardActive: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(Lavender).
-			Padding(0, 1).
-			MarginBottom(1),
+			Padding(0, 1),
 
 		CardSelected: lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(Mauve).
-			Padding(0, 1).
-			MarginBottom(1),
+			Padding(0, 1),
 
 		TaskID: lipgloss.NewStyle().
 			Foreground(Overlay1).

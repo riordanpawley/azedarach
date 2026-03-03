@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
@@ -64,33 +65,33 @@ func renderCard(task domain.Task, isCursor bool, isSelected bool, width int, pha
 	// Build the card content
 	titleLine := cursor + title
 
-	// Badge line: priority • type [• phase]
-	badgeLine := lipgloss.JoinHorizontal(lipgloss.Left, priorityBadge, " • ", typeBadge)
+	// Badge line: priority • type [• phase] [• session] [• epic progress]
+	parts := []string{priorityBadge, typeBadge}
 	if phaseBadge != "" {
-		badgeLine = lipgloss.JoinHorizontal(lipgloss.Left, badgeLine, " • ", phaseBadge)
+		parts = append(parts, phaseBadge)
 	}
 
 	// Session status row (if session exists)
-	var sessionRow string
+	var sessionMeta string
 	if task.Session != nil {
-		sessionRow = renderSessionStatus(task.Session, s)
+		sessionMeta = renderSessionStatus(task.Session, s)
+		parts = append(parts, sessionMeta)
 	}
 
 	// Epic progress (if epic type)
 	var epicProgress string
 	if task.Type == domain.TypeEpic {
 		epicProgress = renderEpicProgress(task, width, s)
+		if epicProgress != "" {
+			parts = append(parts, epicProgress)
+		}
 	}
+	badgeLine := strings.Join(parts, " • ")
+	maxBadgeLen := max(1, width-4)
+	badgeLine = ansi.Truncate(badgeLine, maxBadgeLen, "…")
 
-	// Compose card content
+	// Keep all cards the same visual height across variants.
 	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, badgeLine)
-
-	if sessionRow != "" {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, sessionRow)
-	}
-	if epicProgress != "" {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, epicProgress)
-	}
 
 	return cardStyle.Render(content)
 }
