@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -868,14 +869,62 @@ func (m Model) layer(bottom, top string) string {
 			t = tLines[i]
 		}
 
-		if strings.TrimSpace(t) == "" {
+		tVisible := ansi.Strip(t)
+		if strings.TrimSpace(tVisible) == "" {
 			res[i] = b
 		} else {
-			res[i] = t
+			start, end, ok := visibleBounds(tVisible)
+			if !ok {
+				res[i] = b
+				continue
+			}
+
+			bWidth := ansi.StringWidth(b)
+			if bWidth <= 0 {
+				res[i] = t
+				continue
+			}
+
+			if start > bWidth {
+				start = bWidth
+			}
+			if end > bWidth {
+				end = bWidth
+			}
+			if start >= end {
+				res[i] = b
+				continue
+			}
+
+			left := ansi.Cut(b, 0, start)
+			middle := ansi.Cut(t, start, end)
+			right := ansi.Cut(b, end, bWidth)
+			res[i] = left + middle + right
 		}
 	}
 
 	return strings.Join(res, "\n")
+}
+
+func visibleBounds(line string) (start int, end int, ok bool) {
+	runes := []rune(line)
+	first := -1
+	last := -1
+
+	for i, r := range runes {
+		if r != ' ' {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+
+	if first == -1 {
+		return 0, 0, false
+	}
+
+	return first, last + 1, true
 }
 
 // buildColumns converts tasks into board columns, applying filter and sort

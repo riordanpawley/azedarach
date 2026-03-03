@@ -46,6 +46,20 @@ func TestViewHeight(t *testing.T) {
 	})
 }
 
+func TestLayer_PreservesBottomOutsideOverlaySpan(t *testing.T) {
+	m := newTestModel()
+	m.height = 1
+
+	bottom := "ABCDEFGHIJ"
+	top := "     123  "
+
+	got := m.layer(bottom, top)
+	want := "ABCDE123IJ"
+	if got != want {
+		t.Fatalf("layer() = %q, want %q", got, want)
+	}
+}
+
 type testOverlay struct{}
 
 func (o *testOverlay) View() string                            { return "test overlay" }
