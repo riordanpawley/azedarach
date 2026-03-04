@@ -204,7 +204,8 @@ Settings are stored in `.azedarach.json` in your project root:
   "network": {
     "autoDetect": true
   },
-  "beads": {
+  "issueTracker": "br",
+  "beads_rust": {
     "syncEnabled": true
   },
   "stateDetection": {

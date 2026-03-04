@@ -759,7 +759,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						Effect.gen(function* () {
 							const session = sessionMap.get(issue.id)
 							const metricsOpt = HashMap.get(allMetrics, issue.id)
-							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : {}
+							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
 
 							// Get parent epic ID (if this is an epic child)
@@ -806,9 +806,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								sessionStartedAt: session?.startedAt
 									? DateTime.formatIso(session.startedAt)
 									: undefined,
-								estimatedTokens: metrics.estimatedTokens,
-								recentOutput: metrics.recentOutput,
-								agentPhase: metrics.agentPhase,
+								estimatedTokens: metrics?.estimatedTokens,
+								recentOutput: metrics?.recentOutput,
+								agentPhase: metrics?.agentPhase,
 							}
 
 							// Apply optimistic updates

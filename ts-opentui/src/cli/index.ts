@@ -159,6 +159,13 @@ const projectDirArg = Args.directory().pipe(
  */
 const validateBeadsDatabase = (projectDir: string) =>
 	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
+		if (resolvedConfig.issueTracker === "linear") {
+			yield* Console.log("Using linear issue tracker (no .beads directory required)")
+			return
+		}
+
 		const fs = yield* FileSystem.FileSystem
 		const path = yield* Path.Path
 		const beadsDir = path.join(projectDir, ".beads")
@@ -858,15 +865,44 @@ const projectAddHandler = (args: {
 			return yield* Effect.fail(new Error(`Path does not exist: ${absolutePath}`))
 		}
 
-		// Validate .beads directory exists
-		const beadsPath = pathService.join(absolutePath, ".beads")
-		const beadsExists = yield* fs.exists(beadsPath)
-		if (!beadsExists) {
-			return yield* Effect.fail(
-				new Error(
-					`No .beads directory found in ${absolutePath}. Run 'bd init' to initialize beads tracking.`,
-				),
+		let tracker: "bd" | "br" | "linear" = "br"
+		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
+		const hasLocalConfig = yield* fs.exists(localConfigPath).pipe(Effect.catchAll(() => Effect.succeed(false)))
+		if (hasLocalConfig) {
+			const localConfigRaw = yield* fs.readFileString(localConfigPath).pipe(
+				Effect.catchAll(() => Effect.succeed("")),
 			)
+			const localIssueTracker = yield* Effect.try({
+				try: () => {
+					const parsed: unknown = JSON.parse(localConfigRaw)
+					if (typeof parsed !== "object" || parsed === null || !("issueTracker" in parsed)) {
+						return undefined
+					}
+					const issueTrackerValue = parsed.issueTracker
+					if (
+						issueTrackerValue === "bd" ||
+						issueTrackerValue === "br" ||
+						issueTrackerValue === "linear"
+					) {
+						return issueTrackerValue
+					}
+					return undefined
+				},
+				catch: () => undefined,
+			})
+			tracker = localIssueTracker ?? tracker
+		}
+
+		const beadsPath = pathService.join(absolutePath, ".beads")
+		if (tracker !== "linear") {
+			const beadsExists = yield* fs.exists(beadsPath)
+			if (!beadsExists) {
+				return yield* Effect.fail(
+					new Error(
+						`No .beads directory found in ${absolutePath}. Run 'bd init' to initialize beads tracking.`,
+					),
+				)
+			}
 		}
 
 		// Derive name from directory if not provided
@@ -875,7 +911,10 @@ const projectAddHandler = (args: {
 		if (args.verbose) {
 			yield* Console.log(`Adding project: ${projectName}`)
 			yield* Console.log(`  Path: ${absolutePath}`)
-			yield* Console.log(`  Beads: ${beadsPath}`)
+			yield* Console.log(`  Tracker: ${tracker}`)
+			if (tracker !== "linear") {
+				yield* Console.log(`  Beads: ${beadsPath}`)
+			}
 		}
 
 		// Add project via ProjectService (provided by cliLayer)
@@ -883,7 +922,7 @@ const projectAddHandler = (args: {
 		yield* projectService.addProject({
 			name: projectName,
 			path: absolutePath,
-			beadsPath,
+			beadsPath: tracker === "linear" ? undefined : beadsPath,
 		})
 
 		yield* Console.log(`Project '${projectName}' added successfully.`)

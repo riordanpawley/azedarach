@@ -82,8 +82,11 @@ export interface AppConfigService {
 	/** Get notifications configuration section */
 	readonly getNotificationsConfig: () => Effect.Effect<ResolvedConfig["notifications"]>
 
-	/** Get beads configuration section */
-	readonly getBeadsConfig: () => Effect.Effect<ResolvedConfig["beads"]>
+	/** Get effective issue backend configuration (tracker + sync flag) */
+	readonly getBeadsConfig: () => Effect.Effect<{
+		readonly issueTracker: ResolvedConfig["issueTracker"]
+		readonly syncEnabled: boolean
+	}>
 
 	/** Get network configuration section */
 	readonly getNetworkConfig: () => Effect.Effect<ResolvedConfig["network"]>
@@ -371,6 +374,17 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// Reactive Config Setup
 		// ============================================================================
 
+		const getIssueBackendSyncEnabled = (config: ResolvedConfig): boolean => {
+			switch (config.issueTracker) {
+				case "bd":
+					return config.beads.syncEnabled
+				case "br":
+					return config.beads_rust.syncEnabled
+				case "linear":
+					return config.linear.syncEnabled
+			}
+		}
+
 		// Get initial project path from ProjectService
 		const initialProjectPath = yield* projectService.getCurrentPath()
 		const effectiveProjectPath = initialProjectPath ?? process.cwd()
@@ -450,7 +464,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getMergeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.merge),
 			getNotificationsConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => c.notifications),
-			getBeadsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.beads),
+			getBeadsConfig: () =>
+				Effect.map(SubscriptionRef.get(configRef), (c) => ({
+					issueTracker: c.issueTracker,
+					syncEnabled: getIssueBackendSyncEnabled(c),
+				})),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
 			getKeyboardConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.keyboard),

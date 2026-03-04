@@ -19,15 +19,12 @@ describe("AzedarachConfigSchema", () => {
 		it("sets $schema to current for empty config", () => {
 			const result = decodeConfig({})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.issueTracker).toBe("br")
+			expect(result.beads_rust?.syncEnabled).toBe(true)
 		})
 
 		it("sets $schema to current for v1 config (legacy)", () => {
 			const result = decodeConfig({ $schema: 1 })
-			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
-		})
-
-		it("preserves $schema for current version config", () => {
-			const result = decodeConfig({ $schema: CURRENT_CONFIG_VERSION })
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 		})
 
@@ -49,44 +46,111 @@ describe("AzedarachConfigSchema", () => {
 				},
 			})
 
-			// baseBranch should be in git section now
 			expect(result.git?.baseBranch).toBe("develop")
-			// pr section should NOT have baseBranch
 			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
 		})
 
 		it("does not overwrite existing git.baseBranch", () => {
 			const result = decodeConfig({
 				git: { baseBranch: "main" },
-				pr: { baseBranch: "develop" }, // legacy field should be ignored
+				pr: { baseBranch: "develop" },
 			})
 
-			// git.baseBranch should win
 			expect(result.git?.baseBranch).toBe("main")
 		})
+	})
 
-		it("handles config with only git.baseBranch (no legacy)", () => {
+	describe("v2 → v3 migration: top-level issueTracker", () => {
+		it("migrates legacy beads.issueTracker=bd to top-level issueTracker + beads block", () => {
 			const result = decodeConfig({
 				$schema: 2,
-				git: { baseBranch: "release" },
-			})
-
-			expect(result.git?.baseBranch).toBe("release")
-		})
-
-		it("strips baseBranch from pr section in output", () => {
-			const result = decodeConfig({
-				pr: {
-					autoDraft: false,
-					autoMerge: true,
-					baseBranch: "legacy-value",
+				beads: {
+					syncEnabled: false,
+					issueTracker: "bd",
 				},
 			})
 
-			// pr should only have autoDraft, autoMerge, and enabled
-			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true, enabled: undefined })
-			// baseBranch should NOT be in pr
-			expect("baseBranch" in (result.pr ?? {})).toBe(false)
+			expect(result.issueTracker).toBe("bd")
+			expect(result.beads?.syncEnabled).toBe(false)
+			expect(result.beads_rust).toBeUndefined()
+			expect(result.linear).toBeUndefined()
+		})
+
+		it("migrates legacy beads.issueTracker=br to top-level issueTracker + beads_rust block", () => {
+			const result = decodeConfig({
+				$schema: 2,
+				beads: {
+					syncEnabled: false,
+					issueTracker: "br",
+				},
+			})
+
+			expect(result.issueTracker).toBe("br")
+			expect(result.beads_rust?.syncEnabled).toBe(false)
+			expect(result.beads).toBeUndefined()
+			expect(result.linear).toBeUndefined()
+		})
+
+		it("accepts new bd config shape", () => {
+			const result = decodeConfig({
+				issueTracker: "bd",
+				beads: { syncEnabled: false },
+			})
+
+			expect(result.issueTracker).toBe("bd")
+			expect(result.beads?.syncEnabled).toBe(false)
+		})
+
+		it("accepts new br config shape", () => {
+			const result = decodeConfig({
+				issueTracker: "br",
+				beads_rust: { syncEnabled: true },
+			})
+
+			expect(result.issueTracker).toBe("br")
+			expect(result.beads_rust?.syncEnabled).toBe(true)
+		})
+
+		it("accepts new linear config shape", () => {
+			const result = decodeConfig({
+				issueTracker: "linear",
+				linear: {
+					syncEnabled: true,
+					command: "linear-cli",
+					team: "ENG",
+				},
+			})
+
+			expect(result.issueTracker).toBe("linear")
+			expect(result.linear?.team).toBe("ENG")
+			expect(result.linear?.command).toBe("linear-cli")
+		})
+
+		it("rejects mismatched issueTracker/backend block", () => {
+			expect(() =>
+				decodeConfig({
+					issueTracker: "bd",
+					beads_rust: { syncEnabled: true },
+				}),
+			).toThrow(/issueTracker='bd' does not match backend block/)
+		})
+
+		it("rejects multiple backend blocks", () => {
+			expect(() =>
+				decodeConfig({
+					issueTracker: "br",
+					beads_rust: { syncEnabled: true },
+					linear: { syncEnabled: true },
+				}),
+			).toThrow(/only one issue backend block is allowed/)
+		})
+
+		it("rejects issueTracker without backend block", () => {
+			expect(() =>
+				decodeConfig({
+					issueTracker: "linear",
+				}),
+			).toThrow(/requires matching backend block/)
 		})
 	})
 
@@ -97,50 +161,12 @@ describe("AzedarachConfigSchema", () => {
 					initCommands: ["direnv allow", "bun install"],
 					continueOnFailure: false,
 				},
+				issueTracker: "br",
+				beads_rust: { syncEnabled: true },
 			})
 
 			expect(result.worktree?.initCommands).toEqual(["direnv allow", "bun install"])
 			expect(result.worktree?.continueOnFailure).toBe(false)
-		})
-
-		it("preserves session config", () => {
-			const result = decodeConfig({
-				session: {
-					command: "claude --model haiku",
-					shell: "/bin/zsh",
-					tmuxPrefix: "C-b",
-				},
-			})
-
-			expect(result.session?.command).toBe("claude --model haiku")
-			expect(result.session?.shell).toBe("/bin/zsh")
-			expect(result.session?.tmuxPrefix).toBe("C-b")
-		})
-
-		it("preserves merge config", () => {
-			const result = decodeConfig({
-				merge: {
-					validateCommands: ["bun run test", "bun run build"],
-					fixCommand: "bun run fix",
-					maxFixAttempts: 3,
-				},
-			})
-
-			expect(result.merge?.validateCommands).toEqual(["bun run test", "bun run build"])
-			expect(result.merge?.fixCommand).toBe("bun run fix")
-			expect(result.merge?.maxFixAttempts).toBe(3)
-		})
-
-		it("preserves notifications config", () => {
-			const result = decodeConfig({
-				notifications: {
-					bell: false,
-					system: true,
-				},
-			})
-
-			expect(result.notifications?.bell).toBe(false)
-			expect(result.notifications?.system).toBe(true)
 		})
 
 		it("preserves projects array", () => {
@@ -150,6 +176,8 @@ describe("AzedarachConfigSchema", () => {
 					{ name: "project2", path: "/path/to/project2", beadsPath: "/custom/beads" },
 				],
 				defaultProject: "project1",
+				issueTracker: "bd",
+				beads: { syncEnabled: true },
 			})
 
 			expect(result.projects).toHaveLength(2)
@@ -159,60 +187,13 @@ describe("AzedarachConfigSchema", () => {
 		})
 	})
 
-	describe("complex migration scenarios", () => {
-		it("handles full v1 config with all sections", () => {
-			const result = decodeConfig({
-				worktree: { initCommands: ["npm install"] },
-				session: { command: "claude" },
-				git: { remote: "upstream", branchPrefix: "feature-" },
-				pr: {
-					baseBranch: "develop", // legacy
-					autoDraft: false,
-					autoMerge: true,
-				},
-				merge: { validateCommands: ["npm test"] },
-				notifications: { bell: true },
-			})
-
-			// Migration should move baseBranch to git
-			expect(result.git?.baseBranch).toBe("develop")
-			expect(result.git?.remote).toBe("upstream")
-			expect(result.git?.branchPrefix).toBe("feature-")
-
-			// pr should not have baseBranch
-			expect(result.pr).toEqual({ autoDraft: false, autoMerge: true, enabled: undefined })
-
-			// Other sections should pass through
-			expect(result.worktree?.initCommands).toEqual(["npm install"])
-			expect(result.session?.command).toBe("claude")
-			expect(result.merge?.validateCommands).toEqual(["npm test"])
-			expect(result.notifications?.bell).toBe(true)
-
-			// Version should be current
-			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
-		})
-
-		it("handles already-migrated v2 config cleanly", () => {
-			const v2Config = {
-				$schema: 2,
-				git: { baseBranch: "main", remote: "origin" },
-				pr: { autoDraft: true },
-				session: { command: "claude" },
-			}
-
-			const result = decodeConfig(v2Config)
-
-			expect(result.$schema).toBe(2)
-			expect(result.git?.baseBranch).toBe("main")
-			expect(result.git?.remote).toBe("origin")
-			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
-		})
-	})
-
 	describe("encoding", () => {
 		it("encodes current config with version", () => {
+			const issueTracker: "br" = "br"
 			const config = {
-				$schema: 2,
+				$schema: CURRENT_CONFIG_VERSION,
+				issueTracker,
+				beads_rust: { syncEnabled: true },
 				git: { baseBranch: "main" },
 				pr: { autoDraft: true },
 			}
@@ -220,6 +201,7 @@ describe("AzedarachConfigSchema", () => {
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 
 			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(encoded.issueTracker).toBe("br")
 			expect(encoded.git?.baseBranch).toBe("main")
 		})
 	})

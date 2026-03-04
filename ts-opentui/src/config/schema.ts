@@ -7,6 +7,7 @@
  * ## Version History
  * - Version 1: Original schema (no $schema field) - legacy format
  * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
+ * - Version 3: Adds top-level issueTracker with backend-specific config blocks
  *
  * ## Adding New Versions
  * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
@@ -22,7 +23,7 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 2
+export const CURRENT_CONFIG_VERSION = 3
 
 // ============================================================================
 // CLI Tool Configuration
@@ -36,6 +37,16 @@ export const CURRENT_CONFIG_VERSION = 2
  */
 export const CliToolSchema = Schema.Literal("claude", "opencode")
 export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
+
+/**
+ * Supported issue tracker backends for beads commands.
+ *
+ * - bd: legacy beads backend
+ * - br: rust beads backend
+ * - linear: Linear backend through linear-cli
+ */
+export const IssueTrackerSchema = Schema.Literal("bd", "br", "linear")
+export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
 
 /**
  * Model configuration for AI sessions
@@ -343,9 +354,9 @@ const LegacyPRConfigSchema = Schema.Struct({
 })
 
 /**
- * Beads configuration
+ * Beads (bd) backend configuration
  *
- * Controls beads issue tracker behavior.
+ * Controls legacy beads issue tracker behavior.
  */
 const BeadsConfigSchema = Schema.Struct({
 	/**
@@ -355,6 +366,59 @@ const BeadsConfigSchema = Schema.Struct({
 	 * tracked locally but not synced to the remote repository.
 	 */
 	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Beads Rust (br) backend configuration
+ *
+ * Controls rust beads issue tracker behavior.
+ */
+const BeadsRustConfigSchema = Schema.Struct({
+	/**
+	 * Enable beads sync operations (default: true)
+	 *
+	 * When false, `bd sync`/`br sync` is silently skipped.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Linear backend configuration
+ *
+ * Controls linear-cli integration.
+ */
+const LinearConfigSchema = Schema.Struct({
+	/**
+	 * Enable linear sync operations (default: true)
+	 *
+	 * For linear this controls whether sync-like operations are enabled.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Command used to invoke linear CLI (default: "linear-cli")
+	 */
+	command: Schema.optional(Schema.String),
+
+	/**
+	 * Default Linear team key or ID (required for create operations)
+	 */
+	team: Schema.optional(Schema.String),
+
+	/**
+	 * Optional default Linear project name or ID
+	 */
+	project: Schema.optional(Schema.String),
+})
+
+/**
+ * Legacy beads schema used for migration.
+ *
+ * v1/v2 had backend selection nested under `beads.issueTracker`.
+ */
+const LegacyBeadsConfigSchema = Schema.Struct({
+	syncEnabled: Schema.optional(Schema.Boolean),
+	issueTracker: Schema.optional(IssueTrackerSchema),
 })
 
 /**
@@ -548,6 +612,100 @@ const migrations: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		toVersion: 3,
+		description: "Move backend selection to top-level issueTracker + backend blocks",
+		migrate: (config) => {
+			type BackendKey = "beads" | "beads_rust" | "linear"
+
+			const trackerToBackend = (tracker: IssueTracker): BackendKey => {
+				switch (tracker) {
+					case "bd":
+						return "beads"
+					case "br":
+						return "beads_rust"
+					case "linear":
+						return "linear"
+				}
+			}
+
+			const backendToTracker = (backend: BackendKey): IssueTracker => {
+				switch (backend) {
+					case "beads":
+						return "bd"
+					case "beads_rust":
+						return "br"
+					case "linear":
+						return "linear"
+				}
+			}
+
+			const configuredBackends: BackendKey[] = []
+			if (config.beads !== undefined) configuredBackends.push("beads")
+			if (config.beads_rust !== undefined) configuredBackends.push("beads_rust")
+			if (config.linear !== undefined) configuredBackends.push("linear")
+
+			if (configuredBackends.length > 1) {
+				throw new Error(
+					"Invalid config: only one issue backend block is allowed (beads, beads_rust, or linear)",
+				)
+			}
+
+			const explicitTracker = config.issueTracker
+			const inferredTracker =
+				configuredBackends.length === 1 ? backendToTracker(configuredBackends[0]!) : undefined
+			const legacyTracker = config.beads?.issueTracker
+
+			if (explicitTracker !== undefined && configuredBackends.length === 0) {
+				throw new Error(
+					`Invalid config: issueTracker='${explicitTracker}' requires matching backend block '${trackerToBackend(explicitTracker)}'`,
+				)
+			}
+
+			if (
+				explicitTracker !== undefined &&
+				inferredTracker !== undefined &&
+				explicitTracker !== inferredTracker
+			) {
+				throw new Error(
+					`Invalid config: issueTracker='${explicitTracker}' does not match backend block '${configuredBackends[0]}'`,
+				)
+			}
+
+			const tracker: IssueTracker = explicitTracker ?? legacyTracker ?? inferredTracker ?? "br"
+			const selectedBackend = trackerToBackend(tracker)
+
+			const legacySyncEnabled = config.beads?.syncEnabled
+			const syncEnabledDefault = legacySyncEnabled ?? true
+
+			return {
+				...config,
+				$schema: 3,
+				issueTracker: tracker,
+				beads:
+					selectedBackend === "beads"
+						? {
+								syncEnabled: config.beads?.syncEnabled ?? syncEnabledDefault,
+							}
+						: undefined,
+				beads_rust:
+					selectedBackend === "beads_rust"
+						? {
+								syncEnabled: config.beads_rust?.syncEnabled ?? syncEnabledDefault,
+							}
+						: undefined,
+				linear:
+					selectedBackend === "linear"
+						? {
+								syncEnabled: config.linear?.syncEnabled ?? syncEnabledDefault,
+								command: config.linear?.command,
+								team: config.linear?.team,
+								project: config.linear?.project,
+							}
+						: undefined,
+			}
+		},
+	},
 	// ────────────────────────────────────────────────────────────────────────
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
@@ -583,6 +741,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 	return {
 		$schema: CURRENT_CONFIG_VERSION,
 		cliTool: current.cliTool,
+		issueTracker: current.issueTracker,
 		model: current.model,
 		worktree: current.worktree,
 		git: current.git,
@@ -600,6 +759,8 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		devServer: current.devServer,
 		notifications: current.notifications,
 		beads: current.beads,
+		beads_rust: current.beads_rust,
+		linear: current.linear,
 		network: current.network,
 		keyboard: current.keyboard,
 		sessionRecovery: current.sessionRecovery,
@@ -616,7 +777,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 /**
  * Raw input schema for Azedarach config
  *
- * Accepts both legacy (v1/unversioned) and current (v2) formats.
+ * Accepts both legacy (v1/v2) and current (v3) formats.
  * Used as the input side of the migration transform.
  */
 const RawConfigSchema = Schema.Struct({
@@ -631,6 +792,7 @@ const RawConfigSchema = Schema.Struct({
 	 * - "opencode": OpenCode (SST's open-source alternative)
 	 */
 	cliTool: Schema.optional(CliToolSchema),
+	issueTracker: Schema.optional(IssueTrackerSchema),
 
 	/**
 	 * Model configuration for AI sessions
@@ -651,8 +813,12 @@ const RawConfigSchema = Schema.Struct({
 	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 
-	/** Beads issue tracker configuration */
-	beads: Schema.optional(BeadsConfigSchema),
+	/** Legacy beads config (supports nested issueTracker for migration) */
+	beads: Schema.optional(LegacyBeadsConfigSchema),
+	/** Beads rust backend config */
+	beads_rust: Schema.optional(BeadsRustConfigSchema),
+	/** Linear backend config */
+	linear: Schema.optional(LinearConfigSchema),
 
 	/** Network connectivity configuration */
 	network: Schema.optional(NetworkConfigSchema),
@@ -671,7 +837,7 @@ const RawConfigSchema = Schema.Struct({
 })
 
 /**
- * Current config schema (v2)
+ * Current config schema (v3)
  *
  * This is the canonical schema after migration.
  * Does NOT include legacy fields - they should be migrated away.
@@ -679,6 +845,7 @@ const RawConfigSchema = Schema.Struct({
 const CurrentConfigSchema = Schema.Struct({
 	$schema: Schema.optional(Schema.Number),
 	cliTool: Schema.optional(CliToolSchema),
+	issueTracker: Schema.optional(IssueTrackerSchema),
 	model: Schema.optional(ModelConfigSchema),
 	worktree: Schema.optional(WorktreeConfigSchema),
 	git: Schema.optional(GitConfigSchema),
@@ -690,6 +857,8 @@ const CurrentConfigSchema = Schema.Struct({
 	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 	beads: Schema.optional(BeadsConfigSchema),
+	beads_rust: Schema.optional(BeadsRustConfigSchema),
+	linear: Schema.optional(LinearConfigSchema),
 	network: Schema.optional(NetworkConfigSchema),
 	keyboard: Schema.optional(KeyboardConfigSchema),
 	sessionRecovery: Schema.optional(SessionRecoveryConfigSchema),
@@ -748,6 +917,12 @@ export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigS
 
 /** Beads config section type */
 export type BeadsConfig = Schema.Schema.Type<typeof BeadsConfigSchema>
+
+/** Beads rust config section type */
+export type BeadsRustConfig = Schema.Schema.Type<typeof BeadsRustConfigSchema>
+
+/** Linear config section type */
+export type LinearConfig = Schema.Schema.Type<typeof LinearConfigSchema>
 
 /** Network config section type */
 export type NetworkConfig = Schema.Schema.Type<typeof NetworkConfigSchema>
