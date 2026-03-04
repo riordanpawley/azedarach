@@ -67,19 +67,27 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by merge.
 		 */
-		const doMerge = (beadId: string, targetBranch: string) =>
+		const doMerge = (issueId: string, targetBranch: string) =>
 			helpers.withQueue(
-				beadId,
+				issueId,
 				"merge",
 				Effect.gen(function* () {
-					yield* toast.show("info", `Merging ${beadId} into ${targetBranch}...`)
+					yield* toast.show("info", `Merging ${issueId} into ${targetBranch}...`)
 
 					// Get current project path (from ProjectService or cwd fallback)
 					const projectPath = yield* helpers.getProjectPath()
 
-					yield* prWorkflow.mergeToMain({ beadId, projectPath }).pipe(
-						Effect.tap(() => board.refresh()),
-						Effect.tap(() => toast.show("success", `Merged ${beadId} into ${targetBranch}`)),
+					yield* prWorkflow.mergeToMain({ issueId, projectPath }).pipe(
+						Effect.tap(() =>
+							Effect.gen(function* () {
+								yield* board.patchTaskFromMutation(issueId, {
+									hasMergeConflict: false,
+									updated_at: new Date().toISOString(),
+								})
+								yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
+							}),
+						),
+						Effect.tap(() => toast.show("success", `Merged ${issueId} into ${targetBranch}`)),
 						Effect.catchAll(helpers.showErrorToast("Merge failed")),
 					)
 				}),
@@ -91,17 +99,17 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by cleanup.
 		 */
-		const doCleanup = (beadId: string, projectPath: string) =>
+		const doCleanup = (issueId: string, projectPath: string) =>
 			helpers.withQueue(
-				beadId,
+				issueId,
 				"cleanup",
 				Effect.gen(function* () {
 					// DIAGNOSTIC: Log the bead ID when cleanup actually executes (az-f3iw)
-					yield* Effect.log(`[cleanup:execute] Running cleanup for beadId=${beadId}`)
-					yield* toast.show("info", `Cleaning up ${beadId}...`)
+					yield* Effect.log(`[cleanup:execute] Running cleanup for issueId=${issueId}`)
+					yield* toast.show("info", `Cleaning up ${issueId}...`)
 
-					yield* prWorkflow.cleanup({ beadId, projectPath }).pipe(
-						Effect.tap(() => toast.show("success", `Cleaned up ${beadId}`)),
+					yield* prWorkflow.cleanup({ issueId, projectPath }).pipe(
+						Effect.tap(() => toast.show("success", `Cleaned up ${issueId}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
 				}),
@@ -150,7 +158,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						// Get current project path (from ProjectService or cwd fallback)
 						const projectPath = yield* helpers.getProjectPath()
 
-						yield* prWorkflow.updateFromBase({ beadId: task.id, projectPath }).pipe(
+						yield* prWorkflow.updateFromBase({ issueId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", `Updated from ${effectiveBaseBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Update from base failed")),
 						)
@@ -202,7 +210,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Update from base first to resolve any conflicts
 				yield* toast.show("info", `Syncing with ${effectiveBaseBranch} before PR...`)
 				const updateResult = yield* prWorkflow
-					.updateFromBase({ beadId: task.id, projectPath })
+					.updateFromBase({ issueId: task.id, projectPath })
 					.pipe(
 						Effect.match({
 							onFailure: (error) => {
@@ -239,7 +247,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					Effect.gen(function* () {
 						yield* toast.show("info", `Creating PR for ${task.id}...`)
 
-						yield* prWorkflow.createPR({ beadId: task.id, projectPath }).pipe(
+						yield* prWorkflow.createPR({ issueId: task.id, projectPath }).pipe(
 							Effect.tap((pr) => toast.show("success", `PR created: ${pr.url}`)),
 							Effect.catchAll((error) => {
 								// Use formatForToast for consistent, user-friendly error messages
@@ -319,7 +327,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// you get a stash conflict that's hard to recover from.
 				const uncommittedResult = yield* prWorkflow
 					.checkUncommittedChanges({
-						beadId: task.id,
+						issueId: task.id,
 						projectPath,
 					})
 					.pipe(
@@ -359,7 +367,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// If check fails, we must NOT proceed - failing to check doesn't mean it's safe
 				const conflictCheckResult = yield* prWorkflow
 					.checkMergeConflicts({
-						beadId: task.id,
+						issueId: task.id,
 						projectPath,
 					})
 					.pipe(
@@ -475,7 +483,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									task.id,
 									"cleanup",
 									prWorkflow
-										.cleanup({ beadId: task.id, projectPath, closeBead: false })
+										.cleanup({ issueId: task.id, projectPath, closeBead: false })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
 								)
 							}),
@@ -483,7 +491,17 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						{ concurrency: "unbounded" },
 					)
 
-					yield* board.refresh().pipe(Effect.catchAll(Effect.logError))
+					for (const task of tasksWithWorktrees) {
+						yield* board.patchTaskFromMutation(task.id, {
+							sessionState: "idle",
+							hasWorktree: undefined,
+							hasMergeConflict: false,
+							gitBehindCount: undefined,
+							hasUncommittedChanges: undefined,
+							gitAdditions: undefined,
+							gitDeletions: undefined,
+						})
+					}
 					yield* toast.show("success", `Cleaned up ${taskIds.length} worktrees`)
 				}).pipe(Effect.catchAll(Effect.logError))
 
@@ -501,7 +519,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									task.id,
 									"cleanup",
 									prWorkflow
-										.cleanup({ beadId: task.id, projectPath, closeBead: true })
+										.cleanup({ issueId: task.id, projectPath, closeBead: true })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
 								)
 							}),
@@ -509,7 +527,19 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						{ concurrency: "unbounded" },
 					)
 
-					yield* board.refresh().pipe(Effect.catchAll(Effect.logError))
+					for (const task of tasksWithWorktrees) {
+						yield* board.patchTaskFromMutation(task.id, {
+							status: "closed",
+							sessionState: "idle",
+							hasWorktree: undefined,
+							hasMergeConflict: false,
+							updated_at: new Date().toISOString(),
+							gitBehindCount: undefined,
+							hasUncommittedChanges: undefined,
+							gitAdditions: undefined,
+							gitDeletions: undefined,
+						})
+					}
 					yield* toast.show("success", `Full cleanup of ${taskIds.length} beads completed`)
 				}).pipe(Effect.catchAll(Effect.logError))
 
@@ -554,8 +584,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 						// Get project path from helpers
 						const abortProjectPath = yield* helpers.getProjectPath()
-						yield* prWorkflow.abortMerge({ beadId: task.id, projectPath: abortProjectPath }).pipe(
-							Effect.tap(() => board.refresh()),
+						yield* prWorkflow.abortMerge({ issueId: task.id, projectPath: abortProjectPath }).pipe(
+							Effect.tap(() =>
+								Effect.gen(function* () {
+									yield* board.patchTaskFromMutation(task.id, {
+										hasMergeConflict: false,
+									})
+									yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
+								}),
+							),
 							Effect.tap(() => toast.show("success", `Merge aborted for ${task.id}`)),
 							Effect.catchAll((error: unknown) => {
 								const formatted = formatForToast(error)
@@ -590,7 +627,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Get effective base branch (epic branch for children, main for others)
 				const { baseBranch: effectiveBaseBranch } = yield* prWorkflow
 					.getEffectiveBaseBranchForBead({
-						beadId: task.id,
+						issueId: task.id,
 						projectPath,
 					})
 					.pipe(
@@ -679,7 +716,12 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						projectPath,
 					})
 					.pipe(
-						Effect.tap(() => board.refresh()),
+						Effect.tap(() =>
+							board.patchTaskFromMutation(sourceId, {
+								status: "closed",
+								updated_at: new Date().toISOString(),
+							}),
+						),
 						Effect.tap(() =>
 							toast.show("success", `Merged ${sourceId} into ${targetId}. Source bead closed.`),
 						),

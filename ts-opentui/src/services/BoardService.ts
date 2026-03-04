@@ -21,7 +21,12 @@ import {
 	SubscriptionRef,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { BeadsClient, type SyncRequiredError } from "../core/BeadsClient.js"
+import {
+	BeadsClient,
+	inferLinearIssueType,
+	type Issue,
+	type SyncRequiredError,
+} from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
@@ -31,13 +36,57 @@ import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/ty
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
+import {
+	LinearWebhookService,
+	type LinearIssueWebhookEvent,
+} from "./LinearWebhookService.js"
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
+const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
 const REFRESH_FAILURE_TOAST_DEBOUNCE_MS = 15000
+const LINEAR_WEBHOOK_RESTART_DELAY = "5 seconds"
+const LINEAR_WEBHOOK_DEFAULT_PORT = 9000
+const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
+
+const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
+	if (!stateName) return "open"
+	const normalized = stateName.trim().toLowerCase()
+
+	if (
+		normalized.includes("done") ||
+		normalized.includes("complete") ||
+		normalized.includes("cancel") ||
+		normalized.includes("duplicate")
+	) {
+		return "closed"
+	}
+
+	if (normalized.includes("block")) {
+		return "blocked"
+	}
+
+	if (
+		normalized.includes("progress") ||
+		normalized.includes("review") ||
+		normalized.includes("started")
+	) {
+		return "in_progress"
+	}
+
+	return "open"
+}
+
+const normalizeLinearWebhookPriority = (priority: number | undefined): number => {
+	if (priority === undefined || priority <= 0) return 2
+	if (priority === 1) return 0
+	if (priority === 2) return 1
+	if (priority === 3) return 2
+	return 3
+}
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -211,7 +260,7 @@ const filterTasks = (
 // ============================================================================
 
 /** TTL for git status cache in milliseconds (10 seconds)
- * Must be longer than the 5-second polling interval so cache survives between polls */
+ * Must be longer than the board refresh interval so cache survives between refreshes. */
 const GIT_STATUS_CACHE_TTL_MS = 10000
 
 /**
@@ -242,6 +291,31 @@ export interface ColumnInfo {
 	readonly status: string
 }
 
+interface LinearWebhookListenerConfig {
+	readonly command: string
+	readonly team: string
+	readonly url: string
+	readonly port: number
+	readonly events: readonly string[]
+	readonly secret: string | undefined
+}
+
+type BoardRefreshReason =
+	| "default"
+	| "mutation"
+	| "webhook-insufficient"
+	| "initial-load"
+	| "project-switch"
+
+interface BoardRefreshOptions {
+	readonly reason?: BoardRefreshReason
+	readonly forceRemote?: boolean
+}
+
+interface MutationTaskUpsertOptions {
+	readonly parentEpicId?: string | null
+}
+
 /**
  * Per-project board state
  *
@@ -268,6 +342,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		ProjectService.Default,
 		DiagnosticsService.Default,
 		AppConfig.Default,
+		LinearWebhookService.Default,
 		MutationQueue.Default,
 		WorktreeManager.Default,
 		PRStateService.Default,
@@ -281,6 +356,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const projectService = yield* ProjectService
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
+		const linearWebhookService = yield* LinearWebhookService
 		const mutationQueue = yield* MutationQueue
 		const worktreeManager = yield* WorktreeManager
 		const prStateService = yield* PRStateService
@@ -289,7 +365,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
 		// Register with diagnostics
-		yield* diagnostics.trackService("BoardService", "5s beads polling + session state merge")
+		yield* diagnostics.trackService("BoardService", "Board refresh + session state merge")
 
 		yield* diagnostics.trackService("BoardService", "Event-driven refresh with per-project cache")
 
@@ -305,6 +381,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
+		const localRefreshOnlyRef = yield* Ref.make(false)
 		const refreshFailureToastRef = yield* Ref.make<{
 			readonly message: string
 			readonly timestamp: number
@@ -400,7 +477,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		 */
 		const updateProjectTaskSessionState = (
 			projectPath: string,
-			beadId: string,
+			issueId: string,
 			sessionState: TaskWithSession["sessionState"],
 		) =>
 			Effect.gen(function* () {
@@ -409,9 +486,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					const existing = copy.get(projectPath)
 					if (!existing) return copy // Project not loaded yet, skip
 
-					const updatedTasks = existing.tasks.map((t) =>
-						t.id === beadId ? { ...t, sessionState } : t,
-					)
+						const updatedTasks = existing.tasks.map((t) =>
+							t.id === issueId ? { ...t, sessionState } : t,
+						)
 					const updatedTasksByColumn = groupTasksByColumn(updatedTasks)
 					copy.set(projectPath, {
 						...existing,
@@ -594,6 +671,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const projectPath = yield* projectService.getCurrentPath()
 				const gitConfig = yield* appConfig.getGitConfig()
 				const { baseBranch, showLineChanges } = gitConfig
+				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+				const isLinearBackend = "linear" in startupConfig.issueTracker
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
 
 				const issues = yield* diagnostics.measure(
@@ -626,7 +705,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						.listActive(projectPath ?? undefined)
 						.pipe(Effect.withSpan("sessions.listActive")),
 				)
-				const sessionMap = new Map(activeSessions.map((session) => [session.beadId, session]))
+				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 
 				// Auto-recovery of crashed sessions (if enabled)
 				const crashedSessions = activeSessions.filter((s) => s.state === "crashed")
@@ -645,10 +724,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								yield* Effect.sleep(recoveryConfig.autoRecoveryDelayMs)
 
 								for (const session of crashedSessions) {
-									yield* sessionManager.recoverSession(session.beadId).pipe(
-										Effect.tap(() => Effect.log(`Auto-recovered session for ${session.beadId}`)),
+									yield* sessionManager.recoverSession(session.issueId).pipe(
+										Effect.tap(() => Effect.log(`Auto-recovered session for ${session.issueId}`)),
 										Effect.catchAll((error) =>
-											Effect.log(`Failed to auto-recover ${session.beadId}: ${error._tag}`),
+											Effect.log(`Failed to auto-recover ${session.issueId}: ${error._tag}`),
 										),
 									)
 								}
@@ -694,25 +773,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					const issuesWithDeps = issues.filter((issue) => (issue.dependency_count ?? 0) > 0)
 
 					if (issuesWithDeps.length > 0) {
-						// Single batched call to get all issues with their dependencies
-						const issuesWithDepDetails = yield* diagnostics
-							.measure(
-								{
-									source: "BoardService",
-									name: "beads.showMultiple",
-									thresholdMs: 200,
-									details: `count=${issuesWithDeps.length}`,
-								},
-								beadsClient
-									.showMultiple(
-										issuesWithDeps.map((i) => i.id),
-										projectPath,
+						// Linear list already includes dependency details; avoid an additional fetch.
+						const issuesWithDepDetails = isLinearBackend
+							? issuesWithDeps
+							: yield* diagnostics
+									.measure(
+										{
+											source: "BoardService",
+											name: "beads.showMultiple",
+											thresholdMs: 200,
+											details: `count=${issuesWithDeps.length}`,
+										},
+										beadsClient
+											.showMultiple(
+												issuesWithDeps.map((i) => i.id),
+												projectPath,
+											)
+											.pipe(
+												Effect.withSpan("beads.showMultiple"),
+												Effect.catchAll(() => Effect.succeed([])),
+											),
 									)
-									.pipe(
-											Effect.withSpan("beads.showMultiple"),
-											Effect.catchAll(() => Effect.succeed([])),
-										),
-							)
 
 						// Extract parent epic IDs from dependencies
 						for (const issue of issuesWithDepDetails) {
@@ -760,7 +841,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								.pipe(Effect.withSpan("worktrees.list"), Effect.catchAll(() => Effect.succeed([]))),
 						)
 					: []
-				const worktreeBeadIds = new Set(worktreeList.map((wt) => wt.beadId))
+				const worktreeBeadIds = new Set(worktreeList.map((wt) => wt.issueId))
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -847,7 +928,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 				let prStateMap = new Map<string, PRState>()
 				if (tasksWithPRs.length > 0 && projectPath) {
-					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, beadId: t.id }))
+					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, issueId: t.id }))
 					prStateMap = yield* diagnostics
 						.measure(
 							{
@@ -940,56 +1021,134 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* SubscriptionRef.set(filteredTasksByColumn, computed)
 			})
 
-			const refresh = () =>
-				diagnostics
-					.measure(
-						{
-							source: "BoardService",
-							name: "refresh",
-							thresholdMs: 500,
-						},
-						Effect.gen(function* () {
-							yield* SubscriptionRef.set(isLoading, true)
+		const replaceTasks = (nextTasks: ReadonlyArray<TaskWithSession>) =>
+			Effect.gen(function* () {
+				yield* SubscriptionRef.set(tasks, nextTasks)
+				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
+				yield* updateFilteredTasks()
+				yield* saveCurrentToMap()
+			})
 
-							// Capture project path at refresh START
-							const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
+		const upsertTaskInMemory = (task: TaskWithSession) =>
+			Effect.gen(function* () {
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const nextTasks = [...currentTasks.filter((existing) => existing.id !== task.id), task].sort(
+					(left, right) =>
+						new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+				)
+				yield* replaceTasks(nextTasks)
+			})
 
-							// Update currentProjectPath SubscriptionRef
-							yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
+		const removeTaskFromMutation = (taskId: string) =>
+			Effect.gen(function* () {
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const nextTasks = currentTasks.filter((task) => task.id !== taskId)
+				if (nextTasks.length === currentTasks.length) return
+				yield* replaceTasks(nextTasks)
+			})
 
-							const loadedTasks = yield* diagnostics.measure(
-								{
-									source: "BoardService",
-									name: "loadTasks",
-									thresholdMs: 400,
-								},
-								loadTasks().pipe(Effect.withSpan("board.loadTasks")),
-							)
+		const patchTaskFromMutation = (
+			taskId: string,
+			patch: Partial<Omit<TaskWithSession, "id">>,
+		) =>
+			Effect.gen(function* () {
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				let changed = false
+				const nextTasks = currentTasks.map((task) => {
+					if (task.id !== taskId) return task
+					changed = true
+					return { ...task, ...patch }
+				})
+				if (!changed) return
+				yield* replaceTasks(nextTasks)
+			})
 
-							// Verify project hasn't changed during refresh (race condition guard)
-							// If project changed, discard results to avoid showing wrong project's data
-							const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
-							if (startProjectPath !== activeProjectPath) {
-								yield* Effect.log(
-									`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
-								)
-								return
-							}
+		const toTaskFromMutationIssue = (
+			issue: Issue,
+			existingTask: TaskWithSession | undefined,
+			options?: MutationTaskUpsertOptions,
+		): TaskWithSession => {
+			const prInfo = parsePRInfo(issue.notes)
+			const hasPR = prInfo.hasPR === true
+			const parentEpicId =
+				options?.parentEpicId === undefined ? existingTask?.parentEpicId : options.parentEpicId ?? undefined
 
-							yield* SubscriptionRef.set(tasks, loadedTasks)
-							const grouped = groupTasksByColumn(loadedTasks)
-							yield* SubscriptionRef.set(tasksByColumn, grouped)
-							yield* updateFilteredTasks()
+			return {
+				...issue,
+				sessionState: existingTask?.sessionState ?? "idle",
+				hasWorktree: existingTask?.hasWorktree,
+				hasMergeConflict: existingTask?.hasMergeConflict,
+				parentEpicId,
+				gitBehindCount: existingTask?.gitBehindCount,
+				hasUncommittedChanges: existingTask?.hasUncommittedChanges,
+				gitAdditions: existingTask?.gitAdditions,
+				gitDeletions: existingTask?.gitDeletions,
+				sessionStartedAt: existingTask?.sessionStartedAt,
+				estimatedTokens: existingTask?.estimatedTokens,
+				recentOutput: existingTask?.recentOutput,
+				agentPhase: existingTask?.agentPhase,
+				hasPR: hasPR ? true : undefined,
+				prUrl: hasPR ? prInfo.prUrl : undefined,
+				prNumber: hasPR ? prInfo.prNumber : undefined,
+				prState: hasPR ? existingTask?.prState : undefined,
+			}
+		}
 
-							// Save to per-project map for fast switching
-							yield* saveCurrentToMap()
+		const upsertIssueFromMutation = (issue: Issue, options?: MutationTaskUpsertOptions) =>
+			Effect.gen(function* () {
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const existingTask = currentTasks.find((task) => task.id === issue.id)
+				const nextTask = toTaskFromMutationIssue(issue, existingTask, options)
+				yield* upsertTaskInMemory(nextTask)
+			})
 
+		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
+			beadsClient.show(taskId).pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
+
+		const refresh = () =>
+			diagnostics
+				.measure(
+					{
+						source: "BoardService",
+						name: "refresh",
+						thresholdMs: 500,
+					},
+					Effect.gen(function* () {
+						yield* SubscriptionRef.set(isLoading, true)
+
+						// Capture project path at refresh START
+						const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
+
+						// Update currentProjectPath SubscriptionRef
+						yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
+
+						const loadedTasks = yield* diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "loadTasks",
+								thresholdMs: 400,
+							},
+							loadTasks().pipe(Effect.withSpan("board.loadTasks")),
+						)
+
+						// Verify project hasn't changed during refresh (race condition guard)
+						// If project changed, discard results to avoid showing wrong project's data
+						const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
+						if (startProjectPath !== activeProjectPath) {
 							yield* Effect.log(
-								`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+								`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
 							)
-						}).pipe(Effect.withSpan("board.refresh")),
-					)
-					.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
+							return
+						}
+
+						yield* replaceTasks(loadedTasks)
+
+						yield* Effect.log(
+							`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+						)
+					}).pipe(Effect.withSpan("board.refresh")),
+				)
+				.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
 			const formatRefreshFailureMessage = (cause: Cause.Cause<unknown>): string => {
 				const pretty = Cause.pretty(cause)
@@ -1047,21 +1206,342 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					),
 				)
 
-			const requestRefresh = () =>
+			const refreshLocalSessionAndGitState = () =>
+				Effect.gen(function* () {
+					const projectPath = yield* projectService.getCurrentPath()
+					const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
+					const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined).pipe(
+						Effect.catchAll(() => Effect.succeed([])),
+					)
+					const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+					const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
+					const gitConfig = yield* appConfig.getGitConfig()
+					const { baseBranch, showLineChanges } = gitConfig
+					const currentTasks = yield* SubscriptionRef.get(tasks)
+
+					const nextTasks = yield* Effect.all(
+						currentTasks.map((task) =>
+							Effect.gen(function* () {
+								const session = sessionMap.get(task.id)
+								const metricsOpt = HashMap.get(allMetrics, task.id)
+								const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
+								const sessionState = session?.state ?? "idle"
+
+								let gitStatus: GitStatus = {
+									gitBehindCount: undefined,
+									hasUncommittedChanges: undefined,
+									gitAdditions: undefined,
+									gitDeletions: undefined,
+								}
+								if (
+									projectPath &&
+									currentVisibleTaskIds.has(task.id) &&
+									(sessionState !== "idle" || task.hasWorktree === true)
+								) {
+									const worktreePath = getWorktreePath(projectPath, task.id)
+									const effectiveBaseBranch = task.parentEpicId ?? baseBranch
+									const cachedStatus = yield* getCachedGitStatus(
+										worktreePath,
+										effectiveBaseBranch,
+										showLineChanges,
+									)
+									gitStatus = {
+										gitBehindCount: cachedStatus.gitBehindCount,
+										hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+										gitAdditions: cachedStatus.gitAdditions,
+										gitDeletions: cachedStatus.gitDeletions,
+									}
+								}
+
+								return {
+									...task,
+									sessionState,
+									...gitStatus,
+									sessionStartedAt: session?.startedAt
+										? DateTime.formatIso(session.startedAt)
+										: undefined,
+									estimatedTokens: metrics?.estimatedTokens,
+									recentOutput: metrics?.recentOutput,
+									agentPhase: metrics?.agentPhase,
+								} satisfies TaskWithSession
+							}),
+						),
+						{ concurrency: 4 },
+					)
+
+					yield* SubscriptionRef.set(tasks, nextTasks)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
+					yield* updateFilteredTasks()
+					yield* saveCurrentToMap()
+				})
+
+			const shouldUseLocalRefreshOnly = (
+				localRefreshOnly: boolean,
+				options: BoardRefreshOptions | undefined,
+			): boolean => {
+				if (!localRefreshOnly) return false
+				if (options?.forceRemote === true) return false
+				switch (options?.reason ?? "default") {
+					case "mutation":
+					case "webhook-insufficient":
+					case "initial-load":
+					case "project-switch":
+						return false
+					default:
+						return true
+				}
+			}
+
+			const refreshWithPolicy = (options?: BoardRefreshOptions) =>
+				Effect.gen(function* () {
+					const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+					const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
+					const refreshEffect = useLocalRefresh
+						? refreshLocalSessionAndGitState()
+						: refreshWithRecovery()
+					yield* refreshEffect
+				})
+
+			const requestRefresh = (options?: BoardRefreshOptions) =>
 				Effect.gen(function* () {
 					const existingFiber = yield* Ref.get(debounceFiberRef)
 					if (existingFiber) {
 						yield* Fiber.interrupt(existingFiber)
 					}
+					const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+					const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
 					// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
 					const fiber = yield* Effect.gen(function* () {
 						yield* Effect.sleep("500 millis")
-						yield* refreshWithRecovery().pipe(
-							Effect.catchAllCause((cause) => logAndToastRefreshFailure("debounced", cause)),
+						const refreshEffect = useLocalRefresh
+							? refreshLocalSessionAndGitState()
+							: refreshWithRecovery()
+						yield* refreshEffect.pipe(
+							Effect.catchAllCause((cause) =>
+								logAndToastRefreshFailure(
+									useLocalRefresh ? "debounced-local" : "debounced",
+									cause,
+								),
+							),
 						)
 					}).pipe(Effect.forkIn(serviceScope))
 					yield* Ref.set(debounceFiberRef, fiber)
 				})
+
+		const isRemoveAction = (action: string): boolean => {
+			const normalized = action.trim().toLowerCase()
+			return normalized === "remove" || normalized === "delete" || normalized === "archive"
+		}
+
+		const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
+			Effect.gen(function* () {
+				const payload = event.data
+				const issueId = payload.identifier
+				const status = normalizeLinearWebhookStatus(payload.state.name)
+				const labels = payload.labels.map((label) => label.name)
+				const priority = normalizeLinearWebhookPriority(payload.priority)
+
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const existingTask = currentTasks.find((task) => task.id === issueId)
+				const withRemoved = currentTasks.filter((task) => task.id !== issueId)
+
+				if (isRemoveAction(event.action)) {
+					yield* SubscriptionRef.set(tasks, withRemoved)
+					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(withRemoved))
+					yield* updateFilteredTasks()
+					yield* saveCurrentToMap()
+					return
+				}
+
+				let nextParentEpicId = existingTask?.parentEpicId
+				let requiresRemoteRefresh = false
+				if (payload.parentId === null) {
+					nextParentEpicId = undefined
+				} else if (typeof payload.parentId === "string" && payload.parentId.trim().length > 0) {
+					const parentId = payload.parentId.trim()
+					if (existingTask?.parentEpicId === parentId) {
+						nextParentEpicId = parentId
+					} else {
+						const parentTask = currentTasks.find((task) => task.id === parentId)
+						if (parentTask?.issue_type === "epic") {
+							nextParentEpicId = parentId
+						} else {
+							requiresRemoteRefresh = true
+						}
+					}
+				}
+
+				if (requiresRemoteRefresh) {
+					yield* Effect.logWarning(
+						`Linear webhook payload for ${issueId} missing parent epic metadata, forcing remote refresh`,
+					)
+					yield* requestRefresh({
+						reason: "webhook-insufficient",
+						forceRemote: true,
+					})
+					return
+				}
+
+				const inferredType = inferLinearIssueType(
+					labels,
+					existingTask?.issue_type === "epic",
+					undefined,
+				)
+
+				const updatedTask: TaskWithSession = existingTask
+					? {
+							...existingTask,
+							title: payload.title,
+							description: payload.description ?? undefined,
+							status,
+							priority,
+							issue_type: inferredType,
+							created_at: payload.createdAt,
+							updated_at: payload.updatedAt,
+							closed_at:
+								status === "closed"
+									? payload.completedAt ?? payload.canceledAt ?? existingTask.closed_at
+									: undefined,
+							labels,
+							parentEpicId: nextParentEpicId,
+					  }
+					: {
+							id: issueId,
+							title: payload.title,
+							description: payload.description ?? undefined,
+							status,
+							priority,
+							issue_type: inferredType,
+							created_at: payload.createdAt,
+							updated_at: payload.updatedAt,
+							closed_at:
+								status === "closed" ? payload.completedAt ?? payload.canceledAt ?? null : undefined,
+							labels,
+							parentEpicId: nextParentEpicId,
+							sessionState: "idle",
+					  }
+
+				const nextTasks = [...withRemoved, updatedTask].sort(
+					(left, right) =>
+						new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+				)
+
+				yield* SubscriptionRef.set(tasks, nextTasks)
+				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
+				yield* updateFilteredTasks()
+				yield* saveCurrentToMap()
+			})
+
+		const getLinearWebhookListenerConfig = (
+			options?: {
+				readonly requireCliTransport?: boolean
+			},
+		): Effect.Effect<
+			LinearWebhookListenerConfig | undefined
+		> =>
+			Effect.gen(function* () {
+				const config = yield* SubscriptionRef.get(appConfig.config)
+				if (!("linear" in config.issueTracker)) {
+					return undefined
+				}
+
+				const linearConfig = config.issueTracker.linear
+				const webhookConfig = linearConfig.webhooks
+				const webhooksEnabled = webhookConfig.enabled
+				if (webhooksEnabled === false) {
+					return undefined
+				}
+				if ((options?.requireCliTransport ?? true) && webhookConfig.transport !== "cli") {
+					return undefined
+				}
+
+				const team = linearConfig.team?.trim()
+				const url = webhookConfig.url?.trim()
+				if (!team || !url) {
+					return undefined
+				}
+
+				const configuredEvents = webhookConfig.events
+					?.map((eventType) => eventType.trim())
+					.filter((eventType) => eventType.length > 0)
+				const events =
+					configuredEvents !== undefined && configuredEvents.length > 0
+						? configuredEvents
+						: LINEAR_WEBHOOK_DEFAULT_EVENTS
+
+				const port =
+					Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
+						? webhookConfig.port
+						: LINEAR_WEBHOOK_DEFAULT_PORT
+
+				const secret = webhookConfig.secret?.trim()
+
+				return {
+					command: linearConfig.command,
+					team,
+					url,
+					port,
+					events,
+					secret: secret && secret.length > 0 ? secret : undefined,
+				}
+			})
+
+		const runLinearWebhookListener = (listenerConfig: LinearWebhookListenerConfig) =>
+			Effect.gen(function* () {
+				const args = [
+					"webhooks",
+					"listen",
+					"--json",
+					"--events",
+					listenerConfig.events.join(","),
+					"--team",
+					listenerConfig.team,
+					"--url",
+					listenerConfig.url,
+					"--port",
+					String(listenerConfig.port),
+					"--quiet",
+					"--no-color",
+				]
+				if (listenerConfig.secret !== undefined) {
+					args.push("--secret", listenerConfig.secret)
+				}
+
+				const projectPath = yield* projectService.getCurrentPath()
+				const command = projectPath
+					? Command.make(listenerConfig.command, ...args).pipe(Command.workingDirectory(projectPath))
+					: Command.make(listenerConfig.command, ...args)
+
+				yield* Stream.runForEach(Command.streamLines(command), (line) => {
+					const trimmed = line.trim()
+					if (trimmed.length === 0) {
+						return Effect.void
+					}
+					if (!trimmed.startsWith("{")) {
+						return Effect.logDebug(`Linear webhook listener: ${trimmed}`).pipe(Effect.asVoid)
+					}
+					return requestRefresh().pipe(
+						Effect.catchAllCause((cause) => logAndToastRefreshFailure("linear-webhook", cause)),
+					)
+				})
+			})
+
+		const startBackgroundPolling = () =>
+			Effect.gen(function* () {
+				const backgroundPollingFiber = yield* Effect.forkScoped(
+					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
+						refreshWithRecovery().pipe(
+							Effect.catchAllCause((cause) => logAndToastRefreshFailure("background", cause)),
+						),
+					),
+				)
+				yield* diagnostics.registerFiber({
+					id: "board-background-polling",
+					name: "Board Background Polling",
+					description: "Refreshes board every 5 seconds to keep git stats fresh",
+					fiber: backgroundPollingFiber,
+				})
+			})
 
 		/**
 		 * Refresh git stats (behind count, uncommitted changes, line additions/deletions)
@@ -1119,21 +1599,113 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.catchAllCause((cause) => logAndToastRefreshFailure("initial", cause)),
 		)
 
-		// Background polling fallback (every 5 seconds) to keep git stats fresh
-		// This ensures data stays current even if event-driven refresh misses something
-		const backgroundPollingFiber = yield* Effect.forkScoped(
-			Effect.repeat(Schedule.spaced("5 seconds"))(
-				refreshWithRecovery().pipe(
-					Effect.catchAllCause((cause) => logAndToastRefreshFailure("background", cause)),
-				),
-			),
-		)
-		yield* diagnostics.registerFiber({
-			id: "board-background-polling",
-			name: "Board Background Polling",
-			description: "Refreshes board every 5 seconds to keep git stats fresh",
-			fiber: backgroundPollingFiber,
-		})
+		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+		if ("linear" in startupConfig.issueTracker) {
+			const webhookConfig = startupConfig.issueTracker.linear.webhooks
+			const transport = webhookConfig.transport
+
+			if (webhookConfig.enabled === false) {
+				yield* Ref.set(localRefreshOnlyRef, false)
+				yield* Effect.log("Linear webhooks disabled in config, using background polling fallback")
+				yield* startBackgroundPolling()
+			} else if (transport === "cli") {
+				yield* Ref.set(localRefreshOnlyRef, false)
+				const linearWebhookListenerConfig = yield* getLinearWebhookListenerConfig()
+				if (linearWebhookListenerConfig !== undefined) {
+					const linearWebhookFiber = yield* Effect.forkScoped(
+						Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
+							runLinearWebhookListener(linearWebhookListenerConfig).pipe(
+								Effect.catchAllCause((cause) =>
+									Cause.isInterruptedOnly(cause)
+										? Effect.void
+										: Effect.logWarning(
+												`Linear CLI webhook listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
+											).pipe(Effect.asVoid),
+								),
+							),
+						),
+					)
+					yield* diagnostics.registerFiber({
+						id: "board-linear-webhook-cli-listener",
+						name: "Board Linear CLI Webhook Listener",
+						description: "Refreshes board from linear-cli webhook events",
+						fiber: linearWebhookFiber,
+					})
+				} else {
+					const missing: string[] = []
+					const linearConfig = startupConfig.issueTracker.linear
+					if (!linearConfig.team?.trim()) {
+						missing.push("issueTracker.linear.team")
+					}
+					if (!webhookConfig.url?.trim()) {
+						missing.push("issueTracker.linear.webhooks.url")
+					}
+					yield* Effect.logWarning(
+						`Linear CLI webhooks not configured (${missing.join(", ")}), using background polling fallback`,
+					)
+					yield* startBackgroundPolling()
+				}
+			} else {
+				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
+				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
+				if (sdkMode === "sdk" && sdkHealthy) {
+					const linearWebhookFiber = yield* Effect.forkScoped(
+						Stream.runForEach(linearWebhookService.issueEvents, (event) =>
+							applyLinearWebhookIssueEvent(event).pipe(
+								Effect.catchAllCause((cause) =>
+									logAndToastRefreshFailure("linear-webhook-sdk", cause),
+								),
+							),
+						),
+					)
+					yield* diagnostics.registerFiber({
+						id: "board-linear-webhook-sdk-events",
+						name: "Board Linear SDK Webhook Events",
+						description: "Applies Linear SDK webhook issue events to board state",
+						fiber: linearWebhookFiber,
+					})
+					yield* Ref.set(localRefreshOnlyRef, true)
+				} else {
+					yield* Ref.set(localRefreshOnlyRef, false)
+					const listenerConfig = yield* getLinearWebhookListenerConfig({
+						requireCliTransport: false,
+					})
+					if (listenerConfig !== undefined) {
+						yield* Effect.logWarning(
+							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}); attempting CLI webhook listener fallback`,
+						)
+						const linearWebhookFallbackFiber = yield* Effect.forkScoped(
+							Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
+								runLinearWebhookListener(listenerConfig).pipe(
+									Effect.catchAllCause((cause) =>
+										Cause.isInterruptedOnly(cause)
+											? Effect.void
+											: Effect.logWarning(
+													`Linear SDK->CLI webhook fallback listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
+												).pipe(Effect.asVoid),
+									),
+								),
+							),
+						)
+						yield* diagnostics.registerFiber({
+							id: "board-linear-webhook-sdk-cli-fallback-listener",
+							name: "Board Linear SDK CLI Fallback Listener",
+							description: "Refreshes board from CLI webhook events when SDK mode is unhealthy",
+							fiber: linearWebhookFallbackFiber,
+						})
+					} else {
+						yield* Effect.logWarning(
+							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
+						)
+						yield* startBackgroundPolling()
+					}
+				}
+			}
+		} else {
+			yield* Ref.set(localRefreshOnlyRef, false)
+			// Background polling for non-linear backends
+			yield* startBackgroundPolling()
+		}
 
 		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
@@ -1222,20 +1794,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		 */
 		const applyOptimisticMove = (taskId: string, newStatus: ColumnStatus) =>
 			Effect.gen(function* () {
-				// Update tasks
-				yield* SubscriptionRef.update(tasks, (currentTasks) =>
-					currentTasks.map((task) => (task.id === taskId ? { ...task, status: newStatus } : task)),
-				)
-				// Update tasksByColumn
-				yield* SubscriptionRef.update(tasksByColumn, (current) => {
-					const allTasks: TaskWithSession[] = Object.values(current).flat()
-					const updatedTasks = allTasks.map((task) =>
-						task.id === taskId ? { ...task, status: newStatus } : task,
-					)
-					return groupTasksByColumn(updatedTasks)
+				yield* patchTaskFromMutation(taskId, {
+					status: newStatus,
+					updated_at: new Date().toISOString(),
 				})
-				// Update filtered view
-				yield* updateFilteredTasks()
 			})
 
 		/**
@@ -1291,7 +1853,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Fork the refresh into the service's scope - not a daemon fiber
 				yield* Effect.gen(function* () {
-					yield* refresh()
+					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true })
 					yield* onRefreshComplete
 				}).pipe(
 					Effect.catchAllCause((cause) => logAndToastRefreshFailure("project-switch", cause)),
@@ -1355,15 +1917,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					columnIndex < 0 || columnIndex >= COLUMNS.length ? undefined : COLUMNS[columnIndex]!,
 				),
 			getColumnCount: (): Effect.Effect<number> => Effect.succeed(COLUMNS.length),
-			refresh,
+			refresh: (options?: BoardRefreshOptions) => refreshWithPolicy(options),
 			requestRefresh,
 			refreshGitStats,
+			removeTaskFromMutation,
+			patchTaskFromMutation,
+			upsertIssueFromMutation,
+			syncTaskFromBackend,
 			clearBoard,
 			saveToCache,
 			loadFromCache,
 			switchToProject,
 			applyOptimisticMove,
-			initialize: refresh,
+			initialize: () => refreshWithPolicy({ reason: "initial-load", forceRemote: true }),
 			getFilteredTasksByColumn: (
 				searchQuery: string,
 				sortConfig: SortConfig,

@@ -58,6 +58,22 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					return tasks.find((task) => task.id === taskId)
 				})
 
+			const syncTaskFromBackend = (
+				taskId: string,
+				options?: { readonly parentEpicId?: string | null },
+			) =>
+				board.syncTaskFromBackend(taskId, options).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Failed to sync task ${taskId} after mutation: ${formatForToast(error)}`,
+						),
+					),
+					Effect.asVoid,
+				)
+
+			const isColumnStatus = (status: string): status is (typeof COLUMNS)[number]["status"] =>
+				COLUMNS.some((column) => column.status === status)
+
 			const handleForkError = (error: unknown) =>
 				Effect.gen(function* () {
 					const formatted = formatForToast(error)
@@ -71,7 +87,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
 						yield* prWorkflow
 							.cleanup({
-								beadId: taskId,
+								issueId: taskId,
 								projectPath: process.cwd(),
 								closeBead: false,
 							})
@@ -85,14 +101,14 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const deleteMutation: Mutation = {
 						_tag: "Delete",
 						id: taskId,
-						rollback: board.requestRefresh(),
+						rollback: syncTaskFromBackend(taskId),
 					}
+					yield* board.removeTaskFromMutation(taskId)
 					yield* mutationQueue.add(deleteMutation)
 					yield* toast.show("success", `Deleted ${taskId}`)
 					// Await mutation processing - bd commands are fast (~50ms)
 					// MutationQueue handles rollback and error toasts on failure
 					yield* mutationQueue.process(taskId)
-					yield* board.requestRefresh()
 					yield* nav.initialize()
 				})
 
@@ -103,7 +119,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					yield* beadEditor.editBead(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
-						Effect.tap(() => board.requestRefresh()),
+						Effect.tap(() => syncTaskFromBackend(task.id)),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -124,13 +140,17 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const createBead = () =>
 				Effect.gen(function* () {
 					yield* beadEditor.createBead().pipe(
-						Effect.tap((result) =>
+						Effect.flatMap((result) =>
 							Effect.gen(function* () {
 								const epicId = yield* nav.getDrillDownEpic()
+								let parentEpicId: string | null | undefined = undefined
 
 								if (epicId) {
 									yield* beadsClient.addDependency(result.id, epicId, "parent-child").pipe(
-										Effect.tap(() => toast.show("success", `Created ${result.id} (added to epic)`)),
+										Effect.tap(() => {
+											parentEpicId = epicId
+											return toast.show("success", `Created ${result.id} (added to epic)`)
+										}),
 										Effect.catchAll((error) =>
 											Effect.gen(function* () {
 												yield* Effect.logWarning(
@@ -146,10 +166,11 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 								} else {
 									yield* toast.show("success", `Created ${result.id}`)
 								}
+
+								yield* syncTaskFromBackend(result.id, { parentEpicId })
+								yield* nav.jumpToTask(result.id)
 							}),
 						),
-						Effect.tap(() => board.requestRefresh()),
-						Effect.tap((result) => nav.jumpToTask(result.id)),
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -207,6 +228,14 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					const firstTaskId = taskIdsToMove[0]
 
 					if (taskIdsToMove.length > 0) {
+						const previousStatusByTaskId = new Map<string, (typeof COLUMNS)[number]["status"]>()
+						for (const id of taskIdsToMove) {
+							const task = yield* board.findTaskById(id)
+							if (task && isColumnStatus(task.status)) {
+								previousStatusByTaskId.set(id, task.status)
+							}
+						}
+
 						// Apply optimistic updates IMMEDIATELY to in-memory state
 						// This gives instant visual feedback before any async work
 						for (const id of taskIdsToMove) {
@@ -220,23 +249,18 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 						// Add mutations to queue and process
 						for (const id of taskIdsToMove) {
-							const task = yield* board.findTaskById(id)
-							if (!task) continue
+							const previousStatus = previousStatusByTaskId.get(id)
+							if (!previousStatus) continue
 
 							const moveMutation: Mutation = {
 								_tag: "Move",
 								id,
 								status: targetStatus,
-								rollback: Effect.gen(function* () {
-									yield* board.requestRefresh()
-								}),
+								rollback: board.applyOptimisticMove(id, previousStatus),
 							}
 							yield* mutationQueue.add(moveMutation)
 							yield* mutationQueue.process(id)
 						}
-
-						// Refresh to sync with backend after mutations complete
-						yield* board.requestRefresh()
 					}
 				})
 
@@ -264,7 +288,10 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					if (task.issue_type !== "epic") {
 						yield* toast.show("info", `Converting ${task.id} to epic...`)
 						yield* beadsClient.update(task.id, { type: "epic" })
-						yield* board.requestRefresh()
+						yield* board.patchTaskFromMutation(task.id, {
+							issue_type: "epic",
+							updated_at: new Date().toISOString(),
+						})
 					}
 
 					yield* overlay.push({

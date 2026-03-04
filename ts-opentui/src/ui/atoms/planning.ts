@@ -60,9 +60,12 @@ export const runPlanningAtom = appRuntime.fn((featureDescription: string) =>
 		const board = yield* BoardService
 
 		const createdBeads = yield* planning.runPlanningWorkflow(featureDescription)
-
-		// Refresh the board to show new beads
-		yield* board.refresh()
+		const epicId = createdBeads.find((bead) => bead.issue_type === "epic")?.id
+		for (const bead of createdBeads) {
+			yield* board.upsertIssueFromMutation(bead, {
+				parentEpicId: epicId && bead.id !== epicId ? epicId : undefined,
+			})
+		}
 
 		return createdBeads
 	}).pipe(
