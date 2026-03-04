@@ -146,6 +146,34 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// which uses Schema.transform to migrate legacy formats (e.g., pr.baseBranch → git.baseBranch)
 		//
 
+		const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+			typeof value === "object" && value !== null && !Array.isArray(value)
+
+		const canonicalizeJson = (value: unknown): unknown => {
+			if (Array.isArray(value)) {
+				return value.map((item) => canonicalizeJson(item))
+			}
+
+			if (isJsonObject(value)) {
+				const sortedEntries = Object.entries(value).sort(([left], [right]) =>
+					left.localeCompare(right),
+				)
+				const normalized: Record<string, unknown> = {}
+				for (const [key, entryValue] of sortedEntries) {
+					normalized[key] = canonicalizeJson(entryValue)
+				}
+				return normalized
+			}
+
+			return value
+		}
+
+		const shouldPersistMigratedConfig = (rawConfig: unknown, migratedConfig: unknown): boolean =>
+			JSON.stringify(canonicalizeJson(rawConfig)) !==
+			JSON.stringify(canonicalizeJson(migratedConfig))
+
+		const formatConfigJson = (config: unknown): string => `${JSON.stringify(config, null, 2)}\n`
+
 		/**
 		 * Try to load .azedarach.json from project root
 		 */
@@ -197,6 +225,32 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 							}),
 					),
 				)
+
+				const encoded = yield* Schema.encode(AzedarachConfigSchema)(validated).pipe(
+					Effect.mapError(
+						(e) =>
+							new ConfigParseError({
+								message: "Config encoding failed",
+								path: targetConfigPath,
+								details: String(e),
+							}),
+					),
+				)
+
+				if (shouldPersistMigratedConfig(json, encoded)) {
+					yield* fs.writeFileString(targetConfigPath, formatConfigJson(encoded)).pipe(
+						Effect.tap(() =>
+							Effect.log(
+								`[DEBUG] Persisted migrated config to .azedarach.json: ${targetConfigPath}`,
+							),
+						),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Failed to persist migrated .azedarach.json at ${targetConfigPath}: ${String(error)}`,
+							),
+						),
+					)
+				}
 
 				return validated
 			})
