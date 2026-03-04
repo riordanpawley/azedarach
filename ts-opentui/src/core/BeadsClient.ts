@@ -9,6 +9,8 @@ import { Command, type CommandExecutor } from "@effect/platform"
 import { Data, Effect, SubscriptionRef } from "effect"
 import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
+import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
 
@@ -58,7 +60,6 @@ export interface DependencyRef {
 }
 
 type DependencyLink = DependencyLinkRaw
-type Dependency = DependencyRefRaw | DependencyLink
 
 /**
  * Issue schema matching bd/br --json output
@@ -360,32 +361,60 @@ const toLinearPriority = (priority: number | undefined): string | undefined => {
 	return "3"
 }
 
-const normalizeLinearType = (
-	labels: readonly string[] | undefined,
-	hasChildren: boolean,
-): IssueType => {
-	const normalizedLabels = (labels ?? []).map((label) => label.trim().toLowerCase())
-
-	if (normalizedLabels.some((label) => label === "bug" || label === "type:bug")) return "bug"
-	if (normalizedLabels.some((label) => label === "feature" || label === "type:feature"))
-		return "feature"
-	if (normalizedLabels.some((label) => label === "chore" || label === "type:chore")) return "chore"
-	if (
-		hasChildren ||
-		normalizedLabels.some(
-			(label) => label === "epic" || label === "initiative" || label === "type:epic",
-		)
-	) {
-		return "epic"
-	}
-
-	return "task"
-}
-
 const normalizeLinearTypeInput = (value: string | undefined): string | undefined => {
 	if (!value) return undefined
-	const normalized = value.trim().toLowerCase()
+	const normalized = value.trim().toLowerCase().replace(/\s*:\s*/g, ":")
 	return normalized.length > 0 ? normalized : undefined
+}
+
+const parseLinearNamedType = (value: string | undefined): IssueType | undefined => {
+	switch (normalizeLinearTypeInput(value)) {
+		case "bug":
+		case "type:bug":
+			return "bug"
+		case "feature":
+		case "type:feature":
+			return "feature"
+		case "chore":
+		case "type:chore":
+			return "chore"
+		case "epic":
+		case "initiative":
+		case "type:epic":
+		case "type:initiative":
+			return "epic"
+		case "task":
+		case "subtask":
+		case "sub-task":
+		case "type:task":
+		case "type:subtask":
+			return "task"
+		default:
+			return undefined
+	}
+}
+
+export const inferLinearIssueType = (
+	labels: readonly string[] | undefined,
+	hasChildren: boolean,
+	nativeTypeName: string | undefined,
+): IssueType => {
+	const explicitType = parseLinearNamedType(nativeTypeName)
+	if (explicitType !== undefined) return explicitType
+
+	const normalizedLabels = (labels ?? [])
+		.map((label) => normalizeLinearTypeInput(label))
+		.filter((label): label is string => label !== undefined)
+	const hasLabelType = (issueType: IssueType): boolean =>
+		normalizedLabels.some((label) => parseLinearNamedType(label) === issueType)
+
+	if (hasLabelType("bug")) return "bug"
+	if (hasLabelType("feature")) return "feature"
+	if (hasLabelType("chore")) return "chore"
+	if (hasChildren || hasLabelType("epic")) return "epic"
+	if (hasLabelType("task")) return "task"
+
+	return "task"
 }
 
 const typeToLinearLabel = (type: string | undefined): string | undefined => {
@@ -421,6 +450,13 @@ const toIsoNow = (): string => new Date().toISOString()
 const LinearIssueLabelNodeSchema = Schema.Struct({
 	name: Schema.NullOr(Schema.String).pipe(Schema.optional),
 })
+
+const LinearIssueTypeSchema = Schema.Union(
+	Schema.String,
+	Schema.Struct({
+		name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	}),
+)
 
 const LinearIssueSchema = Schema.Struct({
 	id: Schema.String,
@@ -461,6 +497,8 @@ const LinearIssueSchema = Schema.Struct({
 			title: Schema.NullOr(Schema.String).pipe(Schema.optional),
 		}),
 	).pipe(Schema.optional),
+	type: Schema.NullOr(LinearIssueTypeSchema).pipe(Schema.optional),
+	issueType: Schema.NullOr(LinearIssueTypeSchema).pipe(Schema.optional),
 	children: Schema.NullOr(
 		Schema.Struct({
 			nodes: Schema.NullOr(
@@ -484,6 +522,13 @@ const LinearIssueSchema = Schema.Struct({
 
 type LinearIssue = Schema.Schema.Type<typeof LinearIssueSchema>
 
+const extractLinearIssueTypeName = (
+	typeValue: Schema.Schema.Type<typeof LinearIssueTypeSchema> | null | undefined,
+): string | undefined => {
+	if (typeValue == null) return undefined
+	return typeof typeValue === "string" ? typeValue : (typeValue.name ?? undefined)
+}
+
 const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const labels = (issue.labels?.nodes ?? [])
 		.map((label) => label?.name)
@@ -491,6 +536,8 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 
 	const children = issue.children?.nodes ?? []
 	const hasChildren = children.length > 0
+	const nativeTypeName =
+		extractLinearIssueTypeName(issue.issueType) ?? extractLinearIssueTypeName(issue.type)
 	const status = normalizeLinearStatus(issue.state?.name)
 	const identifier = issue.identifier ?? issue.id
 	const createdAt = issue.createdAt ?? issue.updatedAt ?? toIsoNow()
@@ -528,7 +575,7 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 		description: issue.description ?? undefined,
 		status,
 		priority: normalizeLinearPriority(issue.priority),
-		issue_type: normalizeLinearType(labels, hasChildren),
+		issue_type: inferLinearIssueType(labels, hasChildren, nativeTypeName),
 		created_at: createdAt,
 		updated_at: updatedAt,
 		closed_at: closedAt,
@@ -919,6 +966,81 @@ interface IssueDbClient {
 	readonly parseSyncResult: (output: string) => Effect.Effect<SyncResult, ParseError>
 }
 
+interface IssueDbTimingRecorder {
+	readonly recordIssueDbTiming: (options: {
+		backend: "linear"
+		operation: string
+		kind: IssueDbPerfOperationKind
+		durationMs: number
+		success: boolean
+	}) => Effect.Effect<void>
+}
+
+export interface LinearCommandPerfMetadata {
+	readonly operation: string
+	readonly kind: IssueDbPerfOperationKind
+}
+
+export const getLinearCommandPerfMetadata = (
+	linearArgs: readonly string[],
+): LinearCommandPerfMetadata => {
+	if (linearArgs[0] !== "i") {
+		return { operation: "other", kind: "write" }
+	}
+
+	switch (linearArgs[1]) {
+		case "list":
+			return { operation: "i.list", kind: "read" }
+		case "get":
+			return { operation: "i.get", kind: "read" }
+		case "create":
+			return { operation: "i.create", kind: "write" }
+		case "update":
+			return { operation: "i.update", kind: "write" }
+		case "close":
+			return { operation: "i.close", kind: "write" }
+		case "start":
+			return { operation: "i.start", kind: "write" }
+		case "stop":
+			return { operation: "i.stop", kind: "write" }
+		default:
+			return { operation: "other", kind: "write" }
+	}
+}
+
+export const withIssueDbTiming = <A, E, R>(
+	options: {
+		readonly recorder: IssueDbTimingRecorder
+		readonly backend: "linear"
+		readonly operation: string
+		readonly kind: IssueDbPerfOperationKind
+	},
+	effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+	Effect.gen(function* () {
+		const startTimeMs = Date.now()
+		return yield* effect.pipe(
+			Effect.tap(() =>
+				options.recorder.recordIssueDbTiming({
+					backend: options.backend,
+					operation: options.operation,
+					kind: options.kind,
+					durationMs: Date.now() - startTimeMs,
+					success: true,
+				}),
+			),
+			Effect.tapError(() =>
+				options.recorder.recordIssueDbTiming({
+					backend: options.backend,
+					operation: options.operation,
+					kind: options.kind,
+					durationMs: Date.now() - startTimeMs,
+					success: false,
+				}),
+			),
+		)
+	})
+
 const hasNoDaemonFlag = (args: readonly string[]): boolean =>
 	args.some((arg) => arg === "--no-daemon")
 
@@ -1070,11 +1192,17 @@ const parseJson = <A, I, R>(
  * ```
  */
 export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
-	dependencies: [ProjectService.Default, OfflineService.Default, AppConfig.Default],
+	dependencies: [
+		ProjectService.Default,
+		OfflineService.Default,
+		AppConfig.Default,
+		DiagnosticsService.Default,
+	],
 	effect: Effect.gen(function* () {
 		const projectService = yield* ProjectService
 		const offlineService = yield* OfflineService
 		const appConfig = yield* AppConfig
+		const diagnostics = yield* DiagnosticsService
 
 		/**
 		 * Get effective cwd for bd commands:
@@ -1208,27 +1336,35 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			readonly defaultTeam?: string
 		}
 
-		const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
-			const runLinearCommand = (
-				linearArgs: readonly string[],
-				runCwd?: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-				Effect.gen(function* () {
-					const command = runCwd
-						? Command.make(config.command, ...linearArgs).pipe(Command.workingDirectory(runCwd))
-						: Command.make(config.command, ...linearArgs)
-
-					return yield* Command.string(command).pipe(
-						Effect.mapError((error) => {
-							const stderr = "stderr" in error ? String(error.stderr) : String(error)
-							return new BeadsError({
-								message: `linear command failed: ${stderr}`,
-								command: `${config.command} ${linearArgs.join(" ")}`,
-								stderr,
-							})
-						}),
-					)
-				})
+			const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
+				const runLinearCommand = (
+					linearArgs: readonly string[],
+					runCwd?: string,
+				): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+					Effect.gen(function* () {
+						const command = runCwd
+							? Command.make(config.command, ...linearArgs).pipe(Command.workingDirectory(runCwd))
+							: Command.make(config.command, ...linearArgs)
+						const perf = getLinearCommandPerfMetadata(linearArgs)
+						return yield* withIssueDbTiming(
+							{
+								recorder: diagnostics,
+								backend: "linear",
+								operation: perf.operation,
+								kind: perf.kind,
+							},
+							Command.string(command).pipe(
+								Effect.mapError((error) => {
+									const stderr = "stderr" in error ? String(error.stderr) : String(error)
+									return new BeadsError({
+										message: `linear command failed: ${stderr}`,
+										command: `${config.command} ${linearArgs.join(" ")}`,
+										stderr,
+									})
+								}),
+							),
+						)
+					})
 
 			const decodeLinearIssues = (
 				output: string,

@@ -199,6 +199,49 @@ const EventRow = ({
 	</box>
 )
 
+const IssueDbPerfRow = ({
+	backend,
+	operation,
+	kind,
+	count,
+	failureCount,
+	avgMs,
+	p95Ms,
+	maxMs,
+	lastMs,
+	lastStatus,
+	lastAt,
+}: {
+	backend: string
+	operation: string
+	kind: "read" | "write"
+	count: number
+	failureCount: number
+	avgMs: number
+	p95Ms: number
+	maxMs: number
+	lastMs: number
+	lastStatus: "success" | "failure"
+	lastAt: Date
+}) => {
+	const failureRate = count > 0 ? Math.round((failureCount / count) * 100) : 0
+	const statusColorValue = lastStatus === "success" ? theme.green : theme.red
+
+	return (
+		<box flexDirection="row">
+			<text fg={theme.text}>{`${backend.padEnd(6)} ${operation.padEnd(9)}`}</text>
+			<text fg={theme.subtext0}>{` ${kind.padEnd(5)} `}</text>
+			<text fg={theme.subtext1}>{`n=${String(count).padStart(4)} `}</text>
+			<text fg={failureRate > 0 ? theme.yellow : theme.subtext1}>{`fail=${failureRate}% `}</text>
+			<text fg={theme.subtext1}>{`avg=${String(avgMs).padStart(4)}ms `}</text>
+			<text fg={p95Ms >= 300 ? theme.yellow : theme.subtext1}>{`p95=${String(p95Ms).padStart(4)}ms `}</text>
+			<text fg={maxMs >= 500 ? theme.red : theme.subtext1}>{`max=${String(maxMs).padStart(4)}ms `}</text>
+			<text fg={statusColorValue}>{`last=${lastMs}ms`}</text>
+			<text fg={theme.subtext1}>{` (${formatRelativeTime(lastAt)})`}</text>
+		</box>
+	)
+}
+
 /**
  * DiagnosticsOverlay component
  *
@@ -214,6 +257,8 @@ export const DiagnosticsOverlay = () => {
 	const fibers = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.fibers : []
 	const services = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.services : []
 	const events = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.events : []
+	const issueDbPerf = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.issueDbPerf : []
+	const sortedIssueDbPerf = [...issueDbPerf].sort((left, right) => right.p95Ms - left.p95Ms)
 
 	return (
 		<box
@@ -281,6 +326,30 @@ export const DiagnosticsOverlay = () => {
 							startedAt={fiber.startedAt}
 							endedAt={fiber.endedAt}
 							error={fiber.error}
+						/>
+					))
+				)}
+				<text> </text>
+
+				{/* Issue database performance section */}
+				<SectionHeader title="Issue DB Perf:" />
+				{sortedIssueDbPerf.length === 0 ? (
+					<text fg={theme.subtext0}>{"  No issue db metrics yet"}</text>
+				) : (
+					sortedIssueDbPerf.map((perf) => (
+						<IssueDbPerfRow
+							key={`${perf.backend}:${perf.operation}`}
+							backend={perf.backend}
+							operation={perf.operation}
+							kind={perf.kind}
+							count={perf.count}
+							failureCount={perf.failureCount}
+							avgMs={perf.avgMs}
+							p95Ms={perf.p95Ms}
+							maxMs={perf.maxMs}
+							lastMs={perf.lastMs}
+							lastStatus={perf.lastStatus}
+							lastAt={perf.lastAt}
 						/>
 					))
 				)}

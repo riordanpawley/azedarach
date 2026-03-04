@@ -11,7 +11,7 @@
  * status automatically updates when they're interrupted/complete.
  */
 
-import { Effect, Fiber, FiberId, Scope, SubscriptionRef } from "effect"
+import { Effect, Fiber, FiberId, Ref, Scope, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Types
@@ -63,6 +63,75 @@ export interface ServiceHealth {
 	readonly details?: string
 }
 
+export type IssueDbPerfBackend = "linear"
+export type IssueDbPerfOperationKind = "read" | "write"
+export type IssueDbPerfLastStatus = "success" | "failure"
+
+export interface IssueDbPerfStats {
+	readonly backend: IssueDbPerfBackend
+	readonly operation: string
+	readonly kind: IssueDbPerfOperationKind
+	readonly count: number
+	readonly failureCount: number
+	readonly avgMs: number
+	readonly p50Ms: number
+	readonly p95Ms: number
+	readonly maxMs: number
+	readonly lastMs: number
+	readonly lastStatus: IssueDbPerfLastStatus
+	readonly lastAt: Date
+}
+
+interface IssueDbPerfAccumulator {
+	readonly backend: IssueDbPerfBackend
+	readonly operation: string
+	readonly kind: IssueDbPerfOperationKind
+	readonly count: number
+	readonly failureCount: number
+	readonly totalDurationMs: number
+	readonly sampleDurations: readonly number[]
+	readonly maxMs: number
+	readonly lastMs: number
+	readonly lastStatus: IssueDbPerfLastStatus
+	readonly lastAt: Date
+}
+
+const ISSUE_DB_PERF_SAMPLE_LIMIT = 200
+const ISSUE_DB_PERF_READ_SLOW_THRESHOLD_MS = 300
+const ISSUE_DB_PERF_WRITE_SLOW_THRESHOLD_MS = 500
+
+const appendSample = (samples: readonly number[], durationMs: number): readonly number[] => {
+	const next = [...samples, durationMs]
+	return next.length > ISSUE_DB_PERF_SAMPLE_LIMIT
+		? next.slice(next.length - ISSUE_DB_PERF_SAMPLE_LIMIT)
+		: next
+}
+
+const percentileFromSorted = (sortedValues: readonly number[], percentile: number): number => {
+	if (sortedValues.length === 0) return 0
+	const rawIndex = Math.ceil(sortedValues.length * percentile) - 1
+	const boundedIndex = Math.min(Math.max(rawIndex, 0), sortedValues.length - 1)
+	return Math.round(sortedValues[boundedIndex] ?? 0)
+}
+
+const toIssueDbPerfStats = (accumulator: IssueDbPerfAccumulator): IssueDbPerfStats => {
+	const sortedSamples = [...accumulator.sampleDurations].sort((left, right) => left - right)
+	return {
+		backend: accumulator.backend,
+		operation: accumulator.operation,
+		kind: accumulator.kind,
+		count: accumulator.count,
+		failureCount: accumulator.failureCount,
+		avgMs: accumulator.count > 0 ? Math.round(accumulator.totalDurationMs / accumulator.count) : 0,
+		p50Ms: percentileFromSorted(sortedSamples, 0.5),
+		p95Ms: percentileFromSorted(sortedSamples, 0.95),
+		maxMs: Math.round(accumulator.maxMs),
+		lastMs: Math.round(accumulator.lastMs),
+		lastStatus: accumulator.lastStatus,
+		lastAt: accumulator.lastAt,
+	}
+}
+
 /**
  * Full diagnostics state
  */
@@ -70,6 +139,7 @@ export interface DiagnosticsState {
 	readonly fibers: readonly RegisteredFiber[]
 	readonly services: readonly ServiceHealth[]
 	readonly events: readonly DiagnosticEvent[]
+	readonly issueDbPerf: readonly IssueDbPerfStats[]
 	readonly lastUpdated: Date
 }
 
@@ -99,8 +169,12 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			fibers: [],
 			services: [],
 			events: [],
+			issueDbPerf: [],
 			lastUpdated: new Date(),
 		})
+		const issueDbPerfAccumulators = yield* Ref.make<Map<string, IssueDbPerfAccumulator>>(
+			new Map(),
+		)
 
 		/**
 		 * Register a fiber for monitoring
@@ -302,6 +376,77 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			}))
 
 		/**
+		 * Record issue database command timing
+		 *
+		 * Maintains aggregate command latency stats and emits slow-call events.
+		 */
+		const recordIssueDbTiming = (options: {
+			backend: IssueDbPerfBackend
+			operation: string
+			kind: IssueDbPerfOperationKind
+			durationMs: number
+			success: boolean
+		}) =>
+			Effect.gen(function* () {
+				const key = `${options.backend}:${options.operation}`
+				const now = new Date()
+				const existing = (yield* Ref.get(issueDbPerfAccumulators)).get(key)
+				const nextAccumulator: IssueDbPerfAccumulator = existing
+					? {
+							...existing,
+							kind: options.kind,
+							count: existing.count + 1,
+							failureCount: existing.failureCount + (options.success ? 0 : 1),
+							totalDurationMs: existing.totalDurationMs + options.durationMs,
+							sampleDurations: appendSample(existing.sampleDurations, options.durationMs),
+							maxMs: Math.max(existing.maxMs, options.durationMs),
+							lastMs: options.durationMs,
+							lastStatus: options.success ? "success" : "failure",
+							lastAt: now,
+						}
+					: {
+							backend: options.backend,
+							operation: options.operation,
+							kind: options.kind,
+							count: 1,
+							failureCount: options.success ? 0 : 1,
+							totalDurationMs: options.durationMs,
+							sampleDurations: [options.durationMs],
+							maxMs: options.durationMs,
+							lastMs: options.durationMs,
+							lastStatus: options.success ? "success" : "failure",
+							lastAt: now,
+						}
+
+				const nextAccumulators = new Map(yield* Ref.get(issueDbPerfAccumulators))
+				nextAccumulators.set(key, nextAccumulator)
+				yield* Ref.set(issueDbPerfAccumulators, nextAccumulators)
+
+				const issueDbPerf = Array.from(nextAccumulators.values())
+					.map((value) => toIssueDbPerfStats(value))
+					.sort((left, right) => right.p95Ms - left.p95Ms)
+
+				yield* SubscriptionRef.update(stateRef, (s) => ({
+					...s,
+					issueDbPerf,
+					lastUpdated: new Date(),
+				}))
+
+				const thresholdMs =
+					options.kind === "read"
+						? ISSUE_DB_PERF_READ_SLOW_THRESHOLD_MS
+						: ISSUE_DB_PERF_WRITE_SLOW_THRESHOLD_MS
+				if (options.durationMs >= thresholdMs) {
+					yield* logEvent({
+						severity: "info",
+						source: "IssueDbPerf",
+						message: `${options.backend} ${options.operation} ${Math.round(options.durationMs)}ms`,
+						details: `kind=${options.kind} status=${options.success ? "success" : "failure"} threshold=${thresholdMs}ms`,
+					})
+				}
+			})
+
+		/**
 		 * Record a timing event when an operation is slow
 		 */
 		const logTiming = (options: {
@@ -362,6 +507,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			trackService,
 			logEvent,
 			clearEvents,
+			recordIssueDbTiming,
 			logTiming,
 			measure,
 		}

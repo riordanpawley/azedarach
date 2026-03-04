@@ -155,6 +155,19 @@ Press `Enter` on any task to see full details:
 
 Press `Enter` or `Esc` to dismiss.
 
+### Diagnostics and Performance
+
+Press `d` to open the diagnostics overlay. It includes an **Issue DB Perf** section that
+shows backend command latency stats:
+- command operation (`i.list`, `i.get`, `i.update`, etc.)
+- call count and failure percentage
+- average, p95, and max latency
+- most recent latency and status
+
+Slow Linear backend calls are also logged in **Recent Events**:
+- reads (`i.list`, `i.get`) at or above `300ms`
+- writes at or above `500ms`
+
 ### Virtual Scrolling
 
 Columns automatically scroll when tasks exceed terminal height. Scroll indicators (`▲`/`▼`) show when more content exists above/below.
