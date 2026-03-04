@@ -35,6 +35,8 @@ import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 
+const BOARD_ISSUE_LIST_PAGE_SIZE = 200
+
 // ============================================================================
 // Sort Orders using Effect's composable Order module
 // ============================================================================
@@ -593,7 +595,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						thresholdMs: 200,
 						details: projectPath ?? "default",
 					},
-					beadsClient.list(undefined, projectPath).pipe(Effect.withSpan("beads.list")),
+					beadsClient
+						.list(undefined, projectPath, {
+							pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
+							sortBy: "updated_at",
+							sortDirection: "desc",
+							includeClosed: true,
+						})
+						.pipe(Effect.withSpan("beads.list")),
 				)
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,

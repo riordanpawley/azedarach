@@ -1041,8 +1041,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						DEFAULT_ISSUE_LIST_PAGE_SIZE,
 					)
 					const targetLimit =
-						options?.limit !== undefined
-							? clampPositiveInt(options.limit, DEFAULT_ISSUE_LIST_PAGE_SIZE)
+						options?.limit !== undefined && options.limit > 0
+							? Math.floor(options.limit)
 							: undefined
 
 					let currentLimit =
@@ -1480,17 +1480,14 @@ export const BeadsClientLiveWithPlatform = BeadsClient.Default
  * Get all issues matching filters
  */
 export const list = (
-	filters?: {
-		status?: string
-		priority?: number
-		type?: string
-	},
+	filters?: IssueListFilters,
 	cwd?: string,
+	options?: IssueListOptions,
 ): Effect.Effect<
 	Issue[],
 	BeadsError | ParseError | SyncRequiredError,
 	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd))
+> => Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd, options))
 
 /**
  * Get a single issue by ID
