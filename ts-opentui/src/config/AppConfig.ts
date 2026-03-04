@@ -375,14 +375,13 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// ============================================================================
 
 		const getIssueBackendSyncEnabled = (config: ResolvedConfig): boolean => {
-			switch (config.issueTracker) {
-				case "bd":
-					return config.beads.syncEnabled
-				case "br":
-					return config.beads_rust.syncEnabled
-				case "linear":
-					return config.linear.syncEnabled
+			if ("beads" in config.issueTracker) {
+				return config.issueTracker.beads.syncEnabled
 			}
+			if ("beads_rust" in config.issueTracker) {
+				return config.issueTracker.beads_rust.syncEnabled
+			}
+			return config.issueTracker.linear.syncEnabled
 		}
 
 		// Get initial project path from ProjectService

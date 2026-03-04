@@ -1575,13 +1575,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
 		const issueDbClient: IssueDbClient =
-			startupConfig.issueTracker === "bd"
+			"beads" in startupConfig.issueTracker
 				? createBdIssueDbClient("bd")
-				: startupConfig.issueTracker === "br"
+				: "beads_rust" in startupConfig.issueTracker
 					? createBrIssueDbClient("br")
 					: createLinearIssueDbClient({
-							command: startupConfig.linear.command,
-							defaultTeam: startupConfig.linear.team,
+							command: startupConfig.issueTracker.linear.command,
+							defaultTeam: startupConfig.issueTracker.linear.team,
 					  })
 
 		const runBd = (

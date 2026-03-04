@@ -11,7 +11,6 @@ import {
 	type AzedarachConfig,
 	type CliTool,
 	CURRENT_CONFIG_VERSION,
-	type IssueTracker,
 	type SessionRecoveryMode,
 	type WorkflowMode,
 } from "./schema.js"
@@ -158,18 +157,10 @@ export const DEFAULT_CONFIG = {
 		bell: true,
 		system: false,
 	},
-	issueTracker: "br" as IssueTracker,
-	beads: {
-		syncEnabled: true,
-	},
-	beads_rust: {
-		syncEnabled: true,
-	},
-	linear: {
-		syncEnabled: true,
-		command: "linear-cli",
-		team: undefined as string | undefined,
-		project: undefined as string | undefined,
+	issueTracker: {
+		beads_rust: {
+			syncEnabled: true,
+		},
 	},
 	network: {
 		autoDetect: true,
@@ -291,19 +282,25 @@ export interface ResolvedConfig {
 		bell: boolean
 		system: boolean
 	}
-	issueTracker: IssueTracker
-	beads: {
-		syncEnabled: boolean
-	}
-	beads_rust: {
-		syncEnabled: boolean
-	}
-	linear: {
-		syncEnabled: boolean
-		command: string
-		team: string | undefined
-		project: string | undefined
-	}
+	issueTracker:
+		| {
+				beads: {
+					syncEnabled: boolean
+				}
+		  }
+		| {
+				beads_rust: {
+					syncEnabled: boolean
+				}
+		  }
+		| {
+				linear: {
+					syncEnabled: boolean
+					command: string
+					team: string | undefined
+					project: string | undefined
+				}
+		  }
 	network: {
 		autoDetect: boolean
 		checkIntervalSeconds: number
@@ -356,6 +353,41 @@ export interface ResolvedConfig {
  * @param config - User-provided configuration (may have undefined fields)
  * @returns Fully resolved configuration with all fields defined
  */
+const mergeIssueTrackerWithDefaults = (
+	issueTracker: AzedarachConfig["issueTracker"],
+): ResolvedConfig["issueTracker"] => {
+	if (issueTracker !== undefined) {
+		if (issueTracker.beads !== undefined) {
+			return {
+				beads: {
+					syncEnabled: issueTracker.beads.syncEnabled ?? true,
+				},
+			}
+		}
+
+		if (issueTracker.beads_rust !== undefined) {
+			return {
+				beads_rust: {
+					syncEnabled: issueTracker.beads_rust.syncEnabled ?? true,
+				},
+			}
+		}
+
+		if (issueTracker.linear !== undefined) {
+			return {
+				linear: {
+					syncEnabled: issueTracker.linear.syncEnabled ?? true,
+					command: issueTracker.linear.command ?? "linear-cli",
+					team: issueTracker.linear.team,
+					project: issueTracker.linear.project,
+				},
+			}
+		}
+	}
+
+	return DEFAULT_CONFIG.issueTracker
+}
+
 export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 	return {
 		$schema: config.$schema ?? DEFAULT_CONFIG.$schema,
@@ -424,21 +456,9 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,
 			system: config.notifications?.system ?? DEFAULT_CONFIG.notifications.system,
 		},
-		issueTracker: config.issueTracker ?? DEFAULT_CONFIG.issueTracker,
+		issueTracker: mergeIssueTrackerWithDefaults(config.issueTracker),
 		projects: config.projects ?? DEFAULT_CONFIG.projects,
 		defaultProject: config.defaultProject ?? DEFAULT_CONFIG.defaultProject,
-		beads: {
-			syncEnabled: config.beads?.syncEnabled ?? DEFAULT_CONFIG.beads.syncEnabled,
-		},
-		beads_rust: {
-			syncEnabled: config.beads_rust?.syncEnabled ?? DEFAULT_CONFIG.beads_rust.syncEnabled,
-		},
-		linear: {
-			syncEnabled: config.linear?.syncEnabled ?? DEFAULT_CONFIG.linear.syncEnabled,
-			command: config.linear?.command ?? DEFAULT_CONFIG.linear.command,
-			team: config.linear?.team ?? DEFAULT_CONFIG.linear.team,
-			project: config.linear?.project ?? DEFAULT_CONFIG.linear.project,
-		},
 		network: {
 			autoDetect: config.network?.autoDetect ?? DEFAULT_CONFIG.network.autoDetect,
 			checkIntervalSeconds:

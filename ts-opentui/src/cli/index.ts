@@ -161,7 +161,7 @@ const validateBeadsDatabase = (projectDir: string) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
-		if (resolvedConfig.issueTracker === "linear") {
+		if ("linear" in resolvedConfig.issueTracker) {
 			yield* Console.log("Using linear issue tracker (no .beads directory required)")
 			return
 		}
@@ -879,13 +879,17 @@ const projectAddHandler = (args: {
 						return undefined
 					}
 					const issueTrackerValue = parsed.issueTracker
-					if (
-						issueTrackerValue === "bd" ||
-						issueTrackerValue === "br" ||
-						issueTrackerValue === "linear"
-					) {
+
+					if (issueTrackerValue === "bd" || issueTrackerValue === "br" || issueTrackerValue === "linear") {
 						return issueTrackerValue
 					}
+
+					if (typeof issueTrackerValue === "object" && issueTrackerValue !== null) {
+						if ("beads" in issueTrackerValue) return "bd"
+						if ("beads_rust" in issueTrackerValue) return "br"
+						if ("linear" in issueTrackerValue) return "linear"
+					}
+
 					return undefined
 				},
 				catch: () => undefined,

@@ -19,8 +19,7 @@ describe("AzedarachConfigSchema", () => {
 		it("sets $schema to current for empty config", () => {
 			const result = decodeConfig({})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
-			expect(result.issueTracker).toBe("br")
-			expect(result.beads_rust?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(true)
 		})
 
 		it("sets $schema to current for v1 config (legacy)", () => {
@@ -60,8 +59,8 @@ describe("AzedarachConfigSchema", () => {
 		})
 	})
 
-	describe("v2 → v3 migration: top-level issueTracker", () => {
-		it("migrates legacy beads.issueTracker=bd to top-level issueTracker + beads block", () => {
+	describe("v2/v3 → v4 migration: nested issueTracker config", () => {
+		it("migrates legacy beads.issueTracker=bd to issueTracker.beads", () => {
 			const result = decodeConfig({
 				$schema: 2,
 				beads: {
@@ -70,13 +69,10 @@ describe("AzedarachConfigSchema", () => {
 				},
 			})
 
-			expect(result.issueTracker).toBe("bd")
-			expect(result.beads?.syncEnabled).toBe(false)
-			expect(result.beads_rust).toBeUndefined()
-			expect(result.linear).toBeUndefined()
+			expect(result.issueTracker?.beads?.syncEnabled).toBe(false)
 		})
 
-		it("migrates legacy beads.issueTracker=br to top-level issueTracker + beads_rust block", () => {
+		it("migrates legacy beads.issueTracker=br to issueTracker.beads_rust", () => {
 			const result = decodeConfig({
 				$schema: 2,
 				beads: {
@@ -85,34 +81,12 @@ describe("AzedarachConfigSchema", () => {
 				},
 			})
 
-			expect(result.issueTracker).toBe("br")
-			expect(result.beads_rust?.syncEnabled).toBe(false)
-			expect(result.beads).toBeUndefined()
-			expect(result.linear).toBeUndefined()
+			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(false)
 		})
 
-		it("accepts new bd config shape", () => {
+		it("migrates v3 flat linear config to nested issueTracker.linear", () => {
 			const result = decodeConfig({
-				issueTracker: "bd",
-				beads: { syncEnabled: false },
-			})
-
-			expect(result.issueTracker).toBe("bd")
-			expect(result.beads?.syncEnabled).toBe(false)
-		})
-
-		it("accepts new br config shape", () => {
-			const result = decodeConfig({
-				issueTracker: "br",
-				beads_rust: { syncEnabled: true },
-			})
-
-			expect(result.issueTracker).toBe("br")
-			expect(result.beads_rust?.syncEnabled).toBe(true)
-		})
-
-		it("accepts new linear config shape", () => {
-			const result = decodeConfig({
+				$schema: 3,
 				issueTracker: "linear",
 				linear: {
 					syncEnabled: true,
@@ -121,11 +95,61 @@ describe("AzedarachConfigSchema", () => {
 				},
 			})
 
-			expect(result.issueTracker).toBe("linear")
-			expect(result.linear?.team).toBe("ENG")
-			expect(result.linear?.command).toBe("linear-cli")
+			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.linear?.team).toBe("ENG")
+			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+		})
+	})
+
+	describe("v4 issueTracker shape", () => {
+		it("accepts nested beads config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					beads: { syncEnabled: false },
+				},
+			})
+
+			expect(result.issueTracker?.beads?.syncEnabled).toBe(false)
 		})
 
+		it("accepts nested beads_rust config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					beads_rust: { syncEnabled: true },
+				},
+			})
+
+			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(true)
+		})
+
+		it("accepts nested linear config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					linear: {
+						syncEnabled: true,
+						command: "linear-cli",
+						team: "ENG",
+					},
+				},
+			})
+
+			expect(result.issueTracker?.linear?.team).toBe("ENG")
+			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+		})
+
+		it("rejects nested issueTracker with multiple backend blocks", () => {
+			expect(() =>
+				decodeConfig({
+					issueTracker: {
+						beads: { syncEnabled: true },
+						linear: { syncEnabled: true },
+					},
+				}),
+			).toThrow(/Predicate refinement failure/)
+		})
+	})
+
+	describe("legacy v3 shape validation", () => {
 		it("rejects mismatched issueTracker/backend block", () => {
 			expect(() =>
 				decodeConfig({
@@ -145,7 +169,7 @@ describe("AzedarachConfigSchema", () => {
 			).toThrow(/only one issue backend block is allowed/)
 		})
 
-		it("rejects issueTracker without backend block", () => {
+		it("rejects issueTracker literal without backend block", () => {
 			expect(() =>
 				decodeConfig({
 					issueTracker: "linear",
@@ -161,8 +185,9 @@ describe("AzedarachConfigSchema", () => {
 					initCommands: ["direnv allow", "bun install"],
 					continueOnFailure: false,
 				},
-				issueTracker: "br",
-				beads_rust: { syncEnabled: true },
+				issueTracker: {
+					beads_rust: { syncEnabled: true },
+				},
 			})
 
 			expect(result.worktree?.initCommands).toEqual(["direnv allow", "bun install"])
@@ -176,8 +201,9 @@ describe("AzedarachConfigSchema", () => {
 					{ name: "project2", path: "/path/to/project2", beadsPath: "/custom/beads" },
 				],
 				defaultProject: "project1",
-				issueTracker: "bd",
-				beads: { syncEnabled: true },
+				issueTracker: {
+					beads: { syncEnabled: true },
+				},
 			})
 
 			expect(result.projects).toHaveLength(2)
@@ -189,19 +215,27 @@ describe("AzedarachConfigSchema", () => {
 
 	describe("encoding", () => {
 		it("encodes current config with version", () => {
-			const issueTracker: "br" = "br"
 			const config = {
 				$schema: CURRENT_CONFIG_VERSION,
-				issueTracker,
-				beads_rust: { syncEnabled: true },
+				issueTracker: {
+					beads_rust: { syncEnabled: true },
+				},
 				git: { baseBranch: "main" },
 				pr: { autoDraft: true },
 			}
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
+			const encodedIssueTracker = encoded.issueTracker
 
 			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
-			expect(encoded.issueTracker).toBe("br")
+			if (
+				encodedIssueTracker === undefined ||
+				typeof encodedIssueTracker !== "object" ||
+				encodedIssueTracker === null
+			) {
+				throw new Error("Expected encoded issueTracker object")
+			}
+			expect(encodedIssueTracker.beads_rust?.syncEnabled).toBe(true)
 			expect(encoded.git?.baseBranch).toBe("main")
 		})
 	})

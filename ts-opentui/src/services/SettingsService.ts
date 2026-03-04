@@ -144,11 +144,55 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	{
 		key: "beadsSyncEnabled",
 		label: "Beads Sync",
-		getValue: (c) => c.beads?.syncEnabled ?? true,
-		toggle: (c) => ({
-			...c,
-			beads: { ...c.beads, syncEnabled: !(c.beads?.syncEnabled ?? true) },
-		}),
+		getValue: (c) => {
+			if (c.issueTracker?.beads !== undefined) return c.issueTracker.beads.syncEnabled ?? true
+			if (c.issueTracker?.beads_rust !== undefined) return c.issueTracker.beads_rust.syncEnabled ?? true
+			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
+			return true
+		},
+		toggle: (c) => {
+			if (c.issueTracker?.beads !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						beads: {
+							...c.issueTracker.beads,
+							syncEnabled: !(c.issueTracker.beads.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			if (c.issueTracker?.beads_rust !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						beads_rust: {
+							...c.issueTracker.beads_rust,
+							syncEnabled: !(c.issueTracker.beads_rust.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			if (c.issueTracker?.linear !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						linear: {
+							...c.issueTracker.linear,
+							syncEnabled: !(c.issueTracker.linear.syncEnabled ?? true),
+						},
+					},
+				}
+			}
+			return {
+				...c,
+				issueTracker: {
+					beads_rust: {
+						syncEnabled: false,
+					},
+				},
+			}
+		},
 	},
 	{
 		key: "patternMatching",
