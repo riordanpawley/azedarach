@@ -341,8 +341,8 @@ const normalizeLinearStatus = (stateName: string | null | undefined): IssueStatu
 	return "open"
 }
 
-const normalizeLinearPriority = (priority: number | undefined): number => {
-	if (priority === undefined) return 2
+const normalizeLinearPriority = (priority: number | null | undefined): number => {
+	if (priority == null) return 2
 	if (priority <= 0) return 2
 	if (priority === 1) return 0
 	if (priority === 2) return 1
@@ -385,7 +385,7 @@ const normalizeLinearType = (
 const toIsoNow = (): string => new Date().toISOString()
 
 const LinearIssueLabelNodeSchema = Schema.Struct({
-	name: Schema.String,
+	name: Schema.NullOr(Schema.String).pipe(Schema.optional),
 })
 
 const LinearIssueSchema = Schema.Struct({
@@ -393,9 +393,9 @@ const LinearIssueSchema = Schema.Struct({
 	identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	title: Schema.String,
 	description: Schema.NullOr(Schema.String).pipe(Schema.optional),
-	priority: Schema.Number.pipe(Schema.optional),
-	createdAt: Schema.String.pipe(Schema.optional),
-	updatedAt: Schema.String.pipe(Schema.optional),
+	priority: Schema.NullOr(Schema.Number).pipe(Schema.optional),
+	createdAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	updatedAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	completedAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	canceledAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	state: Schema.NullOr(
@@ -411,7 +411,9 @@ const LinearIssueSchema = Schema.Struct({
 	).pipe(Schema.optional),
 	labels: Schema.NullOr(
 		Schema.Struct({
-			nodes: Schema.NullOr(Schema.Array(LinearIssueLabelNodeSchema)).pipe(Schema.optional),
+			nodes: Schema.NullOr(
+				Schema.Array(Schema.NullOr(LinearIssueLabelNodeSchema)),
+			).pipe(Schema.optional),
 		}),
 	).pipe(Schema.optional),
 	project: Schema.NullOr(
@@ -429,15 +431,17 @@ const LinearIssueSchema = Schema.Struct({
 		Schema.Struct({
 			nodes: Schema.NullOr(
 				Schema.Array(
-					Schema.Struct({
-						identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
-						title: Schema.NullOr(Schema.String).pipe(Schema.optional),
-						state: Schema.NullOr(
-							Schema.Struct({
-								name: Schema.NullOr(Schema.String).pipe(Schema.optional),
-							}),
-						).pipe(Schema.optional),
-					}),
+					Schema.NullOr(
+						Schema.Struct({
+							identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
+							title: Schema.NullOr(Schema.String).pipe(Schema.optional),
+							state: Schema.NullOr(
+								Schema.Struct({
+									name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+								}),
+							).pipe(Schema.optional),
+						}),
+					),
 				),
 			).pipe(Schema.optional),
 		}),
@@ -445,15 +449,10 @@ const LinearIssueSchema = Schema.Struct({
 })
 
 type LinearIssue = Schema.Schema.Type<typeof LinearIssueSchema>
-const LinearIssueListOrSingleSchema = Schema.Union(
-	Schema.Array(LinearIssueSchema),
-	LinearIssueSchema,
-)
-type LinearIssueListOrSingle = Schema.Schema.Type<typeof LinearIssueListOrSingleSchema>
 
 const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const labels = (issue.labels?.nodes ?? [])
-		.map((label) => label.name)
+		.map((label) => label?.name)
 		.filter((value): value is string => value != null)
 
 	const children = issue.children?.nodes ?? []
@@ -477,15 +476,15 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 			: []
 
 	const dependents: DependencyRaw[] = children
-		.filter((child) => child.identifier != null)
+		.filter((child) => child?.identifier != null)
 		.map((child) => {
-			const identifier = child.identifier ?? ""
+			const identifier = child?.identifier ?? ""
 			return {
 				id: identifier,
-				title: child.title ?? null,
+				title: child?.title ?? null,
 				dependency_type: "parent-child",
 				issue_type: "task",
-				status: normalizeLinearStatus(child.state?.name),
+				status: normalizeLinearStatus(child?.state?.name),
 			}
 		})
 
@@ -1200,11 +1199,50 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			const decodeLinearIssues = (
 				output: string,
 			): Effect.Effect<LinearIssue[], ParseError> =>
-				parseJson(LinearIssueListOrSingleSchema, output).pipe(
-					Effect.map((parsed: LinearIssueListOrSingle) =>
-						Array.isArray(parsed) ? parsed : [parsed],
-					),
-				)
+				Effect.gen(function* () {
+					const parsedUnknown = yield* Effect.try({
+						try: (): unknown => JSON.parse(output),
+						catch: (error) =>
+							new ParseError({
+								message: `Failed to parse JSON: ${String(error)}`,
+								output,
+							}),
+					})
+					const candidates = Array.isArray(parsedUnknown) ? parsedUnknown : [parsedUnknown]
+					const decodeIssue = Schema.decodeUnknownEither(LinearIssueSchema)
+					const decodedIssues: LinearIssue[] = []
+					let skippedCount = 0
+					let firstDecodeError: string | undefined
+
+					for (const candidate of candidates) {
+						const decoded = decodeIssue(candidate)
+						if (decoded._tag === "Right") {
+							decodedIssues.push(decoded.right)
+							continue
+						}
+						skippedCount += 1
+						if (firstDecodeError === undefined) {
+							firstDecodeError = String(decoded.left)
+						}
+					}
+
+					if (decodedIssues.length === 0 && firstDecodeError !== undefined) {
+						return yield* Effect.fail(
+							new ParseError({
+								message: `Schema validation failed: ${firstDecodeError}`,
+								output,
+							}),
+						)
+					}
+
+					if (skippedCount > 0) {
+						yield* Effect.logWarning(
+							`Linear decode skipped ${skippedCount} malformed issue(s) in list payload`,
+						)
+					}
+
+					return decodedIssues
+				})
 
 			const fetchLinearIssues = (
 				runCwd: string | undefined,

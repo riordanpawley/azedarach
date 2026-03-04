@@ -34,8 +34,10 @@ import { EditorService, type FilterConfig, type SortConfig } from "./EditorServi
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
+import { ToastService } from "./ToastService.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
+const REFRESH_FAILURE_TOAST_DEBOUNCE_MS = 15000
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -269,6 +271,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		MutationQueue.Default,
 		WorktreeManager.Default,
 		PRStateService.Default,
+		ToastService.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const beadsClient = yield* BeadsClient
@@ -281,6 +284,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const mutationQueue = yield* MutationQueue
 		const worktreeManager = yield* WorktreeManager
 		const prStateService = yield* PRStateService
+		const toast = yield* ToastService
 
 		// Capture the service's scope for use in methods that spawn background fibers
 		const serviceScope = yield* Effect.scope
@@ -301,6 +305,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		)
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
+		const refreshFailureToastRef = yield* Ref.make<{
+			readonly message: string
+			readonly timestamp: number
+		} | null>(null)
 
 		// ====================================================================
 		// Per-Project State Management
@@ -932,108 +940,128 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* SubscriptionRef.set(filteredTasksByColumn, computed)
 			})
 
-		const refresh = () =>
-			diagnostics
-				.measure(
-					{
-						source: "BoardService",
-						name: "refresh",
-						thresholdMs: 500,
-					},
-					Effect.gen(function* () {
-						yield* SubscriptionRef.set(isLoading, true)
-
-						// Capture project path at refresh START
-						const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
-
-						// Update currentProjectPath SubscriptionRef
-						yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
-
-						const loadedTasks = yield* diagnostics.measure(
-							{
-								source: "BoardService",
-								name: "loadTasks",
-								thresholdMs: 400,
-							},
-							loadTasks().pipe(Effect.withSpan("board.loadTasks")),
-						)
-
-						// Verify project hasn't changed during refresh (race condition guard)
-						// If project changed, discard results to avoid showing wrong project's data
-						const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
-						if (startProjectPath !== activeProjectPath) {
-							yield* Effect.log(
-								`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
-							)
-							return
-						}
-
-						yield* SubscriptionRef.set(tasks, loadedTasks)
-						const grouped = groupTasksByColumn(loadedTasks)
-						yield* SubscriptionRef.set(tasksByColumn, grouped)
-						yield* updateFilteredTasks()
-
-						// Save to per-project map for fast switching
-						yield* saveCurrentToMap()
-
-						yield* Effect.log(
-							`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
-						)
-					}).pipe(Effect.withSpan("board.refresh")),
-				)
-				.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
-
-		/**
-		 * Refresh with auto-recovery for database sync errors.
-		 *
-		 * If the beads database is out of sync with JSONL (common after git pull
-		 * or when another worktree modifies issues), this will:
-		 * 1. Detect the SyncRequiredError
-		 * 2. Auto-run 'bd sync --import-only' to re-import JSONL
-		 * 3. Retry the refresh
-		 */
-		const refreshWithRecovery = () =>
-			refresh().pipe(
-				Effect.catchIf(
-					(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
-					() =>
+			const refresh = () =>
+				diagnostics
+					.measure(
+						{
+							source: "BoardService",
+							name: "refresh",
+							thresholdMs: 500,
+						},
 						Effect.gen(function* () {
-							yield* Effect.log(
-								"Beads database out of sync, auto-recovering with 'bd sync --import-only'...",
-							)
-							const projectPath = yield* projectService.getCurrentPath()
-							yield* beadsClient
-								.syncImportOnly(projectPath ?? undefined)
-								.pipe(
-									Effect.catchAll((syncError) =>
-										Effect.logError("Auto-sync recovery failed", String(syncError)),
-									),
-								)
-							yield* Effect.log("Auto-sync complete, retrying refresh...")
-							yield* refresh()
-						}),
-				),
-			)
+							yield* SubscriptionRef.set(isLoading, true)
 
-		const requestRefresh = () =>
-			Effect.gen(function* () {
-				const existingFiber = yield* Ref.get(debounceFiberRef)
-				if (existingFiber) {
-					yield* Fiber.interrupt(existingFiber)
-				}
-				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
-				const fiber = yield* Effect.gen(function* () {
-					yield* Effect.sleep("500 millis")
-					yield* refreshWithRecovery().pipe(
-						Effect.catchAllCause((cause) =>
-							Effect.logError("BoardService debounced refresh failed", Cause.pretty(cause)).pipe(
-								Effect.asVoid,
-							),
-						),
+							// Capture project path at refresh START
+							const startProjectPath = (yield* projectService.getCurrentPath()) ?? null
+
+							// Update currentProjectPath SubscriptionRef
+							yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
+
+							const loadedTasks = yield* diagnostics.measure(
+								{
+									source: "BoardService",
+									name: "loadTasks",
+									thresholdMs: 400,
+								},
+								loadTasks().pipe(Effect.withSpan("board.loadTasks")),
+							)
+
+							// Verify project hasn't changed during refresh (race condition guard)
+							// If project changed, discard results to avoid showing wrong project's data
+							const activeProjectPath = (yield* projectService.getCurrentPath()) ?? null
+							if (startProjectPath !== activeProjectPath) {
+								yield* Effect.log(
+									`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
+								)
+								return
+							}
+
+							yield* SubscriptionRef.set(tasks, loadedTasks)
+							const grouped = groupTasksByColumn(loadedTasks)
+							yield* SubscriptionRef.set(tasksByColumn, grouped)
+							yield* updateFilteredTasks()
+
+							// Save to per-project map for fast switching
+							yield* saveCurrentToMap()
+
+							yield* Effect.log(
+								`refresh: State updated, ${loadedTasks.length} tasks now in SubscriptionRefs`,
+							)
+						}).pipe(Effect.withSpan("board.refresh")),
 					)
-				}).pipe(Effect.forkIn(serviceScope))
-				yield* Ref.set(debounceFiberRef, fiber)
-			})
+					.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
+
+			const formatRefreshFailureMessage = (cause: Cause.Cause<unknown>): string => {
+				const pretty = Cause.pretty(cause)
+				const firstLine = pretty.split("\n").find((line) => line.trim().length > 0)?.trim()
+				const base = firstLine && firstLine.length > 0 ? firstLine : "Unknown board refresh failure"
+				return base.length > 180 ? `${base.slice(0, 177)}...` : base
+			}
+
+			const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
+				Effect.gen(function* () {
+					yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
+					const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
+					const now = Date.now()
+					const previousToast = yield* Ref.get(refreshFailureToastRef)
+					const shouldToast =
+						previousToast === null ||
+						previousToast.message !== message ||
+						now - previousToast.timestamp >= REFRESH_FAILURE_TOAST_DEBOUNCE_MS
+
+					if (shouldToast) {
+						yield* toast.show("error", message)
+						yield* Ref.set(refreshFailureToastRef, { message, timestamp: now })
+					}
+				}).pipe(Effect.asVoid)
+
+			/**
+			 * Refresh with auto-recovery for database sync errors.
+			 *
+			 * If the beads database is out of sync with JSONL (common after git pull
+			 * or when another worktree modifies issues), this will:
+			 * 1. Detect the SyncRequiredError
+			 * 2. Auto-run 'bd sync --import-only' to re-import JSONL
+			 * 3. Retry the refresh
+			 */
+			const refreshWithRecovery = () =>
+				refresh().pipe(
+					Effect.catchIf(
+						(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
+						() =>
+							Effect.gen(function* () {
+								yield* Effect.log(
+									"Beads database out of sync, auto-recovering with 'bd sync --import-only'...",
+								)
+								const projectPath = yield* projectService.getCurrentPath()
+								yield* beadsClient
+									.syncImportOnly(projectPath ?? undefined)
+									.pipe(
+										Effect.catchAll((syncError) =>
+											Effect.logError("Auto-sync recovery failed", String(syncError)),
+										),
+									)
+								yield* Effect.log("Auto-sync complete, retrying refresh...")
+								yield* refresh()
+							}),
+					),
+				)
+
+			const requestRefresh = () =>
+				Effect.gen(function* () {
+					const existingFiber = yield* Ref.get(debounceFiberRef)
+					if (existingFiber) {
+						yield* Fiber.interrupt(existingFiber)
+					}
+					// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
+					const fiber = yield* Effect.gen(function* () {
+						yield* Effect.sleep("500 millis")
+						yield* refreshWithRecovery().pipe(
+							Effect.catchAllCause((cause) => logAndToastRefreshFailure("debounced", cause)),
+						)
+					}).pipe(Effect.forkIn(serviceScope))
+					yield* Ref.set(debounceFiberRef, fiber)
+				})
 
 		/**
 		 * Refresh git stats (behind count, uncommitted changes, line additions/deletions)
@@ -1088,11 +1116,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* refreshWithRecovery().pipe(
-			Effect.catchAllCause((cause) =>
-				Effect.logError("BoardService initial refresh failed", Cause.pretty(cause)).pipe(
-					Effect.asVoid,
-				),
-			),
+			Effect.catchAllCause((cause) => logAndToastRefreshFailure("initial", cause)),
 		)
 
 		// Background polling fallback (every 5 seconds) to keep git stats fresh
@@ -1100,11 +1124,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const backgroundPollingFiber = yield* Effect.forkScoped(
 			Effect.repeat(Schedule.spaced("5 seconds"))(
 				refreshWithRecovery().pipe(
-					Effect.catchAllCause((cause) =>
-						Effect.logError("BoardService background refresh failed", Cause.pretty(cause)).pipe(
-							Effect.asVoid,
-						),
-					),
+					Effect.catchAllCause((cause) => logAndToastRefreshFailure("background", cause)),
 				),
 			),
 		)
@@ -1118,11 +1138,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
 				requestRefresh().pipe(
-					Effect.catchAllCause((cause) =>
-						Effect.logError("PTY-triggered refresh failed", Cause.pretty(cause)).pipe(
-							Effect.asVoid,
-						),
-					),
+					Effect.catchAllCause((cause) => logAndToastRefreshFailure("pty-triggered", cause)),
 				),
 			),
 		)
@@ -1278,11 +1294,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* refresh()
 					yield* onRefreshComplete
 				}).pipe(
-					Effect.catchAllCause((cause) =>
-						Effect.logError("Project switch refresh failed", Cause.pretty(cause)).pipe(
-							Effect.asVoid,
-						),
-					),
+					Effect.catchAllCause((cause) => logAndToastRefreshFailure("project-switch", cause)),
 					Effect.forkIn(serviceScope),
 				)
 
