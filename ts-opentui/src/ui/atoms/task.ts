@@ -410,8 +410,6 @@ export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
-export const deleteBeadAtom = deleteIssueAtom
-
 // ============================================================================
 // Epic Children Atoms
 // ============================================================================
