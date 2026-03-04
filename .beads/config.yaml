@@ -1,4 +1,8 @@
-# Beads Project Configuration
-# issue_prefix: az
-# default_priority: 2
-# default_type: task
+id:
+  prefix: az
+defaults:
+  priority: 2
+  type: task
+# sync:
+#   auto_flush: 'false'
+# no-auto-flush: 'true'
