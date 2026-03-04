@@ -313,7 +313,7 @@ const LINEAR_STATUS_CLOSED = "closed"
 const LINEAR_STATUS_IN_PROGRESS = "in_progress"
 const LINEAR_STATUS_BLOCKED = "blocked"
 
-const normalizeLinearStatus = (stateName: string | undefined): IssueStatus => {
+const normalizeLinearStatus = (stateName: string | null | undefined): IssueStatus => {
 	if (!stateName) return "open"
 	const normalized = stateName.trim().toLowerCase()
 
@@ -390,7 +390,7 @@ const LinearIssueLabelNodeSchema = Schema.Struct({
 
 const LinearIssueSchema = Schema.Struct({
 	id: Schema.String,
-	identifier: Schema.String.pipe(Schema.optional),
+	identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	title: Schema.String,
 	description: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	priority: Schema.Number.pipe(Schema.optional),
@@ -398,34 +398,50 @@ const LinearIssueSchema = Schema.Struct({
 	updatedAt: Schema.String.pipe(Schema.optional),
 	completedAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	canceledAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
-	state: Schema.Struct({
-		name: Schema.String.pipe(Schema.optional),
-	}).pipe(Schema.optional),
-	assignee: Schema.Struct({
-		name: Schema.String.pipe(Schema.optional),
-		email: Schema.String.pipe(Schema.optional),
-	}).pipe(Schema.optional),
-	labels: Schema.Struct({
-		nodes: Schema.Array(LinearIssueLabelNodeSchema).pipe(Schema.optional),
-	}).pipe(Schema.optional),
-	project: Schema.Struct({
-		name: Schema.String.pipe(Schema.optional),
-	}).pipe(Schema.optional),
-	parent: Schema.Struct({
-		identifier: Schema.String.pipe(Schema.optional),
-		title: Schema.String.pipe(Schema.optional),
-	}).pipe(Schema.optional),
-	children: Schema.Struct({
-		nodes: Schema.Array(
-			Schema.Struct({
-				identifier: Schema.String.pipe(Schema.optional),
-				title: Schema.String.pipe(Schema.optional),
-				state: Schema.Struct({
-					name: Schema.String.pipe(Schema.optional),
-				}).pipe(Schema.optional),
-			}),
-		).pipe(Schema.optional),
-	}).pipe(Schema.optional),
+	state: Schema.NullOr(
+		Schema.Struct({
+			name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
+	assignee: Schema.NullOr(
+		Schema.Struct({
+			name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+			email: Schema.NullOr(Schema.String).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
+	labels: Schema.NullOr(
+		Schema.Struct({
+			nodes: Schema.NullOr(Schema.Array(LinearIssueLabelNodeSchema)).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
+	project: Schema.NullOr(
+		Schema.Struct({
+			name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
+	parent: Schema.NullOr(
+		Schema.Struct({
+			identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
+			title: Schema.NullOr(Schema.String).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
+	children: Schema.NullOr(
+		Schema.Struct({
+			nodes: Schema.NullOr(
+				Schema.Array(
+					Schema.Struct({
+						identifier: Schema.NullOr(Schema.String).pipe(Schema.optional),
+						title: Schema.NullOr(Schema.String).pipe(Schema.optional),
+						state: Schema.NullOr(
+							Schema.Struct({
+								name: Schema.NullOr(Schema.String).pipe(Schema.optional),
+							}),
+						).pipe(Schema.optional),
+					}),
+				),
+			).pipe(Schema.optional),
+		}),
+	).pipe(Schema.optional),
 })
 
 type LinearIssue = Schema.Schema.Type<typeof LinearIssueSchema>
@@ -438,7 +454,7 @@ type LinearIssueListOrSingle = Schema.Schema.Type<typeof LinearIssueListOrSingle
 const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const labels = (issue.labels?.nodes ?? [])
 		.map((label) => label.name)
-		.filter((value): value is string => value !== undefined)
+		.filter((value): value is string => value != null)
 
 	const children = issue.children?.nodes ?? []
 	const hasChildren = children.length > 0
@@ -449,7 +465,7 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const closedAt = status === "closed" ? issue.completedAt ?? issue.canceledAt ?? updatedAt : undefined
 
 	const dependencies: DependencyRaw[] =
-		issue.parent?.identifier !== undefined
+		issue.parent?.identifier != null
 			? [
 					{
 						id: issue.parent.identifier,
@@ -461,7 +477,7 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 			: []
 
 	const dependents: DependencyRaw[] = children
-		.filter((child) => child.identifier !== undefined)
+		.filter((child) => child.identifier != null)
 		.map((child) => {
 			const identifier = child.identifier ?? ""
 			return {
