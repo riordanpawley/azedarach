@@ -382,6 +382,40 @@ const normalizeLinearType = (
 	return "task"
 }
 
+const normalizeLinearTypeInput = (value: string | undefined): string | undefined => {
+	if (!value) return undefined
+	const normalized = value.trim().toLowerCase()
+	return normalized.length > 0 ? normalized : undefined
+}
+
+const typeToLinearLabel = (type: string | undefined): string | undefined => {
+	switch (normalizeLinearTypeInput(type)) {
+		case "bug":
+			return "type:bug"
+		case "feature":
+			return "type:feature"
+		case "chore":
+			return "type:chore"
+		case "epic":
+			return "type:epic"
+		case "task":
+			return "type:task"
+		default:
+			return undefined
+	}
+}
+
+const mergeLinearLabelsWithType = (
+	labels: readonly string[],
+	type: string | undefined,
+): readonly string[] => {
+	const typeLabel = typeToLinearLabel(type)
+	if (!typeLabel) return labels
+	const typePrefixes = ["type:bug", "type:feature", "type:chore", "type:epic", "type:task"]
+	const next = labels.filter((label) => !typePrefixes.includes(label.trim().toLowerCase()))
+	return [...next, typeLabel]
+}
+
 const toIsoNow = (): string => new Date().toISOString()
 
 const LinearIssueLabelNodeSchema = Schema.Struct({
@@ -1390,6 +1424,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const description = parseArgumentValue(rest, "--description")
 							const design = parseArgumentValue(rest, "--design")
 							const acceptance = parseArgumentValue(rest, "--acceptance")
+							const type = parseArgumentValue(rest, "--type")
 							const assignee = parseArgumentValue(rest, "--assignee")
 							const estimate = parseArgumentValue(rest, "--estimate")
 							const priorityArg = parseArgumentValue(rest, "--priority")
@@ -1401,6 +1436,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								.flatMap((value) => value.split(","))
 								.map((value) => value.trim())
 								.filter((value) => value.length > 0)
+							const labelsWithType = mergeLinearLabelsWithType(labels, type)
 
 							const extraSections: string[] = []
 							if (design) extraSections.push(`## Design\\n${design}`)
@@ -1421,7 +1457,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							if (priority) linearArgs.push("-p", priority)
 							if (assignee) linearArgs.push("-a", assignee)
 							if (estimate) linearArgs.push("-e", estimate)
-							for (const label of labels) {
+							for (const label of labelsWithType) {
 								linearArgs.push("-l", label)
 							}
 
@@ -1466,6 +1502,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const notes = parseArgumentValue(rest, "--notes")
 							const design = parseArgumentValue(rest, "--design")
 							const acceptance = parseArgumentValue(rest, "--acceptance")
+							const type = parseArgumentValue(rest, "--type")
 							const assignee = parseArgumentValue(rest, "--assignee")
 							const estimate = parseArgumentValue(rest, "--estimate")
 							const priorityArg = parseArgumentValue(rest, "--priority")
@@ -1473,6 +1510,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
 							)
 							const labels = parseRepeatedArgumentValues(rest, "--set-labels")
+							const labelsWithType = mergeLinearLabelsWithType(labels, type)
 							const parent = parseArgumentValue(rest, "--parent")
 
 							const extraSections: string[] = []
@@ -1494,7 +1532,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							if (priority) linearArgs.push("-p", priority)
 							if (assignee !== undefined) linearArgs.push("-a", assignee)
 							if (estimate) linearArgs.push("-e", estimate)
-							for (const label of labels) {
+							for (const label of labelsWithType) {
 								linearArgs.push("-l", label)
 							}
 
@@ -1504,7 +1542,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								priority !== undefined ||
 								assignee !== undefined ||
 								estimate !== undefined ||
-								labels.length > 0
+								labelsWithType.length > 0
 
 							if (hasInlineUpdate) {
 								yield* runLinearCommand(linearArgs, runCwd)
