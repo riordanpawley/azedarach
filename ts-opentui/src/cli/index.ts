@@ -240,14 +240,17 @@ const startHandler = (args: {
 		})
 
 		// Claim the bead with session assignee
-		const claimCommand = PlatformCommand.make(
-			"bd",
-			"update",
-			args.issueId,
-			"--status=in_progress",
-			`--assignee=${session.tmuxSessionName}`,
-		)
-		yield* PlatformCommand.exitCode(claimCommand).pipe(
+		const beadsClient = yield* BeadsClient
+		yield* beadsClient
+			.update(
+				args.issueId,
+				{
+					status: "in_progress",
+					assignee: session.tmuxSessionName,
+				},
+				cwd,
+			)
+			.pipe(
 			Effect.tap(() => {
 				if (args.verbose) {
 					return Console.log(

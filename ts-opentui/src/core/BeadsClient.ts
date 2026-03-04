@@ -15,54 +15,76 @@ import { ProjectService } from "../services/ProjectService.js"
 // Schema Definitions
 // ============================================================================
 
+export type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
+export type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
+export type DependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
+
 /**
  * Dependency reference schema for issue dependencies/dependents
+ *
+ * Intentionally permissive for br compatibility:
+ * - br can emit extra dependency types
+ * - show/list can use either compact refs or full dependency links
  */
-const DependencyTypeSchema = Schema.Literal("blocks", "related", "parent-child", "discovered-from")
-
 const DependencyRefSchema = Schema.Struct({
 	id: Schema.String,
-	title: Schema.String.pipe(Schema.optional),
-	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone").pipe(
-		Schema.optional,
-	),
-	dependency_type: DependencyTypeSchema,
-	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore").pipe(Schema.optional),
+	title: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	status: Schema.String.pipe(Schema.optional),
+	dependency_type: Schema.String,
+	issue_type: Schema.String.pipe(Schema.optional),
 })
 
 const DependencyLinkSchema = Schema.Struct({
 	issue_id: Schema.String,
 	depends_on_id: Schema.String,
-	type: DependencyTypeSchema,
+	type: Schema.String,
 	created_at: Schema.String.pipe(Schema.optional),
 	created_by: Schema.String.pipe(Schema.optional),
 })
 
 const DependencySchema = Schema.Union(DependencyRefSchema, DependencyLinkSchema)
 
-export type DependencyRef = Schema.Schema.Type<typeof DependencyRefSchema>
-type DependencyLink = Schema.Schema.Type<typeof DependencyLinkSchema>
-type Dependency = Schema.Schema.Type<typeof DependencySchema>
+type DependencyRefRaw = Schema.Schema.Type<typeof DependencyRefSchema>
+type DependencyLinkRaw = Schema.Schema.Type<typeof DependencyLinkSchema>
+type DependencyRaw = Schema.Schema.Type<typeof DependencySchema>
+
+export interface DependencyRef {
+	readonly id: string
+	readonly title?: string
+	readonly status?: IssueStatus
+	readonly dependency_type: DependencyType
+	readonly issue_type?: IssueType
+}
+
+type DependencyLink = DependencyLinkRaw
+type Dependency = DependencyRefRaw | DependencyLink
 
 /**
- * Issue schema matching bd --json output
+ * Issue schema matching bd/br --json output
+ *
+ * Intentionally permissive for br compatibility:
+ * - br can emit additional status / issue_type variants
+ * - br can emit `estimated_minutes` instead of `estimate`
+ * - some fields can be null or omitted depending on command
  */
 const IssueSchema = Schema.Struct({
 	id: Schema.String,
 	title: Schema.String,
-	description: Schema.String.pipe(Schema.optional),
-	status: Schema.Literal("open", "in_progress", "blocked", "closed", "tombstone"),
-	priority: Schema.Number,
-	issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore"),
+	description: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	status: Schema.String.pipe(Schema.optional),
+	priority: Schema.Number.pipe(Schema.optional),
+	issue_type: Schema.String.pipe(Schema.optional),
 	created_at: Schema.String,
 	updated_at: Schema.String,
 	closed_at: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	assignee: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	labels: Schema.Array(Schema.String).pipe(Schema.optional),
-	design: Schema.String.pipe(Schema.optional),
-	notes: Schema.String.pipe(Schema.optional),
-	acceptance: Schema.String.pipe(Schema.optional),
+	design: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	notes: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	acceptance: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	acceptance_criteria: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	estimate: Schema.Number.pipe(Schema.optional),
+	estimated_minutes: Schema.Number.pipe(Schema.optional),
 	dependent_count: Schema.Number.pipe(Schema.optional),
 	dependency_count: Schema.Number.pipe(Schema.optional),
 	dependents: Schema.Array(DependencySchema).pipe(Schema.optional),
@@ -71,27 +93,164 @@ const IssueSchema = Schema.Struct({
 
 type IssueRaw = Schema.Schema.Type<typeof IssueSchema>
 
-export type Issue = Omit<IssueRaw, "dependents" | "dependencies"> & {
+export interface Issue {
+	readonly id: string
+	readonly title: string
+	readonly description?: string
+	readonly status: IssueStatus
+	readonly priority: number
+	readonly issue_type: IssueType
+	readonly created_at: string
+	readonly updated_at: string
+	readonly closed_at?: string | null
+	readonly assignee?: string | null
+	readonly labels?: readonly string[]
+	readonly design?: string
+	readonly notes?: string
+	readonly acceptance?: string
+	readonly estimate?: number
+	readonly dependent_count?: number
+	readonly dependency_count?: number
 	readonly dependents?: readonly DependencyRef[]
 	readonly dependencies?: readonly DependencyRef[]
 }
 
+export interface IssueListFilters {
+	readonly status?: string
+	readonly priority?: number
+	readonly type?: string
+}
+
+export type IssueListSortField = "updated_at" | "created_at" | "priority" | "title"
+
+export interface IssueListOptions {
+	readonly limit?: number
+	readonly pageSize?: number
+	readonly includeClosed?: boolean
+	readonly sortBy?: IssueListSortField
+	readonly sortDirection?: "asc" | "desc"
+}
+
+const parseIssueStatus = (status: string | undefined): IssueStatus | undefined => {
+	switch (status) {
+		case "open":
+		case "in_progress":
+		case "blocked":
+		case "closed":
+		case "tombstone":
+			return status
+		// br-native states: map into existing board model
+		case "deferred":
+			return "blocked"
+		case "draft":
+		case "pinned":
+			return "open"
+		default:
+			return undefined
+	}
+}
+
+const normalizeIssueStatus = (status: string | undefined): IssueStatus =>
+	parseIssueStatus(status) ?? "open"
+
+const parseIssueType = (issueType: string | undefined): IssueType | undefined => {
+	switch (issueType) {
+		case "bug":
+		case "feature":
+		case "task":
+		case "epic":
+		case "chore":
+			return issueType
+		// br-specific types that do not exist in legacy UI model
+		case "docs":
+		case "question":
+			return "task"
+		default:
+			return undefined
+	}
+}
+
+const normalizeIssueType = (issueType: string | undefined): IssueType =>
+	parseIssueType(issueType) ?? "task"
+
+const parseDependencyType = (dependencyType: string | undefined): DependencyType | undefined => {
+	switch (dependencyType) {
+		case "blocks":
+		case "related":
+		case "parent-child":
+		case "discovered-from":
+			return dependencyType
+		// br dependency variants mapped to existing relationship model
+		case "conditional-blocks":
+		case "waits-for":
+		case "caused-by":
+			return "blocks"
+		case "replies-to":
+		case "relates-to":
+		case "duplicates":
+		case "supersedes":
+			return "related"
+		default:
+			return undefined
+	}
+}
+
+const normalizeDependencyType = (dependencyType: string | undefined): DependencyType =>
+	parseDependencyType(dependencyType) ?? "related"
+
 const normalizeDependencies = (
-	deps: readonly Dependency[] | undefined,
+	deps: readonly DependencyRaw[] | undefined,
+	kind: "dependencies" | "dependents",
+	issueId: string,
 ): readonly DependencyRef[] | undefined =>
-	deps?.map((dep) =>
-		"id" in dep
-			? dep
-			: {
-					id: dep.depends_on_id,
-					dependency_type: dep.type,
-				},
-	)
+	deps?.map((dep) => {
+		if ("id" in dep) {
+			return {
+				id: dep.id,
+				title: dep.title ?? undefined,
+				status: parseIssueStatus(dep.status),
+				dependency_type: normalizeDependencyType(dep.dependency_type),
+				issue_type: parseIssueType(dep.issue_type),
+			}
+		}
+
+		// Link shape doesn't include display metadata, only IDs and relation type.
+		// Infer counterpart ID based on whether we are normalizing dependencies or dependents.
+		const relatedId =
+			kind === "dependencies"
+				? dep.issue_id === issueId
+					? dep.depends_on_id
+					: dep.issue_id
+				: dep.depends_on_id === issueId
+					? dep.issue_id
+					: dep.depends_on_id
+
+		return {
+			id: relatedId,
+			dependency_type: normalizeDependencyType(dep.type),
+		}
+	})
 
 const normalizeIssue = (issue: IssueRaw): Issue => ({
-	...issue,
-	dependents: normalizeDependencies(issue.dependents),
-	dependencies: normalizeDependencies(issue.dependencies),
+	id: issue.id,
+	title: issue.title,
+	description: issue.description ?? undefined,
+	status: normalizeIssueStatus(issue.status),
+	priority: issue.priority ?? 2,
+	issue_type: normalizeIssueType(issue.issue_type),
+	created_at: issue.created_at,
+	updated_at: issue.updated_at,
+	closed_at: issue.closed_at,
+	assignee: issue.assignee,
+	labels: issue.labels,
+	design: issue.design ?? undefined,
+	notes: issue.notes ?? undefined,
+	acceptance: issue.acceptance ?? issue.acceptance_criteria ?? undefined,
+	estimate: issue.estimate ?? issue.estimated_minutes,
+	dependent_count: issue.dependent_count,
+	dependency_count: issue.dependency_count,
+	dependents: normalizeDependencies(issue.dependents, "dependents", issue.id),
+	dependencies: normalizeDependencies(issue.dependencies, "dependencies", issue.id),
 })
 
 const normalizeIssues = (issues: readonly IssueRaw[]): Issue[] =>
@@ -99,13 +258,50 @@ const normalizeIssues = (issues: readonly IssueRaw[]): Issue[] =>
 
 /**
  * Sync result schema
+ *
+ * Legacy bd returns:
+ *   { pushed: number, pulled: number }
+ *
+ * br returns import/export stats:
+ *   {
+ *     created: number,
+ *     updated: number,
+ *     skipped: number,
+ *     tombstone_skipped: number,
+ *     orphans_removed: number,
+ *     blocked_cache_rebuilt: boolean
+ *   }
  */
-const SyncResultSchema = Schema.Struct({
+const LegacySyncResultSchema = Schema.Struct({
 	pushed: Schema.Number,
 	pulled: Schema.Number,
 })
 
-export type SyncResult = Schema.Schema.Type<typeof SyncResultSchema>
+const BrSyncResultSchema = Schema.Struct({
+	created: Schema.Number.pipe(Schema.optional),
+	updated: Schema.Number.pipe(Schema.optional),
+	skipped: Schema.Number.pipe(Schema.optional),
+	tombstone_skipped: Schema.Number.pipe(Schema.optional),
+	orphans_removed: Schema.Number.pipe(Schema.optional),
+	blocked_cache_rebuilt: Schema.Boolean.pipe(Schema.optional),
+})
+
+type LegacySyncResult = Schema.Schema.Type<typeof LegacySyncResultSchema>
+type BrSyncResult = Schema.Schema.Type<typeof BrSyncResultSchema>
+
+export interface SyncResult {
+	readonly pushed: number
+	readonly pulled: number
+}
+
+const normalizeLegacySyncResult = (result: LegacySyncResult): SyncResult => result
+
+const normalizeBrSyncResult = (result: BrSyncResult): SyncResult => ({
+	// br sync is local DB<->JSONL reconciliation; treat created+updated as "pulled"
+	// for existing UI counters while keeping pushed at zero.
+	pushed: 0,
+	pulled: (result.created ?? 0) + (result.updated ?? 0),
+})
 
 // ============================================================================
 // Error Types
@@ -165,12 +361,9 @@ export interface BeadsClientService {
 	 * ```
 	 */
 	readonly list: (
-		filters?: {
-			status?: string
-			priority?: number
-			type?: string
-		},
+		filters?: IssueListFilters,
 		cwd?: string,
+		options?: IssueListOptions,
 	) => Effect.Effect<
 		Issue[],
 		BeadsError | ParseError | SyncRequiredError,
@@ -471,20 +664,122 @@ const isSyncRequiredError = (message: string): boolean =>
 	message.includes("Run 'bd sync --import-only'") ||
 	message.includes("bd sync --import-only")
 
-/**
- * Execute a bd command and return stdout as string
- */
-const runBd = (
+type BeadsExecutable = "bd" | "br"
+type IssueDbFlavor = "bd" | "br"
+
+interface IssueDbClient {
+	readonly flavor: IssueDbFlavor
+	readonly executable: BeadsExecutable
+	readonly runJson: (
+		args: readonly string[],
+		cwd?: string,
+	) => Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	readonly runDirect: (
+		args: readonly string[],
+		cwd?: string,
+	) => Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor>
+	readonly parseSyncResult: (output: string) => Effect.Effect<SyncResult, ParseError>
+}
+
+let cachedIssueDbClient: IssueDbClient | undefined
+
+const hasNoDaemonFlag = (args: readonly string[]): boolean =>
+	args.some((arg) => arg === "--no-daemon")
+
+const DEFAULT_ISSUE_LIST_PAGE_SIZE = 200
+
+const clampPositiveInt = (value: number, fallback: number): number => {
+	if (!Number.isFinite(value)) return fallback
+	const rounded = Math.floor(value)
+	return rounded > 0 ? rounded : fallback
+}
+
+const isUnsupportedSortFlagError = (error: BeadsError): boolean => {
+	const message = `${error.message}\n${error.stderr ?? ""}`.toLowerCase()
+	const hasSortFlagReference = message.includes("--sort") || message.includes("--reverse")
+	const isFlagError =
+		message.includes("unexpected argument") ||
+		message.includes("unknown option") ||
+		message.includes("unknown argument") ||
+		message.includes("unrecognized option")
+	return hasSortFlagReference && isFlagError
+}
+
+const toTimestampMs = (value: string): number => {
+	const parsed = Date.parse(value)
+	return Number.isNaN(parsed) ? 0 : parsed
+}
+
+const sortIssuesInMemory = (
+	issues: readonly Issue[],
+	sortBy: IssueListSortField,
+	sortDirection: "asc" | "desc",
+): Issue[] => {
+	const sorted = [...issues]
+	sorted.sort((left, right) => {
+		switch (sortBy) {
+			case "updated_at":
+				return toTimestampMs(left.updated_at) - toTimestampMs(right.updated_at)
+			case "created_at":
+				return toTimestampMs(left.created_at) - toTimestampMs(right.created_at)
+			case "priority":
+				return left.priority - right.priority
+			case "title":
+				return left.title.localeCompare(right.title)
+			default:
+				return 0
+		}
+	})
+	return sortDirection === "desc" ? sorted.reverse() : sorted
+}
+
+const buildListCommandArgs = (
+	limit: number,
+	filters: IssueListFilters | undefined,
+	options: IssueListOptions | undefined,
+	includeSortFlags: boolean,
+): string[] => {
+	const args: string[] = ["list", "--limit", String(limit)]
+	const includeClosed = options?.includeClosed ?? true
+	if (includeClosed) {
+		args.push("--all")
+	}
+
+	if (includeSortFlags) {
+		const sortBy = options?.sortBy ?? "updated_at"
+		const sortDirection = options?.sortDirection ?? "desc"
+		args.push("--sort", sortBy)
+		if (sortDirection === "desc") {
+			args.push("--reverse")
+		}
+	}
+
+	if (filters?.status) {
+		args.push("--status", filters.status)
+	}
+	if (filters?.priority !== undefined) {
+		args.push("--priority", String(filters.priority))
+	}
+	if (filters?.type) {
+		args.push("--type", filters.type)
+	}
+
+	return args
+}
+
+const executeBeadsJsonCommand = (
+	executable: BeadsExecutable,
 	args: readonly string[],
 	cwd?: string,
+	retryOnEmptyOutput = true,
 ): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
 		// Always add --json flag for structured output
 		const allArgs = [...args, "--json"]
 
 		const command = cwd
-			? Command.make("bd", ...allArgs).pipe(Command.workingDirectory(cwd))
-			: Command.make("bd", ...allArgs)
+			? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
+			: Command.make(executable, ...allArgs)
 
 		const result = yield* Command.string(command).pipe(
 			Effect.mapError((error) => {
@@ -498,19 +793,19 @@ const runBd = (
 				}
 
 				return new BeadsError({
-					message: `bd command failed: ${stderr}`,
-					command: `bd ${allArgs.join(" ")}`,
+					message: `beads command failed: ${stderr}`,
+					command: `${executable} ${allArgs.join(" ")}`,
 					stderr,
 				})
 			}),
 		)
 
-		// Check for empty output - bd daemon can return exit 0 with empty stdout on sync errors
+		// Check for empty output - daemon mode can return exit 0 with empty stdout
 		const trimmed = result.trim()
 		if (!trimmed || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
 			// Output is empty or doesn't look like JSON - check if it's a sync error message
 			if (isSyncRequiredError(trimmed)) {
-				yield* Effect.log(`bd returned sync error in stdout, triggering auto-recovery`)
+				yield* Effect.log(`${executable} returned sync error in stdout, triggering auto-recovery`)
 				return yield* Effect.fail(
 					new SyncRequiredError({
 						message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
@@ -519,11 +814,25 @@ const runBd = (
 			}
 			// If not a sync error, fail with descriptive error
 			if (!trimmed) {
-				yield* Effect.logWarning(`bd command returned empty output: bd ${allArgs.join(" ")}`)
+				if (retryOnEmptyOutput && !hasNoDaemonFlag(args)) {
+					yield* Effect.logWarning(
+						`${executable} returned empty output, retrying with --no-daemon: ${executable} ${allArgs.join(" ")}`,
+					)
+					return yield* executeBeadsJsonCommand(
+						executable,
+						["--no-daemon", ...args],
+						cwd,
+						false,
+					)
+				}
+
+				yield* Effect.logWarning(
+					`${executable} command returned empty output: ${executable} ${allArgs.join(" ")}`,
+				)
 				return yield* Effect.fail(
 					new BeadsError({
-						message: "bd command returned empty output",
-						command: `bd ${allArgs.join(" ")}`,
+						message: "beads command returned empty output",
+						command: `${executable} ${allArgs.join(" ")}`,
 						stderr: "",
 					}),
 				)
@@ -533,11 +842,8 @@ const runBd = (
 		return result
 	})
 
-/**
- * Execute a bd command directly (bypasses daemon, no JSON output)
- * Used for commands like delete that aren't supported by the daemon
- */
-const runBdDirect = (
+const executeBeadsDirectCommand = (
+	executable: BeadsExecutable,
 	args: readonly string[],
 	cwd?: string,
 ): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
@@ -546,32 +852,133 @@ const runBdDirect = (
 		const allArgs = ["--no-daemon", ...args]
 
 		const command = cwd
-			? Command.make("bd", ...allArgs).pipe(Command.workingDirectory(cwd))
-			: Command.make("bd", ...allArgs)
+			? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
+			: Command.make(executable, ...allArgs)
 
-		const result = yield* Command.string(command).pipe(
+		return yield* Command.string(command).pipe(
 			Effect.mapError((error) => {
 				const stderr = "stderr" in error ? String(error.stderr) : String(error)
 				return new BeadsError({
-					message: `bd command failed: ${stderr}`,
-					command: `bd ${allArgs.join(" ")}`,
+					message: `beads command failed: ${stderr}`,
+					command: `${executable} ${allArgs.join(" ")}`,
 					stderr,
 				})
 			}),
 		)
-
-		return result
 	})
+
+const createBdIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
+	flavor: "bd",
+	executable,
+	runJson: (args, cwd) => executeBeadsJsonCommand(executable, args, cwd),
+	runDirect: (args, cwd) => executeBeadsDirectCommand(executable, args, cwd),
+	parseSyncResult: (output) =>
+		parseJson(LegacySyncResultSchema, output).pipe(Effect.map(normalizeLegacySyncResult)),
+})
+
+const createBrIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
+	flavor: "br",
+	executable,
+	runJson: (args, cwd) => executeBeadsJsonCommand(executable, args, cwd),
+	runDirect: (args, cwd) => executeBeadsDirectCommand(executable, args, cwd),
+	parseSyncResult: (output) =>
+		parseJson(BrSyncResultSchema, output).pipe(Effect.map(normalizeBrSyncResult)),
+})
+
+const detectIssueDbClient = (): Effect.Effect<
+	IssueDbClient,
+	BeadsError,
+	CommandExecutor.CommandExecutor
+> =>
+	Effect.gen(function* () {
+		if (cachedIssueDbClient) {
+			return cachedIssueDbClient
+		}
+
+		const probeVersion = (
+			executable: BeadsExecutable,
+		): Effect.Effect<string | undefined, never, CommandExecutor.CommandExecutor> =>
+			Command.string(Command.make(executable, "--version")).pipe(
+				Effect.map((version) => version.trim()),
+				Effect.catchAll(() => Effect.succeed(undefined)),
+			)
+
+		const bdVersion = yield* probeVersion("bd")
+		if (bdVersion !== undefined) {
+			const client = bdVersion.startsWith("br ")
+				? createBrIssueDbClient("bd")
+				: createBdIssueDbClient("bd")
+			cachedIssueDbClient = client
+			return client
+		}
+
+		const brVersion = yield* probeVersion("br")
+		if (brVersion !== undefined) {
+			const client = createBrIssueDbClient("br")
+			cachedIssueDbClient = client
+			return client
+		}
+
+		return yield* Effect.fail(
+			new BeadsError({
+				message: "No beads CLI found. Install either 'bd' or 'br'.",
+				command: "bd --version / br --version",
+			}),
+		)
+	})
+
+/**
+ * Execute a beads command and return stdout as string (JSON mode)
+ */
+const runBd = (
+	args: readonly string[],
+	cwd?: string,
+): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(detectIssueDbClient(), (client) => client.runJson(args, cwd))
+
+/**
+ * Execute a beads command directly (bypasses daemon, no JSON output)
+ * Used for commands like delete that aren't supported by the daemon
+ */
+const runBdDirect = (
+	args: readonly string[],
+	cwd?: string,
+): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(detectIssueDbClient(), (client) => client.runDirect(args, cwd))
+
+const parseSyncResult = (
+	output: string,
+): Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor> =>
+	Effect.flatMap(detectIssueDbClient(), (client) => client.parseSyncResult(output))
 
 /**
  * Parse JSON output with schema validation
  */
+const extractJsonPayload = (output: string): string => {
+	const trimmed = output.trim()
+	if (!trimmed) return trimmed
+	if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed
+
+	const firstObject = trimmed.indexOf("{")
+	const firstArray = trimmed.indexOf("[")
+	const startCandidates = [firstObject, firstArray].filter((idx) => idx >= 0)
+	if (startCandidates.length === 0) return trimmed
+
+	const start = Math.min(...startCandidates)
+	const sliced = trimmed.slice(start)
+	const lastObject = sliced.lastIndexOf("}")
+	const lastArray = sliced.lastIndexOf("]")
+	const end = Math.max(lastObject, lastArray)
+
+	return end >= 0 ? sliced.slice(0, end + 1) : sliced
+}
+
 const parseJson = <A, I, R>(
 	schema: Schema.Schema<A, I, R>,
 	output: string,
 ): Effect.Effect<A, ParseError, R> =>
 	Effect.try({
-		try: () => JSON.parse(output),
+		try: () => JSON.parse(extractJsonPayload(output)),
 		catch: (error) =>
 			new ParseError({
 				message: `Failed to parse JSON: ${error}`,
@@ -626,28 +1033,76 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
 
 		return {
-			list: (filters?: { status?: string; priority?: number; type?: string }, cwd?: string) =>
+			list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
-					// --limit 0 = no limit (default is 50)
-					// --all = include closed issues (despite help text, closed are excluded by default)
-					const args: string[] = ["list", "--limit", "0", "--all"]
+					const pageSize = clampPositiveInt(
+						options?.pageSize ?? DEFAULT_ISSUE_LIST_PAGE_SIZE,
+						DEFAULT_ISSUE_LIST_PAGE_SIZE,
+					)
+					const targetLimit =
+						options?.limit !== undefined
+							? clampPositiveInt(options.limit, DEFAULT_ISSUE_LIST_PAGE_SIZE)
+							: undefined
 
-					if (filters?.status) {
-						args.push("--status", filters.status)
-					}
-					if (filters?.priority !== undefined) {
-						args.push("--priority", String(filters.priority))
-					}
-					if (filters?.type) {
-						args.push("--type", filters.type)
-					}
+					let currentLimit =
+						targetLimit !== undefined ? Math.min(targetLimit, pageSize) : pageSize
+					let previousIssueCount = -1
+					let includeSortFlags = true
+					const sortBy = options?.sortBy ?? "updated_at"
+					const sortDirection = options?.sortDirection ?? "desc"
 
-					const output = yield* runBd(args, effectiveCwd)
-					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-					const normalized = normalizeIssues(parsed)
-					// Filter out tombstone (deleted) issues
-					return normalized.filter((issue) => issue.status !== "tombstone")
+					while (true) {
+						const args = buildListCommandArgs(currentLimit, filters, options, includeSortFlags)
+						const output = yield* runBd(args, effectiveCwd).pipe(
+							Effect.catchAll((error) => {
+								if (
+									error._tag === "BeadsError" &&
+									includeSortFlags &&
+									isUnsupportedSortFlagError(error)
+								) {
+									includeSortFlags = false
+									const fallbackArgs = buildListCommandArgs(
+										currentLimit,
+										filters,
+										options,
+										false,
+									)
+									return runBd(fallbackArgs, effectiveCwd)
+								}
+
+								return Effect.fail(error)
+							}),
+						)
+						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+						const normalized = normalizeIssues(parsed)
+						const withoutTombstones = normalized.filter((issue) => issue.status !== "tombstone")
+						const sorted = sortIssuesInMemory(withoutTombstones, sortBy, sortDirection)
+
+						if (targetLimit !== undefined && sorted.length >= targetLimit) {
+							return sorted.slice(0, targetLimit)
+						}
+
+						// If backend returned fewer than requested, we've exhausted available issues.
+						if (sorted.length < currentLimit) {
+							return sorted
+						}
+
+						// Guard against non-growing result sets to avoid infinite loops.
+						if (sorted.length <= previousIssueCount) {
+							return sorted
+						}
+						previousIssueCount = sorted.length
+
+						const nextLimit =
+							targetLimit !== undefined
+								? Math.min(currentLimit + pageSize, targetLimit)
+								: currentLimit + pageSize
+						if (nextLimit === currentLimit) {
+							return sorted
+						}
+						currentLimit = nextLimit
+					}
 				}),
 
 			show: (id: string, cwd?: string) =>
@@ -774,9 +1229,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["sync"], effectiveCwd)
-
-					// Parse sync output - bd sync returns statistics
-					return yield* parseJson(SyncResultSchema, output)
+					return yield* parseSyncResult(output)
 				}),
 
 			/**
@@ -788,7 +1241,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
-					return yield* parseJson(SyncResultSchema, output)
+					return yield* parseSyncResult(output)
 				}),
 
 			recoverTombstones: (cwd?: string) =>

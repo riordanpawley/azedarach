@@ -67,3 +67,6 @@ coverage/
 .beads/dolt-monitor.pid
 .beads/dolt-server.activity
 .beads.bak
+
+# bv (beads viewer) local config and caches
+.bv/
