@@ -6,13 +6,15 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect, SubscriptionRef } from "effect"
+import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
+import { Config, Data, Effect, Option, SubscriptionRef } from "effect"
 import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
 import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
+import { LinearSdk } from "./LinearSdk.js"
 
 // ============================================================================
 // Schema Definitions
@@ -313,6 +315,9 @@ const ZERO_SYNC_RESULT: SyncResult = {
 const LINEAR_STATUS_CLOSED = "closed"
 const LINEAR_STATUS_IN_PROGRESS = "in_progress"
 const LINEAR_STATUS_BLOCKED = "blocked"
+const LINEAR_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000
+const LINEAR_DETAIL_FETCH_LIMIT_PER_LIST = 80
+const LINEAR_DETAIL_FETCH_CHUNK_SIZE = 20
 
 const normalizeLinearStatus = (stateName: string | null | undefined): IssueStatus => {
 	if (!stateName) return "open"
@@ -1128,7 +1133,7 @@ const buildListCommandArgs = (
 /**
  * Parse JSON output with schema validation
  */
-const extractJsonPayload = (output: string): string => {
+export const extractJsonPayload = (output: string): string => {
 	const trimmed = output.trim()
 	if (!trimmed) return trimmed
 	if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed
@@ -1150,27 +1155,29 @@ const extractJsonPayload = (output: string): string => {
 const parseJson = <A, I, R>(
 	schema: Schema.Schema<A, I, R>,
 	output: string,
-): Effect.Effect<A, ParseError, R> =>
-	Effect.try({
-		try: () => JSON.parse(extractJsonPayload(output)),
-		catch: (error) =>
-			new ParseError({
-				message: `Failed to parse JSON: ${error}`,
-				output,
-			}),
-	}).pipe(
+): Effect.Effect<A, ParseError, R> => {
+	const parseUnknown = Schema.decode(Schema.parseJson(Schema.Unknown))
+	return parseUnknown(extractJsonPayload(output)).pipe(
+		Effect.mapError(
+			(error) =>
+				new ParseError({
+					message: `Failed to parse JSON: ${String(error)}`,
+					output,
+				}),
+		),
 		Effect.flatMap((json) =>
 			Schema.decodeUnknown(schema)(json).pipe(
 				Effect.mapError(
 					(error) =>
 						new ParseError({
-							message: `Schema validation failed: ${error}`,
+							message: `Schema validation failed: ${String(error)}`,
 							output,
 						}),
 				),
 			),
 		),
 	)
+}
 
 // ============================================================================
 // Service Implementation
@@ -1197,12 +1204,14 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		OfflineService.Default,
 		AppConfig.Default,
 		DiagnosticsService.Default,
+		LinearSdk.Default,
 	],
 	effect: Effect.gen(function* () {
 		const projectService = yield* ProjectService
 		const offlineService = yield* OfflineService
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
+		const linearSdk = yield* LinearSdk
 
 		/**
 		 * Get effective cwd for bd commands:
@@ -1332,127 +1341,31 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		})
 
 		interface LinearRuntimeConfig {
-			readonly command: string
+			readonly linearClient: LinearClient
 			readonly defaultTeam?: string
 		}
 
-			const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
-				const runLinearCommand = (
-					linearArgs: readonly string[],
-					runCwd?: string,
-				): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-					Effect.gen(function* () {
-						const command = runCwd
-							? Command.make(config.command, ...linearArgs).pipe(Command.workingDirectory(runCwd))
-							: Command.make(config.command, ...linearArgs)
-						const perf = getLinearCommandPerfMetadata(linearArgs)
-						return yield* withIssueDbTiming(
-							{
-								recorder: diagnostics,
-								backend: "linear",
-								operation: perf.operation,
-								kind: perf.kind,
-							},
-							Command.string(command).pipe(
-								Effect.mapError((error) => {
-									const stderr = "stderr" in error ? String(error.stderr) : String(error)
-									return new BeadsError({
-										message: `linear command failed: ${stderr}`,
-										command: `${config.command} ${linearArgs.join(" ")}`,
-										stderr,
-									})
-								}),
-							),
-						)
-					})
+		const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
+			const linearClient = config.linearClient
 
-			const decodeLinearIssues = (
-				output: string,
-			): Effect.Effect<LinearIssue[], ParseError> =>
-				Effect.gen(function* () {
-					const parsedUnknown = yield* Effect.try({
-						try: (): unknown => JSON.parse(output),
-						catch: (error) =>
-							new ParseError({
-								message: `Failed to parse JSON: ${String(error)}`,
-								output,
-							}),
-					})
-					const candidates = Array.isArray(parsedUnknown) ? parsedUnknown : [parsedUnknown]
-					const decodeIssue = Schema.decodeUnknownEither(LinearIssueSchema)
-					const decodedIssues: LinearIssue[] = []
-					let skippedCount = 0
-					let firstDecodeError: string | undefined
+			const withLinearSdkTiming = <A>(
+				linearArgs: readonly string[],
+				effect: Effect.Effect<A, BeadsError, CommandExecutor.CommandExecutor>,
+			): Effect.Effect<A, BeadsError, CommandExecutor.CommandExecutor> => {
+				const perf = getLinearCommandPerfMetadata(linearArgs)
+				return withIssueDbTiming(
+					{
+						recorder: diagnostics,
+						backend: "linear",
+						operation: perf.operation,
+						kind: perf.kind,
+					},
+					effect,
+				)
+			}
 
-					for (const candidate of candidates) {
-						const decoded = decodeIssue(candidate)
-						if (decoded._tag === "Right") {
-							decodedIssues.push(decoded.right)
-							continue
-						}
-						skippedCount += 1
-						if (firstDecodeError === undefined) {
-							firstDecodeError = String(decoded.left)
-						}
-					}
-
-					if (decodedIssues.length === 0 && firstDecodeError !== undefined) {
-						return yield* Effect.fail(
-							new ParseError({
-								message: `Schema validation failed: ${firstDecodeError}`,
-								output,
-							}),
-						)
-					}
-
-					if (skippedCount > 0) {
-						yield* Effect.logWarning(
-							`Linear decode skipped ${skippedCount} malformed issue(s) in list payload`,
-						)
-					}
-
-					return decodedIssues
-				})
-
-			const fetchLinearIssues = (
-				runCwd: string | undefined,
-				limit?: number,
-			): Effect.Effect<
-				IssueRaw[],
-				BeadsError | ParseError,
-				CommandExecutor.CommandExecutor
-			> =>
-				Effect.gen(function* () {
-					const linearArgs: string[] = ["i", "list", "--output", "json", "--compact", "--all"]
-					if (limit !== undefined) {
-						linearArgs.push("--limit", String(limit))
-					}
-					const output = yield* runLinearCommand(linearArgs, runCwd)
-					const issues = yield* decodeLinearIssues(output)
-					return issues.map((issue) => normalizeLinearIssue(issue))
-				})
-
-			const resolveLinearIssueId = (
-				issueId: string,
-				runCwd: string | undefined,
-			): Effect.Effect<string, BeadsError | ParseError, CommandExecutor.CommandExecutor> =>
-				Effect.gen(function* () {
-					const output = yield* runLinearCommand(
-						["i", "get", issueId, "--output", "json", "--compact"],
-						runCwd,
-					)
-					const issues = yield* decodeLinearIssues(output)
-					const issue = issues[0]
-					if (!issue) {
-						return yield* Effect.fail(
-							new BeadsError({
-								message: `Could not resolve Linear issue id: ${issueId}`,
-								command: `${config.command} i get ${issueId} --output json --compact`,
-							}),
-						)
-					}
-					return issue.id
-				})
+			const toIso = (value: Date | null | undefined): string | undefined =>
+				value ? value.toISOString() : undefined
 
 			const parseArgumentValue = (
 				args: readonly string[],
@@ -1474,10 +1387,375 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				return values
 			}
 
+			const fetchAllIssues = (): Effect.Effect<
+				readonly LinearSdkIssue[],
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.tryPromise({
+					try: async () => {
+						const allIssues: LinearSdkIssue[] = []
+						let afterCursor: string | null | undefined = undefined
+						while (true) {
+							const page = await linearClient.issues({
+								first: 250,
+								after: afterCursor,
+							})
+							allIssues.push(...page.nodes)
+							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+								break
+							}
+							afterCursor = page.pageInfo.endCursor
+						}
+						return allIssues
+					},
+					catch: (error) =>
+						new BeadsError({
+							message:
+								error instanceof Error
+									? error.message
+									: `Failed to fetch Linear issues: ${String(error)}`,
+							command: "linear-sdk issues",
+						}),
+				})
+
+			const fetchStateNameById = (): Effect.Effect<
+				ReadonlyMap<string, string>,
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.tryPromise({
+					try: async () => {
+						const states = await linearClient.workflowStates({ first: 500 })
+						return new Map(states.nodes.map((state) => [state.id, state.name] as const))
+					},
+					catch: (error) =>
+						new BeadsError({
+							message:
+								error instanceof Error
+									? error.message
+									: `Failed to fetch Linear workflow states: ${String(error)}`,
+							command: "linear-sdk workflowStates",
+						}),
+				})
+
+			const fetchWorkflowStates = (): Effect.Effect<
+				readonly { readonly id: string; readonly teamId?: string; readonly name: string; readonly type: string }[],
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.tryPromise({
+					try: async () => {
+						const states = await linearClient.workflowStates({ first: 500 })
+						return states.nodes.map((state) => ({
+							id: state.id,
+							teamId: state.teamId,
+							name: state.name,
+							type: state.type,
+						}))
+					},
+					catch: (error) =>
+						new BeadsError({
+							message:
+								error instanceof Error
+									? error.message
+									: `Failed to fetch Linear workflow states: ${String(error)}`,
+							command: "linear-sdk workflowStates",
+						}),
+				})
+
+			const fetchLabelNameById = (): Effect.Effect<
+				ReadonlyMap<string, string>,
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.tryPromise({
+					try: async () => {
+						const labels = await linearClient.issueLabels({ first: 500 })
+						return new Map(labels.nodes.map((label) => [label.id, label.name] as const))
+					},
+					catch: (error) =>
+						new BeadsError({
+							message:
+								error instanceof Error
+									? error.message
+									: `Failed to fetch Linear labels: ${String(error)}`,
+							command: "linear-sdk issueLabels",
+						}),
+				})
+
+			const fetchUsers = (): Effect.Effect<
+				readonly { readonly id: string; readonly name: string; readonly email: string }[],
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.tryPromise({
+					try: async () => {
+						const users = await linearClient.users({ first: 250 })
+						return users.nodes.map((user) => ({
+							id: user.id,
+							name: user.name ?? "",
+							email: user.email ?? "",
+						}))
+					},
+					catch: (error) =>
+						new BeadsError({
+							message:
+								error instanceof Error
+									? error.message
+									: `Failed to fetch Linear users: ${String(error)}`,
+							command: "linear-sdk users",
+						}),
+				})
+
+			const resolveTeamId = (
+				reference: string,
+			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+				linearSdk.resolveTeamId(linearClient, reference).pipe(
+					Effect.mapError(
+						(error) =>
+							new BeadsError({
+								message: error.message,
+								command: "linear-sdk team",
+							}),
+					),
+				)
+
+			const resolveAssigneeId = (
+				reference: string,
+			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const trimmed = reference.trim()
+					if (trimmed.length === 0) {
+						return yield* Effect.fail(
+							new BeadsError({
+								message: "Assignee reference cannot be empty",
+								command: "linear-sdk users",
+							}),
+						)
+					}
+					if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed)) {
+						return trimmed
+					}
+					const users = yield* fetchUsers()
+					const normalizedReference = trimmed.toLowerCase()
+					const matched = users.find((user) => {
+						const byName = user.name.trim().toLowerCase() === normalizedReference
+						const byEmail = user.email.trim().toLowerCase() === normalizedReference
+						return byName || byEmail
+					})
+					if (!matched) {
+						return yield* Effect.fail(
+							new BeadsError({
+								message: `Could not resolve Linear assignee '${reference}'`,
+								command: "linear-sdk users",
+							}),
+						)
+					}
+					return matched.id
+				})
+
+			const normalizeLinearSdkIssues = (
+				issues: readonly LinearSdkIssue[],
+				stateNameById: ReadonlyMap<string, string>,
+				labelNameById: ReadonlyMap<string, string>,
+			): readonly IssueRaw[] => {
+				const issuesByLinearId = new Map(issues.map((issue) => [issue.id, issue]))
+				const childCountByParentId = new Map<string, number>()
+				const childrenByParentId = new Map<string, LinearSdkIssue[]>()
+
+				for (const issue of issues) {
+					const parentId = issue.parentId
+					if (!parentId) continue
+					childCountByParentId.set(parentId, (childCountByParentId.get(parentId) ?? 0) + 1)
+					const parentChildren = childrenByParentId.get(parentId) ?? []
+					parentChildren.push(issue)
+					childrenByParentId.set(parentId, parentChildren)
+				}
+
+				return issues.map((issue) => {
+					const labels = issue.labelIds
+						.map((labelId) => labelNameById.get(labelId))
+						.filter((label): label is string => label !== undefined)
+
+					const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
+					const stateName = issue.stateId ? stateNameById.get(issue.stateId) : undefined
+					const status = normalizeLinearStatus(stateName)
+					const parent = issue.parentId ? issuesByLinearId.get(issue.parentId) : undefined
+					const parentIdentifier = parent?.identifier
+					const children = childrenByParentId.get(issue.id) ?? []
+
+					const dependencies: DependencyRaw[] =
+						parentIdentifier !== undefined
+							? [
+									{
+										id: parentIdentifier,
+										title: parent?.title,
+										dependency_type: "parent-child",
+										issue_type: "epic",
+									},
+								]
+							: []
+
+					const dependents: DependencyRaw[] = children.map((child) => ({
+						id: child.identifier,
+						title: child.title,
+						dependency_type: "parent-child",
+						issue_type: "task",
+						status: normalizeLinearStatus(
+							child.stateId ? stateNameById.get(child.stateId) : undefined,
+						),
+					}))
+
+					return {
+						id: issue.identifier,
+						title: issue.title,
+						description: issue.description ?? undefined,
+						status,
+						priority: normalizeLinearPriority(issue.priority),
+						issue_type: inferLinearIssueType(labels, hasChildren, undefined),
+						created_at: issue.createdAt.toISOString(),
+						updated_at: issue.updatedAt.toISOString(),
+						closed_at: status === "closed" ? toIso(issue.completedAt ?? issue.canceledAt) : undefined,
+						assignee: issue.assigneeId ?? undefined,
+						labels,
+						dependency_count: dependencies.length,
+						dependent_count: dependents.length,
+						dependencies,
+						dependents,
+					}
+				})
+			}
+
+			interface LinearIssueSnapshot {
+				readonly issues: readonly IssueRaw[]
+				readonly linearIdByIdentifier: ReadonlyMap<string, string>
+				readonly teamIdByIdentifier: ReadonlyMap<string, string | undefined>
+			}
+
+			const buildLinearIssueSnapshot = (): Effect.Effect<
+				LinearIssueSnapshot,
+				BeadsError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					const [linearIssues, stateNameById, labelNameById] = yield* Effect.all([
+						fetchAllIssues(),
+						fetchStateNameById(),
+						fetchLabelNameById(),
+					])
+					const normalizedIssues = normalizeLinearSdkIssues(
+						linearIssues,
+						stateNameById,
+						labelNameById,
+					)
+					return {
+						issues: normalizedIssues,
+						linearIdByIdentifier: new Map(
+							linearIssues.map((issue) => [issue.identifier, issue.id] as const),
+						),
+						teamIdByIdentifier: new Map(
+							linearIssues.map((issue) => [issue.identifier, issue.teamId] as const),
+						),
+					}
+				})
+
+			const resolveLinearIssueId = (
+				identifier: string,
+			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const snapshot = yield* buildLinearIssueSnapshot()
+					const linearId = snapshot.linearIdByIdentifier.get(identifier)
+					if (!linearId) {
+						return yield* Effect.fail(
+							new BeadsError({
+								message: `Could not resolve Linear issue id: ${identifier}`,
+								command: "linear-sdk issue",
+							}),
+						)
+					}
+					return linearId
+				})
+
+			const findTeamStateIdForStatus = (
+				teamId: string,
+				targetStatus: IssueStatus,
+			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const workflowStates = yield* fetchWorkflowStates()
+					const teamStates = workflowStates.filter((state) => state.teamId === teamId)
+					if (teamStates.length === 0) {
+						return yield* Effect.fail(
+							new BeadsError({
+								message: `No workflow states available for team ${teamId}`,
+								command: "linear-sdk workflowStates",
+							}),
+						)
+					}
+
+					const findByType = (types: readonly string[]) =>
+						teamStates.find((state) => types.includes(state.type))
+					const findByName = (needle: string) =>
+						teamStates.find((state) => state.name.toLowerCase().includes(needle))
+
+					switch (targetStatus) {
+						case "closed":
+							return (
+								findByType(["completed"]) ??
+								findByType(["canceled"]) ??
+								teamStates[0]
+							).id
+						case "in_progress":
+							return (
+								findByType(["started"]) ??
+								findByName("progress") ??
+								findByName("review") ??
+								teamStates[0]
+							).id
+						case "blocked":
+							return (
+								findByName("block") ??
+								findByType(["started"]) ??
+								teamStates[0]
+							).id
+						case "open":
+						case "tombstone":
+							return (
+								findByType(["unstarted", "backlog", "triage"]) ??
+								teamStates[0]
+							).id
+					}
+				})
+
+			const resolveLabelIds = (
+				labelNames: readonly string[],
+			): Effect.Effect<readonly string[], BeadsError, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const labelMap = yield* fetchLabelNameById()
+					const ids: string[] = []
+					for (const name of labelNames) {
+						const normalized = name.trim().toLowerCase()
+						const match = [...labelMap.entries()].find(
+							([, labelName]) => labelName.trim().toLowerCase() === normalized,
+						)
+						if (match) {
+							ids.push(match[0])
+						}
+					}
+					return ids
+				})
+
+			const toLinearPriorityValue = (priority: number | undefined): number | undefined => {
+				const mapped = toLinearPriority(priority)
+				if (mapped === undefined) return undefined
+				const parsed = Number.parseInt(mapped, 10)
+				return Number.isNaN(parsed) ? undefined : parsed
+			}
+
 			const runJson = (
 				args: readonly string[],
-				runCwd?: string,
-			): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+				_runCwd?: string,
+			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const [command, ...rest] = args
 					if (!command) {
@@ -1494,32 +1772,37 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								? Number.parseInt(priorityFilterValue, 10)
 								: undefined
 							const typeFilter = parseArgumentValue(rest, "--type")
-							const issues = yield* fetchLinearIssues(
-								runCwd,
-								Number.isFinite(parsedLimit ?? Number.NaN) ? parsedLimit : undefined,
+							const snapshot = yield* withLinearSdkTiming(
+								["i", "list"],
+								buildLinearIssueSnapshot(),
 							)
-							const filtered = issues.filter((issue) => {
+							const filtered = snapshot.issues.filter((issue) => {
 								if (statusFilter !== undefined && issue.status !== statusFilter) return false
 								if (priorityFilter !== undefined && issue.priority !== priorityFilter) return false
 								if (typeFilter !== undefined && issue.issue_type !== typeFilter) return false
 								return true
 							})
-							return JSON.stringify(filtered)
+							const limited =
+								parsedLimit !== undefined && parsedLimit > 0
+									? filtered.slice(0, parsedLimit)
+									: filtered
+							return JSON.stringify(limited)
 						}
 
 						case "show": {
 							if (rest.length === 0) return JSON.stringify([])
-							const output = yield* runLinearCommand(
-								["i", "get", ...rest, "--output", "json", "--compact"],
-								runCwd,
+							const snapshot = yield* withLinearSdkTiming(
+								["i", "get", ...rest],
+								buildLinearIssueSnapshot(),
 							)
-							const issues = yield* decodeLinearIssues(output)
-							return JSON.stringify(issues.map((issue) => normalizeLinearIssue(issue)))
+							const requested = new Set(rest)
+							const matches = snapshot.issues.filter((issue) => requested.has(issue.id))
+							return JSON.stringify(matches)
 						}
 
 						case "ready": {
-							const issues = yield* fetchLinearIssues(runCwd)
-							const filtered = issues.filter(
+							const snapshot = yield* withLinearSdkTiming(["i", "list"], buildLinearIssueSnapshot())
+							const filtered = snapshot.issues.filter(
 								(issue) => issue.status === "open" || issue.status === "in_progress",
 							)
 							return JSON.stringify(filtered)
@@ -1527,8 +1810,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 						case "search": {
 							const query = rest[0]?.trim().toLowerCase() ?? ""
-							const issues = yield* fetchLinearIssues(runCwd)
-							const filtered = issues.filter((issue) => {
+							const snapshot = yield* withLinearSdkTiming(["i", "list"], buildLinearIssueSnapshot())
+							const filtered = snapshot.issues.filter((issue) => {
 								const haystack = `${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
 								return haystack.includes(query)
 							})
@@ -1541,21 +1824,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								return yield* Effect.fail(
 									new BeadsError({
 										message: "Create requires issue title",
-										command: `${config.command} i create`,
+										command: "linear-sdk createIssue",
 									}),
 								)
 							}
 
-							const team = config.defaultTeam
-							if (!team) {
+							const configuredTeam = config.defaultTeam?.trim()
+							if (!configuredTeam) {
 								return yield* Effect.fail(
 									new BeadsError({
 										message:
-											"Linear create requires linear.team in config. Set it in the top-level 'linear' block.",
-										command: `${config.command} i create`,
+											"Linear create requires issueTracker.linear.team in config.",
+										command: "linear-sdk createIssue",
 									}),
 								)
 							}
+							const teamId = yield* resolveTeamId(configuredTeam)
 
 							const description = parseArgumentValue(rest, "--description")
 							const design = parseArgumentValue(rest, "--design")
@@ -1564,7 +1848,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const assignee = parseArgumentValue(rest, "--assignee")
 							const estimate = parseArgumentValue(rest, "--estimate")
 							const priorityArg = parseArgumentValue(rest, "--priority")
-							const priority = toLinearPriority(
+							const priority = toLinearPriorityValue(
 								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
 							)
 							const labelArgs = parseRepeatedArgumentValues(rest, "--labels")
@@ -1573,66 +1857,109 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								.map((value) => value.trim())
 								.filter((value) => value.length > 0)
 							const labelsWithType = mergeLinearLabelsWithType(labels, type)
+							const labelIds = yield* resolveLabelIds(labelsWithType)
+							const assigneeId =
+								assignee !== undefined && assignee.trim().length > 0
+									? yield* resolveAssigneeId(assignee)
+									: undefined
+							const parsedEstimate =
+								estimate !== undefined ? Number.parseInt(estimate, 10) : undefined
+							const estimateValue =
+								parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
+									? parsedEstimate
+									: undefined
 
 							const extraSections: string[] = []
-							if (design) extraSections.push(`## Design\\n${design}`)
-							if (acceptance) extraSections.push(`## Acceptance\\n${acceptance}`)
-							const mergedDescription = [description, ...extraSections].filter(Boolean).join("\\n\\n")
+							if (design) extraSections.push(`## Design\n${design}`)
+							if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
+							const mergedDescription = [description, ...extraSections]
+								.filter((value): value is string => value !== undefined && value.length > 0)
+								.join("\n\n")
 
-							const linearArgs: string[] = [
-								"i",
-								"create",
-								title,
-								"-t",
-								team,
-								"--output",
-								"json",
-								"--compact",
-							]
-							if (mergedDescription) linearArgs.push("-d", mergedDescription)
-							if (priority) linearArgs.push("-p", priority)
-							if (assignee) linearArgs.push("-a", assignee)
-							if (estimate) linearArgs.push("-e", estimate)
-							for (const label of labelsWithType) {
-								linearArgs.push("-l", label)
-							}
-
-							const output = yield* runLinearCommand(linearArgs, runCwd)
-							const issues = yield* decodeLinearIssues(output)
-							const issue = issues[0]
-							if (!issue) {
+							const createdPayload = yield* withLinearSdkTiming(
+								["i", "create"],
+								Effect.tryPromise({
+									try: () =>
+										linearClient.createIssue({
+											teamId,
+											title,
+											description: mergedDescription.length > 0 ? mergedDescription : undefined,
+											priority,
+											assigneeId,
+											estimate: estimateValue,
+											labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+										}),
+									catch: (error) =>
+										new BeadsError({
+											message:
+												error instanceof Error ? error.message : String(error),
+											command: "linear-sdk createIssue",
+										}),
+								}),
+							)
+							const createdIssueId = createdPayload.issueId
+							if (!createdIssueId) {
 								return yield* Effect.fail(
 									new BeadsError({
 										message: "Linear create returned no issue",
-										command: `${config.command} ${linearArgs.join(" ")}`,
+										command: "linear-sdk createIssue",
 									}),
 								)
 							}
-							return JSON.stringify(normalizeLinearIssue(issue))
+							const createdLinearIssue = yield* withLinearSdkTiming(
+								["i", "get", createdIssueId],
+								Effect.tryPromise({
+									try: () => linearClient.issue(createdIssueId),
+									catch: (error) =>
+										new BeadsError({
+											message:
+												error instanceof Error ? error.message : String(error),
+											command: "linear-sdk issue",
+										}),
+								}),
+							)
+							const snapshot = yield* buildLinearIssueSnapshot()
+							const created = snapshot.issues.find(
+								(issue) => issue.id === createdLinearIssue.identifier,
+							)
+							if (!created) {
+								return JSON.stringify({
+									id: createdLinearIssue.identifier,
+									title: createdLinearIssue.title,
+									status: "open",
+									priority: normalizeLinearPriority(createdLinearIssue.priority),
+									issue_type: inferLinearIssueType([], false, undefined),
+									created_at: createdLinearIssue.createdAt.toISOString(),
+									updated_at: createdLinearIssue.updatedAt.toISOString(),
+								} satisfies IssueRaw)
+							}
+							return JSON.stringify(created)
 						}
 
 						case "update": {
-							const issueId = rest[0]
-							if (!issueId) {
+							const issueIdentifier = rest[0]
+							if (!issueIdentifier) {
 								return yield* Effect.fail(
 									new BeadsError({
 										message: "Update requires issue id",
-										command: `${config.command} i update`,
+										command: "linear-sdk updateIssue",
 									}),
 								)
 							}
 
-							const status = parseArgumentValue(rest, "--status")
-							if (status === "closed") {
-								yield* runLinearCommand(["i", "close", issueId], runCwd)
-							} else if (status === "in_progress") {
-								yield* runLinearCommand(["i", "start", issueId], runCwd)
-							} else if (status === "open") {
-								yield* runLinearCommand(["i", "stop", issueId], runCwd)
-							} else if (status === "blocked") {
-								yield* runLinearCommand(["i", "update", issueId, "-s", "Blocked"], runCwd)
+							const snapshot = yield* buildLinearIssueSnapshot()
+							const linearId = snapshot.linearIdByIdentifier.get(issueIdentifier)
+							if (!linearId) {
+								return yield* Effect.fail(
+									new BeadsError({
+										message: `Issue not found: ${issueIdentifier}`,
+										command: "linear-sdk updateIssue",
+									}),
+								)
 							}
 
+							const teamId = snapshot.teamIdByIdentifier.get(issueIdentifier)
+							const status = parseArgumentValue(rest, "--status")
 							const title = parseArgumentValue(rest, "--title")
 							const description = parseArgumentValue(rest, "--description")
 							const notes = parseArgumentValue(rest, "--notes")
@@ -1642,72 +1969,99 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const assignee = parseArgumentValue(rest, "--assignee")
 							const estimate = parseArgumentValue(rest, "--estimate")
 							const priorityArg = parseArgumentValue(rest, "--priority")
-							const priority = toLinearPriority(
-								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
-							)
+							const parent = parseArgumentValue(rest, "--parent")
 							const labels = parseRepeatedArgumentValues(rest, "--set-labels")
 							const labelsWithType = mergeLinearLabelsWithType(labels, type)
-							const parent = parseArgumentValue(rest, "--parent")
+							const labelIds = yield* resolveLabelIds(labelsWithType)
 
 							const extraSections: string[] = []
-							if (notes) extraSections.push(`## Notes\\n${notes}`)
-							if (design) extraSections.push(`## Design\\n${design}`)
-							if (acceptance) extraSections.push(`## Acceptance\\n${acceptance}`)
-							const mergedDescription = [description, ...extraSections].filter(Boolean).join("\\n\\n")
+							if (notes) extraSections.push(`## Notes\n${notes}`)
+							if (design) extraSections.push(`## Design\n${design}`)
+							if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
+							const mergedDescription = [description, ...extraSections]
+								.filter((value): value is string => value !== undefined && value.length > 0)
+								.join("\n\n")
 
-							const linearArgs: string[] = [
-								"i",
-								"update",
-								issueId,
-								"--output",
-								"json",
-								"--compact",
-							]
-							if (title) linearArgs.push("-T", title)
-							if (mergedDescription) linearArgs.push("-d", mergedDescription)
-							if (priority) linearArgs.push("-p", priority)
-							if (assignee !== undefined) linearArgs.push("-a", assignee)
-							if (estimate) linearArgs.push("-e", estimate)
-							for (const label of labelsWithType) {
-								linearArgs.push("-l", label)
-							}
+							const priority = toLinearPriorityValue(
+								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
+							)
+							const assigneeId =
+								assignee !== undefined && assignee.trim().length > 0
+									? yield* resolveAssigneeId(assignee)
+									: assignee === undefined
+										? undefined
+										: null
+							const parsedEstimate =
+								estimate !== undefined ? Number.parseInt(estimate, 10) : undefined
+							const estimateValue =
+								parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
+									? parsedEstimate
+									: undefined
+							const parentId =
+								parent !== undefined && parent.trim().length > 0
+									? yield* resolveLinearIssueId(parent)
+									: parent !== undefined
+										? null
+										: undefined
+							const parsedStatus = parseIssueStatus(status)
+							const stateId =
+								parsedStatus !== undefined && teamId !== undefined
+									? yield* findTeamStateIdForStatus(teamId, parsedStatus)
+									: undefined
 
-							const hasInlineUpdate =
-								title !== undefined ||
-								mergedDescription.length > 0 ||
-								priority !== undefined ||
-								assignee !== undefined ||
-								estimate !== undefined ||
-								labelsWithType.length > 0
-
-							if (hasInlineUpdate) {
-								yield* runLinearCommand(linearArgs, runCwd)
-							}
-
-							if (parent !== undefined) {
-								const parentLinearId = yield* resolveLinearIssueId(parent, runCwd)
-								yield* runLinearCommand(
-									[
-										"i",
-										"update",
-										issueId,
-										"--data",
-										JSON.stringify({ parentId: parentLinearId }),
-										"--output",
-										"json",
-										"--compact",
-									],
-									runCwd,
-								)
-							}
-
+							yield* withLinearSdkTiming(
+								["i", "update"],
+								Effect.tryPromise({
+									try: () =>
+										linearClient.updateIssue(linearId, {
+											title,
+											description:
+												mergedDescription.length > 0 ? mergedDescription : undefined,
+											priority,
+											assigneeId,
+											estimate: estimateValue,
+											labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+											parentId,
+											stateId,
+										}),
+									catch: (error) =>
+										new BeadsError({
+											message:
+												error instanceof Error ? error.message : String(error),
+											command: "linear-sdk updateIssue",
+										}),
+								}),
+							)
 							return "{}"
 						}
 
 						case "close": {
-							const issueId = rest[0]
-							if (!issueId) return "{}"
-							yield* runLinearCommand(["i", "close", issueId], runCwd)
+							const issueIdentifier = rest[0]
+							if (!issueIdentifier) return "{}"
+							const snapshot = yield* buildLinearIssueSnapshot()
+							const linearId = snapshot.linearIdByIdentifier.get(issueIdentifier)
+							const teamId = snapshot.teamIdByIdentifier.get(issueIdentifier)
+							if (!linearId || !teamId) {
+								return yield* Effect.fail(
+									new BeadsError({
+										message: `Issue not found: ${issueIdentifier}`,
+										command: "linear-sdk closeIssue",
+									}),
+								)
+							}
+							const closedStateId = yield* findTeamStateIdForStatus(teamId, "closed")
+							yield* withLinearSdkTiming(
+								["i", "close"],
+								Effect.tryPromise({
+									try: () => linearClient.updateIssue(linearId, { stateId: closedStateId }),
+									catch: (error) =>
+										new BeadsError({
+											message:
+												error instanceof Error ? error.message : String(error),
+											command: "linear-sdk closeIssue",
+										}),
+								}),
+							)
 							return "{}"
 						}
 
@@ -1719,46 +2073,43 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								return yield* Effect.fail(
 									new BeadsError({
 										message: "Only dependency add is supported",
-										command: `${config.command} dep ${rest.join(" ")}`,
+										command: "linear-sdk dep add",
 									}),
 								)
 							}
-							const issueId = rest[1]
-							const dependsOnId = rest[2]
+							const issueIdentifier = rest[1]
+							const dependsOnIdentifier = rest[2]
 							const depType = parseArgumentValue(rest, "--type")
-
-							if (!issueId || !dependsOnId) {
+							if (!issueIdentifier || !dependsOnIdentifier) {
 								return yield* Effect.fail(
 									new BeadsError({
 										message: "Dependency add requires child and parent ids",
-										command: `${config.command} dep add`,
+										command: "linear-sdk dep add",
 									}),
 								)
 							}
-
 							if (depType !== undefined && depType !== "parent-child") {
 								return yield* Effect.fail(
 									new BeadsError({
 										message:
 											"Linear backend currently supports only parent-child dependencies",
-										command: `${config.command} dep add ${issueId} ${dependsOnId} --type ${depType}`,
+										command: "linear-sdk dep add",
 									}),
 								)
 							}
-
-							const parentLinearId = yield* resolveLinearIssueId(dependsOnId, runCwd)
-							yield* runLinearCommand(
-								[
-									"i",
-									"update",
-									issueId,
-									"--data",
-									JSON.stringify({ parentId: parentLinearId }),
-									"--output",
-									"json",
-									"--compact",
-								],
-								runCwd,
+							const childId = yield* resolveLinearIssueId(issueIdentifier)
+							const parentId = yield* resolveLinearIssueId(dependsOnIdentifier)
+							yield* withLinearSdkTiming(
+								["i", "update"],
+								Effect.tryPromise({
+									try: () => linearClient.updateIssue(childId, { parentId }),
+									catch: (error) =>
+										new BeadsError({
+											message:
+												error instanceof Error ? error.message : String(error),
+											command: "linear-sdk dep add",
+										}),
+								}),
 							)
 							return "{}"
 						}
@@ -1767,50 +2118,51 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							return yield* Effect.fail(
 								new BeadsError({
 									message: `Linear backend does not support command: ${command}`,
-									command: `${config.command} ${args.join(" ")}`,
+									command: `linear-sdk ${args.join(" ")}`,
 								}),
 							)
 					}
-				}).pipe(
-					Effect.mapError((error) =>
-						error._tag === "BeadsError"
-							? error
-							: new BeadsError({
-									message: error.message,
-									command: `${config.command} ${args.join(" ")}`,
-							  }),
-					),
-				)
+				})
 
 			return {
 				flavor: "linear",
-				executable: config.command,
+				executable: "linear-sdk",
 				runJson,
-				runDirect: (args, runCwd) =>
-					runJson(args, runCwd).pipe(
-						Effect.mapError((error) =>
-							error._tag === "BeadsError"
-								? error
-								: new BeadsError({
-										message: error.message,
-										command: `${config.command} ${args.join(" ")}`,
-									}),
-						),
-					),
+				runDirect: (args, runCwd) => runJson(args, runCwd),
 				parseSyncResult: () => Effect.succeed(ZERO_SYNC_RESULT),
 			}
 		}
 
 		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+		const linearApiKeyOption =
+			"linear" in startupConfig.issueTracker
+				? yield* Config.option(Config.string("LINEAR_API_KEY"))
+				: Option.none<string>()
 		const issueDbClient: IssueDbClient =
 			"beads" in startupConfig.issueTracker
 				? createBdIssueDbClient("bd")
 				: "beads_rust" in startupConfig.issueTracker
 					? createBrIssueDbClient("br")
-					: createLinearIssueDbClient({
-							command: startupConfig.issueTracker.linear.command,
-							defaultTeam: startupConfig.issueTracker.linear.team,
-					  })
+					: Option.isSome(linearApiKeyOption)
+						? createLinearIssueDbClient({
+								linearClient: yield* linearSdk.getClient(linearApiKeyOption.value).pipe(
+									Effect.mapError(
+										(error) =>
+											new BeadsError({
+												message: error.message,
+												command: "linear-sdk",
+											}),
+									),
+								),
+								defaultTeam: startupConfig.issueTracker.linear.team,
+							})
+						: yield* Effect.fail(
+								new BeadsError({
+									message:
+										"LINEAR_API_KEY is required when issueTracker.linear backend is active",
+									command: "linear-sdk",
+								}),
+							)
 
 		const runBd = (
 			args: readonly string[],
