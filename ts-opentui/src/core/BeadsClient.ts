@@ -6,7 +6,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import { Data, Effect } from "effect"
+import { Data, Effect, Ref } from "effect"
 import * as Schema from "effect/Schema"
 import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -681,8 +681,6 @@ interface IssueDbClient {
 	readonly parseSyncResult: (output: string) => Effect.Effect<SyncResult, ParseError>
 }
 
-let cachedIssueDbClient: IssueDbClient | undefined
-
 const hasNoDaemonFlag = (args: readonly string[]): boolean =>
 	args.some((arg) => arg === "--no-daemon")
 
@@ -767,190 +765,6 @@ const buildListCommandArgs = (
 	return args
 }
 
-const executeBeadsJsonCommand = (
-	executable: BeadsExecutable,
-	args: readonly string[],
-	cwd?: string,
-	retryOnEmptyOutput = true,
-): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		// Always add --json flag for structured output
-		const allArgs = [...args, "--json"]
-
-		const command = cwd
-			? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
-			: Command.make(executable, ...allArgs)
-
-		const result = yield* Command.string(command).pipe(
-			Effect.mapError((error) => {
-				const stderr = "stderr" in error ? String(error.stderr) : String(error)
-
-				// Detect sync required errors specifically
-				if (isSyncRequiredError(stderr)) {
-					return new SyncRequiredError({
-						message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
-					})
-				}
-
-				return new BeadsError({
-					message: `beads command failed: ${stderr}`,
-					command: `${executable} ${allArgs.join(" ")}`,
-					stderr,
-				})
-			}),
-		)
-
-		// Check for empty output - daemon mode can return exit 0 with empty stdout
-		const trimmed = result.trim()
-		if (!trimmed || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
-			// Output is empty or doesn't look like JSON - check if it's a sync error message
-			if (isSyncRequiredError(trimmed)) {
-				yield* Effect.log(`${executable} returned sync error in stdout, triggering auto-recovery`)
-				return yield* Effect.fail(
-					new SyncRequiredError({
-						message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
-					}),
-				)
-			}
-			// If not a sync error, fail with descriptive error
-			if (!trimmed) {
-				if (retryOnEmptyOutput && !hasNoDaemonFlag(args)) {
-					yield* Effect.logWarning(
-						`${executable} returned empty output, retrying with --no-daemon: ${executable} ${allArgs.join(" ")}`,
-					)
-					return yield* executeBeadsJsonCommand(
-						executable,
-						["--no-daemon", ...args],
-						cwd,
-						false,
-					)
-				}
-
-				yield* Effect.logWarning(
-					`${executable} command returned empty output: ${executable} ${allArgs.join(" ")}`,
-				)
-				return yield* Effect.fail(
-					new BeadsError({
-						message: "beads command returned empty output",
-						command: `${executable} ${allArgs.join(" ")}`,
-						stderr: "",
-					}),
-				)
-			}
-		}
-
-		return result
-	})
-
-const executeBeadsDirectCommand = (
-	executable: BeadsExecutable,
-	args: readonly string[],
-	cwd?: string,
-): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		// Add --no-daemon to bypass daemon (daemon doesn't support all operations)
-		const allArgs = ["--no-daemon", ...args]
-
-		const command = cwd
-			? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
-			: Command.make(executable, ...allArgs)
-
-		return yield* Command.string(command).pipe(
-			Effect.mapError((error) => {
-				const stderr = "stderr" in error ? String(error.stderr) : String(error)
-				return new BeadsError({
-					message: `beads command failed: ${stderr}`,
-					command: `${executable} ${allArgs.join(" ")}`,
-					stderr,
-				})
-			}),
-		)
-	})
-
-const createBdIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
-	flavor: "bd",
-	executable,
-	runJson: (args, cwd) => executeBeadsJsonCommand(executable, args, cwd),
-	runDirect: (args, cwd) => executeBeadsDirectCommand(executable, args, cwd),
-	parseSyncResult: (output) =>
-		parseJson(LegacySyncResultSchema, output).pipe(Effect.map(normalizeLegacySyncResult)),
-})
-
-const createBrIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
-	flavor: "br",
-	executable,
-	runJson: (args, cwd) => executeBeadsJsonCommand(executable, args, cwd),
-	runDirect: (args, cwd) => executeBeadsDirectCommand(executable, args, cwd),
-	parseSyncResult: (output) =>
-		parseJson(BrSyncResultSchema, output).pipe(Effect.map(normalizeBrSyncResult)),
-})
-
-const detectIssueDbClient = (): Effect.Effect<
-	IssueDbClient,
-	BeadsError,
-	CommandExecutor.CommandExecutor
-> =>
-	Effect.gen(function* () {
-		if (cachedIssueDbClient) {
-			return cachedIssueDbClient
-		}
-
-		const probeVersion = (
-			executable: BeadsExecutable,
-		): Effect.Effect<string | undefined, never, CommandExecutor.CommandExecutor> =>
-			Command.string(Command.make(executable, "--version")).pipe(
-				Effect.map((version) => version.trim()),
-				Effect.catchAll(() => Effect.succeed(undefined)),
-			)
-
-		const bdVersion = yield* probeVersion("bd")
-		if (bdVersion !== undefined) {
-			const client = bdVersion.startsWith("br ")
-				? createBrIssueDbClient("bd")
-				: createBdIssueDbClient("bd")
-			cachedIssueDbClient = client
-			return client
-		}
-
-		const brVersion = yield* probeVersion("br")
-		if (brVersion !== undefined) {
-			const client = createBrIssueDbClient("br")
-			cachedIssueDbClient = client
-			return client
-		}
-
-		return yield* Effect.fail(
-			new BeadsError({
-				message: "No beads CLI found. Install either 'bd' or 'br'.",
-				command: "bd --version / br --version",
-			}),
-		)
-	})
-
-/**
- * Execute a beads command and return stdout as string (JSON mode)
- */
-const runBd = (
-	args: readonly string[],
-	cwd?: string,
-): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(detectIssueDbClient(), (client) => client.runJson(args, cwd))
-
-/**
- * Execute a beads command directly (bypasses daemon, no JSON output)
- * Used for commands like delete that aren't supported by the daemon
- */
-const runBdDirect = (
-	args: readonly string[],
-	cwd?: string,
-): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(detectIssueDbClient(), (client) => client.runDirect(args, cwd))
-
-const parseSyncResult = (
-	output: string,
-): Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor> =>
-	Effect.flatMap(detectIssueDbClient(), (client) => client.parseSyncResult(output))
-
 /**
  * Parse JSON output with schema validation
  */
@@ -1031,6 +845,187 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		 */
 		const getEffectiveCwd = (explicitCwd?: string): Effect.Effect<string | undefined> =>
 			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
+
+		// Cache the detected CLI implementation per service instance.
+		const issueDbClientRef = yield* Ref.make<IssueDbClient | undefined>(undefined)
+
+		const executeBeadsJsonCommand = (
+			executable: BeadsExecutable,
+			args: readonly string[],
+			cwd?: string,
+			retryOnEmptyOutput = true,
+		): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Always add --json flag for structured output
+				const allArgs = [...args, "--json"]
+
+				const command = cwd
+					? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
+					: Command.make(executable, ...allArgs)
+
+				const result = yield* Command.string(command).pipe(
+					Effect.mapError((error) => {
+						const stderr = "stderr" in error ? String(error.stderr) : String(error)
+
+						// Detect sync required errors specifically
+						if (isSyncRequiredError(stderr)) {
+							return new SyncRequiredError({
+								message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+							})
+						}
+
+						return new BeadsError({
+							message: `beads command failed: ${stderr}`,
+							command: `${executable} ${allArgs.join(" ")}`,
+							stderr,
+						})
+					}),
+				)
+
+				// Check for empty output - daemon mode can return exit 0 with empty stdout
+				const trimmed = result.trim()
+				if (!trimmed || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
+					// Output is empty or doesn't look like JSON - check if it's a sync error message
+					if (isSyncRequiredError(trimmed)) {
+						yield* Effect.log(`${executable} returned sync error in stdout, triggering auto-recovery`)
+						return yield* Effect.fail(
+							new SyncRequiredError({
+								message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+							}),
+						)
+					}
+					// If not a sync error, fail with descriptive error
+					if (!trimmed) {
+						if (retryOnEmptyOutput && !hasNoDaemonFlag(args)) {
+							yield* Effect.logWarning(
+								`${executable} returned empty output, retrying with --no-daemon: ${executable} ${allArgs.join(" ")}`,
+							)
+							return yield* executeBeadsJsonCommand(
+								executable,
+								["--no-daemon", ...args],
+								cwd,
+								false,
+							)
+						}
+
+						yield* Effect.logWarning(
+							`${executable} command returned empty output: ${executable} ${allArgs.join(" ")}`,
+						)
+						return yield* Effect.fail(
+							new BeadsError({
+								message: "beads command returned empty output",
+								command: `${executable} ${allArgs.join(" ")}`,
+								stderr: "",
+							}),
+						)
+					}
+				}
+
+				return result
+			})
+
+		const executeBeadsDirectCommand = (
+			executable: BeadsExecutable,
+			args: readonly string[],
+			cwd?: string,
+		): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				// Add --no-daemon to bypass daemon (daemon doesn't support all operations)
+				const allArgs = ["--no-daemon", ...args]
+
+				const command = cwd
+					? Command.make(executable, ...allArgs).pipe(Command.workingDirectory(cwd))
+					: Command.make(executable, ...allArgs)
+
+				return yield* Command.string(command).pipe(
+					Effect.mapError((error) => {
+						const stderr = "stderr" in error ? String(error.stderr) : String(error)
+						return new BeadsError({
+							message: `beads command failed: ${stderr}`,
+							command: `${executable} ${allArgs.join(" ")}`,
+							stderr,
+						})
+					}),
+				)
+			})
+
+		const createBdIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
+			flavor: "bd",
+			executable,
+			runJson: (args, runCwd) => executeBeadsJsonCommand(executable, args, runCwd),
+			runDirect: (args, runCwd) => executeBeadsDirectCommand(executable, args, runCwd),
+			parseSyncResult: (output) =>
+				parseJson(LegacySyncResultSchema, output).pipe(Effect.map(normalizeLegacySyncResult)),
+		})
+
+		const createBrIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
+			flavor: "br",
+			executable,
+			runJson: (args, runCwd) => executeBeadsJsonCommand(executable, args, runCwd),
+			runDirect: (args, runCwd) => executeBeadsDirectCommand(executable, args, runCwd),
+			parseSyncResult: (output) =>
+				parseJson(BrSyncResultSchema, output).pipe(Effect.map(normalizeBrSyncResult)),
+		})
+
+		const detectIssueDbClient = (): Effect.Effect<
+			IssueDbClient,
+			BeadsError,
+			CommandExecutor.CommandExecutor
+		> =>
+			Effect.gen(function* () {
+				const cached = yield* Ref.get(issueDbClientRef)
+				if (cached) {
+					return cached
+				}
+
+				const probeVersion = (
+					executable: BeadsExecutable,
+				): Effect.Effect<string | undefined, never, CommandExecutor.CommandExecutor> =>
+					Command.string(Command.make(executable, "--version")).pipe(
+						Effect.map((version) => version.trim()),
+						Effect.catchAll(() => Effect.succeed(undefined)),
+					)
+
+				const bdVersion = yield* probeVersion("bd")
+				if (bdVersion !== undefined) {
+					const client = bdVersion.startsWith("br ")
+						? createBrIssueDbClient("bd")
+						: createBdIssueDbClient("bd")
+					yield* Ref.set(issueDbClientRef, client)
+					return client
+				}
+
+				const brVersion = yield* probeVersion("br")
+				if (brVersion !== undefined) {
+					const client = createBrIssueDbClient("br")
+					yield* Ref.set(issueDbClientRef, client)
+					return client
+				}
+
+				return yield* Effect.fail(
+					new BeadsError({
+						message: "No beads CLI found. Install either 'bd' or 'br'.",
+						command: "bd --version / br --version",
+					}),
+				)
+			})
+
+		const runBd = (
+			args: readonly string[],
+			runCwd?: string,
+		): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+			Effect.flatMap(detectIssueDbClient(), (client) => client.runJson(args, runCwd))
+
+		const runBdDirect = (
+			args: readonly string[],
+			runCwd?: string,
+		): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			Effect.flatMap(detectIssueDbClient(), (client) => client.runDirect(args, runCwd))
+
+		const parseSyncResult = (
+			output: string,
+		): Effect.Effect<SyncResult, BeadsError | ParseError, CommandExecutor.CommandExecutor> =>
+			Effect.flatMap(detectIssueDbClient(), (client) => client.parseSyncResult(output))
 
 		return {
 			list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>

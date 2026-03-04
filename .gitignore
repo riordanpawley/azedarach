@@ -25,6 +25,7 @@ Thumbs.db
 .beads/daemon.lock
 .beads/daemon.log
 .beads/last-touched
+.beads/.br_history
 
 # Claude Code cache
 .claude/.cache/
