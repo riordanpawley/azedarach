@@ -29,7 +29,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { Data, Effect, Option, Schedule } from "effect"
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { getBeadSessionName, getWorktreePath } from "./paths.js"
+import { getIssueSessionName, getWorktreePath } from "./paths.js"
 import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
 // ============================================================================
@@ -190,7 +190,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				 *
 				 * This is the primary entry point for creating tmux sessions for beads.
 				 * It consolidates:
-				 * 1. Session name generation (uses getBeadSessionName)
+				 * 1. Session name generation (uses getIssueSessionName)
 				 * 2. Worktree path computation (uses getWorktreePath)
 				 * 3. Session creation (getOrCreateSession)
 				 * 4. Window creation (ensureWindow)
@@ -234,7 +234,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							} = options
 
 							// Use canonical path functions instead of inline computation
-							const sessionName = getBeadSessionName(beadId)
+							const sessionName = getIssueSessionName(beadId)
 							const worktreePath = getWorktreePath(projectPath, beadId)
 							const effectiveCwd = cwd ?? worktreePath
 
@@ -360,7 +360,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							details: `beadId=${beadId}`,
 						},
 						Effect.gen(function* () {
-							const sessionName = getBeadSessionName(beadId)
+							const sessionName = getIssueSessionName(beadId)
 							const exists = yield* tmux.hasSession(sessionName)
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const shell = sessionConfig.shell

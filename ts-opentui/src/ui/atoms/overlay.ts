@@ -139,7 +139,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 			| {
 					readonly _tag: "devServerMenu"
-					readonly beadId: string
+					readonly issueId: string
 			  }
 			| { readonly _tag: "planning" },
 	) =>

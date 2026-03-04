@@ -26,7 +26,7 @@ import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
-import { getBeadSessionName, getWorktreePath, parseSessionName, WINDOW_NAMES } from "./paths.js"
+import { getIssueSessionName, getWorktreePath, parseIssueSessionName, WINDOW_NAMES } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -577,7 +577,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const toolDef = getToolDefinition(cliTool)
 
 						// Generate tmux session name (just the beadId)
-						const tmuxSessionName = getBeadSessionName(beadId)
+						const tmuxSessionName = getIssueSessionName(beadId)
 
 						// Check if bead session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
@@ -955,7 +955,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})
 
-						const tmuxSessionName = getBeadSessionName(beadId)
+						const tmuxSessionName = getIssueSessionName(beadId)
 						const { tmuxPrefix, backgroundTasks } = sessionConfig
 
 						// Get initCommands: merge worktree config + tool-specific init commands
@@ -1038,11 +1038,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Build set of running tmux session names for crash detection
 						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
 
-						for (const tmuxSession of tmuxSessions) {
-							const parsed = parseSessionName(tmuxSession.name)
-							if (!parsed || parsed.type !== "bead") continue
+							for (const tmuxSession of tmuxSessions) {
+								const parsed = parseIssueSessionName(tmuxSession.name)
+								if (!parsed || parsed.type !== "issue") continue
 
-							const beadId = parsed.beadId
+							const beadId = parsed.issueId
 
 							if (HashMap.has(inMemorySessions, beadId)) continue
 

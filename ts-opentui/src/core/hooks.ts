@@ -8,7 +8,7 @@
  * (the Effect-based merge is in WorktreeManager which has the services).
  */
 
-import { getBeadSessionName } from "./paths.js"
+import { getIssueSessionName } from "./paths.js"
 
 /**
  * Compute the absolute path to the project bin directory at module load time.
@@ -79,25 +79,25 @@ export const getAzPreCompactPath = (): string => AZ_PRE_COMPACT_PATH
  * without any compilation overhead (~10ms vs ~600ms).
  *
  * @param event - Hook event type
- * @param beadId - Bead ID for the session
+ * @param issueId - Bead ID for the session
  * @param azNotifyPath - Optional absolute path to az-notify.sh (auto-detected if not provided)
  */
-const buildNotifyCommand = (event: string, beadId: string, azNotifyPath?: string): string => {
+const buildNotifyCommand = (event: string, issueId: string, azNotifyPath?: string): string => {
 	const notifyPath = azNotifyPath ?? getAzNotifyPath()
-	const sessionName = getBeadSessionName(beadId)
+	const sessionName = getIssueSessionName(issueId)
 	// Use the shell script directly - no bun/node overhead
-	return `"${notifyPath}" ${event} "${beadId}" "${sessionName}"`
+	return `"${notifyPath}" ${event} "${issueId}" "${sessionName}"`
 }
 
 /**
  * Build the pre-compact command with proper path handling
  *
- * @param beadId - Bead ID for the session
+ * @param issueId - Bead ID for the session
  * @param azPreCompactPath - Optional absolute path to az-pre-compact.sh (auto-detected if not provided)
  */
-const buildPreCompactCommand = (beadId: string, azPreCompactPath?: string): string => {
+const buildPreCompactCommand = (issueId: string, azPreCompactPath?: string): string => {
 	const preCompactPath = azPreCompactPath ?? getAzPreCompactPath()
-	return `"${preCompactPath}" ${beadId}`
+	return `"${preCompactPath}" ${issueId}`
 }
 
 /**
@@ -151,11 +151,11 @@ export const WORKTREE_PERMISSIONS = {
  * - Stop - Claude session stops (Ctrl+C, completion, etc.)
  * - SessionEnd - Claude session fully ends
  *
- * @param beadId - The bead ID to associate with this session
+ * @param issueId - The bead ID to associate with this session
  * @param options - Optional configuration for hook generation
  * @returns Hook and permission configuration object to merge into settings.local.json
  */
-export const generateHookConfig = (beadId: string, options: HookConfigOptions = {}) => {
+export const generateHookConfig = (issueId: string, options: HookConfigOptions = {}) => {
 	const { preCompactEnabled = true, azNotifyPath, azPreCompactPath } = options
 
 	// Build the hooks object with required hooks
@@ -167,7 +167,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("user_prompt", beadId, azNotifyPath),
+						command: buildNotifyCommand("user_prompt", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -179,7 +179,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("pretooluse", beadId, azNotifyPath),
+						command: buildNotifyCommand("pretooluse", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -190,7 +190,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("idle_prompt", beadId, azNotifyPath),
+						command: buildNotifyCommand("idle_prompt", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -200,7 +200,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("permission_request", beadId, azNotifyPath),
+						command: buildNotifyCommand("permission_request", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -210,7 +210,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("stop", beadId, azNotifyPath),
+						command: buildNotifyCommand("stop", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -220,7 +220,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("session_end", beadId, azNotifyPath),
+						command: buildNotifyCommand("session_end", issueId, azNotifyPath),
 					},
 				],
 			},
@@ -236,7 +236,7 @@ export const generateHookConfig = (beadId: string, options: HookConfigOptions = 
 				hooks: [
 					{
 						type: "command",
-						command: buildPreCompactCommand(beadId, azPreCompactPath),
+						command: buildPreCompactCommand(issueId, azPreCompactPath),
 					},
 				],
 			},
@@ -368,17 +368,17 @@ export const extractMergeableSettings = (
  * This skill is injected into worktrees so Claude sessions know their
  * bead ID and how to use the az CLI without having to discover it.
  *
- * @param beadId - The bead ID for this worktree session
+ * @param issueId - The bead ID for this worktree session
  * @returns Markdown skill content
  */
-export const generateWorktreeSkill = (beadId: string): string => `# Azedarach Worktree Context
+export const generateWorktreeSkill = (issueId: string): string => `# Azedarach Worktree Context
 
 **This is an Azedarach-managed worktree session.**
 
 ## Your Session
 
-- **Bead ID:** \`${beadId}\`
-- **Branch:** \`${beadId}\`
+- **Bead ID:** \`${issueId}\`
+- **Branch:** \`${issueId}\`
 
 ## Dev Server Commands
 
@@ -386,16 +386,16 @@ Control dev servers without breaking TUI state tracking:
 
 \`\`\`bash
 # Start the dev server
-az dev start ${beadId}
+az dev start ${issueId}
 
 # Stop the dev server
-az dev stop ${beadId}
+az dev stop ${issueId}
 
 # Restart after config changes
-az dev restart ${beadId}
+az dev restart ${issueId}
 
 # Check server status
-az dev status ${beadId}
+az dev status ${issueId}
 \`\`\`
 
 **Why use az CLI?** Direct commands (npm run dev, ctrl-c) break TUI state tracking.
@@ -412,10 +412,10 @@ The \`az dev\` commands sync state via tmux metadata.
 
 | Command | Description |
 |---------|-------------|
-| \`az dev start ${beadId}\` | Start dev server |
-| \`az dev stop ${beadId}\` | Stop dev server |
-| \`az dev restart ${beadId}\` | Restart dev server |
-| \`az dev status ${beadId}\` | Check server status |
+| \`az dev start ${issueId}\` | Start dev server |
+| \`az dev stop ${issueId}\` | Stop dev server |
+| \`az dev restart ${issueId}\` | Restart dev server |
+| \`az dev status ${issueId}\` | Check server status |
 | \`bd sync\` | Sync beads changes |
-| \`bd close ${beadId}\` | Mark bead complete |
+| \`bd close ${issueId}\` | Mark bead complete |
 `

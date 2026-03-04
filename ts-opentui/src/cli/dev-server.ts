@@ -72,7 +72,7 @@ const getProjectPath = (projectDir: Option.Option<string>) =>
 // ============================================================================
 
 const devStartHandler = (args: {
-	readonly beadId: string
+	readonly issueId: string
 	readonly server: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -85,7 +85,7 @@ const devStartHandler = (args: {
 		const devServerService = yield* DevServerService
 
 		// Check current status first
-		const currentStatus = yield* devServerService.getStatus(args.beadId, serverName)
+		const currentStatus = yield* devServerService.getStatus(args.issueId, serverName)
 
 		if (currentStatus.status === "running") {
 			if (args.json) {
@@ -98,7 +98,7 @@ const devStartHandler = (args: {
 					}),
 				)
 			} else {
-				yield* Console.log(`Dev server '${serverName}' is already running for ${args.beadId}`)
+				yield* Console.log(`Dev server '${serverName}' is already running for ${args.issueId}`)
 				if (currentStatus.port) {
 					yield* Console.log(`  Port: ${currentStatus.port}`)
 				}
@@ -107,13 +107,13 @@ const devStartHandler = (args: {
 		}
 
 		// Start the server via service
-		const state = yield* devServerService.start(args.beadId, projectPath, serverName)
+		const state = yield* devServerService.start(args.issueId, projectPath, serverName)
 
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify({
 					resultStatus: "started",
-					beadId: args.beadId,
+					issueId: args.issueId,
 					serverName,
 					serverStatus: state.status,
 					port: state.port,
@@ -121,14 +121,14 @@ const devStartHandler = (args: {
 				}),
 			)
 		} else {
-			yield* Console.log(`Started dev server '${serverName}' for ${args.beadId}`)
+			yield* Console.log(`Started dev server '${serverName}' for ${args.issueId}`)
 			if (state.port) yield* Console.log(`  Port: ${state.port}`)
 			if (state.windowName) yield* Console.log(`  Window: ${state.windowName}`)
 		}
 	})
 
 const devStopHandler = (args: {
-	readonly beadId: string
+	readonly issueId: string
 	readonly server: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
@@ -138,7 +138,7 @@ const devStopHandler = (args: {
 		const devServerService = yield* DevServerService
 
 		// Check current status
-		const currentStatus = yield* devServerService.getStatus(args.beadId, serverName)
+		const currentStatus = yield* devServerService.getStatus(args.issueId, serverName)
 
 		if (currentStatus.status !== "running" && currentStatus.status !== "starting") {
 			if (args.json) {
@@ -146,25 +146,25 @@ const devStopHandler = (args: {
 					JSON.stringify({ resultStatus: "not_running", message: "Dev server is not running" }),
 				)
 			} else {
-				yield* Console.log(`Dev server '${serverName}' is not running for ${args.beadId}`)
+				yield* Console.log(`Dev server '${serverName}' is not running for ${args.issueId}`)
 			}
 			return
 		}
 
 		// Stop the server via service
-		yield* devServerService.stop(args.beadId, serverName)
+		yield* devServerService.stop(args.issueId, serverName)
 
 		if (args.json) {
 			yield* Console.log(
-				JSON.stringify({ resultStatus: "stopped", beadId: args.beadId, serverName }),
+				JSON.stringify({ resultStatus: "stopped", issueId: args.issueId, serverName }),
 			)
 		} else {
-			yield* Console.log(`Stopped dev server '${serverName}' for ${args.beadId}`)
+			yield* Console.log(`Stopped dev server '${serverName}' for ${args.issueId}`)
 		}
 	})
 
 const devRestartHandler = (args: {
-	readonly beadId: string
+	readonly issueId: string
 	readonly server: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -176,32 +176,32 @@ const devRestartHandler = (args: {
 		const devServerService = yield* DevServerService
 
 		if (!args.json) {
-			yield* Console.log(`Restarting dev server '${serverName}' for ${args.beadId}...`)
+			yield* Console.log(`Restarting dev server '${serverName}' for ${args.issueId}...`)
 		}
 
 		// Stop then start via service
-		yield* devServerService.stop(args.beadId, serverName).pipe(Effect.ignore)
+		yield* devServerService.stop(args.issueId, serverName).pipe(Effect.ignore)
 		yield* Effect.sleep("500 millis")
-		const state = yield* devServerService.start(args.beadId, projectPath, serverName)
+		const state = yield* devServerService.start(args.issueId, projectPath, serverName)
 
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify({
 					resultStatus: "restarted",
-					beadId: args.beadId,
+					issueId: args.issueId,
 					serverName,
 					serverStatus: state.status,
 					port: state.port,
 				}),
 			)
 		} else {
-			yield* Console.log(`Restarted dev server '${serverName}' for ${args.beadId}`)
+			yield* Console.log(`Restarted dev server '${serverName}' for ${args.issueId}`)
 			if (state.port) yield* Console.log(`  Port: ${state.port}`)
 		}
 	})
 
 const devStatusHandler = (args: {
-	readonly beadId: string
+	readonly issueId: string
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
@@ -209,14 +209,14 @@ const devStatusHandler = (args: {
 		const devServerService = yield* DevServerService
 
 		// Get all servers for this bead
-		const beadServers = yield* devServerService.getBeadServers(args.beadId)
+		const beadServers = yield* devServerService.getIssueServers(args.issueId)
 		const serverList = Array.from(HashMap.values(beadServers))
 
 		if (serverList.length === 0) {
 			if (args.json) {
-				yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: [] }))
+				yield* Console.log(JSON.stringify({ issueId: args.issueId, servers: [] }))
 			} else {
-				yield* Console.log(`No dev servers configured for ${args.beadId}`)
+				yield* Console.log(`No dev servers configured for ${args.issueId}`)
 			}
 			return
 		}
@@ -236,11 +236,11 @@ const devStatusHandler = (args: {
 					}),
 				),
 			)
-			yield* Console.log(JSON.stringify({ beadId: args.beadId, servers: serversJson }, null, 2))
+			yield* Console.log(JSON.stringify({ issueId: args.issueId, servers: serversJson }, null, 2))
 			return
 		}
 
-		yield* Console.log(`Dev servers for ${args.beadId}:`)
+		yield* Console.log(`Dev servers for ${args.issueId}:`)
 		yield* Console.log("")
 
 		for (const server of serverList) {
@@ -272,22 +272,22 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 		const allServers = yield* SubscriptionRef.get(devServerService.servers)
 
 		// Collect running servers across all beads
-		const runningServers: Array<{ beadId: string; server: DevServerState }> = []
-		for (const [beadId, beadServers] of HashMap.entries(allServers)) {
+		const runningServers: Array<{ issueId: string; server: DevServerState }> = []
+		for (const [issueId, beadServers] of HashMap.entries(allServers)) {
 			for (const server of HashMap.values(beadServers)) {
 				if (server.status === "running") {
-					runningServers.push({ beadId, server })
+					runningServers.push({ issueId, server })
 				}
 			}
 		}
 
 		if (args.json) {
 			const serversJson = yield* Effect.all(
-				runningServers.map(({ beadId, server }) =>
+				runningServers.map(({ issueId, server }) =>
 					Effect.gen(function* () {
 						const uptime = yield* formatUptime(server.startedAt)
 						return {
-							beadId,
+							issueId,
 							name: server.name,
 							status: server.status,
 							port: server.port,
@@ -311,11 +311,11 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 		yield* Console.log("  BEAD         SERVER    PORT    UPTIME")
 		yield* Console.log("  ─────────────────────────────────────────")
 
-		for (const { beadId, server } of runningServers) {
+		for (const { issueId, server } of runningServers) {
 			const port = server.port?.toString() ?? "-"
 			const uptime = yield* formatUptime(server.startedAt)
 			yield* Console.log(
-				`  ${beadId.padEnd(12)} ${server.name.padEnd(9)} ${port.padEnd(7)} ${uptime}`,
+				`  ${issueId.padEnd(12)} ${server.name.padEnd(9)} ${port.padEnd(7)} ${uptime}`,
 			)
 		}
 
@@ -326,7 +326,7 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 const devStartCommand = Command.make(
 	"start",
 	{
-		beadId: beadIdArg,
+		issueId: beadIdArg,
 		server: serverOption,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
@@ -338,7 +338,7 @@ const devStartCommand = Command.make(
 const devStopCommand = Command.make(
 	"stop",
 	{
-		beadId: beadIdArg,
+		issueId: beadIdArg,
 		server: serverOption,
 		verbose: verboseOption,
 		json: jsonOption,
@@ -349,7 +349,7 @@ const devStopCommand = Command.make(
 const devRestartCommand = Command.make(
 	"restart",
 	{
-		beadId: beadIdArg,
+		issueId: beadIdArg,
 		server: serverOption,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
@@ -361,7 +361,7 @@ const devRestartCommand = Command.make(
 const devStatusCommand = Command.make(
 	"status",
 	{
-		beadId: beadIdArg,
+		issueId: beadIdArg,
 		verbose: verboseOption,
 		json: jsonOption,
 	},

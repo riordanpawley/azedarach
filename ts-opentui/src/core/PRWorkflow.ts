@@ -26,7 +26,7 @@ import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.
 import { getToolDefinition } from "./CliToolRegistry.js"
 import { FileLockManager } from "./FileLockManager.js"
 import { ImageAttachmentService } from "./ImageAttachmentService.js"
-import { getBeadSessionName } from "./paths.js"
+import { getIssueSessionName } from "./paths.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
 import { WorktreeSessionService } from "./WorktreeSessionService.js"
@@ -1155,7 +1155,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						const windowName = "merge"
-						const sessionName = getBeadSessionName(beadId)
+						const sessionName = getIssueSessionName(beadId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -1707,7 +1707,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
 						const windowName = "merge"
-						const sessionName = getBeadSessionName(beadId)
+						const sessionName = getIssueSessionName(beadId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -1983,7 +1983,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						const windowName = "merge"
-						const sessionName = getBeadSessionName(beadId)
+						const sessionName = getIssueSessionName(beadId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -2194,7 +2194,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start Claude session in a new "merge" window within the target's session
 						const windowName = "merge"
-						const sessionName = getBeadSessionName(targetBeadId)
+						const sessionName = getIssueSessionName(targetBeadId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()

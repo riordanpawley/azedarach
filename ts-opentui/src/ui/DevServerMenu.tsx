@@ -12,12 +12,12 @@ import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard } from "@opentui/react"
 import { useState } from "react"
 import type { DevServerView } from "./atoms.js"
-import { attachDevServerAtom, beadDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
+import { attachDevServerAtom, issueDevServerViewsAtom, toggleDevServerAtom } from "./atoms.js"
 import { useOverlays } from "./hooks/index.js"
 import { theme } from "./theme.js"
 
 interface Props {
-	beadId: string
+	issueId: string
 }
 
 /** Status colors for dev server states */
@@ -38,12 +38,12 @@ const statusColor = (status: DevServerView["status"]) => {
 const canAttach = (status: DevServerView["status"]) =>
 	status === "running" || status === "starting" || status === "error"
 
-export const DevServerMenu = ({ beadId }: Props) => {
+export const DevServerMenu = ({ issueId }: Props) => {
 	const { dismiss } = useOverlays()
 	const toggleDevServer = useAtomSet(toggleDevServerAtom, { mode: "promise" })
 	const attachDevServer = useAtomSet(attachDevServerAtom, { mode: "promise" })
 
-	const serverList = useAtomValue(beadDevServerViewsAtom(beadId))
+	const serverList = useAtomValue(issueDevServerViewsAtom(issueId))
 	const [selectedIndex, setSelectedIndex] = useState(0)
 
 	const selectedServer = serverList[selectedIndex]
@@ -65,7 +65,7 @@ export const DevServerMenu = ({ beadId }: Props) => {
 			case "right":
 			case "space":
 				if (selectedServer) {
-					toggleDevServer({ beadId, serverName: selectedServer.name })
+					toggleDevServer({ issueId, serverName: selectedServer.name })
 				}
 				break
 
@@ -73,7 +73,7 @@ export const DevServerMenu = ({ beadId }: Props) => {
 			case "return":
 			case "a":
 				if (selectedServer && canAttach(selectedServer.status)) {
-					attachDevServer({ beadId, serverName: selectedServer.name })
+					attachDevServer({ issueId, serverName: selectedServer.name })
 				}
 				break
 

@@ -1,59 +1,90 @@
 import { describe, expect, it } from "bun:test"
-import { decodeBeadSessionName, getBeadSessionName, parseSessionName } from "./paths.js"
+import {
+	decodeIssueSessionName,
+	getIssueSessionName,
+	issueIdsEqualForLookup,
+	normalizeIssueIdForLookup,
+	parseIssueSessionName,
+} from "./paths.js"
 
 describe("paths session naming", () => {
-	it("keeps already-safe bead IDs unchanged", () => {
-		expect(getBeadSessionName("az-05y")).toBe("az-05y")
+	it("keeps already-safe issue IDs unchanged", () => {
+		expect(getIssueSessionName("az-05y")).toBe("az-05y")
 	})
 
-	it("encodes dotted bead IDs into tmux-safe names", () => {
-		expect(getBeadSessionName("az.foo")).toBe("az_x2e_foo")
+	it("encodes dotted issue IDs into tmux-safe names", () => {
+		expect(getIssueSessionName("az.foo")).toBe("az_x2e_foo")
 	})
 
 	it("round-trips canonical encoded names", () => {
-		const beadId = "az.foo_bar"
-		const sessionName = getBeadSessionName(beadId)
-		expect(decodeBeadSessionName(sessionName)).toBe(beadId)
+		const issueId = "az.foo_bar"
+		const sessionName = getIssueSessionName(issueId)
+		expect(decodeIssueSessionName(sessionName)).toBe(issueId)
 	})
 
-	it("parses canonical encoded bead session names", () => {
-		expect(parseSessionName("az_x2e_foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+	it("parses canonical encoded issue session names", () => {
+		expect(parseIssueSessionName("az_x2e_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
 	})
 
 	it("parses AI-prefixed encoded session names", () => {
-		expect(parseSessionName("claude-az_x2e_foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+		expect(parseIssueSessionName("claude-az_x2e_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
-		expect(parseSessionName("opencode-az_x2e_foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+		expect(parseIssueSessionName("opencode-az_x2e_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
 	})
 
 	it("parses legacy raw session names", () => {
-		expect(parseSessionName("az.foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+		expect(parseIssueSessionName("az.foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
 	})
 
 	it("parses legacy underscore-normalized session names", () => {
-		expect(parseSessionName("az_foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+		expect(parseIssueSessionName("az_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
-		expect(parseSessionName("claude-az_foo")).toEqual({
-			type: "bead",
-			beadId: "az.foo",
+		expect(parseIssueSessionName("claude-az_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
 	})
 
-	it("rejects non-bead names", () => {
-		expect(parseSessionName("notasession")).toBeUndefined()
-		expect(parseSessionName("")).toBeUndefined()
+	it("rejects non-issue names", () => {
+		expect(parseIssueSessionName("notasession")).toBeUndefined()
+		expect(parseIssueSessionName("")).toBeUndefined()
+	})
+
+	it("parses Linear-style uppercase identifiers", () => {
+		expect(parseIssueSessionName("AZE-123")).toEqual({
+			type: "issue",
+			issueId: "AZE-123",
+		})
+		expect(parseIssueSessionName("claude-AZE-123")).toEqual({
+			type: "issue",
+			issueId: "AZE-123",
+		})
+	})
+})
+
+describe("paths lookup normalization", () => {
+	it("normalizes only Linear identifiers to uppercase", () => {
+		expect(normalizeIssueIdForLookup("aze-123")).toBe("AZE-123")
+		expect(normalizeIssueIdForLookup("AZE-123")).toBe("AZE-123")
+		expect(normalizeIssueIdForLookup("az-05y")).toBe("az-05y")
+	})
+
+	it("compares Linear identifiers case-insensitively for lookup", () => {
+		expect(issueIdsEqualForLookup("AZE-123", "aze-123")).toBe(true)
+		expect(issueIdsEqualForLookup("AZE-123", "AZE-124")).toBe(false)
+		expect(issueIdsEqualForLookup("az-05y", "AZ-05Y")).toBe(false)
 	})
 })

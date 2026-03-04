@@ -19,7 +19,7 @@ import {
 	drillDownEpicAtom,
 	drillDownFilteredTasksAtom,
 	drillDownPhasesAtom,
-	focusedBeadPrimaryDevServerAtom,
+	focusedIssuePrimaryDevServerAtom,
 	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
 	forkCreateEpicAtom,
@@ -217,7 +217,7 @@ export const App = () => {
 		Result.getOrElse(() => "kanban" as const),
 	)
 
-	const displayDevServer = useAtomValue(focusedBeadPrimaryDevServerAtom)
+	const displayDevServer = useAtomValue(focusedIssuePrimaryDevServerAtom)
 
 	const runningOperation = useAtomValue(focusedTaskRunningOperationAtom)
 
@@ -446,7 +446,7 @@ export const App = () => {
 			{showingProjectSelector && <ProjectSelector />}
 
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
-				<DevServerMenu beadId={currentOverlay.beadId} />
+				<DevServerMenu issueId={currentOverlay.issueId} />
 			)}
 
 			{/* Diagnostics overlay */}

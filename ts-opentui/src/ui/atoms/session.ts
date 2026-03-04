@@ -31,13 +31,13 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 		const monitor = yield* TmuxSessionMonitor
 		const manager = yield* ClaudeSessionManager
 
-		yield* monitor.start((update) =>
-			Effect.gen(function* () {
-				// Pass full session metadata for orphan recovery
-				yield* manager.updateStateFromTmux(update.beadId, update.status, {
-					sessionName: update.sessionName,
-					createdAt: update.createdAt,
-					worktreePath: update.worktreePath,
+			yield* monitor.start((update) =>
+				Effect.gen(function* () {
+					// Pass full session metadata for orphan recovery
+					yield* manager.updateStateFromTmux(update.issueId, update.status, {
+						sessionName: update.sessionName,
+						createdAt: update.createdAt,
+						worktreePath: update.worktreePath,
 					projectPath: update.projectPath,
 				})
 			}).pipe(Effect.catchAll(() => Effect.void)),

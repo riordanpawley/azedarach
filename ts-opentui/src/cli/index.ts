@@ -31,7 +31,7 @@ import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { getBeadSessionName, parseSessionName } from "../core/paths.js"
+import { getIssueSessionName, issueIdsEqualForLookup, parseIssueSessionName } from "../core/paths.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -297,7 +297,7 @@ const attachHandler = (args: {
 			yield* Console.log(`Project: ${cwd}`)
 		}
 
-		const sessionName = yield* findSessionByBeadId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(args.issueId)
 		if (!sessionName) {
 			yield* Console.error(`No session found for ${args.issueId}`)
 			yield* Console.log(`Start a new session with: az start ${args.issueId}`)
@@ -348,7 +348,7 @@ const killHandler = (args: {
 
 		yield* Console.log(`Killing session for issue: ${args.issueId}`)
 
-		const sessionName = yield* findSessionByBeadId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(args.issueId)
 		if (!sessionName) {
 			yield* Console.log(`No session found for ${args.issueId}`)
 			return
@@ -407,15 +407,15 @@ const statusHandler = (args: {
 				continue
 			}
 
-			const parsed = parseSessionName(name)
-			if (parsed?.type === "bead") {
+			const parsed = parseIssueSessionName(name)
+			if (parsed?.type === "issue") {
 				sessionCount++
 				const statusDisplay = status || "unknown"
 				const attachedDisplay = attached === "attached" ? " (attached)" : ""
-				yield* Console.log(`  ${parsed.beadId} - ${statusDisplay.toUpperCase()}${attachedDisplay}`)
+				yield* Console.log(`  ${parsed.issueId} - ${statusDisplay.toUpperCase()}${attachedDisplay}`)
 
 				if (args.verbose) {
-					if (name !== parsed.beadId) {
+					if (name !== parsed.issueId) {
 						yield* Console.log(`    Session: ${name}`)
 					}
 
@@ -494,7 +494,7 @@ const gateHandler = (args: {
 		yield* Console.log(`Running quality gates for: ${args.issueId}`)
 
 		// Find the worktree path for this task
-		const sessionName = yield* findSessionByBeadId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(args.issueId)
 		let worktreePath = ""
 
 		if (sessionName) {
@@ -680,9 +680,9 @@ const listTmuxSessionNames = Effect.gen(function* () {
 		.filter((line) => line.length > 0)
 })
 
-const findSessionByBeadId = (beadId: string) =>
+const findSessionByIssueId = (issueId: string) =>
 	Effect.gen(function* () {
-		const canonicalSessionName = getBeadSessionName(beadId)
+		const canonicalSessionName = getIssueSessionName(issueId)
 		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
 		const canonicalExitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
 			Effect.catchAll(() => Effect.succeed(1)),
@@ -694,8 +694,8 @@ const findSessionByBeadId = (beadId: string) =>
 
 		const sessionNames = yield* listTmuxSessionNames
 		for (const sessionName of sessionNames) {
-			const parsed = parseSessionName(sessionName)
-			if (parsed?.type === "bead" && parsed.beadId === beadId) {
+			const parsed = parseIssueSessionName(sessionName)
+			if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
 				return sessionName
 			}
 		}
@@ -703,17 +703,17 @@ const findSessionByBeadId = (beadId: string) =>
 		return null
 	})
 
-const findAiSessionByBeadId = (beadId: string) =>
+const findAiSessionByIssueId = (issueId: string) =>
 	Effect.gen(function* () {
-		yield* Console.log(`[DEBUG] findAiSessionByBeadId: beadId=${beadId}`)
+		yield* Console.log(`[DEBUG] findAiSessionByIssueId: issueId=${issueId}`)
 
-		const sessionName = yield* findSessionByBeadId(beadId)
+		const sessionName = yield* findSessionByIssueId(issueId)
 		if (sessionName) {
 			yield* Console.log(`[DEBUG] Found session: ${sessionName}`)
 			return sessionName
 		}
 
-		yield* Console.log(`[DEBUG] No session found for beadId=${beadId}`)
+		yield* Console.log(`[DEBUG] No session found for issueId=${issueId}`)
 		return null
 	})
 
@@ -729,7 +729,7 @@ const findAiSessionByBeadId = (beadId: string) =>
  */
 const notifyHandler = (args: {
 	readonly event: string
-	readonly beadId: string
+	readonly issueId: string
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
@@ -742,17 +742,17 @@ const notifyHandler = (args: {
 
 		const status = mapEventToStatus(args.event)
 
-		// Find the session by beadId (handles both new and legacy naming formats)
-		const sessionName = yield* findAiSessionByBeadId(args.beadId)
+		// Find the session by issue ID (handles both new and legacy naming formats)
+		const sessionName = yield* findAiSessionByIssueId(args.issueId)
 		if (!sessionName) {
 			if (args.verbose) {
-				yield* Console.log(`No session found for ${args.beadId}`)
+				yield* Console.log(`No session found for ${args.issueId}`)
 			}
 			return
 		}
 
 		if (args.verbose) {
-			yield* Console.log(`Hook: ${args.event} for ${args.beadId} → status: ${status}`)
+			yield* Console.log(`Hook: ${args.event} for ${args.issueId} → status: ${status}`)
 		}
 
 		// Update tmux session option for the Claude session
@@ -789,7 +789,7 @@ const notifyHandler = (args: {
  * - Debugging hook configuration
  */
 const hooksInstallHandler = (args: {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 }) =>
@@ -828,13 +828,13 @@ const hooksInstallHandler = (args: {
 		}
 
 		// Generate and merge hook configuration
-		const hookConfig = generateHookConfig(args.beadId)
+		const hookConfig = generateHookConfig(args.issueId)
 		const mergedSettings = deepMerge(existingSettings, hookConfig)
 
 		// Write merged settings
 		yield* fs.writeFileString(settingsPath, JSON.stringify(mergedSettings, null, "\t"))
 
-		yield* Console.log(`✓ Installed hooks for bead ${args.beadId}`)
+		yield* Console.log(`✓ Installed hooks for issue ${args.issueId}`)
 		yield* Console.log(`  File: ${settingsPath}`)
 		yield* Console.log(`  Events: pretooluse, permission_request, idle_prompt, stop, session_end`)
 
@@ -1113,14 +1113,14 @@ const eventArg = Args.text({ name: "event" }).pipe(
 )
 
 /**
- * Bead ID argument for notify command
+ * Issue ID argument for notify/hook commands
  */
-const beadIdArg = Args.text({ name: "bead-id" }).pipe(
-	Args.withDescription("Bead ID for the session (e.g., az-123)"),
+const issueIdArgForHooks = Args.text({ name: "issue-id" }).pipe(
+	Args.withDescription("Issue ID for the session (e.g., AZE-123)"),
 )
 
 /**
- * az notify <event> <bead-id> - Handle Claude Code hook notifications
+ * az notify <event> <issue-id> - Handle Claude Code hook notifications
  *
  * Called by Claude Code hooks to notify Azedarach of session state changes.
  * Sets tmux session option that TmuxSessionMonitor polls.
@@ -1129,14 +1129,14 @@ const notifyCommand = Command.make(
 	"notify",
 	{
 		event: eventArg,
-		beadId: beadIdArg,
+		issueId: issueIdArgForHooks,
 		verbose: verboseOption,
 	},
 	notifyHandler,
 ).pipe(Command.withDescription("Handle Claude Code hook notifications (internal use)"))
 
 /**
- * az hooks install <bead-id> - Install session state hooks
+ * az hooks install <issue-id> - Install session state hooks
  *
  * Installs Azedarach hooks into .claude/settings.local.json for session state detection.
  * This is automatically done when creating worktrees, but can be run manually.
@@ -1144,7 +1144,7 @@ const notifyCommand = Command.make(
 const hooksInstallCommand = Command.make(
 	"install",
 	{
-		beadId: beadIdArg,
+		issueId: issueIdArgForHooks,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
 	},
@@ -1155,7 +1155,7 @@ const hooksInstallCommand = Command.make(
  * az hooks - Parent command for hook management
  */
 const hooksCommand = Command.make("hooks", {}, () =>
-	Console.log("Usage: az hooks install <bead-id>"),
+	Console.log("Usage: az hooks install <issue-id>"),
 ).pipe(
 	Command.withDescription("Manage Claude Code hooks for session state detection"),
 	Command.withSubcommands([hooksInstallCommand]),

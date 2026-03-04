@@ -40,10 +40,10 @@ export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
 	attachDevServerAtom,
-	beadDevServerViewsAtom,
+	issueDevServerViewsAtom,
 	devServersAtom,
-	focusedBeadDevServerViewsAtom,
-	focusedBeadPrimaryDevServerAtom,
+	focusedIssueDevServerViewsAtom,
+	focusedIssuePrimaryDevServerAtom,
 	stopDevServerAtom,
 	syncDevServerStateAtom,
 	toggleDevServerAtom,

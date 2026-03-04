@@ -6,7 +6,7 @@
  * from Claude Code's native hook system.
  *
  * State detection flow:
- * 1. Claude Code hooks call `az notify <event> <beadId>`
+ * 1. Claude Code hooks call `az notify <event> <issueId>`
  * 2. `az notify` sets tmux session option `@az_status` on the Claude session
  * 3. TmuxSessionMonitor polls tmux sessions and reads their `@az_status`
  * 4. State changes trigger handler callbacks
@@ -20,7 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { parseSessionName } from "./paths.js"
+import { issueIdsEqualForLookup, parseIssueSessionName } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -35,7 +35,7 @@ export type TmuxStatus = "busy" | "waiting" | "idle"
  * Session state update from tmux polling
  */
 export interface SessionStateUpdate {
-	readonly beadId: string
+	readonly issueId: string
 	readonly status: TmuxStatus
 	readonly sessionName: string
 	/** Unix timestamp when the tmux session was created */
@@ -99,14 +99,14 @@ export interface TmuxSessionMonitorService {
 	/**
 	 * Get current status for a specific session
 	 */
-	readonly getSessionStatus: (beadId: string) => Effect.Effect<TmuxStatus | null, never>
+	readonly getSessionStatus: (issueId: string) => Effect.Effect<TmuxStatus | null, never>
 
 	/**
 	 * Get session creation time (Unix timestamp)
 	 *
 	 * Uses tmux's built-in #{session_created} variable.
 	 */
-	readonly getSessionCreatedAt: (beadId: string) => Effect.Effect<number | null, never>
+	readonly getSessionCreatedAt: (issueId: string) => Effect.Effect<number | null, never>
 
 	/**
 	 * List all active Claude sessions with their status
@@ -131,7 +131,7 @@ export interface TmuxSessionMonitorService {
  *   const fiber = yield* monitor.start((update) =>
  *     Effect.gen(function* () {
  *       const newState = mapStatusToState(update.status)
- *       yield* sessionManager.updateState(update.beadId, newState)
+ *       yield* sessionManager.updateState(update.issueId, newState)
  *     })
  *   )
  *   // Later: yield* Fiber.interrupt(fiber)
@@ -151,10 +151,10 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
 
-		// Track previous state to detect changes (beadId → {status, sessionName})
+		// Track previous state to detect changes (issueId → {status, sessionName})
 		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
 
-		const listBeadSessions = () =>
+		const listIssueSessions = () =>
 			diagnostics.measure(
 				{
 					source: "TmuxSessionMonitor",
@@ -178,14 +178,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 						.map((line) => line.trim())
 						.map((line) => {
 							const [name, createdStr] = line.split("|")
-							const parsed = parseSessionName(name ?? "")
+							const parsed = parseIssueSessionName(name ?? "")
 							return {
 								name: name ?? "",
 								createdAt: parseInt(createdStr ?? "0", 10) || 0,
 								parsed,
 							}
 						})
-						.filter((s) => s.parsed !== undefined && s.parsed.type === "bead")
+						.filter((s) => s.parsed !== undefined && s.parsed.type === "issue")
 				}).pipe(Effect.withSpan("tmux.listSessions")),
 			)
 
@@ -218,10 +218,10 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				return "busy" as const
 			})
 
-		const extractBeadId = (sessionName: string): string | null => {
-			const parsed = parseSessionName(sessionName)
-			if (parsed && parsed.type === "bead") {
-				return parsed.beadId
+		const extractIssueIdFromSession = (sessionName: string): string | null => {
+			const parsed = parseIssueSessionName(sessionName)
+			if (parsed && parsed.type === "issue") {
+				return parsed.issueId
 			}
 
 			return null
@@ -232,12 +232,12 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 */
 		const listSessions = () =>
 			Effect.gen(function* () {
-				const sessions = yield* listBeadSessions()
+				const sessions = yield* listIssueSessions()
 				const results: SessionStateUpdate[] = []
 
 				for (const session of sessions) {
-					const beadId = extractBeadId(session.name)
-					if (!beadId) continue
+					const issueId = extractIssueIdFromSession(session.name)
+					if (!issueId) continue
 
 					const status = yield* getSessionOption(session.name)
 					if (status) {
@@ -246,7 +246,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 						const projectPath = yield* getTmuxOption(session.name, "@az_project")
 
 						results.push({
-							beadId,
+							issueId: issueId,
 							status,
 							sessionName: session.name,
 							createdAt: session.createdAt,
@@ -260,17 +260,17 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 			})
 
 		/**
-		 * Find the tmux session name for a given beadId
+		 * Find the tmux session name for a given issueId
 		 *
-		 * Searches through running sessions to find one that matches the beadId.
-		 * Handles both new format (claude-{project}-{beadId}) and legacy (claude-{beadId}).
+		 * Searches through running sessions to find one that matches the issueId.
+		 * Handles both new format (claude-{project}-{issueId}) and legacy (claude-{issueId}).
 		 */
-		const findSessionByBeadId = (beadId: string) =>
+		const findSessionByIssueId = (issueId: string) =>
 			Effect.gen(function* () {
-				const sessions = yield* listBeadSessions()
+				const sessions = yield* listIssueSessions()
 				for (const session of sessions) {
-					const sessionBeadId = extractBeadId(session.name)
-					if (sessionBeadId === beadId) {
+					const sessionIssueId = extractIssueIdFromSession(session.name)
+					if (sessionIssueId !== null && issueIdsEqualForLookup(sessionIssueId, issueId)) {
 						return session.name
 					}
 				}
@@ -280,11 +280,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		/**
 		 * Get status for a specific session
 		 *
-		 * Searches for the session by beadId since we don't know the project name.
+		 * Searches for the session by issueId since we don't know the project name.
 		 */
-		const getSessionStatus = (beadId: string) =>
+		const getSessionStatus = (issueId: string) =>
 			Effect.gen(function* () {
-				const sessionName = yield* findSessionByBeadId(beadId)
+				const sessionName = yield* findSessionByIssueId(issueId)
 				if (!sessionName) return null
 				return yield* getSessionOption(sessionName)
 			})
@@ -293,11 +293,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 		 * Get session creation time (Unix timestamp)
 		 * Uses tmux's built-in #{session_created} variable.
 		 *
-		 * Searches for the session by beadId since we don't know the project name.
+		 * Searches for the session by issueId since we don't know the project name.
 		 */
-		const getSessionCreatedAt = (beadId: string) =>
+		const getSessionCreatedAt = (issueId: string) =>
 			Effect.gen(function* () {
-				const sessionName = yield* findSessionByBeadId(beadId)
+				const sessionName = yield* findSessionByIssueId(issueId)
 				if (!sessionName) return null
 
 				const command = Command.make(
@@ -326,7 +326,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				const initialSessions = yield* listSessions()
 				const initialMap = new Map<string, PreviousSessionState>()
 				for (const session of initialSessions) {
-					initialMap.set(session.beadId, {
+					initialMap.set(session.issueId, {
 						status: session.status,
 						sessionName: session.sessionName,
 					})
@@ -347,29 +347,29 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					const newState = new Map<string, PreviousSessionState>()
 
 					for (const session of sessions) {
-						newState.set(session.beadId, {
+						newState.set(session.issueId, {
 							status: session.status,
 							sessionName: session.sessionName,
 						})
 
-						const prevState = previousState.get(session.beadId)
+						const prevState = previousState.get(session.issueId)
 						if (prevState === undefined || prevState.status !== session.status) {
 							// State changed - call handler
 							yield* Effect.log(
-								`TmuxSessionMonitor: ${session.beadId} status changed: ${prevState?.status ?? "none"} → ${session.status}`,
+								`TmuxSessionMonitor: ${session.issueId} status changed: ${prevState?.status ?? "none"} → ${session.status}`,
 							)
 							yield* handler(session)
 						}
 					}
 
 					// Check for sessions that disappeared (session ended)
-					for (const [beadId, prevState] of previousState.entries()) {
-						if (!newState.has(beadId)) {
+					for (const [issueId, prevState] of previousState.entries()) {
+						if (!newState.has(issueId)) {
 							// Session disappeared - treat as idle
 							// Use the sessionName we stored, createdAt is 0 and paths are null
-							yield* Effect.log(`TmuxSessionMonitor: ${beadId} session ended`)
+							yield* Effect.log(`TmuxSessionMonitor: ${issueId} session ended`)
 							yield* handler({
-								beadId,
+								issueId,
 								status: "idle",
 								sessionName: prevState.sessionName,
 								createdAt: 0,

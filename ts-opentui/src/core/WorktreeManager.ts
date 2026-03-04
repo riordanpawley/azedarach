@@ -551,6 +551,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			const entries = output.split("\n\n").filter((entry) => entry.trim())
 			const worktrees: Worktree[] = []
 			const normalizedProjectPath = pathService.resolve(projectPath)
+			const projectName = pathService.basename(normalizedProjectPath)
+			const projectNamePrefix = `${projectName}-`
 
 			for (const entry of entries) {
 				const lines = entry.split("\n")
@@ -571,15 +573,18 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					}
 				}
 
+				const normalizedPath = pathService.resolve(path)
 				let beadId = branch
 				if (!beadId) {
-					const pathParts = path.split("/")
-					const lastPart = pathParts[pathParts.length - 1]
-					const match = lastPart?.match(/-([a-z]+-[a-z0-9]+)$/i)
-					beadId = match?.[1] || ""
+					const lastPart = pathService.basename(normalizedPath)
+					if (lastPart.startsWith(projectNamePrefix) && lastPart.length > projectNamePrefix.length) {
+						beadId = lastPart.slice(projectNamePrefix.length)
+					} else {
+						const match = lastPart.match(/-([A-Za-z0-9]+[.-][A-Za-z0-9._-]+)$/)
+						beadId = match?.[1] ?? ""
+					}
 				}
 
-				const normalizedPath = pathService.resolve(path)
 				if (beadId && normalizedPath !== normalizedProjectPath) {
 					worktrees.push({ path, beadId, branch, isLocked, head })
 				}

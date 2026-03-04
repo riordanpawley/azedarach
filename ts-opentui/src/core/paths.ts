@@ -1,13 +1,13 @@
 /**
  * Pure path utility functions that don't require Path service
  *
- * Session naming convention: canonical tmux-safe encoding of beadId
- * - Each bead has exactly one tmux session (with backwards-compatible parsing)
+ * Session naming convention: canonical tmux-safe encoding of issueId
+ * - Each issue has exactly one tmux session (with backwards-compatible parsing)
  * - Windows within the session handle different concerns (code, dev, etc.)
  */
 
 /**
- * Standard window names for bead sessions
+ * Standard window names for issue sessions
  */
 export const WINDOW_NAMES = {
 	CODE: "code",
@@ -63,20 +63,20 @@ const encodeSessionChar = (char: string): string => {
 }
 
 /**
- * Generate canonical tmux session name for a bead.
+ * Generate canonical tmux session name for an issue.
  *
- * Tmux session names must be shell-safe and cannot rely on raw bead IDs
+ * Tmux session names must be shell-safe and cannot rely on raw issue IDs
  * containing punctuation (for example, dots). We keep the mapping bijective
  * by escaping unsupported characters as _x<hex>_ tokens.
  */
-export function getBeadSessionName(beadId: string): string {
-	return [...beadId].map(encodeSessionChar).join("")
+export function getIssueSessionName(issueId: string): string {
+	return [...issueId].map(encodeSessionChar).join("")
 }
 
 /**
- * Decode a canonical tmux bead session name back to the original bead ID.
+ * Decode a canonical tmux issue session name back to the original issue ID.
  */
-export function decodeBeadSessionName(sessionName: string): string {
+export function decodeIssueSessionName(sessionName: string): string {
 	return sessionName.replace(/_x([0-9a-f]+)_/gi, (_full, hex: string) => {
 		const codepoint = Number.parseInt(hex, 16)
 		if (!Number.isFinite(codepoint)) {
@@ -94,36 +94,37 @@ export function decodeBeadSessionName(sessionName: string): string {
 /**
  * Session types that can be parsed from tmux session names
  */
-export type SessionType = "bead"
+export type SessionType = "issue"
 
 /**
  * AI session prefixes used for tmux sessions
  */
 export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
 
-const BEAD_ID_PATTERN = /^[A-Za-z0-9]+[.-][A-Za-z0-9._-]+$/
+const ISSUE_ID_PATTERN = /^[A-Za-z0-9]+[.-][A-Za-z0-9._-]+$/
+const LINEAR_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9]*-[0-9]+$/
 
-const decodeLegacyNormalizedBeadId = (sessionName: string): string | undefined => {
+const decodeLegacyNormalizedIssueId = (sessionName: string): string | undefined => {
 	if (sessionName.includes(".") || !sessionName.includes("_")) {
 		return undefined
 	}
 
-	const legacyDotBeadId = sessionName.replaceAll("_", ".")
-	if (BEAD_ID_PATTERN.test(legacyDotBeadId)) {
-		return legacyDotBeadId
+	const legacyDotIssueId = sessionName.replaceAll("_", ".")
+	if (ISSUE_ID_PATTERN.test(legacyDotIssueId)) {
+		return legacyDotIssueId
 	}
 
 	return undefined
 }
 
 /**
- * Parse a session name to extract type and beadId
+ * Parse a session name to extract type and issueId
  *
  * Returns undefined if the session name doesn't match the expected format.
  */
-export function parseSessionName(
+export function parseIssueSessionName(
 	sessionName: string,
-): { type: SessionType; beadId: string } | undefined {
+): { type: SessionType; issueId: string } | undefined {
 	const aiPrefix = AI_SESSION_PREFIXES.find((prefix) => sessionName.startsWith(prefix))
 	const withoutPrefix = aiPrefix ? sessionName.slice(aiPrefix.length) : sessionName
 
@@ -131,32 +132,53 @@ export function parseSessionName(
 		return undefined
 	}
 
-	const beadId = decodeBeadSessionName(withoutPrefix)
-	const legacyNormalizedBeadId = decodeLegacyNormalizedBeadId(beadId)
-	if (legacyNormalizedBeadId) {
-		return { type: "bead", beadId: legacyNormalizedBeadId }
+	const issueId = decodeIssueSessionName(withoutPrefix)
+	const legacyNormalizedIssueId = decodeLegacyNormalizedIssueId(issueId)
+	if (legacyNormalizedIssueId) {
+		return { type: "issue", issueId: legacyNormalizedIssueId }
 	}
 
-	if (BEAD_ID_PATTERN.test(beadId)) {
-		return { type: "bead", beadId }
+	if (ISSUE_ID_PATTERN.test(issueId)) {
+		return { type: "issue", issueId }
 	}
 
 	return undefined
 }
 
 /**
- * Compute the worktree path for a bead
+ * Normalize issue IDs for lookup comparisons.
+ *
+ * Linear identifiers are case-insensitive in practice (`AZE-123`), so we
+ * normalize just that shape. Other issue ID formats preserve original case.
+ */
+export function normalizeIssueIdForLookup(issueId: string): string {
+	if (LINEAR_IDENTIFIER_PATTERN.test(issueId)) {
+		return issueId.toUpperCase()
+	}
+
+	return issueId
+}
+
+/**
+ * Compare issue IDs in a lookup-safe way.
+ */
+export function issueIdsEqualForLookup(left: string, right: string): boolean {
+	return normalizeIssueIdForLookup(left) === normalizeIssueIdForLookup(right)
+}
+
+/**
+ * Compute the worktree path for an issue
  *
  * Worktrees are created as siblings to the project directory:
- * ../ProjectName-beadId/
+ * ../ProjectName-issueId/
  *
  * @param projectPath - Absolute path to the project directory
- * @param beadId - The bead ID
+ * @param issueId - The issue ID
  * @returns Absolute path to the worktree directory
  */
-export function getWorktreePath(projectPath: string, beadId: string): string {
+export function getWorktreePath(projectPath: string, issueId: string): string {
 	const lastSlash = projectPath.lastIndexOf("/")
 	const parentDir = projectPath.slice(0, lastSlash)
 	const projectName = projectPath.slice(lastSlash + 1)
-	return `${parentDir}/${projectName}-${beadId}`
+	return `${parentDir}/${projectName}-${issueId}`
 }

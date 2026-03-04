@@ -19,9 +19,10 @@ import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
-	getBeadSessionName,
+	getIssueSessionName,
 	getWorktreePath,
-	parseSessionName,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
 	WINDOW_NAMES,
 } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
@@ -362,33 +363,33 @@ What would you like to discuss?`
 						)
 				})
 
-			const findAiSession = (beadId: string) =>
-				Effect.gen(function* () {
-					const canonicalSessionName = getBeadSessionName(beadId)
-					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
-					if (hasCanonicalSession) {
-						return canonicalSessionName
-					}
-
-					const sessions = yield* tmux.listSessions()
-					for (const session of sessions) {
-						const parsed = parseSessionName(session.name)
-						if (parsed?.type === "bead" && parsed.beadId === beadId) {
-							return session.name
+				const findAiSession = (issueId: string) =>
+					Effect.gen(function* () {
+						const canonicalSessionName = getIssueSessionName(issueId)
+						const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
+						if (hasCanonicalSession) {
+							return canonicalSessionName
 						}
-					}
+
+						const sessions = yield* tmux.listSessions()
+						for (const session of sessions) {
+							const parsed = parseIssueSessionName(session.name)
+							if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
+								return session.name
+							}
+						}
 
 					return null
 				})
 
-			const doAttach = (beadId: string) =>
-				Effect.gen(function* () {
-					const sessionName = yield* findAiSession(beadId)
-					if (!sessionName) {
-						yield* toast.show("error", `No session for ${beadId} - press Space+s to start`)
-						return
-					}
-					yield* attachment.attachExternal(sessionName)
+				const doAttach = (issueId: string) =>
+					Effect.gen(function* () {
+						const sessionName = yield* findAiSession(issueId)
+						if (!sessionName) {
+							yield* toast.show("error", `No session for ${issueId} - press Space+s to start`)
+							return
+						}
+						yield* attachment.attachExternal(sessionName)
 					yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
 				}).pipe(
 					Effect.catchAll((error) => {
@@ -623,7 +624,7 @@ What would you like to discuss?`
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
 					const shell = sessionConfig.shell
 					const existingSessionName = yield* findAiSession(task.id)
-					const sessionName = existingSessionName ?? getBeadSessionName(task.id)
+					const sessionName = existingSessionName ?? getIssueSessionName(task.id)
 
 					// Check if session already exists
 					const hasSession = yield* tmux.hasSession(sessionName)

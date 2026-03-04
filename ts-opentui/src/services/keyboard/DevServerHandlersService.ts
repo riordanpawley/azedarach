@@ -62,7 +62,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 					if (serverNames.length > 1) {
 						// Multiple servers: show unified overlay
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+						yield* overlay.push({ _tag: "devServerMenu", issueId: task.id })
 					} else {
 						// Single server: toggle directly
 						const serverName = serverNames[0]
@@ -119,7 +119,7 @@ export class DevServerHandlersService extends Effect.Service<DevServerHandlersSe
 
 					if (serverNames.length > 1) {
 						// Multiple servers: show unified overlay (user can toggle from there)
-						yield* overlay.push({ _tag: "devServerMenu", beadId: task.id })
+						yield* overlay.push({ _tag: "devServerMenu", issueId: task.id })
 					} else {
 						// Single server: restart directly
 						const serverName = serverNames[0]

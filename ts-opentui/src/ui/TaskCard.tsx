@@ -4,7 +4,7 @@
 
 import { useAtomValue } from "@effect-atom/atom-react"
 import type { DevServerView } from "./atoms.js"
-import { beadDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
+import { issueDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -90,7 +90,7 @@ export const TaskCard = (props: TaskCardProps) => {
 		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
 		: ""
 
-	const devServers = useAtomValue(beadDevServerViewsAtom(props.task.id)) as DevServerView[]
+	const devServers = useAtomValue(issueDevServerViewsAtom(props.task.id)) as DevServerView[]
 	const hasDevServer = devServers.some((s) => s.status === "running" || s.status === "starting")
 
 	// Get context health border color based on contextPercent

@@ -49,7 +49,7 @@ export const focusedTaskIdAtom = appRuntime.subscriptionRef(
 	}),
 )
 
-export const beadDevServerViewsAtom = (beadId: string) =>
+export const issueDevServerViewsAtom = (issueId: string) =>
 	Atom.readable((get) => {
 		const serversResult = get(devServersAtom)
 		const configResult = get(appConfigAtom)
@@ -58,7 +58,7 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 			return [] as DevServerView[]
 		}
 
-		const runningServers = HashMap.get(serversResult.value, beadId).pipe(
+		const runningServers = HashMap.get(serversResult.value, issueId).pipe(
 			Option.getOrElse(() => HashMap.empty<string, DevServerState>()),
 		)
 
@@ -109,12 +109,12 @@ export const beadDevServerViewsAtom = (beadId: string) =>
 		return views
 	})
 
-export const focusedBeadDevServerViewsAtom = Atom.readable((get) => {
+export const focusedIssueDevServerViewsAtom = Atom.readable((get) => {
 	const focusedIdResult = get(focusedTaskIdAtom)
 	if (!Result.isSuccess(focusedIdResult) || !focusedIdResult.value) {
 		return [] as DevServerView[]
 	}
-	return get(beadDevServerViewsAtom(focusedIdResult.value))
+	return get(issueDevServerViewsAtom(focusedIdResult.value))
 })
 
 const IDLE_VIEW: DevServerView = {
@@ -123,8 +123,8 @@ const IDLE_VIEW: DevServerView = {
 	isConfigured: false,
 }
 
-export const focusedBeadPrimaryDevServerAtom = Atom.readable((get) => {
-	const views = get(focusedBeadDevServerViewsAtom)
+export const focusedIssuePrimaryDevServerAtom = Atom.readable((get) => {
+	const views = get(focusedIssueDevServerViewsAtom)
 	const running = views.find((v) => v.status === "running" || v.status === "starting")
 	if (running) return running
 
@@ -132,25 +132,25 @@ export const focusedBeadPrimaryDevServerAtom = Atom.readable((get) => {
 	return defaultSrv ?? views[0] ?? IDLE_VIEW
 })
 
-export const toggleDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
+export const toggleDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
 	Effect.gen(function* () {
 		const svc = yield* DevServerService
 		const projectService = yield* ProjectService
 		const project = yield* projectService.requireCurrentProject()
 		const path = project.path
 
-		return yield* svc.toggle(args.beadId, path, args.serverName)
+		return yield* svc.toggle(args.issueId, path, args.serverName)
 	}),
 )
 
-export const attachDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
+export const attachDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
 	Effect.gen(function* () {
 		const devServer = yield* DevServerService
 		const tmux = yield* TmuxService
 		const toast = yield* ToastService
 
 		// Get the server state for the specific server
-		const serverState = yield* devServer.getStatus(args.beadId, args.serverName)
+		const serverState = yield* devServer.getStatus(args.issueId, args.serverName)
 
 		if (serverState.status !== "running" && serverState.status !== "starting") {
 			yield* toast.show("error", `Dev server ${args.serverName} is not running`)
@@ -177,19 +177,19 @@ export const attachDevServerAtom = appRuntime.fn((args: { beadId: string; server
 	}),
 )
 
-export const stopDevServerAtom = appRuntime.fn((args: { beadId: string; serverName: string }) =>
+export const stopDevServerAtom = appRuntime.fn((args: { issueId: string; serverName: string }) =>
 	Effect.gen(function* () {
 		const svc = yield* DevServerService
-		return yield* svc.stop(args.beadId, args.serverName)
+		return yield* svc.stop(args.issueId, args.serverName)
 	}),
 )
 
-export const syncDevServerStateAtom = appRuntime.fn((beadId: string) =>
+export const syncDevServerStateAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const svc = yield* DevServerService
-		const servers = yield* svc.getBeadServers(beadId)
+		const servers = yield* svc.getIssueServers(issueId)
 		for (const [name] of HashMap.entries(servers)) {
-			yield* svc.syncState(beadId, name)
+			yield* svc.syncState(issueId, name)
 		}
 	}),
 )
