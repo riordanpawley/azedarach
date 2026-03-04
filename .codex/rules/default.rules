@@ -1,0 +1,7 @@
+prefix_rule(pattern=["gh"], decision="allow")
+prefix_rule(pattern=["git", "add"], decision="allow")
+prefix_rule(pattern=["git", "commit"], decision="allow")
+prefix_rule(pattern=["git", "push"], decision="allow")
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach", "add"], decision="allow")
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach", "commit"], decision="allow")
+prefix_rule(pattern=["git", "-C", "/Users/riordan/prog/azedarach", "push"], decision="allow")
