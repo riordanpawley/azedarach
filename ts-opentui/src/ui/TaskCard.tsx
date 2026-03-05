@@ -3,6 +3,7 @@
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
+import type { MouseEvent } from "@opentui/core"
 import type { DevServerView } from "./atoms.js"
 import { issueDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
@@ -73,6 +74,8 @@ export interface TaskCardProps {
 	isMergeSource?: boolean
 	/** Whether this task is blocked by other tasks (phase > 1 in drill-down) */
 	isBlocked?: boolean
+	/** Mouse handler from parent board for focus/open actions */
+	onMouseDown?: (taskId: string, event: MouseEvent) => void
 }
 
 /**
@@ -250,6 +253,7 @@ export const TaskCard = (props: TaskCardProps) => {
 	}
 
 	return (
+		// biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target.
 		<box
 			borderStyle={getBorderStyle()}
 			border={true}
@@ -259,6 +263,7 @@ export const TaskCard = (props: TaskCardProps) => {
 			paddingRight={1}
 			height={TASK_CARD_HEIGHT}
 			flexDirection="column"
+			onMouseDown={(event) => props.onMouseDown?.(props.task.id, event)}
 		>
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>

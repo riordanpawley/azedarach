@@ -76,6 +76,7 @@ import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
+import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 
 // ============================================================================
@@ -1872,7 +1873,7 @@ const DEFAULT_OPENCODE_CONFIG = {
  *
  * - Creates/updates opencode.json with recommended plugins
  * - Generates SKILL.md wrappers from .claude/skills if present
- * - Installs azedarach plugin globally if not present
+ * - Checks for globally installed opencode-az plugin
  */
 const opencodeInitHandler = (args: {
 	readonly projectDir: Option.Option<string>
@@ -1886,13 +1887,11 @@ const opencodeInitHandler = (args: {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const opencodeJsonPath = pathService.join(cwd, "opencode.json")
 		const claudeSkillsDir = pathService.join(cwd, ".claude", "skills")
-		const globalPluginDir = pathService.join(
-			process.env.HOME ?? "~",
-			".config",
-			"opencode",
-			"plugin",
-		)
-		const globalPluginPath = pathService.join(globalPluginDir, "azedarach.js")
+		const configHome =
+			process.env.XDG_CONFIG_HOME ??
+			(process.env.HOME ? pathService.join(process.env.HOME, ".config") : pathService.join(cwd, ".config"))
+		const globalPluginDir = pathService.join(configHome, "opencode", "plugins")
+		const globalPluginPath = pathService.join(globalPluginDir, OPENCODE_AZ_PLUGIN_FILENAME)
 
 		yield* Console.log("🚀 Initializing OpenCode support...")
 		yield* Console.log("")
@@ -1925,15 +1924,14 @@ const opencodeInitHandler = (args: {
 			yield* Console.log(`  Plugins: ${config.plugins.join(", ")}`)
 		}
 
-		// Step 2: Check/install global azedarach plugin
+		// Step 2: Check/install global opencode-az plugin
 		const globalPluginExists = yield* fs.exists(globalPluginPath)
 		if (!globalPluginExists) {
 			yield* Console.log("")
-			yield* Console.log("! Global azedarach plugin not found")
-			yield* Console.log(`  Install with: mkdir -p ${globalPluginDir}`)
-			yield* Console.log(`  Then copy azedarach.js from an existing project's .opencode/plugin/`)
+			yield* Console.log("! Global opencode-az plugin not found")
+			yield* Console.log("  Install with: az opencode plugin install")
 		} else {
-			yield* Console.log("✓ Global azedarach plugin found")
+			yield* Console.log("✓ Global opencode-az plugin found")
 		}
 
 		// Step 3: Generate skill wrappers if .claude/skills exists
@@ -1981,9 +1979,10 @@ const opencodeInitHandler = (args: {
 		yield* Console.log("✅ OpenCode setup complete!")
 		yield* Console.log("")
 		yield* Console.log("Next steps:")
-		yield* Console.log("  1. Install opencode-beads: npm install -g opencode-beads")
-		yield* Console.log("  2. Install opencode-skills: npm install -g opencode-skills")
-		yield* Console.log("  3. Run: opencode")
+		yield* Console.log("  1. Install AZ plugin: az opencode plugin install")
+		yield* Console.log("  2. Install opencode-beads: npm install -g opencode-beads")
+		yield* Console.log("  3. Install opencode-skills: npm install -g opencode-skills")
+		yield* Console.log("  4. Run: opencode")
 	})
 
 /**
@@ -2001,14 +2000,101 @@ const opencodeInitCommand = Command.make(
 	opencodeInitHandler,
 ).pipe(Command.withDescription("Initialize OpenCode support in a project"))
 
+const opencodePluginInstallHandler = (args: {
+	readonly globalDir: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const cwd = process.cwd()
+		const defaultConfigHome =
+			process.env.XDG_CONFIG_HOME ??
+			(process.env.HOME ? pathService.join(process.env.HOME, ".config") : pathService.join(cwd, ".config"))
+		const defaultGlobalDir = pathService.join(defaultConfigHome, "opencode", "plugins")
+		const globalDir = Option.getOrElse(args.globalDir, () => defaultGlobalDir)
+		const globalPluginPath = pathService.join(globalDir, OPENCODE_AZ_PLUGIN_FILENAME)
+		const legacyGlobalPluginPath = pathService.join(globalDir, "opencode-linear-cli.js")
+
+		yield* fs.makeDirectory(globalDir, { recursive: true })
+
+		const existingGlobalPlugin = yield* fs.exists(globalPluginPath)
+		const needsGlobalWrite = existingGlobalPlugin
+			? (yield* fs.readFileString(globalPluginPath)) !== OPENCODE_AZ_PLUGIN_SOURCE
+			: true
+
+		if (needsGlobalWrite) {
+			yield* fs.writeFileString(globalPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)
+			yield* Console.log(`✓ Installed global plugin: ${globalPluginPath}`)
+		} else {
+			yield* Console.log(`✓ Global plugin already up to date: ${globalPluginPath}`)
+		}
+
+		if (yield* fs.exists(legacyGlobalPluginPath)) {
+			yield* fs.remove(legacyGlobalPluginPath, { force: true }).pipe(Effect.ignore)
+			yield* Console.log(`✓ Removed legacy global plugin: ${legacyGlobalPluginPath}`)
+		}
+
+		if (Option.isSome(args.projectDir)) {
+			const projectPluginsDir = pathService.join(args.projectDir.value, ".opencode", "plugins")
+			const projectPluginPath = pathService.join(projectPluginsDir, OPENCODE_AZ_PLUGIN_FILENAME)
+			const legacyProjectPluginPath = pathService.join(projectPluginsDir, "opencode-linear-cli.js")
+
+			yield* fs.makeDirectory(projectPluginsDir, { recursive: true })
+
+			const existingProjectPlugin = yield* fs.exists(projectPluginPath)
+			const needsProjectWrite = existingProjectPlugin
+				? (yield* fs.readFileString(projectPluginPath)) !== OPENCODE_AZ_PLUGIN_SOURCE
+				: true
+
+			if (needsProjectWrite) {
+				yield* fs.writeFileString(projectPluginPath, OPENCODE_AZ_PLUGIN_SOURCE)
+				yield* Console.log(`✓ Installed project plugin: ${projectPluginPath}`)
+			} else {
+				yield* Console.log(`✓ Project plugin already up to date: ${projectPluginPath}`)
+			}
+
+			if (yield* fs.exists(legacyProjectPluginPath)) {
+				yield* fs.remove(legacyProjectPluginPath, { force: true }).pipe(Effect.ignore)
+				yield* Console.log(`✓ Removed legacy project plugin: ${legacyProjectPluginPath}`)
+			}
+		} else if (args.verbose) {
+			yield* Console.log("i No --project-dir provided; only global plugin installed")
+		}
+	})
+
+const opencodePluginInstallCommand = Command.make(
+	"install",
+	{
+		globalDir: Options.directory("global-dir").pipe(
+			Options.optional,
+			Options.withDescription("Global plugin directory (default: ~/.config/opencode/plugins)"),
+		),
+		projectDir: Options.directory("project-dir").pipe(
+			Options.optional,
+			Options.withDescription("Optional project root to install .opencode/plugins/opencode-az.js"),
+		),
+		verbose: verboseOption,
+	},
+	opencodePluginInstallHandler,
+).pipe(Command.withDescription("Install opencode-az plugin from embedded az CLI source"))
+
+const opencodePluginCommand = Command.make("plugin", {}, () =>
+	Console.log("Usage: az opencode plugin install [--global-dir <dir>] [--project-dir <dir>]"),
+).pipe(
+	Command.withDescription("Manage opencode-az plugin installation"),
+	Command.withSubcommands([opencodePluginInstallCommand]),
+)
+
 /**
  * az opencode - Parent command for OpenCode integration
  */
 const opencodeCommand = Command.make("opencode", {}, () =>
-	Console.log("Usage: az opencode init [project-dir]"),
+	Console.log("Usage: az opencode <init|plugin>"),
 ).pipe(
 	Command.withDescription("OpenCode integration commands"),
-	Command.withSubcommands([opencodeInitCommand]),
+	Command.withSubcommands([opencodeInitCommand, opencodePluginCommand]),
 )
 
 /**

@@ -25,6 +25,7 @@
 | [Hooks Installation](hooks-installation.md) | How az installs session state hooks |
 | [tmux Guide](tmux-guide.md) | **New to tmux?** Start here! |
 | [tmux Config](tmux-config.md) | Recommended tmux configuration + cheatsheet |
+| [Install Guide](install.md) | Fast coworker install path + brew tap feasibility notes |
 | [Services Architecture](services.md) | Effect services and architecture |
 | [Testing Guide](testing.md) | How to test each feature |
 
