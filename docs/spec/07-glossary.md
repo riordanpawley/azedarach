@@ -26,7 +26,7 @@
 - Tombstone issue record: logically deleted issue record retained for audit/history metadata and optional include-deleted query surfaces.
 - Epic: issue that groups child issues for scoped drill-down and progress tracking; one relationship type among many possible dependencies.
 - Drill-down: focused board mode showing only children of selected epic.
-- Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).
+- Dependency edge: typed directed relationship between issues (for example blocking, blocked-by, discovered-from, parent-child, related).
 - Dependency graph: full set of issue nodes and dependency edges; not restricted to a tree.
 - Dependency relation type key: canonical CLI/schema key representing one directed dependency class (for example `blocking`, `blocked-by`, `parent-child`, `discovered-from`).
 - Dependency projection mode: `az show` dependency output shape selector (`none`, `counts`, `direct`, `verbose`).

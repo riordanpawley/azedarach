@@ -145,7 +145,7 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 ### Case F-041: Active selections contain hidden items after filter change
 
 - Required behavior:
-  - preserve selection by ID but clearly indicate hidden count OR clear with warning (must be consistent by profile).
+- preserve selection by ID, clearly indicate hidden count, and provide explicit clear path.
 
 ### Case F-042: Overlay opens while another modal pending
 

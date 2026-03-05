@@ -122,7 +122,7 @@ Internal ID policy:
 ### D-06 Dependency Edge
 
 - directed relationship between two issues
-- supports multiple relation types (for example: blocks, depends-on, discovered-from, parent-child, related)
+- supports multiple relation types (for example: blocking, blocked-by, discovered-from, parent-child, related)
 - dependency model is graph-based and MUST NOT be limited to a single parent/child tree
 
 ## 1.7 Status Taxonomy

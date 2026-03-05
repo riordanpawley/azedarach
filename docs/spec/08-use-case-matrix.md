@@ -505,7 +505,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: open issue detail on non-epic issue
 - Expected: typed incoming/outgoing dependency edges are visible
 
-### UC-DEP-002 Add blocks relation between sibling tasks
+### UC-DEP-002 Add blocking relation between sibling tasks
 
 - Trigger: dependency add flow from source task to target task
 - Expected: relation persists and target/source readiness state updates

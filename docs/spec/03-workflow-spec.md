@@ -647,10 +647,10 @@ Rules:
 
 Dependency handling is graph-oriented and includes, but is not limited to, epic parent/child links.
 
-Canonical upstream relation direction (source -> target):
+Canonical relation direction (source -> target):
 
-- `blocks`: blocker -> blocked
-- `depends-on`: dependency -> dependent
+- `blocking`: blocker -> blocked
+- `blocked-by`: blocked issue -> blocker
 - `parent-child`: parent -> child
 - `discovered-from`: discovered source -> discovered issue
 - `related`: non-directional for visibility; NOT upstream-eligible unless explicitly promoted by policy
@@ -708,7 +708,7 @@ Parent drill-down shortcut:
 
 Relation readiness policy (default contract):
 
-- `blocks` / `depends-on`: source SHOULD be `closed` unless override policy allows `in_progress`
+- `blocking` / `blocked-by`: source SHOULD be `closed` unless override policy allows `in_progress`
 - `parent-child`: source MAY be `in_progress` when child continuation is intentional
 - `discovered-from`: source MAY be `in_progress` when linking exploratory follow-on work
 - `related`: no default follow-on merge eligibility unless explicitly elevated by policy

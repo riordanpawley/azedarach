@@ -161,7 +161,7 @@ Canonical fixture profile names:
 - Preconditions: select multiple issues where one targeted mutation is forced to fail.
 - Steps: execute bulk-compatible action.
 - Expected: successful items complete; failed item is explicitly reported with per-item context.
-- Links: AZ-FR-0408.
+- Links: AZ-FR-0408, AZ-FR-1205.
 
 ## 6.6 Search/Filter/Sort Acceptance
 
@@ -484,7 +484,7 @@ Canonical fixture profile names:
 
 - Steps: inject malformed metadata, open detail panel.
 - Expected: unaffected attachments remain usable; repair hint shown.
-- Links: section 05 F-062.
+- Links: AZ-FR-1609, section 05 F-062.
 
 ### AZ-AT-1504 Transient dependency retry and retry-exhausted guidance
 
@@ -786,7 +786,7 @@ Canonical fixture profile names:
 - Expected: parent preselected as upstream source for merge/fork with explicit override option.
 - Links: AZ-FR-1405, AZ-FR-3603, AZ-FR-3604.
 
-## 6.27 Optimistic Mutation Acceptance
+## 6.27 Optimistic Mutation and Top-Level Az CLI Acceptance
 
 ### AZ-AT-2501 Optimistic move success path
 
@@ -917,7 +917,7 @@ Canonical fixture profile names:
 ### AZ-AT-2842 Dependency command contract (`az dep add/remove/list/tree/cycles`)
 
 - Preconditions: fixture includes valid and invalid dependency references plus at least one cycle candidate.
-- Steps: run `az dep add`, `az dep remove`, `az dep list`, `az dep tree`, and `az dep cycles` in JSON mode.
+- Steps: run `az dep add <source-id> <target-id> --type <relation-type>`, `az dep remove <source-id> <target-id> --type <relation-type>`, `az dep list`, `az dep tree`, and `az dep cycles` in JSON mode.
 - Expected: dependency mutations and inspections are deterministic, scoped to canonical local graph, and produce actionable diagnostics for invalid references.
 - Links: AZ-FR-4215, AZ-FR-4216, AZ-FR-4217, AZ-FR-4218, AZ-FR-4219, AZ-FR-4223, AZ-FR-4225, section 05 F-210.
 
@@ -1334,7 +1334,7 @@ Canonical fixture profile names:
 
 A release candidate MUST pass:
 
-- all scenarios AZ-AT-0001 through AZ-AT-1003
+- all scenarios currently defined in sections 6.2 through 6.12 (IDs are non-contiguous; missing IDs are not implied requirements)
 - at least one scenario in each remaining feature area
 - all failure scenarios tagged high-risk (merge/cleanup/pr/session attach)
 - all guardrail/reconciliation scenarios AZ-AT-2001 through AZ-AT-2005

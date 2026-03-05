@@ -522,8 +522,8 @@ Machine-readable JSON envelope details are normative in section 12.
 - AZ-FR-4212: The product MUST expose `az search "<query>" ...` for full-text issue retrieval.
 - AZ-FR-4213: The product MUST expose `az stale ...` for stale-issue discovery.
 - AZ-FR-4214: The product MUST expose `az count ...` including grouping flags (for example `--by status`).
-- AZ-FR-4215: The product MUST expose `az dep add <child-id> <parent-id> ...` for dependency creation.
-- AZ-FR-4216: The product MUST expose `az dep remove <child-id> <parent-id> ...` for dependency removal.
+- AZ-FR-4215: The product MUST expose `az dep add <source-id> <target-id> --type <relation-type> ...` for dependency creation.
+- AZ-FR-4216: The product MUST expose `az dep remove <source-id> <target-id> --type <relation-type> ...` for dependency removal.
 - AZ-FR-4217: The product MUST expose `az dep list <issue-id> ...` for dependency inspection.
 - AZ-FR-4218: The product MUST expose `az dep tree <issue-id> ...` for dependency tree visualization.
 - AZ-FR-4219: The product MUST expose `az dep cycles ...` for cycle detection.
