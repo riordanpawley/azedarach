@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto"
-import { execFileSync } from "node:child_process"
+import { FileSystem, Path, PlatformConfigProvider } from "@effect/platform"
 import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
-import { Config, Data, Effect, Option, Ref, Request, RequestResolver } from "effect"
+import { Config, ConfigProvider, Data, Effect, Option, Ref, Request, RequestResolver } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
 	LocalIssueStore,
-	LocalIssueStoreError,
+	type LocalIssueStoreError,
 	type ExternalIssueSnapshot,
 	type PendingSyncItem,
 	type SyncOperation,
@@ -38,7 +38,7 @@ interface LinearRuntime {
 	readonly defaultProject: string | undefined
 }
 
-type ApiKeySource = "direnv" | "process-env" | "none"
+type ApiKeySource = "config-provider" | "none"
 
 interface ApiKeyCacheEntry {
 	readonly apiKey: string | undefined
@@ -281,32 +281,14 @@ const getEffectiveProjectPath = (cwd: string | undefined): string => {
 	return trimmed.length > 0 ? trimmed : process.cwd()
 }
 
-const readLinearApiKeyFromDirenv = (projectPath: string): string | undefined => {
-	try {
-		const envOutput = execFileSync("direnv", ["exec", projectPath, "env"], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-		})
-		const keyPrefix = "LINEAR_API_KEY="
-		const keyLine = envOutput
-			.split(/\r?\n/)
-			.find((line) => line.startsWith(keyPrefix))
-		if (keyLine === undefined) {
-			return undefined
-		}
-		const key = keyLine.slice(keyPrefix.length).trim()
-		return key.length > 0 ? key : undefined
-	} catch {
-		return undefined
-	}
-}
-
 export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueSyncService", {
 	dependencies: [AppConfig.Default, LocalIssueStore.Default, LinearSdk.Default],
 		effect: Effect.gen(function* () {
 			const appConfig = yield* AppConfig
 			const localStore = yield* LocalIssueStore
 			const linearSdk = yield* LinearSdk
+			const fs = yield* FileSystem.FileSystem
+			const pathService = yield* Path.Path
 			const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
 			const warnedMissingApiKeyRef = yield* Ref.make(false)
 			const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
@@ -320,6 +302,63 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const fromStore = <A>(
 			effect: Effect.Effect<A, LocalIssueStoreError>,
 		): Effect.Effect<A, IssueSyncError> => effect.pipe(Effect.mapError(mapLocalStoreError))
+
+			const resolveDotEnvProvider = (
+				path: string,
+			): Effect.Effect<Option.Option<ConfigProvider.ConfigProvider>, never> =>
+				Effect.gen(function* () {
+					const exists = yield* fs
+						.exists(path)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					if (!exists) {
+						return Option.none()
+					}
+
+					return yield* PlatformConfigProvider.fromDotEnv(path).pipe(
+						Effect.provideService(FileSystem.FileSystem, fs),
+						Effect.map(Option.some),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`IssueSyncService: failed to load dotenv provider path=${path}; continuing with env fallback. cause=${String(error)}`,
+							).pipe(Effect.as(Option.none<ConfigProvider.ConfigProvider>())),
+						),
+					)
+				})
+
+			const resolveProjectConfigProvider = (
+				projectPath: string,
+			): Effect.Effect<ConfigProvider.ConfigProvider, never> =>
+				Effect.gen(function* () {
+					const dotEnvPath = pathService.join(projectPath, ".env")
+					const dotEnvLocalPath = pathService.join(projectPath, ".env.local")
+					const envProvider = ConfigProvider.fromEnv()
+					const dotEnvProviderOption = yield* resolveDotEnvProvider(dotEnvPath)
+					const dotEnvLocalProviderOption = yield* resolveDotEnvProvider(dotEnvLocalPath)
+
+					const dotenvChain = Option.match(dotEnvProviderOption, {
+						onNone: () => dotEnvLocalProviderOption,
+						onSome: (dotEnvProvider) =>
+							Option.match(dotEnvLocalProviderOption, {
+								onNone: () => Option.some(dotEnvProvider),
+								onSome: (dotEnvLocalProvider) =>
+									Option.some(
+										ConfigProvider.orElse(dotEnvLocalProvider, () => dotEnvProvider),
+									),
+							}),
+					})
+
+					const provider = Option.match(dotenvChain, {
+						onNone: () => envProvider,
+						onSome: (dotenvProvider) =>
+							ConfigProvider.orElse(dotenvProvider, () => envProvider),
+					})
+
+					yield* Effect.log(
+						`IssueSyncService: resolved config provider for projectPath=${projectPath} usingDotEnv=${Option.isSome(dotenvChain)}`,
+					)
+
+					return provider
+				})
 
 			const requireTeamId = (
 				teamId: string | undefined,
@@ -349,41 +388,25 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}
 					}
 
-					const direnvApiKey = readLinearApiKeyFromDirenv(projectPath)
-					if (direnvApiKey !== undefined) {
-						yield* Ref.update(apiKeyCacheRef, (cache) => {
-							const next = new Map(cache)
-							next.set(projectPath, {
-								apiKey: direnvApiKey,
-								source: "direnv",
-								resolvedAtMs: now,
-							})
-							return next
-						})
-						yield* Effect.log(
-							`IssueSyncService: resolved LINEAR_API_KEY from direnv for projectPath=${projectPath}`,
-						)
-						return {
-							apiKey: direnvApiKey,
-							source: "direnv",
-						}
-					}
-
-					const apiKeyFromEnv = yield* Config.option(Config.string("LINEAR_API_KEY")).pipe(
+					const configProvider = yield* resolveProjectConfigProvider(projectPath)
+					const apiKeyFromConfigProvider = yield* Config.option(Config.string("LINEAR_API_KEY")).pipe(
+						Effect.withConfigProvider(configProvider),
 						Effect.mapError(
 							(cause) =>
 								new IssueSyncError({
 									message: "Failed to resolve LINEAR_API_KEY",
-								cause,
+									cause,
 								}),
 						),
 					)
-					const envApiKey = Option.isSome(apiKeyFromEnv) ? apiKeyFromEnv.value : undefined
-					const source: ApiKeySource = envApiKey !== undefined ? "process-env" : "none"
+					const resolvedApiKey = Option.isSome(apiKeyFromConfigProvider)
+						? apiKeyFromConfigProvider.value
+						: undefined
+					const source: ApiKeySource = resolvedApiKey !== undefined ? "config-provider" : "none"
 					yield* Ref.update(apiKeyCacheRef, (cache) => {
 						const next = new Map(cache)
 						next.set(projectPath, {
-							apiKey: envApiKey,
+							apiKey: resolvedApiKey,
 							source,
 							resolvedAtMs: now,
 						})
@@ -393,7 +416,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						`IssueSyncService: resolved LINEAR_API_KEY from ${source} for projectPath=${projectPath}`,
 					)
 					return {
-						apiKey: envApiKey,
+						apiKey: resolvedApiKey,
 						source,
 					}
 				})
