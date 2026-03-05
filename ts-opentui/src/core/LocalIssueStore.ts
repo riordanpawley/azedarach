@@ -376,16 +376,16 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const fs = yield* FileSystem.FileSystem
 		const projectService = yield* ProjectService
 
-			const getStorageRoot = (cwd?: string): Effect.Effect<string> =>
-				projectService.getCurrentPath().pipe(
-					Effect.map((projectPath) =>
-						resolveLocalIssueStorageRoot({
-							explicitProjectPath: cwd,
-							currentProjectPath: projectPath,
-							fallbackCwd: process.cwd(),
-						}),
-					),
-				)
+		const getStorageRoot = (cwd?: string): Effect.Effect<string> =>
+			projectService.getCurrentPath().pipe(
+				Effect.map((projectPath) =>
+					resolveLocalIssueStorageRoot({
+						explicitProjectPath: cwd,
+						currentProjectPath: projectPath,
+						fallbackCwd: process.cwd(),
+					}),
+				),
+			)
 
 		const ensureSyncQueueColumns = (
 			sql: SqlClient.SqlClient,
@@ -405,11 +405,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const withSql = <A>(
 			cwd: string | undefined,
 			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
-			): Effect.Effect<A, LocalIssueStoreError> =>
-				Effect.gen(function* () {
-					const storageRoot = yield* getStorageRoot(cwd)
-					const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
-					const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
+		): Effect.Effect<A, LocalIssueStoreError> =>
+			Effect.gen(function* () {
+				const storageRoot = yield* getStorageRoot(cwd)
+				const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
+				const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
 
 				yield* fs.makeDirectory(dbDir, { recursive: true }).pipe(
 					Effect.catchAll((cause) =>
