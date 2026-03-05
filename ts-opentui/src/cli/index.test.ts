@@ -71,6 +71,7 @@ describe("resolveCliExecutionMode", () => {
 	it("uses command mode for non-dev subcommands", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 	})
 
 	it("uses dev-command mode for az dev", () => {
@@ -117,6 +118,11 @@ describe("formatIssueDetailSections", () => {
 			design: "Move options before positional args",
 			acceptance: "description can be updated",
 			notes: "manual repro completed",
+			dependencies: [
+				{ id: "AZE-11", dependency_type: "blocks" },
+				{ id: "AZE-12", dependency_type: "related" },
+				{ id: "AZE-13", dependency_type: "discovered-from" },
+			],
 		})
 
 		expect(sections).toEqual([
@@ -124,6 +130,8 @@ describe("formatIssueDetailSections", () => {
 			"Design:\nMove options before positional args",
 			"Acceptance:\ndescription can be updated",
 			"Notes:\nmanual repro completed",
+			"Dependency Counts: blockedBy: 1, related: 1, discoveredFrom: 1",
+			"Dependencies:\nAZE-11, AZE-12, AZE-13",
 		])
 	})
 
@@ -159,7 +167,11 @@ describe("formatIssueDetailSections", () => {
 			dependents: [{ id: "AZE-9", dependency_type: "parent-child" }],
 		})
 
-		expect(sections).toEqual(["Dependencies:\nAZE-1, AZE-2", "Dependents:\nAZE-9"])
+		expect(sections).toEqual([
+			"Dependency Counts: blockedBy: 1, children: 1, related: 2",
+			"Dependencies:\nAZE-1, AZE-2",
+			"Dependents:\nAZE-9",
+		])
 	})
 
 	it("falls back to dependency counts when ids are unavailable", () => {
@@ -176,5 +188,33 @@ describe("formatIssueDetailSections", () => {
 		})
 
 		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
+	})
+
+	it("formats directional counts for blocks and parent-child relationships", () => {
+		const sections = formatIssueDetailSections({
+			id: "az-123",
+			title: "Title",
+			status: "open",
+			priority: 2,
+			issue_type: "task",
+			created_at: "2026-03-05T10:00:00.000Z",
+			updated_at: "2026-03-05T11:00:00.000Z",
+			dependencies: [
+				{ id: "AZE-11", dependency_type: "blocks" },
+				{ id: "AZE-12", dependency_type: "blocks" },
+				{ id: "AZE-10", dependency_type: "parent-child" },
+			],
+			dependents: [
+				{ id: "AZE-90", dependency_type: "blocks" },
+				{ id: "AZE-91", dependency_type: "parent-child" },
+				{ id: "AZE-92", dependency_type: "parent-child" },
+			],
+		})
+
+		expect(sections).toEqual([
+			"Dependency Counts: blocking: 1, blockedBy: 2, children: 2, parent: 1",
+			"Dependencies:\nAZE-11, AZE-12, AZE-10",
+			"Dependents:\nAZE-90, AZE-91, AZE-92",
+		])
 	})
 })
