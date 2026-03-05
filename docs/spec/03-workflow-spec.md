@@ -334,11 +334,13 @@ This section is normative for outcome quality; implementations MAY choose differ
 
 - open editable template
 - parse fields on save
+- assign internal issue ID using configured generation strategy (prefix-free canonical ID contract)
 - create issue via local canonical issue store API
 
 ### AI Create (`C`)
 
 - capture natural language request
+- assign internal issue ID using configured generation strategy (prefix-free canonical ID contract)
 - spawn assistant session to create issue
 
 ### Manual Edit (`Space e`)

@@ -661,3 +661,10 @@ On failure, logs SHOULD capture:
   - reject or normalize prompt template to `az issue` command contract before session launch.
   - expose diagnostics for prompt template mismatch.
   - continue allowing backend adapters internally without leaking backend-specific instructions to agents.
+
+### Case F-209: Title-hash ID strategy generates collision
+
+- Required behavior:
+  - resolve collision deterministically without requiring manual DB intervention.
+  - preserve configured strategy constraints (for example lowercase alphabetic hash policy).
+  - return actionable diagnostics only if collision cannot be resolved automatically.

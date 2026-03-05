@@ -97,6 +97,11 @@ Fields (canonical minimum):
 - notes
 - created/updated timestamps
 
+Internal ID policy:
+
+- internal issue IDs are canonical local identifiers and MUST NOT require a fixed textual prefix
+- internal issue IDs SHOULD optimize for low-friction typing and avoid mixed alpha-numeric form when strategy allows
+
 ### D-02 Session
 
 - maps to a tmux session associated with an issue
@@ -171,6 +176,10 @@ Power users MUST be able to apply actions across many tasks.
 ### P-05 Context Preservation
 
 Returning from overlays or drill-down SHOULD restore meaningful cursor state.
+
+### P-06 Typable Identifiers
+
+Internal issue IDs SHOULD be as short as practical for fast keyboard entry and SHOULD avoid mixed letter/number typing where possible.
 
 ## 1.10 User Experience Constraints
 

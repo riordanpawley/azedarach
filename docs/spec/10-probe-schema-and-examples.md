@@ -34,17 +34,17 @@ The probe contract is behavioral and transport-agnostic.
     "overlays": []
   },
   "focus": {
-    "issueId": "az-142",
+    "issueId": "kqd",
     "column": "in_progress",
     "indexInColumn": 5
   },
   "board": {
     "visibleWindow": {
       "columns": ["open", "in_progress", "blocked", "closed"],
-      "issueIds": ["az-131", "az-139", "az-142", "az-144", "az-148"]
+      "issueIds": ["kpn", "kqr", "kqd", "kqt", "kqx"]
     },
     "indicators": {
-      "az-142": {
+      "kqd": {
         "session": "busy",
         "git": "dirty",
         "pr": "open",
@@ -86,13 +86,13 @@ The probe contract is behavioral and transport-agnostic.
     }
   },
   "agentBootstrap": {
-    "issueLookupCommand": "az issue get az-142",
+    "issueLookupCommand": "az issue get kqd",
     "backendSpecificCommandLeakDetected": false
   },
   "commands": {
     "issue": {
       "lastOperation": "update",
-      "lastCommand": "az issue update az-142 --design \"...\"",
+      "lastCommand": "az issue update kqd --design \"...\"",
       "lastError": null
     }
   },
@@ -135,17 +135,17 @@ The probe contract is behavioral and transport-agnostic.
     "overlays": ["detail"]
   },
   "focus": {
-    "issueId": "az-144",
+    "issueId": "kqt",
     "column": "in_progress",
     "indexInColumn": 6
   },
   "board": {
     "visibleWindow": {
       "columns": ["open", "in_progress", "blocked", "closed"],
-      "issueIds": ["az-139", "az-142", "az-144", "az-148", "az-151"]
+      "issueIds": ["kqr", "kqd", "kqt", "kqx", "kra"]
     },
     "selection": {
-      "selectedIssueIds": ["az-142", "az-144"],
+      "selectedIssueIds": ["kqd", "kqt"],
       "count": 2
     }
   },
@@ -153,13 +153,13 @@ The probe contract is behavioral and transport-agnostic.
     "queue": []
   },
   "agentBootstrap": {
-    "issueLookupCommand": "az issue get az-144",
+    "issueLookupCommand": "az issue get kqt",
     "backendSpecificCommandLeakDetected": false
   },
   "commands": {
     "issue": {
       "lastOperation": "get",
-      "lastCommand": "az issue get az-144 --json",
+      "lastCommand": "az issue get kqt --json",
       "lastError": null
     }
   },

@@ -15,6 +15,8 @@
 - Bootstrap prompt contract: normative session-start prompt guidance requiring `az issue` commands for issue context and mutation flows.
 - Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
 - Destructive issue operation: issue mutation that removes canonical issue records (for example `az issue delete`) and requires explicit guardrails.
+- Internal issue ID: canonical local identifier for issues in project SQLite that has no mandatory textual prefix requirement.
+- Issue ID strategy: configurable per-project policy for generating internal IDs (for example incrementing numeric or 3-4 char lowercase alphabetic title hash).
 - Epic: issue that groups child issues for scoped drill-down and progress tracking; one relationship type among many possible dependencies.
 - Drill-down: focused board mode showing only children of selected epic.
 - Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).

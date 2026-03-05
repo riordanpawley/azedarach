@@ -307,6 +307,16 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: run `az issue delete <issue-id>`
 - Expected: destructive guardrail path requires explicit confirmation before delete applies
 
+### UC-AUTH-010 Create issue with prefix-free short internal ID
+
+- Trigger: create issue through manual or AI create path
+- Expected: internal canonical ID is short/typable and does not require fixed textual prefix
+
+### UC-AUTH-011 Switch ID generation strategy by project
+
+- Trigger: change ID strategy setting (numeric increment vs alpha hash), then create issues
+- Expected: generated IDs follow configured strategy constraints without mixed alphanumeric typing in built-in modes
+
 ## 8.11 Attachment Use Cases
 
 ### UC-ATT-001 Attach screenshot from clipboard
@@ -372,6 +382,11 @@ This section expands product behavior into concrete user-centered use cases.
 
 - Trigger: `e` in settings
 - Expected: config editor opens and saves valid structure
+
+### UC-SET-005 Configure internal issue ID strategy
+
+- Trigger: settings toggle for issue ID strategy (incrementing numeric vs alpha hash)
+- Expected: newly created issue IDs follow configured strategy, remain prefix-free, and avoid mixed alphanumeric typing in built-in modes
 
 ## 8.14 Dependency Graph Use Cases
 

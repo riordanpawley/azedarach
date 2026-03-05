@@ -914,6 +914,20 @@ Canonical fixture profile names:
 - Expected: prompt references `az issue get <issue-id>` (and optional `az issue update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
 - Links: AZ-FR-4209, AZ-FR-4210, section 05 F-208.
 
+### AZ-AT-2842 Prefix-free internal issue ID policy
+
+- Preconditions: issue creation path available in active project.
+- Steps: create issue and inspect canonical stored ID plus board rendering.
+- Expected: issue ID is accepted/displayed without requiring fixed textual prefix and remains concise for keyboard entry.
+- Links: AZ-FR-0003, AZ-FR-0017, AZ-FR-0018.
+
+### AZ-AT-2843 Configurable short ID strategy (numeric vs alpha hash)
+
+- Preconditions: per-project ID strategy setting is configurable.
+- Steps: set strategy to incrementing numeric and create issue; switch to title-derived hash and create issue including collision-case fixture.
+- Expected: numeric strategy yields digits-only IDs; hash strategy yields lowercase alphabetic 3-4 char IDs; collisions resolve deterministically without manual DB edits.
+- Links: AZ-FR-0019, AZ-FR-0020, AZ-FR-0021, AZ-FR-0022, AZ-FR-1704, section 05 F-209.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1079,4 +1093,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2841
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2843

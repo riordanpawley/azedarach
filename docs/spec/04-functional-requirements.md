@@ -25,6 +25,12 @@ This section is normative.
 - AZ-FR-0014: Canonical SQLite for the active project MUST be stored at `<project-root>/.azedarach/azedarach.db`.
 - AZ-FR-0015: If `<project-root>/.azedarach/azedarach.db` does not exist, the app MUST initialize it before first board hydration for that project.
 - AZ-FR-0016: Each project MUST use an isolated canonical SQLite store; issue data MUST NOT be mixed across project boundaries.
+- AZ-FR-0017: Internal issue IDs in canonical local store MUST NOT require a fixed textual prefix.
+- AZ-FR-0018: Internal issue IDs SHOULD optimize for minimal typing length while preserving deterministic uniqueness.
+- AZ-FR-0019: Internal issue ID generation strategy MUST be configurable per project.
+- AZ-FR-0020: Built-in ID generation strategies MUST include incrementing numeric IDs and title-derived alphabetic hash IDs.
+- AZ-FR-0021: Title-derived hash strategy IDs MUST be lowercase alphabetic only (`a-z`) with 3-4 character length.
+- AZ-FR-0022: ID generation MUST avoid mixed alphanumeric IDs in built-in strategies and MUST resolve collisions deterministically.
 
 ## 4.3 Modal Interaction Requirements
 
