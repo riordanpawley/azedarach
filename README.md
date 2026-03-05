@@ -1,6 +1,6 @@
 # Azedarach
 
-> A TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
+> A TUI Kanban board for orchestrating parallel AI coding sessions with issue tracking
 
 Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Melia azedarach), whose seeds have been used for prayer beads for millennia.
 
@@ -8,26 +8,26 @@ Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Meli
 
 Azedarach is a terminal-based Kanban board that:
 - Displays tasks from your configured issue tracker via `az issue`
-- Spawns Claude Code sessions in isolated git worktrees
+- Spawns AI coding sessions in isolated git worktrees
 - Enables full parallelization of development work
 - Monitors session state (busy/waiting/done/error)
 - Auto-creates GitHub PRs when tasks complete
 - Allows manual intervention via terminal attachment
 
-The key insight: **Claude Code already handles all the hard parts** (permissions, tools, context, hooks). Azedarach is purely an orchestration layer that spawns Claude in the right place and monitors progress.
+The key insight: **the AI coding CLI already handles the hard parts** (permissions, tools, context, hooks). Azedarach is an orchestration layer that spawns your configured tool in the right place and monitors progress.
 
 ## Goals
 
 1. **Parallel execution**: Work on multiple tasks simultaneously across isolated worktrees
 2. **Minimal friction**: Start a task with a single keypress
-3. **Full visibility**: See status of all running Claude sessions at a glance
+3. **Full visibility**: See status of all running sessions at a glance
 4. **Easy intervention**: Attach to any session for manual fixes
 5. **Automated workflow**: Update issue status, create PRs, notify on completion
-6. **Zero Claude config**: 100% inherit project's Claude configuration
+6. **Zero agent config**: 100% inherit project-level agent/tool configuration
 
 ## Non-Goals
 
-- Managing Claude permissions (project's `.claude/settings.json` handles this)
+- Managing agent permissions/tool policy (project configuration handles this)
 - Implementing custom Claude tools (project's MCP/skills handle this)
 - Replacing the issue tracker CLI
 - IDE integration (this is terminal-native)
@@ -118,6 +118,43 @@ make test               # Run tests
 
 ---
 
+## Installation
+
+Azedarach does not require `claude` to run the board. You only need an AI session CLI (`opencode`, `claude`, etc.) when using session start/attach workflows.
+
+**Recommended (`ts-opentui`, from repo root):**
+```bash
+bun install
+just install-sfe-ts
+az --help
+```
+
+**Alternative (`go-bubbletea` rewrite track):**
+```bash
+cd go-bubbletea
+go mod download
+```
+
+---
+
+## Build and Dev Commands
+
+```bash
+# ts-opentui (recommended)
+cd ts-opentui
+bun run dev
+bun run type-check
+bun run build
+
+# go-bubbletea (rewrite track)
+cd go-bubbletea
+make build
+make run
+make test
+```
+
+---
+
 ## Architecture (Overview)
 
 The architecture is shared across implementations:
@@ -180,7 +217,7 @@ Azedarach:
   2. Loads issue context: `az issue get che-102 --output json --compact`
   3. Updates status: `az issue update che-102 --status=in_progress`
   4. Spawns tmux session: `tmux new-session -d -s che-102`
-  5. Starts Claude: `claude "work on: che-102"`
+  5. Starts configured AI CLI (for example `opencode` or `claude`)
   ↓
 Task moves to "in_progress" with 🔵 indicator
   ↓
@@ -242,7 +279,7 @@ Azedarach:
   - tmux >= 3.0
   - gh CLI (authenticated)
   - Issue tracker (`az` CLI installed and configured)
-  - Claude Code (`claude` CLI installed and authenticated)
+  - AI session CLI for start/attach workflows (for example `opencode` or `claude`; not required if you only use board/task management)
 
 - **For go-bubbletea:**
   - Go >= 1.21
@@ -250,7 +287,7 @@ Azedarach:
   - tmux >= 3.0
   - gh CLI (authenticated)
   - Issue tracker (`az` CLI installed and configured)
-  - Claude Code (`claude` CLI installed and authenticated)
+  - AI session CLI for session workflows (for example `opencode` or `claude`)
 
 ---
 
