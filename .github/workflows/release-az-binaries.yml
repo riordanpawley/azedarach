@@ -1,0 +1,83 @@
+name: Release az binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: darwin-arm64
+            target: bun-darwin-arm64
+          - os: macos-13
+            label: darwin-x64
+            target: bun-darwin-x64
+          - os: ubuntu-24.04
+            label: linux-x64
+            target: bun-linux-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install ts-opentui dependencies
+        working-directory: ts-opentui
+        run: bun install --frozen-lockfile
+
+      - name: Build standalone binary
+        working-directory: ts-opentui
+        run: |
+          mkdir -p ../release-assets
+          bun build bin/az.ts --compile --target="${{ matrix.target }}" --outfile="../release-assets/az-${{ matrix.label }}"
+
+      - name: Generate SHA256 checksum
+        run: |
+          cd release-assets
+          shasum -a 256 "az-${{ matrix.label }}" > "az-${{ matrix.label }}.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: az-${{ matrix.label }}
+          path: |
+            release-assets/az-${{ matrix.label }}
+            release-assets/az-${{ matrix.label }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: az-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Build checksum manifest
+        run: |
+          cd release-assets
+          cat ./*.sha256 > SHA256SUMS.txt
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

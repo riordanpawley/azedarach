@@ -87,3 +87,26 @@ Recommended trigger to start a tap:
 1. Keep `just install-sfe-ts` as the default internal path now.
 2. Add automated tagged releases for compiled binaries.
 3. Introduce a tap after release automation is stable.
+
+## Automated Releases (Maintainers)
+
+Releases are automated via GitHub Actions in `.github/workflows/release-az-binaries.yml`.
+
+Trigger:
+- push a semver tag matching `v*` (for example `v0.3.0`)
+
+What it publishes:
+- `az-darwin-arm64`
+- `az-darwin-x64`
+- `az-linux-x64`
+- per-binary `.sha256` files
+- `SHA256SUMS.txt`
+
+Example release cut:
+
+```bash
+git checkout main
+git pull --rebase
+git tag v0.3.0
+git push origin v0.3.0
+```
