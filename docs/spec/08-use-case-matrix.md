@@ -139,7 +139,7 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-SESS-002 Start session with explicit work instruction
 
 - Trigger: `Space S`
-- Expected: assistant begins with default work-on-task prompt that instructs `az show <issue-id>` for canonical context retrieval
+- Expected: assistant begins with default work-on-task prompt that instructs `az prime` first, then `az show <issue-id>` for canonical context retrieval
 
 ### UC-SESS-003 Fast autonomous mode
 
@@ -401,6 +401,11 @@ This section expands product behavior into concrete user-centered use cases.
 
 - Trigger: run `az dep add` (and create-with-parent linkage) for an edge that would introduce disallowed cycle
 - Expected: mutation is rejected pre-persist with deterministic diagnostics and no partial graph writes
+
+### UC-AUTH-029 Prime agent workflow guidance via CLI
+
+- Trigger: run `az prime` at session start
+- Expected: output includes common issue command/flag guidance, policy to close issues when done, policy to commit before close, and commit message template requiring issue ID inclusion
 
 ## 8.11 Attachment Use Cases
 
@@ -703,7 +708,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4254
+- Az CLI command suite -> AZ-FR-4201..4260
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

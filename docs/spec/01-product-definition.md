@@ -258,7 +258,7 @@ Minimum external capabilities required:
 - tmux available and functional
 - git worktree operations supported
 - writable local filesystem for project-local Azedarach SQLite stores at `<project-root>/.azedarach/azedarach.db`
-- top-level `az` CLI issue commands available in project execution contexts for agent workflows (`init/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, plus `dep/config/stats`)
+- top-level `az` CLI issue commands available in project execution contexts for agent workflows (`init/prime/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, plus `dep/config/stats`)
 - project registry CLI commands available for multi-project management (`az project add/list/remove/switch`)
 - AI CLI available and authenticated
 - optional gh for PR workflows

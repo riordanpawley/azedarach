@@ -86,6 +86,7 @@ The probe contract is behavioral and transport-agnostic.
     }
   },
   "agentBootstrap": {
+    "primeCommand": "az prime",
     "issueLookupCommand": "az show kqd",
     "backendSpecificCommandLeakDetected": false
   },
@@ -113,9 +114,10 @@ The probe contract is behavioral and transport-agnostic.
 - `board.indicators[*].staleness`: freshness hint (`fresh`, `loading`, `stale`) for user-visible indicator convergence checks.
 - `operations.queue[*].state`: one of `queued`, `running`, `succeeded`, `failed`, `canceled`.
 - `sync.linear.rateLimit`: outbound throttling snapshot; present when Linear sync target is enabled.
+- `agentBootstrap.primeCommand`: active session bootstrap priming command (must use `az prime` when bootstrap guidance is present).
 - `agentBootstrap.issueLookupCommand`: active session bootstrap issue lookup command (must use `az show <issue-id>` when bootstrap guidance is present).
 - `agentBootstrap.backendSpecificCommandLeakDetected`: diagnostic boolean for backend-specific command leakage in bootstrap guidance.
-- `commands.az.lastOperation`: last observed top-level `az` operation kind (for example `show`, `create`, `q`, `update`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `search`, `stale`, `count`, `dep.*`, `config.*`, `stats`, `project.add`, `project.list`, `project.remove`, `project.switch`) when available.
+- `commands.az.lastOperation`: last observed top-level `az` operation kind (for example `prime`, `show`, `create`, `q`, `update`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `search`, `stale`, `count`, `dep.*`, `config.*`, `stats`, `project.add`, `project.list`, `project.remove`, `project.switch`) when available.
 
 ## 10.5 Example: Overlay + Selection State
 
@@ -153,6 +155,7 @@ The probe contract is behavioral and transport-agnostic.
     "queue": []
   },
   "agentBootstrap": {
+    "primeCommand": "az prime",
     "issueLookupCommand": "az show kqt",
     "backendSpecificCommandLeakDetected": false
   },

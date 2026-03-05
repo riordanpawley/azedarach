@@ -40,6 +40,7 @@ Workflows are written as behavior contracts, not implementation details.
 
 ### Agent Bootstrap Prompt Contract
 
+- Session bootstrap prompts MUST instruct the agent to run `az prime` before substantive task execution.
 - Session bootstrap prompts MUST instruct issue context retrieval via `az show <issue-id>`.
 - When prompt guidance asks the agent to update issue metadata, it MUST reference `az update <issue-id> ...`.
 - When prompt guidance asks the agent to complete/remove issues, it MUST reference `az close <issue-id> ...` and/or `az delete <issue-id> ...`.
@@ -889,6 +890,7 @@ Enable full-screen correctness assertions for TUI rendering beyond state-only ch
 Canonical CLI surface for issue management:
 
 - lifecycle: `az init`, `az create`, `az q`, `az show`, `az update`, `az close`, `az reopen`, `az delete`
+- agent priming: `az prime`
 - issue retrieval projection controls: `az show --deps=none|counts|direct|verbose`, `--dep-depth`, `--dep-type`, `--dep-limit`, `--dep-node-limit`
 - querying: `az list`, `az ready`, `az blocked`, `az search`, `az stale`, `az count`
 - dependencies: `az dep add/remove/list/tree/cycles`
@@ -906,6 +908,7 @@ Canonical CLI surface for issue management:
 6. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
 7. command JSON payloads follow the schema contract defined in Section 12
 8. dependency projection query paths are strictly read-only; cycle prevention occurs during mutation commands before persist
+9. agent bootstrap flows require deterministic priming guidance via `az prime` before substantive task execution
 
 ### Postconditions
 

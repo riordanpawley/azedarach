@@ -742,3 +742,10 @@ On failure, logs SHOULD capture:
   - default `az project switch` updates persisted default and active context consistently.
   - session-only switch modes (if available) must not mutate persisted default.
   - failures during switch must roll back partial scope updates and preserve prior persisted/default context.
+
+### Case F-220: `az prime` guidance is incomplete, stale, or invoked with invalid arguments
+
+- Required behavior:
+  - priming output includes common issue command/flag guidance and completion workflow policies (close when done, commit before close, issue ID in commit message).
+  - invalid `az prime` arguments fail deterministically with actionable diagnostics.
+  - JSON-mode priming output remains schema-conformant and deterministic across identical inputs.

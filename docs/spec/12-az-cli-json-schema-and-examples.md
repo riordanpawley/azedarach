@@ -307,7 +307,82 @@ Projection parameter contract:
 }
 ```
 
-## 12.8 Tombstone Visibility Semantics
+## 12.8 Prime Guidance Contract
+
+`az prime` is the canonical agent-priming command for Azedarach CLI workflows.
+
+Prime guidance requirements:
+
+- guidance includes common issue workflow command/flag quick-reference (including lifecycle read/write operations and JSON mode guidance).
+- guidance includes completion policy: close issues when done and commit changes before close operations.
+- guidance includes commit message policy requiring issue ID inclusion with concrete template example.
+- invocation is standalone (`az prime`) and MUST NOT require issue-specific positional arguments.
+
+### 12.8.1 Success Example: `az prime --json`
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "prime",
+  "commandPath": ["az", "prime"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "commandQuickRef": [
+      "az show <issue-id> --json",
+      "az update <issue-id> ... --json",
+      "az close <issue-id> --json",
+      "az list --json"
+    ],
+    "policies": {
+      "closeWhenDone": true,
+      "commitBeforeClose": true,
+      "requireIssueIdInCommitMessage": true
+    },
+    "commitTemplate": "git commit -m \"AZE-123: <summary>\""
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 7,
+    "at": "2026-03-05T03:23:24Z"
+  }
+}
+```
+
+### 12.8.2 Failure Example: invalid argument for `az prime`
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "prime",
+  "commandPath": ["az", "prime"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "invalid_argument",
+    "message": "az prime does not accept positional arguments: AZE-99999",
+    "remediation": "Run az prime --json without positional arguments",
+    "details": {
+      "argument": "AZE-99999"
+    }
+  },
+  "meta": {
+    "durationMs": 4,
+    "at": "2026-03-05T03:23:33Z"
+  }
+}
+```
+
+## 12.9 Tombstone Visibility Semantics
 
 Default behavior:
 
@@ -349,7 +424,7 @@ Include-deleted behavior:
 }
 ```
 
-## 12.9 Out-of-Scope Restore Semantics (Current Contract)
+## 12.10 Out-of-Scope Restore Semantics (Current Contract)
 
 The current command contract does not define a restore operation for tombstoned issues.
 

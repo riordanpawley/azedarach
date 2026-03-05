@@ -82,6 +82,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Follow-on merge workflows: merge eligible upstream source branches directly into target issue branches
 - Relationship display workflows: compact graph chips on board and relation-scope drill-down views
 - Issue lookup projection workflows: `az show` typed dependency counts by default with optional direct/verbose depth-limited projections
+- Agent priming workflows: `az prime` briefing for canonical issue commands, close/commit policy, and issue-ID commit message conventions
 - E2E testability workflows: machine-readable state probe, deterministic fixtures, optimistic rollback checks
 - Mutation semantics: optimistic UI updates with rollback-on-failure guarantees
 - Async orchestration semantics: background operations with progress inspection and cancellation
@@ -141,7 +142,7 @@ An implementation is complete when:
 - Canonical issue state MUST be stored locally in Azedarach-managed SQLite.
 - Canonical project DB path MUST be `<project-root>/.azedarach/azedarach.db` (one isolated DB per registered project).
 - Internal canonical issue IDs MUST be prefix-agnostic and SHOULD remain short/typable via configurable generation strategy.
-- Agent-facing issue retrieval and mutation commands MUST go through the top-level `az` CLI contract (`az init/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, `az dep ...`, `az config ...`, `az stats`, and project management via `az project add/list/remove/switch`).
+- Agent-facing issue retrieval and mutation commands MUST go through the top-level `az` CLI contract (`az init/prime/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, `az dep ...`, `az config ...`, `az stats`, and project management via `az project add/list/remove/switch`).
 - External trackers are optional sync targets, not runtime sources of truth.
 - Linear is a first-class optional sync target and SHOULD prefer webhook-driven inbound updates over polling.
 - Linear outbound sync MUST enforce internal throttling (30 requests per rolling minute with default burst allowance of 10 requests).

@@ -230,7 +230,7 @@ Canonical fixture profile names:
 ### AZ-AT-0702 Start with work prompt
 
 - Steps: `Space S`.
-- Expected: session starts with default work instruction that uses `az show <issue-id>` for canonical context retrieval.
+- Expected: session starts with default work instruction that uses `az prime` before `az show <issue-id>` for canonical context retrieval.
 - Links: AZ-FR-0802, AZ-FR-4204, AZ-FR-4226, AZ-FR-4227.
 
 ### AZ-AT-0703 Yolo start variant
@@ -946,7 +946,7 @@ Canonical fixture profile names:
 
 - Preconditions: issue-focused start path with injected prompt visible/inspectable in harness.
 - Steps: run `Space S` and `Space !`, capture bootstrap prompt text.
-- Expected: prompt references `az show <issue-id>` (and optional `az update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
+- Expected: prompt references `az prime` and `az show <issue-id>` (and optional `az update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
 - Links: AZ-FR-4226, AZ-FR-4227, section 05 F-208.
 
 ### AZ-AT-2847 Prefix-free internal issue ID policy
@@ -1074,6 +1074,41 @@ Canonical fixture profile names:
 - Steps: execute both mutation attempts in JSON mode.
 - Expected: both writes are rejected before persist with deterministic cycle diagnostics; canonical graph remains unchanged with no partial edge writes.
 - Links: AZ-FR-3410, AZ-FR-4245, AZ-FR-4254.
+
+### AZ-AT-2865 `az prime` baseline guidance contract
+
+- Preconditions: active project context is available.
+- Steps: run `az prime`.
+- Expected: output includes common issue command/flag guidance, policy to close issues when done, policy to commit before close, and issue-ID commit message requirement.
+- Links: AZ-FR-4255, AZ-FR-4256, AZ-FR-4257, AZ-FR-4258.
+
+### AZ-AT-2866 Standalone `az prime` commit template contract
+
+- Preconditions: active project context is available.
+- Steps: run `az prime`.
+- Expected: priming output includes concrete commit template example that demonstrates required issue ID inclusion without requiring issue lookup.
+- Links: AZ-FR-4255, AZ-FR-4258.
+
+### AZ-AT-2867 `az prime --json` deterministic payload contract
+
+- Preconditions: active project context is available.
+- Steps: run `az prime --json`.
+- Expected: response includes deterministic envelope fields plus structured quick-reference, policy checklist, and commit template payload.
+- Links: AZ-FR-4255, AZ-FR-4260, AZ-FR-4225, AZ-FR-4238, AZ-FR-4239.
+
+### AZ-AT-2868 Session bootstrap requires `az prime` invocation guidance
+
+- Preconditions: issue-focused start path with injected prompt visible/inspectable in harness.
+- Steps: run `Space S` and `Space !`, capture bootstrap prompt text.
+- Expected: prompt instructs running `az prime` before substantive execution and remains backend-agnostic for issue operations.
+- Links: AZ-FR-4259, AZ-FR-4226, AZ-FR-4227.
+
+### AZ-AT-2869 Invalid argument for `az prime` fails deterministically
+
+- Preconditions: invalid/unrecognized `az prime` argument is available.
+- Steps: run `az prime <invalid-arg> --json`.
+- Expected: deterministic non-zero failure with actionable diagnostics; no ambiguous partial guidance payload is emitted.
+- Links: AZ-FR-4260, AZ-FR-4229, section 05 F-220.
 
 ## 6.28 Background Operation Acceptance
 
@@ -1240,4 +1275,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2864
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2869

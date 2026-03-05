@@ -196,7 +196,7 @@ Action mode is a palette of context-sensitive operations.
 
 Session prompt contract:
 
-- default session/chat prompts MUST guide issue retrieval through `az show <issue-id>`
+- default session/chat prompts MUST guide initial agent priming through `az prime` and issue retrieval through `az show <issue-id>`
 - when prompts include issue mutation guidance, they MUST use `az update/close/delete` for canonical write flows and MAY use `az list` for active-project discovery
 - prompts MUST avoid backend-specific issue command instructions
 

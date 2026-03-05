@@ -11,7 +11,7 @@
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
 - Burst window: short-term allowance for sync requests above sustained throughput before throttling/deferred execution begins.
-- Az CLI Suite: canonical top-level `az` issue command suite (`init/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
+- Az CLI Suite: canonical top-level `az` issue command suite (`init/prime/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
 - Bootstrap prompt contract: normative session-start prompt guidance requiring top-level `az` commands for issue context and mutation flows.
 - Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
 - Destructive issue operation: issue mutation that removes canonical issue records (for example `az delete`) and requires explicit guardrails.
@@ -25,6 +25,7 @@
 - Dependency relation type key: canonical CLI/schema key representing one directed dependency class (for example `blocking`, `blocked-by`, `parent-child`, `discovered-from`).
 - Dependency projection mode: `az show` dependency output shape selector (`none`, `counts`, `direct`, `verbose`).
 - Dependency depth: maximum dependency-expansion depth in projection output; depth `0` returns counts-only without expanded dependency nodes.
+- Prime guidance: deterministic agent briefing output from `az prime` containing command quick-reference and required workflow policies.
 - Base branch: configurable integration branch used for default update/merge flows (for example develop, trunk, main).
 - Follow-on merge: direct merge of eligible upstream source branch into target issue branch without routing through the base branch.
 - Optimistic mutation: immediate in-memory UI state update performed before async persistence completes.

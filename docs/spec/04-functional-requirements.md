@@ -549,3 +549,9 @@ Machine-readable JSON envelope details are normative in section 12.
 - AZ-FR-4252: Dependency projection responses MUST support deterministic truncation controls (`--dep-limit` and `--dep-node-limit`) and MUST expose truncation metadata when limits are hit.
 - AZ-FR-4253: `az show` dependency projections and `az dep list/tree/cycles` query commands MUST be read-only and MUST NOT mutate or auto-repair canonical dependency graph state.
 - AZ-FR-4254: Dependency mutation commands (`az dep add`, create-with-parent linkage, and other CLI-surfaced dependency edge writes) MUST reject cycle-introducing writes at mutation time with deterministic diagnostics and MUST persist no partial edge mutations on failure.
+- AZ-FR-4255: The product MUST expose `az prime` to emit deterministic agent-priming guidance for canonical Azedarach CLI workflows.
+- AZ-FR-4256: `az prime` guidance MUST include a compact quick-reference for common issue commands and flags (at minimum: issue retrieval/mutation lifecycle commands, `--json`, and parent-linkage guidance where relevant).
+- AZ-FR-4257: `az prime` guidance MUST state completion workflow policy: close issues when done and commit changes before issue-close operations.
+- AZ-FR-4258: `az prime` guidance MUST require issue ID inclusion in commit messages and MUST provide a concrete commit-template example (for example `AZE-123: ...`).
+- AZ-FR-4259: Session start/bootstrap prompt guidance MUST instruct the agent to run `az prime` before substantive task execution.
+- AZ-FR-4260: `az prime --json` MUST return deterministic structured priming payloads (commands, checklist/policies, commit template) and deterministic non-zero diagnostics for invalid arguments.
