@@ -11,7 +11,6 @@ build-ts:
 build-run-ts:
     @echo "Building & running ts-opentui"
     cd ./ts-opentui && bun run build && cd .. && bun run ./ts-opentui/bin/az.ts
-
 build-sfe-ts:
     @echo "Building ts-opentui single-file executable"
     cd ./ts-opentui && bun build --compile ./bin/az.ts --outfile ./bin/az
