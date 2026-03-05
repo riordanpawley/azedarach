@@ -160,6 +160,13 @@ export const DEFAULT_CONFIG = {
 	issueTracker: {
 		local: {
 			syncEnabled: false,
+			backups: {
+				enabled: true,
+				intervalMinutes: 60,
+				writeCooldownSeconds: 300,
+				maxBackups: 30,
+				directory: ".azedarach/backups",
+			},
 		},
 	},
 	network: {
@@ -312,6 +319,13 @@ export interface ResolvedConfig {
 		| {
 				local: {
 					syncEnabled: boolean
+					backups: {
+						enabled: boolean
+						intervalMinutes: number
+						writeCooldownSeconds: number
+						maxBackups: number
+						directory: string
+					}
 				}
 		  }
 	network: {
@@ -423,9 +437,27 @@ const mergeIssueTrackerWithDefaults = (
 		}
 
 		if (issueTracker.local !== undefined) {
+			const configuredBackups = issueTracker.local.backups
 			return {
 				local: {
 					syncEnabled: issueTracker.local.syncEnabled ?? false,
+					backups: {
+						enabled:
+							configuredBackups?.enabled ??
+							DEFAULT_CONFIG.issueTracker.local.backups.enabled,
+						intervalMinutes:
+							configuredBackups?.intervalMinutes ??
+							DEFAULT_CONFIG.issueTracker.local.backups.intervalMinutes,
+						writeCooldownSeconds:
+							configuredBackups?.writeCooldownSeconds ??
+							DEFAULT_CONFIG.issueTracker.local.backups.writeCooldownSeconds,
+						maxBackups:
+							configuredBackups?.maxBackups ??
+							DEFAULT_CONFIG.issueTracker.local.backups.maxBackups,
+						directory:
+							configuredBackups?.directory ??
+							DEFAULT_CONFIG.issueTracker.local.backups.directory,
+					},
 				},
 			}
 		}
