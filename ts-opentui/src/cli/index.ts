@@ -31,6 +31,7 @@ import {
 	Schema,
 	SubscriptionRef,
 } from "effect"
+import packageJson from "../../package.json"
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
@@ -94,6 +95,8 @@ const telemetryLayer =
 				},
 			}).pipe(Layer.provide(FetchHttpClient.layer))
 		: Layer.empty
+
+const CLI_VERSION = packageJson.version
 
 /**
  * Full CLI layer used for TUI launch and commands that still depend on
@@ -2101,11 +2104,11 @@ const cliRunner = (argv: ReadonlyArray<string>) => {
 		mode === "command"
 			? Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
-					version: "0.1.0",
+					version: CLI_VERSION,
 				})(normalizedArgv)
 			: Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
 					name: "Azedarach",
-					version: "0.1.0",
+					version: CLI_VERSION,
 				})(normalizedArgv)
 	return runEffect.pipe(
 		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
