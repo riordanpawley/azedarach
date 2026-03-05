@@ -1173,8 +1173,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const modelConfig = yield* appConfig.getModelConfig()
 							const toolDef = getToolDefinition(cliTool)
-							const toolModelConfig =
-								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const toolModelConfig = modelConfig[cliTool]
 							const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
 							const command = toolDef.buildCommand({
@@ -1730,8 +1729,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const modelConfig = yield* appConfig.getModelConfig()
 							const toolDef = getToolDefinition(cliTool)
-							const toolModelConfig =
-								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const toolModelConfig = modelConfig[cliTool]
 							const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
 							const command = toolDef.buildCommand({
@@ -2007,7 +2005,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const sessionConfig = yield* appConfig.getSessionConfig()
 						const modelConfig = yield* appConfig.getModelConfig()
 						const toolDef = getToolDefinition(cliTool)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const toolModelConfig = modelConfig[cliTool]
 						const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
 						const command = toolDef.buildCommand({
@@ -2231,8 +2229,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const modelConfig = yield* appConfig.getModelConfig()
 							const toolDef = getToolDefinition(cliTool)
-							const toolModelConfig =
-								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const toolModelConfig = modelConfig[cliTool]
 							const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
 							const command = toolDef.buildCommand({

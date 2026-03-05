@@ -535,12 +535,12 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// Check if this bead has a parent epic
 							const parentEpic = yield* issueTrackerClient.getParentEpic(issueId)
 
-								if (parentEpic) {
-									// Ensure epic branch exists by creating epic worktree if needed
-									// This is idempotent - if worktree already exists, it returns the existing one
-									const epicWorktree = yield* worktreeManager.create({
-										issueId: parentEpic.id,
-										projectPath,
+							if (parentEpic) {
+								// Ensure epic branch exists by creating epic worktree if needed
+								// This is idempotent - if worktree already exists, it returns the existing one
+								const epicWorktree = yield* worktreeManager.create({
+									issueId: parentEpic.id,
+									projectPath,
 									// Epic branches from main (no baseBranch = uses current branch)
 									// Epic gets copyPaths from config (copies from main project)
 									copyPaths: worktreeConfig.copyPaths,
@@ -557,10 +557,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// copyPaths are applied to ALL worktrees:
 						// - Epic children: copy from epic's worktree (epicWorktreePath)
 						// - Regular tasks: copy from main project (projectPath fallback)
-							const worktree = yield* worktreeManager.create({
-								issueId: issueId,
-								projectPath,
-								baseBranch: effectiveBaseBranch,
+						const worktree = yield* worktreeManager.create({
+							issueId: issueId,
+							projectPath,
+							baseBranch: effectiveBaseBranch,
 							sourceWorktreePath: epicWorktreePath,
 							copyPaths: worktreeConfig.copyPaths,
 							preCompactEnabled: hooksConfig.preCompact.enabled,
@@ -597,7 +597,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// 2. Config model.[cliTool].default
 						// 3. Config model.default
 						// 4. Tool's default (undefined = let tool decide)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const toolModelConfig = modelConfig[cliTool]
 						const effectiveModel = model ?? toolModelConfig.default ?? modelConfig.default
 
 						// Build command using the CLI tool registry
@@ -625,7 +625,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// Both are "resources" that need rollback on failure
 							Effect.gen(function* () {
 								let createdNewSession = false
-									let updatedIssueStatus = false
+								let updatedIssueStatus = false
 
 								if (!hasSession) {
 									yield* worktreeSession.getOrCreateSession(issueId, {
@@ -648,11 +648,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								// in "in_progress" state with no actual session (az-g7p bug fix)
 								if (needsStatusUpdate) {
 									yield* issueTrackerClient.update(issueId, { status: "in_progress" })
-										updatedIssueStatus = true
-									}
+									updatedIssueStatus = true
+								}
 
-									return { createdNewSession, updatedIssueStatus }
-								}),
+								return { createdNewSession, updatedIssueStatus }
+							}),
 
 							// USE: Register session in memory and publish event
 							() =>
@@ -701,7 +701,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 											}
 
 											// Rollback bead status if we changed it
-												if (acquired.updatedIssueStatus) {
+											if (acquired.updatedIssueStatus) {
 												yield* issueTrackerClient.update(issueId, { status: "open" }).pipe(
 													Effect.tap(() =>
 														Effect.logWarning(`Rolled back bead ${issueId} status to open`),
@@ -913,10 +913,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						yield* Effect.log(`Recovering crashed session for ${issueId}`)
 
-							// Verify worktree still exists
-							const worktreeExists = yield* worktreeManager
-								.exists({ issueId: issueId, projectPath: session.projectPath })
-								.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						// Verify worktree still exists
+						const worktreeExists = yield* worktreeManager
+							.exists({ issueId: issueId, projectPath: session.projectPath })
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
 
 						if (!worktreeExists) {
 							return yield* Effect.fail(
@@ -951,7 +951,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Get tool definition and model
 						const toolDef = getToolDefinition(cliTool)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+						const toolModelConfig = modelConfig[cliTool]
 						const effectiveModel = toolModelConfig.default ?? modelConfig.default
 
 						// Build command with -c flag to continue conversation
@@ -1037,48 +1037,48 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const worktrees = yield* worktreeManager
 							.list(effectiveProjectPath)
 							.pipe(Effect.catchAll(() => Effect.succeed([])))
-							const worktreeByIssueLookup = new Map(
-								worktrees.map((wt) => [normalizeIssueIdForLookup(wt.issueId), wt] as const),
-							)
-							const persistedByIssueLookup = new Map(
-								Array.from(HashMap.entries(persistedSessions), ([storedIssueId, persisted]) => [
-									normalizeIssueIdForLookup(storedIssueId),
-									persisted,
-								]),
-							)
-							const inMemoryIssueLookup = new Set(
-								Array.from(HashMap.keys(inMemorySessions), normalizeIssueIdForLookup),
-							)
+						const worktreeByIssueLookup = new Map(
+							worktrees.map((wt) => [normalizeIssueIdForLookup(wt.issueId), wt] as const),
+						)
+						const persistedByIssueLookup = new Map(
+							Array.from(HashMap.entries(persistedSessions), ([storedIssueId, persisted]) => [
+								normalizeIssueIdForLookup(storedIssueId),
+								persisted,
+							]),
+						)
+						const inMemoryIssueLookup = new Set(
+							Array.from(HashMap.keys(inMemorySessions), normalizeIssueIdForLookup),
+						)
 
 						// Build set of running tmux session names for crash detection
 						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
 
-							for (const tmuxSession of tmuxSessions) {
-								const parsed = parseIssueSessionName(tmuxSession.name)
-								if (!parsed || parsed.type !== "issue") continue
+						for (const tmuxSession of tmuxSessions) {
+							const parsed = parseIssueSessionName(tmuxSession.name)
+							if (!parsed || parsed.type !== "issue") continue
 
-								const issueId = parsed.issueId
-								const issueLookupKey = normalizeIssueIdForLookup(issueId)
+							const issueId = parsed.issueId
+							const issueLookupKey = normalizeIssueIdForLookup(issueId)
 
-								if (inMemoryIssueLookup.has(issueLookupKey)) continue
+							if (inMemoryIssueLookup.has(issueLookupKey)) continue
 
-								{
-									const worktree = worktreeByIssueLookup.get(issueLookupKey)
-									const persisted = persistedByIssueLookup.get(issueLookupKey)
+							{
+								const worktree = worktreeByIssueLookup.get(issueLookupKey)
+								const persisted = persistedByIssueLookup.get(issueLookupKey)
 
-									const orphanedSession: Session = {
-										issueId,
-										worktreePath:
-											worktree?.path ??
-											persisted?.worktreePath ??
-											getWorktreePath(effectiveProjectPath, issueId),
-										tmuxSessionName: tmuxSession.name,
-										state: persisted?.state ?? "busy",
-										startedAt: persisted?.startedAt ?? DateTime.unsafeFromDate(tmuxSession.created),
-										projectPath: persisted?.projectPath ?? effectiveProjectPath,
-									}
-									yield* Ref.update(sessionsRef, (sessions) =>
-										HashMap.set(sessions, issueId, orphanedSession),
+								const orphanedSession: Session = {
+									issueId,
+									worktreePath:
+										worktree?.path ??
+										persisted?.worktreePath ??
+										getWorktreePath(effectiveProjectPath, issueId),
+									tmuxSessionName: tmuxSession.name,
+									state: persisted?.state ?? "busy",
+									startedAt: persisted?.startedAt ?? DateTime.unsafeFromDate(tmuxSession.created),
+									projectPath: persisted?.projectPath ?? effectiveProjectPath,
+								}
+								yield* Ref.update(sessionsRef, (sessions) =>
+									HashMap.set(sessions, issueId, orphanedSession),
 								)
 							}
 						}
@@ -1093,10 +1093,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							"warning",
 						])
 
-							for (const [issueId, persisted] of HashMap.entries(persistedSessions)) {
-								const issueLookupKey = normalizeIssueIdForLookup(issueId)
-								// Skip if already recovered from tmux (handled above)
-								if (inMemoryIssueLookup.has(issueLookupKey)) continue
+						for (const [issueId, persisted] of HashMap.entries(persistedSessions)) {
+							const issueLookupKey = normalizeIssueIdForLookup(issueId)
+							// Skip if already recovered from tmux (handled above)
+							if (inMemoryIssueLookup.has(issueLookupKey)) continue
 
 							// Check if this session was active but tmux died
 							if (

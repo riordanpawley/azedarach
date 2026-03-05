@@ -37,8 +37,9 @@ export const CURRENT_CONFIG_VERSION = 4
  *
  * - claude: Claude Code (Anthropic's official CLI)
  * - opencode: OpenCode (SST's open-source alternative)
+ * - codex: Codex CLI (OpenAI)
  */
-export const CliToolSchema = Schema.Literal("claude", "opencode")
+export const CliToolSchema = Schema.Literal("claude", "opencode", "codex")
 export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
 
 /**
@@ -72,7 +73,7 @@ const ModelConfigSchema = Schema.Struct({
 
 	/**
 	 * Tool-specific model configuration overrides.
-	 * Allows having different defaults for Claude and OpenCode at the same time.
+	 * Allows having different defaults for each CLI tool at the same time.
 	 */
 	claude: Schema.optional(
 		Schema.Struct({
@@ -82,6 +83,13 @@ const ModelConfigSchema = Schema.Struct({
 	),
 
 	opencode: Schema.optional(
+		Schema.Struct({
+			default: Schema.optional(Schema.String),
+			chat: Schema.optional(Schema.String),
+		}),
+	),
+
+	codex: Schema.optional(
 		Schema.Struct({
 			default: Schema.optional(Schema.String),
 			chat: Schema.optional(Schema.String),
@@ -721,15 +729,15 @@ const migrations: readonly Migration[] = [
 					? legacyBaseBranch
 					: currentGitBaseBranch
 
-				// Build new pr config without legacy baseBranch field
-				const newPr =
-					pr !== undefined
-						? {
-								enabled: pr.enabled,
-								autoDraft: pr.autoDraft,
-								autoMerge: pr.autoMerge,
-							}
-						: undefined
+			// Build new pr config without legacy baseBranch field
+			const newPr =
+				pr !== undefined
+					? {
+							enabled: pr.enabled,
+							autoDraft: pr.autoDraft,
+							autoMerge: pr.autoMerge,
+						}
+					: undefined
 
 			return {
 				...config,
@@ -832,9 +840,9 @@ const migrations: readonly Migration[] = [
 				configuredBackends.length === 1 ? backendToTracker(configuredBackends[0]!) : undefined
 			const legacyTracker = config.beads?.issueTracker
 
-				if (
-					explicitTracker !== undefined &&
-					inferredTracker !== undefined &&
+			if (
+				explicitTracker !== undefined &&
+				inferredTracker !== undefined &&
 				explicitTracker !== inferredTracker
 			) {
 				throw new Error(
@@ -917,10 +925,10 @@ const migrations: readonly Migration[] = [
 
 			const inferredTracker: IssueTracker =
 				explicitTracker ??
-					(config.beads !== undefined
-						? "bd"
-						: config.beads_rust !== undefined
-							? "br"
+				(config.beads !== undefined
+					? "bd"
+					: config.beads_rust !== undefined
+						? "br"
 						: config.linear !== undefined
 							? "linear"
 							: config.local !== undefined
@@ -1065,6 +1073,7 @@ const RawConfigSchema = Schema.Struct({
 	 * Applies to NEW sessions only - existing sessions are not affected.
 	 * - "claude": Claude Code (Anthropic's official CLI)
 	 * - "opencode": OpenCode (SST's open-source alternative)
+	 * - "codex": Codex CLI (OpenAI)
 	 */
 	cliTool: Schema.optional(CliToolSchema),
 	issueTracker: Schema.optional(Schema.Union(IssueTrackerSchema, IssueTrackerConfigSchema)),
@@ -1149,30 +1158,24 @@ const CurrentConfigSchema = Schema.Struct({
  * 2. applyMigrations() transforms to current version
  * 3. Result matches CurrentConfigSchema
  */
-export const AzedarachConfigSchema = Schema.transformOrFail(
-	RawConfigSchema,
-	CurrentConfigSchema,
-	{
-		strict: true,
-		decode: (rawConfig, _options, ast, rawInput) =>
-			Effect.try({
-				try: () => applyMigrations(rawConfig),
-				catch: (error) =>
-					new ParseResult.Type(
-						ast,
-						rawInput,
-						error instanceof Error
-							? error.message
-							: `Config migration failed: ${String(error)}`,
-					),
-			}),
-		encode: (current) =>
-			Effect.succeed({
-				...current,
-				$schema: CURRENT_CONFIG_VERSION,
-			}),
-	},
-)
+export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, CurrentConfigSchema, {
+	strict: true,
+	decode: (rawConfig, _options, ast, rawInput) =>
+		Effect.try({
+			try: () => applyMigrations(rawConfig),
+			catch: (error) =>
+				new ParseResult.Type(
+					ast,
+					rawInput,
+					error instanceof Error ? error.message : `Config migration failed: ${String(error)}`,
+				),
+		}),
+	encode: (current) =>
+		Effect.succeed({
+			...current,
+			$schema: CURRENT_CONFIG_VERSION,
+		}),
+})
 
 // ============================================================================
 // Type Exports

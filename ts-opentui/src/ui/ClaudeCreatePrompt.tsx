@@ -33,7 +33,7 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 	const appConfig = appConfigResult._tag === "Success" ? appConfigResult.value : null
 	const cliTool = appConfig?.cliTool ?? "claude"
 	const modelConfig = appConfig?.model
-	const toolModelConfig = cliTool === "claude" ? modelConfig?.claude : modelConfig?.opencode
+	const toolModelConfig = modelConfig?.[cliTool]
 	const activeModel =
 		modelConfig?.chat ??
 		toolModelConfig?.chat ??
@@ -134,7 +134,8 @@ export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
 				{/* Title */}
 				<box>
 					<text fg={theme.lavender} attributes={ATTR_BOLD}>
-						Create Task with {cliTool === "claude" ? "Claude" : "OpenCode"}
+						Create Task with{" "}
+						{cliTool === "claude" ? "Claude" : cliTool === "opencode" ? "OpenCode" : "Codex"}
 						{"\n"}
 					</text>
 				</box>

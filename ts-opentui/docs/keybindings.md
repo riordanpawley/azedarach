@@ -131,7 +131,7 @@ Press `s` to open the interactive settings overlay. This allows you to view and 
 The settings overlay shows all editable configuration options:
 
 #### Session Settings
-- **CLI Tool**: Choose between "claude" (default) or "opencode" for AI sessions
+- **CLI Tool**: Choose between "claude" (default), "opencode", or "codex" for AI sessions
 - **Skip Permissions**: When enabled, Claude can execute commands without asking for permission (dangerous mode)
 
 #### Git Settings
@@ -170,7 +170,7 @@ The settings overlay shows all editable configuration options:
 ```
 1. Press `s` to open settings overlay
 2. Use `j`/`k` to navigate to "CLI Tool" setting
-3. Press `Space` to toggle between "claude" and "opencode"
+3. Press `Space` to cycle between "claude", "opencode", and "codex"
 4. Press `j` to move to "Skip Permissions" setting
 5. Press `Space` to toggle the boolean value
 6. Press `Esc` to close and return to normal mode
