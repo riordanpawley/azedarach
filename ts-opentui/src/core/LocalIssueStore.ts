@@ -641,6 +641,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					assignee?: string
 					estimate?: number
 					labels?: readonly string[]
+					parent?: string
 				},
 				syncTarget?: SyncTarget,
 				cwd?: string,
@@ -700,6 +701,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										${null}
 									)
 								`
+								if (params.parent !== undefined && params.parent.trim().length > 0) {
+									yield* sql`
+										INSERT INTO issue_dependencies (
+											issue_id,
+											depends_on_id,
+											dependency_type,
+											tombstoned_at
+										)
+										VALUES (${issueId}, ${params.parent}, ${"parent-child"}, ${null})
+									`
+								}
 								if (syncTarget !== undefined) {
 									yield* enqueueSync(sql, issueId, "upsert", syncTarget)
 								}

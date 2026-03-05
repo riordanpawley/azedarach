@@ -845,6 +845,7 @@ export interface BeadsClientService {
 		assignee?: string
 		estimate?: number
 		labels?: string[]
+		parent?: string
 		cwd?: string
 	}) => Effect.Effect<
 		Issue,
@@ -1913,16 +1914,17 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							}
 							const teamId = yield* resolveTeamId(configuredTeam)
 
-							const description = parseArgumentValue(rest, "--description")
-							const design = parseArgumentValue(rest, "--design")
-							const acceptance = parseArgumentValue(rest, "--acceptance")
-							const type = parseArgumentValue(rest, "--type")
-							const assignee = parseArgumentValue(rest, "--assignee")
-							const estimate = parseArgumentValue(rest, "--estimate")
-							const priorityArg = parseArgumentValue(rest, "--priority")
-							const priority = toLinearPriorityValue(
-								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
-							)
+						const description = parseArgumentValue(rest, "--description")
+						const design = parseArgumentValue(rest, "--design")
+						const acceptance = parseArgumentValue(rest, "--acceptance")
+						const type = parseArgumentValue(rest, "--type")
+						const assignee = parseArgumentValue(rest, "--assignee")
+						const estimate = parseArgumentValue(rest, "--estimate")
+						const parent = parseArgumentValue(rest, "--parent")
+						const priorityArg = parseArgumentValue(rest, "--priority")
+						const priority = toLinearPriorityValue(
+							priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
+						)
 							const labelArgs = parseRepeatedArgumentValues(rest, "--labels")
 							const labels = labelArgs
 								.flatMap((value) => value.split(","))
@@ -1936,14 +1938,18 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: undefined
 							const parsedEstimate =
 								estimate !== undefined ? Number.parseInt(estimate, 10) : undefined
-							const estimateValue =
-								parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
-									? parsedEstimate
-									: undefined
+						const estimateValue =
+							parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
+								? parsedEstimate
+								: undefined
+						const parentId =
+							parent !== undefined && parent.trim().length > 0
+								? yield* resolveLinearIssueId(parent)
+								: undefined
 
-							const extraSections: string[] = []
-							if (design) extraSections.push(`## Design\n${design}`)
-							if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
+						const extraSections: string[] = []
+						if (design) extraSections.push(`## Design\n${design}`)
+						if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
 							const mergedDescription = [description, ...extraSections]
 								.filter((value): value is string => value !== undefined && value.length > 0)
 								.join("\n\n")
@@ -1959,6 +1965,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 											priority,
 											assigneeId,
 											estimate: estimateValue,
+											parentId,
 											labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
 										}),
 									catch: (error) =>
@@ -2637,6 +2644,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				assignee?: string
 				estimate?: number
 				labels?: string[]
+				parent?: string
 				cwd?: string
 			}) =>
 				Effect.gen(function* () {
@@ -2655,6 +2663,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									assignee: params.assignee,
 									estimate: params.estimate,
 									labels: params.labels,
+									parent: params.parent,
 								},
 								mutationSyncTarget,
 								effectiveCwd,
@@ -2688,6 +2697,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					if (params.labels && params.labels.length > 0) {
 						// bd create uses --labels with comma-separated values
 						args.push("--labels", params.labels.join(","))
+					}
+					if (params.parent !== undefined) {
+						args.push("--parent", params.parent)
 					}
 
 					const output = yield* runBd(args, effectiveCwd)
@@ -3020,6 +3032,7 @@ export const create = (params: {
 	assignee?: string
 	estimate?: number
 	labels?: string[]
+	parent?: string
 	cwd?: string
 }): Effect.Effect<
 	Issue,

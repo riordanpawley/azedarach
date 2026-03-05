@@ -618,6 +618,7 @@ const issueCreateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
@@ -625,6 +626,10 @@ const issueCreateHandler = (args: {
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(cwd)
+		const resolvedParent = yield* Option.match(args.parent, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, cwd),
+		})
 
 		const issueTrackerClient = yield* BeadsClient
 		const issue = yield* issueTrackerClient.create({
@@ -644,6 +649,7 @@ const issueCreateHandler = (args: {
 						.map((label) => label.trim())
 						.filter((label) => label.length > 0),
 			}),
+			parent: resolvedParent,
 			cwd,
 		})
 
@@ -1477,6 +1483,10 @@ const issueCreateCommand = Command.make(
 		labels: Options.text("labels").pipe(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
+		),
+		parent: Options.text("parent").pipe(
+			Options.optional,
+			Options.withDescription("Parent epic issue ID"),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
