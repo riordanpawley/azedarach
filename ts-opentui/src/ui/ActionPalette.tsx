@@ -1,6 +1,7 @@
 /**
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
+import { MouseButton, type MouseEvent } from "@opentui/core"
 import type { WorkflowMode } from "../config/schema.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
@@ -20,6 +21,8 @@ export interface ActionPaletteProps {
 	workflowMode?: WorkflowMode
 	/** Current drilldown epic ID (when viewing inside an epic) */
 	drillDownEpicId?: string
+	/** Execute an action key sequence (same path as keyboard handler) */
+	onActionSelect?: (keySeq: string) => void
 }
 
 const _ATTR_BOLD = 1
@@ -42,6 +45,31 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  */
 /** Actions that require network connectivity */
 const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
+
+const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
+	h: "h",
+	l: "l",
+	s: "s",
+	S: "S-s",
+	"!": "!",
+	c: "c",
+	a: "a",
+	p: "p",
+	R: "S-r",
+	x: "x",
+	r: "r",
+	v: "v",
+	H: "S-h",
+	i: "i",
+	F: "S-f",
+	u: "u",
+	f: "f",
+	P: "S-p",
+	O: "S-o",
+	m: "m",
+	d: "d",
+	D: "S-d",
+}
 
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
@@ -156,9 +184,20 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 		// Show "(offline)" suffix for network actions when offline
 		const displayDesc = offlineBlocked ? `${description} (offline)` : description
+		const mappedKey = ACTION_KEY_SEQUENCE_MAP[keyName]
+
+		const handleMouseDown = (event: MouseEvent) => {
+			if (!available || !mappedKey || !props.onActionSelect) return
+			if (event.button !== MouseButton.LEFT) return
+
+			event.preventDefault()
+			event.stopPropagation()
+			props.onActionSelect(mappedKey)
+		}
 
 		return (
-			<box flexDirection="row">
+			// biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target.
+			<box flexDirection="row" onMouseDown={handleMouseDown}>
 				<text fg={keyColor} attributes={attrs}>
 					{keyName}
 				</text>
