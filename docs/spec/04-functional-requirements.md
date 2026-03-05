@@ -22,6 +22,9 @@ This section is normative.
 - AZ-FR-0011: The canonical persisted issue store MUST be local SQLite managed by Azedarach.
 - AZ-FR-0012: Local-only mode (no sync targets configured) MUST preserve full board and mutation workflows.
 - AZ-FR-0013: Sync targets (for example Linear or Beads adapter) MUST remain optional and non-blocking for local operation.
+- AZ-FR-0014: Canonical SQLite for the active project MUST be stored at `<project-root>/.azedarach/azedarach.db`.
+- AZ-FR-0015: If `<project-root>/.azedarach/azedarach.db` does not exist, the app MUST initialize it before first board hydration for that project.
+- AZ-FR-0016: Each project MUST use an isolated canonical SQLite store; issue data MUST NOT be mixed across project boundaries.
 
 ## 4.3 Modal Interaction Requirements
 
@@ -238,6 +241,8 @@ This section is normative.
 - AZ-FR-1803: Project switch MUST reload board against selected project.
 - AZ-FR-1804: Startup SHOULD auto-select project by cwd/default fallback order.
 - AZ-FR-1805: Project metadata MUST persist in global registry config.
+- AZ-FR-1806: Project switch MUST redirect all canonical issue reads/writes to the selected project's SQLite store.
+- AZ-FR-1807: Project switch MUST re-scope project-bound in-memory state (for example caches and mutation queues) to prevent cross-project operations.
 
 ## 4.21 Status Bar and Overlay Requirements
 
@@ -426,6 +431,8 @@ This section is normative.
 - AZ-FR-3814: Linear adapter SHOULD consume webhook/event ingestion paths to reduce polling load and API round-trips.
 - AZ-FR-3815: Manual sync command MUST drain pending queue items and report per-item success/failure diagnostics.
 - AZ-FR-3816: Outbound sync failures MUST not rollback successful local canonical commits.
+- AZ-FR-3817: Linear outbound API calls MUST be governed by an internal rate limiter capped at 30 requests per rolling 60 seconds.
+- AZ-FR-3818: Linear rate limiting MUST allow burst behavior with a default burst capacity of 10 requests before throttling/deferred execution applies.
 
 ## 4.42 Background Operation Requirements
 

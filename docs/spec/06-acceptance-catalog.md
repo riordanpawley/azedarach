@@ -453,6 +453,13 @@ Canonical fixture profile names:
 - Expected: multi-project model is supported and registry metadata persists/reloads correctly.
 - Links: AZ-FR-1801, AZ-FR-1805.
 
+### AZ-AT-2833 Project-local canonical DB isolation and switch semantics
+
+- Preconditions: two registered projects with distinct issue sets; at least one project starts without `.azedarach/azedarach.db`.
+- Steps: load project A, perform mutation, switch to project B, perform mutation, switch back to project A.
+- Expected: app initializes missing project DB on first load, each project uses `<project-root>/.azedarach/azedarach.db`, and switching projects fully re-scopes canonical reads/writes without cross-project leakage.
+- Links: AZ-FR-0014, AZ-FR-0015, AZ-FR-0016, AZ-FR-1806, AZ-FR-1807.
+
 ### AZ-AT-2824 Status/help/log and tmux discovery contract
 
 - Steps: open board, invoke help and logs overlays, run tmux discovery against known sessions.
@@ -851,6 +858,13 @@ Canonical fixture profile names:
 - Expected: local canonical state remains updated; sync failure is surfaced with retry path and queued pending sync item.
 - Links: AZ-FR-3815, AZ-FR-3816.
 
+### AZ-AT-2834 Linear outbound rate limiting with burst window
+
+- Preconditions: Linear sync target configured; outbound adapter calls and queue/backoff state are observable.
+- Steps: enqueue enough outbound sync actions to exceed 30 requests inside a rolling 60-second window while starting with a burst.
+- Expected: adapter enforces 30-requests/minute sustained ceiling, allows configured burst window before throttling, defers excess requests without dropping successful local commits, and exposes throttling/backlog diagnostics.
+- Links: AZ-FR-3816, AZ-FR-3817, AZ-FR-3818.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1009,4 +1023,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2832
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2834

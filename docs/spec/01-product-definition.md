@@ -248,7 +248,7 @@ Minimum external capabilities required:
 - terminal emulator supporting interactive keyboard input
 - tmux available and functional
 - git worktree operations supported
-- writable local filesystem for Azedarach SQLite data store
+- writable local filesystem for project-local Azedarach SQLite stores at `<project-root>/.azedarach/azedarach.db`
 - AI CLI available and authenticated
 - optional gh for PR workflows
 - optional linear-cli and/or Beads adapter tooling when sync targets are enabled

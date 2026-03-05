@@ -373,6 +373,8 @@ This section is normative for outcome quality; implementations MAY choose differ
 1. open project selector
 2. choose target project
 3. reload board against selected project context
+4. bind canonical store to `<target-project>/.azedarach/azedarach.db`
+5. re-scope project-bound in-memory state to selected project context before accepting new mutations
 
 ### Auto-Selection on Startup
 
@@ -381,6 +383,8 @@ Priority:
 1. current directory match
 2. configured default project
 3. first registered project
+
+If selected project canonical DB is missing, initialize `<project-root>/.azedarach/azedarach.db` before first hydration.
 
 ## 3.19 Search/Filter/Sort Composition Workflow
 
@@ -711,8 +715,11 @@ Applies to user-facing mutations where fast feedback matters, including:
 Local-first synchronization contract:
 
 - local SQLite store remains source of truth for persisted issue state
+- canonical local DB path per project is `<project-root>/.azedarach/azedarach.db`
+- switching projects fully swaps canonical DB context before subsequent reads/writes
 - UI applies optimistic mutations immediately against local state
 - inbound external updates SHOULD be event-driven (Linear webhooks) with manual sync fallback
+- Linear outbound API flow enforces internal throttle of 30 requests per rolling minute with default burst capacity of 10 requests
 - implementations MAY provide polling fallback for adapters that cannot emit events
 - inbound reconciliation MUST NOT clobber locally pending optimistic updates
 

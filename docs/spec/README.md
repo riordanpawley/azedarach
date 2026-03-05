@@ -135,8 +135,10 @@ An implementation is complete when:
 ## Data Model and Sync Topology
 
 - Canonical issue state MUST be stored locally in Azedarach-managed SQLite.
+- Canonical project DB path MUST be `<project-root>/.azedarach/azedarach.db` (one isolated DB per registered project).
 - External trackers are optional sync targets, not runtime sources of truth.
 - Linear is a first-class optional sync target and SHOULD prefer webhook-driven inbound updates over polling.
+- Linear outbound sync MUST enforce internal throttling (30 requests per rolling minute with default burst allowance of 10 requests).
 - A Beads sync adapter MAY be configured for projects that still mirror to Beads.
 - Local mutations MUST update local canonical state first; outbound sync is asynchronous and must not block board interaction.
 

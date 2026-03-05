@@ -226,6 +226,13 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 - Required behavior:
   - choose deterministic precedence or prompt selector.
 
+### Case F-083: Selected project store directory/DB missing
+
+- Required behavior:
+  - initialize `<project-root>/.azedarach/` and canonical SQLite DB if absent.
+  - continue with empty/local baseline board state without crashing.
+  - show non-blocking feedback that project-local store was initialized.
+
 ## 5.12 Bulk Operation Edge Cases
 
 ### Case F-090: Bulk stop includes tasks without sessions
@@ -624,3 +631,10 @@ On failure, logs SHOULD capture:
   - keep board fully functional from local canonical state.
   - show stale-external-sync indicator with last successful sync/event timestamp.
   - allow manual sync trigger while webhook path is degraded.
+
+### Case F-205: Linear outbound rate limit exceeded
+
+- Required behavior:
+  - keep local canonical commits successful and queue outbound sync work for retry.
+  - enforce internal throttling ceiling and burst policy deterministically.
+  - surface retry/backlog diagnostics (queued count and next eligible dispatch window).

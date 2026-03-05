@@ -432,6 +432,11 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: launch app outside registered paths
 - Expected: configured default project used
 
+### UC-PROJ-004 Project-local DB isolation on switch
+
+- Trigger: switch between two registered projects with different issue sets
+- Expected: app fully swaps to selected project's `<project-root>/.azedarach/azedarach.db` with no cross-project issue leakage
+
 ## 8.16 Operational and Recovery Use Cases
 
 ### UC-OPS-001 Handle missing session on attach
@@ -540,7 +545,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Session/dev use cases -> AZ-FR-0801..0907
 - Git/PR use cases -> AZ-FR-1001..1108
 - Authoring/planning -> AZ-FR-1301..1506
-- Attachments/settings/projects -> AZ-FR-1601..1805
+- Attachments/settings/projects -> AZ-FR-1601..1807
 - Recovery/ops -> AZ-FR-2101..2205 and Section 05 failure cases
 - Startup/re-entry -> AZ-FR-2701..2708
 - Concurrency/mutation -> AZ-FR-2801..2808
@@ -550,7 +555,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Runtime branch origin -> AZ-FR-3501..3506
 - Upstream follow-on merge -> AZ-FR-3601..3611
 - Relationship representation -> AZ-FR-3701..3705
-- Optimistic mutation -> AZ-FR-3801..3810
+- Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4008, AZ-FR-4101..4110
 
@@ -600,6 +605,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-042: open PR when metadata URL malformed.
 - UC-EXT-043: PR already merged status indicator updates.
 - UC-EXT-044: PR closed without merge reflected on card.
+- UC-EXT-045: Linear outbound sync bursts above limit are throttled with queued retry diagnostics.
 
 ### Authoring and Planning
 
@@ -623,6 +629,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-071: project path exists but Azedarach local store is not initialized.
 - UC-EXT-072: default project removed from registry.
 - UC-EXT-073: duplicate project names in registry handled safely.
+- UC-EXT-074: selected project is missing `.azedarach/azedarach.db` and store bootstrap is created automatically.
 
 ### Bulk and Scale
 
