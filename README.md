@@ -1,13 +1,13 @@
 # Azedarach
 
-> A TUI Kanban board for orchestrating parallel Claude Code sessions with Linear task tracking
+> A TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
 Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Melia azedarach), whose seeds have been used for prayer beads for millennia.
 
 ## Overview
 
 Azedarach is a terminal-based Kanban board that:
-- Displays tasks from any Linear-enabled project
+- Displays tasks from your configured issue tracker via `az issue`
 - Spawns Claude Code sessions in isolated git worktrees
 - Enables full parallelization of development work
 - Monitors session state (busy/waiting/done/error)
@@ -22,14 +22,14 @@ The key insight: **Claude Code already handles all the hard parts** (permissions
 2. **Minimal friction**: Start a task with a single keypress
 3. **Full visibility**: See status of all running Claude sessions at a glance
 4. **Easy intervention**: Attach to any session for manual fixes
-5. **Automated workflow**: Update Linear status, create PRs, notify on completion
+5. **Automated workflow**: Update issue status, create PRs, notify on completion
 6. **Zero Claude config**: 100% inherit project's Claude configuration
 
 ## Non-Goals
 
 - Managing Claude permissions (project's `.claude/settings.json` handles this)
 - Implementing custom Claude tools (project's MCP/skills handle this)
-- Replacing Linear CLI (we wrap it, not replace it)
+- Replacing the issue tracker CLI
 - IDE integration (this is terminal-native)
 
 ---
@@ -42,7 +42,7 @@ This repository contains multiple implementations of Azedarach, each exploring d
 
 **Tech Stack:** TypeScript, Bun, OpenTUI, Effect, React
 
-**Status:** Active development, most features implemented
+**Status:** Primary implementation in active development; default path for day-to-day use
 
 **Key Features:**
 - React-based UI with OpenTUI rendering
@@ -50,7 +50,9 @@ This repository contains multiple implementations of Azedarach, each exploring d
 - Modal keybindings (Helix-editor style)
 - Full session management with tmux
 
-**Documentation:** See [ts-opentui/CLAUDE.md](./ts-opentui/CLAUDE.md)
+**Documentation:**
+- [ts-opentui/docs/README.md](./ts-opentui/docs/README.md) (user guide)
+- [ts-opentui/CLAUDE.md](./ts-opentui/CLAUDE.md) (developer workflow)
 
 **Quick Start:**
 ```bash
@@ -71,19 +73,22 @@ See [ts-opentui/docs/install.md](./ts-opentui/docs/install.md) for full setup de
 
 ---
 
-### 🧊 go-bubbletea/ (Alternative Implementation)
+### 🧊 go-bubbletea/ (Alternative Rewrite Track)
 
 **Tech Stack:** Go, Bubbletea, Lip Gloss
 
-**Status:** Implemented, alternative implementation
+**Status:** Rewrite track with partial feature coverage; not yet at `ts-opentui` parity
 
-**Key Features:**
-- Elm Architecture (Model-Update-View)
-- Bubbletea for terminal UI
-- Lip Gloss for styling
-- Bubbles for UI components
+**Current Focus:**
+- Elm Architecture (Model-Update-View) foundations in Go
+- Bubbletea + Lip Gloss stack exploration
+- Incremental parity plan against the canonical product spec
 
-**Documentation:** See [go-bubbletea/CLAUDE.md](./go-bubbletea/CLAUDE.md)
+**Documentation:**
+- [go-bubbletea/CLAUDE.md](./go-bubbletea/CLAUDE.md) (developer workflow)
+- [go-bubbletea/docs/01-overview.md](./go-bubbletea/docs/01-overview.md) (rewrite context)
+- [go-bubbletea/docs/06-implementation-phases.md](./go-bubbletea/docs/06-implementation-phases.md) (phase roadmap)
+- [go-bubbletea/docs/07-feature-matrix.md](./go-bubbletea/docs/07-feature-matrix.md) (parity matrix)
 
 **Quick Start:**
 ```bash
@@ -102,6 +107,14 @@ make test               # Run tests
 **Status:** Experimental, not actively developed
 
 **Note:** For exploration purposes only
+
+---
+
+## Spec and Roadmap
+
+- Canonical product spec and shared roadmap: [docs/spec/README.md](./docs/spec/README.md)
+- `ts-opentui` roadmap source: implement and validate against `docs/spec/*` requirements and acceptance scenarios
+- `go-bubbletea` roadmap source: [06-implementation-phases.md](./go-bubbletea/docs/06-implementation-phases.md) + [07-feature-matrix.md](./go-bubbletea/docs/07-feature-matrix.md)
 
 ---
 
@@ -135,7 +148,7 @@ The architecture is shared across implementations:
 │  - Spawn/manage tmux sessions                                       │
 │  - Monitor Claude output for state changes                          │
 │  - Execute hooks on state transitions                               │
-│  - Coordinate with linear via `linear-cli` CLI                               │
+│  - Coordinate with issues via `az issue` CLI                         │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
               ┌───────────────────┼───────────────────┐
@@ -164,8 +177,8 @@ User presses Enter on CHE-102
   ↓
 Azedarach:
   1. Creates worktree: ../Chefy-che-102
-  2. Loads issue context: `linear-cli i get che-102 --output json --compact`
-  3. Updates status: `linear-cli i update che-102 --status=in_progress`
+  2. Loads issue context: `az issue get che-102 --output json --compact`
+  3. Updates status: `az issue update che-102 --status=in_progress`
   4. Spawns tmux session: `tmux new-session -d -s che-102`
   5. Starts Claude: `claude "work on: che-102"`
   ↓
@@ -201,7 +214,7 @@ Claude finishes CHE-103 successfully
 Azedarach detects "done" state
   ↓
 Azedarach:
-  1. Updates issue status/comments in Linear as needed
+  1. Updates issue status/comments via `az issue` as needed
   2. Commits changes: `git add -A && git commit -m "..."`
   3. Pushes: `git push -u origin che-103`
   4. Creates PR: `gh pr create --draft`
@@ -213,7 +226,7 @@ User reviews PR, approves, merges
 User marks task verified (or auto-verify if configured)
   ↓
 Azedarach:
-  1. Runs `linear-cli i close che-103`
+  1. Runs `az issue close che-103`
   2. Cleans up worktree
   3. Task moves to "closed"
 ```
@@ -228,7 +241,7 @@ Azedarach:
   - Git >= 2.20 (worktree support)
   - tmux >= 3.0
   - gh CLI (authenticated)
-  - Linear (`linear-cli` CLI installed and configured)
+  - Issue tracker (`az` CLI installed and configured)
   - Claude Code (`claude` CLI installed and authenticated)
 
 - **For go-bubbletea:**
@@ -236,7 +249,7 @@ Azedarach:
   - Git >= 2.20 (worktree support)
   - tmux >= 3.0
   - gh CLI (authenticated)
-  - Linear (`linear-cli` CLI installed and configured)
+  - Issue tracker (`az` CLI installed and configured)
   - Claude Code (`claude` CLI installed and authenticated)
 
 ---
@@ -257,8 +270,7 @@ See [LICENSE](./LICENSE) for details.
 
 ## References
 
-- [Linear](https://github.com/steveyegge/linear) - Task tracking backend
-- [Linear Worktree Docs](https://github.com/steveyegge/linear/blob/main/docs/ADVANCED.md#git-worktrees)
+- `az issue --help` - Task tracking command reference
 - [CCManager](https://github.com/kbwo/ccmanager) - Session management inspiration
 - [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel Claude orchestration
 - [OpenTUI](https://github.com/sst/opentui) - React for CLI (ts-opentui)
