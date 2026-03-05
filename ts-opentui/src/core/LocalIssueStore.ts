@@ -2034,23 +2034,23 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												${snapshot.estimate ?? null},
 												${null}
 											)
-											ON CONFLICT(id)
-											DO UPDATE SET
-												title = ${snapshot.title},
-												description = ${snapshot.description ?? null},
-												status = ${snapshot.status},
-												priority = ${snapshot.priority},
-												issue_type = ${snapshot.issueType},
-												updated_at = ${snapshot.updatedAt},
-												closed_at = ${snapshot.closedAt ?? null},
-												assignee = ${snapshot.assignee ?? null},
-												labels_json = ${encodeLabels(snapshot.labels)},
-												design = ${snapshot.design ?? null},
-												notes = ${snapshot.notes ?? null},
-												acceptance = ${snapshot.acceptance ?? null},
-												estimate = ${snapshot.estimate ?? null},
-												deleted_at = ${null}
-										`
+									ON CONFLICT(id)
+									DO UPDATE SET
+										title = ${snapshot.title},
+										description = COALESCE(${snapshot.description ?? null}, description),
+										status = ${snapshot.status},
+										priority = ${snapshot.priority},
+										issue_type = ${snapshot.issueType},
+										updated_at = ${snapshot.updatedAt},
+										closed_at = ${snapshot.closedAt ?? null},
+										assignee = ${snapshot.assignee ?? null},
+										labels_json = ${encodeLabels(snapshot.labels)},
+										design = COALESCE(${snapshot.design ?? null}, design),
+										notes = COALESCE(${snapshot.notes ?? null}, notes),
+										acceptance = COALESCE(${snapshot.acceptance ?? null}, acceptance),
+										estimate = COALESCE(${snapshot.estimate ?? null}, estimate),
+										deleted_at = ${null}
+									`
 
 										yield* sql`
 											INSERT INTO issue_external_refs (
