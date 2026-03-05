@@ -60,6 +60,15 @@ bun run type-check       # Full project check
 bun run build            # Build the project
 ```
 
+**Coworker Install (global `az` command, from repo root):**
+```bash
+bun install
+just install-sfe-ts
+az --help
+```
+
+See [ts-opentui/docs/install.md](./ts-opentui/docs/install.md) for full setup details and brew tap feasibility notes.
+
 ---
 
 ### 🧊 go-bubbletea/ (Alternative Implementation)
