@@ -83,7 +83,7 @@ export interface AppConfigService {
 	readonly getNotificationsConfig: () => Effect.Effect<ResolvedConfig["notifications"]>
 
 	/** Get effective issue backend configuration (tracker + sync flag) */
-	readonly getBeadsConfig: () => Effect.Effect<{
+	readonly getIssueTrackerSyncConfig: () => Effect.Effect<{
 		readonly issueTracker: ResolvedConfig["issueTracker"]
 		readonly syncEnabled: boolean
 	}>
@@ -520,7 +520,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getMergeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.merge),
 			getNotificationsConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => c.notifications),
-			getBeadsConfig: () =>
+			getIssueTrackerSyncConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => ({
 					issueTracker: c.issueTracker,
 					syncEnabled: getIssueBackendSyncEnabled(c),

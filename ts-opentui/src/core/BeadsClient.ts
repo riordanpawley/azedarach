@@ -2390,7 +2390,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
 					// Check if beads sync is enabled (config + network)
-					const syncStatus = yield* offlineService.isBeadsSyncEnabled()
+					const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
 					if (!syncStatus.enabled) {
 						// Return empty result when offline - issues are tracked locally
 						return { pushed: 0, pulled: 0 }

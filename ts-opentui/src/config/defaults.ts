@@ -369,13 +369,20 @@ export interface ResolvedConfig {
 const mergeIssueTrackerWithDefaults = (
 	issueTracker: AzedarachConfig["issueTracker"],
 ): ResolvedConfig["issueTracker"] => {
-	const defaultLinearWebhooks = {
+	const defaultLinearWebhooks: {
+		readonly enabled: boolean
+		readonly transport: "sdk" | "cli"
+		readonly url: string | undefined
+		readonly port: number
+		readonly events: readonly string[]
+		readonly secret: string | undefined
+	} = {
 		enabled: true,
-		transport: "sdk" as const,
+		transport: "sdk",
 		url: undefined,
 		port: 9000,
-		events: ["Issue"] as readonly string[],
-		secret: undefined as string | undefined,
+		events: ["Issue"],
+		secret: undefined,
 	}
 
 	if (issueTracker !== undefined) {

@@ -100,15 +100,15 @@ export class OfflineService extends Effect.Service<OfflineService>()("OfflineSer
 			isPREnabled: (): Effect.Effect<EnabledStatus> =>
 				checkEnabled(Effect.map(appConfig.getPRConfig(), (c) => c.enabled)),
 
-			/**
-			 * Check if beads sync is enabled
-			 *
-			 * Disabled if:
-			 * - beads.syncEnabled is false in config
-			 * - Network is offline
-			 */
-			isBeadsSyncEnabled: (): Effect.Effect<EnabledStatus> =>
-				checkEnabled(Effect.map(appConfig.getBeadsConfig(), (c) => c.syncEnabled)),
+				/**
+				 * Check if issue-tracker sync is enabled.
+				 *
+				 * Disabled if:
+				 * - backend syncEnabled is false in config
+				 * - Network is offline
+				 */
+			isIssueTrackerSyncEnabled: (): Effect.Effect<EnabledStatus> =>
+				checkEnabled(Effect.map(appConfig.getIssueTrackerSyncConfig(), (c) => c.syncEnabled)),
 
 			/**
 			 * Get descriptive message for why an operation is disabled
