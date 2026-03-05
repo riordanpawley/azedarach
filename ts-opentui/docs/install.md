@@ -110,3 +110,44 @@ git pull --rebase
 git tag v0.3.0
 git push origin v0.3.0
 ```
+
+## Homebrew Tap Setup (Maintainers)
+
+Status:
+- release artifacts are automated
+- tap repository and formula publishing are manual
+
+Suggested tap repo name:
+- `homebrew-azedarach`
+
+Bootstrap steps:
+
+1. Create and clone the tap repository:
+   ```bash
+   gh repo create <owner>/homebrew-azedarach --public
+   git clone git@github.com:<owner>/homebrew-azedarach.git
+   ```
+2. Generate a formula from a release tag:
+   ```bash
+   ./ts-opentui/scripts/generate-homebrew-formula.sh v0.3.0 \
+     --repo <owner>/azedarach \
+     --output /path/to/homebrew-azedarach/Formula/azedarach.rb
+   ```
+3. Commit and push in the tap repo:
+   ```bash
+   cd /path/to/homebrew-azedarach
+   git add Formula/azedarach.rb
+   git commit -m "azedarach v0.3.0"
+   git push
+   ```
+
+Coworker install (after tap is published):
+
+```bash
+brew tap <owner>/azedarach
+brew install azedarach
+az --help
+```
+
+Note:
+- this formula installs an `az` binary and declares `conflicts_with "azure-cli"`.
