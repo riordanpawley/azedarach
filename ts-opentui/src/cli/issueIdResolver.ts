@@ -22,21 +22,6 @@ const parseLinearIdentifier = (
 	}
 }
 
-/**
- * Normalize CLI issue input:
- * - Linear identifiers become uppercase prefix (`aze-123` -> `AZE-123`)
- * - All other shapes are returned unchanged (trimmed)
- */
-export const normalizeIssueIdInput = (input: string): string => {
-	const trimmed = input.trim()
-	const parsed = parseLinearIdentifier(trimmed)
-	if (!parsed) {
-		return trimmed
-	}
-
-	return `${parsed.prefix}-${parsed.suffix}`
-}
-
 const resolveConfiguredLinearPrefix = (config: ResolvedConfig): string | undefined => {
 	if (!("linear" in config.issueTracker)) {
 		return undefined
@@ -108,16 +93,16 @@ export const resolveCliIssueId = (
 	projectPath: string,
 ) =>
 	Effect.gen(function* () {
-		const normalizedIssueId = normalizeIssueIdInput(rawIssueId)
-		if (!NUMERIC_ISSUE_SUFFIX_PATTERN.test(normalizedIssueId)) {
-			return normalizedIssueId
+		const trimmedIssueId = rawIssueId.trim()
+		if (!NUMERIC_ISSUE_SUFFIX_PATTERN.test(trimmedIssueId)) {
+			return trimmedIssueId
 		}
 
 		const appConfig = yield* AppConfig
 		const config = yield* SubscriptionRef.get(appConfig.config)
 		const configuredPrefix = resolveConfiguredLinearPrefix(config)
 		if (configuredPrefix) {
-			return `${configuredPrefix}-${normalizedIssueId}`
+			return `${configuredPrefix}-${trimmedIssueId}`
 		}
 
 		const beadsClient = yield* BeadsClient
@@ -129,5 +114,5 @@ export const resolveCliIssueId = (
 			.pipe(Effect.catchAll(() => Effect.succeed([])))
 
 		const inferredPrefix = inferLinearIssuePrefixFromIds(issueSample.map((issue) => issue.id))
-		return inferredPrefix ? `${inferredPrefix}-${normalizedIssueId}` : normalizedIssueId
+		return inferredPrefix ? `${inferredPrefix}-${trimmedIssueId}` : trimmedIssueId
 	})

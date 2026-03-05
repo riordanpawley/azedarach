@@ -1,20 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { inferLinearIssuePrefixFromIds, normalizeIssueIdInput } from "./issueIdResolver.js"
-
-describe("normalizeIssueIdInput", () => {
-	it("uppercases Linear identifier prefixes", () => {
-		expect(normalizeIssueIdInput("aze-123")).toBe("AZE-123")
-	})
-
-	it("keeps non-Linear identifiers unchanged", () => {
-		expect(normalizeIssueIdInput("az-2qy")).toBe("az-2qy")
-	})
-
-	it("trims surrounding whitespace", () => {
-		expect(normalizeIssueIdInput("  AZE-321  ")).toBe("AZE-321")
-		expect(normalizeIssueIdInput("  321  ")).toBe("321")
-	})
-})
+import { inferLinearIssuePrefixFromIds } from "./issueIdResolver.js"
 
 describe("inferLinearIssuePrefixFromIds", () => {
 	it("infers the dominant prefix from a mixed issue set", () => {
