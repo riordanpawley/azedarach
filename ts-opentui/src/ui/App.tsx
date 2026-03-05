@@ -370,7 +370,7 @@ export const App = () => {
 		// Keep mouse interactions scoped to the main board surface
 		if (currentOverlay) return
 
-		// Left click = focus, right click = focus + open details/drill-down
+		// Left click = focus, right click = focus + open action menu
 		if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
 		const button = event.button
 
@@ -387,8 +387,13 @@ export const App = () => {
 		lastClickRef.current = { taskId, at: now }
 
 		void jumpToTask(taskId).then(() => {
-			const shouldOpen = button === MouseButton.RIGHT || isDoubleClick
-			if (!shouldOpen) return
+			if (button === MouseButton.RIGHT) {
+				if (mode._tag !== "normal" && mode._tag !== "select") return
+				void handleKey("space")
+				return
+			}
+
+			if (!isDoubleClick) return
 			if (mode._tag !== "normal") return
 			void handleKey("return")
 		})
@@ -533,6 +538,9 @@ export const App = () => {
 					devServerPort={displayDevServer.port}
 					workflowMode={workflowMode}
 					drillDownEpicId={drillDownEpicId}
+					onActionSelect={(keySeq) => {
+						void handleKey(keySeq)
+					}}
 				/>
 			)}
 
