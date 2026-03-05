@@ -532,6 +532,159 @@ const compactSingleLineText = (value: string): string => value.replace(/\s+/g, "
 const formatIssueSummaryLine = (issue: BeadsIssue): string =>
 	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
 
+const normalizeIssueTextField = (value: string | undefined): string | undefined => {
+	const normalized = value?.trim()
+	return normalized && normalized.length > 0 ? normalized : undefined
+}
+
+type DependencyCountLabel =
+	| "blocking"
+	| "blockedBy"
+	| "children"
+	| "parent"
+	| "related"
+	| "discoveredFrom"
+	| "discoveredBy"
+type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
+
+const DEPENDENCY_COUNT_LABEL_ORDER: readonly DependencyCountLabel[] = [
+	"blocking",
+	"blockedBy",
+	"children",
+	"parent",
+	"related",
+	"discoveredFrom",
+	"discoveredBy",
+]
+
+const normalizeDependencyIds = (
+	refs: ReadonlyArray<{ readonly id: string }> | undefined,
+): readonly string[] => {
+	if (!refs || refs.length === 0) {
+		return []
+	}
+	const seen = new Set<string>()
+	const ids: string[] = []
+	for (const ref of refs) {
+		const normalized = ref.id.trim()
+		if (normalized.length === 0 || seen.has(normalized)) continue
+		seen.add(normalized)
+		ids.push(normalized)
+	}
+	return ids
+}
+
+const formatIssueRelationshipSection = (
+	label: "Dependencies" | "Dependents",
+	refs: ReadonlyArray<{ readonly id: string }> | undefined,
+	count: number | undefined,
+): string | undefined => {
+	const ids = normalizeDependencyIds(refs)
+	if (ids.length > 0) {
+		return `${label}:\n${ids.join(", ")}`
+	}
+	if (count !== undefined && count > 0) {
+		return `${label}: ${count}`
+	}
+	return undefined
+}
+
+const dependencyCountLabelFromDependency = (
+	dependencyType: RelationshipDependencyType,
+): DependencyCountLabel => {
+	switch (dependencyType) {
+		case "blocks":
+			return "blockedBy"
+		case "parent-child":
+			return "parent"
+		case "discovered-from":
+			return "discoveredFrom"
+		case "related":
+		default:
+			return "related"
+	}
+}
+
+const dependencyCountLabelFromDependent = (
+	dependencyType: RelationshipDependencyType,
+): DependencyCountLabel => {
+	switch (dependencyType) {
+		case "blocks":
+			return "blocking"
+		case "parent-child":
+			return "children"
+		case "discovered-from":
+			return "discoveredBy"
+		case "related":
+		default:
+			return "related"
+	}
+}
+
+const formatIssueDependencyTypeCountsSection = (issue: BeadsIssue): string | undefined => {
+	const counts = new Map<DependencyCountLabel, number>()
+	for (const dependency of issue.dependencies ?? []) {
+		const label = dependencyCountLabelFromDependency(dependency.dependency_type)
+		counts.set(label, (counts.get(label) ?? 0) + 1)
+	}
+	for (const dependent of issue.dependents ?? []) {
+		const label = dependencyCountLabelFromDependent(dependent.dependency_type)
+		counts.set(label, (counts.get(label) ?? 0) + 1)
+	}
+
+	const parts = DEPENDENCY_COUNT_LABEL_ORDER.flatMap((label) => {
+		const count = counts.get(label)
+		return count && count > 0 ? `${label}: ${count}` : []
+	})
+	if (parts.length === 0) {
+		return undefined
+	}
+	return `Dependency Counts: ${parts.join(", ")}`
+}
+
+const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
+	const sections: string[] = []
+	const description = normalizeIssueTextField(issue.description)
+	const design = normalizeIssueTextField(issue.design)
+	const acceptance = normalizeIssueTextField(issue.acceptance)
+	const notes = normalizeIssueTextField(issue.notes)
+	const dependencyTypeCounts = formatIssueDependencyTypeCountsSection(issue)
+	const dependencies = formatIssueRelationshipSection(
+		"Dependencies",
+		issue.dependencies,
+		issue.dependency_count,
+	)
+	const dependents = formatIssueRelationshipSection(
+		"Dependents",
+		issue.dependents,
+		issue.dependent_count,
+	)
+
+	if (description) {
+		sections.push(`Description:\n${description}`)
+	}
+	if (design) {
+		sections.push(`Design:\n${design}`)
+	}
+	if (acceptance) {
+		sections.push(`Acceptance:\n${acceptance}`)
+	}
+	if (notes) {
+		sections.push(`Notes:\n${notes}`)
+	}
+	if (dependencyTypeCounts) {
+		sections.push(dependencyTypeCounts)
+	}
+	if (dependencies) {
+		sections.push(dependencies)
+	}
+	if (dependents) {
+		sections.push(dependents)
+	}
+
+	return sections
+}
+
 /**
  * Show issue details
  */
@@ -542,18 +695,23 @@ const issueGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 
 		if (args.verbose) {
 			yield* Console.error(`Loading issue: ${issueId}`)
-			yield* Console.error(`Project: ${cwd}`)
+			yield* Console.error(`Project: ${explicitProjectDir ?? resolverCwd}`)
 		}
 
-		yield* validateIssueTrackerStore(cwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		const issue = yield* issueTrackerClient.show(issueId, cwd)
+		const issue = yield* issueTrackerClient.show(issueId, explicitProjectDir).pipe(
+			Effect.catchTag("NotFoundError", () =>
+				Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
+			),
+		)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -561,6 +719,11 @@ const issueGetHandler = (args: {
 		}
 
 		yield* Console.log(formatIssueSummaryLine(issue))
+		const detailSections = formatIssueDetailSections(issue)
+		if (detailSections.length > 0) {
+			yield* Console.log("")
+			yield* Console.log(detailSections.join("\n\n"))
+		}
 
 		if (args.verbose) {
 			if (issue.assignee && issue.assignee.trim().length > 0) {
@@ -585,13 +748,19 @@ const issueCreateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const resolvedParent = yield* Option.match(args.parent, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
+		})
 
 		const issueTrackerClient = yield* BeadsClient
 		const issue = yield* issueTrackerClient.create({
@@ -611,7 +780,8 @@ const issueCreateHandler = (args: {
 						.map((label) => label.trim())
 						.filter((label) => label.length > 0),
 			}),
-			cwd,
+			parent: resolvedParent,
+			cwd: explicitProjectDir,
 		})
 
 		if (args.json) {
@@ -649,9 +819,10 @@ const issueUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const labels = Option.match(args.labels, {
 			onNone: () => undefined,
@@ -664,7 +835,7 @@ const issueUpdateHandler = (args: {
 
 		const resolvedParent = yield* Option.match(args.parent, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, cwd),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
 		})
 
 		const fields = {
@@ -692,7 +863,7 @@ const issueUpdateHandler = (args: {
 		}
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.update(issueId, fields, cwd)
+		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
 			return
@@ -714,12 +885,17 @@ const issueCloseHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), cwd)
+		yield* issueTrackerClient.close(
+			issueId,
+			Option.getOrUndefined(args.reason),
+			explicitProjectDir,
+		)
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -756,12 +932,13 @@ const issueDeleteHandler = (args: {
 			)
 		}
 
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.delete(issueId, cwd)
+		yield* issueTrackerClient.delete(issueId, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
 			return
@@ -916,6 +1093,36 @@ const gateHandler = (args: {
 		if (!typeCheckResult.passed) {
 			return yield* Effect.fail(new Error("Type-check failed"))
 		}
+	})
+
+/**
+ * az prime - Print session primer for AI agents
+ */
+const primeHandler = (_args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		yield* Console.log(`Azedarach Session Primer
+
+- Use \`az issue\` commands as the task-tracker interface for this repo.
+- Start each session with: \`az issue get <issue-id>\`
+- Common issue commands:
+  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
+  - \`az issue update <issue-id> --design "..."\`
+  - \`az issue update <issue-id> --notes "..."\`
+  - \`az issue update <issue-id> --status in_progress|blocked|open\`
+  - \`az issue create "Title" --type task|bug|epic|chore --priority 1-5\`
+  - \`az issue create "Child task" --parent <epic-id>\`
+  - \`az issue close <issue-id> --reason "..."\`
+  - \`az issue --help\`
+- Keep issue context current as you work:
+  - Update design/notes as implementation decisions change.
+  - Use status/priority/labels flags when state changes materially.
+- Create follow-up/child work in the tracker instead of local TODOs.
+- Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
+- When work is complete:
+  - Commit your changes first (\`git add -A && git commit -m "AZE-123: ..."\`).
+  - Always include the issue ID in the commit message.
+  - Then close the issue (\`az issue close <issue-id>\`).
+`)
 	})
 
 /**
@@ -1390,6 +1597,17 @@ const gateCommand = Command.make(
 	gateHandler,
 ).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
 
+/**
+ * az prime - Print agent primer
+ */
+const primeCommand = Command.make(
+	"prime",
+	{
+		verbose: verboseOption,
+	},
+	primeHandler,
+).pipe(Command.withDescription("Print session primer for AI agents using az issue as task tracker"))
+
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
 /**
@@ -1444,6 +1662,10 @@ const issueCreateCommand = Command.make(
 		labels: Options.text("labels").pipe(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
+		),
+		parent: Options.text("parent").pipe(
+			Options.optional,
+			Options.withDescription("Parent epic issue ID"),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
@@ -1930,6 +2152,7 @@ const cli = az.pipe(
 		// Top-level shortcuts (most commonly used)
 		addCommand,
 		listCommand,
+		primeCommand,
 		// Session management
 		startCommand,
 		attachCommand,
@@ -1961,6 +2184,7 @@ const commandCli = az.pipe(
 	Command.withSubcommands([
 		addCommand,
 		listCommand,
+		primeCommand,
 		startCommand,
 		attachCommand,
 		pauseCommand,
@@ -2001,7 +2225,14 @@ const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => 
 	return null
 }
 
-const normalizeIssueJsonFlagOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+/**
+ * @effect/cli expects options before positional args.
+ * Normalize common user ordering like:
+ *   az issue update <issue-id> --description "..."
+ * into:
+ *   az issue update --description "..." <issue-id>
+ */
+const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
 	const issueCommandIndex = argv.indexOf("issue")
 	if (issueCommandIndex === -1) return argv
 
@@ -2016,17 +2247,27 @@ const normalizeIssueJsonFlagOrder = (argv: ReadonlyArray<string>): ReadonlyArray
 		return argv
 	}
 
-	const jsonFlagIndex = argv.indexOf("--json", issueCommandIndex + 2)
-	if (jsonFlagIndex === -1) return argv
+	const positionalArgIndex = issueCommandIndex + 2
+	if (positionalArgIndex >= argv.length) return argv
 
-	const desiredIndex = issueCommandIndex + 2
-	if (jsonFlagIndex <= desiredIndex) return argv
+	const positionalArg = argv[positionalArgIndex]
+	if (positionalArg === undefined || positionalArg.startsWith("-")) {
+		return argv
+	}
+
+	const hasOptionAfterPositional = argv
+		.slice(positionalArgIndex + 1)
+		.some((token) => token.startsWith("-"))
+	if (!hasOptionAfterPositional) return argv
 
 	const reordered = [...argv]
-	reordered.splice(jsonFlagIndex, 1)
-	reordered.splice(desiredIndex, 0, "--json")
+	reordered.splice(positionalArgIndex, 1)
+	reordered.push(positionalArg)
 	return reordered
 }
+
+// Backward-compatible name used by existing tests and imports.
+const normalizeIssueJsonFlagOrder = normalizeIssueOptionOrder
 
 const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 	argv.includes("--verbose") || argv.includes("-v")
@@ -2034,6 +2275,7 @@ const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"add",
 	"list",
+	"prime",
 	"start",
 	"attach",
 	"pause",
@@ -2117,7 +2359,7 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
-	const normalizedArgv = normalizeIssueJsonFlagOrder(argv)
+	const normalizedArgv = normalizeIssueOptionOrder(argv)
 	const mode = resolveCliExecutionMode(normalizedArgv)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
@@ -2148,4 +2390,11 @@ export { cliLayer, commandCliLayer }
 /**
  * Export the raw runner for ManagedRuntime pattern
  */
-export { cliRunner, formatIssueSummaryLine, normalizeIssueJsonFlagOrder, resolveCliExecutionMode }
+export {
+	cliRunner,
+	formatIssueDetailSections,
+	formatIssueSummaryLine,
+	normalizeIssueOptionOrder,
+	normalizeIssueJsonFlagOrder,
+	resolveCliExecutionMode,
+}

@@ -391,6 +391,36 @@ const BeadsRustConfigSchema = Schema.Struct({
  *
  * Runs Azedarach as a standalone issue tracker using local SQLite storage.
  */
+const LocalBackupsConfigSchema = Schema.Struct({
+	/**
+	 * Enable automatic SQLite backups for the local issue store (default: true)
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Minimum age (minutes) before stale-on-open triggers a backup (default: 60)
+	 */
+	intervalMinutes: Schema.optional(Schema.Number),
+
+	/**
+	 * Cooldown between write-triggered backups (seconds, default: 300)
+	 */
+	writeCooldownSeconds: Schema.optional(Schema.Number),
+
+	/**
+	 * Max number of backup snapshots to keep (default: 30)
+	 */
+	maxBackups: Schema.optional(Schema.Number),
+
+	/**
+	 * Backup directory path.
+	 *
+	 * Relative paths are resolved against the project root.
+	 * Default: ".azedarach/backups"
+	 */
+	directory: Schema.optional(Schema.String),
+})
+
 const LocalConfigSchema = Schema.Struct({
 	/**
 	 * Enable external sync queue processing when a sync target is configured.
@@ -398,6 +428,11 @@ const LocalConfigSchema = Schema.Struct({
 	 * Local-only mode does not require external sync, so default is false.
 	 */
 	syncEnabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Local SQLite backup policy and retention.
+	 */
+	backups: Schema.optional(LocalBackupsConfigSchema),
 })
 
 /**
@@ -777,6 +812,7 @@ const migrations: readonly Migration[] = [
 				(nestedIssueTracker?.local !== undefined
 					? {
 							syncEnabled: nestedIssueTracker.local.syncEnabled,
+							backups: nestedIssueTracker.local.backups,
 						}
 					: undefined)
 
@@ -842,6 +878,7 @@ const migrations: readonly Migration[] = [
 					selectedBackend === "local"
 						? {
 								syncEnabled: localConfig?.syncEnabled ?? false,
+								backups: localConfig?.backups,
 							}
 						: undefined,
 			}
@@ -919,6 +956,7 @@ const migrations: readonly Migration[] = [
 							: {
 									local: {
 										syncEnabled: config.local?.syncEnabled ?? false,
+										backups: config.local?.backups,
 									},
 								}
 

@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME="issue"
+
+print_usage() {
+  cat <<EOF_USAGE
+Usage: ${SCRIPT_NAME} <command> [args...]
+
+Wrapper commands:
+  prime                Print AI session primer + backend API guide
+  backend              Print resolved issue backend
+  help-backend         Print backend-native help
+  help                 Show this help
+
+Issue commands:
+  Any other command is passed through to the selected backend.
+
+Backends:
+  - linear (default)   -> linear-cli i <command> [args...]
+  - br                 -> br <command> [args...]
+  - bd                 -> bd <command> [args...]
+  - az                 -> az issue <command> [args...]
+
+Environment:
+  ISSUE_BACKEND        Select backend (linear|br|bd|az), defaults to linear
+EOF_USAGE
+}
+
+normalize_backend() {
+  case "${1:-}" in
+    "") printf '%s\n' "linear" ;;
+    linear|br|bd|az) printf '%s\n' "$1" ;;
+    beads_rust) printf '%s\n' "br" ;;
+    beads) printf '%s\n' "bd" ;;
+    *)
+      printf '%s\n' "issue: unsupported ISSUE_BACKEND '$1' (expected: linear|br|bd|az)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+resolve_backend() {
+  normalize_backend "${ISSUE_BACKEND:-linear}"
+}
+
+require_command() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    printf '%s\n' "issue: required command '$cmd' is not installed or not on PATH" >&2
+    exit 127
+  fi
+}
+
+backend_delegate() {
+  local backend="$1"
+  case "$backend" in
+    linear) printf '%s\n' "linear-cli i" ;;
+    br) printf '%s\n' "br" ;;
+    bd) printf '%s\n' "bd" ;;
+    az) printf '%s\n' "az issue" ;;
+    *) printf '%s\n' "<unknown>" ;;
+  esac
+}
+
+run_backend_help() {
+  local backend="$1"
+
+  case "$backend" in
+    linear)
+      require_command "linear-cli"
+      linear-cli i --help
+      ;;
+    br)
+      require_command "br"
+      br --help
+      ;;
+    bd)
+      require_command "bd"
+      bd --help
+      ;;
+    az)
+      require_command "az"
+      az issue --help
+      ;;
+    *)
+      printf '%s\n' "issue: unsupported backend '$backend'" >&2
+      exit 2
+      ;;
+  esac
+}
+
+print_prime() {
+  local backend="$1"
+  local delegate
+  delegate="$(backend_delegate "$backend")"
+
+  cat <<EOF_PRIME
+Issue Session Primer
+
+- First step in new AI sessions: $SCRIPT_NAME prime
+- Use $SCRIPT_NAME for issue operations in this repo.
+- Resolved backend: $backend
+- Delegates to: $delegate
+- Local machine override: export ISSUE_BACKEND=az|linear|br|bd
+
+AI Workflow Guidance:
+- Use the issue CLI as the source of truth for task tracking.
+- Do not use internal TODO tools, markdown task lists, or side trackers for issue state.
+- Keep issue status and notes current as you work.
+- Include the current issue ID in commit messages.
+- Commit code changes before closing the issue.
+- Close the issue only after the commit is created.
+
+Backend API Guide:
+EOF_PRIME
+
+  run_backend_help "$backend"
+}
+
+exec_backend() {
+  local backend="$1"
+  shift
+
+  case "$backend" in
+    linear)
+      require_command "linear-cli"
+      exec linear-cli i "$@"
+      ;;
+    br)
+      require_command "br"
+      exec br "$@"
+      ;;
+    bd)
+      require_command "bd"
+      exec bd "$@"
+      ;;
+    az)
+      require_command "az"
+      exec az issue "$@"
+      ;;
+    *)
+      printf '%s\n' "issue: unsupported backend '$backend'" >&2
+      exit 2
+      ;;
+  esac
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    print_usage
+    exit 0
+  fi
+
+  local backend
+  backend="$(resolve_backend)"
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    help|-h|--help)
+      print_usage
+      exit 0
+      ;;
+    backend)
+      printf '%s\n' "$backend"
+      exit 0
+      ;;
+    prime)
+      print_prime "$backend"
+      exit 0
+      ;;
+    help-backend)
+      run_backend_help "$backend"
+      exit 0
+      ;;
+  esac
+
+  exec_backend "$backend" "$command" "$@"
+}
+
+main "$@"

@@ -21,6 +21,10 @@ describe("AzedarachConfigSchema", () => {
 			const result = decodeConfig({})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(result.issueTracker?.local?.syncEnabled).toBe(false)
+			const resolved = mergeWithDefaults(result)
+			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.enabled).toBe(
+				true,
+			)
 		})
 
 		it("sets $schema to current for v1 config (legacy)", () => {
@@ -193,6 +197,41 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.issueTracker?.local?.syncEnabled).toBe(false)
+		})
+
+		it("accepts nested local backup config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					local: {
+						syncEnabled: false,
+						backups: {
+							enabled: true,
+							intervalMinutes: 15,
+							writeCooldownSeconds: 45,
+							maxBackups: 12,
+							directory: ".azedarach/snapshots",
+						},
+					},
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.enabled).toBe(
+				true,
+			)
+			expect(
+				"local" in resolved.issueTracker && resolved.issueTracker.local.backups.intervalMinutes,
+			).toBe(15)
+			expect(
+				"local" in resolved.issueTracker &&
+					resolved.issueTracker.local.backups.writeCooldownSeconds,
+			).toBe(45)
+			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.maxBackups).toBe(
+				12,
+			)
+			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.directory).toBe(
+				".azedarach/snapshots",
+			)
 		})
 
 		it("uses sdk webhook transport by default", () => {

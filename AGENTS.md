@@ -1,7 +1,7 @@
 <!--
 File: AGENTS.md
-Version: 1.1.0
-Updated: 2026-03-04
+Version: 1.2.0
+Updated: 2026-03-05
 Purpose: OpenCode entry point - references CLAUDE.md for full context
 -->
 <ai_context version="1.0" tool="opencode">
@@ -25,7 +25,7 @@ This file provides a condensed reference for OpenCode sessions.
 
 1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any' (ts-opentui only).
 2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed).
-3. **Issue Tracker**: Use `linear-cli` for issue tracking. Prefer `linear-cli i list` / `linear-cli i get` / `linear-cli i create` / `linear-cli i update` / `linear-cli i close`.
+3. **Issue Tracker**: Start sessions with `issue prime`, then use `issue` for issue tracking commands.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 
 ## Quick Commands
@@ -48,11 +48,7 @@ rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
-linear-cli i list --output json --compact --all             # List issues
-linear-cli i get <id> --output json --compact               # Show issue details
-linear-cli i create "Title" --output json --compact         # Create issue (uses configured default team)
-linear-cli i update <id> --output json --compact ...        # Update issue
-linear-cli i close <id>                                     # Mark complete
+issue prime                                              # Session primer + backend API guide
 ```
 
 ## Architecture Quick Reference
@@ -81,13 +77,8 @@ go-bubbletea/
 
 ## Task Management
 
-**Track ALL work through issue tracking** (preserves context across sessions):
-
-```bash
-linear-cli i list --output json --compact --all
-linear-cli i update <id> --output json --compact ...
-linear-cli i close <id>
-```
+**Track ALL work through issue tracking** (preserves context across sessions).  
+Run `issue prime` at the start of each session, then use `issue` for all issue operations.
 
 ## OpenCode Plugins
 
@@ -100,32 +91,15 @@ Both are configured in `opencode.json`.
 
 </ai_context>
 
-## Issue Tracking with linear-cli
+## Issue Tracking Policy
 
-**IMPORTANT**: This project uses **`linear-cli`** for issue tracking. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
-
-### Quick Start
-
-```bash
-# List issues
-linear-cli i list --output json --compact --all
-
-# Show issue details
-linear-cli i get <id> --output json --compact
-
-# Create issue
-linear-cli i create "Issue title" --output json --compact
-
-# Start / update / close
-linear-cli i start <id>
-linear-cli i update <id> --output json --compact ...
-linear-cli i close <id>
-```
+**IMPORTANT**: This project uses **`issue`** as the issue tracking interface. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
 
 ### Important Rules
 
-- ✅ Use `linear-cli` for issue tracking commands
-- ✅ Configure default team once in `.azedarach.json` (`issueTracker.linear.team`) or via `linear-cli setup`
+- ✅ First command in a new AI session: `issue prime`
+- ✅ Use `issue` for issue tracking commands
+- ✅ `issue prime` is the source of backend-specific CLI/API guidance
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
