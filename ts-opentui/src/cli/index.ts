@@ -20,11 +20,21 @@ import {
 	PlatformLogger,
 } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Console, Duration, Effect, Layer, Logger, Option, Schema, SubscriptionRef } from "effect"
+import {
+	Console,
+	Duration,
+	Effect,
+	Layer,
+	Logger,
+	LogLevel,
+	Option,
+	Schema,
+	SubscriptionRef,
+} from "effect"
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { BeadsClient } from "../core/BeadsClient.js"
+import { BeadsClient, type Issue as BeadsIssue } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
@@ -66,12 +76,11 @@ import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
 
 // ============================================================================
-// CLI Layer - All services needed by CLI commands
+// CLI Layers
 // ============================================================================
 
 /**
- * Unified layer for CLI commands.
- * Provides all services that handlers might need - layer is provided ONCE at run().
+ * File logger used by both TUI and command-mode invocations.
  */
 const fileLogger = Logger.logfmtLogger.pipe(PlatformLogger.toFile("az-cli.log", { flag: "a" }))
 
@@ -86,7 +95,11 @@ const telemetryLayer =
 			}).pipe(Layer.provide(FetchHttpClient.layer))
 		: Layer.empty
 
-const cliLayer = Layer.mergeAll(
+/**
+ * Full CLI layer used for TUI launch and commands that still depend on
+ * TUI-coupled services (for now, `az dev`).
+ */
+const fullCliLayer = Layer.mergeAll(
 	MutationQueue.Default,
 	SessionService.Default,
 	AttachmentService.Default,
@@ -126,6 +139,22 @@ const cliLayer = Layer.mergeAll(
 	Layer.provideMerge(BunContext.layer),
 )
 
+/**
+ * Lean command layer for non-TUI CLI commands.
+ * Intentionally excludes board/navigation/overlay/view services so command
+ * invocations don't start board refresh polling or webhook listeners.
+ */
+const commandCliLayer = Layer.mergeAll(
+	AppConfig.Default,
+	ProjectService.Default,
+	BeadsClient.Default,
+	ClaudeSessionManager.Default,
+).pipe(
+	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+	Layer.provideMerge(telemetryLayer),
+	Layer.provideMerge(BunContext.layer),
+)
+
 // ============================================================================
 // Shared Options
 // ============================================================================
@@ -148,6 +177,15 @@ const configOption = Options.file("config").pipe(
 )
 
 /**
+ * Project directory option for commands that need explicit cwd without
+ * conflicting with trailing options like --json.
+ */
+const projectDirOption = Options.directory("project-dir").pipe(
+	Options.optional,
+	Options.withDescription("Project directory (default: current directory)"),
+)
+
+/**
  * Project directory argument
  */
 const projectDirArg = Args.directory().pipe(
@@ -167,7 +205,6 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		const appConfig = yield* AppConfig
 		const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
 		if ("linear" in resolvedConfig.issueTracker || "local" in resolvedConfig.issueTracker) {
-			yield* Console.log("Using remote/local issue tracker backend (no .beads directory required)")
 			return
 		}
 
@@ -183,8 +220,6 @@ const validateIssueTrackerStore = (projectDir: string) =>
 				),
 			)
 		}
-
-		yield* Console.log(`Using issue tracker store: ${issueStoreDir}`)
 	})
 
 // ============================================================================
@@ -484,6 +519,11 @@ const syncHandler = (args: {
 		}
 	})
 
+const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
+
+const formatIssueSummaryLine = (issue: BeadsIssue): string =>
+	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
+
 /**
  * Show issue details
  */
@@ -497,8 +537,8 @@ const issueGetHandler = (args: {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
 		if (args.verbose) {
-			yield* Console.log(`Loading issue: ${args.issueId}`)
-			yield* Console.log(`Project: ${cwd}`)
+			yield* Console.error(`Loading issue: ${args.issueId}`)
+			yield* Console.error(`Project: ${cwd}`)
 		}
 
 		yield* validateIssueTrackerStore(cwd)
@@ -511,40 +551,15 @@ const issueGetHandler = (args: {
 			return
 		}
 
-		yield* Console.log(`${issue.id}: ${issue.title}`)
-		yield* Console.log(`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`)
-		yield* Console.log(`updated_at=${issue.updated_at}`)
+		yield* Console.log(formatIssueSummaryLine(issue))
 
-		if (issue.assignee && issue.assignee.trim().length > 0) {
-			yield* Console.log(`assignee=${issue.assignee}`)
-		}
-
-		if (issue.labels && issue.labels.length > 0) {
-			yield* Console.log(`labels=${issue.labels.join(",")}`)
-		}
-
-		if (issue.description && issue.description.trim().length > 0) {
-			yield* Console.log("")
-			yield* Console.log("Description:")
-			yield* Console.log(issue.description)
-		}
-
-		if (issue.design && issue.design.trim().length > 0) {
-			yield* Console.log("")
-			yield* Console.log("Design:")
-			yield* Console.log(issue.design)
-		}
-
-		if (issue.acceptance && issue.acceptance.trim().length > 0) {
-			yield* Console.log("")
-			yield* Console.log("Acceptance:")
-			yield* Console.log(issue.acceptance)
-		}
-
-		if (issue.notes && issue.notes.trim().length > 0) {
-			yield* Console.log("")
-			yield* Console.log("Notes:")
-			yield* Console.log(issue.notes)
+		if (args.verbose) {
+			if (issue.assignee && issue.assignee.trim().length > 0) {
+				yield* Console.error(`assignee=${issue.assignee}`)
+			}
+			if (issue.labels && issue.labels.length > 0) {
+				yield* Console.error(`labels=${issue.labels.join(",")}`)
+			}
 		}
 	})
 
@@ -595,9 +610,9 @@ const issueCreateHandler = (args: {
 			return
 		}
 
-		yield* Console.log(`Created issue ${issue.id}: ${issue.title}`)
+		yield* Console.log(`Created issue ${issue.id}`)
 		if (args.verbose) {
-			yield* Console.log(
+			yield* Console.error(
 				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
 			)
 		}
@@ -622,6 +637,7 @@ const issueUpdateHandler = (args: {
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
@@ -662,9 +678,13 @@ const issueUpdateHandler = (args: {
 
 		const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient.update(args.issueId, fields, cwd)
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ id: args.issueId, updated: true }, null, 2))
+			return
+		}
 		yield* Console.log(`Updated issue ${args.issueId}`)
 		if (args.verbose) {
-			yield* Console.log("Use `az issue get <issue-id>` to inspect the updated issue.")
+			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
 		}
 	})
 
@@ -676,6 +696,7 @@ const issueCloseHandler = (args: {
 	readonly reason: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
+	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
@@ -683,9 +704,23 @@ const issueCloseHandler = (args: {
 
 		const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient.close(args.issueId, Option.getOrUndefined(args.reason), cwd)
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						id: args.issueId,
+						closed: true,
+						reason: Option.getOrUndefined(args.reason),
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
 		yield* Console.log(`Closed issue ${args.issueId}`)
 		if (args.verbose && Option.isSome(args.reason)) {
-			yield* Console.log(`reason=${args.reason.value}`)
+			yield* Console.error(`reason=${args.reason.value}`)
 		}
 	})
 
@@ -696,6 +731,7 @@ const issueDeleteHandler = (args: {
 	readonly issueId: string
 	readonly force: boolean
 	readonly projectDir: Option.Option<string>
+	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		if (!args.force) {
@@ -709,6 +745,10 @@ const issueDeleteHandler = (args: {
 
 		const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient.delete(args.issueId, cwd)
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ id: args.issueId, deleted: true }, null, 2))
+			return
+		}
 		yield* Console.log(`Deleted issue ${args.issueId}`)
 	})
 
@@ -1336,7 +1376,7 @@ const issueGetCommand = Command.make(
 	"get",
 	{
 		issueId: issueIdArg,
-		projectDir: projectDirArg,
+		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
 	},
@@ -1382,7 +1422,7 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
-		projectDir: projectDirArg,
+		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
 	},
@@ -1432,8 +1472,9 @@ const issueUpdateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Parent epic issue ID"),
 		),
-		projectDir: projectDirArg,
+		projectDir: projectDirOption,
 		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
 	},
 	issueUpdateHandler,
 ).pipe(Command.withDescription("Update issue fields"))
@@ -1446,8 +1487,9 @@ const issueCloseCommand = Command.make(
 	{
 		issueId: issueIdArg,
 		reason: Options.text("reason").pipe(Options.optional, Options.withDescription("Close reason")),
-		projectDir: projectDirArg,
+		projectDir: projectDirOption,
 		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
 	},
 	issueCloseHandler,
 ).pipe(Command.withDescription("Close an issue"))
@@ -1462,7 +1504,8 @@ const issueDeleteCommand = Command.make(
 		force: Options.boolean("force").pipe(
 			Options.withDescription("Required: confirms irreversible deletion"),
 		),
-		projectDir: projectDirArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
 	},
 	issueDeleteHandler,
 ).pipe(Command.withDescription("Delete an issue (requires --force)"))
@@ -1882,6 +1925,35 @@ const cli = az.pipe(
 	]),
 )
 
+const devCommandPlaceholder = Command.make("dev", {}, () =>
+	Console.error("Use `az dev --help` for dev server command usage."),
+).pipe(Command.withDescription("Manage dev servers for issues"))
+
+/**
+ * Command-only CLI tree used for non-TUI subcommands.
+ * Uses a lightweight `dev` placeholder because DevServerService is still coupled
+ * to navigation/overlay services in the full runtime.
+ */
+const commandCli = az.pipe(
+	Command.withSubcommands([
+		addCommand,
+		listCommand,
+		startCommand,
+		attachCommand,
+		pauseCommand,
+		killCommand,
+		statusCommand,
+		syncCommand,
+		issueCommand,
+		gateCommand,
+		devCommandPlaceholder,
+		notifyCommand,
+		hooksCommand,
+		projectCommand,
+		opencodeCommand,
+	]),
+)
+
 // ============================================================================
 // CLI Runner
 // ============================================================================
@@ -1906,12 +1978,108 @@ const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => 
 	return null
 }
 
-const buildCliLayerForArgv = (argv: ReadonlyArray<string>) => {
+const normalizeIssueJsonFlagOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+	const issueCommandIndex = argv.indexOf("issue")
+	if (issueCommandIndex === -1) return argv
+
+	const subcommand = argv[issueCommandIndex + 1]
+	if (
+		subcommand !== "get" &&
+		subcommand !== "create" &&
+		subcommand !== "update" &&
+		subcommand !== "close" &&
+		subcommand !== "delete"
+	) {
+		return argv
+	}
+
+	const jsonFlagIndex = argv.indexOf("--json", issueCommandIndex + 2)
+	if (jsonFlagIndex === -1) return argv
+
+	const desiredIndex = issueCommandIndex + 2
+	if (jsonFlagIndex <= desiredIndex) return argv
+
+	const reordered = [...argv]
+	reordered.splice(jsonFlagIndex, 1)
+	reordered.splice(desiredIndex, 0, "--json")
+	return reordered
+}
+
+const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
+	argv.includes("--verbose") || argv.includes("-v")
+
+const TOP_LEVEL_SUBCOMMANDS = new Set([
+	"add",
+	"list",
+	"start",
+	"attach",
+	"pause",
+	"kill",
+	"status",
+	"sync",
+	"issue",
+	"gate",
+	"dev",
+	"notify",
+	"hooks",
+	"project",
+	"opencode",
+])
+
+type CliExecutionMode = "tui" | "command" | "dev-command"
+
+const parseTopLevelSubcommand = (argv: ReadonlyArray<string>): string | null => {
+	for (let index = 2; index < argv.length; index++) {
+		const arg = argv[index]
+		if (arg === "--") return null
+		if (arg === "--config" || arg === "-c") {
+			index += 1
+			continue
+		}
+		if (arg.startsWith("--config=") || arg.startsWith("-c=") || arg.startsWith("-")) {
+			continue
+		}
+		return TOP_LEVEL_SUBCOMMANDS.has(arg) ? arg : null
+	}
+	return null
+}
+
+const hasGlobalHelpOrVersionFlag = (argv: ReadonlyArray<string>): boolean =>
+	argv.includes("--help") || argv.includes("-h") || argv.includes("--version")
+
+const resolveCliExecutionMode = (argv: ReadonlyArray<string>): CliExecutionMode => {
+	const subcommand = parseTopLevelSubcommand(argv)
+	if (subcommand === null) {
+		return hasGlobalHelpOrVersionFlag(argv) ? "command" : "tui"
+	}
+	if (subcommand === "dev") {
+		return "dev-command"
+	}
+	return "command"
+}
+
+const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return cliLayer
+	if (configPath === null) return fullCliLayer
 
 	return Layer.mergeAll(
-		cliLayer,
+		fullCliLayer,
+		Layer.succeed(
+			AppConfigConfig,
+			AppConfigConfig.make({
+				configPath,
+				projectPath: process.cwd(),
+			}),
+		),
+	)
+}
+
+const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
+	const configPath = parseConfigPathFromArgv(argv)
+	if (configPath === null) return commandCliLayer
+
+	return Layer.mergeAll(
+		commandCliLayer,
 		Layer.succeed(
 			AppConfigConfig,
 			AppConfigConfig.make({
@@ -1925,20 +2093,36 @@ const buildCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 /**
  * CLI runner function - returns an Effect that still needs BunContext
  */
-const cliRunner = (argv: ReadonlyArray<string>) =>
-	Command.run(cli.pipe(Command.provide(buildCliLayerForArgv(argv))), {
-		name: "Azedarach",
-		version: "0.1.0",
-	})(argv)
+const cliRunner = (argv: ReadonlyArray<string>) => {
+	const normalizedArgv = normalizeIssueJsonFlagOrder(argv)
+	const mode = resolveCliExecutionMode(normalizedArgv)
+	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
+	const runEffect =
+		mode === "command"
+			? Command.run(commandCli.pipe(Command.provide(buildCommandCliLayerForArgv(normalizedArgv))), {
+					name: "Azedarach",
+					version: "0.1.0",
+				})(normalizedArgv)
+			: Command.run(cli.pipe(Command.provide(buildFullCliLayerForArgv(normalizedArgv))), {
+					name: "Azedarach",
+					version: "0.1.0",
+				})(normalizedArgv)
+	return runEffect.pipe(
+		Effect.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Effect.provide(Logger.minimumLogLevel(minimumLogLevel)),
+	)
+}
 
 export { cli }
+export { commandCli }
 
 /**
  * Export the layer for ManagedRuntime usage
  */
-export { cliLayer }
+const cliLayer = fullCliLayer
+export { cliLayer, commandCliLayer }
 
 /**
  * Export the raw runner for ManagedRuntime pattern
  */
-export { cliRunner }
+export { cliRunner, formatIssueSummaryLine, normalizeIssueJsonFlagOrder, resolveCliExecutionMode }
