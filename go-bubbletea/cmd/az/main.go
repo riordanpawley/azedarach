@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,20 +12,25 @@ import (
 )
 
 func main() {
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func runCLI(args []string, stdout, stderr io.Writer) int {
+	// Standalone prime command should not depend on runtime config.
+	if len(args) > 0 && args[0] == "prime" {
+		return handlePrimeCommand(args[1:], stdout, stderr)
+	}
+
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Error loading config: %v\n", err)
+		return 1
 	}
-
-	// Parse command-line arguments
-	args := os.Args[1:]
 
 	// If no arguments, run the TUI
 	if len(args) == 0 {
-		runTUI(cfg)
-		return
+		return runTUI(cfg, stderr)
 	}
 
 	// Handle subcommands
@@ -34,38 +40,38 @@ func main() {
 	switch command {
 	case "start":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az start <bead-id>\n")
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Usage: az start <bead-id>\n")
+			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StartCommand(deps, commandArgs[0])
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
 		}
 
 	case "attach":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az attach <bead-id>\n")
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Usage: az attach <bead-id>\n")
+			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.AttachCommand(deps, commandArgs[0])
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
 		}
 
 	case "kill":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az kill <bead-id>\n")
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Usage: az kill <bead-id>\n")
+			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.KillCommand(deps, commandArgs[0])
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
 		}
 
 	case "status":
@@ -73,35 +79,39 @@ func main() {
 		if len(commandArgs) == 1 {
 			beadID = commandArgs[0]
 		} else if len(commandArgs) > 1 {
-			fmt.Fprintf(os.Stderr, "Usage: az status [bead-id]\n")
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Usage: az status [bead-id]\n")
+			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.StatusCommand(deps, beadID)
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
 		}
 
 	case "help", "-h", "--help":
 		cli.PrintUsage()
 
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
+		fmt.Fprintf(stderr, "Unknown command: %s\n\n", command)
 		cli.PrintUsage()
-		os.Exit(1)
+		return 1
 	}
+
+	return 0
 }
 
 // runTUI starts the terminal user interface
-func runTUI(cfg *config.Config) {
+func runTUI(cfg *config.Config, stderr io.Writer) int {
 	model := app.New(cfg)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
 	}
+
+	return 0
 }
 
 // runCommand executes a CLI command with dependency injection
