@@ -19,8 +19,4 @@ This installs:
 2. Copy `opencode-az.js` into each repo's `.opencode/plugins/` when `--project-dir` is provided
 3. Remove legacy `.opencode/plugins/opencode-linear-cli.js` when present
 
-## Install (from azedarach clone)
-
-```bash
-bin/install-opencode-az-plugin --repo ~/prog/azedarach --repo ~/prog/Chefy --repo ~/prog/wedding
-```
+No standalone installer script is required; use `az opencode plugin install`.
