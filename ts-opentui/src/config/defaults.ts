@@ -102,6 +102,11 @@ export const DEFAULT_CONFIG = {
 			default: undefined as string | undefined,
 			chat: undefined as string | undefined,
 		},
+		/** Codex-specific overrides */
+		codex: {
+			default: "gpt-5.3-codex" as string | undefined,
+			chat: undefined as string | undefined,
+		},
 	},
 
 	worktree: {
@@ -237,6 +242,10 @@ export interface ResolvedConfig {
 			chat: string | undefined
 		}
 		opencode: {
+			default: string | undefined
+			chat: string | undefined
+		}
+		codex: {
 			default: string | undefined
 			chat: string | undefined
 		}
@@ -443,8 +452,7 @@ const mergeIssueTrackerWithDefaults = (
 					syncEnabled: issueTracker.local.syncEnabled ?? false,
 					backups: {
 						enabled:
-							configuredBackups?.enabled ??
-							DEFAULT_CONFIG.issueTracker.local.backups.enabled,
+							configuredBackups?.enabled ?? DEFAULT_CONFIG.issueTracker.local.backups.enabled,
 						intervalMinutes:
 							configuredBackups?.intervalMinutes ??
 							DEFAULT_CONFIG.issueTracker.local.backups.intervalMinutes,
@@ -452,11 +460,9 @@ const mergeIssueTrackerWithDefaults = (
 							configuredBackups?.writeCooldownSeconds ??
 							DEFAULT_CONFIG.issueTracker.local.backups.writeCooldownSeconds,
 						maxBackups:
-							configuredBackups?.maxBackups ??
-							DEFAULT_CONFIG.issueTracker.local.backups.maxBackups,
+							configuredBackups?.maxBackups ?? DEFAULT_CONFIG.issueTracker.local.backups.maxBackups,
 						directory:
-							configuredBackups?.directory ??
-							DEFAULT_CONFIG.issueTracker.local.backups.directory,
+							configuredBackups?.directory ?? DEFAULT_CONFIG.issueTracker.local.backups.directory,
 					},
 				},
 			}
@@ -480,6 +486,10 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			opencode: {
 				default: config.model?.opencode?.default ?? DEFAULT_CONFIG.model.opencode.default,
 				chat: config.model?.opencode?.chat ?? DEFAULT_CONFIG.model.opencode.chat,
+			},
+			codex: {
+				default: config.model?.codex?.default ?? DEFAULT_CONFIG.model.codex.default,
+				chat: config.model?.codex?.chat ?? DEFAULT_CONFIG.model.codex.chat,
 			},
 		},
 		worktree: {

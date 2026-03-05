@@ -1,7 +1,7 @@
 /**
  * CLI Tool Registry - Abstraction layer for AI coding assistants
  *
- * Provides structured definitions for CLI tools like Claude Code and OpenCode,
+ * Provides structured definitions for CLI tools like Claude Code, OpenCode, and Codex,
  * handling tool-specific command construction, flag mappings, and session naming.
  *
  * This abstraction enables:
@@ -19,7 +19,7 @@ import { escapeForShellDoubleQuotes } from "./shell.js"
 /**
  * Supported CLI tool identifiers
  */
-export type CliToolName = "claude" | "opencode"
+export type CliToolName = "claude" | "opencode" | "codex"
 
 /**
  * Hook strategy for session status detection
@@ -61,10 +61,10 @@ export interface CliToolDefinition {
 	readonly executable: string
 
 	/** Config directory for tool-specific hooks/plugins */
-	readonly hookConfigDir: ".claude" | ".opencode"
+	readonly hookConfigDir: ".claude" | ".opencode" | ".codex"
 
 	/** Session name prefix for tmux sessions */
-	readonly sessionNamePrefix: "claude" | "opencode"
+	readonly sessionNamePrefix: "claude" | "opencode" | "codex"
 
 	/** How this tool handles session status detection */
 	readonly hookStrategy: HookStrategy
@@ -177,6 +177,45 @@ const openCodeToolDefinition: CliToolDefinition = {
 	getInitCommands: () => [],
 }
 
+/**
+ * Codex CLI tool definition
+ *
+ * Codex uses:
+ * - Positional argument for initial prompt
+ * - --model for model selection
+ * - resume --last to continue the most recent conversation
+ * - --dangerously-bypass-approvals-and-sandbox for fully automatic execution
+ */
+const codexToolDefinition: CliToolDefinition = {
+	name: "codex",
+	executable: "codex",
+	hookConfigDir: ".codex",
+	sessionNamePrefix: "codex",
+	hookStrategy: "hooks+pty",
+
+	buildCommand: (options) => {
+		const parts: string[] = ["codex"]
+
+		if (options.model) {
+			parts.push(`--model ${options.model}`)
+		}
+
+		if (options.dangerouslySkipPermissions) {
+			parts.push("--dangerously-bypass-approvals-and-sandbox")
+		}
+
+		if (options.continueConversation) {
+			parts.push("resume", "--last")
+		} else if (options.initialPrompt) {
+			parts.push(`"${escapeForShellDoubleQuotes(options.initialPrompt)}"`)
+		}
+
+		return parts.join(" ")
+	},
+
+	getInitCommands: () => [],
+}
+
 // ============================================================================
 // Registry
 // ============================================================================
@@ -187,12 +226,13 @@ const openCodeToolDefinition: CliToolDefinition = {
 const toolRegistry: ReadonlyMap<CliToolName, CliToolDefinition> = new Map([
 	["claude", claudeToolDefinition],
 	["opencode", openCodeToolDefinition],
+	["codex", codexToolDefinition],
 ])
 
 /**
  * Get the tool definition for a given tool name
  *
- * @param name - Tool identifier ("claude" or "opencode")
+ * @param name - Tool identifier ("claude", "opencode", or "codex")
  * @returns Tool definition
  * @throws Error if tool is not found (should not happen with typed CliToolName)
  */

@@ -38,6 +38,10 @@ describe("paths session naming", () => {
 			type: "issue",
 			issueId: "az.foo",
 		})
+		expect(parseIssueSessionName("codex-az_x2e_foo")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
+		})
 	})
 
 	it("parses legacy raw session names", () => {
@@ -78,6 +82,10 @@ describe("paths session naming", () => {
 			issueId: "a",
 		})
 		expect(parseIssueSessionName("opencode-123")).toEqual({
+			type: "issue",
+			issueId: "123",
+		})
+		expect(parseIssueSessionName("codex-123")).toEqual({
 			type: "issue",
 			issueId: "123",
 		})

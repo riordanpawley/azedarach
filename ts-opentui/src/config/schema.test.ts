@@ -226,12 +226,12 @@ describe("AzedarachConfigSchema", () => {
 				"local" in resolved.issueTracker &&
 					resolved.issueTracker.local.backups.writeCooldownSeconds,
 			).toBe(45)
-			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.maxBackups).toBe(
-				12,
-			)
-			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.directory).toBe(
-				".azedarach/snapshots",
-			)
+			expect(
+				"local" in resolved.issueTracker && resolved.issueTracker.local.backups.maxBackups,
+			).toBe(12)
+			expect(
+				"local" in resolved.issueTracker && resolved.issueTracker.local.backups.directory,
+			).toBe(".azedarach/snapshots")
 		})
 
 		it("uses sdk webhook transport by default", () => {
@@ -304,6 +304,23 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("passthrough of other config sections", () => {
+		it("accepts codex as cliTool with codex model overrides", () => {
+			const result = decodeConfig({
+				cliTool: "codex",
+				model: {
+					codex: {
+						default: "gpt-5-codex",
+						chat: "gpt-5-mini",
+					},
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.cliTool).toBe("codex")
+			expect(resolved.model.codex.default).toBe("gpt-5-codex")
+			expect(resolved.model.codex.chat).toBe("gpt-5-mini")
+		})
+
 		it("preserves worktree config", () => {
 			const result = decodeConfig({
 				worktree: {

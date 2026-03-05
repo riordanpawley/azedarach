@@ -99,7 +99,7 @@ export type SessionType = "issue"
 /**
  * AI session prefixes used for tmux sessions
  */
-export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
+export const AI_SESSION_PREFIXES = ["claude-", "opencode-", "codex-"]
 
 const ISSUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const LINEAR_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9]*-[0-9]+$/

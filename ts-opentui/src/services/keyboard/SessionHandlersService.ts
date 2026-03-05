@@ -273,7 +273,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const modelConfig = yield* appConfig.getModelConfig()
 					const { command: cliCommand, shell } = sessionConfig
 
-					const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+					const toolModelConfig = modelConfig[cliTool]
 					const chatModel =
 						modelConfig.chat ??
 						toolModelConfig.chat ??
