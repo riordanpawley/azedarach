@@ -50,6 +50,18 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
 		})
 
+		it("preserves pr.enabled while removing legacy baseBranch", () => {
+			const result = decodeConfig({
+				pr: {
+					enabled: false,
+					baseBranch: "develop",
+				},
+			})
+
+			expect(result.git?.baseBranch).toBe("develop")
+			expect(result.pr?.enabled).toBe(false)
+		})
+
 		it("does not overwrite existing git.baseBranch", () => {
 			const result = decodeConfig({
 				git: { baseBranch: "main" },
@@ -233,12 +245,22 @@ describe("AzedarachConfigSchema", () => {
 			).toThrow(/only one issue backend block is allowed/)
 		})
 
-		it("rejects issueTracker literal without backend block", () => {
-			expect(() =>
-				decodeConfig({
-					issueTracker: "linear",
-				}),
-			).toThrow(/requires matching backend block/)
+		it("accepts issueTracker literal without backend block and synthesizes linear defaults", () => {
+			const result = decodeConfig({
+				$schema: 2,
+				issueTracker: "linear",
+			})
+
+			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
+		})
+
+		it("accepts issueTracker literal without backend block and synthesizes local defaults", () => {
+			const result = decodeConfig({
+				$schema: 2,
+				issueTracker: "local",
+			})
+
+			expect(result.issueTracker?.local?.syncEnabled).toBe(false)
 		})
 	})
 

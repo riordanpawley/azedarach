@@ -110,7 +110,7 @@ export interface AppConfigService {
 	readonly getEffectiveBaseBranch: () => Effect.Effect<string>
 }
 
-export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfig", {
+export class AppConfigConfig extends Effect.Service<AppConfigConfig>()("AppConfigConfig", {
 	effect: (projectPath?: string, configPath?: string) =>
 		Effect.succeed({
 			configPath: configPath ?? null,

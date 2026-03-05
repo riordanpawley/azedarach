@@ -20,8 +20,9 @@ import {
 	PlatformLogger,
 } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Console, Duration, Effect, Layer, Logger, Option, SubscriptionRef } from "effect"
-import { AppConfig } from "../config/AppConfig.js"
+import { Console, Duration, Effect, Layer, Logger, Option, Schema, SubscriptionRef } from "effect"
+import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
+import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
 import { BeadsClient } from "../core/BeadsClient.js"
@@ -872,35 +873,16 @@ const projectAddHandler = (args: {
 			const localConfigRaw = yield* fs.readFileString(localConfigPath).pipe(
 				Effect.catchAll(() => Effect.succeed("")),
 			)
-			const localIssueTracker = yield* Effect.try({
-				try: () => {
-					const parsed: unknown = JSON.parse(localConfigRaw)
-					if (typeof parsed !== "object" || parsed === null || !("issueTracker" in parsed)) {
-						return undefined
-					}
-					const issueTrackerValue = parsed.issueTracker
-
-					if (
-						issueTrackerValue === "bd" ||
-						issueTrackerValue === "br" ||
-						issueTrackerValue === "linear" ||
-						issueTrackerValue === "local"
-					) {
-						return issueTrackerValue
-					}
-
-					if (typeof issueTrackerValue === "object" && issueTrackerValue !== null) {
-						if ("beads" in issueTrackerValue) return "bd"
-						if ("beads_rust" in issueTrackerValue) return "br"
-						if ("linear" in issueTrackerValue) return "linear"
-						if ("local" in issueTrackerValue) return "local"
-					}
-
-					return undefined
-				},
-				catch: () => undefined,
-			})
-			tracker = localIssueTracker ?? tracker
+			const decodedConfig = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
+				localConfigRaw,
+			).pipe(Effect.option)
+			if (Option.isSome(decodedConfig)) {
+				const issueTrackerConfig = decodedConfig.value.issueTracker
+				if (issueTrackerConfig?.beads !== undefined) tracker = "bd"
+				else if (issueTrackerConfig?.beads_rust !== undefined) tracker = "br"
+				else if (issueTrackerConfig?.linear !== undefined) tracker = "linear"
+				else tracker = "local"
+			}
 		}
 
 		const beadsPath = pathService.join(absolutePath, ".beads")
@@ -1513,18 +1495,53 @@ const cli = az.pipe(
 // CLI Runner
 // ============================================================================
 
-/**
- * CLI with application services provided via Command.provide
- */
-const cliWithServices = cli.pipe(Command.provide(cliLayer))
+const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => {
+	for (let index = 2; index < argv.length; index++) {
+		const arg = argv[index]
+		if (arg === "--") return null
+		if (arg.startsWith("--config=")) {
+			const value = arg.slice("--config=".length)
+			return value.length > 0 ? value : null
+		}
+		if (arg.startsWith("-c=")) {
+			const value = arg.slice("-c=".length)
+			return value.length > 0 ? value : null
+		}
+		if ((arg === "--config" || arg === "-c") && index + 1 < argv.length) {
+			const value = argv[index + 1]
+			return value.length > 0 ? value : null
+		}
+	}
+	return null
+}
+
+const buildCliLayerForArgv = (argv: ReadonlyArray<string>) => {
+	const configPath = parseConfigPathFromArgv(argv)
+	if (configPath === null) return cliLayer
+
+	return Layer.mergeAll(
+		cliLayer,
+		Layer.succeed(
+			AppConfigConfig,
+			AppConfigConfig.make({
+				configPath,
+				projectPath: process.cwd(),
+			}),
+		),
+	)
+}
 
 /**
  * CLI runner function - returns an Effect that still needs BunContext
  */
-const cliRunner = Command.run(cliWithServices, {
-	name: "Azedarach",
-	version: "0.1.0",
-})
+const cliRunner = (argv: ReadonlyArray<string>) =>
+	Command.run(
+		cli.pipe(Command.provide(buildCliLayerForArgv(argv))),
+		{
+			name: "Azedarach",
+			version: "0.1.0",
+		},
+	)(argv)
 
 export { cli }
 

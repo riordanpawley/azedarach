@@ -686,9 +686,15 @@ const migrations: readonly Migration[] = [
 					? legacyBaseBranch
 					: currentGitBaseBranch
 
-			// Build new pr config without legacy baseBranch field
-			const newPr =
-				pr !== undefined ? { autoDraft: pr.autoDraft, autoMerge: pr.autoMerge } : undefined
+				// Build new pr config without legacy baseBranch field
+				const newPr =
+					pr !== undefined
+						? {
+								enabled: pr.enabled,
+								autoDraft: pr.autoDraft,
+								autoMerge: pr.autoMerge,
+							}
+						: undefined
 
 			return {
 				...config,
@@ -790,15 +796,9 @@ const migrations: readonly Migration[] = [
 				configuredBackends.length === 1 ? backendToTracker(configuredBackends[0]!) : undefined
 			const legacyTracker = config.beads?.issueTracker
 
-			if (explicitTracker !== undefined && configuredBackends.length === 0) {
-				throw new Error(
-					`Invalid config: issueTracker='${explicitTracker}' requires matching backend block '${trackerToBackend(explicitTracker)}'`,
-				)
-			}
-
-			if (
-				explicitTracker !== undefined &&
-				inferredTracker !== undefined &&
+				if (
+					explicitTracker !== undefined &&
+					inferredTracker !== undefined &&
 				explicitTracker !== inferredTracker
 			) {
 				throw new Error(

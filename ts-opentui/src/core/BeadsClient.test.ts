@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
 import {
 	extractJsonPayload,
+	getSyncTargetForBackend,
 	getLinearCommandPerfMetadata,
+	isLocalFirstIssueBackend,
+	resolveConfiguredIssueBackend,
 	withIssueDbTiming,
 } from "./BeadsClient.js"
 
@@ -116,5 +119,39 @@ describe("extractJsonPayload", () => {
 				state: { name: "Backlog" },
 			},
 		])
+	})
+})
+
+describe("local-first backend selection", () => {
+	it("resolves local backend without linear API assumptions", () => {
+		const backend = resolveConfiguredIssueBackend({
+			local: { syncEnabled: false },
+		})
+		expect(backend).toBe("local")
+		expect(isLocalFirstIssueBackend(backend)).toBe(true)
+		expect(getSyncTargetForBackend(backend)).toBeUndefined()
+	})
+
+	it("uses linear sync target for linear backend", () => {
+		const backend = resolveConfiguredIssueBackend({
+			linear: { syncEnabled: true },
+		})
+		expect(backend).toBe("linear")
+		expect(isLocalFirstIssueBackend(backend)).toBe(true)
+		expect(getSyncTargetForBackend(backend)).toBe("linear")
+	})
+
+	it("keeps legacy backends on non local-first path", () => {
+		const bdBackend = resolveConfiguredIssueBackend({
+			beads: { syncEnabled: true },
+		})
+		const brBackend = resolveConfiguredIssueBackend({
+			beads_rust: { syncEnabled: true },
+		})
+
+		expect(isLocalFirstIssueBackend(bdBackend)).toBe(false)
+		expect(isLocalFirstIssueBackend(brBackend)).toBe(false)
+		expect(getSyncTargetForBackend(bdBackend)).toBeUndefined()
+		expect(getSyncTargetForBackend(brBackend)).toBeUndefined()
 	})
 })

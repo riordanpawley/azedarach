@@ -144,13 +144,13 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	{
 		key: "issueSyncEnabled",
 		label: "Issue Sync",
-		getValue: (c) => {
-			if (c.issueTracker?.beads !== undefined) return c.issueTracker.beads.syncEnabled ?? true
-			if (c.issueTracker?.beads_rust !== undefined) return c.issueTracker.beads_rust.syncEnabled ?? true
-			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
-			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
-			return true
-		},
+			getValue: (c) => {
+				if (c.issueTracker?.beads !== undefined) return c.issueTracker.beads.syncEnabled ?? true
+				if (c.issueTracker?.beads_rust !== undefined) return c.issueTracker.beads_rust.syncEnabled ?? true
+				if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
+				if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
+				return false
+			},
 		toggle: (c) => {
 			if (c.issueTracker?.beads !== undefined) {
 				return {
@@ -196,14 +196,14 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 					},
 				}
 			}
-			return {
-				...c,
-				issueTracker: {
-					local: {
-						syncEnabled: false,
+				return {
+					...c,
+					issueTracker: {
+						local: {
+							syncEnabled: true,
+						},
 					},
-				},
-			}
+				}
 		},
 	},
 	{
@@ -285,10 +285,10 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					focusIndex: Math.min(EDITABLE_SETTINGS.length - 1, s.focusIndex + 1),
 				})),
 
-			getCurrentValue: (setting: SettingDefinition): Effect.Effect<unknown> =>
-				Effect.gen(function* () {
-					const config = yield* SubscriptionRef.get(appConfig.config)
-					return setting.getValue(config)
+				getCurrentValue: (setting: SettingDefinition): Effect.Effect<boolean | string> =>
+					Effect.gen(function* () {
+						const config = yield* SubscriptionRef.get(appConfig.config)
+						return setting.getValue(config)
 				}),
 
 			toggleCurrent: () =>
