@@ -2360,15 +2360,31 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
-						const issue = yield* fromLocalStore(
+						const localIssue = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(id, effectiveCwd),
 						)
-						if (issue === undefined || issue.status === "tombstone") {
+						if (localIssue !== undefined && localIssue.status !== "tombstone") {
+							return localIssue
+						}
+
+						// On linear local-first backends, try refreshing the local cache from Linear once
+						// before returning not found. If refresh fails, still surface not found rather than
+						// leaking backend sync failures for missing issues.
+						if (configuredBackend === "linear") {
+							yield* ensureLinearBootstrapForRead(effectiveCwd).pipe(
+								Effect.catchAll(() => Effect.void),
+							)
+						}
+
+						const refreshedIssue = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(id, effectiveCwd),
+						)
+						if (refreshedIssue === undefined || refreshedIssue.status === "tombstone") {
 							return yield* Effect.fail(new NotFoundError({ issueId: id }))
 						}
-						return issue
+						return refreshedIssue
 					}
 
 					const output = yield* runBd(["show", id], effectiveCwd)

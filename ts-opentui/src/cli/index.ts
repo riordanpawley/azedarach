@@ -706,7 +706,11 @@ const issueGetHandler = (args: {
 		yield* validateIssueTrackerStore(cwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		const issue = yield* issueTrackerClient.show(issueId, cwd)
+		const issue = yield* issueTrackerClient.show(issueId, cwd).pipe(
+			Effect.catchTag("NotFoundError", () =>
+				Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
+			),
+		)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
