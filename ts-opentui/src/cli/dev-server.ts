@@ -6,6 +6,7 @@
  */
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
+import { resolveCliIssueId } from "./issueIdResolver.js"
 import { DevServerService, type DevServerState } from "../services/DevServerService.js"
 import { ProjectService } from "../services/ProjectService.js"
 
@@ -34,7 +35,7 @@ const formatUptime = (startedAt: Date | undefined): Effect.Effect<string, never,
 // ============================================================================
 
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Issue ID (e.g., az-2qy)"),
+	Args.withDescription("Issue ID (e.g., AZE-123 or shorthand suffix 123)"),
 )
 
 const projectDirArg = Args.directory().pipe(
@@ -81,11 +82,12 @@ const devStartHandler = (args: {
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
 		const projectPath = yield* getProjectPath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 
 		const devServerService = yield* DevServerService
 
 		// Check current status first
-		const currentStatus = yield* devServerService.getStatus(args.issueId, serverName)
+		const currentStatus = yield* devServerService.getStatus(issueId, serverName)
 
 		if (currentStatus.status === "running") {
 			if (args.json) {
@@ -98,7 +100,7 @@ const devStartHandler = (args: {
 					}),
 				)
 			} else {
-				yield* Console.log(`Dev server '${serverName}' is already running for ${args.issueId}`)
+				yield* Console.log(`Dev server '${serverName}' is already running for ${issueId}`)
 				if (currentStatus.port) {
 					yield* Console.log(`  Port: ${currentStatus.port}`)
 				}
@@ -107,13 +109,13 @@ const devStartHandler = (args: {
 		}
 
 		// Start the server via service
-		const state = yield* devServerService.start(args.issueId, projectPath, serverName)
+		const state = yield* devServerService.start(issueId, projectPath, serverName)
 
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify({
 					resultStatus: "started",
-					issueId: args.issueId,
+					issueId,
 					serverName,
 					serverStatus: state.status,
 					port: state.port,
@@ -121,7 +123,7 @@ const devStartHandler = (args: {
 				}),
 			)
 		} else {
-			yield* Console.log(`Started dev server '${serverName}' for ${args.issueId}`)
+			yield* Console.log(`Started dev server '${serverName}' for ${issueId}`)
 			if (state.port) yield* Console.log(`  Port: ${state.port}`)
 			if (state.windowName) yield* Console.log(`  Window: ${state.windowName}`)
 		}
@@ -135,10 +137,12 @@ const devStopHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
+		const projectPath = yield* getProjectPath(Option.none())
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const devServerService = yield* DevServerService
 
 		// Check current status
-		const currentStatus = yield* devServerService.getStatus(args.issueId, serverName)
+		const currentStatus = yield* devServerService.getStatus(issueId, serverName)
 
 		if (currentStatus.status !== "running" && currentStatus.status !== "starting") {
 			if (args.json) {
@@ -146,20 +150,20 @@ const devStopHandler = (args: {
 					JSON.stringify({ resultStatus: "not_running", message: "Dev server is not running" }),
 				)
 			} else {
-				yield* Console.log(`Dev server '${serverName}' is not running for ${args.issueId}`)
+				yield* Console.log(`Dev server '${serverName}' is not running for ${issueId}`)
 			}
 			return
 		}
 
 		// Stop the server via service
-		yield* devServerService.stop(args.issueId, serverName)
+		yield* devServerService.stop(issueId, serverName)
 
 		if (args.json) {
 			yield* Console.log(
-				JSON.stringify({ resultStatus: "stopped", issueId: args.issueId, serverName }),
+				JSON.stringify({ resultStatus: "stopped", issueId, serverName }),
 			)
 		} else {
-			yield* Console.log(`Stopped dev server '${serverName}' for ${args.issueId}`)
+			yield* Console.log(`Stopped dev server '${serverName}' for ${issueId}`)
 		}
 	})
 
@@ -173,29 +177,30 @@ const devRestartHandler = (args: {
 	Effect.gen(function* () {
 		const serverName = Option.getOrElse(args.server, () => CLI_DEFAULT_SERVER_NAME)
 		const projectPath = yield* getProjectPath(args.projectDir)
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const devServerService = yield* DevServerService
 
 		if (!args.json) {
-			yield* Console.log(`Restarting dev server '${serverName}' for ${args.issueId}...`)
+			yield* Console.log(`Restarting dev server '${serverName}' for ${issueId}...`)
 		}
 
 		// Stop then start via service
-		yield* devServerService.stop(args.issueId, serverName).pipe(Effect.ignore)
+		yield* devServerService.stop(issueId, serverName).pipe(Effect.ignore)
 		yield* Effect.sleep("500 millis")
-		const state = yield* devServerService.start(args.issueId, projectPath, serverName)
+		const state = yield* devServerService.start(issueId, projectPath, serverName)
 
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify({
 					resultStatus: "restarted",
-					issueId: args.issueId,
+					issueId,
 					serverName,
 					serverStatus: state.status,
 					port: state.port,
 				}),
 			)
 		} else {
-			yield* Console.log(`Restarted dev server '${serverName}' for ${args.issueId}`)
+			yield* Console.log(`Restarted dev server '${serverName}' for ${issueId}`)
 			if (state.port) yield* Console.log(`  Port: ${state.port}`)
 		}
 	})
@@ -206,17 +211,19 @@ const devStatusHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
+		const projectPath = yield* getProjectPath(Option.none())
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
 		const devServerService = yield* DevServerService
 
 		// Get all servers for this issue
-		const issueServers = yield* devServerService.getIssueServers(args.issueId)
+		const issueServers = yield* devServerService.getIssueServers(issueId)
 		const serverList = Array.from(HashMap.values(issueServers))
 
 		if (serverList.length === 0) {
 			if (args.json) {
-				yield* Console.log(JSON.stringify({ issueId: args.issueId, servers: [] }))
+				yield* Console.log(JSON.stringify({ issueId, servers: [] }))
 			} else {
-				yield* Console.log(`No dev servers configured for ${args.issueId}`)
+				yield* Console.log(`No dev servers configured for ${issueId}`)
 			}
 			return
 		}
@@ -236,11 +243,11 @@ const devStatusHandler = (args: {
 					}),
 				),
 			)
-			yield* Console.log(JSON.stringify({ issueId: args.issueId, servers: serversJson }, null, 2))
+			yield* Console.log(JSON.stringify({ issueId, servers: serversJson }, null, 2))
 			return
 		}
 
-		yield* Console.log(`Dev servers for ${args.issueId}:`)
+		yield* Console.log(`Dev servers for ${issueId}:`)
 		yield* Console.log("")
 
 		for (const server of serverList) {
