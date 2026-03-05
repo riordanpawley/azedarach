@@ -127,7 +127,7 @@ Canonical fixture profile names:
 
 - Steps: select multiple cards, `Space l`.
 - Expected: each selected issue transitions rightward when valid.
-- Links: AZ-FR-0407, AZ-FR-1205.
+- Links: AZ-FR-0407.
 
 ### AZ-AT-0303 Bulk cleanup choice dialog
 
@@ -455,10 +455,10 @@ Canonical fixture profile names:
 
 ### AZ-AT-2833 Project-local canonical DB isolation and switch semantics
 
-- Preconditions: two registered projects with distinct issue sets; at least one project starts without `.azedarach/azedarach.db`.
-- Steps: load project A, perform mutation, switch to project B, perform mutation, switch back to project A.
-- Expected: app initializes missing project DB on first load, each project uses `<project-root>/.azedarach/azedarach.db`, and switching projects fully re-scopes canonical reads/writes without cross-project leakage.
-- Links: AZ-FR-0014, AZ-FR-0015, AZ-FR-0016, AZ-FR-1806, AZ-FR-1807, section 05 F-083.
+- Preconditions: two registered projects with distinct issue sets; project A has no sync targets configured; project B has optional sync target configured (target may be unavailable); at least one project starts without `.azedarach/azedarach.db`.
+- Steps: load project A and perform mutation in local-only mode; switch to project B and perform mutation while sync target is unavailable; switch back to project A.
+- Expected: canonical persisted issue store remains local SQLite managed by Azedarach, app initializes missing project DB on first load, each project uses `<project-root>/.azedarach/azedarach.db`, local-only workflows preserve full board/mutation behavior, optional sync target availability does not block local operations, and switching projects fully re-scopes canonical reads/writes without cross-project leakage.
+- Links: AZ-FR-0011, AZ-FR-0012, AZ-FR-0013, AZ-FR-0014, AZ-FR-0015, AZ-FR-0016, AZ-FR-1806, AZ-FR-1807, section 05 F-083.
 
 ### AZ-AT-2824 Status/help/log and tmux discovery contract
 
@@ -1345,4 +1345,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2873
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2879
