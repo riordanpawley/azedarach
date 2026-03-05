@@ -1,7 +1,18 @@
 import { createHash } from "node:crypto"
 import { FileSystem, Path, PlatformConfigProvider } from "@effect/platform"
 import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
-import { Config, ConfigProvider, Data, Effect, Option, Ref, Request, RequestResolver } from "effect"
+import {
+	Config,
+	ConfigProvider,
+	Data,
+	Deferred,
+	Effect,
+	Option,
+	Ref,
+	Request,
+	RequestResolver,
+	Schedule,
+} from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
 	LocalIssueStore,
@@ -18,6 +29,8 @@ const MAX_SYNC_BATCH = 500
 const MAX_SYNC_ATTEMPTS = 5
 const BASE_RETRY_SECONDS = 5
 const API_KEY_CACHE_TTL_MS = 30_000
+const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
+const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
 
 type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
@@ -300,6 +313,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
 		const warnedMissingApiKeyRef = yield* Ref.make(false)
 		const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
+		const bootstrapInFlightRef = yield* Ref.make<
+			Map<string, Deferred.Deferred<number, IssueSyncError>>
+		>(new Map())
 
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
@@ -918,7 +934,17 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
 				)
 				const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
-				const issues = yield* fetchAllLinearIssues(client, scope)
+				const issues = yield* fetchAllLinearIssues(client, scope).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Linear bootstrap: fetch issues failed (${error.message}); retrying`),
+					),
+					Effect.retry({
+						schedule: Schedule.recurs(BOOTSTRAP_FETCH_RETRY_ATTEMPTS - 1).pipe(
+							Schedule.addDelay(() => BOOTSTRAP_FETCH_RETRY_DELAY),
+						),
+						while: () => true,
+					}),
+				)
 				yield* Effect.log(
 					`Linear bootstrap: fetched ${issues.length} issues before metadata enrichment`,
 				)
@@ -956,19 +982,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 								.map((labelId) => labelNameById.get(labelId))
 								.filter((label): label is string => label !== undefined)
 							const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
-							const stateNameFromMap = issue.stateId ? stateNameById.get(issue.stateId) : undefined
-							const issueState = issue.state
-							const stateNameFromIssue =
-								issueState === undefined
-									? undefined
-									: yield* Effect.tryPromise({
-											try: () => issueState,
-											catch: () => undefined,
-										}).pipe(
-											Effect.map((state) => state?.name),
-											Effect.catchAll(() => Effect.succeed(undefined)),
-										)
-							const stateName = stateNameFromMap ?? stateNameFromIssue
+							const stateName = issue.stateId ? stateNameById.get(issue.stateId) : undefined
 							const status =
 								stateName !== undefined
 									? normalizeLinearStatus(stateName)
@@ -1006,39 +1020,101 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				)
 			})
 
+		interface BootstrapGate {
+			readonly join: Deferred.Deferred<number, IssueSyncError>
+			readonly shouldRun: boolean
+		}
+
 		return {
 			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
 				Effect.gen(function* () {
-					const runtimeOption = yield* getLinearRuntime(cwd)
-					if (Option.isNone(runtimeOption)) {
-						return 0
-					}
-
-					const bootstrapComplete = yield* fromStore(
-						localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
+					const projectPath = getEffectiveProjectPath(cwd)
+					const inFlight = yield* Ref.get(bootstrapInFlightRef).pipe(
+						Effect.map((pending) => pending.get(projectPath)),
 					)
-					if (bootstrapComplete) {
-						return 0
+					if (inFlight !== undefined) {
+						yield* Effect.log(
+							`Linear bootstrap: awaiting in-flight run for projectPath=${projectPath}`,
+						)
+						return yield* Deferred.await(inFlight)
 					}
 
-					const existingCount = yield* fromStore(localStore.countIssues(cwd))
-					if (existingCount > 0) {
-						yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
-						return 0
-					}
-
-					const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
-						team: runtimeOption.value.defaultTeam,
-						project: runtimeOption.value.defaultProject,
+					const completion = yield* Deferred.make<number, IssueSyncError>()
+					const gate: BootstrapGate = yield* Ref.modify(bootstrapInFlightRef, (pending) => {
+						const existing = pending.get(projectPath)
+						if (existing !== undefined) {
+							const value: BootstrapGate = {
+								join: existing,
+								shouldRun: false,
+							}
+							return [value, pending] as const
+						}
+						const next = new Map(pending)
+						next.set(projectPath, completion)
+						const value: BootstrapGate = {
+							join: completion,
+							shouldRun: true,
+						}
+						return [value, next] as const
 					})
-					yield* Effect.log(
-						`Linear bootstrap imported ${snapshots.length} issues (team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
+
+					if (!gate.shouldRun) {
+						yield* Effect.log(
+							`Linear bootstrap: joined concurrent run for projectPath=${projectPath}`,
+						)
+						return yield* Deferred.await(gate.join)
+					}
+
+					const runBootstrap: Effect.Effect<number, IssueSyncError> = Effect.gen(function* () {
+						const runtimeOption = yield* getLinearRuntime(cwd)
+						if (Option.isNone(runtimeOption)) {
+							return 0
+						}
+
+						const bootstrapComplete = yield* fromStore(
+							localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
+						)
+						if (bootstrapComplete) {
+							return 0
+						}
+
+						const existingCount = yield* fromStore(localStore.countIssues(cwd))
+						if (existingCount > 0) {
+							yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
+							return 0
+						}
+
+						const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
+							team: runtimeOption.value.defaultTeam,
+							project: runtimeOption.value.defaultProject,
+						})
+						yield* Effect.log(
+							`Linear bootstrap imported ${snapshots.length} issues (team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
+						)
+						const imported = yield* fromStore(
+							localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
+						)
+						yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
+						const totalIssues = yield* fromStore(localStore.countIssues(cwd))
+						yield* Effect.log(
+							`Linear bootstrap complete: projectPath=${projectPath} imported=${imported} totalIssues=${totalIssues}`,
+						)
+						return imported
+					})
+
+					return yield* runBootstrap.pipe(
+						Effect.tap((result) => Deferred.succeed(completion, result)),
+						Effect.tapError((error) => Deferred.fail(completion, error)),
+						Effect.ensuring(
+							Ref.update(bootstrapInFlightRef, (pending) => {
+								const next = new Map(pending)
+								if (next.get(projectPath) === completion) {
+									next.delete(projectPath)
+								}
+								return next
+							}),
+						),
 					)
-					const imported = yield* fromStore(
-						localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
-					)
-					yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
-					return imported
 				}),
 
 			flushLinearQueue: (
