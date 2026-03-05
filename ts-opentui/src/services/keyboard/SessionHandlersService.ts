@@ -146,9 +146,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
-					const imagePaths = attachments.map(
-						(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
-					)
+					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
+						imageAttachment.getPath(task.id, attachment.id).pipe(Effect.orElseSucceed(() => "")),
+					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({
 						taskId: task.id,
@@ -215,9 +215,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
-					const imagePaths = attachments.map(
-						(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
-					)
+					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
+						imageAttachment.getPath(task.id, attachment.id).pipe(Effect.orElseSucceed(() => "")),
+					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({
 						taskId: task.id,

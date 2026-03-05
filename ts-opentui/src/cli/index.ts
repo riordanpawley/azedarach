@@ -1116,7 +1116,7 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - When work is complete:
-  - Commit your changes first (\`git add -A && git commit -m "AZE-123: ..."\`).
+  - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.
   - Then close the issue (\`az issue close <issue-id>\`).
 `)
@@ -1504,7 +1504,7 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
  * Issue ID argument for commands that operate on a specific issue
  */
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Issue ID (e.g., AZE-123 or shorthand suffix 123)"),
+	Args.withDescription("Issue ID (e.g., a, ab, 12, AZE-123, or shorthand suffix 123)"),
 )
 
 /**
@@ -1786,7 +1786,7 @@ const eventArg = Args.text({ name: "event" }).pipe(
  * Issue ID argument for notify/hook commands
  */
 const issueIdArgForHooks = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Issue ID for the session (e.g., AZE-123)"),
+	Args.withDescription("Issue ID for the session (e.g., a, 12, or AZE-123)"),
 )
 
 /**
@@ -1929,7 +1929,7 @@ const opencodeInitHandler = (args: {
 		const globalPluginExists = yield* fs.exists(globalPluginPath)
 		if (!globalPluginExists) {
 			yield* Console.log("")
-			yield* Console.log("⚠ Global azedarach plugin not found")
+			yield* Console.log("! Global azedarach plugin not found")
 			yield* Console.log(`  Install with: mkdir -p ${globalPluginDir}`)
 			yield* Console.log(`  Then copy azedarach.js from an existing project's .opencode/plugin/`)
 		} else {
@@ -1966,13 +1966,13 @@ const opencodeInitHandler = (args: {
 						yield* Console.log(output)
 					}
 				} else {
-					yield* Console.log("⚠ Skill generator script not found")
+					yield* Console.log("! Skill generator script not found")
 					yield* Console.log(`  Expected at: ${scriptPath}`)
 					yield* Console.log("  Run manually: generate-opencode-skills.sh <project-dir>")
 				}
 			} else if (args.verbose) {
 				yield* Console.log("")
-				yield* Console.log("ℹ No .claude/skills directory found, skipping skill generation")
+				yield* Console.log("i No .claude/skills directory found, skipping skill generation")
 			}
 		}
 
