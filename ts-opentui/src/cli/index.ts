@@ -76,6 +76,7 @@ import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
+import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 
 // ============================================================================
 // CLI Layers
@@ -1408,6 +1409,13 @@ const projectAddHandler = (args: {
 				yield* Console.log(`  Beads: ${beadsPath}`)
 			}
 		}
+
+		yield* ensureProjectAzedarachGitignore({
+			projectPath: absolutePath,
+			pathService,
+			fs,
+			verbose: args.verbose,
+		})
 
 		// Add project via ProjectService (provided by cliLayer)
 		const projectService = yield* ProjectService
