@@ -62,14 +62,21 @@ bun run type-check       # Full project check
 bun run build            # Build the project
 ```
 
-**Coworker Install (global `az` command, from repo root):**
+**Install (Homebrew tap, macOS):**
+```bash
+brew tap riordanpawley/azedarach
+brew install azedarach
+az --help
+```
+
+**Install from source (repo root):**
 ```bash
 bun install
 just install-sfe-ts
 az --help
 ```
 
-See [ts-opentui/docs/install.md](./ts-opentui/docs/install.md) for full setup details and brew tap feasibility notes.
+See [ts-opentui/docs/install.md](./ts-opentui/docs/install.md) for full setup details and tap maintenance notes.
 
 ---
 
@@ -122,7 +129,15 @@ make test               # Run tests
 
 Azedarach does not require `claude` to run the board. You only need an AI session CLI (`opencode`, `claude`, etc.) when using session start/attach workflows.
 
-**Recommended (`ts-opentui`, from repo root):**
+**Recommended (macOS, Homebrew tap):**
+```bash
+brew tap riordanpawley/azedarach
+brew install azedarach
+az --help
+```
+Note: this installs an `az` executable, which can conflict with Azure CLI's `az`.
+
+**Alternative (`ts-opentui`, from source):**
 ```bash
 bun install
 just install-sfe-ts
