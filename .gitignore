@@ -39,6 +39,7 @@ Thumbs.db
 # Environment
 .env.local
 .env*.local
+.envrc.local
 
 # OpenCode (ignore generated artifacts only)
 .opencode/node_modules/
@@ -76,3 +77,5 @@ coverage/
 
 # bv (beads viewer) local config and caches
 .bv/
+/ts-opentui/bin/az
+/.beads

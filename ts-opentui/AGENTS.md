@@ -1,17 +1,8 @@
 # Agent Instructions
 
-This project uses **`linear-cli`** for issue tracking.
-Set `issueTracker.linear.team` in `.azedarach.json` (or run `linear-cli setup`) to avoid passing `-t` on every create command.
-
-## Quick Reference
-
-```bash
-linear-cli i list --output json --compact --all   # List issues
-linear-cli i get <id> --output json --compact     # View issue details
-linear-cli i start <id>                            # Claim/start work
-linear-cli i update <id> --output json --compact ...  # Update details/status
-linear-cli i close <id>                            # Complete work
-```
+First command in a new AI session: **`bin/issue prime`**.
+Use **`bin/issue`** for issue tracking commands.
+`bin/issue prime` is the source of backend-specific CLI/API guidance.
 
 ## Landing the Plane (Session Completion)
 
