@@ -717,50 +717,68 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
 					const childCountByParentId = new Map<string, number>()
-				for (const issue of issues) {
-					if (issue.parentId) {
-						childCountByParentId.set(issue.parentId, (childCountByParentId.get(issue.parentId) ?? 0) + 1)
+					for (const issue of issues) {
+						if (issue.parentId) {
+							childCountByParentId.set(issue.parentId, (childCountByParentId.get(issue.parentId) ?? 0) + 1)
+						}
 					}
-				}
 
-				return issues.map((issue) => {
-						const labels = issue.labelIds
-							.map((labelId) => labelNameById.get(labelId))
-							.filter((label): label is string => label !== undefined)
-						const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
-						const stateName = issue.stateId ? stateNameById.get(issue.stateId) : undefined
-						const status =
-							stateName !== undefined
-								? normalizeLinearStatus(stateName)
-								: issue.completedAt != null || issue.canceledAt != null
-									? "closed"
-									: issue.startedAt != null
-										? "in_progress"
-									: "open"
-						const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
+					return yield* Effect.forEach(
+						issues,
+						(issue) =>
+							Effect.gen(function* () {
+								const labels = issue.labelIds
+									.map((labelId) => labelNameById.get(labelId))
+									.filter((label): label is string => label !== undefined)
+								const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
+								const stateNameFromMap = issue.stateId ? stateNameById.get(issue.stateId) : undefined
+								const issueState = issue.state
+								const stateNameFromIssue =
+									issueState === undefined
+										? undefined
+										: yield* Effect.tryPromise({
+												try: () => issueState,
+												catch: () => undefined,
+											}).pipe(
+												Effect.map((state) => state?.name),
+												Effect.catchAll(() => Effect.succeed(undefined)),
+											)
+								const stateName =
+									stateNameFromMap ?? stateNameFromIssue
+								const status =
+									stateName !== undefined
+										? normalizeLinearStatus(stateName)
+										: issue.completedAt != null || issue.canceledAt != null
+											? "closed"
+											: issue.startedAt != null
+												? "in_progress"
+											: "open"
+								const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
 
-						return {
-						localId: issue.identifier,
-						externalId: issue.id,
-						externalKey: issue.identifier,
-						title: issue.title,
-						description: issue.description ?? undefined,
-						status,
-						priority: normalizeLinearPriority(issue.priority),
-						issueType: inferIssueTypeFromLabels(labels, hasChildren),
-						createdAt: issue.createdAt.toISOString(),
-						updatedAt: issue.updatedAt.toISOString(),
-						closedAt:
-							status === "closed"
-								? (issue.completedAt ?? issue.canceledAt ?? issue.updatedAt).toISOString()
-								: undefined,
-						assignee: issue.assigneeId ?? null,
-						labels,
-						estimate: issue.estimate ?? undefined,
-						parentLocalId,
-					}
+								return {
+									localId: issue.identifier,
+									externalId: issue.id,
+									externalKey: issue.identifier,
+									title: issue.title,
+									description: issue.description ?? undefined,
+									status,
+									priority: normalizeLinearPriority(issue.priority),
+									issueType: inferIssueTypeFromLabels(labels, hasChildren),
+									createdAt: issue.createdAt.toISOString(),
+									updatedAt: issue.updatedAt.toISOString(),
+									closedAt:
+										status === "closed"
+											? (issue.completedAt ?? issue.canceledAt ?? issue.updatedAt).toISOString()
+											: undefined,
+									assignee: issue.assigneeId ?? null,
+									labels,
+									estimate: issue.estimate ?? undefined,
+									parentLocalId,
+								}
+							}),
+						{ concurrency: 16 },
+					)
 				})
-			})
 
 		return {
 			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
