@@ -1012,6 +1012,13 @@ Canonical fixture profile names:
 - Expected: default switch updates active and persisted default scope; session-only mode (if implemented) changes only active invocation scope without persisting default.
 - Links: AZ-FR-4233, AZ-FR-4234, AZ-FR-4235, AZ-FR-4244, section 05 F-219.
 
+### AZ-AT-2856 Atomic create-with-parent contract
+
+- Preconditions: valid parent issue exists; JSON mode enabled.
+- Steps: run `az create "Child issue" --parent <parent-id> --json`; repeat with invalid parent ID.
+- Expected: valid parent path creates child and parent-child linkage in one atomic operation; invalid parent path fails with deterministic error and creates no orphan child issue.
+- Links: AZ-FR-3405, AZ-FR-4245.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1177,4 +1184,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2855
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2856

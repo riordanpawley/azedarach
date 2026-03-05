@@ -539,3 +539,4 @@ Machine-readable JSON envelope details are normative in section 12.
 - AZ-FR-4242: `az show <issue-id>` on tombstoned issues MUST return deterministic tombstone-aware diagnostics by default and MUST return tombstone metadata when include-deleted mode is explicitly requested.
 - AZ-FR-4243: Restore of tombstoned issues is out of current command contract scope; restore attempts MUST return deterministic unsupported-operation diagnostics with guidance to create/link replacement work.
 - AZ-FR-4244: If session-only project switching is implemented, it MUST require explicit opt-in flag and MUST NOT mutate persisted default project scope.
+- AZ-FR-4245: Issue creation commands (`az create`, `az q`, and equivalent create namespace command) MUST support optional `--parent <issue-id>` linkage that persists child creation and parent-child edge atomically; invalid parent IDs MUST fail deterministically with no orphaned issue creation.

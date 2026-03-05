@@ -683,7 +683,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4244
+- Az CLI command suite -> AZ-FR-4201..4245
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

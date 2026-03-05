@@ -94,7 +94,44 @@ Error requirements:
 }
 ```
 
-## 12.6 Tombstone Visibility Semantics
+## 12.6 Success Example: Create With Parent Linkage
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "create",
+  "commandPath": ["az", "create"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "issue": {
+      "id": "kqf",
+      "title": "Implement cache invalidation",
+      "status": "open"
+    },
+    "relationships": {
+      "parentIssueId": "kqd",
+      "edgeType": "parent-child"
+    }
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 21,
+    "at": "2026-03-05T03:21:43Z"
+  }
+}
+```
+
+Create-with-parent requirements:
+
+- `--parent <issue-id>` MUST fail deterministically when parent does not exist in active project context.
+- failed parent validation MUST NOT leave orphan child issue rows in canonical storage.
+
+## 12.7 Tombstone Visibility Semantics
 
 Default behavior:
 
@@ -136,7 +173,7 @@ Include-deleted behavior:
 }
 ```
 
-## 12.7 Out-of-Scope Restore Semantics (Current Contract)
+## 12.8 Out-of-Scope Restore Semantics (Current Contract)
 
 The current command contract does not define a restore operation for tombstoned issues.
 
