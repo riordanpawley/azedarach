@@ -22,6 +22,9 @@
 - Drill-down: focused board mode showing only children of selected epic.
 - Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).
 - Dependency graph: full set of issue nodes and dependency edges; not restricted to a tree.
+- Dependency relation type key: canonical CLI/schema key representing one directed dependency class (for example `blocking`, `blocked-by`, `parent-child`, `discovered-from`).
+- Dependency projection mode: `az show` dependency output shape selector (`none`, `counts`, `direct`, `verbose`).
+- Dependency depth: maximum dependency-expansion depth in projection output; depth `0` returns counts-only without expanded dependency nodes.
 - Base branch: configurable integration branch used for default update/merge flows (for example develop, trunk, main).
 - Follow-on merge: direct merge of eligible upstream source branch into target issue branch without routing through the base branch.
 - Optimistic mutation: immediate in-memory UI state update performed before async persistence completes.

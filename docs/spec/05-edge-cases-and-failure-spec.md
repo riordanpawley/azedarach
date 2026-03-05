@@ -494,8 +494,9 @@ On failure, logs SHOULD capture:
 ### Case F-163: Cycle introduced in disallowed dependency type
 
 - Required behavior:
-  - reject write with actionable cycle diagnostics.
-  - preserve pre-operation graph state.
+  - reject mutation at write time (before persist) with actionable cycle diagnostics.
+  - preserve pre-operation graph state with no partial edge mutation side effects.
+  - apply to `az dep add`, create-with-parent linkage, and other dependency edge mutation paths.
 
 ## 5.26 Upstream Follow-On Merge Edge Cases
 
@@ -673,7 +674,10 @@ On failure, logs SHOULD capture:
 
 - Required behavior:
   - dependency mutations reject missing source/target issue IDs with deterministic diagnostics.
+  - dependency mutations that would introduce disallowed cycles are rejected before persist with deterministic diagnostics and no partial writes.
+  - invalid dependency projection arguments (for example negative `--dep-depth`) return deterministic argument-validation diagnostics.
   - cycle detection output remains deterministic for identical graph inputs.
+  - query traversal remains deterministic and bounded even if legacy cyclic graph data exists.
   - dependency tree/list operations fail clearly if canonical store is unavailable.
 
 ### Case F-211: `az config validate/show` called with invalid or incompatible configuration payload

@@ -1019,6 +1019,62 @@ Canonical fixture profile names:
 - Expected: valid parent path creates child and parent-child linkage in one atomic operation; invalid parent path fails with deterministic error and creates no orphan child issue.
 - Links: AZ-FR-3405, AZ-FR-4245.
 
+### AZ-AT-2857 `az show` typed dependency counts default contract
+
+- Preconditions: target issue has mixed relation types (for example `blocking`, `blocked-by`, `parent-child`).
+- Steps: run `az show <issue-id>` and `az show <issue-id> --json` without explicit deps mode.
+- Expected: output includes dependency counts keyed by relation type rather than generic directional-only labels; JSON envelope remains deterministic.
+- Links: AZ-FR-4246, AZ-FR-4247, AZ-FR-4225.
+
+### AZ-AT-2858 `az show --deps=direct` relation-grouped projection contract
+
+- Preconditions: target issue has at least one incoming and one outgoing dependency edge.
+- Steps: run `az show <issue-id> --deps=direct --json`.
+- Expected: direct neighbors are grouped by canonical relation type and ordered deterministically (relation type key then issue ID).
+- Links: AZ-FR-4246, AZ-FR-4248.
+
+### AZ-AT-2859 `az show --deps=verbose` expanded dependency fields contract
+
+- Preconditions: target issue has dependencies with rich metadata.
+- Steps: run `az show <issue-id> --deps=verbose --json`.
+- Expected: dependency entries include expanded issue fields (description, priority, status, type) with deterministic ordering.
+- Links: AZ-FR-4246, AZ-FR-4249.
+
+### AZ-AT-2860 `--dep-depth=0` counts-only behavior across all projection modes
+
+- Preconditions: issue has dependencies in multiple relation types.
+- Steps: run `az show <issue-id> --deps=counts --dep-depth=0 --json`; run again with `--deps=direct` and `--deps=verbose`.
+- Expected: typed dependency counts remain available; dependency expansion is suppressed consistently in all modes when depth is `0`.
+- Links: AZ-FR-4246, AZ-FR-4250.
+
+### AZ-AT-2861 Deterministic `--dep-type` filtering contract
+
+- Preconditions: issue has dependencies across multiple relation types.
+- Steps: run `az show <issue-id> --deps=direct --dep-type blocking,blocked-by --json`.
+- Expected: projection includes only requested relation types with deterministic ordering and stable metadata shape.
+- Links: AZ-FR-4251, AZ-FR-4248.
+
+### AZ-AT-2862 Deterministic truncation metadata contract
+
+- Preconditions: issue has dependency fan-out exceeding configured limits.
+- Steps: run `az show <issue-id> --deps=direct --dep-limit 2 --dep-node-limit 3 --json`.
+- Expected: response applies deterministic truncation and includes explicit truncation metadata indicating omitted nodes/edges.
+- Links: AZ-FR-4252, AZ-FR-4248.
+
+### AZ-AT-2863 Query-time read-only behavior with legacy cycle data
+
+- Preconditions: fixture contains pre-existing cyclic dependency data imported from external source.
+- Steps: run `az show <issue-id> --deps=direct --json`; run `az dep list`, `az dep tree`, and `az dep cycles`.
+- Expected: query paths are deterministic, bounded, and side-effect-free; no auto-repair or mutation of canonical graph state occurs.
+- Links: AZ-FR-4253, AZ-FR-4217, AZ-FR-4218, AZ-FR-4219.
+
+### AZ-AT-2864 Mutation-time cycle rejection and no-partial-write contract
+
+- Preconditions: one `az dep add` path and one create-with-parent path would each introduce disallowed cycles.
+- Steps: execute both mutation attempts in JSON mode.
+- Expected: both writes are rejected before persist with deterministic cycle diagnostics; canonical graph remains unchanged with no partial edge writes.
+- Links: AZ-FR-3410, AZ-FR-4245, AZ-FR-4254.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1184,4 +1240,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2856
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2864

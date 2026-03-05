@@ -889,6 +889,7 @@ Enable full-screen correctness assertions for TUI rendering beyond state-only ch
 Canonical CLI surface for issue management:
 
 - lifecycle: `az init`, `az create`, `az q`, `az show`, `az update`, `az close`, `az reopen`, `az delete`
+- issue retrieval projection controls: `az show --deps=none|counts|direct|verbose`, `--dep-depth`, `--dep-type`, `--dep-limit`, `--dep-node-limit`
 - querying: `az list`, `az ready`, `az blocked`, `az search`, `az stale`, `az count`
 - dependencies: `az dep add/remove/list/tree/cycles`
 - configuration and reporting: `az config validate`, `az config show`, `az stats`
@@ -904,6 +905,7 @@ Canonical CLI surface for issue management:
 5. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
 6. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
 7. command JSON payloads follow the schema contract defined in Section 12
+8. dependency projection query paths are strictly read-only; cycle prevention occurs during mutation commands before persist
 
 ### Postconditions
 

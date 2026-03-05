@@ -81,6 +81,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Dependency graph workflows: typed non-hierarchical relationships beyond epic-only links
 - Follow-on merge workflows: merge eligible upstream source branches directly into target issue branches
 - Relationship display workflows: compact graph chips on board and relation-scope drill-down views
+- Issue lookup projection workflows: `az show` typed dependency counts by default with optional direct/verbose depth-limited projections
 - E2E testability workflows: machine-readable state probe, deterministic fixtures, optimistic rollback checks
 - Mutation semantics: optimistic UI updates with rollback-on-failure guarantees
 - Async orchestration semantics: background operations with progress inspection and cancellation

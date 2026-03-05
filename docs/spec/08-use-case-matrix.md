@@ -305,7 +305,7 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-AUTH-009 Show issue via CLI
 
 - Trigger: run `az show <issue-id>`
-- Expected: command resolves canonical issue details for active project context
+- Expected: command resolves canonical issue details for active project context and includes typed dependency counts by default
 
 ### UC-AUTH-010 Update issue metadata via CLI
 
@@ -381,6 +381,26 @@ This section expands product behavior into concrete user-centered use cases.
 
 - Trigger: run successful and failing `az` commands with `--json`
 - Expected: responses conform to schema-versioned envelope with deterministic success/error fields
+
+### UC-AUTH-025 Show direct dependencies grouped by relation type
+
+- Trigger: run `az show <issue-id> --deps=direct --json`
+- Expected: direct dependencies are grouped by relation type and ordered deterministically
+
+### UC-AUTH-026 Show verbose dependency projection with depth controls
+
+- Trigger: run `az show <issue-id> --deps=verbose --dep-depth 0 --json`
+- Expected: depth `0` returns counts-only projection; depth >0 returns expanded verbose dependency issue fields
+
+### UC-AUTH-027 Filter dependency projection by relation type
+
+- Trigger: run `az show <issue-id> --deps=direct --dep-type blocking,blocked-by --json`
+- Expected: output includes only selected relation-type groups with deterministic ordering
+
+### UC-AUTH-028 Reject cycle-introducing dependency writes at mutation time
+
+- Trigger: run `az dep add` (and create-with-parent linkage) for an edge that would introduce disallowed cycle
+- Expected: mutation is rejected pre-persist with deterministic diagnostics and no partial graph writes
 
 ## 8.11 Attachment Use Cases
 
@@ -683,7 +703,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4245
+- Az CLI command suite -> AZ-FR-4201..4254
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

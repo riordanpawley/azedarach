@@ -394,12 +394,12 @@ This section is normative.
 - AZ-FR-3402: Dependency edges MUST be typed and preserve canonical local semantics (with adapter-specific mapping when synced externally).
 - AZ-FR-3403: Issue detail MUST expose incoming and outgoing dependency edges.
 - AZ-FR-3404: UI MUST distinguish at least blockers, blocked-by, and lineage/discovery-style relations when present.
-- AZ-FR-3405: Dependency create/update flows MUST validate target issue existence before persist.
+- AZ-FR-3405: Dependency create/update flows MUST validate both source and target issue existence before persist.
 - AZ-FR-3406: Duplicate dependency edges of same type and endpoints SHOULD be prevented.
 - AZ-FR-3407: Dependency changes MUST refresh blocked/readiness indicators consistently.
 - AZ-FR-3408: Dependency removal MUST require explicit confirmation when it can unblock/retarget workflow.
 - AZ-FR-3409: Planning/fork flows MUST preserve and/or create non-hierarchical dependencies when specified by user intent.
-- AZ-FR-3410: Cyclic dependency validation MUST follow canonical local policy and surface actionable feedback when rejected.
+- AZ-FR-3410: Cyclic dependency validation MUST execute before persist on dependency mutation paths and follow canonical local policy; rejected writes MUST surface actionable feedback and leave pre-operation graph state unchanged.
 
 ## 4.38 Runtime Branch-Origin Selection Requirements
 
@@ -540,3 +540,12 @@ Machine-readable JSON envelope details are normative in section 12.
 - AZ-FR-4243: Restore of tombstoned issues is out of current command contract scope; restore attempts MUST return deterministic unsupported-operation diagnostics with guidance to create/link replacement work.
 - AZ-FR-4244: If session-only project switching is implemented, it MUST require explicit opt-in flag and MUST NOT mutate persisted default project scope.
 - AZ-FR-4245: Issue creation commands (`az create`, `az q`, and equivalent create namespace command) MUST support optional `--parent <issue-id>` linkage that persists child creation and parent-child edge atomically; invalid parent IDs MUST fail deterministically with no orphaned issue creation.
+- AZ-FR-4246: `az show <issue-id>` MUST support dependency projection mode selection via `--deps=none|counts|direct|verbose`; default mode MUST be `counts`.
+- AZ-FR-4247: `az show` default output (`--deps=counts`) MUST include dependency counts keyed by canonical relation type (for example `blocking`, `blocked-by`) rather than generic directional labels.
+- AZ-FR-4248: `az show --deps=direct` MUST return direct dependency neighbors grouped by canonical relation type with deterministic ordering (relation type key, then issue ID).
+- AZ-FR-4249: `az show --deps=verbose` MUST include expanded dependency issue fields (including description, priority, status, and type) while preserving deterministic ordering guarantees.
+- AZ-FR-4250: `--dep-depth` MUST accept integer values `>= 0` for all dependency projection modes; depth `0` MUST disable dependency expansion while still returning typed dependency counts.
+- AZ-FR-4251: `--dep-type` filtering MUST be supported for `direct` and `verbose` projections and MUST apply deterministically against canonical relation type keys.
+- AZ-FR-4252: Dependency projection responses MUST support deterministic truncation controls (`--dep-limit` and `--dep-node-limit`) and MUST expose truncation metadata when limits are hit.
+- AZ-FR-4253: `az show` dependency projections and `az dep list/tree/cycles` query commands MUST be read-only and MUST NOT mutate or auto-repair canonical dependency graph state.
+- AZ-FR-4254: Dependency mutation commands (`az dep add`, create-with-parent linkage, and other CLI-surfaced dependency edge writes) MUST reject cycle-introducing writes at mutation time with deterministic diagnostics and MUST persist no partial edge mutations on failure.

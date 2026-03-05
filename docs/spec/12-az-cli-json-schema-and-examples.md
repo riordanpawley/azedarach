@@ -131,7 +131,183 @@ Create-with-parent requirements:
 - `--parent <issue-id>` MUST fail deterministically when parent does not exist in active project context.
 - failed parent validation MUST NOT leave orphan child issue rows in canonical storage.
 
-## 12.7 Tombstone Visibility Semantics
+## 12.7 Show Dependency Projection Contract
+
+Projection parameter contract:
+
+- `--deps`: `none|counts|direct|verbose` (default `counts`)
+- `--dep-depth`: integer `>= 0` in all projection modes (`0` = counts-only, no expansion)
+- `--dep-type`: optional relation-type filter (csv) for `direct|verbose`
+- `--dep-limit`, `--dep-node-limit`: deterministic truncation controls for projection payloads
+
+### 12.7.1 Success Example: `az show` default typed counts
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "show",
+  "commandPath": ["az", "show"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "issue": {
+      "id": "kqd",
+      "title": "Refactor sync queue",
+      "status": "in_progress"
+    },
+    "dependencyCountsByType": {
+      "blocking": 8,
+      "blocked-by": 1,
+      "parent-child": 2
+    }
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 12,
+    "at": "2026-03-05T03:22:10Z"
+  }
+}
+```
+
+### 12.7.2 Success Example: `az show --deps=direct`
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "show",
+  "commandPath": ["az", "show"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "issue": {
+      "id": "kqd",
+      "title": "Refactor sync queue"
+    },
+    "dependencyProjection": {
+      "mode": "direct",
+      "depth": 1,
+      "order": "relationType,issueId",
+      "byType": {
+        "blocked-by": [{ "issueId": "kqa", "title": "Stabilize storage adapter" }],
+        "blocking": [{ "issueId": "kqf", "title": "Add cache key namespacing" }]
+      },
+      "truncated": false
+    }
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 17,
+    "at": "2026-03-05T03:22:22Z"
+  }
+}
+```
+
+### 12.7.3 Success Example: `az show --deps=verbose --dep-depth=0`
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "show",
+  "commandPath": ["az", "show"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "issue": {
+      "id": "kqd",
+      "title": "Refactor sync queue"
+    },
+    "dependencyCountsByType": {
+      "blocking": 8,
+      "blocked-by": 1
+    },
+    "dependencyProjection": {
+      "mode": "verbose",
+      "depth": 0,
+      "byType": {},
+      "truncated": false
+    }
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 14,
+    "at": "2026-03-05T03:22:34Z"
+  }
+}
+```
+
+### 12.7.4 Failure Example: invalid dependency projection arguments
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "show",
+  "commandPath": ["az", "show"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "invalid_argument",
+    "message": "--dep-depth must be >= 0",
+    "remediation": "Run az show <issue-id> --deps=counts --dep-depth 0",
+    "details": {
+      "argument": "dep-depth",
+      "value": "-1"
+    }
+  },
+  "meta": {
+    "durationMs": 3,
+    "at": "2026-03-05T03:22:47Z"
+  }
+}
+```
+
+### 12.7.5 Failure Example: mutation-time cycle rejection
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "dep.add",
+  "commandPath": ["az", "dep", "add"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": false,
+  "result": null,
+  "error": {
+    "code": "cycle_rejected",
+    "message": "Dependency edge would introduce disallowed cycle",
+    "remediation": "Run az dep cycles --json and choose a non-cyclic relation target",
+    "details": {
+      "sourceIssueId": "kqd",
+      "targetIssueId": "kqa"
+    }
+  },
+  "meta": {
+    "durationMs": 8,
+    "at": "2026-03-05T03:23:01Z"
+  }
+}
+```
+
+## 12.8 Tombstone Visibility Semantics
 
 Default behavior:
 
@@ -173,7 +349,7 @@ Include-deleted behavior:
 }
 ```
 
-## 12.8 Out-of-Scope Restore Semantics (Current Contract)
+## 12.9 Out-of-Scope Restore Semantics (Current Contract)
 
 The current command contract does not define a restore operation for tombstoned issues.
 
