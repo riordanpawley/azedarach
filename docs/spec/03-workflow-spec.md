@@ -397,6 +397,27 @@ Priority:
 
 If selected project canonical DB is missing, initialize `<project-root>/.azedarach/azedarach.db` before first hydration.
 
+### Project Registry Management (CLI)
+
+Canonical project-management commands:
+
+- `az project add <path> [--name <name>]`
+- `az project list`
+- `az project remove <name>`
+- `az project switch <name>`
+
+Compatibility note:
+
+- current `ts-opentui` builds may expose `az add <path>` as shortcut for `az project add`; canonical spec behavior remains anchored on `az project ...` commands and deterministic `az list` issue-query semantics.
+
+CLI registry workflow:
+
+1. validate command arguments against registry/path constraints
+2. apply project-registry mutation atomically
+3. persist registry changes to global config storage
+4. on switch, update default/current project identity and rebind active canonical DB context
+5. expose deterministic success/error diagnostics in human-readable and JSON modes
+
 ## 3.19 Search/Filter/Sort Composition Workflow
 
 Rules:
@@ -866,6 +887,7 @@ Canonical CLI surface for issue management:
 - querying: `az list`, `az ready`, `az blocked`, `az search`, `az stale`, `az count`
 - dependencies: `az dep add/remove/list/tree/cycles`
 - configuration and reporting: `az config validate`, `az config show`, `az stats`
+- project management: `az project add/list/remove/switch`
 
 ### Command Execution Rules
 
@@ -874,8 +896,10 @@ Canonical CLI surface for issue management:
 3. for mutating commands, commit local canonical changes atomically before outbound sync enqueue
 4. emit deterministic command results and non-zero failures (including machine-readable JSON mode)
 5. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
+6. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
 
 ### Postconditions
 
 - all issue lifecycle/query/dependency/config/stats flows remain available in local-only mode
+- project registry management commands remain available independent of optional sync-adapter configuration
 - command semantics remain stable across optional adapter configurations

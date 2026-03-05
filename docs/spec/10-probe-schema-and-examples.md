@@ -115,7 +115,7 @@ The probe contract is behavioral and transport-agnostic.
 - `sync.linear.rateLimit`: outbound throttling snapshot; present when Linear sync target is enabled.
 - `agentBootstrap.issueLookupCommand`: active session bootstrap issue lookup command (must use `az show <issue-id>` when bootstrap guidance is present).
 - `agentBootstrap.backendSpecificCommandLeakDetected`: diagnostic boolean for backend-specific command leakage in bootstrap guidance.
-- `commands.az.lastOperation`: last observed top-level `az` operation kind (for example `show`, `create`, `q`, `update`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `search`, `stale`, `count`, `dep.*`, `config.*`, `stats`) when available.
+- `commands.az.lastOperation`: last observed top-level `az` operation kind (for example `show`, `create`, `q`, `update`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `search`, `stale`, `count`, `dep.*`, `config.*`, `stats`, `project.add`, `project.list`, `project.remove`, `project.switch`) when available.
 
 ## 10.5 Example: Overlay + Selection State
 

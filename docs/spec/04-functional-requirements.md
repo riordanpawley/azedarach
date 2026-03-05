@@ -522,3 +522,11 @@ This section is normative.
 - AZ-FR-4227: Session start/bootstrap prompts MUST NOT require backend-specific issue CLIs for canonical issue read/write flows.
 - AZ-FR-4228: `az delete` MUST require explicit confirmation or safe-mode equivalent before destructive execution and MUST preserve tombstone/audit metadata.
 - AZ-FR-4229: Top-level `az` not-found/store-unavailable failures MUST return actionable diagnostics and preserve local canonical state.
+- AZ-FR-4230: The product MUST expose `az project add <path> [--name <name>]` for project registration in the global project registry.
+- AZ-FR-4231: The product MUST expose `az project list` for deterministic listing of registered projects.
+- AZ-FR-4232: The product MUST expose `az project remove <name>` for unregistering projects.
+- AZ-FR-4233: The product MUST expose `az project switch <name>` for selecting the active/default project.
+- AZ-FR-4234: `az project switch` MUST rebind canonical local store context to the selected project before subsequent issue reads/writes.
+- AZ-FR-4235: Project registry mutations via `az project add/remove/switch` MUST persist and remain consistent with TUI project selector behavior (`g p`).
+- AZ-FR-4236: Command namespace MUST remain deterministic: issue listing resolves via `az list ...`; project listing resolves via `az project list`.
+- AZ-FR-4237: `az project` command failures (invalid path/name, duplicate registration, unknown project) MUST return actionable diagnostics and deterministic non-zero failures in JSON mode.

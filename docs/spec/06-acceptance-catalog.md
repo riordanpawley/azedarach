@@ -451,7 +451,7 @@ Canonical fixture profile names:
 - Preconditions: registry has multiple projects and persisted metadata.
 - Steps: start app and switch projects via selector.
 - Expected: multi-project model is supported and registry metadata persists/reloads correctly.
-- Links: AZ-FR-1801, AZ-FR-1805.
+- Links: AZ-FR-1801, AZ-FR-1805, AZ-FR-4235.
 
 ### AZ-AT-2833 Project-local canonical DB isolation and switch semantics
 
@@ -963,6 +963,34 @@ Canonical fixture profile names:
 - Expected: numeric strategy yields digits-only IDs; hash strategy yields lowercase alphabetic 3-4 char IDs; collisions resolve deterministically without manual DB edits.
 - Links: AZ-FR-0019, AZ-FR-0020, AZ-FR-0021, AZ-FR-0022, AZ-FR-1704, section 05 F-209.
 
+### AZ-AT-2849 `az project add` registry contract
+
+- Preconditions: candidate project path exists and is readable.
+- Steps: run `az project add <path> --name <name> --json`, then run `az project list`.
+- Expected: project is registered deterministically in global registry and appears in subsequent project listings/TUI selector.
+- Links: AZ-FR-4230, AZ-FR-4231, AZ-FR-4235, AZ-FR-4237, section 05 F-214.
+
+### AZ-AT-2850 `az project list/remove` registry mutation contract
+
+- Preconditions: multiple registered projects exist.
+- Steps: run `az project list --json`, then `az project remove <name> --json`, then list again.
+- Expected: removed project is absent from registry; unaffected projects remain unchanged with deterministic payload ordering.
+- Links: AZ-FR-4231, AZ-FR-4232, AZ-FR-4235, AZ-FR-4237, section 05 F-215.
+
+### AZ-AT-2851 `az project switch` context-rebind contract
+
+- Preconditions: at least two registered projects with distinct canonical DB paths.
+- Steps: run `az project switch <name> --json`, launch/refresh app context, then run `az show <issue-id>` and `az list`.
+- Expected: selected project becomes active/default, canonical reads/writes rebind to selected project, and issue commands execute against that project only.
+- Links: AZ-FR-4233, AZ-FR-4234, AZ-FR-4223, AZ-FR-4235, AZ-FR-4237.
+
+### AZ-AT-2852 Issue/project list namespace disambiguation contract
+
+- Preconditions: registered projects exist and active project has issues.
+- Steps: run `az list --json` and `az project list --json` in same shell context.
+- Expected: `az list` returns issue-query payload; `az project list` returns project-registry payload; diagnostics/help remain unambiguous.
+- Links: AZ-FR-4209, AZ-FR-4231, AZ-FR-4236, section 05 F-216.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1128,4 +1156,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2848
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2852

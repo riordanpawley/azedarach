@@ -522,6 +522,26 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: switch between two registered projects with different issue sets
 - Expected: app fully swaps to selected project's `<project-root>/.azedarach/azedarach.db` with no cross-project issue leakage
 
+### UC-PROJ-005 Register project via CLI
+
+- Trigger: run `az project add /path/to/project --name my-project`
+- Expected: project registry persists entry and project becomes selectable via `g p`
+
+### UC-PROJ-006 List and remove project via CLI
+
+- Trigger: run `az project list`, then `az project remove my-project`
+- Expected: listing reflects deterministic registry state before/after removal
+
+### UC-PROJ-007 Switch active/default project via CLI
+
+- Trigger: run `az project switch project-name`
+- Expected: active/default project changes and subsequent issue commands bind to switched project context
+
+### UC-PROJ-008 Distinguish issue list and project list commands
+
+- Trigger: run `az list` and `az project list` in same context
+- Expected: issue-query and project-registry payloads are unambiguous and deterministic
+
 ## 8.16 Operational and Recovery Use Cases
 
 ### UC-OPS-001 Handle missing session on attach
@@ -643,7 +663,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4229
+- Az CLI command suite -> AZ-FR-4201..4237
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

@@ -11,7 +11,7 @@
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
 - Burst window: short-term allowance for sync requests above sustained throughput before throttling/deferred execution begins.
-- Agent Issue CLI: canonical top-level `az` issue command suite (`init/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) used by agent workflows.
+- Agent Issue CLI: canonical top-level `az` issue command suite (`init/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
 - Bootstrap prompt contract: normative session-start prompt guidance requiring top-level `az` commands for issue context and mutation flows.
 - Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
 - Destructive issue operation: issue mutation that removes canonical issue records (for example `az delete`) and requires explicit guardrails.

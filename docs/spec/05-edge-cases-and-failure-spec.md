@@ -655,13 +655,6 @@ On failure, logs SHOULD capture:
   - preserve canonical local state and avoid fallback to remote tracker as runtime source of truth.
   - provide explicit retry guidance once lock/unavailability clears.
 
-### Case F-213: `az list/ready/blocked/search/stale/count` runs while canonical store is unavailable/locked
-
-- Required behavior:
-  - fail with actionable diagnostics including project/canonical DB context.
-  - return deterministic non-zero exit in machine-readable mode.
-  - avoid returning partial/ambiguous query payloads.
-
 ### Case F-208: Session bootstrap prompt references backend-specific issue CLI
 
 - Required behavior:
@@ -696,3 +689,31 @@ On failure, logs SHOULD capture:
   - return deterministic zero-safe aggregates for empty datasets.
   - avoid blocking on optional sync targets; stats are sourced from canonical local state.
   - include freshness/backlog hints when statistic inputs are still converging.
+
+### Case F-213: `az list/ready/blocked/search/stale/count` runs while canonical store is unavailable/locked
+
+- Required behavior:
+  - fail with actionable diagnostics including project/canonical DB context.
+  - return deterministic non-zero exit in machine-readable mode.
+  - avoid returning partial/ambiguous query payloads.
+
+### Case F-214: `az project add` receives invalid path or duplicate project name
+
+- Required behavior:
+  - reject non-existent or non-readable paths with explicit remediation guidance.
+  - reject duplicate registration/name collisions deterministically.
+  - avoid mutating existing project registry entries on failed add attempts.
+
+### Case F-215: `az project remove/switch` targets unknown project
+
+- Required behavior:
+  - return deterministic unknown-project diagnostics with available next actions.
+  - avoid changing current/default project state on failed switch/remove.
+  - keep TUI project selector state consistent with persisted registry after failures.
+
+### Case F-216: Command namespace ambiguity between issue list and project list
+
+- Required behavior:
+  - `az list` resolves issue-query semantics deterministically.
+  - `az project list` resolves registry semantics deterministically.
+  - diagnostics and help text must disambiguate list-command scope when user intent is ambiguous.
