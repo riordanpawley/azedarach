@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { execFileSync } from "node:child_process"
 import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
 import { Config, Data, Effect, Option, Ref, Request, RequestResolver } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
@@ -16,6 +17,7 @@ const LINEAR_SYNC_TARGET: "linear" = "linear"
 const MAX_SYNC_BATCH = 500
 const MAX_SYNC_ATTEMPTS = 5
 const BASE_RETRY_SECONDS = 5
+const API_KEY_CACHE_TTL_MS = 30_000
 
 type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
@@ -34,6 +36,14 @@ interface LinearRuntime {
 	readonly client: LinearClient
 	readonly defaultTeam: string | undefined
 	readonly defaultProject: string | undefined
+}
+
+type ApiKeySource = "direnv" | "process-env" | "none"
+
+interface ApiKeyCacheEntry {
+	readonly apiKey: string | undefined
+	readonly source: ApiKeySource
+	readonly resolvedAtMs: number
 }
 
 type LinearIssuesQuery = NonNullable<Parameters<LinearClient["issues"]>[0]>
@@ -265,14 +275,41 @@ const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | u
 	return { and: constraints }
 }
 
+const getEffectiveProjectPath = (cwd: string | undefined): string => {
+	if (cwd === undefined) return process.cwd()
+	const trimmed = cwd.trim()
+	return trimmed.length > 0 ? trimmed : process.cwd()
+}
+
+const readLinearApiKeyFromDirenv = (projectPath: string): string | undefined => {
+	try {
+		const envOutput = execFileSync("direnv", ["exec", projectPath, "env"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		})
+		const keyPrefix = "LINEAR_API_KEY="
+		const keyLine = envOutput
+			.split(/\r?\n/)
+			.find((line) => line.startsWith(keyPrefix))
+		if (keyLine === undefined) {
+			return undefined
+		}
+		const key = keyLine.slice(keyPrefix.length).trim()
+		return key.length > 0 ? key : undefined
+	} catch {
+		return undefined
+	}
+}
+
 export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueSyncService", {
 	dependencies: [AppConfig.Default, LocalIssueStore.Default, LinearSdk.Default],
-	effect: Effect.gen(function* () {
-		const appConfig = yield* AppConfig
-		const localStore = yield* LocalIssueStore
-		const linearSdk = yield* LinearSdk
-		const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
-		const warnedMissingApiKeyRef = yield* Ref.make(false)
+		effect: Effect.gen(function* () {
+			const appConfig = yield* AppConfig
+			const localStore = yield* LocalIssueStore
+			const linearSdk = yield* LinearSdk
+			const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
+			const warnedMissingApiKeyRef = yield* Ref.make(false)
+			const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
 
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
@@ -284,45 +321,108 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			effect: Effect.Effect<A, LocalIssueStoreError>,
 		): Effect.Effect<A, IssueSyncError> => effect.pipe(Effect.mapError(mapLocalStoreError))
 
-		const requireTeamId = (
-			teamId: string | undefined,
-			message: string,
-		): Effect.Effect<string, IssueSyncError> =>
-			teamId !== undefined
-				? Effect.succeed(teamId)
-				: Effect.fail(
-						new IssueSyncError({
-							message,
-						}),
-					)
-
-		const getLinearRuntime = (): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
-			Effect.gen(function* () {
-				const config = yield* appConfig.getIssueTrackerSyncConfig()
-				if (!("linear" in config.issueTracker)) {
-					return Option.none()
-				}
-
-				const apiKeyOption = yield* Config.option(Config.string("LINEAR_API_KEY")).pipe(
-					Effect.mapError(
-						(cause) =>
+			const requireTeamId = (
+				teamId: string | undefined,
+				message: string,
+			): Effect.Effect<string, IssueSyncError> =>
+				teamId !== undefined
+					? Effect.succeed(teamId)
+					: Effect.fail(
 							new IssueSyncError({
-								message: "Failed to resolve LINEAR_API_KEY",
-								cause,
+								message,
 							}),
-					),
-				)
-
-				if (Option.isNone(apiKeyOption)) {
-					const warned = yield* Ref.get(warnedMissingApiKeyRef)
-					if (!warned) {
-						yield* Ref.set(warnedMissingApiKeyRef, true)
-						yield* Effect.logWarning(
-							"LINEAR_API_KEY not set; linear sync is disabled while local tracking remains active.",
 						)
+
+			const resolveLinearApiKey = (
+				cwd: string | undefined,
+			): Effect.Effect<Readonly<{ apiKey: string | undefined; source: ApiKeySource }>, IssueSyncError> =>
+				Effect.gen(function* () {
+					const projectPath = getEffectiveProjectPath(cwd)
+					const now = Date.now()
+					const cached = yield* Ref.get(apiKeyCacheRef).pipe(
+						Effect.map((cache) => cache.get(projectPath)),
+					)
+					if (cached !== undefined && now - cached.resolvedAtMs < API_KEY_CACHE_TTL_MS) {
+						return {
+							apiKey: cached.apiKey,
+							source: cached.source,
+						}
 					}
-					return Option.none()
-				}
+
+					const direnvApiKey = readLinearApiKeyFromDirenv(projectPath)
+					if (direnvApiKey !== undefined) {
+						yield* Ref.update(apiKeyCacheRef, (cache) => {
+							const next = new Map(cache)
+							next.set(projectPath, {
+								apiKey: direnvApiKey,
+								source: "direnv",
+								resolvedAtMs: now,
+							})
+							return next
+						})
+						yield* Effect.log(
+							`IssueSyncService: resolved LINEAR_API_KEY from direnv for projectPath=${projectPath}`,
+						)
+						return {
+							apiKey: direnvApiKey,
+							source: "direnv",
+						}
+					}
+
+					const apiKeyFromEnv = yield* Config.option(Config.string("LINEAR_API_KEY")).pipe(
+						Effect.mapError(
+							(cause) =>
+								new IssueSyncError({
+									message: "Failed to resolve LINEAR_API_KEY",
+								cause,
+								}),
+						),
+					)
+					const envApiKey = Option.isSome(apiKeyFromEnv) ? apiKeyFromEnv.value : undefined
+					const source: ApiKeySource = envApiKey !== undefined ? "process-env" : "none"
+					yield* Ref.update(apiKeyCacheRef, (cache) => {
+						const next = new Map(cache)
+						next.set(projectPath, {
+							apiKey: envApiKey,
+							source,
+							resolvedAtMs: now,
+						})
+						return next
+					})
+					yield* Effect.log(
+						`IssueSyncService: resolved LINEAR_API_KEY from ${source} for projectPath=${projectPath}`,
+					)
+					return {
+						apiKey: envApiKey,
+						source,
+					}
+				})
+
+			const getLinearRuntime = (
+				cwd?: string,
+			): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
+				Effect.gen(function* () {
+					const config = yield* appConfig.getIssueTrackerSyncConfig()
+					if (!("linear" in config.issueTracker)) {
+						return Option.none()
+					}
+
+					const apiKeyResolution = yield* resolveLinearApiKey(cwd)
+					const apiKeyOption =
+						apiKeyResolution.apiKey !== undefined
+							? Option.some(apiKeyResolution.apiKey)
+							: Option.none<string>()
+
+					if (Option.isNone(apiKeyOption)) {
+						const warned = yield* Ref.get(warnedMissingApiKeyRef)
+						if (!warned) {
+							yield* Ref.set(warnedMissingApiKeyRef, true)
+							yield* Effect.logWarning(
+								`LINEAR_API_KEY not set for projectPath=${getEffectiveProjectPath(cwd)} (source=${apiKeyResolution.source}); linear sync is disabled while local tracking remains active.`,
+							)
+						}
+						return Option.none()
+					}
 
 				const client = yield* linearSdk.getClient(apiKeyOption.value).pipe(
 					Effect.mapError(
@@ -840,13 +940,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					)
 				})
 
-		return {
-			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
-				Effect.gen(function* () {
-					const runtimeOption = yield* getLinearRuntime()
-					if (Option.isNone(runtimeOption)) {
-						return 0
-					}
+			return {
+				bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
+					Effect.gen(function* () {
+						const runtimeOption = yield* getLinearRuntime(cwd)
+						if (Option.isNone(runtimeOption)) {
+							return 0
+						}
 
 					const bootstrapComplete = yield* fromStore(
 						localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
@@ -875,14 +975,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return imported
 				}),
 
-			flushLinearQueue: (
-				cwd?: string,
-			): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
-				Effect.gen(function* () {
-					const runtimeOption = yield* getLinearRuntime()
-					if (Option.isNone(runtimeOption)) {
-						return { pushed: 0, pulled: 0 }
-					}
+				flushLinearQueue: (
+					cwd?: string,
+				): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
+					Effect.gen(function* () {
+						const runtimeOption = yield* getLinearRuntime(cwd)
+						if (Option.isNone(runtimeOption)) {
+							return { pushed: 0, pulled: 0 }
+						}
 
 					const pendingItems = yield* fromStore(
 						localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
