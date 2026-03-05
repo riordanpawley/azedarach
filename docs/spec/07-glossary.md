@@ -11,12 +11,13 @@
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
 - Burst window: short-term allowance for sync requests above sustained throughput before throttling/deferred execution begins.
-- Agent Issue CLI: canonical top-level `az` issue command suite (`init/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
+- Az CLI Suite: canonical top-level `az` issue command suite (`init/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
 - Bootstrap prompt contract: normative session-start prompt guidance requiring top-level `az` commands for issue context and mutation flows.
 - Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
 - Destructive issue operation: issue mutation that removes canonical issue records (for example `az delete`) and requires explicit guardrails.
 - Internal issue ID: canonical local identifier for issues in project SQLite that has no mandatory textual prefix requirement.
-- Issue ID strategy: configurable per-project policy for generating internal IDs (for example incrementing numeric or 3-4 char lowercase alphabetic title hash).
+- Issue ID strategy: configurable per-project policy for generating internal IDs (for example incrementing numeric or adaptive-length lowercase alphabetic title hash).
+- Tombstone issue record: logically deleted issue record retained for audit/history metadata and optional include-deleted query surfaces.
 - Epic: issue that groups child issues for scoped drill-down and progress tracking; one relationship type among many possible dependencies.
 - Drill-down: focused board mode showing only children of selected epic.
 - Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).

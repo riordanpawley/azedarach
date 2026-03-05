@@ -24,6 +24,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 9. [09-keybinding-reference-normative.md](./09-keybinding-reference-normative.md)
 10. [10-probe-schema-and-examples.md](./10-probe-schema-and-examples.md)
 11. [11-golden-workflow-transcripts.md](./11-golden-workflow-transcripts.md)
+12. [12-az-cli-json-schema-and-examples.md](./12-az-cli-json-schema-and-examples.md)
 
 ## Spec Structure
 
@@ -38,6 +39,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - `09`: complete normative keybinding table and conflict policy
 - `10`: machine-readable probe schema and deterministic payload examples
 - `11`: canonical high-risk workflow transcripts for validation
+- `12`: canonical top-level `az` command JSON schema envelope and deterministic success/failure examples
 
 ## Normative Language
 
@@ -131,6 +133,7 @@ An implementation is complete when:
 - Acceptance scenarios are automation-ready with deterministic fixtures and probe-backed assertions.
 - High-risk workflows pass both probe assertions and visual snapshot assertions.
 - Performance and stress E2E profiles pass configured latency/responsiveness budgets.
+- Top-level `az` JSON command payloads conform to section `12` schema contract across success and failure paths.
 
 ## Data Model and Sync Topology
 

@@ -29,8 +29,8 @@ This section is normative.
 - AZ-FR-0018: Internal issue IDs SHOULD optimize for minimal typing length while preserving deterministic uniqueness.
 - AZ-FR-0019: Internal issue ID generation strategy MUST be configurable per project.
 - AZ-FR-0020: Built-in ID generation strategies MUST include incrementing numeric IDs and title-derived alphabetic hash IDs.
-- AZ-FR-0021: Title-derived hash strategy IDs MUST be lowercase alphabetic only (`a-z`) with 3-4 character length.
-- AZ-FR-0022: ID generation MUST avoid mixed alphanumeric IDs in built-in strategies and MUST resolve collisions deterministically.
+- AZ-FR-0021: Title-derived hash strategy IDs MUST be lowercase alphabetic only (`a-z`), SHOULD start at configurable minimal length (default 3), and MAY expand length deterministically on collision up to configured maximum.
+- AZ-FR-0022: ID generation MUST avoid mixed alphanumeric IDs in built-in strategies and MUST resolve collisions deterministically (including deterministic hash-length expansion where configured).
 
 ## 4.3 Modal Interaction Requirements
 
@@ -493,6 +493,8 @@ This section is normative.
 
 ## 4.45 Top-Level Az CLI Requirements
 
+Machine-readable JSON envelope details are normative in section 12.
+
 - AZ-FR-4201: The product MUST expose `az init` to initialize project-local Azedarach workspace artifacts when missing.
 - AZ-FR-4202: The product MUST expose `az create "<title>" ...` for issue creation.
 - AZ-FR-4203: The product MUST expose `az q "<text>" ...` for quick-capture issue creation.
@@ -525,8 +527,15 @@ This section is normative.
 - AZ-FR-4230: The product MUST expose `az project add <path> [--name <name>]` for project registration in the global project registry.
 - AZ-FR-4231: The product MUST expose `az project list` for deterministic listing of registered projects.
 - AZ-FR-4232: The product MUST expose `az project remove <name>` for unregistering projects.
-- AZ-FR-4233: The product MUST expose `az project switch <name>` for selecting the active/default project.
+- AZ-FR-4233: The product MUST expose `az project switch <name>` for selecting the active project and persisting it as default project scope.
 - AZ-FR-4234: `az project switch` MUST rebind canonical local store context to the selected project before subsequent issue reads/writes.
 - AZ-FR-4235: Project registry mutations via `az project add/remove/switch` MUST persist and remain consistent with TUI project selector behavior (`g p`).
 - AZ-FR-4236: Command namespace MUST remain deterministic: issue listing resolves via `az list ...`; project listing resolves via `az project list`.
 - AZ-FR-4237: `az project` command failures (invalid path/name, duplicate registration, unknown project) MUST return actionable diagnostics and deterministic non-zero failures in JSON mode.
+- AZ-FR-4238: Top-level `az` JSON output MUST follow a versioned command-result schema with deterministic envelope fields.
+- AZ-FR-4239: JSON success payloads MUST include at minimum command identifier, project context, and operation result object.
+- AZ-FR-4240: JSON failure payloads MUST include deterministic error code, human-readable message, and actionable remediation hint.
+- AZ-FR-4241: Tombstoned issues MUST be excluded from `az list/ready/blocked/search/stale/count` results by default and MAY be included only via explicit include-deleted option.
+- AZ-FR-4242: `az show <issue-id>` on tombstoned issues MUST return deterministic tombstone-aware diagnostics by default and MUST return tombstone metadata when include-deleted mode is explicitly requested.
+- AZ-FR-4243: Restore of tombstoned issues is out of current command contract scope; restore attempts MUST return deterministic unsupported-operation diagnostics with guidance to create/link replacement work.
+- AZ-FR-4244: If session-only project switching is implemented, it MUST require explicit opt-in flag and MUST NOT mutate persisted default project scope.

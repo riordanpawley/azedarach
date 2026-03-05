@@ -364,8 +364,23 @@ This section expands product behavior into concrete user-centered use cases.
 
 ### UC-AUTH-021 Switch ID generation strategy by project
 
-- Trigger: change ID strategy setting (numeric increment vs alpha hash), then create issues
-- Expected: generated IDs follow configured strategy constraints without mixed alphanumeric typing in built-in modes
+- Trigger: change ID strategy setting (numeric increment vs adaptive alpha hash), then create issues
+- Expected: generated IDs follow configured strategy constraints without mixed alphanumeric typing in built-in modes and hash IDs expand deterministically on collision
+
+### UC-AUTH-022 Query tombstoned issues explicitly
+
+- Trigger: tombstone an issue, then run list/show paths with include-deleted options
+- Expected: tombstoned issues remain hidden by default and are visible only in explicit include-deleted mode
+
+### UC-AUTH-023 Attempt tombstone restore via CLI
+
+- Trigger: invoke restore path for tombstoned issue
+- Expected: CLI returns deterministic unsupported-operation guidance for restore scope
+
+### UC-AUTH-024 Consume deterministic `az` JSON envelopes
+
+- Trigger: run successful and failing `az` commands with `--json`
+- Expected: responses conform to schema-versioned envelope with deterministic success/error fields
 
 ## 8.11 Attachment Use Cases
 
@@ -435,7 +450,7 @@ This section expands product behavior into concrete user-centered use cases.
 
 ### UC-SET-005 Configure internal issue ID strategy
 
-- Trigger: settings toggle for issue ID strategy (incrementing numeric vs alpha hash)
+- Trigger: settings toggle for issue ID strategy (incrementing numeric vs adaptive alpha hash)
 - Expected: newly created issue IDs follow configured strategy, remain prefix-free, and avoid mixed alphanumeric typing in built-in modes
 
 ## 8.14 Dependency Graph Use Cases
@@ -535,12 +550,17 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-PROJ-007 Switch active/default project via CLI
 
 - Trigger: run `az project switch project-name`
-- Expected: active/default project changes and subsequent issue commands bind to switched project context
+- Expected: active/default project changes by default and subsequent issue commands bind to switched project context
 
 ### UC-PROJ-008 Distinguish issue list and project list commands
 
 - Trigger: run `az list` and `az project list` in same context
 - Expected: issue-query and project-registry payloads are unambiguous and deterministic
+
+### UC-PROJ-009 Session-only project switch (if supported)
+
+- Trigger: run session-only variant of `az project switch`
+- Expected: active context changes for current invocation only while persisted default remains unchanged
 
 ## 8.16 Operational and Recovery Use Cases
 
@@ -663,7 +683,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4237
+- Az CLI command suite -> AZ-FR-4201..4244
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

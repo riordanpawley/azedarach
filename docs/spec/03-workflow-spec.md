@@ -418,6 +418,11 @@ CLI registry workflow:
 4. on switch, update default/current project identity and rebind active canonical DB context
 5. expose deterministic success/error diagnostics in human-readable and JSON modes
 
+Project switch scope contract:
+
+- `az project switch <name>` updates active context and persisted default project scope by default
+- if session-only switching is supported, it requires explicit opt-in flag and must not mutate persisted default scope
+
 ## 3.19 Search/Filter/Sort Composition Workflow
 
 Rules:
@@ -888,6 +893,7 @@ Canonical CLI surface for issue management:
 - dependencies: `az dep add/remove/list/tree/cycles`
 - configuration and reporting: `az config validate`, `az config show`, `az stats`
 - project management: `az project add/list/remove/switch`
+- tombstone visibility: include-deleted options for list/search/show where implemented by command contract
 
 ### Command Execution Rules
 
@@ -897,9 +903,11 @@ Canonical CLI surface for issue management:
 4. emit deterministic command results and non-zero failures (including machine-readable JSON mode)
 5. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
 6. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
+7. command JSON payloads follow the schema contract defined in Section 12
 
 ### Postconditions
 
 - all issue lifecycle/query/dependency/config/stats flows remain available in local-only mode
 - project registry management commands remain available independent of optional sync-adapter configuration
 - command semantics remain stable across optional adapter configurations
+- tombstoned issue visibility remains explicit (default-hidden unless include-deleted mode is requested)

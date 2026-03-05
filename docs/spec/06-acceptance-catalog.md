@@ -960,7 +960,7 @@ Canonical fixture profile names:
 
 - Preconditions: per-project ID strategy setting is configurable.
 - Steps: set strategy to incrementing numeric and create issue; switch to title-derived hash and create issue including collision-case fixture.
-- Expected: numeric strategy yields digits-only IDs; hash strategy yields lowercase alphabetic 3-4 char IDs; collisions resolve deterministically without manual DB edits.
+- Expected: numeric strategy yields digits-only IDs; hash strategy yields lowercase alphabetic IDs with deterministic adaptive length expansion from configured minimum when collisions occur; collisions resolve without manual DB edits.
 - Links: AZ-FR-0019, AZ-FR-0020, AZ-FR-0021, AZ-FR-0022, AZ-FR-1704, section 05 F-209.
 
 ### AZ-AT-2849 `az project add` registry contract
@@ -990,6 +990,27 @@ Canonical fixture profile names:
 - Steps: run `az list --json` and `az project list --json` in same shell context.
 - Expected: `az list` returns issue-query payload; `az project list` returns project-registry payload; diagnostics/help remain unambiguous.
 - Links: AZ-FR-4209, AZ-FR-4231, AZ-FR-4236, section 05 F-216.
+
+### AZ-AT-2853 Top-level `az` JSON schema envelope contract
+
+- Preconditions: at least one command success path and one failure path are available.
+- Steps: run representative success/failure commands in `--json` mode (for example `az show`, `az update` invalid ID, `az project add` invalid path).
+- Expected: JSON payloads include schema version and deterministic envelope fields; success payloads include command/project/result; failures include deterministic error code/message/remediation hint.
+- Links: AZ-FR-4238, AZ-FR-4239, AZ-FR-4240, section 05 F-217, section 12.
+
+### AZ-AT-2854 Tombstone visibility and restore-scope contract
+
+- Preconditions: issue exists and can be tombstoned via delete flow.
+- Steps: tombstone issue with `az delete`; run `az list/search` and `az show` without include-deleted mode, then repeat with include-deleted mode; attempt restore command path.
+- Expected: default query/show surfaces exclude or return tombstone-aware diagnostics; include-deleted mode exposes tombstone metadata; restore attempts return deterministic unsupported-operation guidance.
+- Links: AZ-FR-4208, AZ-FR-4228, AZ-FR-4241, AZ-FR-4242, AZ-FR-4243, section 05 F-218.
+
+### AZ-AT-2855 Project switch scope persistence and session-only isolation
+
+- Preconditions: at least two registered projects; optional session-only flag support may be present.
+- Steps: run `az project switch <name>` and verify post-restart default scope; if session-only switch mode exists, run it and verify persisted default remains unchanged.
+- Expected: default switch updates active and persisted default scope; session-only mode (if implemented) changes only active invocation scope without persisting default.
+- Links: AZ-FR-4233, AZ-FR-4234, AZ-FR-4235, AZ-FR-4244, section 05 F-219.
 
 ## 6.28 Background Operation Acceptance
 
@@ -1156,4 +1177,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2852
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2855

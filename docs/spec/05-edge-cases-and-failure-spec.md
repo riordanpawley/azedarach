@@ -666,7 +666,7 @@ On failure, logs SHOULD capture:
 
 - Required behavior:
   - resolve collision deterministically without requiring manual DB intervention.
-  - preserve configured strategy constraints (for example lowercase alphabetic hash policy).
+  - preserve configured strategy constraints (for example lowercase alphabetic policy and deterministic length-expansion bounds).
   - return actionable diagnostics only if collision cannot be resolved automatically.
 
 ### Case F-210: `az dep add/remove/list/tree/cycles` receives invalid issue references or graph state
@@ -717,3 +717,24 @@ On failure, logs SHOULD capture:
   - `az list` resolves issue-query semantics deterministically.
   - `az project list` resolves registry semantics deterministically.
   - diagnostics and help text must disambiguate list-command scope when user intent is ambiguous.
+
+### Case F-217: Top-level `az` JSON response violates schema contract
+
+- Required behavior:
+  - return schema-versioned envelope fields for both success and failure payloads.
+  - reject/flag malformed output in automation harness with explicit mismatch diagnostics.
+  - avoid partial payload emission in JSON mode when terminal/UI logging is also enabled.
+
+### Case F-218: Tombstoned issue visibility mismatch across `show` and list/search queries
+
+- Required behavior:
+  - default queries (`az list/search/stale/ready/blocked/count`) exclude tombstoned issues.
+  - include-deleted mode returns tombstoned entries with tombstone metadata.
+  - `az show` on tombstoned issue returns deterministic tombstone-aware diagnostics when include-deleted mode is not requested.
+
+### Case F-219: Project switch scope unexpectedly mutates persisted default
+
+- Required behavior:
+  - default `az project switch` updates persisted default and active context consistently.
+  - session-only switch modes (if available) must not mutate persisted default.
+  - failures during switch must roll back partial scope updates and preserve prior persisted/default context.
