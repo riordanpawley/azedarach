@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
@@ -15,6 +16,26 @@ describe("normalizeIssueJsonFlagOrder", () => {
 
 	it("keeps non-issue commands unchanged", () => {
 		const argv = ["bun", "az", "status", "--json"]
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
+
+	it("moves issue update options ahead of issue-id when issue-id is first", () => {
+		const argv = ["bun", "az", "issue", "update", "az-123", "--description", "why not"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"update",
+			"--description",
+			"why not",
+			"az-123",
+		])
+	})
+
+	it("keeps issue update argument order when options are already first", () => {
+		const argv = ["bun", "az", "issue", "update", "--description", "why not", "az-123"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
 	})
 })
@@ -56,5 +77,45 @@ describe("formatIssueSummaryLine", () => {
 		expect(line).toContain("status=in_progress")
 		expect(line).toContain("priority=1")
 		expect(line).toContain("type=task")
+	})
+})
+
+describe("formatIssueDetailSections", () => {
+	it("returns populated description/design/acceptance/notes sections", () => {
+		const sections = formatIssueDetailSections({
+			id: "az-123",
+			title: "Title",
+			status: "open",
+			priority: 2,
+			issue_type: "task",
+			created_at: "2026-03-05T10:00:00.000Z",
+			updated_at: "2026-03-05T11:00:00.000Z",
+			description: "Investigate parser behavior",
+			design: "Move options before positional args",
+			acceptance: "description can be updated",
+			notes: "manual repro completed",
+		})
+
+		expect(sections).toEqual([
+			"Description:\nInvestigate parser behavior",
+			"Design:\nMove options before positional args",
+			"Acceptance:\ndescription can be updated",
+			"Notes:\nmanual repro completed",
+		])
+	})
+
+	it("omits empty detail sections", () => {
+		const sections = formatIssueDetailSections({
+			id: "az-123",
+			title: "Title",
+			status: "open",
+			priority: 2,
+			issue_type: "task",
+			created_at: "2026-03-05T10:00:00.000Z",
+			updated_at: "2026-03-05T11:00:00.000Z",
+			description: "   ",
+		})
+
+		expect(sections).toEqual([])
 	})
 })

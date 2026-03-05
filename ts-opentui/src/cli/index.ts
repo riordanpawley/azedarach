@@ -532,6 +532,34 @@ const compactSingleLineText = (value: string): string => value.replace(/\s+/g, "
 const formatIssueSummaryLine = (issue: BeadsIssue): string =>
 	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
 
+const normalizeIssueTextField = (value: string | undefined): string | undefined => {
+	const normalized = value?.trim()
+	return normalized && normalized.length > 0 ? normalized : undefined
+}
+
+const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
+	const sections: string[] = []
+	const description = normalizeIssueTextField(issue.description)
+	const design = normalizeIssueTextField(issue.design)
+	const acceptance = normalizeIssueTextField(issue.acceptance)
+	const notes = normalizeIssueTextField(issue.notes)
+
+	if (description) {
+		sections.push(`Description:\n${description}`)
+	}
+	if (design) {
+		sections.push(`Design:\n${design}`)
+	}
+	if (acceptance) {
+		sections.push(`Acceptance:\n${acceptance}`)
+	}
+	if (notes) {
+		sections.push(`Notes:\n${notes}`)
+	}
+
+	return sections
+}
+
 /**
  * Show issue details
  */
@@ -561,6 +589,11 @@ const issueGetHandler = (args: {
 		}
 
 		yield* Console.log(formatIssueSummaryLine(issue))
+		const detailSections = formatIssueDetailSections(issue)
+		if (detailSections.length > 0) {
+			yield* Console.log("")
+			yield* Console.log(detailSections.join("\n\n"))
+		}
 
 		if (args.verbose) {
 			if (issue.assignee && issue.assignee.trim().length > 0) {
@@ -2001,7 +2034,14 @@ const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => 
 	return null
 }
 
-const normalizeIssueJsonFlagOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+/**
+ * @effect/cli expects options before positional args.
+ * Normalize common user ordering like:
+ *   az issue update <issue-id> --description "..."
+ * into:
+ *   az issue update --description "..." <issue-id>
+ */
+const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
 	const issueCommandIndex = argv.indexOf("issue")
 	if (issueCommandIndex === -1) return argv
 
@@ -2016,17 +2056,27 @@ const normalizeIssueJsonFlagOrder = (argv: ReadonlyArray<string>): ReadonlyArray
 		return argv
 	}
 
-	const jsonFlagIndex = argv.indexOf("--json", issueCommandIndex + 2)
-	if (jsonFlagIndex === -1) return argv
+	const positionalArgIndex = issueCommandIndex + 2
+	if (positionalArgIndex >= argv.length) return argv
 
-	const desiredIndex = issueCommandIndex + 2
-	if (jsonFlagIndex <= desiredIndex) return argv
+	const positionalArg = argv[positionalArgIndex]
+	if (positionalArg === undefined || positionalArg.startsWith("-")) {
+		return argv
+	}
+
+	const hasOptionAfterPositional = argv
+		.slice(positionalArgIndex + 1)
+		.some((token) => token.startsWith("-"))
+	if (!hasOptionAfterPositional) return argv
 
 	const reordered = [...argv]
-	reordered.splice(jsonFlagIndex, 1)
-	reordered.splice(desiredIndex, 0, "--json")
+	reordered.splice(positionalArgIndex, 1)
+	reordered.push(positionalArg)
 	return reordered
 }
+
+// Backward-compatible name used by existing tests and imports.
+const normalizeIssueJsonFlagOrder = normalizeIssueOptionOrder
 
 const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 	argv.includes("--verbose") || argv.includes("-v")
@@ -2117,7 +2167,7 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
-	const normalizedArgv = normalizeIssueJsonFlagOrder(argv)
+	const normalizedArgv = normalizeIssueOptionOrder(argv)
 	const mode = resolveCliExecutionMode(normalizedArgv)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
@@ -2148,4 +2198,11 @@ export { cliLayer, commandCliLayer }
 /**
  * Export the raw runner for ManagedRuntime pattern
  */
-export { cliRunner, formatIssueSummaryLine, normalizeIssueJsonFlagOrder, resolveCliExecutionMode }
+export {
+	cliRunner,
+	formatIssueDetailSections,
+	formatIssueSummaryLine,
+	normalizeIssueOptionOrder,
+	normalizeIssueJsonFlagOrder,
+	resolveCliExecutionMode,
+}
