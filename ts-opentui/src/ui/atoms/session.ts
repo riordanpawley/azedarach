@@ -74,9 +74,9 @@ export const sessionMetricsAtom = appRuntime.subscriptionRef(
  * Also registers the session with PTYMonitor for state detection.
  *
  * Usage: const startSession = useAtomSet(startSessionAtom, { mode: "promise" })
- *        await startSession(beadId)
+ *        await startSession(issueId)
  */
-export const startSessionAtom = appRuntime.fn((beadId: string) =>
+export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
@@ -86,32 +86,32 @@ export const startSessionAtom = appRuntime.fn((beadId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		const session = yield* manager.start({
-			beadId,
+			issueId,
 			projectPath,
 		})
 
 		// Register with PTYMonitor for state detection
-		yield* ptyMonitor.registerSession(beadId, session.tmuxSessionName)
+		yield* ptyMonitor.registerSession(issueId, session.tmuxSessionName)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
  * Pause a running session (Ctrl+C + WIP commit)
  */
-export const pauseSessionAtom = appRuntime.fn((beadId: string) =>
+export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* ClaudeSessionManager
-		yield* manager.pause(beadId)
+		yield* manager.pause(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
  * Resume a paused session
  */
-export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
+export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* ClaudeSessionManager
-		yield* manager.resume(beadId)
+		yield* manager.resume(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -120,15 +120,15 @@ export const resumeSessionAtom = appRuntime.fn((beadId: string) =>
  *
  * Also unregisters the session from PTYMonitor.
  */
-export const stopSessionAtom = appRuntime.fn((beadId: string) =>
+export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const manager = yield* ClaudeSessionManager
 		const ptyMonitor = yield* PTYMonitor
 
 		// Unregister from PTYMonitor first (before session is stopped)
-		yield* ptyMonitor.unregisterSession(beadId)
+		yield* ptyMonitor.unregisterSession(issueId)
 
-		yield* manager.stop(beadId)
+		yield* manager.stop(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 

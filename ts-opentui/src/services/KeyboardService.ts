@@ -83,7 +83,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const editor = yield* EditorService
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
-		const beadsClient = yield* BeadsClient
+			const issueTrackerClient = yield* BeadsClient
 		const board = yield* BoardService
 		const gitSync = yield* GitSyncService
 
@@ -107,7 +107,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 			toast,
 			viewService,
 			tmux,
-			beadsClient,
+				issueTrackerClient,
 			board,
 			gitSync,
 		})

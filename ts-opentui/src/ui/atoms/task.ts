@@ -241,13 +241,13 @@ export const forkCreateEpicAtom = appRuntime.fn(
  * Opens the bead in $EDITOR as structured markdown, parses changes on save,
  * and applies updates via bd update.
  *
- * Usage: const editBead = useAtomSet(editBeadAtom, { mode: "promise" })
- *        await editBead(task)
+ * Usage: const editIssue = useAtomSet(editIssueViaEditorAtom, { mode: "promise" })
+ *        await editIssue(task)
  */
-export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
+export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
 	Effect.gen(function* () {
 		const editor = yield* BeadEditorService
-		yield* editor.editBead(bead)
+		yield* editor.editBead(issue)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
@@ -256,10 +256,10 @@ export const editBeadAtom = appRuntime.fn((bead: TaskWithSession) =>
  *
  * Opens a template in $EDITOR, parses the result, and creates a new bead.
  *
- * Usage: const createBead = useAtom(createBeadViaEditorAtom, { mode: "promise" })
- *        const { id, title } = await createBead()
+ * Usage: const createIssue = useAtom(createIssueViaEditorAtom, { mode: "promise" })
+ *        const { id, title } = await createIssue()
  */
-export const createBeadViaEditorAtom = appRuntime.fn(() =>
+export const createIssueViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const editor = yield* BeadEditorService
 		return yield* editor.createBead()
@@ -284,7 +284,7 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 
@@ -368,7 +368,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 				: 2
 
 		// Phase 2: Create the bead directly via BeadsClient
-		const createdIssue = yield* beadsClient.create({
+		const createdIssue = yield* issueTrackerClient.create({
 			title: parsed.title,
 			type: taskType,
 			priority,

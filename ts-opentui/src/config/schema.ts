@@ -47,8 +47,9 @@ export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
  * - bd: legacy beads backend
  * - br: rust beads backend
  * - linear: Linear backend through linear-cli
+ * - local: local-first sqlite backend (no external tracker required)
  */
-export const IssueTrackerSchema = Schema.Literal("bd", "br", "linear")
+export const IssueTrackerSchema = Schema.Literal("bd", "br", "linear", "local")
 export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
 
 /**
@@ -386,6 +387,62 @@ const BeadsRustConfigSchema = Schema.Struct({
 })
 
 /**
+ * Local backend configuration
+ *
+ * Runs Azedarach as a standalone issue tracker using local SQLite storage.
+ */
+const LocalConfigSchema = Schema.Struct({
+	/**
+	 * Enable external sync queue processing when a sync target is configured.
+	 *
+	 * Local-only mode does not require external sync, so default is false.
+	 */
+	syncEnabled: Schema.optional(Schema.Boolean),
+})
+
+/**
+ * Linear webhook listener configuration
+ *
+ * Controls how Azedarach consumes Linear webhook events for board refreshes.
+ */
+const LinearWebhookConfigSchema = Schema.Struct({
+	/**
+	 * Enable webhook-driven board refresh for linear backend (default: true)
+	 */
+	enabled: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Webhook transport implementation (default: "sdk")
+	 *
+	 * - sdk: @linear/sdk webhook runtime + registration
+	 * - cli: linear-cli `webhooks listen` fallback path
+	 */
+	transport: Schema.optional(Schema.Literal("sdk", "cli")),
+
+	/**
+	 * Public HTTPS URL used when registering the temporary webhook listener
+	 *
+	 * Example: https://my-tunnel.ngrok.io
+	 */
+	url: Schema.optional(Schema.String),
+
+	/**
+	 * Local port for webhook delivery listener (default: 9000)
+	 */
+	port: Schema.optional(Schema.Number),
+
+	/**
+	 * Resource types to subscribe to (default: ["Issue"])
+	 */
+	events: Schema.optional(Schema.Array(Schema.String)),
+
+	/**
+	 * Optional webhook signing secret for verification
+	 */
+	secret: Schema.optional(Schema.String),
+})
+
+/**
  * Linear backend configuration
  *
  * Controls linear-cli integration.
@@ -412,6 +469,11 @@ const LinearConfigSchema = Schema.Struct({
 	 * Optional default Linear project name or ID
 	 */
 	project: Schema.optional(Schema.String),
+
+	/**
+	 * Webhook listener configuration for event-driven refresh
+	 */
+	webhooks: Schema.optional(LinearWebhookConfigSchema),
 })
 
 /**
@@ -423,12 +485,14 @@ const IssueTrackerConfigSchema = Schema.Struct({
 	beads: Schema.optional(BeadsConfigSchema),
 	beads_rust: Schema.optional(BeadsRustConfigSchema),
 	linear: Schema.optional(LinearConfigSchema),
+	local: Schema.optional(LocalConfigSchema),
 }).pipe(
 	Schema.filter((value) => {
 		const configuredCount =
 			(value.beads !== undefined ? 1 : 0) +
 			(value.beads_rust !== undefined ? 1 : 0) +
-			(value.linear !== undefined ? 1 : 0)
+			(value.linear !== undefined ? 1 : 0) +
+			(value.local !== undefined ? 1 : 0)
 		return configuredCount === 1
 	}),
 )
@@ -638,7 +702,7 @@ const migrations: readonly Migration[] = [
 		toVersion: 3,
 		description: "Move backend selection to top-level issueTracker + backend blocks",
 		migrate: (config) => {
-			type BackendKey = "beads" | "beads_rust" | "linear"
+			type BackendKey = "beads" | "beads_rust" | "linear" | "local"
 
 			const trackerToBackend = (tracker: IssueTracker): BackendKey => {
 				switch (tracker) {
@@ -648,6 +712,8 @@ const migrations: readonly Migration[] = [
 						return "beads_rust"
 					case "linear":
 						return "linear"
+					case "local":
+						return "local"
 				}
 			}
 
@@ -659,13 +725,16 @@ const migrations: readonly Migration[] = [
 						return "br"
 					case "linear":
 						return "linear"
+					case "local":
+						return "local"
 				}
 			}
 
 			const explicitTracker: IssueTracker | undefined =
 				config.issueTracker === "bd" ||
 				config.issueTracker === "br" ||
-				config.issueTracker === "linear"
+				config.issueTracker === "linear" ||
+				config.issueTracker === "local"
 					? config.issueTracker
 					: undefined
 
@@ -694,6 +763,14 @@ const migrations: readonly Migration[] = [
 							command: nestedIssueTracker.linear.command,
 							team: nestedIssueTracker.linear.team,
 							project: nestedIssueTracker.linear.project,
+							webhooks: nestedIssueTracker.linear.webhooks,
+						}
+					: undefined)
+			const localConfig =
+				config.local ??
+				(nestedIssueTracker?.local !== undefined
+					? {
+							syncEnabled: nestedIssueTracker.local.syncEnabled,
 						}
 					: undefined)
 
@@ -701,10 +778,11 @@ const migrations: readonly Migration[] = [
 			if (beadsConfig !== undefined) configuredBackends.push("beads")
 			if (beadsRustConfig !== undefined) configuredBackends.push("beads_rust")
 			if (linearConfig !== undefined) configuredBackends.push("linear")
+			if (localConfig !== undefined) configuredBackends.push("local")
 
 			if (configuredBackends.length > 1) {
 				throw new Error(
-					"Invalid config: only one issue backend block is allowed (beads, beads_rust, or linear)",
+					"Invalid config: only one issue backend block is allowed (beads, beads_rust, linear, or local)",
 				)
 			}
 
@@ -728,7 +806,7 @@ const migrations: readonly Migration[] = [
 				)
 			}
 
-			const tracker: IssueTracker = explicitTracker ?? legacyTracker ?? inferredTracker ?? "br"
+			const tracker: IssueTracker = explicitTracker ?? legacyTracker ?? inferredTracker ?? "local"
 			const selectedBackend = trackerToBackend(tracker)
 
 			const legacySyncEnabled = config.beads?.syncEnabled
@@ -757,6 +835,13 @@ const migrations: readonly Migration[] = [
 								command: linearConfig?.command,
 								team: linearConfig?.team,
 								project: linearConfig?.project,
+								webhooks: linearConfig?.webhooks,
+							}
+						: undefined,
+				local:
+					selectedBackend === "local"
+						? {
+								syncEnabled: localConfig?.syncEnabled ?? false,
 							}
 						: undefined,
 			}
@@ -769,7 +854,8 @@ const migrations: readonly Migration[] = [
 			const explicitTracker: IssueTracker | undefined =
 				config.issueTracker === "bd" ||
 				config.issueTracker === "br" ||
-				config.issueTracker === "linear"
+				config.issueTracker === "linear" ||
+				config.issueTracker === "local"
 					? config.issueTracker
 					: undefined
 
@@ -788,18 +874,21 @@ const migrations: readonly Migration[] = [
 					beads: undefined,
 					beads_rust: undefined,
 					linear: undefined,
+					local: undefined,
 				}
 			}
 
 			const inferredTracker: IssueTracker =
 				explicitTracker ??
-				(config.beads !== undefined
-					? "bd"
-					: config.beads_rust !== undefined
-						? "br"
+					(config.beads !== undefined
+						? "bd"
+						: config.beads_rust !== undefined
+							? "br"
 						: config.linear !== undefined
 							? "linear"
-							: "br")
+							: config.local !== undefined
+								? "local"
+								: "local")
 
 			const legacySyncEnabled = config.beads?.syncEnabled
 			const syncEnabledDefault = legacySyncEnabled ?? true
@@ -817,14 +906,21 @@ const migrations: readonly Migration[] = [
 									syncEnabled: config.beads_rust?.syncEnabled ?? syncEnabledDefault,
 								},
 							}
-						: {
-								linear: {
-									syncEnabled: config.linear?.syncEnabled ?? syncEnabledDefault,
-									command: config.linear?.command,
-									team: config.linear?.team,
-									project: config.linear?.project,
-								},
-							}
+						: inferredTracker === "linear"
+							? {
+									linear: {
+										syncEnabled: config.linear?.syncEnabled ?? syncEnabledDefault,
+										command: config.linear?.command,
+										team: config.linear?.team,
+										project: config.linear?.project,
+										webhooks: config.linear?.webhooks,
+									},
+								}
+							: {
+									local: {
+										syncEnabled: config.local?.syncEnabled ?? false,
+									},
+								}
 
 			return {
 				...config,
@@ -833,6 +929,7 @@ const migrations: readonly Migration[] = [
 				beads: undefined,
 				beads_rust: undefined,
 				linear: undefined,
+				local: undefined,
 			}
 		},
 	},
@@ -875,7 +972,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 
 	if (current.issueTracker !== undefined && issueTrackerConfig === undefined) {
 		throw new Error(
-			"Invalid config: issueTracker must be an object with exactly one backend block (beads, beads_rust, or linear)",
+			"Invalid config: issueTracker must be an object with exactly one backend block (beads, beads_rust, linear, or local)",
 		)
 	}
 
@@ -959,6 +1056,8 @@ const RawConfigSchema = Schema.Struct({
 	beads_rust: Schema.optional(BeadsRustConfigSchema),
 	/** Linear backend config */
 	linear: Schema.optional(LinearConfigSchema),
+	/** Local backend config */
+	local: Schema.optional(LocalConfigSchema),
 
 	/** Network connectivity configuration */
 	network: Schema.optional(NetworkConfigSchema),

@@ -120,7 +120,7 @@ export function useEditorMode() {
 	)
 
 	// Get merge select source ID from mode state
-	const mergeSelectSourceId = mode._tag === "mergeSelect" ? mode.sourceBeadId : undefined
+	const mergeSelectSourceId = mode._tag === "mergeSelect" ? mode.sourceIssueId : undefined
 
 	// Get pending jump key and jump labels from mode state
 	const pendingJumpKey = mode._tag === "goto" ? mode.pendingJumpKey : undefined

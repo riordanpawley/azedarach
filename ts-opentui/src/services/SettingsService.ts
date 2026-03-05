@@ -142,12 +142,13 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		}),
 	},
 	{
-		key: "beadsSyncEnabled",
-		label: "Beads Sync",
+		key: "issueSyncEnabled",
+		label: "Issue Sync",
 		getValue: (c) => {
 			if (c.issueTracker?.beads !== undefined) return c.issueTracker.beads.syncEnabled ?? true
 			if (c.issueTracker?.beads_rust !== undefined) return c.issueTracker.beads_rust.syncEnabled ?? true
 			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
+			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
 			return true
 		},
 		toggle: (c) => {
@@ -184,10 +185,21 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 					},
 				}
 			}
+			if (c.issueTracker?.local !== undefined) {
+				return {
+					...c,
+					issueTracker: {
+						local: {
+							...c.issueTracker.local,
+							syncEnabled: !(c.issueTracker.local.syncEnabled ?? false),
+						},
+					},
+				}
+			}
 			return {
 				...c,
 				issueTracker: {
-					beads_rust: {
+					local: {
 						syncEnabled: false,
 					},
 				},

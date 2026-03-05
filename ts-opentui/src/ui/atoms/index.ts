@@ -179,10 +179,10 @@ export {
 // Task CRUD atoms
 export {
 	claudeCreateSessionAtom,
-	createBeadViaEditorAtom,
+	createIssueViaEditorAtom,
 	createTaskAtom,
-	deleteBeadAtom,
-	editBeadAtom,
+	deleteIssueAtom,
+	editIssueViaEditorAtom,
 	epicChildrenAtom,
 	forkCreateChildAtom,
 	forkCreateEpicAtom,

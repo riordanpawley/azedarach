@@ -33,7 +33,7 @@ import {
  */
 export interface Worktree {
 	readonly path: string
-	readonly beadId: string
+	readonly issueId: string
 	readonly branch: string
 	readonly isLocked: boolean
 	readonly head: string
@@ -43,7 +43,7 @@ export interface Worktree {
  * Options for creating a worktree
  */
 export interface CreateWorktreeOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly baseBranch?: string
 	readonly projectPath: string
 	/**
@@ -90,7 +90,7 @@ export class GitError extends Data.TaggedError("GitError")<{
  * Error when a worktree is not found
  */
 export class WorktreeNotFoundError extends Data.TaggedError("WorktreeNotFoundError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly path: string
 }> {}
 
@@ -98,7 +98,7 @@ export class WorktreeNotFoundError extends Data.TaggedError("WorktreeNotFoundErr
  * Error when worktree already exists (for non-idempotent operations)
  */
 export class WorktreeExistsError extends Data.TaggedError("WorktreeExistsError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly path: string
 }> {}
 
@@ -124,12 +124,12 @@ export interface WorktreeManagerService {
 	 * Create a new worktree for a bead
 	 *
 	 * Idempotent: if worktree already exists at expected path, returns existing worktree info.
-	 * Creates a new branch named after the beadId from baseBranch (defaults to current branch).
+	 * Creates a new branch named after the issueId from baseBranch (defaults to current branch).
 	 *
 	 * @example
 	 * ```ts
 	 * WorktreeManager.create({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   baseBranch: "main",
 	 *   projectPath: "/Users/user/project"
 	 * })
@@ -147,11 +147,11 @@ export interface WorktreeManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * WorktreeManager.remove({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * WorktreeManager.remove({ issueId: "az-05y", projectPath: "/Users/user/project" })
 	 * ```
 	 */
 	readonly remove: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<void, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
@@ -174,11 +174,11 @@ export interface WorktreeManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * WorktreeManager.exists({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * WorktreeManager.exists({ issueId: "az-05y", projectPath: "/Users/user/project" })
 	 * ```
 	 */
 	readonly exists: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<boolean, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
@@ -189,11 +189,11 @@ export interface WorktreeManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * WorktreeManager.get({ beadId: "az-05y", projectPath: "/Users/user/project" })
+	 * WorktreeManager.get({ issueId: "az-05y", projectPath: "/Users/user/project" })
 	 * ```
 	 */
 	readonly get: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<Worktree | null, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
@@ -306,7 +306,7 @@ const branchExists = (
  * const program = Effect.gen(function* () {
  *   const manager = yield* WorktreeManager
  *   const worktree = yield* manager.create({
- *     beadId: "az-05y",
+ *     issueId: "az-05y",
  *     baseBranch: "main",
  *     projectPath: "/Users/user/project"
  *   })
@@ -323,7 +323,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const diagnostics = yield* DiagnosticsService
 
 		// Track active worktrees in memory for fast lookups
-		// Now supports multiple projects: projectPath -> (beadId -> Worktree)
+		// Now supports multiple projects: projectPath -> (issueId -> Worktree)
 		const worktreesRef = yield* Ref.make<Map<string, Map<string, Worktree>>>(new Map())
 
 		// TTL cache for worktree refresh - avoid repeated git worktree list calls
@@ -405,13 +405,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		 *
 		 * @param sourceProjectPath - Path to the source project
 		 * @param targetWorktreePath - Path to the target worktree
-		 * @param beadId - Bead ID for the session
+		 * @param issueId - Bead ID for the session
 		 * @param hookOptions - Optional hook configuration options
 		 */
 		const copyClaudeLocalSettings = (
 			sourceProjectPath: string,
 			targetWorktreePath: string,
-			beadId: string,
+			issueId: string,
 			hookOptions: HookConfigOptions = {},
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
@@ -439,7 +439,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				// Generate hook configuration for this bead
-				const hookConfig = generateHookConfig(beadId, hookOptions)
+				const hookConfig = generateHookConfig(issueId, hookOptions)
 
 				// Merge existing settings with hook configuration
 				const mergedSettings = deepMerge(existingSettings, hookConfig)
@@ -451,7 +451,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				const localSkillsDir = pathService.join(targetClaudeDir, "skills", "local")
 				yield* fs.makeDirectory(localSkillsDir, { recursive: true })
 				const skillPath = pathService.join(localSkillsDir, "worktree-context.skill.md")
-				yield* fs.writeFileString(skillPath, generateWorktreeSkill(beadId))
+				yield* fs.writeFileString(skillPath, generateWorktreeSkill(issueId))
 			}).pipe(
 				// Don't fail worktree creation if settings copy fails - just log and continue
 				Effect.catchAll((error) =>
@@ -574,29 +574,29 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				const normalizedPath = pathService.resolve(path)
-				let beadId = branch
-				if (!beadId) {
+				let issueId = branch
+				if (!issueId) {
 					const lastPart = pathService.basename(normalizedPath)
 					if (lastPart.startsWith(projectNamePrefix) && lastPart.length > projectNamePrefix.length) {
-						beadId = lastPart.slice(projectNamePrefix.length)
+						issueId = lastPart.slice(projectNamePrefix.length)
 					} else {
 						const match = lastPart.match(/-([A-Za-z0-9]+[.-][A-Za-z0-9._-]+)$/)
-						beadId = match?.[1] ?? ""
+						issueId = match?.[1] ?? ""
 					}
 				}
 
-				if (beadId && normalizedPath !== normalizedProjectPath) {
-					worktrees.push({ path, beadId, branch, isLocked, head })
+				if (issueId && normalizedPath !== normalizedProjectPath) {
+					worktrees.push({ path, issueId, branch, isLocked, head })
 				}
 			}
 			return worktrees
 		}
 
 		// Pure helper to get worktree path (uses captured pathService)
-		const getWorktreePath = (projectPath: string, beadId: string): string => {
+		const getWorktreePath = (projectPath: string, issueId: string): string => {
 			const projectName = pathService.basename(projectPath)
 			const parentDir = pathService.dirname(projectPath)
-			return pathService.join(parentDir, `${projectName}-${beadId}`)
+			return pathService.join(parentDir, `${projectName}-${issueId}`)
 		}
 
 		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
@@ -632,7 +632,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 					const newMap = new Map<string, Worktree>()
 					for (const wt of worktrees) {
-						newMap.set(wt.beadId, wt)
+						newMap.set(wt.issueId, wt)
 					}
 
 					// Update cache for this project (preserves other projects)
@@ -670,11 +670,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						source: "WorktreeManager",
 						name: "create",
 						thresholdMs: 500,
-						details: `beadId=${options.beadId}`,
+						details: `issueId=${options.issueId}`,
 					},
 					Effect.gen(function* () {
 						const {
-							beadId,
+							issueId,
 							baseBranch,
 							projectPath,
 							sourceWorktreePath,
@@ -694,13 +694,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					}
 
 					// Get expected worktree path
-					const worktreePath = getWorktreePath(projectPath, beadId)
+					const worktreePath = getWorktreePath(projectPath, issueId)
 
 					// Refresh cache and check if already exists
 					yield* refreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					const existingWorktree = projectWorktrees.get(beadId)
+					const existingWorktree = projectWorktrees.get(issueId)
 
 					if (existingWorktree) {
 						// Idempotent: worktree already exists
@@ -708,23 +708,23 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					}
 
 					// Check if branch already exists (e.g., from a previously deleted worktree)
-					const hasBranch = yield* branchExists(beadId, projectPath)
+					const hasBranch = yield* branchExists(issueId, projectPath)
 
 					if (hasBranch) {
 						// Branch exists - create worktree using the existing branch
 						// git worktree add <path> <branch-name>
-						yield* Effect.logInfo(`Branch ${beadId} already exists, reusing it for worktree`)
-						yield* runGit(["worktree", "add", worktreePath, beadId], projectPath)
+						yield* Effect.logInfo(`Branch ${issueId} already exists, reusing it for worktree`)
+						yield* runGit(["worktree", "add", worktreePath, issueId], projectPath)
 					} else {
 						// Branch doesn't exist - create new branch and worktree
 						// git worktree add -b <branch-name> <path> <start-point>
 						const base = baseBranch || (yield* getCurrentBranch(projectPath))
-						yield* runGit(["worktree", "add", "-b", beadId, worktreePath, base], projectPath)
+						yield* runGit(["worktree", "add", "-b", issueId, worktreePath, base], projectPath)
 					}
 
 					// Copy Claude's local settings and inject hook configuration
 					// Use effectiveSourcePath so child tasks inherit settings from epic worktree
-					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, beadId, {
+					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, issueId, {
 						preCompactEnabled,
 					})
 
@@ -742,17 +742,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						yield* forceRefreshWorktrees(projectPath)
 						const allUpdated = yield* Ref.get(worktreesRef)
 						const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-						const newWorktree = projectUpdated.get(beadId)
+							const newWorktree = projectUpdated.get(issueId)
 
-						if (!newWorktree) {
-							const foundBeadIds = Array.from(projectUpdated.keys())
-							return yield* Effect.fail({
-								_tag: "NotFound" as const,
-								foundBeadIds,
-								cacheSize: projectUpdated.size,
-							})
-						}
-						return newWorktree
+							if (!newWorktree) {
+								const foundIssueIds = Array.from(projectUpdated.keys())
+								return yield* Effect.fail({
+									_tag: "NotFound" as const,
+									foundIssueIds,
+									cacheSize: projectUpdated.size,
+								})
+							}
+							return newWorktree
 					})
 
 					// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
@@ -763,25 +763,25 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							schedule: retrySchedule,
 							while: (e) => e._tag === "NotFound",
 						}),
-						Effect.catchIf(
-							(e): e is { _tag: "NotFound"; foundBeadIds: string[]; cacheSize: number } =>
-								"_tag" in e && e._tag === "NotFound",
-							(e) => {
-								// All retries exhausted, log and fail with descriptive error
-								Effect.logError("Worktree created but not found in cache after retries", {
-									beadId,
-									worktreePath,
-									projectPath,
-									foundBeadIds: e.foundBeadIds,
-									cacheSize: e.cacheSize,
-								})
-								return Effect.fail(
-									new GitError({
-										message: `Worktree created but not found in list after retries. Looking for: ${beadId}, found: [${e.foundBeadIds.join(", ")}]`,
-										command: `git worktree add ${worktreePath} ${beadId}`,
-									}),
-								)
-							},
+							Effect.catchIf(
+								(e): e is { _tag: "NotFound"; foundIssueIds: string[]; cacheSize: number } =>
+									"_tag" in e && e._tag === "NotFound",
+								(e) => {
+									// All retries exhausted, log and fail with descriptive error
+									Effect.logError("Worktree created but not found in cache after retries", {
+										issueId,
+										worktreePath,
+										projectPath,
+										foundIssueIds: e.foundIssueIds,
+										cacheSize: e.cacheSize,
+									})
+									return Effect.fail(
+										new GitError({
+											message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
+											command: `git worktree add ${worktreePath} ${issueId}`,
+										}),
+									)
+								},
 						),
 					)
 
@@ -789,15 +789,15 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}).pipe(Effect.withSpan("worktree.create")),
 			),
 
-			remove: (options: { beadId: string; projectPath: string }) =>
+			remove: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 
 					// Force refresh cache (mutation operation needs fresh data)
 					yield* forceRefreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					const worktree = projectWorktrees.get(beadId)
+					const worktree = projectWorktrees.get(issueId)
 
 					if (!worktree) {
 						// Safe no-op if doesn't exist
@@ -819,22 +819,22 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					return Array.from(projectWorktrees.values())
 				}),
 
-			exists: (options: { beadId: string; projectPath: string }) =>
+			exists: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 					yield* refreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					return projectWorktrees.has(beadId)
+					return projectWorktrees.has(issueId)
 				}),
 
-			get: (options: { beadId: string; projectPath: string }) =>
+			get: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 					yield* refreshWorktrees(projectPath)
 					const allWorktrees = yield* Ref.get(worktreesRef)
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					return projectWorktrees.get(beadId) || null
+					return projectWorktrees.get(issueId) || null
 				}),
 
 			mergeClaudeLocalSettings,
@@ -868,7 +868,7 @@ export const create = (
  * Remove a worktree by bead ID
  */
 export const remove = (options: {
-	beadId: string
+	issueId: string
 	projectPath: string
 }): Effect.Effect<
 	void,
@@ -891,7 +891,7 @@ export const list = (
  * Check if a worktree exists
  */
 export const exists = (options: {
-	beadId: string
+	issueId: string
 	projectPath: string
 }): Effect.Effect<
 	boolean,
@@ -903,7 +903,7 @@ export const exists = (options: {
  * Get worktree info for a bead
  */
 export const get = (options: {
-	beadId: string
+	issueId: string
 	projectPath: string
 }): Effect.Effect<
 	Worktree | null,
@@ -920,7 +920,7 @@ export const get = (options: {
  * ```ts
  * Effect.gen(function* () {
  *   const worktree = yield* acquireWorktree({
- *     beadId: "az-05y",
+ *     issueId: "az-05y",
  *     baseBranch: "main",
  *     projectPath: "/Users/user/project"
  *   })
@@ -938,7 +938,7 @@ export const acquireWorktree = (
 	Scope.Scope | WorktreeManager | CommandExecutor.CommandExecutor
 > =>
 	Effect.acquireRelease(create(options), (worktree) =>
-		remove({ beadId: worktree.beadId, projectPath: options.projectPath }).pipe(
+		remove({ issueId: worktree.issueId, projectPath: options.projectPath }).pipe(
 			Effect.orElseSucceed(() => undefined),
 		),
 	)

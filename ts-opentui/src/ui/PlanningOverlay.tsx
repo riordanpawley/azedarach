@@ -296,21 +296,21 @@ const CompletePhase = ({
 			</text>
 
 			<text fg={theme.text} marginTop={1}>
-				{`Created ${state.createdBeads.length} beads:`}
+				{`Created ${state.createdIssues.length} beads:`}
 			</text>
 
-			{state.createdBeads.slice(0, 10).map((bead) => (
-				<box key={bead.id} flexDirection="row" paddingLeft={2}>
-					<text fg={bead.issue_type === "epic" ? theme.lavender : theme.blue}>
-						{`${bead.id}: `}
+			{state.createdIssues.slice(0, 10).map((issue) => (
+				<box key={issue.id} flexDirection="row" paddingLeft={2}>
+					<text fg={issue.issue_type === "epic" ? theme.lavender : theme.blue}>
+						{`${issue.id}: `}
 					</text>
-					<text fg={theme.text}>{bead.title.slice(0, 50)}</text>
+					<text fg={theme.text}>{issue.title.slice(0, 50)}</text>
 				</box>
 			))}
 
-			{state.createdBeads.length > 10 && (
+			{state.createdIssues.length > 10 && (
 				<text fg={theme.subtext0} paddingLeft={2}>
-					{`... and ${state.createdBeads.length - 10} more`}
+					{`... and ${state.createdIssues.length - 10} more`}
 				</text>
 			)}
 
@@ -377,7 +377,7 @@ export const PlanningOverlay = ({ onClose }: PlanningOverlayProps) => {
 				reviewPass: 0,
 				maxReviewPasses: 5,
 				reviewHistory: [],
-				createdBeads: [],
+				createdIssues: [],
 				error: null,
 			}
 

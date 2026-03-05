@@ -59,15 +59,15 @@ export const runPlanningAtom = appRuntime.fn((featureDescription: string) =>
 		const planning = yield* PlanningService
 		const board = yield* BoardService
 
-		const createdBeads = yield* planning.runPlanningWorkflow(featureDescription)
-		const epicId = createdBeads.find((bead) => bead.issue_type === "epic")?.id
-		for (const bead of createdBeads) {
-			yield* board.upsertIssueFromMutation(bead, {
-				parentEpicId: epicId && bead.id !== epicId ? epicId : undefined,
+		const createdIssues = yield* planning.runPlanningWorkflow(featureDescription)
+		const epicId = createdIssues.find((issue) => issue.issue_type === "epic")?.id
+		for (const issue of createdIssues) {
+			yield* board.upsertIssueFromMutation(issue, {
+				parentEpicId: epicId && issue.id !== epicId ? epicId : undefined,
 			})
 		}
 
-		return createdBeads
+		return createdIssues
 	}).pipe(
 		Effect.catchAll((error) =>
 			Effect.gen(function* () {

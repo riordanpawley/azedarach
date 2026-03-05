@@ -83,9 +83,9 @@ export interface WorktreeSessionResult {
  * Consolidates session name generation, worktree path computation, and
  * the common pattern of getOrCreateSession + ensureWindow.
  */
-export interface BuildTmuxSessionFromBeadOptions {
+export interface BuildTmuxSessionFromIssueOptions {
 	/** The bead ID (e.g., "az-05y") */
-	readonly beadId: string
+	readonly issueId: string
 	/** Path to the main project directory */
 	readonly projectPath: string
 	/** Name of the window to create (e.g., "code", "dev", "merge") */
@@ -105,8 +105,8 @@ export interface BuildTmuxSessionFromBeadOptions {
 /**
  * Result of building a tmux session from a bead
  */
-export interface BuildTmuxSessionFromBeadResult {
-	/** The tmux session name (canonical encoding of beadId) */
+export interface BuildTmuxSessionFromIssueResult {
+	/** The tmux session name (canonical encoding of issueId) */
 	readonly sessionName: string
 	/** The tmux target (sessionName:windowName) */
 	readonly target: string
@@ -197,8 +197,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				 *
 				 * @example
 				 * ```ts
-				 * const result = yield* worktreeSession.buildTmuxSessionFromBead({
-				 *   beadId: "az-05y",
+				 * const result = yield* worktreeSession.buildTmuxSessionFromIssue({
+				 *   issueId: "az-05y",
 				 *   projectPath: "/home/user/project",
 				 *   windowName: "code",
 				 *   command: "claude --model opus",
@@ -207,23 +207,23 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				 * // result.target = "az-05y:code"
 				 * ```
 				 */
-				buildTmuxSessionFromBead: (
-					options: BuildTmuxSessionFromBeadOptions,
+				buildTmuxSessionFromIssue: (
+					options: BuildTmuxSessionFromIssueOptions,
 				): Effect.Effect<
-					BuildTmuxSessionFromBeadResult,
+					BuildTmuxSessionFromIssueResult,
 					WorktreeSessionError | TmuxError | SessionNotFoundError | ShellNotReadyError,
 					CommandExecutor.CommandExecutor
 				> =>
 					diagnostics.measure(
 						{
 							source: "WorktreeSessionService",
-							name: "buildTmuxSessionFromBead",
+							name: "buildTmuxSessionFromIssue",
 							thresholdMs: 500,
-							details: `beadId=${options.beadId}`,
+							details: `issueId=${options.issueId}`,
 						},
 						Effect.gen(function* () {
 							const {
-								beadId,
+								issueId,
 								projectPath,
 								windowName,
 								command,
@@ -234,8 +234,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							} = options
 
 							// Use canonical path functions instead of inline computation
-							const sessionName = getIssueSessionName(beadId)
-							const worktreePath = getWorktreePath(projectPath, beadId)
+							const sessionName = getIssueSessionName(issueId)
+							const worktreePath = getWorktreePath(projectPath, issueId)
 							const effectiveCwd = cwd ?? worktreePath
 
 							// Create or get the session
@@ -323,12 +323,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
 								yield* tmux.sendKeys(target, waitCmd)
 
-								yield* Effect.log(`[buildTmuxSessionFromBead] Shell ready for ${target}`)
+								yield* Effect.log(`[buildTmuxSessionFromIssue] Shell ready for ${target}`)
 
 								yield* tmux.sendKeys(target, command)
 							} else {
 								yield* Effect.log(
-									`[buildTmuxSessionFromBead] Window ${target} exists, sending command`,
+									`[buildTmuxSessionFromIssue] Window ${target} exists, sending command`,
 								)
 								yield* tmux.selectWindow(sessionName, windowName)
 								yield* tmux.sendKeys(target, command)
@@ -343,7 +343,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					),
 
 				getOrCreateSession: (
-					beadId: string,
+					issueId: string,
 					options: {
 						worktreePath: string
 						projectPath?: string
@@ -357,10 +357,10 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							source: "WorktreeSessionService",
 							name: "getOrCreateSession",
 							thresholdMs: 400,
-							details: `beadId=${beadId}`,
+							details: `issueId=${issueId}`,
 						},
 						Effect.gen(function* () {
-							const sessionName = getIssueSessionName(beadId)
+							const sessionName = getIssueSessionName(issueId)
 							const exists = yield* tmux.hasSession(sessionName)
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const shell = sessionConfig.shell

@@ -9,11 +9,11 @@
  * - Maintains session registry in Ref<HashMap>
  *
  * Key features:
- * - start(beadId): Create worktree, tmux session, and launch Claude
- * - stop(beadId): Kill tmux session and cleanup
- * - pause(beadId): Send Ctrl+C and create WIP commit
- * - resume(beadId): Continue paused session
- * - getState(beadId): Get current session state
+ * - start(issueId): Create worktree, tmux session, and launch Claude
+ * - stop(issueId): Kill tmux session and cleanup
+ * - pause(issueId): Send Ctrl+C and create WIP commit
+ * - resume(issueId): Continue paused session
+ * - getState(issueId): Get current session state
  * - listActive(): List all running sessions
  */
 
@@ -26,7 +26,13 @@ import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
 import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
-import { getIssueSessionName, getWorktreePath, parseIssueSessionName, WINDOW_NAMES } from "./paths.js"
+import {
+	getIssueSessionName,
+	getWorktreePath,
+	normalizeIssueIdForLookup,
+	parseIssueSessionName,
+	WINDOW_NAMES,
+} from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
 import {
 	type TmuxError,
@@ -44,7 +50,7 @@ import { WorktreeSessionService } from "./WorktreeSessionService.js"
  * Session information tracked by ClaudeSessionManager
  */
 export interface Session {
-	readonly beadId: string
+	readonly issueId: string
 	readonly worktreePath: string
 	readonly tmuxSessionName: string
 	readonly state: SessionState
@@ -76,7 +82,7 @@ const SessionStateSchema = Schema.Literal(
  * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
  */
 const SessionSchema = Schema.Struct({
-	beadId: Schema.String,
+	issueId: Schema.String,
 	worktreePath: Schema.String,
 	tmuxSessionName: Schema.String,
 	state: SessionStateSchema,
@@ -97,7 +103,7 @@ export type ClaudeModel = string
  * Options for starting a session
  */
 export interface StartSessionOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 	readonly baseBranch?: string
 	/** Optional initial prompt to send to Claude on startup (e.g., "work on bead az-123") */
@@ -114,7 +120,7 @@ export interface StartSessionOptions {
  * State change event published to PubSub
  */
 export interface SessionStateChange {
-	readonly beadId: string
+	readonly issueId: string
 	readonly oldState: SessionState
 	readonly newState: SessionState
 	readonly timestamp: Date
@@ -129,21 +135,21 @@ export interface SessionStateChange {
  */
 export class SessionError extends Data.TaggedError("SessionError")<{
 	readonly message: string
-	readonly beadId?: string
+	readonly issueId?: string
 }> {}
 
 /**
  * Error when session is not found
  */
 export class SessionNotFoundError extends Data.TaggedError("SessionNotFoundError")<{
-	readonly beadId: string
+	readonly issueId: string
 }> {}
 
 /**
  * Error when session already exists
  */
 export class SessionExistsError extends Data.TaggedError("SessionExistsError")<{
-	readonly beadId: string
+	readonly issueId: string
 }> {}
 
 /**
@@ -159,7 +165,7 @@ export class SessionLimitError extends Data.TaggedError("SessionLimitError")<{
  * Error when session is in invalid state for operation
  */
 export class InvalidStateError extends Data.TaggedError("InvalidStateError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly currentState: SessionState
 	readonly expectedState?: SessionState
 	readonly operation: string
@@ -185,7 +191,7 @@ export interface ClaudeSessionManagerService {
 	 * @example
 	 * ```ts
 	 * ClaudeSessionManager.start({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project",
 	 *   baseBranch: "main"
 	 * })
@@ -217,7 +223,7 @@ export interface ClaudeSessionManagerService {
 	 * ```
 	 */
 	readonly stop: (
-		beadId: string,
+		issueId: string,
 	) => Effect.Effect<void, SessionError | TmuxError, CommandExecutor.CommandExecutor>
 
 	/**
@@ -232,7 +238,7 @@ export interface ClaudeSessionManagerService {
 	 * ```
 	 */
 	readonly pause: (
-		beadId: string,
+		issueId: string,
 	) => Effect.Effect<
 		void,
 		SessionError | TmuxSessionNotFoundError | TmuxError | GitError,
@@ -249,7 +255,7 @@ export interface ClaudeSessionManagerService {
 	 * ClaudeSessionManager.resume("az-05y")
 	 * ```
 	 */
-	readonly resume: (beadId: string) => Effect.Effect<void, SessionError | InvalidStateError, never>
+	readonly resume: (issueId: string) => Effect.Effect<void, SessionError | InvalidStateError, never>
 
 	/**
 	 * Recover a crashed session
@@ -263,7 +269,7 @@ export interface ClaudeSessionManagerService {
 	 * ```
 	 */
 	readonly recoverSession: (
-		beadId: string,
+		issueId: string,
 	) => Effect.Effect<
 		Session,
 		SessionNotFoundError | InvalidStateError | TmuxError | SessionError | SessionLimitError,
@@ -278,7 +284,7 @@ export interface ClaudeSessionManagerService {
 	 * ClaudeSessionManager.getState("az-05y")
 	 * ```
 	 */
-	readonly getState: (beadId: string) => Effect.Effect<SessionState, SessionNotFoundError, never>
+	readonly getState: (issueId: string) => Effect.Effect<SessionState, SessionNotFoundError, never>
 
 	/**
 	 * List all active sessions
@@ -296,7 +302,7 @@ export interface ClaudeSessionManagerService {
 	 * Internal method for state updates. Publishes state change events.
 	 */
 	readonly updateState: (
-		beadId: string,
+		issueId: string,
 		newState: SessionState,
 	) => Effect.Effect<void, SessionNotFoundError, never>
 
@@ -310,7 +316,7 @@ export interface ClaudeSessionManagerService {
 	 * the session will be registered automatically (orphan recovery).
 	 */
 	readonly updateStateFromTmux: (
-		beadId: string,
+		issueId: string,
 		status: "busy" | "waiting" | "idle",
 		sessionMeta?: {
 			sessionName: string
@@ -347,7 +353,7 @@ export interface ClaudeSessionManagerService {
  * const program = Effect.gen(function* () {
  *   const manager = yield* ClaudeSessionManager
  *   const session = yield* manager.start({
- *     beadId: "az-123",
+ *     issueId: "az-123",
  *     projectPath: process.cwd()
  *   })
  *   return session
@@ -372,7 +378,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const worktreeManager = yield* WorktreeManager
 			const tmuxService = yield* TmuxService
 			const worktreeSession = yield* WorktreeSessionService
-			const beadsClient = yield* BeadsClient
+			const issueTrackerClient = yield* BeadsClient
 			const appConfig = yield* AppConfig
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
@@ -451,12 +457,12 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 			// Helper: Publish state change event
 			const publishStateChange = (
-				beadId: string,
+				issueId: string,
 				oldState: SessionState,
 				newState: SessionState,
 			): Effect.Effect<void, never, never> =>
 				PubSub.publish(stateChangeHub, {
-					beadId,
+					issueId,
 					oldState,
 					newState,
 					timestamp: new Date(),
@@ -469,7 +475,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 				start: (options: StartSessionOptions) =>
 					Effect.gen(function* () {
 						const {
-							beadId,
+							issueId,
 							projectPath,
 							baseBranch: explicitBaseBranch,
 							initialPrompt,
@@ -482,7 +488,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// If a session exists but is "idle", it means the tmux process died but we still
 						// have a stale entry in memory. In that case, we should create a new session.
 						const sessions = yield* Ref.get(sessionsRef)
-						const existingSession = HashMap.get(sessions, beadId)
+						const existingSession = HashMap.get(sessions, issueId)
 
 						if (existingSession._tag === "Some" && existingSession.value.state !== "idle") {
 							return existingSession.value
@@ -508,7 +514,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						// Verify bead exists (will throw NotFoundError if not)
-						const issue = yield* beadsClient.show(beadId)
+						const issue = yield* issueTrackerClient.show(issueId)
 
 						// Note: We update bead status to in_progress AFTER session creation succeeds
 						// to avoid the bug where status updates but session fails (az-g7p)
@@ -527,14 +533,14 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						if (!effectiveBaseBranch) {
 							// Check if this bead has a parent epic
-							const parentEpic = yield* beadsClient.getParentEpic(beadId)
+							const parentEpic = yield* issueTrackerClient.getParentEpic(issueId)
 
-							if (parentEpic) {
-								// Ensure epic branch exists by creating epic worktree if needed
-								// This is idempotent - if worktree already exists, it returns the existing one
-								const epicWorktree = yield* worktreeManager.create({
-									beadId: parentEpic.id,
-									projectPath,
+								if (parentEpic) {
+									// Ensure epic branch exists by creating epic worktree if needed
+									// This is idempotent - if worktree already exists, it returns the existing one
+									const epicWorktree = yield* worktreeManager.create({
+										issueId: parentEpic.id,
+										projectPath,
 									// Epic branches from main (no baseBranch = uses current branch)
 									// Epic gets copyPaths from config (copies from main project)
 									copyPaths: worktreeConfig.copyPaths,
@@ -543,7 +549,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								// Use the epic branch as base for the child task
 								effectiveBaseBranch = parentEpic.id
 								epicWorktreePath = epicWorktree.path
-								yield* Effect.log(`Child task ${beadId} will branch from epic ${parentEpic.id}`)
+								yield* Effect.log(`Child task ${issueId} will branch from epic ${parentEpic.id}`)
 							}
 						}
 
@@ -551,10 +557,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// copyPaths are applied to ALL worktrees:
 						// - Epic children: copy from epic's worktree (epicWorktreePath)
 						// - Regular tasks: copy from main project (projectPath fallback)
-						const worktree = yield* worktreeManager.create({
-							beadId,
-							projectPath,
-							baseBranch: effectiveBaseBranch,
+							const worktree = yield* worktreeManager.create({
+								issueId: issueId,
+								projectPath,
+								baseBranch: effectiveBaseBranch,
 							sourceWorktreePath: epicWorktreePath,
 							copyPaths: worktreeConfig.copyPaths,
 							preCompactEnabled: hooksConfig.preCompact.enabled,
@@ -576,8 +582,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get the tool definition for command building
 						const toolDef = getToolDefinition(cliTool)
 
-						// Generate tmux session name (just the beadId)
-						const tmuxSessionName = getIssueSessionName(beadId)
+						// Generate tmux session name (just the issueId)
+						const tmuxSessionName = getIssueSessionName(issueId)
 
 						// Check if bead session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
@@ -619,10 +625,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// Both are "resources" that need rollback on failure
 							Effect.gen(function* () {
 								let createdNewSession = false
-								let updatedBeadStatus = false
+									let updatedIssueStatus = false
 
 								if (!hasSession) {
-									yield* worktreeSession.getOrCreateSession(beadId, {
+									yield* worktreeSession.getOrCreateSession(issueId, {
 										worktreePath: worktree.path,
 										projectPath,
 										initCommands,
@@ -641,12 +647,12 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								// Done AFTER session creation to ensure we don't leave beads
 								// in "in_progress" state with no actual session (az-g7p bug fix)
 								if (needsStatusUpdate) {
-									yield* beadsClient.update(beadId, { status: "in_progress" })
-									updatedBeadStatus = true
-								}
+									yield* issueTrackerClient.update(issueId, { status: "in_progress" })
+										updatedIssueStatus = true
+									}
 
-								return { createdNewSession, updatedBeadStatus }
-							}),
+									return { createdNewSession, updatedIssueStatus }
+								}),
 
 							// USE: Register session in memory and publish event
 							() =>
@@ -657,7 +663,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 									// Create session object
 									const sessionObj: Session = {
-										beadId,
+										issueId,
 										worktreePath: worktree.path,
 										tmuxSessionName,
 										state: initialState,
@@ -667,7 +673,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 									// Store session in registry
 									yield* Ref.update(sessionsRef, (sessions) =>
-										HashMap.set(sessions, beadId, sessionObj),
+										HashMap.set(sessions, issueId, sessionObj),
 									)
 
 									// Persist to disk
@@ -675,7 +681,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									yield* persistSessions(sessions)
 
 									// Publish state change event (from idle to initial state)
-									yield* publishStateChange(beadId, "idle", initialState)
+									yield* publishStateChange(issueId, "idle", initialState)
 
 									return sessionObj
 								}),
@@ -695,10 +701,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 											}
 
 											// Rollback bead status if we changed it
-											if (acquired.updatedBeadStatus) {
-												yield* beadsClient.update(beadId, { status: "open" }).pipe(
+												if (acquired.updatedIssueStatus) {
+												yield* issueTrackerClient.update(issueId, { status: "open" }).pipe(
 													Effect.tap(() =>
-														Effect.logWarning(`Rolled back bead ${beadId} status to open`),
+														Effect.logWarning(`Rolled back bead ${issueId} status to open`),
 													),
 													Effect.catchAll(() => Effect.void),
 												)
@@ -710,30 +716,30 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						return session
 					}),
 
-				stop: (beadId: string) =>
+				stop: (issueId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
 							return yield* Effect.fail(
 								new SessionError({
 									message: "Session not found",
-									beadId,
+									issueId,
 								}),
 							)
 						}
 
 						const session = sessionOpt.value
 
-						yield* Effect.log(`Stopping session for ${beadId}`)
+						yield* Effect.log(`Stopping session for ${issueId}`)
 
 						// Sync beads changes from worktree before killing session
 						// This ensures any bd update/close commands run in the worktree get synced back to main
-						yield* beadsClient.sync(session.worktreePath).pipe(
-							Effect.tap(() => Effect.log(`Synced beads from worktree for ${beadId}`)),
+						yield* issueTrackerClient.sync(session.worktreePath).pipe(
+							Effect.tap(() => Effect.log(`Synced beads from worktree for ${issueId}`)),
 							Effect.catchAll((error) =>
-								Effect.logWarning(`Sync failed for ${beadId}: ${error}`).pipe(Effect.asVoid),
+								Effect.logWarning(`Sync failed for ${issueId}: ${error}`).pipe(Effect.asVoid),
 							),
 						)
 
@@ -746,28 +752,28 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const oldState = session.state
 
 						// Remove from registry
-						yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, beadId))
+						yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, issueId))
 
 						// Persist to disk
 						const updatedSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(updatedSessions)
 
 						// Publish state change event
-						yield* publishStateChange(beadId, oldState, "idle")
+						yield* publishStateChange(issueId, oldState, "idle")
 
-						yield* Effect.log(`Session stopped for ${beadId} (was: ${oldState})`)
+						yield* Effect.log(`Session stopped for ${issueId} (was: ${oldState})`)
 					}),
 
-				pause: (beadId: string) =>
+				pause: (issueId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
 							return yield* Effect.fail(
 								new SessionError({
 									message: "Session not found",
-									beadId,
+									issueId,
 								}),
 							)
 						}
@@ -782,7 +788,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Sync beads changes from worktree before creating WIP commit
 						// This ensures any bd update/close commands are synced before we pause
-						yield* beadsClient.sync(session.worktreePath).pipe(
+						yield* issueTrackerClient.sync(session.worktreePath).pipe(
 							Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
 						)
 
@@ -825,7 +831,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, beadId, updatedSession),
+							HashMap.set(sessions, issueId, updatedSession),
 						)
 
 						// Persist to disk
@@ -833,19 +839,19 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(beadId, oldState, "paused")
+						yield* publishStateChange(issueId, oldState, "paused")
 					}),
 
-				resume: (beadId: string) =>
+				resume: (issueId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
 							return yield* Effect.fail(
 								new SessionError({
 									message: "Session not found",
-									beadId,
+									issueId,
 								}),
 							)
 						}
@@ -856,7 +862,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						if (session.state !== "paused") {
 							return yield* Effect.fail(
 								new InvalidStateError({
-									beadId,
+									issueId,
 									currentState: session.state,
 									expectedState: "paused",
 									operation: "resume",
@@ -871,7 +877,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, beadId, updatedSession),
+							HashMap.set(sessions, issueId, updatedSession),
 						)
 
 						// Persist to disk
@@ -879,16 +885,16 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(beadId, "paused", "busy")
+						yield* publishStateChange(issueId, "paused", "busy")
 					}),
 
-				recoverSession: (beadId: string) =>
+				recoverSession: (issueId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
-							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+							return yield* Effect.fail(new SessionNotFoundError({ issueId }))
 						}
 
 						const session = sessionOpt.value
@@ -897,7 +903,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						if (session.state !== "crashed") {
 							return yield* Effect.fail(
 								new InvalidStateError({
-									beadId,
+									issueId,
 									currentState: session.state,
 									expectedState: "crashed",
 									operation: "recoverSession",
@@ -905,18 +911,18 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							)
 						}
 
-						yield* Effect.log(`Recovering crashed session for ${beadId}`)
+						yield* Effect.log(`Recovering crashed session for ${issueId}`)
 
-						// Verify worktree still exists
-						const worktreeExists = yield* worktreeManager
-							.exists({ beadId, projectPath: session.projectPath })
-							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+							// Verify worktree still exists
+							const worktreeExists = yield* worktreeManager
+								.exists({ issueId: issueId, projectPath: session.projectPath })
+								.pipe(Effect.catchAll(() => Effect.succeed(false)))
 
 						if (!worktreeExists) {
 							return yield* Effect.fail(
 								new SessionError({
 									message: `Worktree no longer exists at ${session.worktreePath}. Cannot recover session.`,
-									beadId,
+									issueId,
 								}),
 							)
 						}
@@ -955,7 +961,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})
 
-						const tmuxSessionName = getIssueSessionName(beadId)
+						const tmuxSessionName = getIssueSessionName(issueId)
 						const { tmuxPrefix, backgroundTasks } = sessionConfig
 
 						// Get initCommands: merge worktree config + tool-specific init commands
@@ -963,7 +969,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const initCommands = [...worktreeConfig.initCommands, ...toolInitCommands]
 
 						// Create new tmux session in the existing worktree
-						yield* worktreeSession.getOrCreateSession(beadId, {
+						yield* worktreeSession.getOrCreateSession(issueId, {
 							worktreePath: session.worktreePath,
 							projectPath: session.projectPath,
 							initCommands,
@@ -985,7 +991,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, beadId, recoveredSession),
+							HashMap.set(sessions, issueId, recoveredSession),
 						)
 
 						// Persist to disk
@@ -993,20 +999,20 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(beadId, "crashed", "initializing")
+						yield* publishStateChange(issueId, "crashed", "initializing")
 
-						yield* Effect.log(`Successfully recovered session for ${beadId}`)
+						yield* Effect.log(`Successfully recovered session for ${issueId}`)
 
 						return recoveredSession
 					}),
 
-				getState: (beadId: string) =>
+				getState: (issueId: string) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
-							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+							return yield* Effect.fail(new SessionNotFoundError({ issueId }))
 						}
 
 						return sessionOpt.value.state
@@ -1031,9 +1037,18 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const worktrees = yield* worktreeManager
 							.list(effectiveProjectPath)
 							.pipe(Effect.catchAll(() => Effect.succeed([])))
-						const worktreeByBeadId = HashMap.fromIterable(
-							worktrees.map((wt) => [wt.beadId, wt] as const),
-						)
+							const worktreeByIssueLookup = new Map(
+								worktrees.map((wt) => [normalizeIssueIdForLookup(wt.issueId), wt] as const),
+							)
+							const persistedByIssueLookup = new Map(
+								Array.from(HashMap.entries(persistedSessions), ([storedIssueId, persisted]) => [
+									normalizeIssueIdForLookup(storedIssueId),
+									persisted,
+								]),
+							)
+							const inMemoryIssueLookup = new Set(
+								Array.from(HashMap.keys(inMemorySessions), normalizeIssueIdForLookup),
+							)
 
 						// Build set of running tmux session names for crash detection
 						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
@@ -1042,40 +1057,28 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								const parsed = parseIssueSessionName(tmuxSession.name)
 								if (!parsed || parsed.type !== "issue") continue
 
-							const beadId = parsed.issueId
+								const issueId = parsed.issueId
+								const issueLookupKey = normalizeIssueIdForLookup(issueId)
 
-							if (HashMap.has(inMemorySessions, beadId)) continue
+								if (inMemoryIssueLookup.has(issueLookupKey)) continue
 
-							{
-								const worktreeOpt = HashMap.get(worktreeByBeadId, beadId)
-								const persistedOpt = HashMap.get(persistedSessions, beadId)
+								{
+									const worktree = worktreeByIssueLookup.get(issueLookupKey)
+									const persisted = persistedByIssueLookup.get(issueLookupKey)
 
-								const orphanedSession: Session = {
-									beadId,
-									worktreePath: Option.getOrElse(
-										Option.map(worktreeOpt, (wt) => wt.path),
-										() =>
-											Option.getOrElse(
-												Option.map(persistedOpt, (p) => p.worktreePath),
-												() => getWorktreePath(effectiveProjectPath, beadId),
-											),
-									),
-									tmuxSessionName: tmuxSession.name,
-									state: Option.getOrElse(
-										Option.map(persistedOpt, (p) => p.state),
-										() => "busy",
-									),
-									startedAt: Option.getOrElse(
-										Option.map(persistedOpt, (p) => p.startedAt),
-										() => DateTime.unsafeFromDate(tmuxSession.created),
-									),
-									projectPath: Option.getOrElse(
-										Option.map(persistedOpt, (p) => p.projectPath),
-										() => effectiveProjectPath,
-									),
-								}
-								yield* Ref.update(sessionsRef, (sessions) =>
-									HashMap.set(sessions, beadId, orphanedSession),
+									const orphanedSession: Session = {
+										issueId,
+										worktreePath:
+											worktree?.path ??
+											persisted?.worktreePath ??
+											getWorktreePath(effectiveProjectPath, issueId),
+										tmuxSessionName: tmuxSession.name,
+										state: persisted?.state ?? "busy",
+										startedAt: persisted?.startedAt ?? DateTime.unsafeFromDate(tmuxSession.created),
+										projectPath: persisted?.projectPath ?? effectiveProjectPath,
+									}
+									yield* Ref.update(sessionsRef, (sessions) =>
+										HashMap.set(sessions, issueId, orphanedSession),
 								)
 							}
 						}
@@ -1090,9 +1093,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							"warning",
 						])
 
-						for (const [beadId, persisted] of HashMap.entries(persistedSessions)) {
-							// Skip if already recovered from tmux (handled above)
-							if (HashMap.has(inMemorySessions, beadId)) continue
+							for (const [issueId, persisted] of HashMap.entries(persistedSessions)) {
+								const issueLookupKey = normalizeIssueIdForLookup(issueId)
+								// Skip if already recovered from tmux (handled above)
+								if (inMemoryIssueLookup.has(issueLookupKey)) continue
 
 							// Check if this session was active but tmux died
 							if (
@@ -1100,11 +1104,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								!runningTmuxNames.has(persisted.tmuxSessionName)
 							) {
 								yield* Effect.log(
-									`Detected crashed session for ${beadId} (was ${persisted.state}, tmux gone)`,
+									`Detected crashed session for ${issueId} (was ${persisted.state}, tmux gone)`,
 								)
 
 								const crashedSession: Session = {
-									beadId,
+									issueId,
 									worktreePath: persisted.worktreePath,
 									tmuxSessionName: persisted.tmuxSessionName,
 									state: "crashed",
@@ -1112,7 +1116,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									projectPath: persisted.projectPath,
 								}
 								yield* Ref.update(sessionsRef, (sessions) =>
-									HashMap.set(sessions, beadId, crashedSession),
+									HashMap.set(sessions, issueId, crashedSession),
 								)
 							}
 						}
@@ -1122,13 +1126,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						return Array.from(HashMap.values(updatedSessions))
 					}),
 
-				updateState: (beadId: string, newState: SessionState) =>
+				updateState: (issueId: string, newState: SessionState) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						if (sessionOpt._tag === "None") {
-							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+							return yield* Effect.fail(new SessionNotFoundError({ issueId }))
 						}
 
 						const session = sessionOpt.value
@@ -1140,7 +1144,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, beadId, updatedSession),
+							HashMap.set(sessions, issueId, updatedSession),
 						)
 
 						// Persist to disk
@@ -1148,11 +1152,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(beadId, oldState, newState)
+						yield* publishStateChange(issueId, oldState, newState)
 					}),
 
 				updateStateFromTmux: (
-					beadId: string,
+					issueId: string,
 					status: "busy" | "waiting" | "idle",
 					sessionMeta?: {
 						sessionName: string
@@ -1163,12 +1167,12 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 				) =>
 					Effect.gen(function* () {
 						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, beadId)
+						const sessionOpt = HashMap.get(sessions, issueId)
 
 						// If session doesn't exist but we have metadata, create it (orphan recovery)
 						if (sessionOpt._tag === "None") {
 							if (sessionMeta) {
-								yield* Effect.log(`Recovering orphaned session for ${beadId} (status: ${status})`)
+								yield* Effect.log(`Recovering orphaned session for ${issueId} (status: ${status})`)
 
 								// Map status to SessionState
 								let initialState: SessionState = "busy"
@@ -1176,10 +1180,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								if (status === "idle") initialState = "idle"
 
 								const orphanedSession: Session = {
-									beadId,
+									issueId,
 									worktreePath:
 										sessionMeta.worktreePath ??
-										getWorktreePath(sessionMeta.projectPath ?? process.cwd(), beadId),
+										getWorktreePath(sessionMeta.projectPath ?? process.cwd(), issueId),
 									tmuxSessionName: sessionMeta.sessionName,
 									state: initialState,
 									startedAt: DateTime.unsafeFromDate(new Date(sessionMeta.createdAt * 1000)),
@@ -1187,7 +1191,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								}
 
 								yield* Ref.update(sessionsRef, (sessions) =>
-									HashMap.set(sessions, beadId, orphanedSession),
+									HashMap.set(sessions, issueId, orphanedSession),
 								)
 
 								// Persist the recovered session
@@ -1195,10 +1199,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								yield* persistSessions(allSessions)
 
 								// Publish as a new session discovery (idle -> currentState)
-								yield* publishStateChange(beadId, "idle", initialState)
+								yield* publishStateChange(issueId, "idle", initialState)
 								return
 							}
-							return yield* Effect.fail(new SessionNotFoundError({ beadId }))
+							return yield* Effect.fail(new SessionNotFoundError({ issueId }))
 						}
 
 						const session = sessionOpt.value
@@ -1224,7 +1228,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, beadId, updatedSession),
+							HashMap.set(sessions, issueId, updatedSession),
 						)
 
 						// Persist to disk
@@ -1232,7 +1236,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(beadId, oldState, newState)
+						yield* publishStateChange(issueId, oldState, newState)
 					}),
 
 				subscribeToStateChanges: () => Effect.succeed(stateChangeHub),

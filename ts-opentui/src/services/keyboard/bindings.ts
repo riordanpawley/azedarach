@@ -53,7 +53,7 @@ export interface BindingContext {
 	toast: ToastService
 	viewService: ViewService
 	tmux: TmuxService
-	beadsClient: BeadsClient
+	issueTrackerClient: BeadsClient
 	board: BoardService
 	gitSync: GitSyncService
 }
@@ -265,7 +265,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			const task = yield* bc.helpers.getSelectedTask()
 			if (task && task.issue_type === "epic") {
 				// Fetch epic children (DependencyRef array)
-				const children = yield* bc.beadsClient
+				const children = yield* bc.issueTrackerClient
 					.getEpicChildren(task.id)
 					.pipe(Effect.catchAll(() => Effect.succeed([])))
 				const childIds = new Set(children.map((c: { id: string }) => c.id))
@@ -274,7 +274,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 				// Parallel fetch with error tolerance
 				const childDetailResults = yield* Effect.all(
 					children.map((child: { id: string }) =>
-						bc.beadsClient
+						bc.issueTrackerClient
 							.show(child.id)
 							.pipe(Effect.map((issue) => [child.id, issue] as const))
 							.pipe(Effect.catchAll(() => Effect.succeed(null))),
@@ -298,12 +298,12 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 			}
 		}),
 	},
-	{
-		key: "c",
-		mode: "normal",
-		description: "Create bead via $EDITOR",
-		action: Effect.suspend(() => bc.taskHandlers.createBead()),
-	},
+		{
+			key: "c",
+			mode: "normal",
+			description: "Create bead via $EDITOR",
+			action: Effect.suspend(() => bc.taskHandlers.createIssue()),
+		},
 	{
 		key: "S-c",
 		mode: "normal",
@@ -520,14 +520,14 @@ done
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.stopSession())),
 		),
 	},
-	{
-		key: "e",
-		mode: "action",
-		description: "Edit bead ($EDITOR)",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.editBead())),
-		),
-	},
+		{
+			key: "e",
+			mode: "action",
+			description: "Edit bead ($EDITOR)",
+			action: Effect.suspend(() =>
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.editIssue())),
+			),
+		},
 	{
 		key: "S-e",
 		mode: "action",
@@ -542,14 +542,14 @@ done
 				),
 		),
 	},
-	{
-		key: "S-f",
-		mode: "action",
-		description: "Fork bead",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.forkBead())),
-		),
-	},
+		{
+			key: "S-f",
+			mode: "action",
+			description: "Fork bead",
+			action: Effect.suspend(() =>
+				bc.editor.exitToNormal().pipe(Effect.tap(() => bc.taskHandlers.forkIssue())),
+			),
+		},
 	{
 		key: "S-p",
 		mode: "action",
@@ -606,14 +606,14 @@ done
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.prHandlers.updateFromBase())),
 		),
 	},
-	{
-		key: "S-d",
-		mode: "action",
-		description: "Delete bead",
-		action: Effect.suspend(() =>
-			bc.taskHandlers.deleteBead().pipe(Effect.ensuring(bc.editor.exitToNormal())),
-		),
-	},
+		{
+			key: "S-d",
+			mode: "action",
+			description: "Delete bead",
+			action: Effect.suspend(() =>
+				bc.taskHandlers.deleteIssue().pipe(Effect.ensuring(bc.editor.exitToNormal())),
+			),
+		},
 	{
 		key: "i",
 		mode: "action",

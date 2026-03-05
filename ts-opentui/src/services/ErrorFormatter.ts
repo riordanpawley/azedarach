@@ -127,13 +127,13 @@ const ERROR_FORMATTERS: Record<
 	},
 
 	WorktreeNotFoundError: (error) => ({
-		message: `Worktree not found for ${error.beadId}`,
+		message: `Worktree not found for ${error.issueId}`,
 		suggestion: "Try: The worktree may have been deleted. Start a new session to recreate it",
 		category: "git",
 	}),
 
 	WorktreeExistsError: (error) => ({
-		message: `Worktree already exists for ${error.beadId}`,
+		message: `Worktree already exists for ${error.issueId}`,
 		suggestion: "Try: Use the existing worktree or clean it up first",
 		category: "git",
 	}),
@@ -319,13 +319,13 @@ const ERROR_FORMATTERS: Record<
 	}),
 
 	MergeConflictError: (error) => ({
-		message: `Merge conflict for ${error.beadId}`,
+		message: `Merge conflict for ${error.issueId}`,
 		suggestion: "Try: Resolve conflicts in the worktree, then commit and try again",
 		category: "pr",
 	}),
 
 	TypeCheckError: (error) => ({
-		message: `Type errors after merging ${error.beadId}`,
+		message: `Type errors after merging ${error.issueId}`,
 		suggestion: "Try: Claude session started to fix. Run 'bun run type-check' after fixing",
 		category: "pr",
 	}),
@@ -370,13 +370,13 @@ const ERROR_FORMATTERS: Record<
 	}),
 
 	SessionNotFoundError_Session: (error) => ({
-		message: `Session not found: ${error.beadId}`,
+		message: `Session not found: ${error.issueId}`,
 		suggestion: "Try: The session may have ended. Start a new session with Space",
 		category: "session",
 	}),
 
 	SessionExistsError: (error) => ({
-		message: `Session already running for ${error.beadId}`,
+		message: `Session already running for ${error.issueId}`,
 		suggestion: "Try: Attach to the existing session or stop it first",
 		category: "session",
 	}),

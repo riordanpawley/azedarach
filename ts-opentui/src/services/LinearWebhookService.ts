@@ -41,6 +41,11 @@ const IssueLabelChildSchema = Schema.Struct({
 	name: Schema.String,
 })
 
+const IssueParentChildSchema = Schema.Struct({
+	id: Schema.String,
+	identifier: Schema.String,
+})
+
 const IssueWebhookDataSchema = Schema.Struct({
 	id: Schema.String,
 	identifier: Schema.String,
@@ -52,6 +57,7 @@ const IssueWebhookDataSchema = Schema.Struct({
 	completedAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	canceledAt: Schema.NullOr(Schema.String).pipe(Schema.optional),
 	parentId: Schema.NullOr(Schema.String).pipe(Schema.optional),
+	parent: Schema.NullOr(IssueParentChildSchema).pipe(Schema.optional),
 	teamId: Schema.String,
 	state: WorkflowStateChildSchema,
 	labels: Schema.Array(IssueLabelChildSchema),

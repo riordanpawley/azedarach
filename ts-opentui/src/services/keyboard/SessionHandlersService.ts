@@ -102,7 +102,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					yield* helpers.withQueue(
 						task.id,
 						"start",
-						sessionManager.start({ beadId: task.id, projectPath }).pipe(
+						sessionManager.start({ issueId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
 							Effect.catchAll(helpers.showErrorToast("Failed to start")),
 						),
@@ -187,7 +187,7 @@ NOTE: This worktree has existing work. Check:
 						"start",
 						sessionManager
 							.start({
-								beadId: task.id,
+								issueId: task.id,
 								projectPath,
 								initialPrompt,
 							})
@@ -274,7 +274,7 @@ NOTE: This worktree has existing work. Check:
 						"start",
 						sessionManager
 							.start({
-								beadId: task.id,
+								issueId: task.id,
 								projectPath,
 								initialPrompt,
 								dangerouslySkipPermissions: true,
@@ -301,7 +301,7 @@ NOTE: This worktree has existing work. Check:
 			 * Session is created in the background - user remains in Azedarach TUI.
 			 * Uses Haiku model for faster, cheaper responses.
 			 *
-			 * The session name is `chat-<beadId>` to distinguish from work sessions.
+			 * The session name is `chat-<issueId>` to distinguish from work sessions.
 			 * User can attach to the chat session via Space+a (attach external).
 			 */
 			const chatAboutTask = () =>
@@ -429,7 +429,7 @@ What would you like to discuss?`
 
 					// Check if branch is behind its base branch (epic branch for children, main for others)
 					const branchStatus = yield* prWorkflow
-						.checkBranchBehindBase({ beadId: task.id, projectPath })
+						.checkBranchBehindBase({ issueId: task.id, projectPath })
 						.pipe(
 							Effect.catchAll(() =>
 								Effect.succeed({
@@ -461,7 +461,7 @@ What would you like to discuss?`
 					// Define the merge action (merge base branch, then attach)
 					const onMerge = Effect.gen(function* () {
 						yield* toast.show("info", `Merging ${baseBranch} into branch...`)
-						yield* prWorkflow.mergeBaseIntoBranch({ beadId: task.id, projectPath }).pipe(
+						yield* prWorkflow.mergeBaseIntoBranch({ issueId: task.id, projectPath }).pipe(
 							Effect.tap(() => toast.show("success", "Merged! Attaching...")),
 							Effect.tap(() => boardService.refresh()),
 							Effect.tap(() => doAttach(task.id)),
@@ -634,11 +634,11 @@ What would you like to discuss?`
 						yield* toast.show("info", `Creating worktree for ${task.id}...`)
 
 						// Create worktree (idempotent - returns existing if present)
-						const worktree = yield* worktreeManager
-							.create({
-								beadId: task.id,
-								projectPath,
-							})
+							const worktree = yield* worktreeManager
+								.create({
+									issueId: task.id,
+									projectPath,
+								})
 							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))
 
 						if (!worktree) return

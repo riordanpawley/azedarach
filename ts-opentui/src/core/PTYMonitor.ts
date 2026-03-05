@@ -55,7 +55,7 @@ export interface ExtractedMetrics {
  * Per-session monitoring state
  */
 interface SessionMonitor {
-	readonly beadId: string
+	readonly issueId: string
 	readonly tmuxSessionName: string
 	readonly detector: (chunk: string) => DetectionResult
 	readonly lastOutput: string
@@ -339,11 +339,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 *
 		 * Creates a stateful detector for the session and starts monitoring.
 		 */
-		const registerSession = (beadId: string, tmuxSessionName: string) =>
+		const registerSession = (issueId: string, tmuxSessionName: string) =>
 			Effect.gen(function* () {
 				const detector = yield* stateDetector.createCombinedDetector()
 				const monitor: SessionMonitor = {
-					beadId,
+					issueId,
 					tmuxSessionName,
 					detector,
 					lastOutput: "",
@@ -353,8 +353,8 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					pendingState: null,
 					pendingCount: 0,
 				}
-				yield* Ref.update(monitors, (m) => HashMap.set(m, beadId, monitor))
-				yield* Effect.log(`PTYMonitor: Registered session ${beadId}`)
+				yield* Ref.update(monitors, (m) => HashMap.set(m, issueId, monitor))
+				yield* Effect.log(`PTYMonitor: Registered session ${issueId}`)
 			})
 
 		/**
@@ -362,11 +362,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 *
 		 * Cleans up state and metrics for the session.
 		 */
-		const unregisterSession = (beadId: string) =>
+		const unregisterSession = (issueId: string) =>
 			Effect.gen(function* () {
-				yield* Ref.update(monitors, (m) => HashMap.remove(m, beadId))
-				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.remove(m, beadId))
-				yield* Effect.log(`PTYMonitor: Unregistered session ${beadId}`)
+				yield* Ref.update(monitors, (m) => HashMap.remove(m, issueId))
+				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.remove(m, issueId))
+				yield* Effect.log(`PTYMonitor: Unregistered session ${issueId}`)
 			})
 
 		/**
@@ -375,11 +375,11 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 * Called by TmuxSessionMonitor integration to notify PTYMonitor of authoritative
 		 * state changes. The priority window ensures hooks always take precedence.
 		 */
-		const recordHookSignal = (beadId: string, state: SessionState) =>
+		const recordHookSignal = (issueId: string, state: SessionState) =>
 			Ref.update(monitors, (m) => {
-				const existing = HashMap.get(m, beadId)
+				const existing = HashMap.get(m, issueId)
 				if (existing._tag === "Some") {
-					return HashMap.set(m, beadId, {
+					return HashMap.set(m, issueId, {
 						...existing.value,
 						lastStateFromHook: state,
 						lastHookTime: Date.now(),
@@ -404,7 +404,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 * polls before being committed (Grove's pending_status mechanism).
 		 * High-priority states ("waiting", "error") bypass this and apply immediately.
 		 */
-		const pollSession = (beadId: string, monitor: SessionMonitor) =>
+		const pollSession = (issueId: string, monitor: SessionMonitor) =>
 			Effect.gen(function* () {
 				// Capture recent output from tmux pane
 				const output = yield* tmux.capturePane(monitor.tmuxSessionName, CAPTURE_LINES)
@@ -434,7 +434,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				}
 
 				// Update metrics SubscriptionRef
-				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.set(m, beadId, metrics))
+				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.set(m, issueId, metrics))
 
 				// State aggregation: respect hook priority window
 				const hookRecency = Date.now() - monitor.lastHookTime
@@ -447,7 +447,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				if (!hookHasPriority) {
 					// Get current state from ClaudeSessionManager
 					const currentState = yield* sessionManager
-						.getState(beadId)
+						.getState(issueId)
 						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))
 
 					// Foreground process ground-truth (Grove-inspired):
@@ -459,9 +459,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						foregroundKind === "shell" &&
 						(currentState === "busy" || currentState === "initializing")
 					) {
-						yield* sessionManager.updateState(beadId, "done")
+						yield* sessionManager.updateState(issueId, "done")
 						yield* Effect.log(
-							`PTYMonitor: ${beadId} state ${currentState} → done (shell is foreground process)`,
+							`PTYMonitor: ${issueId} state ${currentState} → done (shell is foreground process)`,
 						)
 						newPendingState = null
 						newPendingCount = 0
@@ -476,9 +476,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 							newPendingCount = 1
 						}
 						if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-							yield* sessionManager.updateState(beadId, "busy")
+							yield* sessionManager.updateState(issueId, "busy")
 							yield* Effect.log(
-								`PTYMonitor: ${beadId} state idle → busy (subprocess '${foregroundCmd}' is foreground)`,
+								`PTYMonitor: ${issueId} state idle → busy (subprocess '${foregroundCmd}' is foreground)`,
 							)
 							newPendingState = null
 							newPendingCount = 0
@@ -494,9 +494,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 								(detectedState === "error" || detectedState === "waiting")
 
 							if (shouldUpdate || currentState !== detectedState) {
-								yield* sessionManager.updateState(beadId, detectedState)
+								yield* sessionManager.updateState(issueId, detectedState)
 								yield* Effect.log(
-									`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY high-priority)`,
+									`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY high-priority)`,
 								)
 							}
 							newPendingState = null
@@ -520,9 +520,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 								}
 
 								if (newPendingCount >= PENDING_STATE_THRESHOLD) {
-									yield* sessionManager.updateState(beadId, detectedState)
+									yield* sessionManager.updateState(issueId, detectedState)
 									yield* Effect.log(
-										`PTYMonitor: ${beadId} state ${currentState} → ${detectedState} (PTY, confirmed after ${newPendingCount} polls)`,
+										`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY, confirmed after ${newPendingCount} polls)`,
 									)
 									newPendingState = null
 									newPendingCount = 0
@@ -538,7 +538,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 
 				// Update monitor state with new output, foreground command, and pending counts
 				yield* Ref.update(monitors, (m) =>
-					HashMap.set(m, beadId, {
+					HashMap.set(m, issueId, {
 						...monitor,
 						lastOutput: output,
 						lastForegroundCmd: foregroundCmd,
@@ -548,7 +548,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				)
 			}).pipe(
 				Effect.catchAll((e) =>
-					Effect.logWarning(`PTYMonitor: Error polling ${beadId}: ${e}`).pipe(Effect.asVoid),
+					Effect.logWarning(`PTYMonitor: Error polling ${issueId}: ${e}`).pipe(Effect.asVoid),
 				),
 			)
 
@@ -565,8 +565,8 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				Effect.gen(function* () {
 					const allMonitors = yield* Ref.get(monitors)
 					yield* Effect.all(
-						Array.from(HashMap.entries(allMonitors)).map(([beadId, monitor]) =>
-							pollSession(beadId, monitor),
+						Array.from(HashMap.entries(allMonitors)).map(([issueId, monitor]) =>
+							pollSession(issueId, monitor),
 						),
 						{ concurrency: 4 },
 					)
@@ -606,10 +606,10 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 			metrics: metricsRef,
 
 			/** Get metrics for a specific session */
-			getMetrics: (beadId: string) =>
+			getMetrics: (issueId: string) =>
 				Effect.gen(function* () {
 					const all = yield* SubscriptionRef.get(metricsRef)
-					const found = HashMap.get(all, beadId)
+					const found = HashMap.get(all, issueId)
 					return found._tag === "Some" ? found.value : undefined
 				}),
 		}

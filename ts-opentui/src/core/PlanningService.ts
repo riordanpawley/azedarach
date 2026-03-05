@@ -91,7 +91,7 @@ export interface PlanningState {
 	readonly reviewPass: number
 	readonly maxReviewPasses: number
 	readonly reviewHistory: ReadonlyArray<ReviewFeedback>
-	readonly createdBeads: ReadonlyArray<Issue>
+	readonly createdIssues: ReadonlyArray<Issue>
 	readonly error: string | null
 }
 
@@ -102,7 +102,7 @@ const initialState: PlanningState = {
 	reviewPass: 0,
 	maxReviewPasses: 5,
 	reviewHistory: [],
-	createdBeads: [],
+	createdIssues: [],
 	error: null,
 }
 
@@ -210,7 +210,7 @@ Output the refined plan in the same JSON format as the original.`
 export class PlanningService extends Effect.Service<PlanningService>()("PlanningService", {
 	dependencies: [BeadsClient.Default],
 	effect: Effect.gen(function* () {
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 		const state = yield* SubscriptionRef.make<PlanningState>(initialState)
 
 		// Get API key from environment
@@ -405,15 +405,15 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 		/**
 		 * Create beads from the finalized plan
 		 */
-		const createBeadsFromPlan = (plan: Plan) =>
+		const createIssuesFromPlan = (plan: Plan) =>
 			Effect.gen(function* () {
 				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "creating_beads" as const }))
 
-				const createdBeads: Issue[] = []
+				const createdIssues: Issue[] = []
 				const idMapping = new Map<string, string>() // Map temp IDs to real bead IDs
 
 				// 1. Create the epic first
-				const epic = yield* beadsClient
+				const epic = yield* issueTrackerClient
 					.create({
 						title: plan.epicTitle,
 						description: plan.epicDescription,
@@ -432,7 +432,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 						),
 					)
 
-				createdBeads.push(epic)
+				createdIssues.push(epic)
 
 				// 2. Create tasks in dependency order
 				// First, create tasks with no dependencies
@@ -441,7 +441,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 
 				// Create tasks without dependencies
 				for (const task of noDeps) {
-					const bead = yield* beadsClient
+					const issue = yield* issueTrackerClient
 						.create({
 							title: task.title,
 							description: task.description,
@@ -462,11 +462,11 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 							),
 						)
 
-					idMapping.set(task.id, bead.id)
-					createdBeads.push(bead)
+					idMapping.set(task.id, issue.id)
+					createdIssues.push(issue)
 
 					// Link to epic as child
-					yield* beadsClient.addDependency(bead.id, epic.id, "parent-child").pipe(
+					yield* issueTrackerClient.addDependency(issue.id, epic.id, "parent-child").pipe(
 						Effect.mapError(
 							(e) =>
 								new PlanningError({
@@ -497,7 +497,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					}
 
 					for (const task of canCreate) {
-						const bead = yield* beadsClient
+						const issue = yield* issueTrackerClient
 							.create({
 								title: task.title,
 								description: task.description,
@@ -518,11 +518,11 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 								),
 							)
 
-						idMapping.set(task.id, bead.id)
-						createdBeads.push(bead)
+						idMapping.set(task.id, issue.id)
+						createdIssues.push(issue)
 
 						// Link to epic as child
-						yield* beadsClient.addDependency(bead.id, epic.id, "parent-child").pipe(
+						yield* issueTrackerClient.addDependency(issue.id, epic.id, "parent-child").pipe(
 							Effect.mapError(
 								(e) =>
 									new PlanningError({
@@ -537,7 +537,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 						for (const depId of task.dependsOn) {
 							const realDepId = idMapping.get(depId)
 							if (realDepId) {
-								yield* beadsClient.addDependency(bead.id, realDepId, "blocks").pipe(
+								yield* issueTrackerClient.addDependency(issue.id, realDepId, "blocks").pipe(
 									Effect.mapError(
 										(e) =>
 											new PlanningError({
@@ -563,10 +563,10 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 				yield* SubscriptionRef.update(state, (s) => ({
 					...s,
 					status: "complete" as const,
-					createdBeads,
+					createdIssues,
 				}))
 
-				return createdBeads
+				return createdIssues
 			})
 
 		/**
@@ -607,7 +607,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 				}
 
 				// 3. Create beads from the final plan
-				return yield* createBeadsFromPlan(plan)
+				return yield* createIssuesFromPlan(plan)
 			}).pipe(
 				Effect.catchAll((error) =>
 					Effect.gen(function* () {
@@ -631,7 +631,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 			generatePlan,
 			reviewPlan,
 			refinePlan,
-			createBeadsFromPlan,
+			createIssuesFromPlan,
 			runPlanningWorkflow,
 			reset,
 		}

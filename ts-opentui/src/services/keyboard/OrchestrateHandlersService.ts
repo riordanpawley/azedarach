@@ -42,7 +42,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const toast = yield* ToastService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-			const beads = yield* BeadsClient
+				const issueTrackerClient = yield* BeadsClient
 			const sessionManager = yield* ClaudeSessionManager
 			const templateService = yield* TemplateService
 
@@ -67,7 +67,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					// Get the task details
-					const task = yield* beads.show(current.taskId).pipe(
+						const task = yield* issueTrackerClient.show(current.taskId).pipe(
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -90,7 +90,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					// Fetch the epic with its children
-					const epicWithChildren = yield* beads.getEpicWithChildren(task.id).pipe(
+						const epicWithChildren = yield* issueTrackerClient.getEpicWithChildren(task.id).pipe(
 						Effect.catchAll((error) =>
 							Effect.gen(function* () {
 								const msg =
@@ -108,7 +108,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					const activeSessions = yield* sessionManager
 						.listActive()
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
-					const activeSessionIds = new Set(activeSessions.map((s) => s.beadId))
+					const activeSessionIds = new Set(activeSessions.map((s) => s.issueId))
 
 					// Map children to OrchestrationTask format (filter out tombstones)
 					const orchestrationTasks: ReadonlyArray<OrchestrationTask> = epicWithChildren.children
@@ -154,8 +154,8 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Load epic details for context injection
-					const epic = yield* beads
-						.show(mode.epicId)
+						const epic = yield* issueTrackerClient
+							.show(mode.epicId)
 						.pipe(Effect.catchAll(() => Effect.succeed(null)))
 
 					// Exit orchestrate mode first (so UI updates)
@@ -167,8 +167,8 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						mode.selectedIds.map((taskId) =>
 							Effect.gen(function* () {
 								// Load task details for template
-								const task = yield* beads
-									.show(taskId)
+									const task = yield* issueTrackerClient
+										.show(taskId)
 									.pipe(Effect.catchAll(() => Effect.succeed(null)))
 
 								// Try to render worker template with context
@@ -194,7 +194,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 								// Start session with rendered template as initial prompt
 								return yield* sessionManager
 									.start({
-										beadId: taskId,
+										issueId: taskId,
 										projectPath,
 										initialPrompt,
 									})

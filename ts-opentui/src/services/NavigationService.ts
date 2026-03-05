@@ -69,7 +69,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const board = yield* BoardService
 		const diagnostics = yield* DiagnosticsService
 		const editor = yield* EditorService
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 
 		// Register with diagnostics - tracks service health
 		yield* diagnostics.trackService("NavigationService", "Cursor navigation and focus management")
@@ -313,7 +313,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const refreshDrillDownCore = (epicId: string) =>
 			Effect.gen(function* () {
 				// Fetch current epic children
-				const children = yield* beadsClient
+				const children = yield* issueTrackerClient
 					.getEpicChildren(epicId)
 					.pipe(Effect.catchAll(() => Effect.succeed([])))
 
@@ -340,7 +340,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				// Fetch details for new children only (incremental)
 				const newDetailResults = yield* Effect.all(
 					addedChildren.map((child: { id: string }) =>
-						beadsClient
+						issueTrackerClient
 							.show(child.id)
 							.pipe(Effect.map((issue) => [child.id, issue] as const))
 							.pipe(Effect.catchAll(() => Effect.succeed(null))),

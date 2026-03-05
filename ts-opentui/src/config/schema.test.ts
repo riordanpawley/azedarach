@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from "bun:test"
 import { Schema } from "effect"
+import { mergeWithDefaults } from "./defaults.js"
 import { AzedarachConfigSchema, CURRENT_CONFIG_VERSION } from "./schema.js"
 
 /**
@@ -19,7 +20,7 @@ describe("AzedarachConfigSchema", () => {
 		it("sets $schema to current for empty config", () => {
 			const result = decodeConfig({})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
-			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.local?.syncEnabled).toBe(false)
 		})
 
 		it("sets $schema to current for v1 config (legacy)", () => {
@@ -92,12 +93,19 @@ describe("AzedarachConfigSchema", () => {
 					syncEnabled: true,
 					command: "linear-cli",
 					team: "ENG",
+					webhooks: {
+						enabled: true,
+						url: "https://example.ngrok.app",
+						port: 9000,
+						events: ["Issue"],
+					},
 				},
 			})
 
 			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
 			expect(result.issueTracker?.linear?.team).toBe("ENG")
 			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+			expect(result.issueTracker?.linear?.webhooks?.url).toBe("https://example.ngrok.app")
 		})
 	})
 
@@ -135,6 +143,62 @@ describe("AzedarachConfigSchema", () => {
 
 			expect(result.issueTracker?.linear?.team).toBe("ENG")
 			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+		})
+
+		it("accepts nested linear webhook config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					linear: {
+						team: "AZE",
+						webhooks: {
+							enabled: true,
+							transport: "cli",
+							url: "https://example.ngrok.app",
+							port: 9010,
+							events: ["Issue", "Comment"],
+							secret: "lin_wh_secret",
+						},
+					},
+				},
+			})
+
+			expect(result.issueTracker?.linear?.team).toBe("AZE")
+			expect(result.issueTracker?.linear?.webhooks?.enabled).toBe(true)
+			expect(result.issueTracker?.linear?.webhooks?.transport).toBe("cli")
+			expect(result.issueTracker?.linear?.webhooks?.url).toBe("https://example.ngrok.app")
+			expect(result.issueTracker?.linear?.webhooks?.port).toBe(9010)
+			expect(result.issueTracker?.linear?.webhooks?.events).toEqual(["Issue", "Comment"])
+			expect(result.issueTracker?.linear?.webhooks?.secret).toBe("lin_wh_secret")
+		})
+
+		it("accepts nested local config", () => {
+			const result = decodeConfig({
+				issueTracker: {
+					local: {
+						syncEnabled: false,
+					},
+				},
+			})
+
+			expect(result.issueTracker?.local?.syncEnabled).toBe(false)
+		})
+
+		it("uses sdk webhook transport by default", () => {
+			const decoded = decodeConfig({
+				issueTracker: {
+					linear: {
+						team: "AZE",
+						webhooks: {
+							enabled: true,
+						},
+					},
+				},
+			})
+			const result = mergeWithDefaults(decoded)
+
+			expect("linear" in result.issueTracker && result.issueTracker.linear.webhooks.transport).toBe(
+				"sdk",
+			)
 		})
 
 		it("rejects nested issueTracker with multiple backend blocks", () => {

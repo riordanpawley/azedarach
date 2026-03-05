@@ -17,9 +17,9 @@ import { appRuntime } from "./runtime.js"
  * Create a PR for a bead's worktree branch
  *
  * Usage: const createPR = useAtomSet(createPRAtom, { mode: "promise" })
- *        const pr = await createPR(beadId)
+ *        const pr = await createPR(issueId)
  */
-export const createPRAtom = appRuntime.fn((beadId: string) =>
+export const createPRAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
 		const projectService = yield* ProjectService
@@ -28,7 +28,7 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		return yield* prWorkflow.createPR({
-			beadId,
+			issueId,
 			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),
@@ -38,9 +38,9 @@ export const createPRAtom = appRuntime.fn((beadId: string) =>
  * Cleanup worktree and branches after PR merge or abandonment
  *
  * Usage: const cleanup = useAtomSet(cleanupAtom, { mode: "promise" })
- *        await cleanup(beadId)
+ *        await cleanup(issueId)
  */
-export const cleanupAtom = appRuntime.fn((beadId: string) =>
+export const cleanupAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
 		const projectService = yield* ProjectService
@@ -49,7 +49,7 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		yield* prWorkflow.cleanup({
-			beadId,
+			issueId,
 			projectPath,
 		})
 	}).pipe(Effect.catchAll(Effect.logError)),
@@ -62,9 +62,9 @@ export const cleanupAtom = appRuntime.fn((beadId: string) =>
  * Ideal for completed work that doesn't need review.
  *
  * Usage: const mergeToMain = useAtomSet(mergeToMainAtom, { mode: "promise" })
- *        await mergeToMain(beadId)
+ *        await mergeToMain(issueId)
  */
-export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
+export const mergeToMainAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
 		const prWorkflow = yield* PRWorkflow
 		const projectService = yield* ProjectService
@@ -73,7 +73,7 @@ export const mergeToMainAtom = appRuntime.fn((beadId: string) =>
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
 		yield* prWorkflow.mergeToMain({
-			beadId,
+			issueId,
 			projectPath,
 		})
 	}).pipe(Effect.tapError(Effect.logError)),

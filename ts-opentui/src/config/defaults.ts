@@ -158,8 +158,8 @@ export const DEFAULT_CONFIG = {
 		system: false,
 	},
 	issueTracker: {
-		beads_rust: {
-			syncEnabled: true,
+		local: {
+			syncEnabled: false,
 		},
 	},
 	network: {
@@ -194,7 +194,7 @@ export const DEFAULT_CONFIG = {
 		preCompact: {
 			/**
 			 * PreCompact hook is enabled by default.
-			 * Updates the bead with session progress before context compaction,
+			 * Updates the issue with session progress before context compaction,
 			 * ensuring work-in-progress survives auto-compaction.
 			 */
 			enabled: true,
@@ -299,6 +299,19 @@ export interface ResolvedConfig {
 					command: string
 					team: string | undefined
 					project: string | undefined
+					webhooks: {
+						enabled: boolean
+						transport: "sdk" | "cli"
+						url: string | undefined
+						port: number
+						events: readonly string[]
+						secret: string | undefined
+					}
+				}
+		  }
+		| {
+				local: {
+					syncEnabled: boolean
 				}
 		  }
 	network: {
@@ -356,6 +369,15 @@ export interface ResolvedConfig {
 const mergeIssueTrackerWithDefaults = (
 	issueTracker: AzedarachConfig["issueTracker"],
 ): ResolvedConfig["issueTracker"] => {
+	const defaultLinearWebhooks = {
+		enabled: true,
+		transport: "sdk" as const,
+		url: undefined,
+		port: 9000,
+		events: ["Issue"] as readonly string[],
+		secret: undefined as string | undefined,
+	}
+
 	if (issueTracker !== undefined) {
 		if (issueTracker.beads !== undefined) {
 			return {
@@ -374,12 +396,29 @@ const mergeIssueTrackerWithDefaults = (
 		}
 
 		if (issueTracker.linear !== undefined) {
+			const configuredWebhooks = issueTracker.linear.webhooks
 			return {
 				linear: {
 					syncEnabled: issueTracker.linear.syncEnabled ?? true,
 					command: issueTracker.linear.command ?? "linear-cli",
 					team: issueTracker.linear.team,
 					project: issueTracker.linear.project,
+					webhooks: {
+						enabled: configuredWebhooks?.enabled ?? defaultLinearWebhooks.enabled,
+						transport: configuredWebhooks?.transport ?? defaultLinearWebhooks.transport,
+						url: configuredWebhooks?.url ?? defaultLinearWebhooks.url,
+						port: configuredWebhooks?.port ?? defaultLinearWebhooks.port,
+						events: configuredWebhooks?.events ?? defaultLinearWebhooks.events,
+						secret: configuredWebhooks?.secret ?? defaultLinearWebhooks.secret,
+					},
+				},
+			}
+		}
+
+		if (issueTracker.local !== undefined) {
+			return {
+				local: {
+					syncEnabled: issueTracker.local.syncEnabled ?? false,
 				},
 			}
 		}

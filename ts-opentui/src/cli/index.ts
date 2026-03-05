@@ -161,8 +161,8 @@ const validateBeadsDatabase = (projectDir: string) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
-		if ("linear" in resolvedConfig.issueTracker) {
-			yield* Console.log("Using linear issue tracker (no .beads directory required)")
+		if ("linear" in resolvedConfig.issueTracker || "local" in resolvedConfig.issueTracker) {
+			yield* Console.log("Using non-beads issue tracker (no .beads directory required)")
 			return
 		}
 
@@ -242,13 +242,13 @@ const startHandler = (args: {
 		// Start the session using ClaudeSessionManager (provided by cliLayer)
 		const sessionManager = yield* ClaudeSessionManager
 		const session = yield* sessionManager.start({
-			beadId: args.issueId,
+			issueId: args.issueId,
 			projectPath: cwd,
 		})
 
 		// Claim the bead with session assignee
-		const beadsClient = yield* BeadsClient
-		yield* beadsClient
+		const issueTrackerClient = yield* BeadsClient
+		yield* issueTrackerClient
 			.update(
 				args.issueId,
 				{
@@ -865,7 +865,7 @@ const projectAddHandler = (args: {
 			return yield* Effect.fail(new Error(`Path does not exist: ${absolutePath}`))
 		}
 
-		let tracker: "bd" | "br" | "linear" = "br"
+		let tracker: "bd" | "br" | "linear" | "local" = "local"
 		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
 		const hasLocalConfig = yield* fs.exists(localConfigPath).pipe(Effect.catchAll(() => Effect.succeed(false)))
 		if (hasLocalConfig) {
@@ -880,7 +880,12 @@ const projectAddHandler = (args: {
 					}
 					const issueTrackerValue = parsed.issueTracker
 
-					if (issueTrackerValue === "bd" || issueTrackerValue === "br" || issueTrackerValue === "linear") {
+					if (
+						issueTrackerValue === "bd" ||
+						issueTrackerValue === "br" ||
+						issueTrackerValue === "linear" ||
+						issueTrackerValue === "local"
+					) {
 						return issueTrackerValue
 					}
 
@@ -888,6 +893,7 @@ const projectAddHandler = (args: {
 						if ("beads" in issueTrackerValue) return "bd"
 						if ("beads_rust" in issueTrackerValue) return "br"
 						if ("linear" in issueTrackerValue) return "linear"
+						if ("local" in issueTrackerValue) return "local"
 					}
 
 					return undefined
@@ -898,7 +904,7 @@ const projectAddHandler = (args: {
 		}
 
 		const beadsPath = pathService.join(absolutePath, ".beads")
-		if (tracker !== "linear") {
+		if (tracker === "bd" || tracker === "br") {
 			const beadsExists = yield* fs.exists(beadsPath)
 			if (!beadsExists) {
 				return yield* Effect.fail(
@@ -916,7 +922,7 @@ const projectAddHandler = (args: {
 			yield* Console.log(`Adding project: ${projectName}`)
 			yield* Console.log(`  Path: ${absolutePath}`)
 			yield* Console.log(`  Tracker: ${tracker}`)
-			if (tracker !== "linear") {
+			if (tracker === "bd" || tracker === "br") {
 				yield* Console.log(`  Beads: ${beadsPath}`)
 			}
 		}
@@ -926,7 +932,7 @@ const projectAddHandler = (args: {
 		yield* projectService.addProject({
 			name: projectName,
 			path: absolutePath,
-			beadsPath: tracker === "linear" ? undefined : beadsPath,
+			beadsPath: tracker === "bd" || tracker === "br" ? beadsPath : undefined,
 		})
 
 		yield* Console.log(`Project '${projectName}' added successfully.`)

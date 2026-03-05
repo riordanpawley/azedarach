@@ -380,7 +380,7 @@ export const App = () => {
 			case "orchestrate":
 				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
 			case "mergeSelect":
-				return `merge ${mode.sourceBeadId} into...`
+				return `merge ${mode.sourceIssueId} into...`
 		}
 	}, [mode, searchQuery, selectedIds])
 

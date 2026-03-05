@@ -47,8 +47,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const nav = yield* NavigationService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-			const beadsClient = yield* BeadsClient
-			const beadEditor = yield* BeadEditorService
+				const issueTrackerClient = yield* BeadsClient
+				const issueEditor = yield* BeadEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
 
@@ -81,7 +81,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* toast.show("error", `Fork failed: ${formatted}`)
 				})
 
-			const doDeleteBead = (taskId: string, hasSession: boolean) =>
+				const deleteIssueAndCleanup = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
 					if (hasSession) {
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
@@ -89,7 +89,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 							.cleanup({
 								issueId: taskId,
 								projectPath: process.cwd(),
-								closeBead: false,
+								closeIssue: false,
 							})
 							.pipe(
 								Effect.catchAll((error) => {
@@ -112,12 +112,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* nav.initialize()
 				})
 
-			const editBead = () =>
-				Effect.gen(function* () {
-					const task = yield* helpers.getActionTargetTask()
-					if (!task) return
+				const editIssue = () =>
+					Effect.gen(function* () {
+						const task = yield* helpers.getActionTargetTask()
+						if (!task) return
 
-					yield* beadEditor.editBead(task).pipe(
+						yield* issueEditor.editBead(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
 						Effect.tap(() => syncTaskFromBackend(task.id)),
 						Effect.catchAll((error) => {
@@ -137,16 +137,16 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-			const createBead = () =>
-				Effect.gen(function* () {
-					yield* beadEditor.createBead().pipe(
+				const createIssue = () =>
+					Effect.gen(function* () {
+						yield* issueEditor.createBead().pipe(
 						Effect.flatMap((result) =>
 							Effect.gen(function* () {
 								const epicId = yield* nav.getDrillDownEpic()
 								let parentEpicId: string | null | undefined = undefined
 
 								if (epicId) {
-									yield* beadsClient.addDependency(result.id, epicId, "parent-child").pipe(
+										yield* issueTrackerClient.addDependency(result.id, epicId, "parent-child").pipe(
 										Effect.tap(() => {
 											parentEpicId = epicId
 											return toast.show("success", `Created ${result.id} (added to epic)`)
@@ -188,8 +188,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-			const deleteBead = () =>
-				Effect.gen(function* () {
+				const deleteIssue = () =>
+					Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
@@ -198,12 +198,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						? "\n\nThis will also remove the worktree and session."
 						: ""
 
-					yield* overlay.push({
-						_tag: "confirm",
-						message: `Permanently delete bead ${task.id}?${sessionWarning}`,
-						onConfirm: doDeleteBead(task.id, hasSession),
+						yield* overlay.push({
+							_tag: "confirm",
+							message: `Permanently delete bead ${task.id}?${sessionWarning}`,
+							onConfirm: deleteIssueAndCleanup(task.id, hasSession),
+						})
 					})
-				})
 
 			const moveTasksToColumn = (direction: "left" | "right") =>
 				Effect.gen(function* () {
@@ -264,8 +264,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 				})
 
-			const forkBead = () =>
-				Effect.gen(function* () {
+				const forkIssue = () =>
+					Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
@@ -287,7 +287,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					if (task.issue_type !== "epic") {
 						yield* toast.show("info", `Converting ${task.id} to epic...`)
-						yield* beadsClient.update(task.id, { type: "epic" })
+							yield* issueTrackerClient.update(task.id, { type: "epic" })
 						yield* board.patchTaskFromMutation(task.id, {
 							issue_type: "epic",
 							updated_at: new Date().toISOString(),
@@ -340,16 +340,16 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					})
 				}).pipe(Effect.catchAll(handleForkError))
 
-			return {
-				editBead,
-				createBead,
-				deleteBead,
-				moveTasksToColumn,
-				forkBead,
-				forkFromCurrent,
-				forkWithNewEpic,
-				forkUnderParent,
-			}
+				return {
+					editIssue,
+					createIssue,
+					deleteIssue,
+					moveTasksToColumn,
+					forkIssue,
+					forkFromCurrent,
+					forkWithNewEpic,
+					forkUnderParent,
+				}
 		}),
 	},
 ) {}

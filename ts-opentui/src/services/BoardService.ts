@@ -303,7 +303,6 @@ interface LinearWebhookListenerConfig {
 type BoardRefreshReason =
 	| "default"
 	| "mutation"
-	| "webhook-insufficient"
 	| "initial-load"
 	| "project-switch"
 
@@ -349,7 +348,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		ToastService.Default,
 	],
 	scoped: Effect.gen(function* () {
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 		const sessionManager = yield* ClaudeSessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
@@ -382,10 +381,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
-		const refreshFailureToastRef = yield* Ref.make<{
-			readonly message: string
-			readonly timestamp: number
-		} | null>(null)
+			const refreshFailureToastRef = yield* Ref.make<{
+				readonly message: string
+				readonly timestamp: number
+			} | null>(null)
+			const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 
 		// ====================================================================
 		// Per-Project State Management
@@ -682,7 +682,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						thresholdMs: 200,
 						details: projectPath ?? "default",
 					},
-					beadsClient
+					issueTrackerClient
 						.list(undefined, projectPath, {
 							pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
 							sortBy: "updated_at",
@@ -784,7 +784,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 											thresholdMs: 200,
 											details: `count=${issuesWithDeps.length}`,
 										},
-										beadsClient
+										issueTrackerClient
 											.showMultiple(
 												issuesWithDeps.map((i) => i.id),
 												projectPath,
@@ -841,7 +841,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								.pipe(Effect.withSpan("worktrees.list"), Effect.catchAll(() => Effect.succeed([]))),
 						)
 					: []
-				const worktreeBeadIds = new Set(worktreeList.map((wt) => wt.issueId))
+					const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -855,7 +855,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const parentEpicId = parentEpicMap.get(issue.id)
 
 							// Check if worktree exists (using pre-fetched Set - instant lookup)
-							const hasWorktree = worktreeBeadIds.has(issue.id)
+								const hasWorktree = worktreeIssueIds.has(issue.id)
 
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
@@ -1103,7 +1103,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
-			beadsClient.show(taskId).pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
+			issueTrackerClient.show(taskId).pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
 
 		const refresh = () =>
 			diagnostics
@@ -1193,7 +1193,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 									"Beads database out of sync, auto-recovering with 'bd sync --import-only'...",
 								)
 								const projectPath = yield* projectService.getCurrentPath()
-								yield* beadsClient
+								yield* issueTrackerClient
 									.syncImportOnly(projectPath ?? undefined)
 									.pipe(
 										Effect.catchAll((syncError) =>
@@ -1280,15 +1280,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				options: BoardRefreshOptions | undefined,
 			): boolean => {
 				if (!localRefreshOnly) return false
-				if (options?.forceRemote === true) return false
-				switch (options?.reason ?? "default") {
-					case "mutation":
-					case "webhook-insufficient":
-					case "initial-load":
-					case "project-switch":
-						return false
-					default:
-						return true
+					if (options?.forceRemote === true) return false
+					switch (options?.reason ?? "default") {
+						case "mutation":
+						case "initial-load":
+						case "project-switch":
+							return false
+						default:
+							return true
 				}
 			}
 
@@ -1333,17 +1332,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			return normalized === "remove" || normalized === "delete" || normalized === "archive"
 		}
 
-		const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
-			Effect.gen(function* () {
-				const payload = event.data
-				const issueId = payload.identifier
-				const status = normalizeLinearWebhookStatus(payload.state.name)
-				const labels = payload.labels.map((label) => label.name)
-				const priority = normalizeLinearWebhookPriority(payload.priority)
+			const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
+				Effect.gen(function* () {
+					const payload = event.data
+					const issueId = payload.identifier
+					const status = normalizeLinearWebhookStatus(payload.state.name)
+					const labels = payload.labels.map((label) => label.name)
+					const priority = normalizeLinearWebhookPriority(payload.priority)
 
-				const currentTasks = yield* SubscriptionRef.get(tasks)
-				const existingTask = currentTasks.find((task) => task.id === issueId)
-				const withRemoved = currentTasks.filter((task) => task.id !== issueId)
+					yield* Ref.update(linearIdentifierByEntityIdRef, (current) => {
+						const next = new Map(current)
+						next.set(payload.id, issueId)
+						if (payload.parent && payload.parent.id.trim().length > 0) {
+							next.set(payload.parent.id, payload.parent.identifier)
+						}
+						return next
+					})
+					const identifierByEntityId = yield* Ref.get(linearIdentifierByEntityIdRef)
+
+					const currentTasks = yield* SubscriptionRef.get(tasks)
+					const existingTask = currentTasks.find((task) => task.id === issueId)
+					const withRemoved = currentTasks.filter((task) => task.id !== issueId)
 
 				if (isRemoveAction(event.action)) {
 					yield* SubscriptionRef.set(tasks, withRemoved)
@@ -1351,36 +1360,28 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* updateFilteredTasks()
 					yield* saveCurrentToMap()
 					return
-				}
+					}
 
-				let nextParentEpicId = existingTask?.parentEpicId
-				let requiresRemoteRefresh = false
-				if (payload.parentId === null) {
-					nextParentEpicId = undefined
-				} else if (typeof payload.parentId === "string" && payload.parentId.trim().length > 0) {
-					const parentId = payload.parentId.trim()
-					if (existingTask?.parentEpicId === parentId) {
-						nextParentEpicId = parentId
-					} else {
-						const parentTask = currentTasks.find((task) => task.id === parentId)
-						if (parentTask?.issue_type === "epic") {
-							nextParentEpicId = parentId
+					let nextParentEpicId = existingTask?.parentEpicId
+					if (payload.parentId === null || payload.parent === null) {
+						nextParentEpicId = undefined
+					} else if (payload.parent && payload.parent.identifier.trim().length > 0) {
+						nextParentEpicId = payload.parent.identifier.trim()
+					} else if (typeof payload.parentId === "string" && payload.parentId.trim().length > 0) {
+						const parentEntityId = payload.parentId.trim()
+						const mappedParentIdentifier = identifierByEntityId.get(parentEntityId)
+						if (mappedParentIdentifier !== undefined) {
+							nextParentEpicId = mappedParentIdentifier
+						} else if (currentTasks.some((task) => task.id === parentEntityId)) {
+							nextParentEpicId = parentEntityId
+						} else if (existingTask?.parentEpicId !== undefined) {
+							nextParentEpicId = existingTask.parentEpicId
 						} else {
-							requiresRemoteRefresh = true
+							yield* Effect.logDebug(
+								`Linear webhook parent mapping unavailable for ${issueId}: parentId=${parentEntityId}`,
+							)
 						}
 					}
-				}
-
-				if (requiresRemoteRefresh) {
-					yield* Effect.logWarning(
-						`Linear webhook payload for ${issueId} missing parent epic metadata, forcing remote refresh`,
-					)
-					yield* requestRefresh({
-						reason: "webhook-insufficient",
-						forceRemote: true,
-					})
-					return
-				}
 
 				const inferredType = inferLinearIssueType(
 					labels,

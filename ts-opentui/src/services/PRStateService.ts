@@ -137,11 +137,11 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 		 *
 		 * Fetches in parallel with bounded concurrency to avoid overwhelming gh CLI.
 		 *
-		 * @param prInfos - Array of { prUrl, beadId } tuples
+		 * @param prInfos - Array of { prUrl, issueId } tuples
 		 * @param projectPath - Path to git repo
-		 * @returns Map of beadId -> PRState
+		 * @returns Map of issueId -> PRState
 		 */
-		const getPRStates = (prInfos: { prUrl: string; beadId: string }[], projectPath: string) =>
+		const getPRStates = (prInfos: { prUrl: string; issueId: string }[], projectPath: string) =>
 			Effect.gen(function* () {
 				if (prInfos.length === 0) {
 					return new Map<string, PRState>()
@@ -155,17 +155,17 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 
 				// Fetch all PR states in parallel (bounded concurrency)
 				const results = yield* Effect.all(
-					prInfos.map(({ prUrl, beadId }) =>
-						getPRState(prUrl, projectPath).pipe(Effect.map((state) => [beadId, state] as const)),
+					prInfos.map(({ prUrl, issueId }) =>
+						getPRState(prUrl, projectPath).pipe(Effect.map((state) => [issueId, state] as const)),
 					),
 					{ concurrency: 5 },
 				)
 
 				// Build result map, filtering out undefined states
 				const stateMap = new Map<string, PRState>()
-				for (const [beadId, state] of results) {
+				for (const [issueId, state] of results) {
 					if (state !== undefined) {
-						stateMap.set(beadId, state)
+						stateMap.set(issueId, state)
 					}
 				}
 

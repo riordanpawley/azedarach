@@ -152,7 +152,7 @@ export type EditorMode =
 	  }
 	| {
 			readonly _tag: "mergeSelect"
-			readonly sourceBeadId: string
+			readonly sourceIssueId: string
 	  }
 
 /**
@@ -792,14 +792,14 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			 * Enter merge select mode for selecting a target bead to merge into.
 			 * Called when 'M' is pressed in action mode for a bead with commits.
 			 *
-			 * @param sourceBeadId - The bead whose work will be merged into the target
+			 * @param sourceIssueId - The bead whose work will be merged into the target
 			 */
-			enterMergeSelect: (sourceBeadId: string) =>
+			enterMergeSelect: (sourceIssueId: string) =>
 				SubscriptionRef.set(
 					mode,
 					Data.struct({
 						_tag: "mergeSelect" as const,
-						sourceBeadId,
+						sourceIssueId,
 					}),
 				),
 
@@ -810,7 +810,7 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 			getMergeSelectSourceId: (): Effect.Effect<string | null> =>
 				Effect.gen(function* () {
 					const m = yield* SubscriptionRef.get(mode)
-					return m._tag === "mergeSelect" ? m.sourceBeadId : null
+					return m._tag === "mergeSelect" ? m.sourceIssueId : null
 				}),
 
 			/**

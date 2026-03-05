@@ -33,7 +33,7 @@ const formatUptime = (startedAt: Date | undefined): Effect.Effect<string, never,
 // CLI Arguments and Options
 // ============================================================================
 
-const beadIdArg = Args.text({ name: "bead-id" }).pipe(
+const issueIdArg = Args.text({ name: "bead-id" }).pipe(
 	Args.withDescription("Beads issue ID (e.g., az-2qy)"),
 )
 
@@ -209,8 +209,8 @@ const devStatusHandler = (args: {
 		const devServerService = yield* DevServerService
 
 		// Get all servers for this bead
-		const beadServers = yield* devServerService.getIssueServers(args.issueId)
-		const serverList = Array.from(HashMap.values(beadServers))
+		const issueServers = yield* devServerService.getIssueServers(args.issueId)
+		const serverList = Array.from(HashMap.values(issueServers))
 
 		if (serverList.length === 0) {
 			if (args.json) {
@@ -273,8 +273,8 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 
 		// Collect running servers across all beads
 		const runningServers: Array<{ issueId: string; server: DevServerState }> = []
-		for (const [issueId, beadServers] of HashMap.entries(allServers)) {
-			for (const server of HashMap.values(beadServers)) {
+		for (const [issueId, issueServers] of HashMap.entries(allServers)) {
+			for (const server of HashMap.values(issueServers)) {
 				if (server.status === "running") {
 					runningServers.push({ issueId, server })
 				}
@@ -326,7 +326,7 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 const devStartCommand = Command.make(
 	"start",
 	{
-		issueId: beadIdArg,
+		issueId: issueIdArg,
 		server: serverOption,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
@@ -338,7 +338,7 @@ const devStartCommand = Command.make(
 const devStopCommand = Command.make(
 	"stop",
 	{
-		issueId: beadIdArg,
+		issueId: issueIdArg,
 		server: serverOption,
 		verbose: verboseOption,
 		json: jsonOption,
@@ -349,7 +349,7 @@ const devStopCommand = Command.make(
 const devRestartCommand = Command.make(
 	"restart",
 	{
-		issueId: beadIdArg,
+		issueId: issueIdArg,
 		server: serverOption,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
@@ -361,7 +361,7 @@ const devRestartCommand = Command.make(
 const devStatusCommand = Command.make(
 	"status",
 	{
-		issueId: beadIdArg,
+		issueId: issueIdArg,
 		verbose: verboseOption,
 		json: jsonOption,
 	},

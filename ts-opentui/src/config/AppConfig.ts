@@ -435,7 +435,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			if ("beads_rust" in config.issueTracker) {
 				return config.issueTracker.beads_rust.syncEnabled
 			}
-			return config.issueTracker.linear.syncEnabled
+			if ("linear" in config.issueTracker) {
+				return config.issueTracker.linear.syncEnabled
+			}
+			return config.issueTracker.local.syncEnabled
 		}
 
 		// Get initial project path from ProjectService

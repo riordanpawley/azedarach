@@ -1133,23 +1133,39 @@ const buildListCommandArgs = (
 /**
  * Parse JSON output with schema validation
  */
+const parseUnknownJsonEither = Schema.decodeUnknownEither(Schema.parseJson(Schema.Unknown))
+
+const isParseableJsonPayload = (value: string): boolean =>
+	parseUnknownJsonEither(value)._tag === "Right"
+
 export const extractJsonPayload = (output: string): string => {
 	const trimmed = output.trim()
 	if (!trimmed) return trimmed
-	if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed
+	if (isParseableJsonPayload(trimmed)) {
+		return trimmed
+	}
 
-	const firstObject = trimmed.indexOf("{")
-	const firstArray = trimmed.indexOf("[")
-	const startCandidates = [firstObject, firstArray].filter((idx) => idx >= 0)
-	if (startCandidates.length === 0) return trimmed
+	for (let index = 0; index < trimmed.length; index += 1) {
+		const char = trimmed[index]
+		if (char !== "{" && char !== "[") continue
 
-	const start = Math.min(...startCandidates)
-	const sliced = trimmed.slice(start)
-	const lastObject = sliced.lastIndexOf("}")
-	const lastArray = sliced.lastIndexOf("]")
-	const end = Math.max(lastObject, lastArray)
+		const sliced = trimmed.slice(index)
+		if (isParseableJsonPayload(sliced)) {
+			return sliced
+		}
 
-	return end >= 0 ? sliced.slice(0, end + 1) : sliced
+		const lastObject = sliced.lastIndexOf("}")
+		const lastArray = sliced.lastIndexOf("]")
+		const end = Math.max(lastObject, lastArray)
+		if (end >= 0) {
+			const candidate = sliced.slice(0, end + 1)
+			if (isParseableJsonPayload(candidate)) {
+				return candidate
+			}
+		}
+	}
+
+	return trimmed
 }
 
 const parseJson = <A, I, R>(
@@ -2133,20 +2149,24 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			}
 		}
 
-		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
-		const linearApiKeyOption =
-			"linear" in startupConfig.issueTracker
-				? yield* Config.option(Config.string("LINEAR_API_KEY"))
-				: Option.none<string>()
+			const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+			const linearBackend =
+				"linear" in startupConfig.issueTracker
+					? startupConfig.issueTracker.linear
+					: undefined
+			const linearApiKeyOption =
+				linearBackend !== undefined
+					? yield* Config.option(Config.string("LINEAR_API_KEY"))
+					: Option.none<string>()
 		const issueDbClient: IssueDbClient =
 			"beads" in startupConfig.issueTracker
 				? createBdIssueDbClient("bd")
 				: "beads_rust" in startupConfig.issueTracker
 					? createBrIssueDbClient("br")
-					: Option.isSome(linearApiKeyOption)
-						? createLinearIssueDbClient({
-								linearClient: yield* linearSdk.getClient(linearApiKeyOption.value).pipe(
-									Effect.mapError(
+						: Option.isSome(linearApiKeyOption) && linearBackend !== undefined
+							? createLinearIssueDbClient({
+									linearClient: yield* linearSdk.getClient(linearApiKeyOption.value).pipe(
+										Effect.mapError(
 										(error) =>
 											new BeadsError({
 												message: error.message,
@@ -2154,8 +2174,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 											}),
 									),
 								),
-								defaultTeam: startupConfig.issueTracker.linear.team,
-							})
+									defaultTeam: linearBackend.team,
+								})
 						: yield* Effect.fail(
 								new BeadsError({
 									message:

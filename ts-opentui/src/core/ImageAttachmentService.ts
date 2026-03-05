@@ -91,7 +91,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
-			const beadsClient = yield* BeadsClient
+			const issueTrackerClient = yield* BeadsClient
 			const projectService = yield* ProjectService
 
 			/**
@@ -260,7 +260,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					const attachmentLine = `📎 [${attachment.filename}](${relativePath}) (${source}, ${timestamp})`
 
 					// Get current issue to read existing notes
-					const issue = yield* beadsClient
+					const issue = yield* issueTrackerClient
 						.show(issueId)
 						.pipe(Effect.catchAll(() => Effect.succeed(null)))
 
@@ -270,7 +270,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					const newNotes = `${existingNotes}${separator}${attachmentLine}`
 
 					// Update the bead with new notes
-					yield* beadsClient
+					yield* issueTrackerClient
 						.update(issueId, { notes: newNotes })
 						.pipe(
 							Effect.catchAll((error) =>
@@ -289,7 +289,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					// Get current issue to read existing notes
-					const issue = yield* beadsClient
+					const issue = yield* issueTrackerClient
 						.show(issueId)
 						.pipe(Effect.catchAll(() => Effect.succeed(null)))
 
@@ -308,7 +308,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					const newNotes = filteredLines.join("\n").trim()
 
 					// Update the bead with cleaned notes
-					yield* beadsClient
+					yield* issueTrackerClient
 						.update(issueId, { notes: newNotes || "" })
 						.pipe(
 							Effect.catchAll((error) =>

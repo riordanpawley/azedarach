@@ -483,7 +483,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									task.id,
 									"cleanup",
 									prWorkflow
-										.cleanup({ issueId: task.id, projectPath, closeBead: false })
+										.cleanup({ issueId: task.id, projectPath, closeIssue: false })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
 								)
 							}),
@@ -519,7 +519,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									task.id,
 									"cleanup",
 									prWorkflow
-										.cleanup({ issueId: task.id, projectPath, closeBead: true })
+										.cleanup({ issueId: task.id, projectPath, closeIssue: true })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
 								)
 							}),
@@ -626,7 +626,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Get effective base branch (epic branch for children, main for others)
 				const { baseBranch: effectiveBaseBranch } = yield* prWorkflow
-					.getEffectiveBaseBranchForBead({
+					.getEffectiveBaseBranchForIssue({
 						issueId: task.id,
 						projectPath,
 					})
@@ -710,9 +710,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				yield* toast.show("info", `Merging ${sourceId} into ${targetId}...`)
 
 				yield* prWorkflow
-					.mergeBeadIntoBead({
-						sourceBeadId: sourceId,
-						targetBeadId: targetId,
+					.mergeIssueIntoIssue({
+						sourceIssueId: sourceId,
+						targetIssueId: targetId,
 						projectPath,
 					})
 					.pipe(

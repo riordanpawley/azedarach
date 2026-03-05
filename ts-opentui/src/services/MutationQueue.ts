@@ -8,7 +8,7 @@ import { ToastService } from "./ToastService.js"
 /**
  * Fields that can be updated on a bead - matches BeadsClient.update signature
  */
-export interface BeadUpdateFields {
+export interface IssueUpdateFields {
 	readonly status?: string
 	readonly notes?: string
 	readonly priority?: number
@@ -36,7 +36,7 @@ export type Mutation =
 	| {
 			_tag: "Update"
 			id: string
-			fields: BeadUpdateFields
+			fields: IssueUpdateFields
 			rollback: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 	  }
 
@@ -49,7 +49,7 @@ export interface QueuedMutation {
 export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueue", {
 	dependencies: [BeadsClient.Default, ToastService.Default, DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 		const toast = yield* ToastService
 		const diagnostics = yield* DiagnosticsService
 
@@ -77,8 +77,8 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 		const executeMutation = (mutation: Mutation) => {
 			switch (mutation._tag) {
 				case "Update":
-					// BeadUpdateFields is structurally compatible with BeadsClient.update's fields parameter
-					return beadsClient.update(mutation.id, {
+					// IssueUpdateFields is structurally compatible with BeadsClient.update's fields parameter
+					return issueTrackerClient.update(mutation.id, {
 						status: mutation.fields.status,
 						notes: mutation.fields.notes,
 						priority: mutation.fields.priority,
@@ -91,9 +91,9 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 						labels: mutation.fields.labels ? [...mutation.fields.labels] : undefined,
 					})
 				case "Delete":
-					return beadsClient.delete(mutation.id)
+					return issueTrackerClient.delete(mutation.id)
 				case "Move":
-					return beadsClient.update(mutation.id, { status: mutation.status })
+					return issueTrackerClient.update(mutation.id, { status: mutation.status })
 			}
 		}
 

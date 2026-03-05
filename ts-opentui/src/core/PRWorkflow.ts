@@ -39,13 +39,13 @@ import { WorktreeSessionService } from "./WorktreeSessionService.js"
  * Lock path for beads sync operations.
  * Using a fixed path ensures all processes use the same lock.
  */
-const BEADS_SYNC_LOCK_PATH = "/tmp/azedarach-beads-sync.lock"
+const ISSUE_TRACKER_SYNC_LOCK_PATH = "/tmp/azedarach-beads-sync.lock"
 
 /**
  * Timeout for acquiring the beads sync lock.
  * Should be long enough to allow slow syncs to complete.
  */
-const BEADS_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
+const ISSUE_TRACKER_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
 
 // ============================================================================
 // Type Definitions
@@ -67,7 +67,7 @@ export interface PR {
  * Options for creating a PR
  */
 export interface CreatePROptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 	/** Override the auto-generated title */
 	readonly title?: string
@@ -83,24 +83,24 @@ export interface CreatePROptions {
  * Options for cleanup
  */
 export interface CleanupOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 	/** Delete remote branch (default: true) */
 	readonly deleteRemoteBranch?: boolean
 	/** Close the bead issue (default: true) */
-	readonly closeBead?: boolean
+	readonly closeIssue?: boolean
 }
 
 /**
  * Options for merging to main
  */
 export interface MergeToMainOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 	/** Push to origin after merge (default: true) */
 	readonly pushToOrigin?: boolean
 	/** Close the bead issue after successful merge (default: false) */
-	readonly closeBead?: boolean
+	readonly closeIssue?: boolean
 	/**
 	 * Keep the worktree and branch after merge (default: true)
 	 *
@@ -116,7 +116,7 @@ export interface MergeToMainOptions {
  * Options for updating worktree from base branch
  */
 export interface UpdateFromBaseOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 	/** Base branch to merge from (default: main) */
 	readonly baseBranch?: string
@@ -174,7 +174,7 @@ const GHPRCommentsResponseSchema = Schema.Struct({
  * Options for getting PR comments
  */
 export interface GetPRCommentsOptions {
-	readonly beadId: string
+	readonly issueId: string
 	readonly projectPath: string
 }
 
@@ -202,7 +202,7 @@ export interface MergeConflictCheck {
 export class PRError extends Data.TaggedError("PRError")<{
 	readonly message: string
 	readonly command?: string
-	readonly beadId?: string
+	readonly issueId?: string
 }> {}
 
 /**
@@ -216,7 +216,7 @@ export class GHCLIError extends Data.TaggedError("GHCLIError")<{
  * Error when PR is not found
  */
 export class PRNotFoundError extends Data.TaggedError("PRNotFoundError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly branch: string
 }> {}
 
@@ -224,7 +224,7 @@ export class PRNotFoundError extends Data.TaggedError("PRNotFoundError")<{
  * Error when merge has conflicts
  */
 export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly branch: string
 	readonly message: string
 }> {}
@@ -234,7 +234,7 @@ export class MergeConflictError extends Data.TaggedError("MergeConflictError")<{
  * This indicates the merged code has type errors that need fixing
  */
 export class TypeCheckError extends Data.TaggedError("TypeCheckError")<{
-	readonly beadId: string
+	readonly issueId: string
 	readonly message: string
 	readonly output: string
 }> {}
@@ -269,7 +269,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * const pr = yield* prWorkflow.createPR({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
@@ -297,13 +297,13 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * const pr = yield* prWorkflow.getPR({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
 	 */
 	readonly getPR: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<
 		Option.Option<PR>,
@@ -324,7 +324,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * yield* prWorkflow.cleanup({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
@@ -362,7 +362,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * yield* prWorkflow.mergeToMain({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
@@ -396,7 +396,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * const check = yield* prWorkflow.checkMergeConflicts({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * if (check.hasConflictRisk) {
@@ -406,7 +406,7 @@ export interface PRWorkflowService {
 	 * ```
 	 */
 	readonly checkMergeConflicts: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
 
@@ -419,13 +419,13 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * yield* prWorkflow.abortMerge({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
 	 */
 	readonly abortMerge: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<void, PRError | GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
 
@@ -439,7 +439,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * const result = yield* prWorkflow.checkUncommittedChanges({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * if (result.hasUncommittedChanges) {
@@ -448,7 +448,7 @@ export interface PRWorkflowService {
 	 * ```
 	 */
 	readonly checkUncommittedChanges: (options: {
-		beadId: string
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<
 		{ hasUncommittedChanges: boolean; changedFiles: readonly string[] },
@@ -471,7 +471,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * yield* prWorkflow.updateFromBase({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
@@ -493,7 +493,7 @@ export interface PRWorkflowService {
 	 * @example
 	 * ```ts
 	 * const comments = yield* prWorkflow.getPRComments({
-	 *   beadId: "az-05y",
+	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * if (comments.length > 0) {
@@ -517,16 +517,16 @@ export interface PRWorkflowService {
 	 *
 	 * @example
 	 * ```ts
-	 * const baseBranch = yield* prWorkflow.getEffectiveBaseBranchForBead({
-	 *   beadId: "az-task",
+	 * const baseBranch = yield* prWorkflow.getEffectiveBaseBranchForIssue({
+	 *   issueId: "az-task",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * // Returns "az-epic" if az-task is child of az-epic
 	 * // Returns "main" or "origin/main" otherwise
 	 * ```
 	 */
-	readonly getEffectiveBaseBranchForBead: (options: {
-		beadId: string
+	readonly getEffectiveBaseBranchForIssue: (options: {
+		issueId: string
 		projectPath: string
 	}) => Effect.Effect<
 		{ baseBranch: string; parentEpic: Issue | undefined },
@@ -552,16 +552,16 @@ export interface PRWorkflowService {
 	 *
 	 * @example
 	 * ```ts
-	 * yield* prWorkflow.mergeBeadIntoBead({
-	 *   sourceBeadId: "az-05y",
-	 *   targetBeadId: "az-06z",
+	 * yield* prWorkflow.mergeIssueIntoIssue({
+	 *   sourceIssueId: "az-05y",
+	 *   targetIssueId: "az-06z",
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * ```
 	 */
-	readonly mergeBeadIntoBead: (options: {
-		sourceBeadId: string
-		targetBeadId: string
+	readonly mergeIssueIntoIssue: (options: {
+		sourceIssueId: string
+		targetIssueId: string
 		projectPath: string
 	}) => Effect.Effect<
 		void,
@@ -583,13 +583,13 @@ export interface PRWorkflowService {
 	 *
 	 * @example
 	 * ```ts
-	 * const { targetBranch, isEpicChild } = yield* prWorkflow.getTargetBranch(beadId)
+	 * const { targetBranch, isEpicChild } = yield* prWorkflow.getTargetBranch(issueId)
 	 * // targetBranch: "main" or "az-epic-123"
 	 * // isEpicChild: true if merging to parent epic
 	 * ```
 	 */
 	readonly getTargetBranch: (
-		beadId: string,
+		issueId: string,
 	) => Effect.Effect<
 		{ targetBranch: string; isEpicChild: boolean },
 		BeadsError | NotFoundError | ParseError,
@@ -681,33 +681,33 @@ const runGH = (
 /**
  * Generate PR title from bead
  */
-const generatePRTitle = (bead: Issue): string => {
-	const typePrefix = bead.issue_type ? `[${bead.issue_type}] ` : ""
-	return `${typePrefix}${bead.title} (${bead.id})`
+const generateIssuePRTitle = (issue: Issue): string => {
+	const typePrefix = issue.issue_type ? `[${issue.issue_type}] ` : ""
+	return `${typePrefix}${issue.title} (${issue.id})`
 }
 
 /**
  * Generate PR body from bead
  */
-const generatePRBody = (bead: Issue): string => {
+const generateIssuePRBody = (issue: Issue): string => {
 	const lines: string[] = []
 
 	lines.push(`## Summary`)
 	lines.push(``)
-	lines.push(`Resolves ${bead.id}: ${bead.title}`)
+	lines.push(`Resolves ${issue.id}: ${issue.title}`)
 	lines.push(``)
 
-	if (bead.description) {
+	if (issue.description) {
 		lines.push(`## Description`)
 		lines.push(``)
-		lines.push(bead.description)
+		lines.push(issue.description)
 		lines.push(``)
 	}
 
-	if (bead.design) {
+	if (issue.design) {
 		lines.push(`## Design Notes`)
 		lines.push(``)
-		lines.push(bead.design)
+		lines.push(issue.design)
 		lines.push(``)
 	}
 
@@ -749,7 +749,7 @@ const parsePRJson = (json: string): PR => {
  * const program = Effect.gen(function* () {
  *   const prWorkflow = yield* PRWorkflow
  *   const pr = yield* prWorkflow.createPR({
- *     beadId: "az-123",
+ *     issueId: "az-123",
  *     projectPath: process.cwd()
  *   })
  *   return pr
@@ -771,7 +771,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
-		const beadsClient = yield* BeadsClient
+		const issueTrackerClient = yield* BeadsClient
 		const sessionManager = yield* ClaudeSessionManager
 		const tmuxService = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
@@ -793,9 +793,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				// Acquire: get the lock (null if failed)
 				fileLockManager
 					.acquireLock({
-						path: BEADS_SYNC_LOCK_PATH,
+						path: ISSUE_TRACKER_SYNC_LOCK_PATH,
 						type: "exclusive",
-						timeout: BEADS_SYNC_LOCK_TIMEOUT,
+						timeout: ISSUE_TRACKER_SYNC_LOCK_TIMEOUT,
 					})
 					.pipe(Effect.option),
 				// Use: run the effect
@@ -809,8 +809,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		 * Internal helper to get effective base branch for a bead.
 		 * Uses parent epic branch if child of epic, otherwise uses configured base branch.
 		 */
-		const getBeadBaseBranch = (
-			beadId: string,
+		const getIssueBaseBranch = (
+			issueId: string,
 			explicitBaseBranch?: string,
 		): Effect.Effect<
 			{ baseBranch: string; parentEpic: Issue | undefined },
@@ -822,7 +822,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					return { baseBranch: explicitBaseBranch, parentEpic: undefined }
 				}
 				const gitConfig = yield* getGitConfig()
-				const parentEpic = yield* beadsClient.getParentEpic(beadId)
+				const parentEpic = yield* issueTrackerClient.getParentEpic(issueId)
 				if (parentEpic) {
 					// Child of epic: target the epic branch
 					return { baseBranch: parentEpic.id, parentEpic }
@@ -838,13 +838,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						source: "PRWorkflow",
 						name: "createPR",
 						thresholdMs: 1000,
-						details: `beadId=${options.beadId}`,
+						details: `issueId=${options.issueId}`,
 					},
 					Effect.gen(function* () {
-						const { beadId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
+						const { issueId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
 
 					// Determine effective base branch (epic branch for children, main otherwise)
-					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId, explicitBaseBranch)
+					const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, explicitBaseBranch)
 
 					// Check if PR creation is enabled (config + network)
 					const prStatus = yield* offlineService.isPREnabled()
@@ -857,39 +857,39 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					// Get bead info for PR title/body
-					const bead = yield* beadsClient.show(beadId)
+						// Get issue info for PR title/body
+						const issue = yield* issueTrackerClient.show(issueId)
 
 					// Log context for debugging
 					if (parentEpic) {
-						yield* Effect.log(`Creating PR for ${beadId} targeting epic branch ${parentEpic.id}`)
+						yield* Effect.log(`Creating PR for ${issueId} targeting epic branch ${parentEpic.id}`)
 					}
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
 
 					// Sync beads changes (with lock to prevent races)
 					yield* withSyncLock(
-						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+						issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
 					)
 
 					// Stage and commit any changes
 					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
 
-					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
-						Effect.catchAll(() => Effect.void),
-					) // Ignore if nothing to commit
+						yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path).pipe(
+							Effect.catchAll(() => Effect.void),
+						) // Ignore if nothing to commit
 
 					// Push branch to origin
-					yield* runGit(["push", "-u", "origin", beadId], worktree.path).pipe(
+					yield* runGit(["push", "-u", "origin", issueId], worktree.path).pipe(
 						Effect.mapError(
 							(e) =>
 								new GitError({
@@ -900,8 +900,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					)
 
 					// Generate PR title and body
-					const title = options.title ?? generatePRTitle(bead)
-					const body = options.body ?? generatePRBody(bead)
+						const title = options.title ?? generateIssuePRTitle(issue)
+						const body = options.body ?? generateIssuePRBody(issue)
 
 					// Create PR via gh CLI
 					const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]
@@ -918,8 +918,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0
 
 					// Link PR back to bead
-					yield* beadsClient
-						.update(beadId, {
+					yield* issueTrackerClient
+						.update(issueId, {
 							notes: `PR: ${prUrl}`,
 						})
 						.pipe(Effect.catchAll(() => Effect.void))
@@ -930,20 +930,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						title,
 						state: "open" as const,
 						draft,
-						branch: beadId,
+						branch: issueId,
 					}
 				}).pipe(Effect.withSpan("pr.create")),
 			),
 
-			getPR: (options: { beadId: string; projectPath: string }) =>
+			getPR: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 					const gitConfig = yield* getGitConfig()
 					const _baseBranch = gitConfig.baseBranch
 
 					// Try to get PR info for the branch
 					const result = yield* runGH(
-						["pr", "view", beadId, "--json", "number,url,title,state,isDraft,headRefName"],
+						["pr", "view", issueId, "--json", "number,url,title,state,isDraft,headRefName"],
 						projectPath,
 					).pipe(
 						Effect.map((output) => Option.some(parsePRJson(output))),
@@ -959,25 +959,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						source: "PRWorkflow",
 						name: "cleanup",
 						thresholdMs: 800,
-						details: `beadId=${options.beadId}`,
+						details: `issueId=${options.issueId}`,
 					},
 					Effect.gen(function* () {
-						const { beadId, projectPath, deleteRemoteBranch = true, closeBead = true } = options
+						const { issueId, projectPath, deleteRemoteBranch = true, closeIssue = true } = options
 
 					// 1. Stop any running session (ignore errors)
 					// First try ClaudeSessionManager.stop (handles beads sync from worktree)
-					yield* sessionManager.stop(beadId).pipe(Effect.catchAll(() => Effect.void))
+					yield* sessionManager.stop(issueId).pipe(Effect.catchAll(() => Effect.void))
 					// Also directly kill tmux session in case it wasn't tracked in memory
-					yield* tmuxService.killSession(beadId).pipe(Effect.catchAll(() => Effect.void))
+					yield* tmuxService.killSession(issueId).pipe(Effect.catchAll(() => Effect.void))
 
 					// 2. Delete worktree
-					yield* worktreeManager.remove({ beadId, projectPath })
+					yield* worktreeManager.remove({ issueId: issueId, projectPath })
 
 					// 3. Delete remote branch (optional, only if online)
 					if (deleteRemoteBranch) {
 						const pushStatus = yield* offlineService.isGitPushEnabled()
 						if (pushStatus.enabled) {
-							yield* runGit(["push", "origin", "--delete", beadId], projectPath).pipe(
+							yield* runGit(["push", "origin", "--delete", issueId], projectPath).pipe(
 								Effect.catchAll(() => Effect.void), // Ignore if already deleted
 							)
 						}
@@ -985,26 +985,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					// 4. Delete local branch
-					yield* runGit(["branch", "-D", beadId], projectPath).pipe(
+					yield* runGit(["branch", "-D", issueId], projectPath).pipe(
 						Effect.catchAll(() => Effect.void), // Ignore if already deleted
 					)
 
 					// 5. Close bead issue (optional) and sync to persist the change
-					if (closeBead) {
-						yield* beadsClient
-							.update(beadId, { status: "closed" })
+					if (closeIssue) {
+						yield* issueTrackerClient
+							.update(issueId, { status: "closed" })
 							.pipe(Effect.catchAll(() => Effect.void))
 
 						// Clean up images for the closed bead (temporary debugging images)
 						// This prevents unbounded growth of .beads/images/ directory
 						yield* imageAttachmentService
-							.cleanupImagesForIssue(beadId)
+							.cleanupImagesForIssue(issueId)
 							.pipe(Effect.catchAll(() => Effect.void))
 
 						// Sync the closed status to JSONL and commit it
 						// This fixes az-o5m9: merged tasks being left in in_progress status
 						yield* withSyncLock(
-							beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+							issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
 						)
 					}
 				}).pipe(Effect.withSpan("pr.cleanup")),
@@ -1025,24 +1025,24 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						source: "PRWorkflow",
 						name: "mergeToMain",
 						thresholdMs: 1000,
-						details: `beadId=${options.beadId}`,
+						details: `issueId=${options.issueId}`,
 					},
 					Effect.gen(function* () {
 						const gitConfig = yield* getGitConfig()
 					const {
-						beadId,
+						issueId,
 						projectPath,
 						pushToOrigin = gitConfig.pushEnabled,
-						closeBead = false,
+						closeIssue = false,
 						keepWorktree = true,
 					} = options
 
 					// Determine effective base branch (epic branch for children, main for epics/standalone)
-					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId)
+					const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId)
 
 					// Log context for debugging
 					if (parentEpic) {
-						yield* Effect.log(`Merging ${beadId} into epic branch ${parentEpic.id} (not main)`)
+						yield* Effect.log(`Merging ${issueId} into epic branch ${parentEpic.id} (not main)`)
 					}
 
 					// If merging into a parent epic, we need to merge IN the epic's worktree
@@ -1050,28 +1050,31 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// If epic has no worktree, create one first.
 					let mergeDir = projectPath
 					if (parentEpic) {
-						let epicWorktree = yield* worktreeManager.get({ beadId: parentEpic.id, projectPath })
+						let epicWorktree = yield* worktreeManager.get({
+							issueId: parentEpic.id,
+							projectPath,
+						})
 						if (!epicWorktree) {
 							yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
 							epicWorktree = yield* worktreeManager.create({
-								beadId: parentEpic.id,
+								issueId: parentEpic.id,
 								projectPath,
 							})
 						}
 						mergeDir = epicWorktree.path
-						yield* Effect.log(`Merging ${beadId} in epic worktree ${mergeDir}`)
+						yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
 					}
 
-					// Get bead info for merge commit message
-					const bead = yield* beadsClient.show(beadId)
+						// Get issue info for merge commit message
+						const issue = yield* issueTrackerClient.show(issueId)
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
@@ -1080,10 +1083,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// When keepWorktree=true, we want to keep iterating in the same session
 					if (!keepWorktree) {
 						yield* sessionManager
-							.stop(beadId)
+							.stop(issueId)
 							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
 						yield* tmuxService
-							.killSession(beadId)
+							.killSession(issueId)
 							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)))
 					}
 
@@ -1091,9 +1094,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					yield* runGit(["add", "-A"], worktree.path).pipe(
 						Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
 					)
-					yield* runGit(["commit", "-m", `Complete ${beadId}: ${bead.title}`], worktree.path).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
-					)
+						yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path).pipe(
+							Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
+						)
 
 					// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
 					// We only care about conflicts in actual code files, not .beads/
@@ -1104,7 +1107,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"--write-tree",
 							"--name-only",
 							baseBranch,
-							beadId,
+							issueId,
 						).pipe(Command.workingDirectory(mergeDir))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
@@ -1119,7 +1122,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
 							mergeDir,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -1148,14 +1151,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start merge in worktree so Claude can resolve
 						yield* runGit(
-							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 							worktree.path,
 						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						const windowName = "merge"
-						const sessionName = getIssueSessionName(beadId)
+						const sessionName = getIssueSessionName(issueId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -1179,8 +1182,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						return yield* Effect.fail(
 							new MergeConflictError({
-								beadId,
-								branch: beadId,
+								issueId,
+								branch: issueId,
 								message,
 							}),
 						)
@@ -1203,23 +1206,23 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
 					// This ensures .beads/issues.jsonl from base branch is preserved during merge
-					const mergeMessage = `Merge ${beadId}: ${bead.title}`
+						const mergeMessage = `Merge ${issueId}: ${issue.title}`
 					yield* runGit(
-						["merge", beadId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+						["merge", issueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
 						mergeDir,
 					).pipe(
 						Effect.mapError((e) => {
 							// If merge still fails, report conflict or error
 							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
 								return new MergeConflictError({
-									beadId,
-									branch: beadId,
-									message: `Merge conflict. Resolve manually: git checkout ${baseBranch} && git merge ${beadId}`,
+									issueId,
+									branch: issueId,
+									message: `Merge conflict. Resolve manually: git checkout ${baseBranch} && git merge ${issueId}`,
 								})
 							}
 							return new GitError({
 								message: `Merge failed: ${e.message}`,
-								command: `git merge ${beadId} --no-ff`,
+								command: `git merge ${issueId} --no-ff`,
 								stderr: e.stderr,
 							})
 						}),
@@ -1230,7 +1233,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					yield* withSyncLock(
 						Effect.gen(function* () {
 							// Import beads from the merged JSONL
-							yield* beadsClient
+							yield* issueTrackerClient
 								.syncImportOnly(mergeDir)
 								.pipe(
 									Effect.catchAll((e) =>
@@ -1239,7 +1242,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								)
 
 							// Recover any tombstoned issues
-							yield* beadsClient
+							yield* issueTrackerClient
 								.recoverTombstones(mergeDir)
 								.pipe(
 									Effect.catchAll((e) =>
@@ -1248,7 +1251,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								)
 
 							// Full sync to commit any bead changes
-							yield* beadsClient
+							yield* issueTrackerClient
 								.sync(mergeDir)
 								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
 						}),
@@ -1303,7 +1306,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 										// Commit the fixes
 										yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
 										yield* runGit(
-											["commit", "-m", `fix: auto-fix after merging ${beadId}`],
+											["commit", "-m", `fix: auto-fix after merging ${issueId}`],
 											mergeDir,
 										).pipe(Effect.catchAll(() => Effect.void))
 
@@ -1318,7 +1321,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							// Commit any partial fixes
 							yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
 							yield* runGit(
-								["commit", "-m", `wip: partial fix after merging ${beadId}`],
+								["commit", "-m", `wip: partial fix after merging ${issueId}`],
 								mergeDir,
 							).pipe(Effect.catchAll(() => Effect.void))
 
@@ -1329,7 +1332,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 								yield* sessionManager
 									.start({
-										beadId,
+										issueId,
 										projectPath,
 										initialPrompt: fixPrompt,
 									})
@@ -1342,7 +1345,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							return yield* Effect.fail(
 								new TypeCheckError({
-									beadId,
+									issueId,
 									message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
 									output: lastResult.output,
 								}),
@@ -1361,37 +1364,37 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						})
 
 						// 9. Remove worktree directory
-						yield* worktreeManager.remove({ beadId, projectPath })
+						yield* worktreeManager.remove({ issueId: issueId, projectPath })
 
 						// 10. Delete local branch
-						yield* runGit(["branch", "-d", beadId], projectPath).pipe(
+						yield* runGit(["branch", "-d", issueId], projectPath).pipe(
 							Effect.catchAll(() => Effect.void),
 						)
 					}
 
 					// 11. Close bead issue (and children if epic merging to main)
-					if (closeBead) {
-						yield* beadsClient
-							.update(beadId, { status: "closed" })
+					if (closeIssue) {
+						yield* issueTrackerClient
+							.update(issueId, { status: "closed" })
 							.pipe(
-								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${beadId}: ${e}`)),
+								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${issueId}: ${e}`)),
 							)
 
 						// Clean up images for the closed bead (temporary debugging images)
 						yield* imageAttachmentService
-							.cleanupImagesForIssue(beadId)
+							.cleanupImagesForIssue(issueId)
 							.pipe(Effect.catchAll(() => Effect.void))
 
 						// If this is an epic being merged to main (not to another epic branch),
 						// also close all its child tasks
-						if (bead.issue_type === "epic" && !parentEpic) {
-							const children = yield* beadsClient
-								.getEpicChildren(beadId)
+							if (issue.issue_type === "epic" && !parentEpic) {
+							const children = yield* issueTrackerClient
+								.getEpicChildren(issueId)
 								.pipe(Effect.catchAll(() => Effect.succeed([])))
 
 							for (const child of children) {
 								if (child.status !== "closed") {
-									yield* beadsClient.update(child.id, { status: "closed" }).pipe(
+									yield* issueTrackerClient.update(child.id, { status: "closed" }).pipe(
 										Effect.tap(() =>
 											Effect.log(`Closed child task ${child.id} as part of epic merge`),
 										),
@@ -1407,12 +1410,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}
 
 							if (children.length > 0) {
-								yield* Effect.log(`Closed ${children.length} child task(s) for epic ${beadId}`)
+								yield* Effect.log(`Closed ${children.length} child task(s) for epic ${issueId}`)
 							}
 						}
 
 						yield* withSyncLock(
-							beadsClient
+							issueTrackerClient
 								.sync(mergeDir)
 								.pipe(
 									Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
@@ -1440,10 +1443,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				}).pipe(Effect.withSpan("pr.mergeToMain")),
 			),
 
-			checkMergeConflicts: (options: { beadId: string; projectPath: string }) =>
+			checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
-					const { baseBranch: effectiveBaseBranch } = yield* getBeadBaseBranch(beadId)
+					const { issueId, projectPath } = options
+					const { baseBranch: effectiveBaseBranch } = yield* getIssueBaseBranch(issueId)
 
 					// Use git merge-tree to perform an actual 3-way merge in memory
 					// This detects real line-level conflicts, not just file overlap
@@ -1453,7 +1456,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						"merge-tree",
 						"--write-tree",
 						effectiveBaseBranch,
-						beadId,
+						issueId,
 					).pipe(Command.workingDirectory(projectPath))
 
 					const exitCode = yield* Command.exitCode(mergeTreeCommand).pipe(
@@ -1475,7 +1478,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								"--name-only",
 								"--no-messages",
 								effectiveBaseBranch,
-								beadId,
+								issueId,
 							],
 							projectPath,
 						).pipe(Effect.catchAll(() => Effect.succeed("")))
@@ -1488,7 +1491,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// Get file change counts for informational purposes
 					const mergeBase = yield* runGit(
-						["merge-base", effectiveBaseBranch, beadId],
+						["merge-base", effectiveBaseBranch, issueId],
 						projectPath,
 					).pipe(
 						Effect.map((output) => output.trim()),
@@ -1500,7 +1503,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					if (mergeBase) {
 						const branchOutput = yield* runGit(
-							["diff", "--name-only", `${mergeBase}..${beadId}`],
+							["diff", "--name-only", `${mergeBase}..${issueId}`],
 							projectPath,
 						).pipe(
 							Effect.map(
@@ -1538,17 +1541,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					} satisfies MergeConflictCheck
 				}),
 
-			abortMerge: (options: { beadId: string; projectPath: string }) =>
+			abortMerge: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
@@ -1566,17 +1569,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					)
 				}),
 
-			checkUncommittedChanges: (options: { beadId: string; projectPath: string }) =>
+			checkUncommittedChanges: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
@@ -1612,22 +1615,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						source: "PRWorkflow",
 						name: "updateFromBase",
 						thresholdMs: 1000,
-						details: `beadId=${options.beadId}`,
+						details: `issueId=${options.issueId}`,
 					},
 					Effect.gen(function* () {
 						const gitConfig = yield* getGitConfig()
-					const { beadId, projectPath, baseBranch: explicitBaseBranch } = options
+					const { issueId, projectPath, baseBranch: explicitBaseBranch } = options
 
 					// Determine effective base branch (epic branch for children, main for epics/standalone)
-					const { baseBranch } = yield* getBeadBaseBranch(beadId, explicitBaseBranch)
+					const { baseBranch } = yield* getIssueBaseBranch(issueId, explicitBaseBranch)
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
@@ -1656,7 +1659,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"--write-tree",
 							"--name-only",
 							baseBranch,
-							beadId,
+							issueId,
 						).pipe(Command.workingDirectory(worktree.path))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
@@ -1671,7 +1674,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, beadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
 							worktree.path,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -1700,14 +1703,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start merge in worktree (will result in conflict state)
 						yield* runGit(
-							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 							worktree.path,
 						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
 
 						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
 						const windowName = "merge"
-						const sessionName = getIssueSessionName(beadId)
+						const sessionName = getIssueSessionName(issueId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -1731,8 +1734,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						return yield* Effect.fail(
 							new MergeConflictError({
-								beadId,
-								branch: beadId,
+								issueId,
+								branch: issueId,
 								message,
 							}),
 						)
@@ -1740,7 +1743,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// No conflicts - safe to merge local base branch (fast-forward if possible)
 					yield* runGit(
-						["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+						["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 						worktree.path,
 					).pipe(
 						Effect.mapError(
@@ -1755,18 +1758,18 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// Sync beads after merge to pick up any bead changes from main
 					yield* withSyncLock(
-						beadsClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+						issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
 					)
 				}).pipe(Effect.withSpan("pr.updateFromBase")),
 			),
 
 			getPRComments: (options: GetPRCommentsOptions) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 
 					// First check if a PR exists for this branch
 					const prExists = yield* runGH(
-						["pr", "view", beadId, "--json", "number"],
+						["pr", "view", issueId, "--json", "number"],
 						projectPath,
 					).pipe(
 						Effect.map(() => true),
@@ -1779,7 +1782,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 					// Fetch PR comments (both issue comments and review comments)
 					const commentsJson = yield* runGH(
-						["pr", "view", beadId, "--json", "comments,reviews"],
+						["pr", "view", issueId, "--json", "comments,reviews"],
 						projectPath,
 					).pipe(Effect.catchAll(() => Effect.succeed("{}")))
 
@@ -1827,15 +1830,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			 * For epic children, the base branch is the parent epic's branch.
 			 * Returns { behind, ahead, baseBranch } so caller can show informative message.
 			 */
-			checkBranchBehindBase: (options: { beadId: string; projectPath: string }) =>
+			checkBranchBehindBase: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 
 					// Get effective base branch (parent epic for children, main for others)
-					const { baseBranch } = yield* getBeadBaseBranch(beadId)
+					const { baseBranch } = yield* getIssueBaseBranch(issueId)
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						// No worktree = not behind (task has no session)
 						return { behind: 0, ahead: 0, baseBranch }
@@ -1873,21 +1876,21 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
 			 */
-			mergeBaseIntoBranch: (options: { beadId: string; projectPath: string }) =>
+			mergeBaseIntoBranch: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId, projectPath } = options
+					const { issueId, projectPath } = options
 					const gitConfig = yield* getGitConfig()
 
 					// Get effective base branch (parent epic for children, main for others)
-					const { baseBranch } = yield* getBeadBaseBranch(beadId)
+					const { baseBranch } = yield* getIssueBaseBranch(issueId)
 
 					// Get worktree info
-					const worktree = yield* worktreeManager.get({ beadId, projectPath })
+					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for ${beadId}`,
-								beadId,
+								message: `No worktree found for ${issueId}`,
+								issueId,
 							}),
 						)
 					}
@@ -1974,7 +1977,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start merge in worktree so conflict markers are created
 						yield* runGit(
-							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${beadId}`],
+							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 							worktree.path,
 						).pipe(
 							Effect.catchAll(() => Effect.void), // Will fail with conflicts, that's expected
@@ -1983,7 +1986,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						const windowName = "merge"
-						const sessionName = getIssueSessionName(beadId)
+						const sessionName = getIssueSessionName(issueId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -2007,8 +2010,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						return yield* Effect.fail(
 							new MergeConflictError({
-								beadId,
-								branch: beadId,
+								issueId,
+								branch: issueId,
 								message,
 							}),
 						)
@@ -2035,17 +2038,17 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 					}
 
-					yield* Effect.log(`Successfully merged ${baseBranch} into ${beadId}`)
+					yield* Effect.log(`Successfully merged ${baseBranch} into ${issueId}`)
 				}),
 
-			getEffectiveBaseBranchForBead: (options: { beadId: string; projectPath: string }) =>
+			getEffectiveBaseBranchForIssue: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
-					const { beadId } = options
+					const { issueId } = options
 					const gitConfig = yield* getGitConfig()
 					const workflowMode = yield* appConfig.getWorkflowMode()
 
 					// Check if this bead has a parent epic
-					const parentEpic = yield* beadsClient.getParentEpic(beadId)
+					const parentEpic = yield* issueTrackerClient.getParentEpic(issueId)
 
 					if (parentEpic) {
 						// Child of epic: target the epic branch
@@ -2061,44 +2064,47 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					return { baseBranch, parentEpic: undefined }
 				}),
 
-			mergeBeadIntoBead: (options: {
-				sourceBeadId: string
-				targetBeadId: string
+			mergeIssueIntoIssue: (options: {
+				sourceIssueId: string
+				targetIssueId: string
 				projectPath: string
 			}) =>
 				diagnostics.measure(
 					{
 						source: "PRWorkflow",
-						name: "mergeBeadIntoBead",
+						name: "mergeIssueIntoIssue",
 						thresholdMs: 1000,
-						details: `source=${options.sourceBeadId} target=${options.targetBeadId}`,
+						details: `source=${options.sourceIssueId} target=${options.targetIssueId}`,
 					},
 					Effect.gen(function* () {
-						const { sourceBeadId, targetBeadId, projectPath } = options
+						const { sourceIssueId, targetIssueId, projectPath } = options
 
 					// Validate source and target are different
-					if (sourceBeadId === targetBeadId) {
+					if (sourceIssueId === targetIssueId) {
 						return yield* Effect.fail(
 							new PRError({
 								message: "Cannot merge bead into itself",
-								beadId: sourceBeadId,
+								issueId: sourceIssueId,
 							}),
 						)
 					}
 
 					// Get source bead info
-					const sourceBead = yield* beadsClient.show(sourceBeadId)
+					const sourceIssue = yield* issueTrackerClient.show(sourceIssueId)
 
 					// Validate target bead exists (will throw NotFoundError if not)
-					yield* beadsClient.show(targetBeadId)
+					yield* issueTrackerClient.show(targetIssueId)
 
 					// Check if source has a worktree/branch
-					const sourceWorktree = yield* worktreeManager.get({ beadId: sourceBeadId, projectPath })
+					const sourceWorktree = yield* worktreeManager.get({
+						issueId: sourceIssueId,
+						projectPath,
+					})
 					if (!sourceWorktree) {
 						return yield* Effect.fail(
 							new PRError({
-								message: `No worktree found for source bead ${sourceBeadId}`,
-								beadId: sourceBeadId,
+								message: `No worktree found for source bead ${sourceIssueId}`,
+								issueId: sourceIssueId,
 							}),
 						)
 					}
@@ -2110,23 +2116,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						),
 					)
 					yield* runGit(
-						["commit", "-m", `Work in progress: ${sourceBeadId}: ${sourceBead.title}`],
+						["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
 						sourceWorktree.path,
 					).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
 
 					// Ensure target has a worktree (create if needed)
-					let targetWorktree = yield* worktreeManager.get({ beadId: targetBeadId, projectPath })
+					let targetWorktree = yield* worktreeManager.get({
+						issueId: targetIssueId,
+						projectPath,
+					})
 					if (!targetWorktree) {
-						yield* Effect.log(`Creating worktree for target bead ${targetBeadId}`)
+						yield* Effect.log(`Creating worktree for target bead ${targetIssueId}`)
 						targetWorktree = yield* worktreeManager.create({
-							beadId: targetBeadId,
+							issueId: targetIssueId,
 							projectPath,
 						})
 					}
 
 					// Fetch source branch into target worktree
 					// We use the project path since that's where the git repo is
-					yield* runGit(["fetch", ".", sourceBeadId], targetWorktree.path).pipe(
+					yield* runGit(["fetch", ".", sourceIssueId], targetWorktree.path).pipe(
 						Effect.catchAll((e) =>
 							Effect.logWarning(`Failed to fetch source branch: ${e.message}`).pipe(
 								Effect.map(() => undefined),
@@ -2142,7 +2151,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							"--write-tree",
 							"--name-only",
 							"HEAD",
-							sourceBeadId,
+							sourceIssueId,
 						).pipe(Command.workingDirectory(targetWorktree.path))
 
 						const exitCode = yield* Command.exitCode(command).pipe(
@@ -2157,7 +2166,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Get conflicting files
 						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", sourceBeadId],
+							["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", sourceIssueId],
 							targetWorktree.path,
 						).pipe(
 							Effect.catchAll((e) =>
@@ -2186,15 +2195,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Start merge in target worktree so Claude can resolve
 						yield* runGit(
-							["merge", sourceBeadId, "-m", `Merge ${sourceBeadId} into ${targetBeadId}`],
+							["merge", sourceIssueId, "-m", `Merge ${sourceIssueId} into ${targetIssueId}`],
 							targetWorktree.path,
 						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
 
-						const resolvePrompt = `There are merge conflicts when merging ${sourceBeadId} into ${targetBeadId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+						const resolvePrompt = `There are merge conflicts when merging ${sourceIssueId} into ${targetIssueId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
 						// Start Claude session in a new "merge" window within the target's session
 						const windowName = "merge"
-						const sessionName = getIssueSessionName(targetBeadId)
+						const sessionName = getIssueSessionName(targetIssueId)
 
 						const cliTool = yield* appConfig.getCliTool()
 						const sessionConfig = yield* appConfig.getSessionConfig()
@@ -2214,34 +2223,34 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							command,
 						})
 
-						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetBeadId} to resolve. Retry merge after resolution.`
+						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetIssueId} to resolve. Retry merge after resolution.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({
-								beadId: sourceBeadId,
-								branch: sourceBeadId,
+								issueId: sourceIssueId,
+								branch: sourceIssueId,
 								message,
 							}),
 						)
 					}
 
 					// No conflicts - do the merge
-					const mergeMessage = `Merge ${sourceBeadId}: ${sourceBead.title}`
+					const mergeMessage = `Merge ${sourceIssueId}: ${sourceIssue.title}`
 					yield* runGit(
-						["merge", sourceBeadId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+						["merge", sourceIssueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
 						targetWorktree.path,
 					).pipe(
 						Effect.mapError((e) => {
 							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
 								return new MergeConflictError({
-									beadId: sourceBeadId,
-									branch: sourceBeadId,
-									message: `Merge conflict. Resolve manually in ${targetBeadId} worktree`,
+									issueId: sourceIssueId,
+									branch: sourceIssueId,
+									message: `Merge conflict. Resolve manually in ${targetIssueId} worktree`,
 								})
 							}
 							return new GitError({
 								message: `Merge failed: ${e.message}`,
-								command: `git merge ${sourceBeadId} --no-ff`,
+								command: `git merge ${sourceIssueId} --no-ff`,
 								stderr: e.stderr,
 							})
 						}),
@@ -2250,7 +2259,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// Sync beads after merge
 					yield* withSyncLock(
 						Effect.gen(function* () {
-							yield* beadsClient
+							yield* issueTrackerClient
 								.syncImportOnly(targetWorktree.path)
 								.pipe(
 									Effect.catchAll((e) =>
@@ -2258,41 +2267,41 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									),
 								)
 
-							yield* beadsClient
+							yield* issueTrackerClient
 								.sync(targetWorktree.path)
 								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
 						}),
 					)
 
 					// Close source bead
-					yield* beadsClient.update(sourceBeadId, { status: "closed" }).pipe(
+					yield* issueTrackerClient.update(sourceIssueId, { status: "closed" }).pipe(
 						Effect.tap(() =>
-							Effect.log(`Closed source bead ${sourceBeadId} after merging into ${targetBeadId}`),
+							Effect.log(`Closed source bead ${sourceIssueId} after merging into ${targetIssueId}`),
 						),
 						Effect.catchAll((e) =>
-							Effect.logWarning(`Failed to close source bead ${sourceBeadId}: ${e}`),
+							Effect.logWarning(`Failed to close source bead ${sourceIssueId}: ${e}`),
 						),
 					)
 
 					// Clean up images for the closed source bead
 					yield* imageAttachmentService
-						.cleanupImagesForIssue(sourceBeadId)
+						.cleanupImagesForIssue(sourceIssueId)
 						.pipe(Effect.catchAll(() => Effect.void))
 
 					// Sync the closed status
 					yield* withSyncLock(
-						beadsClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
 					)
 
 					yield* Effect.log(
-						`Successfully merged ${sourceBeadId} into ${targetBeadId}. Source bead closed.`,
+						`Successfully merged ${sourceIssueId} into ${targetIssueId}. Source bead closed.`,
 					)
-				}).pipe(Effect.withSpan("pr.mergeBeadIntoBead")),
+				}).pipe(Effect.withSpan("pr.mergeIssueIntoIssue")),
 			),
 
-			getTargetBranch: (beadId: string) =>
+			getTargetBranch: (issueId: string) =>
 				Effect.gen(function* () {
-					const { baseBranch, parentEpic } = yield* getBeadBaseBranch(beadId)
+					const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId)
 					return {
 						targetBranch: baseBranch,
 						isEpicChild: parentEpic !== undefined,

@@ -162,8 +162,8 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
  */
 export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const beads = yield* BeadsClient
-		return yield* beads.getEpicChildren(epicId)
+		const issueTrackerClient = yield* BeadsClient
+		return yield* issueTrackerClient.getEpicChildren(epicId)
 	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
 )
 
@@ -174,8 +174,8 @@ export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
  */
 export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const beads = yield* BeadsClient
-		return yield* beads.show(epicId)
+		const issueTrackerClient = yield* BeadsClient
+		return yield* issueTrackerClient.show(epicId)
 	}).pipe(
 		Effect.catchAll((e) =>
 			Effect.logError(e).pipe(

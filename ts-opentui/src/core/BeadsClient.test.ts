@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
-import { getLinearCommandPerfMetadata, withIssueDbTiming } from "./BeadsClient.js"
+import {
+	extractJsonPayload,
+	getLinearCommandPerfMetadata,
+	withIssueDbTiming,
+} from "./BeadsClient.js"
 
 interface RecordedTiming {
 	readonly backend: "linear"
@@ -90,5 +94,27 @@ describe("withIssueDbTiming", () => {
 		expect(records[0]?.operation).toBe("i.update")
 		expect(records[0]?.success).toBe(false)
 		expect((records[0]?.durationMs ?? -1) >= 0).toBe(true)
+	})
+})
+
+describe("extractJsonPayload", () => {
+	it("keeps already valid JSON unchanged", () => {
+		const output = '[{"id":"AZE-1"}]'
+		expect(extractJsonPayload(output)).toBe(output)
+	})
+
+	it("extracts JSON when linear-cli prepends process output", () => {
+		const output =
+			"process list refresh started\n" +
+			'[{"id":"AZE-1","title":"Board load","state":{"name":"Backlog"}}]\n' +
+			"process list refresh finished"
+
+		expect(JSON.parse(extractJsonPayload(output))).toEqual([
+			{
+				id: "AZE-1",
+				title: "Board load",
+				state: { name: "Backlog" },
+			},
+		])
 	})
 })
