@@ -75,6 +75,41 @@ const getConfigPaths = (pathService: Path.Path) => {
 	return { configDir, projectsFile }
 }
 
+type WorktreePathOps = Pick<Path.Path, "basename" | "dirname" | "normalize">
+
+/**
+ * Check if cwdPath is a worktree path (or inside one) for projectPath.
+ *
+ * Worktrees are created as siblings: /path/to/project-branchname.
+ * This matcher also handles subdirectories, e.g. /path/to/project-branchname/subdir.
+ */
+export const isWorktreePathForProject = (
+	cwdPath: string,
+	projectPath: string,
+	pathOps: WorktreePathOps,
+): boolean => {
+	const cwdNorm = pathOps.normalize(cwdPath)
+	const projectNorm = pathOps.normalize(projectPath)
+	const projectParent = pathOps.dirname(projectNorm)
+	const projectBase = pathOps.basename(projectNorm)
+	let candidate = cwdNorm
+
+	while (true) {
+		if (pathOps.dirname(candidate) === projectParent) {
+			const candidateBase = pathOps.basename(candidate)
+			if (candidateBase.startsWith(`${projectBase}-`)) {
+				return true
+			}
+		}
+
+		const parent = pathOps.dirname(candidate)
+		if (parent === candidate) {
+			return false
+		}
+		candidate = parent
+	}
+}
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -172,22 +207,8 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 		 * Worktrees are created as siblings: /path/to/project-branchname
 		 * Returns true if cwdPath is a worktree of projectPath.
 		 */
-		const isWorktreeOf = (cwdPath: string, projectPath: string): boolean => {
-			const cwdNorm = pathService.normalize(cwdPath)
-			const projNorm = pathService.normalize(projectPath)
-
-			// Must be in the same parent directory
-			if (pathService.dirname(cwdNorm) !== pathService.dirname(projNorm)) {
-				return false
-			}
-
-			const cwdBase = pathService.basename(cwdNorm)
-			const projBase = pathService.basename(projNorm)
-
-			// Worktree pattern: project-branchname (e.g., azedarach-az-4nge)
-			// cwd basename must start with project basename + hyphen
-			return cwdBase.startsWith(`${projBase}-`)
-		}
+		const isWorktreeOf = (cwdPath: string, projectPath: string): boolean =>
+			isWorktreePathForProject(cwdPath, projectPath, pathService)
 
 		/**
 		 * Determine initial project based on:
