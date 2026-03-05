@@ -638,3 +638,26 @@ On failure, logs SHOULD capture:
   - keep local canonical commits successful and queue outbound sync work for retry.
   - enforce internal throttling ceiling and burst policy deterministically.
   - surface retry/backlog diagnostics (queued count and next eligible dispatch window).
+
+## 5.30 Agent Issue CLI Edge Cases
+
+### Case F-206: `az issue get/update/close/delete` targets missing issue
+
+- Required behavior:
+  - return deterministic not-found diagnostics with issue ID context.
+  - return non-zero exit and machine-readable error payload when JSON mode is requested.
+  - avoid partial local mutations.
+
+### Case F-207: `az issue list/update/close/delete` runs while canonical store is unavailable/locked
+
+- Required behavior:
+  - fail with actionable diagnostics including project/canonical DB context.
+  - preserve canonical local state and avoid fallback to remote tracker as runtime source of truth.
+  - provide explicit retry guidance once lock/unavailability clears.
+
+### Case F-208: Session bootstrap prompt references backend-specific issue CLI
+
+- Required behavior:
+  - reject or normalize prompt template to `az issue` command contract before session launch.
+  - expose diagnostics for prompt template mismatch.
+  - continue allowing backend adapters internally without leaking backend-specific instructions to agents.

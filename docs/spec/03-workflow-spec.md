@@ -28,14 +28,23 @@ Workflows are written as behavior contracts, not implementation details.
 4. load latest local canonical issue state for new context
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session
-7. launch selected AI CLI command
-8. reflect session state as busy/idle/waiting as telemetry arrives
+7. construct agent bootstrap command guidance using `az issue` contract for the active issue/project context
+8. launch selected AI CLI command
+9. reflect session state as busy/idle/waiting as telemetry arrives
 
 ### Variants
 
 - `Space S` injects default work prompt
 - `Space !` injects skip-permissions mode
 - `Space c` launches chat-oriented profile
+
+### Agent Bootstrap Prompt Contract
+
+- Session bootstrap prompts MUST instruct issue context retrieval via `az issue get <issue-id>`.
+- When prompt guidance asks the agent to update issue metadata, it MUST reference `az issue update <issue-id> ...`.
+- When prompt guidance asks the agent to complete/remove issues, it MUST reference `az issue close <issue-id> ...` and/or `az issue delete <issue-id> ...`.
+- Prompt guidance MAY reference `az issue list` for cross-issue discovery in the active project context.
+- Session bootstrap prompts MUST NOT require backend-specific issue CLIs (for example `bd`, `linear-cli`) for canonical issue read/write flows.
 
 ### Postconditions
 

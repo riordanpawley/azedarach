@@ -139,7 +139,7 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-SESS-002 Start session with explicit work instruction
 
 - Trigger: `Space S`
-- Expected: assistant begins with default work-on-task prompt
+- Expected: assistant begins with default work-on-task prompt that instructs `az issue get <issue-id>` for canonical context retrieval
 
 ### UC-SESS-003 Fast autonomous mode
 
@@ -286,6 +286,26 @@ This section expands product behavior into concrete user-centered use cases.
 
 - Trigger: `Space F`
 - Expected: dependency relationship created with parent context
+
+### UC-AUTH-006 List active project issues via agent CLI
+
+- Trigger: run `az issue list` in project context
+- Expected: canonical active-project issue set is returned with backend-agnostic semantics
+
+### UC-AUTH-007 Update issue metadata via agent CLI
+
+- Trigger: run `az issue update <issue-id> ...`
+- Expected: canonical local issue metadata is updated and persists across board refresh
+
+### UC-AUTH-008 Close issue via agent CLI
+
+- Trigger: run `az issue close <issue-id>`
+- Expected: issue transitions to closed in canonical local state
+
+### UC-AUTH-009 Delete issue via agent CLI (guarded)
+
+- Trigger: run `az issue delete <issue-id>`
+- Expected: destructive guardrail path requires explicit confirmation before delete applies
 
 ## 8.11 Attachment Use Cases
 
@@ -558,6 +578,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
+- Agent issue CLI -> AZ-FR-4201..4212
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 
@@ -614,6 +635,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-052: AI create returns multiple issue options for confirmation.
 - UC-EXT-053: planning produces cyclic dependencies and validation rejects.
 - UC-EXT-054: planning partially succeeds; user can continue manually.
+- UC-EXT-055: `az issue` command targets missing issue and returns deterministic diagnostics.
 
 ### Attachments
 

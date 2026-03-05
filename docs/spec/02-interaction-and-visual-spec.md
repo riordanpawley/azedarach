@@ -194,6 +194,11 @@ Action mode is a palette of context-sensitive operations.
 | `Space R` | resume paused session |
 | `Space x` | stop session |
 
+Session prompt contract:
+
+- default session/chat prompts SHOULD guide issue retrieval through `az issue get <issue-id>`
+- prompts SHOULD avoid backend-specific issue command instructions
+
 ### Dev Server Actions
 
 | Sequence | Behavior |

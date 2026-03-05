@@ -471,3 +471,18 @@ This section is normative.
 - AZ-FR-4108: E2E suite MUST include performance assertions for representative critical flows.
 - AZ-FR-4109: E2E suite MUST include stress scenarios for scale datasets and rapid operation concurrency.
 - AZ-FR-4110: E2E release validation SHOULD combine probe assertions with visual assertions for high-risk workflows.
+
+## 4.45 Agent Issue CLI Requirements
+
+- AZ-FR-4201: The product MUST expose `az issue get <issue-id>` for canonical issue retrieval.
+- AZ-FR-4202: The product MUST expose `az issue list` for active-project issue discovery.
+- AZ-FR-4203: The product MUST expose `az issue update <issue-id> ...` for issue mutation.
+- AZ-FR-4204: The product MUST expose `az issue close <issue-id> ...` for completion workflows.
+- AZ-FR-4205: The product MUST expose `az issue delete <issue-id> ...` for destructive removal workflows.
+- AZ-FR-4206: `az issue` commands MUST operate against the selected project's canonical local store and MUST NOT bypass project context.
+- AZ-FR-4207: `az issue` command semantics MUST remain backend-agnostic across local-only and optional sync-adapter configurations.
+- AZ-FR-4208: `az issue` commands MUST support machine-readable JSON output and deterministic non-zero failures.
+- AZ-FR-4209: Session start/bootstrap prompts MUST instruct issue context retrieval via `az issue get <issue-id>`.
+- AZ-FR-4210: Session start/bootstrap prompts MUST NOT require backend-specific issue CLIs for canonical issue read/write flows.
+- AZ-FR-4211: `az issue delete` MUST require explicit confirmation or safe-mode equivalent before destructive execution.
+- AZ-FR-4212: `az issue` not-found/store-unavailable failures MUST return actionable diagnostics and preserve local canonical state.

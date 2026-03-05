@@ -136,6 +136,7 @@ An implementation is complete when:
 
 - Canonical issue state MUST be stored locally in Azedarach-managed SQLite.
 - Canonical project DB path MUST be `<project-root>/.azedarach/azedarach.db` (one isolated DB per registered project).
+- Agent-facing issue retrieval and mutation commands MUST go through the `az issue` CLI contract.
 - External trackers are optional sync targets, not runtime sources of truth.
 - Linear is a first-class optional sync target and SHOULD prefer webhook-driven inbound updates over polling.
 - Linear outbound sync MUST enforce internal throttling (30 requests per rolling minute with default burst allowance of 10 requests).

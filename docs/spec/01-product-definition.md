@@ -239,7 +239,7 @@ As an engineer, I can attach images/screenshots so sessions have visual context.
 - deterministic key handling
 - robust behavior in non-interactive/CI-like shell environments
 - safe handling of credentials and local config files
-- clear compatibility requirements for git/tmux/gh/linear-cli/ai-cli tooling
+- clear compatibility requirements for git/tmux/gh/az-cli/ai-cli tooling and optional backend adapters
 
 ## 1.15 Compatibility Envelope
 
@@ -249,6 +249,7 @@ Minimum external capabilities required:
 - tmux available and functional
 - git worktree operations supported
 - writable local filesystem for project-local Azedarach SQLite stores at `<project-root>/.azedarach/azedarach.db`
+- `az issue` CLI commands available in project execution contexts for agent workflows
 - AI CLI available and authenticated
 - optional gh for PR workflows
 - optional linear-cli and/or Beads adapter tooling when sync targets are enabled
@@ -259,6 +260,7 @@ Minimum external capabilities required:
 - Product behavior must not depend on mouse-only interactions.
 - Task data persistence must preserve canonical local schema and adapter contract semantics.
 - Session naming and lookup must be deterministic from issue identity.
+- Agent-facing issue retrieval/mutation flows must use the `az issue` command contract instead of backend-specific CLIs.
 
 ## 1.17 Decomposition View
 

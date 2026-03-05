@@ -230,8 +230,8 @@ Canonical fixture profile names:
 ### AZ-AT-0702 Start with work prompt
 
 - Steps: `Space S`.
-- Expected: session starts with default work instruction.
-- Links: AZ-FR-0802.
+- Expected: session starts with default work instruction that uses `az issue get <issue-id>` for canonical context retrieval.
+- Links: AZ-FR-0802, AZ-FR-4201, AZ-FR-4209, AZ-FR-4210.
 
 ### AZ-AT-0703 Yolo start variant
 
@@ -865,6 +865,55 @@ Canonical fixture profile names:
 - Expected: adapter enforces 30-requests/minute sustained ceiling, allows configured burst window before throttling, defers excess requests without dropping successful local commits, and exposes throttling/backlog diagnostics.
 - Links: AZ-FR-3816, AZ-FR-3817, AZ-FR-3818, section 05 F-205.
 
+### AZ-AT-2835 `az issue get` canonical retrieval contract
+
+- Preconditions: issue exists in active project canonical DB.
+- Steps: run `az issue get <issue-id> --json`.
+- Expected: command returns canonical issue payload for active project context and deterministic non-zero not-found failure for missing IDs.
+- Links: AZ-FR-4201, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212, section 05 F-206.
+
+### AZ-AT-2836 `az issue list` active-project discovery contract
+
+- Preconditions: active project has mixed issue states.
+- Steps: run `az issue list --json` and compare with canonical local board dataset.
+- Expected: list resolves against active project canonical store and returns deterministic machine-readable output.
+- Links: AZ-FR-4202, AZ-FR-4206, AZ-FR-4208.
+
+### AZ-AT-2837 `az issue update` mutation contract
+
+- Preconditions: mutable issue exists in active project.
+- Steps: run `az issue update <issue-id> ... --json`, then read issue via `az issue get`.
+- Expected: update applies to canonical local state, yields deterministic success/error payloads, and preserves project scoping.
+- Links: AZ-FR-4203, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212.
+
+### AZ-AT-2838 `az issue close` lifecycle contract
+
+- Preconditions: open or in-progress issue exists.
+- Steps: run `az issue close <issue-id> --json`, then inspect board/issue payload.
+- Expected: status transitions to closed in canonical local state with deterministic diagnostics on failures.
+- Links: AZ-FR-4204, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212, section 05 F-206.
+
+### AZ-AT-2839 `az issue delete` guardrail contract
+
+- Preconditions: issue exists and destructive path is testable.
+- Steps: invoke `az issue delete <issue-id>` without confirmation, then with explicit confirmation.
+- Expected: unconfirmed path no-ops safely; confirmed path performs destructive delete with deterministic diagnostics.
+- Links: AZ-FR-4205, AZ-FR-4208, AZ-FR-4211, AZ-FR-4212.
+
+### AZ-AT-2840 Backend-agnostic `az issue` behavior across sync configurations
+
+- Preconditions: one project configured local-only and one with optional sync adapter enabled.
+- Steps: run `az issue get/list/update/close` against equivalent fixture issues in both projects.
+- Expected: command semantics remain consistent and project-local canonical store remains runtime source of truth.
+- Links: AZ-FR-4206, AZ-FR-4207.
+
+### AZ-AT-2841 Session bootstrap prompt uses `az issue` contract only
+
+- Preconditions: issue-focused start path with injected prompt visible/inspectable in harness.
+- Steps: run `Space S` and `Space !`, capture bootstrap prompt text.
+- Expected: prompt references `az issue get <issue-id>` (and optional `az issue update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
+- Links: AZ-FR-4209, AZ-FR-4210, section 05 F-208.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1030,4 +1079,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2834
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2841

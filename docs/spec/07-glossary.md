@@ -11,6 +11,10 @@
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
 - Burst window: short-term allowance for sync requests above sustained throughput before throttling/deferred execution begins.
+- Agent Issue CLI: canonical `az issue` command suite (`get/list/update/close/delete`) used by agent workflows for issue read/write operations.
+- Bootstrap prompt contract: normative session-start prompt guidance requiring `az issue` commands for issue context and mutation flows.
+- Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
+- Destructive issue operation: issue mutation that removes canonical issue records (for example `az issue delete`) and requires explicit guardrails.
 - Epic: issue that groups child issues for scoped drill-down and progress tracking; one relationship type among many possible dependencies.
 - Drill-down: focused board mode showing only children of selected epic.
 - Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).
