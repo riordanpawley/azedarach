@@ -136,6 +136,21 @@ export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError
 
 const DEFAULT_PAGE_SIZE = 200
 const SYNC_QUEUE_LEASE_SECONDS = 120
+const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
+const LOCAL_ISSUE_DB_FILENAME = "issues.db"
+
+interface ResolveLocalIssueStorageRootInput {
+	readonly explicitProjectPath?: string
+	readonly currentProjectPath?: string
+	readonly fallbackCwd: string
+}
+
+export const resolveLocalIssueStorageRoot = ({
+	explicitProjectPath,
+	currentProjectPath,
+	fallbackCwd,
+}: ResolveLocalIssueStorageRootInput): string =>
+	explicitProjectPath ?? currentProjectPath ?? fallbackCwd
 
 const schemaStatements: readonly string[] = [
 	`CREATE TABLE IF NOT EXISTS issues (
@@ -361,10 +376,16 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const fs = yield* FileSystem.FileSystem
 		const projectService = yield* ProjectService
 
-		const getStorageRoot = (cwd?: string): Effect.Effect<string> =>
-			projectService.getCurrentPath().pipe(
-				Effect.map((projectPath) => projectPath ?? cwd ?? process.cwd()),
-			)
+			const getStorageRoot = (cwd?: string): Effect.Effect<string> =>
+				projectService.getCurrentPath().pipe(
+					Effect.map((projectPath) =>
+						resolveLocalIssueStorageRoot({
+							explicitProjectPath: cwd,
+							currentProjectPath: projectPath,
+							fallbackCwd: process.cwd(),
+						}),
+					),
+				)
 
 		const ensureSyncQueueColumns = (
 			sql: SqlClient.SqlClient,
@@ -384,11 +405,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const withSql = <A>(
 			cwd: string | undefined,
 			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
-		): Effect.Effect<A, LocalIssueStoreError> =>
-			Effect.gen(function* () {
-				const storageRoot = yield* getStorageRoot(cwd)
-				const dbDir = pathService.join(storageRoot, ".azedarach")
-				const dbPath = pathService.join(dbDir, "issues.db")
+			): Effect.Effect<A, LocalIssueStoreError> =>
+				Effect.gen(function* () {
+					const storageRoot = yield* getStorageRoot(cwd)
+					const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
+					const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
 
 				yield* fs.makeDirectory(dbDir, { recursive: true }).pipe(
 					Effect.catchAll((cause) =>
