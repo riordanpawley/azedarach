@@ -407,6 +407,11 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: run `az prime` at session start
 - Expected: output includes common issue command/flag guidance, policy to close issues when done, policy to commit before close, and commit message template requiring issue ID inclusion
 
+### UC-AUTH-030 Backend-neutral issue not-found diagnostics
+
+- Trigger: run issue retrieval for missing ID in text and JSON modes
+- Expected: user-facing not-found diagnostics are backend-neutral (`Issue not found internally nor externally: <issue-id>`) with deterministic structured failure payloads
+
 ## 8.11 Attachment Use Cases
 
 ### UC-ATT-001 Attach screenshot from clipboard
@@ -587,6 +592,21 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: run session-only variant of `az project switch`
 - Expected: active context changes for current invocation only while persisted default remains unchanged
 
+### UC-PROJ-010 Explicit `--project-dir` invocation override
+
+- Trigger: run `az show <issue-id> --project-dir <project-root>` from a different cwd/default project scope
+- Expected: command resolves canonical DB from explicit `--project-dir` target and ignores conflicting cwd/default project scope for that invocation
+
+### UC-PROJ-011 Resolve project from sibling worktree root
+
+- Trigger: run issue command from sibling git worktree root without `--project-dir`
+- Expected: project detection maps invocation to registered base project canonical DB
+
+### UC-PROJ-012 Resolve project from nested sibling worktree subdirectory
+
+- Trigger: run issue command from nested path under sibling git worktree without `--project-dir`
+- Expected: project detection still maps invocation to registered base project canonical DB
+
 ## 8.16 Operational and Recovery Use Cases
 
 ### UC-OPS-001 Handle missing session on attach
@@ -708,7 +728,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Az CLI command suite -> AZ-FR-4201..4260
+- Az CLI command suite -> AZ-FR-4201..4264
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

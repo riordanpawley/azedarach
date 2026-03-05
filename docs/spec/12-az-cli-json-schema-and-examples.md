@@ -53,7 +53,7 @@ Field requirements:
 ```json
 {
   "code": "issue_not_found",
-  "message": "Issue kqd was not found in active project",
+  "message": "Issue not found internally nor externally: kqd",
   "remediation": "Run az list --json to inspect available issues",
   "details": {
     "issueId": "kqd"
@@ -67,6 +67,7 @@ Error requirements:
 - `message`: concise human-readable failure summary.
 - `remediation`: single actionable next step.
 - `details`: optional structured context relevant to error type.
+- `issue_not_found` diagnostics for issue-targeting commands MUST use backend-neutral messaging and MUST follow `Issue not found internally nor externally: <issue-id>`.
 
 ## 12.5 Success Example: Project Switch
 
@@ -453,6 +454,42 @@ Restore attempts MUST return deterministic unsupported-operation errors:
   "meta": {
     "durationMs": 5,
     "at": "2026-03-05T03:23:10Z"
+  }
+}
+```
+
+## 12.11 Project Resolution and Worktree Detection Contract
+
+For issue-targeting command execution:
+
+- explicit `--project-dir <path>` overrides invocation scope for that command and binds canonical DB resolution to that path.
+- omitted `--project-dir` uses deterministic project resolution and MUST NOT force raw cwd directly into issue-client binding.
+- sibling git-worktree roots and nested subdirectories under sibling worktrees resolve to the registered base project canonical DB path.
+
+### 12.11.1 Success Example: worktree-aware `az show --json`
+
+```json
+{
+  "schemaVersion": "1.0",
+  "command": "show",
+  "commandPath": ["az", "show"],
+  "project": {
+    "id": "azedarach",
+    "path": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db"
+  },
+  "ok": true,
+  "result": {
+    "issue": {
+      "id": "az-1e6cc1",
+      "title": "Top-level az CLI contract and JSON envelope parity",
+      "status": "open"
+    }
+  },
+  "error": null,
+  "meta": {
+    "durationMs": 9,
+    "at": "2026-03-05T04:02:16Z"
   }
 }
 ```

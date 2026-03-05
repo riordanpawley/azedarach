@@ -143,6 +143,8 @@ An implementation is complete when:
 - Canonical project DB path MUST be `<project-root>/.azedarach/azedarach.db` (one isolated DB per registered project).
 - Internal canonical issue IDs MUST be prefix-agnostic and SHOULD remain short/typable via configurable generation strategy.
 - Agent-facing issue retrieval and mutation commands MUST go through the top-level `az` CLI contract (`az init/prime/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, `az dep ...`, `az config ...`, `az stats`, and project management via `az project add/list/remove/switch`).
+- Issue command not-found diagnostics MUST stay backend-neutral (`Issue not found internally nor externally: <issue-id>`).
+- Issue command project detection MUST be worktree-aware (including nested sibling worktree subdirectories) and honor explicit `--project-dir` invocation overrides.
 - External trackers are optional sync targets, not runtime sources of truth.
 - Linear is a first-class optional sync target and SHOULD prefer webhook-driven inbound updates over polling.
 - Linear outbound sync MUST enforce internal throttling (30 requests per rolling minute with default burst allowance of 10 requests).

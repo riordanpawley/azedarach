@@ -7,6 +7,7 @@
 - Card: visual representation of one issue on the board.
 - Issue: canonical work item tracked in Azedarach local issue store.
 - Project-local canonical DB: SQLite database at `<project-root>/.azedarach/azedarach.db` used as canonical persisted issue store for one project.
+- Worktree-aware project resolution: command resolution behavior mapping sibling git-worktree paths (including nested subdirectories) back to the registered base project canonical DB.
 - Sync target: optional external system mirrored from local canonical issue state.
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
@@ -14,6 +15,7 @@
 - Az CLI Suite: canonical top-level `az` issue command suite (`init/prime/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.
 - Bootstrap prompt contract: normative session-start prompt guidance requiring top-level `az` commands for issue context and mutation flows.
 - Backend-agnostic issue retrieval: requirement that agent-facing issue commands keep stable semantics regardless of optional sync adapter configuration.
+- Backend-neutral not-found diagnostic: required issue-not-found message contract (`Issue not found internally nor externally: <issue-id>`) that avoids backend/sync implementation leakage.
 - Destructive issue operation: issue mutation that removes canonical issue records (for example `az delete`) and requires explicit guardrails.
 - Internal issue ID: canonical local identifier for issues in project SQLite that has no mandatory textual prefix requirement.
 - Issue ID strategy: configurable per-project policy for generating internal IDs (for example incrementing numeric or adaptive-length lowercase alphabetic title hash).

@@ -749,3 +749,17 @@ On failure, logs SHOULD capture:
   - priming output includes common issue command/flag guidance and completion workflow policies (close when done, commit before close, issue ID in commit message).
   - invalid `az prime` arguments fail deterministically with actionable diagnostics.
   - JSON-mode priming output remains schema-conformant and deterministic across identical inputs.
+
+### Case F-221: Issue not-found errors leak backend/sync noise
+
+- Required behavior:
+  - issue-targeting not-found failures use backend-neutral diagnostics with no sync-backend implementation leakage.
+  - human-readable output uses `Issue not found internally nor externally: <issue-id>`.
+  - JSON mode preserves deterministic `issue_not_found` semantics with the same backend-neutral message template.
+
+### Case F-222: Worktree-scoped issue command resolves to wrong project canonical DB
+
+- Required behavior:
+  - explicit `--project-dir` invocation scope takes precedence over raw cwd and persisted default project scope.
+  - when `--project-dir` is omitted, project resolution uses deterministic project detection and does not force raw cwd directly into issue client binding.
+  - sibling worktree roots and nested subdirectories under sibling worktrees resolve to the registered base project canonical DB path.

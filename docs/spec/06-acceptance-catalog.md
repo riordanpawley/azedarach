@@ -1110,6 +1110,34 @@ Canonical fixture profile names:
 - Expected: deterministic non-zero failure with actionable diagnostics; no ambiguous partial guidance payload is emitted.
 - Links: AZ-FR-4260, AZ-FR-4229, section 05 F-220.
 
+### AZ-AT-2870 Backend-neutral issue not-found diagnostics contract
+
+- Preconditions: missing issue ID does not exist in active project.
+- Steps: run `az show <missing-id>` without JSON and with `--json`.
+- Expected: non-JSON output uses `Issue not found internally nor externally: <missing-id>`; JSON output preserves deterministic not-found code/message/remediation with no backend/sync leakage.
+- Links: AZ-FR-4229, AZ-FR-4240, AZ-FR-4261, section 05 F-221, section 12.
+
+### AZ-AT-2871 Explicit `--project-dir` invocation-scope contract
+
+- Preconditions: at least two registered projects with distinct canonical DB paths and distinct issue sets.
+- Steps: from project A cwd, run `az show <issue-id-from-project-b> --project-dir <project-b-root> --json`.
+- Expected: command binds to project B canonical DB path for the invocation and resolves issue deterministically without falling back to cwd/default project scope.
+- Links: AZ-FR-4223, AZ-FR-4234, AZ-FR-4262, section 05 F-222.
+
+### AZ-AT-2872 Sibling worktree root project-resolution contract
+
+- Preconditions: registered base project has at least one sibling git worktree path and issue fixture in canonical DB.
+- Steps: execute `az show <issue-id> --json` from sibling worktree root without `--project-dir`.
+- Expected: resolver maps invocation to registered base project canonical DB path and returns deterministic issue payload.
+- Links: AZ-FR-4223, AZ-FR-4263, AZ-FR-4264, section 05 F-222.
+
+### AZ-AT-2873 Nested sibling worktree subdirectory project-resolution contract
+
+- Preconditions: same as AZ-AT-2872 with invocation path nested under sibling worktree (for example `<worktree>/<repo-subdir>`).
+- Steps: execute `az show <issue-id> --json` from nested sibling worktree subdirectory without `--project-dir`.
+- Expected: resolver still binds to registered base project canonical DB path (not unrelated project DB) and returns deterministic issue payload.
+- Links: AZ-FR-4223, AZ-FR-4263, AZ-FR-4264, AZ-FR-4238, section 05 F-222.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1275,4 +1303,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2869
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2873

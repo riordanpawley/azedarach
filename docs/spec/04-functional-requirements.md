@@ -555,3 +555,7 @@ Machine-readable JSON envelope details are normative in section 12.
 - AZ-FR-4258: `az prime` guidance MUST require issue ID inclusion in commit messages and MUST provide a concrete commit-template example (for example `AZE-123: ...`).
 - AZ-FR-4259: Session start/bootstrap prompt guidance MUST instruct the agent to run `az prime` before substantive task execution.
 - AZ-FR-4260: `az prime --json` MUST return deterministic structured priming payloads (commands, checklist/policies, commit template) and deterministic non-zero diagnostics for invalid arguments.
+- AZ-FR-4261: Issue-targeting not-found diagnostics MUST remain backend-neutral across command paths; human-readable error output MUST use `Issue not found internally nor externally: <issue-id>`.
+- AZ-FR-4262: If `--project-dir <path>` is provided, command execution MUST bind canonical project resolution to that explicit path for the current invocation and MUST NOT be overridden by raw cwd or persisted default project.
+- AZ-FR-4263: If `--project-dir` is omitted, issue command execution MUST use deterministic project resolution and MUST NOT force raw cwd directly into issue-client project binding.
+- AZ-FR-4264: Project resolution MUST treat sibling git-worktree paths and nested subdirectories inside those worktrees as belonging to the registered base project for canonical DB selection.

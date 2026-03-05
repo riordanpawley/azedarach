@@ -909,6 +909,9 @@ Canonical CLI surface for issue management:
 7. command JSON payloads follow the schema contract defined in Section 12
 8. dependency projection query paths are strictly read-only; cycle prevention occurs during mutation commands before persist
 9. agent bootstrap flows require deterministic priming guidance via `az prime` before substantive task execution
+10. if `--project-dir` is provided, command execution binds to that explicit project scope for the invocation and does not fall back to raw cwd/default scope
+11. if `--project-dir` is omitted, project resolution is deterministic and worktree-aware (including nested sibling worktree subdirectories) and must not force raw cwd directly into issue client binding
+12. issue-not-found diagnostics remain backend-neutral and must not leak sync-adapter/backend-specific implementation details
 
 ### Postconditions
 
