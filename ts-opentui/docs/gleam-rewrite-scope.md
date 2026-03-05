@@ -716,7 +716,7 @@ All open questions have been addressed in companion documents:
 | Question | Resolution | Document |
 |----------|------------|----------|
 | Testing strategy | Unit (<5s), integration with real tmux/linear-cli (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
-| Start+work prompt format | Bead ID, type, title, `linear-cli i get` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
+| Start+work prompt format | Issue ID, type, title, `az issue get` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
 | Merge conflict UX | MergeChoice overlay, git merge-tree detection, Claude spawn for resolution | `docs/gleam/merge-conflict-ux.md` |
 
 ---

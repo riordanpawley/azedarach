@@ -83,8 +83,8 @@ pnpm dev
 
 **Verification:**
 ```bash
-# Check the task status changed in linear
-linear-cli i get <task-id>
+# Check the task status changed
+az issue get <task-id>
 ```
 
 ### Batch Movement Testing

@@ -33,6 +33,7 @@ import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
+import { buildChatPrompt, buildStartWorkPrompt } from "./SessionPrompt.js"
 
 // ============================================================================
 // Service Definition
@@ -140,47 +141,22 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					// Get current project path (from ProjectService or cwd fallback)
 					const projectPath = yield* helpers.getProjectPath()
 
-					// Build a clear prompt that explicitly identifies this as a beads issue.
-					// We only provide the ID and title, and tell Claude to run `bd show`
-					// to get the full context.
-					//
-					// The prompt encourages Claude to:
-					// 1. Ask clarifying questions if anything is unclear
-					// 2. Update the bead with design notes for future sessions
-					//
-					// This ensures beads become self-sufficient over time - any Claude session
-					// can pick them up without extra research or context from the user.
-					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-
-Run \`bd show ${task.id}\` to see full description and context.
-
-Before starting implementation:
-1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
-2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
-
-Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
-
-					// If resuming work on an existing worktree, add context about checking git state
-					if (task.hasWorktree) {
-						initialPrompt += `
-
-NOTE: This worktree has existing work. Check:
-- \`git status\` to see uncommitted changes
-- \`git log --oneline -5\` to see recent commits
-- Read the design notes on the bead for context from previous sessions`
-					}
-
 					// Check for attached images and include their paths
 					// This allows Claude to use the Read tool to view them
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
-					if (attachments.length > 0) {
-						const imagePaths = attachments.map(
-							(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
-						)
-						initialPrompt += `\n\nAttached images (use Read tool to view):\n${imagePaths.join("\n")}`
-					}
+					const imagePaths = attachments.map(
+						(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
+					)
+
+					const initialPrompt = buildStartWorkPrompt({
+						taskId: task.id,
+						issueType: task.issue_type,
+						title: task.title,
+						hasWorktree: task.hasWorktree ?? false,
+						attachmentPaths: imagePaths,
+					})
 
 					yield* helpers.withQueue(
 						task.id,
@@ -235,39 +211,21 @@ NOTE: This worktree has existing work. Check:
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
 
-					// Build prompt (same as startSessionWithPrompt)
-					// We only provide the ID and title, and tell Claude to run `bd show`
-					// to get the full context.
-					let initialPrompt = `work on bead ${task.id} (${task.issue_type}): ${task.title}
-
-Run \`bd show ${task.id}\` to see full description and context.
-
-Before starting implementation:
-1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
-2. Once you understand the task, update the bead with your implementation plan using \`bd update ${task.id} --design="..."\`
-
-Goal: Make this bead self-sufficient so any future session could pick it up without extra context.`
-
-					// If resuming work on an existing worktree, add context about checking git state
-					if (task.hasWorktree) {
-						initialPrompt += `
-
-NOTE: This worktree has existing work. Check:
-- \`git status\` to see uncommitted changes
-- \`git log --oneline -5\` to see recent commits
-- Read the design notes on the bead for context from previous sessions`
-					}
-
 					// Check for attached images and include their paths
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
-					if (attachments.length > 0) {
-						const imagePaths = attachments.map(
-							(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
-						)
-						initialPrompt += `\n\nAttached images (use Read tool to view):\n${imagePaths.join("\n")}`
-					}
+					const imagePaths = attachments.map(
+						(a) => `${projectPath}/.beads/images/${task.id}/${a.filename}`,
+					)
+
+					const initialPrompt = buildStartWorkPrompt({
+						taskId: task.id,
+						issueType: task.issue_type,
+						title: task.title,
+						hasWorktree: task.hasWorktree ?? false,
+						attachmentPaths: imagePaths,
+					})
 
 					yield* helpers.withQueue(
 						task.id,
@@ -323,21 +281,11 @@ NOTE: This worktree has existing work. Check:
 						toolModelConfig.default ??
 						"haiku"
 
-					// Inject bead context directly for chat sessions too
-					const prompt = `Let's chat about bead ${task.id}: ${task.title}
-
-Run \`bd show ${task.id}\` to see full description and context.
-
-Help me with one of:
-- Clarifying requirements or scope
-- Improving the description so any Claude session could pick it up
-- Breaking down into subtasks if too large
-- Adding acceptance criteria
-- Just chatting about the task or exploring ideas
-
-Note: You're running with ${chatModel} for fast, cheap discussion. When ready to implement, use \`/model <model>\` to switch models.
-
-What would you like to discuss?`
+					const prompt = buildChatPrompt({
+						taskId: task.id,
+						title: task.title,
+						chatModel,
+					})
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 
 					const sessionName = yield* findAiSession(task.id)
@@ -363,33 +311,33 @@ What would you like to discuss?`
 						)
 				})
 
-				const findAiSession = (issueId: string) =>
-					Effect.gen(function* () {
-						const canonicalSessionName = getIssueSessionName(issueId)
-						const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
-						if (hasCanonicalSession) {
-							return canonicalSessionName
-						}
+			const findAiSession = (issueId: string) =>
+				Effect.gen(function* () {
+					const canonicalSessionName = getIssueSessionName(issueId)
+					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
+					if (hasCanonicalSession) {
+						return canonicalSessionName
+					}
 
-						const sessions = yield* tmux.listSessions()
-						for (const session of sessions) {
-							const parsed = parseIssueSessionName(session.name)
-							if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
-								return session.name
-							}
+					const sessions = yield* tmux.listSessions()
+					for (const session of sessions) {
+						const parsed = parseIssueSessionName(session.name)
+						if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
+							return session.name
 						}
+					}
 
 					return null
 				})
 
-				const doAttach = (issueId: string) =>
-					Effect.gen(function* () {
-						const sessionName = yield* findAiSession(issueId)
-						if (!sessionName) {
-							yield* toast.show("error", `No session for ${issueId} - press Space+s to start`)
-							return
-						}
-						yield* attachment.attachExternal(sessionName)
+			const doAttach = (issueId: string) =>
+				Effect.gen(function* () {
+					const sessionName = yield* findAiSession(issueId)
+					if (!sessionName) {
+						yield* toast.show("error", `No session for ${issueId} - press Space+s to start`)
+						return
+					}
+					yield* attachment.attachExternal(sessionName)
 					yield* toast.show("info", "Switched! Ctrl-a Ctrl-a to return")
 				}).pipe(
 					Effect.catchAll((error) => {
@@ -634,11 +582,11 @@ What would you like to discuss?`
 						yield* toast.show("info", `Creating worktree for ${task.id}...`)
 
 						// Create worktree (idempotent - returns existing if present)
-							const worktree = yield* worktreeManager
-								.create({
-									issueId: task.id,
-									projectPath,
-								})
+						const worktree = yield* worktreeManager
+							.create({
+								issueId: task.id,
+								projectPath,
+							})
 							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))
 
 						if (!worktree) return
