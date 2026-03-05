@@ -33,7 +33,11 @@ interface CollapsedSyncItem {
 interface LinearRuntime {
 	readonly client: LinearClient
 	readonly defaultTeam: string | undefined
+	readonly defaultProject: string | undefined
 }
+
+type LinearIssuesQuery = NonNullable<Parameters<LinearClient["issues"]>[0]>
+type LinearIssuesFilter = NonNullable<LinearIssuesQuery["filter"]>
 
 class LinearSyncRequest extends Request.TaggedClass("LinearSyncRequest")<
 	void,
@@ -216,6 +220,51 @@ const toRetryDelaySeconds = (attempt: number): number => {
 	return BASE_RETRY_SECONDS * 2 ** cappedAttempt
 }
 
+const normalizeScopeValue = (value: string | undefined): string | undefined => {
+	if (value === undefined) return undefined
+	const trimmed = value.trim()
+	return trimmed.length > 0 ? trimmed : undefined
+}
+
+interface LinearIssueScope {
+	readonly team: string | undefined
+	readonly project: string | undefined
+}
+
+const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | undefined => {
+	const team = normalizeScopeValue(scope.team)
+	const project = normalizeScopeValue(scope.project)
+	const constraints: LinearIssuesFilter[] = []
+
+	if (team !== undefined) {
+		constraints.push({
+			team: {
+				or: [
+					{ id: { eq: team } },
+					{ key: { eqIgnoreCase: team } },
+					{ name: { eqIgnoreCase: team } },
+				],
+			},
+		})
+	}
+
+	if (project !== undefined) {
+		constraints.push({
+			project: {
+				or: [
+					{ id: { eq: project } },
+					{ slugId: { eqIgnoreCase: project } },
+					{ name: { eqIgnoreCase: project } },
+				],
+			},
+		})
+	}
+
+	if (constraints.length === 0) return undefined
+	if (constraints.length === 1) return constraints[0]
+	return { and: constraints }
+}
+
 export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueSyncService", {
 	dependencies: [AppConfig.Default, LocalIssueStore.Default, LinearSdk.Default],
 	effect: Effect.gen(function* () {
@@ -283,24 +332,31 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							}),
 					),
 				)
-				return Option.some({
-					client,
-					defaultTeam: config.issueTracker.linear.team,
+					return Option.some({
+						client,
+						defaultTeam: config.issueTracker.linear.team,
+						defaultProject: config.issueTracker.linear.project,
+					})
 				})
-			})
 
-		const fetchAllLinearIssues = (
-			client: LinearClient,
-		): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
-			Effect.tryPromise({
-				try: async () => {
-					const allIssues: LinearSdkIssue[] = []
-					let afterCursor: string | undefined = undefined
-					while (true) {
-						const page = await client.issues({ first: 250, after: afterCursor })
-						allIssues.push(...page.nodes)
-						if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
-							break
+			const fetchAllLinearIssues = (
+				client: LinearClient,
+				scope: LinearIssueScope,
+			): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
+				Effect.tryPromise({
+					try: async () => {
+						const allIssues: LinearSdkIssue[] = []
+						let afterCursor: string | undefined = undefined
+						const filter = buildLinearIssueFilter(scope)
+						while (true) {
+							const page = await client.issues({
+								first: 250,
+								after: afterCursor,
+								filter,
+							})
+							allIssues.push(...page.nodes)
+							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+								break
 						}
 						afterCursor = page.pageInfo.endCursor
 					}
@@ -696,10 +752,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 			const buildBootstrapSnapshots = (
 				client: LinearClient,
+				scope: LinearIssueScope,
 			): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
 				Effect.gen(function* () {
+					yield* Effect.log(
+						`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
+					)
 					const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
-					const issues = yield* fetchAllLinearIssues(client)
+					const issues = yield* fetchAllLinearIssues(client, scope)
 					const stateNameById = yield* fetchStateNameById(client).pipe(
 						Effect.catchAll((error) =>
 							Effect.logWarning(
@@ -801,10 +861,16 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						return 0
 					}
 
-					const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client)
-					const imported = yield* fromStore(
-						localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
-					)
+						const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
+							team: runtimeOption.value.defaultTeam,
+							project: runtimeOption.value.defaultProject,
+						})
+						yield* Effect.log(
+							`Linear bootstrap imported ${snapshots.length} issues (team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
+						)
+						const imported = yield* fromStore(
+							localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
+						)
 					yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
 					return imported
 				}),
