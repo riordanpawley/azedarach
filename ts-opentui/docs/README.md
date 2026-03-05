@@ -442,6 +442,7 @@ Azedarach supports multiple AI coding assistants:
 |------|--------|------------|
 | **Claude Code** | ✅ Default | `cliTool: "claude"` |
 | **OpenCode** | ✅ Supported | `cliTool: "opencode"` |
+| **Codex CLI** | ✅ Supported | `cliTool: "codex"` |
 
 ### AI Tool & Model Configuration
 
@@ -451,6 +452,7 @@ Azedarach supports multiple AI coding assistants and allows fine-grained model s
 |------|--------|------------|
 | **Claude Code** | ✅ Default | `cliTool: "claude"` |
 | **OpenCode** | ✅ Supported | `cliTool: "opencode"` |
+| **Codex CLI** | ✅ Supported | `cliTool: "codex"` |
 
 #### Model Selection
 
@@ -469,6 +471,10 @@ You can configure models globally or specifically for each tool in `.azedarach.j
     "opencode": {
       "default": "anthropic/claude-3-5-sonnet-20241022",
       "chat": "anthropic/claude-3-5-haiku-20241022"
+    },
+    "codex": {
+      "default": "gpt-5-codex",
+      "chat": "gpt-5-mini"
     }
   }
 }

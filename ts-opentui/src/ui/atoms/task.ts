@@ -7,8 +7,8 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
@@ -291,7 +291,7 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		// Dismiss overlay first
 
 		yield* overlay.pop()
-		yield* toast.show("info", "Creating task with Claude...")
+		yield* toast.show("info", "Creating task with AI...")
 
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
@@ -315,7 +315,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 
 		const cliTool = yield* appConfig.getCliTool()
 		const modelConfig = yield* appConfig.getModelConfig()
-		const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+		const toolModelConfig = modelConfig[cliTool]
 		const chatModel =
 			modelConfig.chat ??
 			toolModelConfig.chat ??
