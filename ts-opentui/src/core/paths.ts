@@ -101,7 +101,7 @@ export type SessionType = "issue"
  */
 export const AI_SESSION_PREFIXES = ["claude-", "opencode-"]
 
-const ISSUE_ID_PATTERN = /^[A-Za-z0-9]+[.-][A-Za-z0-9._-]+$/
+const ISSUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const LINEAR_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9]*-[0-9]+$/
 
 const decodeLegacyNormalizedIssueId = (sessionName: string): string | undefined => {

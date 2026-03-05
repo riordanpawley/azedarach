@@ -166,6 +166,7 @@ const SYNC_QUEUE_LEASE_SECONDS = 120
 const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
 const LOCAL_ISSUE_DB_FILENAME = "issues.db"
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
+const LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META = "issue:id_next_alpha_index"
 const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
@@ -371,6 +372,50 @@ export const selectBackupFilesToPrune = (
 	return sorted.slice(keepCount).map((entry) => entry.name)
 }
 
+export const encodeAlphaIssueIndex = (index: number): string => {
+	if (!Number.isInteger(index) || index < 0) {
+		throw new Error(`Issue index must be a non-negative integer: ${index}`)
+	}
+
+	let remaining = index
+	let encoded = ""
+
+	while (remaining >= 0) {
+		const digit = remaining % 26
+		encoded = String.fromCharCode(97 + digit) + encoded
+		remaining = Math.floor(remaining / 26) - 1
+	}
+
+	return encoded
+}
+
+const parseNextAlphaIssueIndex = (rawValue: string | undefined): number => {
+	if (rawValue === undefined) {
+		return 0
+	}
+
+	const parsed = Number.parseInt(rawValue, 10)
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+export const allocateNextAlphaIssueId = (
+	startIndex: number,
+	existingIds: ReadonlySet<string>,
+): { readonly issueId: string; readonly nextIndex: number } => {
+	let candidateIndex = startIndex
+
+	while (true) {
+		const candidateId = encodeAlphaIssueIndex(candidateIndex)
+		if (!existingIds.has(candidateId)) {
+			return {
+				issueId: candidateId,
+				nextIndex: candidateIndex + 1,
+			}
+		}
+		candidateIndex += 1
+	}
+}
+
 const resolveLocalIssueBackupConfig = (config: ResolvedConfig): LocalIssueBackupConfig => {
 	const fallback = DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG
 	if (!("local" in config.issueTracker)) {
@@ -563,11 +608,6 @@ const rowToIssue = (
 		dependencies: deps.dependencies,
 		dependents: deps.dependents,
 	}
-}
-
-const createLocalIssueId = (): string => {
-	const compact = crypto.randomUUID().replaceAll("-", "")
-	return `az-${compact.slice(0, 6)}`
 }
 
 const isValidSyncOperation = (operation: string): operation is SyncOperation =>
@@ -1102,17 +1142,25 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const now = nowIso()
-						let issueId = createLocalIssueId()
+						const nextAlphaIndex = yield* getMetaValue(
+							sql,
+							LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META,
+						).pipe(Effect.map(parseNextAlphaIssueIndex))
+						let nextIssueAlphaIndex = nextAlphaIndex
+						let issueId = encodeAlphaIssueIndex(nextIssueAlphaIndex)
 
-						for (let attempt = 0; attempt < 12; attempt += 1) {
+						while (true) {
 							const existing = yield* sql<{ readonly id: string }>`
 								SELECT id FROM issues WHERE id = ${issueId}
 							`
 							if (existing.length === 0) {
 								break
 							}
-							issueId = createLocalIssueId()
+							nextIssueAlphaIndex += 1
+							issueId = encodeAlphaIssueIndex(nextIssueAlphaIndex)
 						}
+
+						const nextReservedAlphaIndex = nextIssueAlphaIndex + 1
 
 						yield* sql.withTransaction(
 							Effect.gen(function* () {
@@ -1168,6 +1216,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								if (syncTarget !== undefined) {
 									yield* enqueueSync(sql, issueId, "upsert", syncTarget)
 								}
+								yield* setMetaValue(
+									sql,
+									LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META,
+									String(nextReservedAlphaIndex),
+								)
 							}),
 						)
 

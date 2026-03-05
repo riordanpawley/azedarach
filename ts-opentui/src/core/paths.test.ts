@@ -59,8 +59,28 @@ describe("paths session naming", () => {
 	})
 
 	it("rejects non-issue names", () => {
-		expect(parseIssueSessionName("notasession")).toBeUndefined()
+		expect(parseIssueSessionName("not a session")).toBeUndefined()
+		expect(parseIssueSessionName("!invalid")).toBeUndefined()
 		expect(parseIssueSessionName("")).toBeUndefined()
+	})
+
+	it("parses plain local issue IDs", () => {
+		expect(parseIssueSessionName("a")).toEqual({
+			type: "issue",
+			issueId: "a",
+		})
+		expect(parseIssueSessionName("123")).toEqual({
+			type: "issue",
+			issueId: "123",
+		})
+		expect(parseIssueSessionName("claude-a")).toEqual({
+			type: "issue",
+			issueId: "a",
+		})
+		expect(parseIssueSessionName("opencode-123")).toEqual({
+			type: "issue",
+			issueId: "123",
+		})
 	})
 
 	it("parses Linear-style uppercase identifiers", () => {

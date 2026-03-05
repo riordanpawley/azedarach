@@ -6,9 +6,9 @@
  */
 import { Args, Command, Options } from "@effect/cli"
 import { Console, DateTime, Duration, Effect, HashMap, Option, SubscriptionRef } from "effect"
-import { resolveCliIssueId } from "./issueIdResolver.js"
 import { DevServerService, type DevServerState } from "../services/DevServerService.js"
 import { ProjectService } from "../services/ProjectService.js"
+import { resolveCliIssueId } from "./issueIdResolver.js"
 
 const CLI_DEFAULT_SERVER_NAME = "default"
 
@@ -35,7 +35,7 @@ const formatUptime = (startedAt: Date | undefined): Effect.Effect<string, never,
 // ============================================================================
 
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Issue ID (e.g., AZE-123 or shorthand suffix 123)"),
+	Args.withDescription("Issue ID (e.g., a, ab, 12, AZE-123, or shorthand suffix 123)"),
 )
 
 const projectDirArg = Args.directory().pipe(
@@ -159,9 +159,7 @@ const devStopHandler = (args: {
 		yield* devServerService.stop(issueId, serverName)
 
 		if (args.json) {
-			yield* Console.log(
-				JSON.stringify({ resultStatus: "stopped", issueId, serverName }),
-			)
+			yield* Console.log(JSON.stringify({ resultStatus: "stopped", issueId, serverName }))
 		} else {
 			yield* Console.log(`Stopped dev server '${serverName}' for ${issueId}`)
 		}
