@@ -7,7 +7,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { BeadEditorService } from "../../core/BeadEditorService.js"
+import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
@@ -76,7 +76,7 @@ export const moveTasksAtom = appRuntime.fn(
 /**
  * Create a new task with full orchestration
  *
- * Handles the complete create flow: dismiss overlay, create bead, refresh board,
+ * Handles the complete create flow: dismiss overlay, create issue, refresh board,
  * navigate to new task, show toast. All logic in Effects, not React callbacks.
  *
  * Usage: const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
@@ -238,7 +238,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
 /**
  * Edit a bead in $EDITOR
  *
- * Opens the bead in $EDITOR as structured markdown, parses changes on save,
+ * Opens the issue in $EDITOR as structured markdown, parses changes on save,
  * and applies updates via bd update.
  *
  * Usage: const editIssue = useAtomSet(editIssueViaEditorAtom, { mode: "promise" })
@@ -246,28 +246,28 @@ export const forkCreateEpicAtom = appRuntime.fn(
  */
 export const editIssueViaEditorAtom = appRuntime.fn((issue: TaskWithSession) =>
 	Effect.gen(function* () {
-		const editor = yield* BeadEditorService
-		yield* editor.editBead(issue)
+		const editor = yield* IssueEditorService
+		yield* editor.editIssue(issue)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
- * Create a new bead via $EDITOR
+ * Create a new issue via $EDITOR
  *
- * Opens a template in $EDITOR, parses the result, and creates a new bead.
+ * Opens a template in $EDITOR, parses the result, and creates a new issue.
  *
  * Usage: const createIssue = useAtom(createIssueViaEditorAtom, { mode: "promise" })
  *        const { id, title } = await createIssue()
  */
 export const createIssueViaEditorAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
-		const editor = yield* BeadEditorService
-		return yield* editor.createBead()
+		const editor = yield* IssueEditorService
+		return yield* editor.createIssue()
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
 
 /**
- * Create a bead from natural language using Claude CLI
+ * Create an issue from natural language using Claude CLI
  *
  * Two-phase approach for reliability:
  * 1. Claude extracts structured data (title, type, priority) from natural language
@@ -367,7 +367,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 				? parsed.priority
 				: 2
 
-		// Phase 2: Create the bead directly via BeadsClient
+		// Phase 2: Create the issue directly via BeadsClient
 		const createdIssue = yield* issueTrackerClient.create({
 			title: parsed.title,
 			type: taskType,

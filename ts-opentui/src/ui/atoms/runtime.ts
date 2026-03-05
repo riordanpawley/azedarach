@@ -10,7 +10,7 @@ import { Atom } from "@effect-atom/atom"
 import { Layer, Logger } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { BeadEditorService } from "../../core/BeadEditorService.js"
+import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
@@ -55,7 +55,7 @@ export const appLayer = Layer.mergeAll(
 	BoardService.Default,
 	ClockService.Default,
 	TmuxService.Default,
-	BeadEditorService.Default,
+	IssueEditorService.Default,
 	PRWorkflow.Default,
 	TerminalService.Default,
 	EditorService.Default,

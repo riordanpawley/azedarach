@@ -33,8 +33,8 @@ const formatUptime = (startedAt: Date | undefined): Effect.Effect<string, never,
 // CLI Arguments and Options
 // ============================================================================
 
-const issueIdArg = Args.text({ name: "bead-id" }).pipe(
-	Args.withDescription("Beads issue ID (e.g., az-2qy)"),
+const issueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.withDescription("Issue ID (e.g., az-2qy)"),
 )
 
 const projectDirArg = Args.directory().pipe(
@@ -208,7 +208,7 @@ const devStatusHandler = (args: {
 	Effect.gen(function* () {
 		const devServerService = yield* DevServerService
 
-		// Get all servers for this bead
+		// Get all servers for this issue
 		const issueServers = yield* devServerService.getIssueServers(args.issueId)
 		const serverList = Array.from(HashMap.values(issueServers))
 
@@ -271,7 +271,7 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 		// Get all servers from the service's state
 		const allServers = yield* SubscriptionRef.get(devServerService.servers)
 
-		// Collect running servers across all beads
+		// Collect running servers across all issues
 		const runningServers: Array<{ issueId: string; server: DevServerState }> = []
 		for (const [issueId, issueServers] of HashMap.entries(allServers)) {
 			for (const server of HashMap.values(issueServers)) {
@@ -308,7 +308,7 @@ const devListHandler = (args: { readonly verbose: boolean; readonly json: boolea
 
 		yield* Console.log("Running dev servers:")
 		yield* Console.log("")
-		yield* Console.log("  BEAD         SERVER    PORT    UPTIME")
+		yield* Console.log("  ISSUE         SERVER    PORT    UPTIME")
 		yield* Console.log("  ─────────────────────────────────────────")
 
 		for (const { issueId, server } of runningServers) {
@@ -333,7 +333,7 @@ const devStartCommand = Command.make(
 		json: jsonOption,
 	},
 	devStartHandler,
-).pipe(Command.withDescription("Start a dev server for a bead"))
+).pipe(Command.withDescription("Start a dev server for an issue"))
 
 const devStopCommand = Command.make(
 	"stop",
@@ -344,7 +344,7 @@ const devStopCommand = Command.make(
 		json: jsonOption,
 	},
 	devStopHandler,
-).pipe(Command.withDescription("Stop a dev server for a bead"))
+).pipe(Command.withDescription("Stop a dev server for an issue"))
 
 const devRestartCommand = Command.make(
 	"restart",
@@ -356,7 +356,7 @@ const devRestartCommand = Command.make(
 		json: jsonOption,
 	},
 	devRestartHandler,
-).pipe(Command.withDescription("Restart a dev server for a bead"))
+).pipe(Command.withDescription("Restart a dev server for an issue"))
 
 const devStatusCommand = Command.make(
 	"status",
@@ -366,7 +366,7 @@ const devStatusCommand = Command.make(
 		json: jsonOption,
 	},
 	devStatusHandler,
-).pipe(Command.withDescription("Show dev server status for a bead"))
+).pipe(Command.withDescription("Show dev server status for an issue"))
 
 const devListCommand = Command.make(
 	"list",
@@ -375,7 +375,7 @@ const devListCommand = Command.make(
 		json: jsonOption,
 	},
 	devListHandler,
-).pipe(Command.withDescription("Show all running dev servers across all beads"))
+).pipe(Command.withDescription("Show all running dev servers across all issues"))
 
 export const devCommand = Command.make("dev", {}, () =>
 	Console.log("Use 'az dev --help' to see available subcommands"),
@@ -387,5 +387,5 @@ export const devCommand = Command.make("dev", {}, () =>
 		devStatusCommand,
 		devListCommand,
 	]),
-	Command.withDescription("Manage dev servers for beads"),
+	Command.withDescription("Manage dev servers for issues"),
 )

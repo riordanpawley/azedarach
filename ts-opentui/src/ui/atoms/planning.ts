@@ -49,7 +49,7 @@ export const planningStateAtom = appRuntime.subscriptionRef(
  * Takes a feature description and:
  * 1. Generates initial plan with AI
  * 2. Reviews and refines up to 5 times
- * 3. Creates beads from the final plan
+ * 3. Creates issues from the final plan
  *
  * Usage: const runPlanning = useAtomSet(runPlanningAtom)
  *        runPlanning("Add user authentication feature")

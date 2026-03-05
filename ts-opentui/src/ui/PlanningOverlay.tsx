@@ -34,7 +34,7 @@ const StatusIndicator = ({ status }: { status: PlanningState["status"] }) => {
 		generating: theme.yellow,
 		reviewing: theme.blue,
 		refining: theme.lavender,
-		creating_beads: theme.green,
+		creating_issues: theme.green,
 		complete: theme.green,
 		error: theme.red,
 	}
@@ -44,7 +44,7 @@ const StatusIndicator = ({ status }: { status: PlanningState["status"] }) => {
 		generating: "Generating plan...",
 		reviewing: "Reviewing plan...",
 		refining: "Refining plan...",
-		creating_beads: "Creating beads...",
+		creating_issues: "Creating issues...",
 		complete: "Complete!",
 		error: "Error",
 	}
@@ -435,7 +435,7 @@ export const PlanningOverlay = ({ onClose }: PlanningOverlayProps) => {
 				{(state.status === "generating" ||
 					state.status === "reviewing" ||
 					state.status === "refining" ||
-					state.status === "creating_beads") && (
+					state.status === "creating_issues") && (
 					<ProgressPhase state={state} onCancel={handleClose} />
 				)}
 

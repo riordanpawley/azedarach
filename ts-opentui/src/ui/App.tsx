@@ -8,7 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo } from "react"
-import { killActivePopup } from "../core/BeadEditorService.js"
+import { killActivePopup } from "../core/IssueEditorService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
 	activeSessionsCountAtom,

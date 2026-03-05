@@ -23,7 +23,7 @@ import { BunContext } from "@effect/platform-bun"
 import { Console, Duration, Effect, Layer, Logger, Option, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { BeadEditorService } from "../core/BeadEditorService.js"
+import { IssueEditorService } from "../core/IssueEditorService.js"
 import { BeadsClient } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
@@ -90,7 +90,7 @@ const cliLayer = Layer.mergeAll(
 	BoardService.Default,
 	ClockService.Default,
 	TmuxService.Default,
-	BeadEditorService.Default,
+	IssueEditorService.Default,
 	PRWorkflow.Default,
 	TerminalService.Default,
 	EditorService.Default,
@@ -155,31 +155,31 @@ const projectDirArg = Args.directory().pipe(
 // ============================================================================
 
 /**
- * Validate that beads database exists in the project
+ * Validate that the issue tracker store exists when backend requires .beads.
  */
-const validateBeadsDatabase = (projectDir: string) =>
+const validateIssueTrackerStore = (projectDir: string) =>
 	Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const resolvedConfig = yield* SubscriptionRef.get(appConfig.config)
 		if ("linear" in resolvedConfig.issueTracker || "local" in resolvedConfig.issueTracker) {
-			yield* Console.log("Using non-beads issue tracker (no .beads directory required)")
+			yield* Console.log("Using remote/local issue tracker backend (no .beads directory required)")
 			return
 		}
 
 		const fs = yield* FileSystem.FileSystem
 		const path = yield* Path.Path
-		const beadsDir = path.join(projectDir, ".beads")
+		const issueStoreDir = path.join(projectDir, ".beads")
 
-		const exists = yield* fs.exists(beadsDir)
+		const exists = yield* fs.exists(issueStoreDir)
 		if (!exists) {
 			return yield* Effect.fail(
 				new Error(
-					`No .beads directory found in ${projectDir}. Run 'bd init' to initialize beads tracking.`,
+					`No .beads directory found in ${projectDir}. Run 'bd init' to initialize issue tracking storage.`,
 				),
 			)
 		}
 
-		yield* Console.log(`Using beads database: ${beadsDir}`)
+		yield* Console.log(`Using issue tracker store: ${issueStoreDir}`)
 	})
 
 // ============================================================================
@@ -207,15 +207,15 @@ const defaultHandler = (args: {
 			yield* Console.log(`Using config: ${args.config.value}`)
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+			// Validate issue tracker store
+			yield* validateIssueTrackerStore(cwd)
 
 		// Launch TUI
 		yield* Effect.promise(() => launchTUI())
 	})
 
 /**
- * Start a new Claude session for a beads issue
+ * Start a new Claude session for an issue
  */
 const startHandler = (args: {
 	readonly issueId: string
@@ -236,8 +236,8 @@ const startHandler = (args: {
 			}
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+			// Validate issue tracker store
+			yield* validateIssueTrackerStore(cwd)
 
 		// Start the session using ClaudeSessionManager (provided by cliLayer)
 		const sessionManager = yield* ClaudeSessionManager
@@ -246,8 +246,8 @@ const startHandler = (args: {
 			projectPath: cwd,
 		})
 
-		// Claim the bead with session assignee
-		const issueTrackerClient = yield* BeadsClient
+			// Claim the issue with session assignee
+			const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient
 			.update(
 				args.issueId,
@@ -260,22 +260,22 @@ const startHandler = (args: {
 			.pipe(
 			Effect.tap(() => {
 				if (args.verbose) {
-					return Console.log(
-						`Claimed bead ${args.issueId} with assignee ${session.tmuxSessionName}`,
-					)
+						return Console.log(
+							`Claimed issue ${args.issueId} with assignee ${session.tmuxSessionName}`,
+						)
 				}
 				return Effect.void
 			}),
 			Effect.catchAll((e) => {
 				// Non-fatal: log warning but continue
-				return Console.log(`Warning: Could not claim bead: ${e}`)
-			}),
-		)
+					return Console.log(`Warning: Could not claim issue: ${e}`)
+				}),
+			)
 
 		yield* Console.log(`Session started successfully!`)
 		yield* Console.log(`  Worktree: ${session.worktreePath}`)
 		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
-		yield* Console.log(`  Bead claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
+			yield* Console.log(`  Issue claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
 		yield* Console.log(``)
 		yield* Console.log(`To attach: az attach ${args.issueId}`)
 		yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
@@ -327,8 +327,8 @@ const pauseHandler = (args: {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+			// Validate issue tracker store
+			yield* validateIssueTrackerStore(cwd)
 
 		// TODO: Implement session pause
 		yield* Console.log("[Stub] Sending Ctrl+C to session...")
@@ -448,7 +448,7 @@ const statusHandler = (args: {
 	})
 
 /**
- * Sync beads database in current or all worktrees
+ * Sync issue tracker state in current or all worktrees
  */
 const syncHandler = (args: {
 	readonly all: boolean
@@ -458,15 +458,15 @@ const syncHandler = (args: {
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-		yield* Console.log("Syncing beads database...")
+			yield* Console.log("Syncing issue tracker state...")
 		yield* Console.log(`Project: ${cwd}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-		// Validate beads database
-		yield* validateBeadsDatabase(cwd)
+			// Validate issue tracker store
+			yield* validateIssueTrackerStore(cwd)
 
 		if (args.all) {
 			// TODO: Sync all worktrees
@@ -1014,7 +1014,7 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
  * Issue ID argument for commands that operate on a specific issue
  */
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Beads issue ID (e.g., az-2qy)"),
+	Args.withDescription("Issue ID (e.g., az-2qy)"),
 )
 
 /**
@@ -1029,7 +1029,7 @@ const startCommand = Command.make(
 		config: configOption,
 	},
 	startHandler,
-).pipe(Command.withDescription("Start a new Claude Code session for a beads issue"))
+).pipe(Command.withDescription("Start a new Claude Code session for an issue"))
 
 /**
  * az attach <issue-id> - Attach to existing session
@@ -1083,7 +1083,7 @@ const statusCommand = Command.make(
 ).pipe(Command.withDescription("Show status of all Claude Code sessions"))
 
 /**
- * az sync - Sync beads database
+ * az sync - Sync issue tracker state
  */
 const syncCommand = Command.make(
 	"sync",
@@ -1095,7 +1095,7 @@ const syncCommand = Command.make(
 		verbose: verboseOption,
 	},
 	syncHandler,
-).pipe(Command.withDescription("Sync beads database in worktrees"))
+).pipe(Command.withDescription("Sync issue tracker state in worktrees"))
 
 /**
  * az gate <issue-id> - Run quality gates for a task

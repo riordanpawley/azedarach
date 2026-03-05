@@ -1,5 +1,5 @@
 /**
- * BeadEditorService - Bead editor using $EDITOR
+ * IssueEditorService - Bead editor using $EDITOR
  *
  * Serializes beads to structured markdown, opens $EDITOR, parses changes,
  * and applies updates via BeadsClient.
@@ -104,9 +104,9 @@ export class EditorError extends Data.TaggedError("EditorError")<{
 // ============================================================================
 
 /**
- * Result of creating a new bead
+ * Result of creating a new issue
  */
-export interface CreatedBead {
+export interface CreatedIssue {
 	readonly id: string
 	readonly title: string
 }
@@ -115,11 +115,11 @@ export interface CreatedBead {
 // Service Definition
 // ============================================================================
 
-export interface BeadEditorServiceImpl {
+export interface IssueEditorServiceImpl {
 	/**
-	 * Edit a bead in $EDITOR
+	 * Edit a issue in $EDITOR
 	 *
-	 * 1. Serializes bead to markdown
+	 * 1. Serializes issue to markdown
 	 * 2. Writes to /tmp/azedarach-{id}.md
 	 * 3. Opens $EDITOR (blocking)
 	 * 4. Parses result
@@ -127,21 +127,21 @@ export interface BeadEditorServiceImpl {
 	 *
 	 * If type changed: bd delete + bd create (preserve deps)
 	 */
-	readonly editBead: (
-		bead: Issue,
+	readonly editIssue: (
+		issue: Issue,
 	) => Effect.Effect<void, ParseMarkdownError | EditorError, CommandExecutor.CommandExecutor>
 
 	/**
-	 * Create a new bead via $EDITOR
+	 * Create a new issue via $EDITOR
 	 *
 	 * 1. Creates blank template
 	 * 2. Writes to /tmp/azedarach-new.md
 	 * 3. Opens $EDITOR in tmux popup (blocking via tmux wait-for)
 	 * 4. Parses result
-	 * 5. Creates bead via bd create
+	 * 5. Creates issue via bd create
 	 */
-	readonly createBead: () => Effect.Effect<
-		CreatedBead,
+	readonly createIssue: () => Effect.Effect<
+		CreatedIssue,
 		ParseMarkdownError | EditorError,
 		CommandExecutor.CommandExecutor
 	>
@@ -162,53 +162,53 @@ const priorityToLabel = (priority: number): string => `P${priority}`
 const typeToLabel = (type: string): string => type
 
 /**
- * Serialize a bead to markdown format
+ * Serialize a issue to markdown format
  */
-const serializeBeadToMarkdown = (bead: Issue): string => {
+const serializeIssueToMarkdown = (issue: Issue): string => {
 	const lines: string[] = []
 
 	// Header
-	lines.push(`# ${bead.id}: ${bead.title}`)
+	lines.push(`# ${issue.id}: ${issue.title}`)
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("")
 
 	// Metadata section
 	lines.push(
-		`Type:     ${typeToLabel(bead.issue_type)}        (read-only - changing requires delete+create)`,
+		`Type:     ${typeToLabel(issue.issue_type)}        (read-only - changing requires delete+create)`,
 	)
-	lines.push(`Priority: ${priorityToLabel(bead.priority)}`)
-	lines.push(`Status:   ${bead.status}`)
-	lines.push(`Assignee: ${bead.assignee || ""}`)
-	lines.push(`Labels:   ${(bead.labels || []).join(", ")}`)
-	lines.push(`Estimate: ${bead.estimate ?? ""}`)
+	lines.push(`Priority: ${priorityToLabel(issue.priority)}`)
+	lines.push(`Status:   ${issue.status}`)
+	lines.push(`Assignee: ${issue.assignee || ""}`)
+	lines.push(`Labels:   ${(issue.labels || []).join(", ")}`)
+	lines.push(`Estimate: ${issue.estimate ?? ""}`)
 	lines.push("")
 
 	// Description
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Description")
 	lines.push("")
-	lines.push(bead.description || "")
+	lines.push(issue.description || "")
 	lines.push("")
 
 	// Design
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Design")
 	lines.push("")
-	lines.push(bead.design || "")
+	lines.push(issue.design || "")
 	lines.push("")
 
 	// Notes
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Notes")
 	lines.push("")
-	lines.push(bead.notes || "")
+	lines.push(issue.notes || "")
 	lines.push("")
 
 	// Acceptance Criteria
 	lines.push("───────────────────────────────────────────────────")
 	lines.push("## Acceptance Criteria")
 	lines.push("")
-	lines.push(bead.acceptance || "")
+	lines.push(issue.acceptance || "")
 	lines.push("")
 
 	return lines.join("\n")
@@ -295,7 +295,7 @@ interface UpdatedFields {
 /**
  * Parse markdown to extract changed fields
  */
-const parseMarkdownToBead = (
+const parseMarkdownToIssue = (
 	markdown: string,
 	original: Issue,
 ): Effect.Effect<UpdatedFields, ParseMarkdownError> =>
@@ -450,9 +450,9 @@ const ANCHORS = {
 } as const
 
 /**
- * Create a blank bead template for editor creation
+ * Create a blank issue template for editor creation
  */
-const createBlankBeadTemplate = (): string => {
+const createBlankIssueTemplate = (): string => {
 	const lines: string[] = []
 
 	// Header with single-word anchor for easy selection
@@ -501,9 +501,9 @@ const createBlankBeadTemplate = (): string => {
 }
 
 /**
- * New bead fields parsed from template
+ * New issue fields parsed from template
  */
-interface NewBeadFields {
+interface NewIssueFields {
 	title: string
 	type: string
 	priority: number
@@ -518,15 +518,15 @@ interface NewBeadFields {
 }
 
 /**
- * Parse markdown to extract new bead fields
+ * Parse markdown to extract new issue fields
  */
-const parseMarkdownToNewBead = (
+const parseMarkdownToNewIssue = (
 	markdown: string,
-): Effect.Effect<NewBeadFields, ParseMarkdownError> =>
+): Effect.Effect<NewIssueFields, ParseMarkdownError> =>
 	Effect.try({
 		try: () => {
 			const lines = markdown.split("\n")
-			const fields: Partial<NewBeadFields> = {}
+			const fields: Partial<NewIssueFields> = {}
 
 			// Parse header for title (format: "# Title text")
 			const headerLine = lines[0]
@@ -656,7 +656,7 @@ const parseMarkdownToNewBead = (
 			if (fields.priority === undefined) throw new Error("Priority is required")
 			if (!fields.status) throw new Error("Status is required")
 
-			return fields as NewBeadFields
+			return fields as NewIssueFields
 		},
 		catch: (error) =>
 			new ParseMarkdownError({
@@ -670,17 +670,17 @@ const parseMarkdownToNewBead = (
 // ============================================================================
 
 /**
- * BeadEditorService
+ * IssueEditorService
  *
  * @example
  * ```ts
  * const program = Effect.gen(function* () {
- *   const editor = yield* BeadEditorService
- *   yield* editor.editBead(bead)
- * }).pipe(Effect.provide(BeadEditorService.Default))
+ *   const editor = yield* IssueEditorService
+ *   yield* editor.editIssue(issue)
+ * }).pipe(Effect.provide(IssueEditorService.Default))
  * ```
  */
-export class BeadEditorService extends Effect.Service<BeadEditorService>()("BeadEditorService", {
+export class IssueEditorService extends Effect.Service<IssueEditorService>()("IssueEditorService", {
 	dependencies: [BeadsClient.Default],
 	effect: Effect.gen(function* () {
 		const client = yield* BeadsClient
@@ -688,13 +688,13 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 		const fs = yield* FileSystem.FileSystem
 
 		return {
-			editBead: (bead: Issue) =>
+			editIssue: (issue: Issue) =>
 				Effect.gen(function* () {
 					// 1. Serialize to markdown
-					const markdown = serializeBeadToMarkdown(bead)
+					const markdown = serializeIssueToMarkdown(issue)
 
 					// 2. Write to temp file
-					const tempFile = `/tmp/azedarach-${bead.id}.md`
+					const tempFile = `/tmp/azedarach-${issue.id}.md`
 					yield* fs.writeFileString(tempFile, markdown).pipe(
 						Effect.mapError(
 							(error) =>
@@ -727,7 +727,7 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 							"-h",
 							"90%",
 							"-T",
-							` Edit: ${bead.id} `,
+							` Edit: ${issue.id} `,
 							"--",
 							"sh",
 							"-c",
@@ -756,7 +756,7 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 					)
 
 					// 6. Parse changes
-					const updates = yield* parseMarkdownToBead(editedMarkdown, bead)
+					const updates = yield* parseMarkdownToIssue(editedMarkdown, issue)
 
 					// 7. Apply updates
 					const hasChanges = Object.keys(updates).length > 0
@@ -778,7 +778,7 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 
 					// 9. Apply updates via BeadsClient
 					yield* client
-						.update(bead.id, {
+						.update(issue.id, {
 							status: updates.status,
 							notes: updates.notes,
 							priority: updates.priority,
@@ -794,7 +794,7 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 							Effect.mapError(
 								(error) =>
 									new EditorError({
-										message: `Failed to update bead: ${error.message}`,
+										message: `Failed to update issue: ${error.message}`,
 									}),
 							),
 						)
@@ -812,10 +812,10 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 					)
 				}),
 
-			createBead: () =>
+			createIssue: () =>
 				Effect.gen(function* () {
 					// 1. Create blank template
-					const markdown = createBlankBeadTemplate()
+					const markdown = createBlankIssueTemplate()
 
 					// 2. Write to temp file
 					const tempFile = `/tmp/azedarach-new.md`
@@ -879,10 +879,10 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 						),
 					)
 
-					// 6. Parse new bead fields
-					const fields = yield* parseMarkdownToNewBead(editedMarkdown)
+					// 6. Parse new issue fields
+					const fields = yield* parseMarkdownToNewIssue(editedMarkdown)
 
-					// 7. Create bead via BeadsClient
+					// 7. Create issue via BeadsClient
 					const createdIssue = yield* client
 						.create({
 							title: fields.title,
@@ -899,12 +899,12 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 							Effect.mapError(
 								(error) =>
 									new EditorError({
-										message: `Failed to create bead: ${error.message}`,
+										message: `Failed to create issue: ${error.message}`,
 									}),
 							),
 						)
 
-					// 8. If status or notes were set, update the bead (bd create doesn't support these)
+					// 8. If status or notes were set, update the issue (bd create doesn't support these)
 					const needsUpdate = (fields.status && fields.status !== "open") || fields.notes
 					if (needsUpdate) {
 						yield* client
@@ -916,7 +916,7 @@ export class BeadEditorService extends Effect.Service<BeadEditorService>()("Bead
 								Effect.mapError(
 									(error) =>
 										new EditorError({
-											message: `Failed to update bead status/notes: ${error.message}`,
+											message: `Failed to update issue status/notes: ${error.message}`,
 										}),
 								),
 							)

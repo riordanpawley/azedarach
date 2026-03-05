@@ -69,7 +69,7 @@ const ReviewFeedbackSchema = Schema.Struct({
 			reason: Schema.String,
 		}),
 	),
-	isApproved: Schema.Boolean, // Ready for beads generation?
+	isApproved: Schema.Boolean, // Ready for issue generation?
 })
 
 export type ReviewFeedback = Schema.Schema.Type<typeof ReviewFeedbackSchema>
@@ -83,7 +83,7 @@ export interface PlanningState {
 		| "generating"
 		| "reviewing"
 		| "refining"
-		| "creating_beads"
+		| "creating_issues"
 		| "complete"
 		| "error"
 	readonly featureDescription: string | null
@@ -112,7 +112,7 @@ const initialState: PlanningState = {
 
 export class PlanningError extends Data.TaggedError("PlanningError")<{
 	readonly message: string
-	readonly phase: "generation" | "review" | "refinement" | "beads_creation"
+	readonly phase: "generation" | "review" | "refinement" | "issues_creation"
 	readonly cause?: unknown
 }> {}
 
@@ -403,11 +403,11 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 			})
 
 		/**
-		 * Create beads from the finalized plan
+		 * Create issues from the finalized plan
 		 */
 		const createIssuesFromPlan = (plan: Plan) =>
 			Effect.gen(function* () {
-				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "creating_beads" as const }))
+				yield* SubscriptionRef.update(state, (s) => ({ ...s, status: "creating_issues" as const }))
 
 				const createdIssues: Issue[] = []
 				const idMapping = new Map<string, string>() // Map temp IDs to real bead IDs
@@ -426,7 +426,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 							(e) =>
 								new PlanningError({
 									message: `Failed to create epic: ${e}`,
-									phase: "beads_creation",
+									phase: "issues_creation",
 									cause: e,
 								}),
 						),
@@ -456,7 +456,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 								(e) =>
 									new PlanningError({
 										message: `Failed to create task "${task.title}": ${e}`,
-										phase: "beads_creation",
+										phase: "issues_creation",
 										cause: e,
 									}),
 							),
@@ -471,7 +471,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 							(e) =>
 								new PlanningError({
 									message: `Failed to link task to epic: ${e}`,
-									phase: "beads_creation",
+									phase: "issues_creation",
 									cause: e,
 								}),
 						),
@@ -512,7 +512,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 									(e) =>
 										new PlanningError({
 											message: `Failed to create task "${task.title}": ${e}`,
-											phase: "beads_creation",
+											phase: "issues_creation",
 											cause: e,
 										}),
 								),
@@ -527,7 +527,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 								(e) =>
 									new PlanningError({
 										message: `Failed to link task to epic: ${e}`,
-										phase: "beads_creation",
+										phase: "issues_creation",
 										cause: e,
 									}),
 							),
@@ -542,7 +542,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 										(e) =>
 											new PlanningError({
 												message: `Failed to add dependency: ${e}`,
-												phase: "beads_creation",
+												phase: "issues_creation",
 												cause: e,
 											}),
 									),
@@ -606,7 +606,7 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					}
 				}
 
-				// 3. Create beads from the final plan
+				// 3. Create issues from the final plan
 				return yield* createIssuesFromPlan(plan)
 			}).pipe(
 				Effect.catchAll((error) =>

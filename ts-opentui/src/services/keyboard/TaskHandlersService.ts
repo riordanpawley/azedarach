@@ -1,17 +1,17 @@
 /**
  * TaskHandlersService
  *
- * Handles task/bead management:
- * - Edit bead (e)
- * - Create bead (c)
- * - Delete bead (D)
+ * Handles task management:
+ * - Edit issue (e)
+ * - Create issue (c)
+ * - Delete issue (D)
  * - Move task between columns (h/l in action mode)
  *
  * Converted from factory pattern to Effect.Service layer.
  */
 
 import { Effect } from "effect"
-import { BeadEditorService } from "../../core/BeadEditorService.js"
+import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BeadsClient } from "../../core/BeadsClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { COLUMNS } from "../../ui/types.js"
@@ -35,7 +35,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			EditorService.Default,
 			OverlayService.Default,
 			BeadsClient.Default,
-			BeadEditorService.Default,
+			IssueEditorService.Default,
 			PRWorkflow.Default,
 			MutationQueue.Default,
 		],
@@ -48,7 +48,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
 				const issueTrackerClient = yield* BeadsClient
-				const issueEditor = yield* BeadEditorService
+				const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
 
@@ -117,7 +117,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						const task = yield* helpers.getActionTargetTask()
 						if (!task) return
 
-						yield* issueEditor.editBead(task).pipe(
+						yield* issueEditor.editIssue(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
 						Effect.tap(() => syncTaskFromBackend(task.id)),
 						Effect.catchAll((error) => {
@@ -130,7 +130,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 											: `Failed to edit: ${error}`
 									: `Failed to edit: ${error}`
 							return Effect.gen(function* () {
-								yield* Effect.logError(`Edit bead: ${msg}`, { error })
+								yield* Effect.logError(`Edit issue: ${msg}`, { error })
 								yield* toast.show("error", msg)
 							})
 						}),
@@ -139,7 +139,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 				const createIssue = () =>
 					Effect.gen(function* () {
-						yield* issueEditor.createBead().pipe(
+						yield* issueEditor.createIssue().pipe(
 						Effect.flatMap((result) =>
 							Effect.gen(function* () {
 								const epicId = yield* nav.getDrillDownEpic()
@@ -181,7 +181,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 											: `Failed to create: ${error}`
 									: `Failed to create: ${error}`
 							return Effect.gen(function* () {
-								yield* Effect.logError(`Create bead: ${msg}`, { error })
+								yield* Effect.logError(`Create issue: ${msg}`, { error })
 								yield* toast.show("error", msg)
 							})
 						}),
@@ -200,7 +200,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 						yield* overlay.push({
 							_tag: "confirm",
-							message: `Permanently delete bead ${task.id}?${sessionWarning}`,
+							message: `Permanently delete issue ${task.id}?${sessionWarning}`,
 							onConfirm: deleteIssueAndCleanup(task.id, hasSession),
 						})
 					})
