@@ -6,7 +6,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
+import type { LinearClient, Issue as LinearSdkIssue } from "@linear/sdk"
 import { Data, Effect, SubscriptionRef } from "effect"
 import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
@@ -14,9 +14,9 @@ import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import { IssueSyncError, IssueSyncService } from "./IssueSyncService.js"
+import { type IssueSyncError, IssueSyncService } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
-import { LocalIssueStore, LocalIssueStoreError, type SyncTarget } from "./LocalIssueStore.js"
+import { LocalIssueStore, type LocalIssueStoreError, type SyncTarget } from "./LocalIssueStore.js"
 
 // ============================================================================
 // Schema Definitions

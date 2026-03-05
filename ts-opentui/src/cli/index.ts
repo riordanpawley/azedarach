@@ -24,15 +24,19 @@ import { Console, Duration, Effect, Layer, Logger, Option, Schema, SubscriptionR
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { IssueEditorService } from "../core/IssueEditorService.js"
 import { BeadsClient } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
+import { IssueEditorService } from "../core/IssueEditorService.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { getIssueSessionName, issueIdsEqualForLookup, parseIssueSessionName } from "../core/paths.js"
+import {
+	getIssueSessionName,
+	issueIdsEqualForLookup,
+	parseIssueSessionName,
+} from "../core/paths.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -208,8 +212,8 @@ const defaultHandler = (args: {
 			yield* Console.log(`Using config: ${args.config.value}`)
 		}
 
-			// Validate issue tracker store
-			yield* validateIssueTrackerStore(cwd)
+		// Validate issue tracker store
+		yield* validateIssueTrackerStore(cwd)
 
 		// Launch TUI
 		yield* Effect.promise(() => launchTUI())
@@ -237,8 +241,8 @@ const startHandler = (args: {
 			}
 		}
 
-			// Validate issue tracker store
-			yield* validateIssueTrackerStore(cwd)
+		// Validate issue tracker store
+		yield* validateIssueTrackerStore(cwd)
 
 		// Start the session using ClaudeSessionManager (provided by cliLayer)
 		const sessionManager = yield* ClaudeSessionManager
@@ -247,8 +251,8 @@ const startHandler = (args: {
 			projectPath: cwd,
 		})
 
-			// Claim the issue with session assignee
-			const issueTrackerClient = yield* BeadsClient
+		// Claim the issue with session assignee
+		const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient
 			.update(
 				args.issueId,
@@ -259,16 +263,16 @@ const startHandler = (args: {
 				cwd,
 			)
 			.pipe(
-			Effect.tap(() => {
-				if (args.verbose) {
+				Effect.tap(() => {
+					if (args.verbose) {
 						return Console.log(
 							`Claimed issue ${args.issueId} with assignee ${session.tmuxSessionName}`,
 						)
-				}
-				return Effect.void
-			}),
-			Effect.catchAll((e) => {
-				// Non-fatal: log warning but continue
+					}
+					return Effect.void
+				}),
+				Effect.catchAll((e) => {
+					// Non-fatal: log warning but continue
 					return Console.log(`Warning: Could not claim issue: ${e}`)
 				}),
 			)
@@ -276,7 +280,7 @@ const startHandler = (args: {
 		yield* Console.log(`Session started successfully!`)
 		yield* Console.log(`  Worktree: ${session.worktreePath}`)
 		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
-			yield* Console.log(`  Issue claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
+		yield* Console.log(`  Issue claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
 		yield* Console.log(``)
 		yield* Console.log(`To attach: az attach ${args.issueId}`)
 		yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
@@ -328,8 +332,8 @@ const pauseHandler = (args: {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-			// Validate issue tracker store
-			yield* validateIssueTrackerStore(cwd)
+		// Validate issue tracker store
+		yield* validateIssueTrackerStore(cwd)
 
 		// TODO: Implement session pause
 		yield* Console.log("[Stub] Sending Ctrl+C to session...")
@@ -459,15 +463,15 @@ const syncHandler = (args: {
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 
-			yield* Console.log("Syncing issue tracker state...")
+		yield* Console.log("Syncing issue tracker state...")
 		yield* Console.log(`Project: ${cwd}`)
 
 		if (args.verbose) {
 			yield* Console.log("Verbose mode enabled")
 		}
 
-			// Validate issue tracker store
-			yield* validateIssueTrackerStore(cwd)
+		// Validate issue tracker store
+		yield* validateIssueTrackerStore(cwd)
 
 		if (args.all) {
 			// TODO: Sync all worktrees
@@ -478,6 +482,234 @@ const syncHandler = (args: {
 			yield* Console.log("[Stub] Syncing current directory...")
 			yield* Console.log("[Stub] Pushed: 2, Pulled: 1")
 		}
+	})
+
+/**
+ * Show issue details
+ */
+const issueGetHandler = (args: {
+	readonly issueId: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+
+		if (args.verbose) {
+			yield* Console.log(`Loading issue: ${args.issueId}`)
+			yield* Console.log(`Project: ${cwd}`)
+		}
+
+		yield* validateIssueTrackerStore(cwd)
+
+		const issueTrackerClient = yield* BeadsClient
+		const issue = yield* issueTrackerClient.show(args.issueId, cwd)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(issue, null, 2))
+			return
+		}
+
+		yield* Console.log(`${issue.id}: ${issue.title}`)
+		yield* Console.log(`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`)
+		yield* Console.log(`updated_at=${issue.updated_at}`)
+
+		if (issue.assignee && issue.assignee.trim().length > 0) {
+			yield* Console.log(`assignee=${issue.assignee}`)
+		}
+
+		if (issue.labels && issue.labels.length > 0) {
+			yield* Console.log(`labels=${issue.labels.join(",")}`)
+		}
+
+		if (issue.description && issue.description.trim().length > 0) {
+			yield* Console.log("")
+			yield* Console.log("Description:")
+			yield* Console.log(issue.description)
+		}
+
+		if (issue.design && issue.design.trim().length > 0) {
+			yield* Console.log("")
+			yield* Console.log("Design:")
+			yield* Console.log(issue.design)
+		}
+
+		if (issue.acceptance && issue.acceptance.trim().length > 0) {
+			yield* Console.log("")
+			yield* Console.log("Acceptance:")
+			yield* Console.log(issue.acceptance)
+		}
+
+		if (issue.notes && issue.notes.trim().length > 0) {
+			yield* Console.log("")
+			yield* Console.log("Notes:")
+			yield* Console.log(issue.notes)
+		}
+	})
+
+/**
+ * Create a new issue
+ */
+const issueCreateHandler = (args: {
+	readonly title: string
+	readonly issueType: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly description: Option.Option<string>
+	readonly design: Option.Option<string>
+	readonly acceptance: Option.Option<string>
+	readonly assignee: Option.Option<string>
+	readonly estimate: Option.Option<number>
+	readonly labels: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(cwd)
+
+		const issueTrackerClient = yield* BeadsClient
+		const issue = yield* issueTrackerClient.create({
+			title: args.title,
+			type: Option.getOrUndefined(args.issueType),
+			priority: Option.getOrUndefined(args.priority),
+			description: Option.getOrUndefined(args.description),
+			design: Option.getOrUndefined(args.design),
+			acceptance: Option.getOrUndefined(args.acceptance),
+			assignee: Option.getOrUndefined(args.assignee),
+			estimate: Option.getOrUndefined(args.estimate),
+			labels: Option.match(args.labels, {
+				onNone: () => undefined,
+				onSome: (value) =>
+					value
+						.split(",")
+						.map((label) => label.trim())
+						.filter((label) => label.length > 0),
+			}),
+			cwd,
+		})
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(issue, null, 2))
+			return
+		}
+
+		yield* Console.log(`Created issue ${issue.id}: ${issue.title}`)
+		if (args.verbose) {
+			yield* Console.log(
+				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
+			)
+		}
+	})
+
+/**
+ * Update issue fields
+ */
+const issueUpdateHandler = (args: {
+	readonly issueId: string
+	readonly status: Option.Option<string>
+	readonly notes: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly title: Option.Option<string>
+	readonly issueType: Option.Option<string>
+	readonly description: Option.Option<string>
+	readonly design: Option.Option<string>
+	readonly acceptance: Option.Option<string>
+	readonly assignee: Option.Option<string>
+	readonly estimate: Option.Option<number>
+	readonly labels: Option.Option<string>
+	readonly parent: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(cwd)
+
+		const labels = Option.match(args.labels, {
+			onNone: () => undefined,
+			onSome: (value) =>
+				value
+					.split(",")
+					.map((label) => label.trim())
+					.filter((label) => label.length > 0),
+		})
+
+		const fields = {
+			status: Option.getOrUndefined(args.status),
+			notes: Option.getOrUndefined(args.notes),
+			priority: Option.getOrUndefined(args.priority),
+			title: Option.getOrUndefined(args.title),
+			type: Option.getOrUndefined(args.issueType),
+			description: Option.getOrUndefined(args.description),
+			design: Option.getOrUndefined(args.design),
+			acceptance: Option.getOrUndefined(args.acceptance),
+			assignee: Option.getOrUndefined(args.assignee),
+			estimate: Option.getOrUndefined(args.estimate),
+			labels,
+			parent: Option.getOrUndefined(args.parent),
+		}
+
+		const hasChanges = Object.values(fields).some((value) => value !== undefined)
+		if (!hasChanges) {
+			return yield* Effect.fail(
+				new Error(
+					"No fields provided. Use at least one --status/--design/--description/... option.",
+				),
+			)
+		}
+
+		const issueTrackerClient = yield* BeadsClient
+		yield* issueTrackerClient.update(args.issueId, fields, cwd)
+		yield* Console.log(`Updated issue ${args.issueId}`)
+		if (args.verbose) {
+			yield* Console.log("Use `az issue get <issue-id>` to inspect the updated issue.")
+		}
+	})
+
+/**
+ * Close an issue
+ */
+const issueCloseHandler = (args: {
+	readonly issueId: string
+	readonly reason: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+}) =>
+	Effect.gen(function* () {
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(cwd)
+
+		const issueTrackerClient = yield* BeadsClient
+		yield* issueTrackerClient.close(args.issueId, Option.getOrUndefined(args.reason), cwd)
+		yield* Console.log(`Closed issue ${args.issueId}`)
+		if (args.verbose && Option.isSome(args.reason)) {
+			yield* Console.log(`reason=${args.reason.value}`)
+		}
+	})
+
+/**
+ * Delete an issue
+ */
+const issueDeleteHandler = (args: {
+	readonly issueId: string
+	readonly force: boolean
+	readonly projectDir: Option.Option<string>
+}) =>
+	Effect.gen(function* () {
+		if (!args.force) {
+			return yield* Effect.fail(
+				new Error("Refusing to delete without --force. This operation is irreversible."),
+			)
+		}
+
+		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(cwd)
+
+		const issueTrackerClient = yield* BeadsClient
+		yield* issueTrackerClient.delete(args.issueId, cwd)
+		yield* Console.log(`Deleted issue ${args.issueId}`)
 	})
 
 /**
@@ -868,11 +1100,13 @@ const projectAddHandler = (args: {
 
 		let tracker: "bd" | "br" | "linear" | "local" = "local"
 		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
-		const hasLocalConfig = yield* fs.exists(localConfigPath).pipe(Effect.catchAll(() => Effect.succeed(false)))
+		const hasLocalConfig = yield* fs
+			.exists(localConfigPath)
+			.pipe(Effect.catchAll(() => Effect.succeed(false)))
 		if (hasLocalConfig) {
-			const localConfigRaw = yield* fs.readFileString(localConfigPath).pipe(
-				Effect.catchAll(() => Effect.succeed("")),
-			)
+			const localConfigRaw = yield* fs
+				.readFileString(localConfigPath)
+				.pipe(Effect.catchAll(() => Effect.succeed("")))
 			const decodedConfig = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
 				localConfigRaw,
 			).pipe(Effect.option)
@@ -1092,6 +1326,162 @@ const gateCommand = Command.make(
 	},
 	gateHandler,
 ).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
+
+const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
+
+/**
+ * az issue get <issue-id> - Show issue details
+ */
+const issueGetCommand = Command.make(
+	"get",
+	{
+		issueId: issueIdArg,
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+	},
+	issueGetHandler,
+).pipe(Command.withDescription("Show full issue details"))
+
+/**
+ * az issue create <title> - Create issue
+ */
+const issueCreateCommand = Command.make(
+	"create",
+	{
+		title: issueTitleArg,
+		issueType: Options.text("type").pipe(
+			Options.optional,
+			Options.withDescription("Issue type (task, bug, epic, chore)"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.optional,
+			Options.withDescription("Priority (1-5)"),
+		),
+		description: Options.text("description").pipe(
+			Options.optional,
+			Options.withDescription("Issue description"),
+		),
+		design: Options.text("design").pipe(
+			Options.optional,
+			Options.withDescription("Design/implementation notes"),
+		),
+		acceptance: Options.text("acceptance").pipe(
+			Options.optional,
+			Options.withDescription("Acceptance criteria"),
+		),
+		assignee: Options.text("assignee").pipe(
+			Options.optional,
+			Options.withDescription("Assignee value"),
+		),
+		estimate: Options.integer("estimate").pipe(
+			Options.optional,
+			Options.withDescription("Estimate points/minutes (backend-specific)"),
+		),
+		labels: Options.text("labels").pipe(
+			Options.optional,
+			Options.withDescription("Comma-separated labels"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+	},
+	issueCreateHandler,
+).pipe(Command.withDescription("Create a new issue"))
+
+/**
+ * az issue update <issue-id> - Update issue fields
+ */
+const issueUpdateCommand = Command.make(
+	"update",
+	{
+		issueId: issueIdArg,
+		status: Options.text("status").pipe(Options.optional, Options.withDescription("Issue status")),
+		notes: Options.text("notes").pipe(Options.optional, Options.withDescription("Issue notes")),
+		priority: Options.integer("priority").pipe(
+			Options.optional,
+			Options.withDescription("Priority (1-5)"),
+		),
+		title: Options.text("title").pipe(Options.optional, Options.withDescription("New title")),
+		issueType: Options.text("type").pipe(Options.optional, Options.withDescription("Issue type")),
+		description: Options.text("description").pipe(
+			Options.optional,
+			Options.withDescription("Issue description"),
+		),
+		design: Options.text("design").pipe(
+			Options.optional,
+			Options.withDescription("Design/implementation notes"),
+		),
+		acceptance: Options.text("acceptance").pipe(
+			Options.optional,
+			Options.withDescription("Acceptance criteria"),
+		),
+		assignee: Options.text("assignee").pipe(
+			Options.optional,
+			Options.withDescription("Assignee value"),
+		),
+		estimate: Options.integer("estimate").pipe(
+			Options.optional,
+			Options.withDescription("Estimate points/minutes (backend-specific)"),
+		),
+		labels: Options.text("labels").pipe(
+			Options.optional,
+			Options.withDescription("Comma-separated labels (replaces labels)"),
+		),
+		parent: Options.text("parent").pipe(
+			Options.optional,
+			Options.withDescription("Parent epic issue ID"),
+		),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	issueUpdateHandler,
+).pipe(Command.withDescription("Update issue fields"))
+
+/**
+ * az issue close <issue-id> - Close issue
+ */
+const issueCloseCommand = Command.make(
+	"close",
+	{
+		issueId: issueIdArg,
+		reason: Options.text("reason").pipe(Options.optional, Options.withDescription("Close reason")),
+		projectDir: projectDirArg,
+		verbose: verboseOption,
+	},
+	issueCloseHandler,
+).pipe(Command.withDescription("Close an issue"))
+
+/**
+ * az issue delete <issue-id> --force - Delete issue
+ */
+const issueDeleteCommand = Command.make(
+	"delete",
+	{
+		issueId: issueIdArg,
+		force: Options.boolean("force").pipe(
+			Options.withDescription("Required: confirms irreversible deletion"),
+		),
+		projectDir: projectDirArg,
+	},
+	issueDeleteHandler,
+).pipe(Command.withDescription("Delete an issue (requires --force)"))
+
+/**
+ * az issue - Parent command for issue operations
+ */
+const issueCommand = Command.make("issue", {}, () =>
+	Console.log("Use 'az issue --help' to see available issue commands"),
+).pipe(
+	Command.withDescription("Issue operations"),
+	Command.withSubcommands([
+		issueGetCommand,
+		issueCreateCommand,
+		issueUpdateCommand,
+		issueCloseCommand,
+		issueDeleteCommand,
+	]),
+)
 
 /**
  * Event argument for notify command
@@ -1481,6 +1871,7 @@ const cli = az.pipe(
 		killCommand,
 		statusCommand,
 		syncCommand,
+		issueCommand,
 		gateCommand,
 		devCommand,
 		// Internal/advanced commands
@@ -1535,13 +1926,10 @@ const buildCliLayerForArgv = (argv: ReadonlyArray<string>) => {
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) =>
-	Command.run(
-		cli.pipe(Command.provide(buildCliLayerForArgv(argv))),
-		{
-			name: "Azedarach",
-			version: "0.1.0",
-		},
-	)(argv)
+	Command.run(cli.pipe(Command.provide(buildCliLayerForArgv(argv))), {
+		name: "Azedarach",
+		version: "0.1.0",
+	})(argv)
 
 export { cli }
 
