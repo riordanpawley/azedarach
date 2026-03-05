@@ -29,6 +29,12 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "list" {
 		return handleListCommand(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "create" {
+		return handleCreateCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "q" {
+		return handleQuickCaptureCommand(args[1:], stdout, stderr)
+	}
 
 	// Load configuration
 	cfg, err := loadConfig()
