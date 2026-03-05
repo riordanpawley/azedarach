@@ -1,8 +1,8 @@
 # Agent Instructions
 
-First command in a new AI session: **`bin/issue prime`**.
-Use **`bin/issue`** for issue tracking commands.
-`bin/issue prime` is the source of backend-specific CLI/API guidance.
+First command in a new AI session: **`issue prime`**.
+Use **`issue`** for issue tracking commands.
+`issue prime` is the source of backend-specific CLI/API guidance.
 
 ## Landing the Plane (Session Completion)
 

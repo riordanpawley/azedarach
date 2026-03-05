@@ -25,7 +25,7 @@ This file provides a condensed reference for OpenCode sessions.
 
 1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any' (ts-opentui only).
 2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed).
-3. **Issue Tracker**: Start sessions with `bin/issue prime`, then use `bin/issue` for issue tracking commands.
+3. **Issue Tracker**: Start sessions with `issue prime`, then use `issue` for issue tracking commands.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 
 ## Quick Commands
@@ -48,7 +48,7 @@ rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
-bin/issue prime                                              # Session primer + backend API guide
+issue prime                                              # Session primer + backend API guide
 ```
 
 ## Architecture Quick Reference
@@ -78,7 +78,7 @@ go-bubbletea/
 ## Task Management
 
 **Track ALL work through issue tracking** (preserves context across sessions).  
-Run `bin/issue prime` at the start of each session, then use `bin/issue` for all issue operations.
+Run `issue prime` at the start of each session, then use `issue` for all issue operations.
 
 ## OpenCode Plugins
 
@@ -93,13 +93,13 @@ Both are configured in `opencode.json`.
 
 ## Issue Tracking Policy
 
-**IMPORTANT**: This project uses **`bin/issue`** as the issue tracking interface. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
+**IMPORTANT**: This project uses **`issue`** as the issue tracking interface. Do NOT use markdown TODOs, task lists, or parallel tracking systems.
 
 ### Important Rules
 
-- ✅ First command in a new AI session: `bin/issue prime`
-- ✅ Use `bin/issue` for issue tracking commands
-- ✅ `bin/issue prime` is the source of backend-specific CLI/API guidance
+- ✅ First command in a new AI session: `issue prime`
+- ✅ Use `issue` for issue tracking commands
+- ✅ `issue prime` is the source of backend-specific CLI/API guidance
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
