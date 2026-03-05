@@ -2,7 +2,7 @@
 
 ## 1. Starting Fresh Session
 
-**Goal:** Start working on a bead from scratch
+**Goal:** Start working on an issue from scratch
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -26,8 +26,8 @@
 │                                                                              │
 │  3b. Press 'S' (start+work)                                                  │
 │      └── Same as above but Claude gets prompt:                              │
-│          "work on bead az-123 (task): Fix login bug                         │
-│           Run `linear-cli i get az-123` to see full description...                   │
+│          "work on issue az-123 (task): Fix login bug                        │
+│           Run `az issue get az-123` to see full description...               │
 │           Before starting: ASK ME if anything unclear..."                   │
 │                                                                              │
 │  4. Claude starts working                                                    │
@@ -79,7 +79,7 @@
 
 ## 3. Dev Server Workflow
 
-**Goal:** Start dev server for a bead
+**Goal:** Start dev server for an issue
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

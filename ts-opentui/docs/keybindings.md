@@ -376,7 +376,7 @@ Press `e` to edit the selected bead in your $EDITOR.
 2. Press `e` to open your $EDITOR with the bead's current data
 3. Modify any fields you want to change
 4. Save and close the editor
-5. Changes are applied via `linear-cli i update`
+5. Changes are applied via `az issue update`
 
 ## Claude Create Mode (`C`)
 
@@ -416,9 +416,9 @@ Press `E` (capital E) to edit the selected bead with Claude's assistance.
 
 1. Select a task with hjkl navigation
 2. Press `E` to launch a Claude edit session
-3. Claude receives the bead's current details and `linear-cli i update` syntax
+3. Claude receives the issue's current details and `az issue update` syntax
 4. Describe what changes you want in natural language
-5. Claude will help update the bead using `linear-cli i update`
+5. Claude will help update the issue using `az issue update`
 
 ### Example
 
@@ -426,7 +426,7 @@ Press `E` (capital E) to edit the selected bead with Claude's assistance.
 2. Press `E`
 3. Claude shows you the bead details and asks what you'd like to change
 4. Type: `Change the priority to P1 and add a note about the deadline`
-5. Claude runs the appropriate `linear-cli i update` command
+5. Claude runs the appropriate `az issue update` command
 
 ### Comparison: Manual vs Claude
 
