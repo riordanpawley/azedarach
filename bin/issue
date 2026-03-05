@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_NAME="bin/issue"
+SCRIPT_NAME="issue"
 
 print_usage() {
-  cat <<'USAGE'
-Usage: bin/issue <command> [args...]
+  cat <<EOF_USAGE
+Usage: ${SCRIPT_NAME} <command> [args...]
 
 Wrapper commands:
   prime                Print AI session primer + backend API guide
@@ -24,7 +24,7 @@ Backends:
 
 Environment:
   ISSUE_BACKEND        Select backend (linear|br|bd|az), defaults to linear
-USAGE
+EOF_USAGE
 }
 
 normalize_backend() {
