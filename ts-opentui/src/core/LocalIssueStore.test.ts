@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { BunContext } from "@effect/platform-bun"
+import { Effect, Layer } from "effect"
 import {
 	allocateNextAlphaIssueId,
 	encodeAlphaIssueIndex,
+	LocalIssueStore,
 	parseBackupTimestampFromFilename,
 	resolveLocalIssueStorageRoot,
 	selectBackupFilesToPrune,
@@ -93,5 +99,69 @@ describe("allocateNextAlphaIssueId", () => {
 	it("skips occupied candidates and advances index", () => {
 		const existing = new Set(["a", "b", "c"])
 		expect(allocateNextAlphaIssueId(0, existing)).toEqual({ issueId: "d", nextIndex: 4 })
+	})
+})
+
+describe("importExternalSnapshot", () => {
+	it("preserves local optional fields when snapshot omits them", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const issue = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const created = yield* store.create(
+						{
+							title: "Local issue",
+							description: "Local description should survive import",
+							design: "Local design should survive import",
+							acceptance: "Local acceptance should survive import",
+							estimate: 5,
+						},
+						undefined,
+						projectPath,
+					)
+
+					yield* store.update(
+						created.id,
+						{ notes: "Local notes should survive import" },
+						undefined,
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: created.id,
+								externalId: "lin-1",
+								externalKey: created.id,
+								title: "Remote title update",
+								status: created.status,
+								priority: created.priority,
+								issueType: created.issue_type,
+								createdAt: created.created_at,
+								updatedAt: created.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					return yield* store.show(created.id, projectPath)
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(issue).toBeDefined()
+			expect(issue?.title).toBe("Remote title update")
+			expect(issue?.description).toBe("Local description should survive import")
+			expect(issue?.design).toBe("Local design should survive import")
+			expect(issue?.notes).toBe("Local notes should survive import")
+			expect(issue?.acceptance).toBe("Local acceptance should survive import")
+			expect(issue?.estimate).toBe(5)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
 	})
 })
