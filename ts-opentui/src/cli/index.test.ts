@@ -38,6 +38,29 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		const argv = ["bun", "az", "issue", "update", "--description", "why not", "az-123"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
 	})
+
+	it("moves issue create options ahead of title when title is first", () => {
+		const argv = [
+			"bun",
+			"az",
+			"issue",
+			"create",
+			"Child task",
+			"--parent",
+			"AZE-134",
+		]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"create",
+			"--parent",
+			"AZE-134",
+			"Child task",
+		])
+	})
 })
 
 describe("resolveCliExecutionMode", () => {
