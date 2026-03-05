@@ -1091,14 +1091,23 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az issue get <issue-id>\`
-- Keep issue context current as you work:
+- Common issue commands:
+  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
-- Create follow-up/child work in the tracker:
-  - \`az issue create "Child task title" --parent <epic-id>\`
+  - \`az issue update <issue-id> --status in_progress|blocked|open\`
+  - \`az issue create "Title" --type task|bug|epic|chore --priority 1-5\`
+  - \`az issue create "Child task" --parent <epic-id>\`
+  - \`az issue close <issue-id> --reason "..."\`
+  - \`az issue --help\`
+- Keep issue context current as you work:
+  - Update design/notes as implementation decisions change.
+  - Use status/priority/labels flags when state changes materially.
+- Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
-- When work is complete, update status in tracker:
-  - \`az issue close <issue-id>\`
+- When work is complete:
+  - Commit your changes first (\`git add -A && git commit -m "..."\`).
+  - Then close the issue (\`az issue close <issue-id>\`).
 `)
 	})
 
