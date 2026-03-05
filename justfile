@@ -35,3 +35,7 @@ link-sfe-ts:
 
 install-sfe-ts: build-sfe-ts link-sfe-ts
     @echo "Installed az. Try: az --help"
+
+ts-build-link-run: build-sfe-ts link-sfe-ts
+    @echo "Running az"
+    az
