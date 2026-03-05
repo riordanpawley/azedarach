@@ -75,6 +75,7 @@ import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
+import { resolveCliIssueId } from "./issueIdResolver.js"
 
 // ============================================================================
 // CLI Layers
@@ -268,8 +269,9 @@ const startHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
-		yield* Console.log(`Starting Claude session for issue: ${args.issueId}`)
+		yield* Console.log(`Starting Claude session for issue: ${issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
 
 		if (args.verbose) {
@@ -285,7 +287,7 @@ const startHandler = (args: {
 		// Start the session using ClaudeSessionManager (provided by cliLayer)
 		const sessionManager = yield* ClaudeSessionManager
 		const session = yield* sessionManager.start({
-			issueId: args.issueId,
+			issueId,
 			projectPath: cwd,
 		})
 
@@ -293,7 +295,7 @@ const startHandler = (args: {
 		const issueTrackerClient = yield* BeadsClient
 		yield* issueTrackerClient
 			.update(
-				args.issueId,
+				issueId,
 				{
 					status: "in_progress",
 					assignee: session.tmuxSessionName,
@@ -304,7 +306,7 @@ const startHandler = (args: {
 				Effect.tap(() => {
 					if (args.verbose) {
 						return Console.log(
-							`Claimed issue ${args.issueId} with assignee ${session.tmuxSessionName}`,
+							`Claimed issue ${issueId} with assignee ${session.tmuxSessionName}`,
 						)
 					}
 					return Effect.void
@@ -318,9 +320,9 @@ const startHandler = (args: {
 		yield* Console.log(`Session started successfully!`)
 		yield* Console.log(`  Worktree: ${session.worktreePath}`)
 		yield* Console.log(`  tmux session: ${session.tmuxSessionName}`)
-		yield* Console.log(`  Issue claimed: ${args.issueId} (assignee: ${session.tmuxSessionName})`)
+		yield* Console.log(`  Issue claimed: ${issueId} (assignee: ${session.tmuxSessionName})`)
 		yield* Console.log(``)
-		yield* Console.log(`To attach: az attach ${args.issueId}`)
+		yield* Console.log(`To attach: az attach ${issueId}`)
 		yield* Console.log(`Or directly: tmux attach-session -t ${session.tmuxSessionName}`)
 	})
 
@@ -334,17 +336,18 @@ const attachHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
 		if (args.verbose) {
-			yield* Console.log(`Attaching to session for issue: ${args.issueId}`)
+			yield* Console.log(`Attaching to session for issue: ${issueId}`)
 			yield* Console.log(`Project: ${cwd}`)
 		}
 
-		const sessionName = yield* findSessionByIssueId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(issueId)
 		if (!sessionName) {
-			yield* Console.error(`No session found for ${args.issueId}`)
-			yield* Console.log(`Start a new session with: az start ${args.issueId}`)
-			return yield* Effect.fail(new Error(`Session not found: ${args.issueId}`))
+			yield* Console.error(`No session found for ${issueId}`)
+			yield* Console.log(`Start a new session with: az start ${issueId}`)
+			return yield* Effect.fail(new Error(`Session not found: ${issueId}`))
 		}
 
 		// Attach to tmux session (this replaces current process)
@@ -362,8 +365,9 @@ const pauseHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
-		yield* Console.log(`Pausing session for issue: ${args.issueId}`)
+		yield* Console.log(`Pausing session for issue: ${issueId}`)
 		yield* Console.log(`Project: ${cwd}`)
 
 		if (args.verbose) {
@@ -388,12 +392,13 @@ const killHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
-		yield* Console.log(`Killing session for issue: ${args.issueId}`)
+		yield* Console.log(`Killing session for issue: ${issueId}`)
 
-		const sessionName = yield* findSessionByIssueId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(issueId)
 		if (!sessionName) {
-			yield* Console.log(`No session found for ${args.issueId}`)
+			yield* Console.log(`No session found for ${issueId}`)
 			return
 		}
 
@@ -405,7 +410,7 @@ const killHandler = (args: {
 			}),
 		)
 
-		yield* Console.log(`Session ${args.issueId} killed.`)
+		yield* Console.log(`Session ${issueId} killed.`)
 
 		if (args.verbose) {
 			yield* Console.log(`Project: ${cwd}`)
@@ -538,16 +543,17 @@ const issueGetHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
 		if (args.verbose) {
-			yield* Console.error(`Loading issue: ${args.issueId}`)
+			yield* Console.error(`Loading issue: ${issueId}`)
 			yield* Console.error(`Project: ${cwd}`)
 		}
 
 		yield* validateIssueTrackerStore(cwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		const issue = yield* issueTrackerClient.show(args.issueId, cwd)
+		const issue = yield* issueTrackerClient.show(issueId, cwd)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -644,6 +650,7 @@ const issueUpdateHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 		yield* validateIssueTrackerStore(cwd)
 
 		const labels = Option.match(args.labels, {
@@ -653,6 +660,11 @@ const issueUpdateHandler = (args: {
 					.split(",")
 					.map((label) => label.trim())
 					.filter((label) => label.length > 0),
+		})
+
+		const resolvedParent = yield* Option.match(args.parent, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, cwd),
 		})
 
 		const fields = {
@@ -667,7 +679,7 @@ const issueUpdateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels,
-			parent: Option.getOrUndefined(args.parent),
+			parent: resolvedParent,
 		}
 
 		const hasChanges = Object.values(fields).some((value) => value !== undefined)
@@ -680,12 +692,12 @@ const issueUpdateHandler = (args: {
 		}
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.update(args.issueId, fields, cwd)
+		yield* issueTrackerClient.update(issueId, fields, cwd)
 		if (args.json) {
-			yield* Console.log(JSON.stringify({ id: args.issueId, updated: true }, null, 2))
+			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
 			return
 		}
-		yield* Console.log(`Updated issue ${args.issueId}`)
+		yield* Console.log(`Updated issue ${issueId}`)
 		if (args.verbose) {
 			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
 		}
@@ -703,15 +715,16 @@ const issueCloseHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 		yield* validateIssueTrackerStore(cwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.close(args.issueId, Option.getOrUndefined(args.reason), cwd)
+		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), cwd)
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
 					{
-						id: args.issueId,
+						id: issueId,
 						closed: true,
 						reason: Option.getOrUndefined(args.reason),
 					},
@@ -721,7 +734,7 @@ const issueCloseHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Closed issue ${args.issueId}`)
+		yield* Console.log(`Closed issue ${issueId}`)
 		if (args.verbose && Option.isSome(args.reason)) {
 			yield* Console.error(`reason=${args.reason.value}`)
 		}
@@ -744,15 +757,16 @@ const issueDeleteHandler = (args: {
 		}
 
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 		yield* validateIssueTrackerStore(cwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.delete(args.issueId, cwd)
+		yield* issueTrackerClient.delete(issueId, cwd)
 		if (args.json) {
-			yield* Console.log(JSON.stringify({ id: args.issueId, deleted: true }, null, 2))
+			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
 			return
 		}
-		yield* Console.log(`Deleted issue ${args.issueId}`)
+		yield* Console.log(`Deleted issue ${issueId}`)
 	})
 
 /**
@@ -766,11 +780,12 @@ const gateHandler = (args: {
 }) =>
 	Effect.gen(function* () {
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 
-		yield* Console.log(`Running quality gates for: ${args.issueId}`)
+		yield* Console.log(`Running quality gates for: ${issueId}`)
 
 		// Find the worktree path for this task
-		const sessionName = yield* findSessionByIssueId(args.issueId)
+		const sessionName = yield* findSessionByIssueId(issueId)
 		let worktreePath = ""
 
 		if (sessionName) {
@@ -795,13 +810,13 @@ const gateHandler = (args: {
 			const pathService = yield* Path.Path
 			const parentDir = pathService.dirname(cwd)
 			const projectName = pathService.basename(cwd)
-			const expectedPath = pathService.join(parentDir, `${projectName}-${args.issueId}`)
+			const expectedPath = pathService.join(parentDir, `${projectName}-${issueId}`)
 
 			const exists = yield* fs.exists(expectedPath)
 			if (exists) {
 				worktreePath = expectedPath
 			} else {
-				yield* Console.error(`Could not find worktree for ${args.issueId}`)
+				yield* Console.error(`Could not find worktree for ${issueId}`)
 				yield* Console.log(`Checked: ${expectedPath}`)
 				yield* Console.log("Try running from within the worktree directory.")
 				return yield* Effect.fail(new Error("Worktree not found"))
@@ -1009,6 +1024,10 @@ const notifyHandler = (args: {
 	readonly verbose: boolean
 }) =>
 	Effect.gen(function* () {
+		const projectService = yield* ProjectService
+		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const issueId = yield* resolveCliIssueId(args.issueId, projectPath)
+
 		// Validate event type using type guard
 		if (!isValidHookEvent(args.event)) {
 			yield* Console.error(`Invalid event type: ${args.event}`)
@@ -1019,16 +1038,16 @@ const notifyHandler = (args: {
 		const status = mapEventToStatus(args.event)
 
 		// Find the session by issue ID (handles both new and legacy naming formats)
-		const sessionName = yield* findAiSessionByIssueId(args.issueId)
+		const sessionName = yield* findAiSessionByIssueId(issueId)
 		if (!sessionName) {
 			if (args.verbose) {
-				yield* Console.log(`No session found for ${args.issueId}`)
+				yield* Console.log(`No session found for ${issueId}`)
 			}
 			return
 		}
 
 		if (args.verbose) {
-			yield* Console.log(`Hook: ${args.event} for ${args.issueId} → status: ${status}`)
+			yield* Console.log(`Hook: ${args.event} for ${issueId} → status: ${status}`)
 		}
 
 		// Update tmux session option for the Claude session
@@ -1074,6 +1093,7 @@ const hooksInstallHandler = (args: {
 		const pathService = yield* Path.Path
 
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
 		const claudeDir = pathService.join(cwd, ".claude")
 		const settingsPath = pathService.join(claudeDir, "settings.local.json")
 
@@ -1104,13 +1124,13 @@ const hooksInstallHandler = (args: {
 		}
 
 		// Generate and merge hook configuration
-		const hookConfig = generateHookConfig(args.issueId)
+		const hookConfig = generateHookConfig(issueId)
 		const mergedSettings = deepMerge(existingSettings, hookConfig)
 
 		// Write merged settings
 		yield* fs.writeFileString(settingsPath, JSON.stringify(mergedSettings, null, "\t"))
 
-		yield* Console.log(`✓ Installed hooks for issue ${args.issueId}`)
+		yield* Console.log(`✓ Installed hooks for issue ${issueId}`)
 		yield* Console.log(`  File: ${settingsPath}`)
 		yield* Console.log(`  Events: pretooluse, permission_request, idle_prompt, stop, session_end`)
 
@@ -1273,7 +1293,7 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
  * Issue ID argument for commands that operate on a specific issue
  */
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
-	Args.withDescription("Issue ID (e.g., az-2qy)"),
+	Args.withDescription("Issue ID (e.g., AZE-123 or shorthand suffix 123)"),
 )
 
 /**
