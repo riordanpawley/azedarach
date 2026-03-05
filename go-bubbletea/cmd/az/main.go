@@ -11,6 +11,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
+var loadConfig = config.Load
+
 func main() {
 	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -20,9 +22,13 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "prime" {
 		return handlePrimeCommand(args[1:], stdout, stderr)
 	}
+	// Show command owns its own argument parsing and search dependency setup.
+	if len(args) > 0 && args[0] == "show" {
+		return handleShowCommand(args[1:], stdout, stderr)
+	}
 
 	// Load configuration
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "Error loading config: %v\n", err)
 		return 1
