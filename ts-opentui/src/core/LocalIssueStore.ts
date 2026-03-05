@@ -3,7 +3,7 @@ import { Reactivity } from "@effect/experimental"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Data, Effect, Schema } from "effect"
+import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import type {
 	DependencyRef,
 	DependencyType,
@@ -14,6 +14,9 @@ import type {
 	IssueStatus,
 	IssueType,
 } from "./BeadsClient.js"
+import { AppConfig } from "../config/AppConfig.js"
+import type { ResolvedConfig } from "../config/defaults.js"
+import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
@@ -138,6 +141,35 @@ const DEFAULT_PAGE_SIZE = 200
 const SYNC_QUEUE_LEASE_SECONDS = 120
 const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
 const LOCAL_ISSUE_DB_FILENAME = "issues.db"
+const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
+const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
+
+const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
+	enabled: true,
+	intervalMinutes: 60,
+	writeCooldownSeconds: 300,
+	maxBackups: 30,
+	directory: ".azedarach/backups",
+}
+
+interface LocalIssueBackupConfig {
+	readonly enabled: boolean
+	readonly intervalMinutes: number
+	readonly writeCooldownSeconds: number
+	readonly maxBackups: number
+	readonly directory: string
+}
+
+interface LocalIssueBackupPaths {
+	readonly backupDir: string
+	readonly backupPath: string
+	readonly tempPath: string
+}
+
+interface NamedBackupFile {
+	readonly name: string
+	readonly timestampMs: number
+}
 
 interface ResolveLocalIssueStorageRootInput {
 	readonly explicitProjectPath?: string
@@ -218,6 +250,114 @@ const schemaStatements: readonly string[] = [
 ]
 
 const nowIso = (): string => new Date().toISOString()
+
+const normalizePositiveInteger = (value: number | undefined, fallback: number): number => {
+	if (value === undefined || !Number.isFinite(value)) {
+		return fallback
+	}
+	const rounded = Math.floor(value)
+	return rounded > 0 ? rounded : fallback
+}
+
+const parseBackupTimestampToken = (token: string): number | undefined => {
+	if (token.length !== 16) {
+		return undefined
+	}
+	const year = Number(token.slice(0, 4))
+	const month = Number(token.slice(4, 6))
+	const day = Number(token.slice(6, 8))
+	const hour = Number(token.slice(9, 11))
+	const minute = Number(token.slice(11, 13))
+	const second = Number(token.slice(13, 15))
+	if (
+		!Number.isFinite(year) ||
+		!Number.isFinite(month) ||
+		!Number.isFinite(day) ||
+		!Number.isFinite(hour) ||
+		!Number.isFinite(minute) ||
+		!Number.isFinite(second)
+	) {
+		return undefined
+	}
+	const timestampMs = Date.UTC(year, month - 1, day, hour, minute, second)
+	return Number.isNaN(timestampMs) ? undefined : timestampMs
+}
+
+const formatBackupTimestampToken = (date: Date): string => {
+	const year = String(date.getUTCFullYear()).padStart(4, "0")
+	const month = String(date.getUTCMonth() + 1).padStart(2, "0")
+	const day = String(date.getUTCDate()).padStart(2, "0")
+	const hour = String(date.getUTCHours()).padStart(2, "0")
+	const minute = String(date.getUTCMinutes()).padStart(2, "0")
+	const second = String(date.getUTCSeconds()).padStart(2, "0")
+	return `${year}${month}${day}T${hour}${minute}${second}Z`
+}
+
+export const parseBackupTimestampFromFilename = (filename: string): number | undefined => {
+	const match = LOCAL_ISSUE_BACKUP_FILE_PATTERN.exec(filename)
+	if (match === null) {
+		return undefined
+	}
+	return parseBackupTimestampToken(match[1] ?? "")
+}
+
+const toNamedBackupFiles = (filenames: readonly string[]): readonly NamedBackupFile[] =>
+	filenames.flatMap((name) => {
+		const timestampMs = parseBackupTimestampFromFilename(name)
+		if (timestampMs === undefined) {
+			return []
+		}
+		return [
+			{
+				name,
+				timestampMs,
+			},
+		]
+	})
+
+export const selectBackupFilesToPrune = (
+	filenames: readonly string[],
+	maxBackups: number,
+): readonly string[] => {
+	const keepCount = normalizePositiveInteger(maxBackups, DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG.maxBackups)
+	const sorted = [...toNamedBackupFiles(filenames)].sort((left, right) => {
+		if (left.timestampMs !== right.timestampMs) {
+			return right.timestampMs - left.timestampMs
+		}
+		return right.name.localeCompare(left.name)
+	})
+	if (sorted.length <= keepCount) {
+		return []
+	}
+	return sorted.slice(keepCount).map((entry) => entry.name)
+}
+
+const resolveLocalIssueBackupConfig = (config: ResolvedConfig): LocalIssueBackupConfig => {
+	const fallback = DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG
+	if (!("local" in config.issueTracker)) {
+		return {
+			enabled: fallback.enabled,
+			intervalMinutes: fallback.intervalMinutes,
+			writeCooldownSeconds: fallback.writeCooldownSeconds,
+			maxBackups: fallback.maxBackups,
+			directory: fallback.directory,
+		}
+	}
+	const configured = config.issueTracker.local.backups
+	return {
+		enabled: configured?.enabled ?? fallback.enabled,
+		intervalMinutes: normalizePositiveInteger(configured?.intervalMinutes, fallback.intervalMinutes),
+		writeCooldownSeconds: normalizePositiveInteger(
+			configured?.writeCooldownSeconds,
+			fallback.writeCooldownSeconds,
+		),
+		maxBackups: normalizePositiveInteger(configured?.maxBackups, fallback.maxBackups),
+		directory:
+			configured?.directory && configured.directory.trim().length > 0
+				? configured.directory
+				: fallback.directory,
+	}
+}
 
 const normalizeIssueStatus = (status: string | undefined): IssueStatus => {
 	switch (status) {
@@ -377,11 +517,14 @@ const isValidSyncOperation = (operation: string): operation is SyncOperation =>
 const isValidSyncTarget = (target: string): target is SyncTarget => target === "linear"
 
 export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIssueStore", {
-	dependencies: [ProjectService.Default],
+	dependencies: [ProjectService.Default, AppConfig.Default, DiagnosticsService.Default],
 	effect: Effect.gen(function* () {
 		const pathService = yield* Path.Path
 		const fs = yield* FileSystem.FileSystem
 		const projectService = yield* ProjectService
+		const appConfig = yield* AppConfig
+		const diagnostics = yield* DiagnosticsService
+		const backupWarningAtByDbPath = new Map<string, number>()
 
 		const resolveStorageRoot = (
 			cwd?: string,
@@ -419,15 +562,264 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 			})
 
+		const getBackupConfig = (): Effect.Effect<LocalIssueBackupConfig> =>
+			SubscriptionRef.get(appConfig.config).pipe(Effect.map(resolveLocalIssueBackupConfig))
+
+		const getMetaValue = (
+			sql: SqlClient.SqlClient,
+			key: string,
+		): Effect.Effect<string | undefined, SqlError> =>
+			sql<MetaRow>`
+				SELECT value
+				FROM meta
+				WHERE key = ${key}
+				LIMIT 1
+			`.pipe(Effect.map((rows) => rows[0]?.value))
+
+		const setMetaValue = (
+			sql: SqlClient.SqlClient,
+			key: string,
+			value: string,
+		): Effect.Effect<void, SqlError> =>
+			sql`
+				INSERT INTO meta (key, value)
+				VALUES (${key}, ${value})
+				ON CONFLICT(key)
+				DO UPDATE SET value = ${value}
+			`.pipe(Effect.asVoid)
+
+		const getLastBackupTimestampMs = (
+			sql: SqlClient.SqlClient,
+		): Effect.Effect<number | undefined, SqlError> =>
+			getMetaValue(sql, LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT).pipe(
+				Effect.map((value) => {
+					if (value === undefined) {
+						return undefined
+					}
+					const parsed = Date.parse(value)
+					return Number.isNaN(parsed) ? undefined : parsed
+				}),
+			)
+
+		const resolveBackupDirectory = (
+			storageRoot: string,
+			backupConfig: LocalIssueBackupConfig,
+		): string =>
+			pathService.isAbsolute(backupConfig.directory)
+				? backupConfig.directory
+				: pathService.join(storageRoot, backupConfig.directory)
+
+		const reserveBackupPaths = (
+			backupDir: string,
+		): Effect.Effect<LocalIssueBackupPaths, LocalIssueStoreError> =>
+			Effect.gen(function* () {
+				for (let offsetSeconds = 0; offsetSeconds < 5; offsetSeconds += 1) {
+					const candidateDate = new Date(Date.now() + offsetSeconds * 1000)
+					const token = formatBackupTimestampToken(candidateDate)
+					const backupPath = pathService.join(backupDir, `issues-${token}.db`)
+					const exists = yield* fs
+						.exists(backupPath)
+						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					if (!exists) {
+						return {
+							backupDir,
+							backupPath,
+							tempPath: `${backupPath}.tmp-${crypto.randomUUID()}`,
+						}
+					}
+				}
+				return yield* Effect.fail(
+					new LocalIssueStoreError({
+						message: "Failed to reserve backup path after multiple attempts",
+					}),
+				)
+			})
+
+		const pruneBackups = (
+			backupDir: string,
+			maxBackups: number,
+		): Effect.Effect<void, LocalIssueStoreError> =>
+			Effect.gen(function* () {
+				const entries = yield* fs.readDirectory(backupDir).pipe(
+					Effect.catchAll((cause) =>
+						Effect.fail(
+							new LocalIssueStoreError({
+								message: `Failed to read backup directory: ${String(cause)}`,
+								cause,
+							}),
+						),
+					),
+				)
+				const toRemove = selectBackupFilesToPrune(entries, maxBackups)
+				for (const filename of toRemove) {
+					const targetPath = pathService.join(backupDir, filename)
+					yield* fs.remove(targetPath, { force: true }).pipe(
+						Effect.catchAll((cause) =>
+							Effect.fail(
+								new LocalIssueStoreError({
+									message: `Failed to prune backup '${filename}': ${String(cause)}`,
+									cause,
+								}),
+							),
+						),
+					)
+				}
+			})
+
+		const reportBackupFailure = (
+			dbPath: string,
+			backupConfig: LocalIssueBackupConfig,
+			message: string,
+			cause: unknown,
+		): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const nowMs = Date.now()
+				const cooldownMs = backupConfig.writeCooldownSeconds * 1000
+				const lastWarningAtMs = backupWarningAtByDbPath.get(dbPath)
+				if (lastWarningAtMs !== undefined && nowMs - lastWarningAtMs < cooldownMs) {
+					return
+				}
+				backupWarningAtByDbPath.set(dbPath, nowMs)
+				yield* Effect.logWarning(`${message}: ${String(cause)}`)
+				yield* diagnostics.logEvent({
+					severity: "warning",
+					source: "LocalIssueStore",
+					message,
+					details: String(cause),
+				})
+			})
+
+		const runBackup = (
+			sql: SqlClient.SqlClient,
+			storageRoot: string,
+			backupConfig: LocalIssueBackupConfig,
+		): Effect.Effect<void, LocalIssueStoreError | SqlError> =>
+			Effect.gen(function* () {
+				const backupDir = resolveBackupDirectory(storageRoot, backupConfig)
+				yield* fs.makeDirectory(backupDir, { recursive: true }).pipe(
+					Effect.mapError(
+						(cause) =>
+							new LocalIssueStoreError({
+								message: `Failed to create backup directory: ${String(cause)}`,
+								cause,
+							}),
+					),
+				)
+
+				const paths = yield* reserveBackupPaths(backupDir)
+				const cleanupTemp = fs.remove(paths.tempPath, { force: true }).pipe(Effect.ignore)
+
+				yield* sql`VACUUM INTO ${paths.tempPath}`.pipe(
+					Effect.catchAll((cause) =>
+						cleanupTemp.pipe(
+							Effect.zipRight(Effect.fail(cause)),
+						),
+					),
+				)
+
+				yield* fs.rename(paths.tempPath, paths.backupPath).pipe(
+					Effect.catchAll((cause) =>
+						cleanupTemp.pipe(
+							Effect.zipRight(
+								Effect.fail(
+									new LocalIssueStoreError({
+										message: `Failed to finalize sqlite backup: ${String(cause)}`,
+										cause,
+									}),
+								),
+							),
+						),
+					),
+				)
+
+				yield* setMetaValue(sql, LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT, nowIso())
+				yield* pruneBackups(paths.backupDir, backupConfig.maxBackups)
+			})
+
+		const maybeRunStaleOpenBackup = (
+			sql: SqlClient.SqlClient,
+			dbPath: string,
+			storageRoot: string,
+			backupConfig: LocalIssueBackupConfig,
+		): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				if (!backupConfig.enabled) {
+					return
+				}
+				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
+					Effect.catchAll((cause) => {
+						return reportBackupFailure(
+							dbPath,
+							backupConfig,
+							"Failed to read sqlite backup metadata",
+							cause,
+						).pipe(Effect.as(undefined))
+					}),
+				)
+				const staleIntervalMs = backupConfig.intervalMinutes * 60 * 1000
+				const shouldBackup =
+					lastBackupAtMs === undefined || Date.now() - lastBackupAtMs >= staleIntervalMs
+				if (!shouldBackup) {
+					return
+				}
+				yield* runBackup(sql, storageRoot, backupConfig).pipe(
+					Effect.catchAll((cause) =>
+						reportBackupFailure(dbPath, backupConfig, "Automatic sqlite backup failed", cause),
+					),
+				)
+			})
+
+		const maybeRunWriteCooldownBackup = (
+			sql: SqlClient.SqlClient,
+			dbPath: string,
+			storageRoot: string,
+			backupConfig: LocalIssueBackupConfig,
+		): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				if (!backupConfig.enabled) {
+					return
+				}
+				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
+					Effect.catchAll((cause) => {
+						return reportBackupFailure(
+							dbPath,
+							backupConfig,
+							"Failed to read sqlite backup metadata",
+							cause,
+						).pipe(Effect.as(undefined))
+					}),
+				)
+				const cooldownMs = backupConfig.writeCooldownSeconds * 1000
+				const shouldBackup =
+					lastBackupAtMs === undefined || Date.now() - lastBackupAtMs >= cooldownMs
+				if (!shouldBackup) {
+					return
+				}
+				yield* runBackup(sql, storageRoot, backupConfig).pipe(
+					Effect.catchAll((cause) =>
+						reportBackupFailure(
+							dbPath,
+							backupConfig,
+							"Write-triggered sqlite backup failed",
+							cause,
+						),
+					),
+				)
+			})
+
 		const withSql = <A>(
 			cwd: string | undefined,
 			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
+			options?: {
+				readonly triggerWriteBackup?: boolean
+			},
 		): Effect.Effect<A, LocalIssueStoreError> =>
 			Effect.gen(function* () {
 				const storageResolution = yield* resolveStorageRoot(cwd)
 				const storageRoot = storageResolution.storageRoot
 				const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
 				const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
+				const backupConfig = yield* getBackupConfig()
 				yield* Effect.log(
 					`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
 				)
@@ -453,8 +845,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							yield* sql.unsafe(statement)
 						}
 						yield* ensureSyncQueueColumns(sql)
+						yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
 
-						return yield* effect(sql)
+						const result = yield* effect(sql)
+						if (options?.triggerWriteBackup === true) {
+							yield* maybeRunWriteCooldownBackup(sql, dbPath, storageRoot, backupConfig)
+						}
+						return result
 					}),
 				).pipe(
 					Effect.catchAll((cause) =>
@@ -467,6 +864,12 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				)
 			})
+
+		const withSqlMutation = <A>(
+			cwd: string | undefined,
+			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
+		): Effect.Effect<A, LocalIssueStoreError> =>
+			withSql(cwd, effect, { triggerWriteBackup: true })
 
 		const listIssueRows = (
 			sql: SqlClient.SqlClient,
@@ -630,7 +1033,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							),
 						),
 
-			create: (
+				create: (
 				params: {
 					title: string
 					type?: string
@@ -645,8 +1048,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				},
 				syncTarget?: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<Issue, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<Issue, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const now = nowIso()
 						let issueId = createLocalIssueId()
@@ -748,8 +1151,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				},
 				syncTarget?: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<boolean, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<boolean, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const existingRows = yield* sql<IssueRow>`
 							SELECT
@@ -842,8 +1245,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				id: string,
 				syncTarget?: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<boolean, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<boolean, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const now = nowIso()
 						const existing = yield* sql<{ readonly id: string }>`
@@ -875,8 +1278,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				id: string,
 				syncTarget?: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<boolean, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<boolean, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					Effect.gen(function* () {
 						const existing = yield* sql<{ readonly id: string }>`
 							SELECT id FROM issues WHERE id = ${id} AND deleted_at IS NULL
@@ -929,8 +1332,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				type: DependencyType,
 				syncTarget?: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
 						Effect.gen(function* () {
 							if (type === "parent-child") {
@@ -1037,8 +1440,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				target: SyncTarget,
 				limit: number,
 				cwd?: string,
-			): Effect.Effect<readonly PendingSyncItem[], LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<readonly PendingSyncItem[], LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
 						Effect.gen(function* () {
 							const now = nowIso()
@@ -1141,10 +1544,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			markSyncSucceeded: (
 				params: MarkSyncSucceededParams,
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				params.claims.length === 0
-					? Effect.void
-					: withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					params.claims.length === 0
+						? Effect.void
+						: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
 									for (const claim of params.claims) {
@@ -1171,10 +1574,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			markSyncRetriable: (
 				params: MarkSyncRetriableParams,
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				params.claims.length === 0
-					? Effect.void
-					: withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					params.claims.length === 0
+						? Effect.void
+						: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
 									const nextAttemptAt = new Date(
@@ -1211,10 +1614,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			markSyncTerminalFailure: (
 				params: MarkSyncTerminalFailureParams,
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				params.claims.length === 0
-					? Effect.void
-					: withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					params.claims.length === 0
+						? Effect.void
+						: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
 									const nextAttempts = Math.max(0, params.nextAttempts)
@@ -1305,8 +1708,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					externalKey?: string
 				},
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					sql`
 						INSERT INTO issue_external_refs (
 							issue_id,
@@ -1334,10 +1737,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				target: SyncTarget,
 				snapshots: readonly ExternalIssueSnapshot[],
 				cwd?: string,
-			): Effect.Effect<number, LocalIssueStoreError> =>
-				snapshots.length === 0
-					? Effect.succeed(0)
-					: withSql(cwd, (sql) =>
+				): Effect.Effect<number, LocalIssueStoreError> =>
+					snapshots.length === 0
+						? Effect.succeed(0)
+						: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
 									for (const snapshot of snapshots) {
@@ -1461,8 +1864,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			markBootstrapComplete: (
 				target: SyncTarget,
 				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				): Effect.Effect<void, LocalIssueStoreError> =>
+					withSqlMutation(cwd, (sql) =>
 					sql`
 						INSERT INTO meta (key, value)
 						VALUES (${`bootstrap:${target}`}, ${"1"})
