@@ -25,7 +25,7 @@ Workflows are written as behavior contracts, not implementation details.
    - create from configured base branch
    - create from selected upstream-related issue branch (when eligible sources exist)
 3. ensure task-scoped branch exists and is checked out
-4. optionally sync tracker state for new context
+4. load latest local canonical issue state for new context
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session
 7. launch selected AI CLI command
@@ -204,7 +204,7 @@ Each failure MUST return explicit remediation guidance.
 
 If no merge in progress, show no-op notification.
 
-## 3.11 Merge Bead Into Bead Workflow (`Space b`)
+## 3.11 Merge Issue Branch Into Issue Branch Workflow (`Space b`)
 
 ### Intent
 
@@ -271,7 +271,7 @@ This section is normative for outcome quality; implementations MAY choose differ
 - left: move toward earlier status
 - right: move toward later status
 - support bulk movement for selected set
-- update tracker immediately on success
+- update local canonical issue state immediately on success and enqueue outbound sync when configured
 
 ### Constraints
 
@@ -325,7 +325,7 @@ This section is normative for outcome quality; implementations MAY choose differ
 
 - open editable template
 - parse fields on save
-- create issue via tracker command
+- create issue via local canonical issue store API
 
 ### AI Create (`C`)
 
@@ -340,7 +340,7 @@ This section is normative for outcome quality; implementations MAY choose differ
 ### AI Edit (`Space E`)
 
 - pass current issue context to assistant
-- assistant performs updates through tracker
+- assistant performs updates through local canonical issue store API
 
 ## 3.17 Attachment Workflow (`Space i`)
 
@@ -423,14 +423,14 @@ Notification policy SHOULD be configurable per channel.
 sequenceDiagram
   participant U as User
   participant AZ as Azedarach TUI
-  participant BD as Linear
+  participant SY as Sync Layer
   participant TM as tmux
   participant G as Git
   participant GH as GitHub
 
   U->>AZ: Select open issue + Space S
   AZ->>G: Create/prepare worktree+branch
-  AZ->>BD: Update issue status in_progress
+  AZ->>SY: Enqueue sync after local status update
   AZ->>TM: Start AI session
   TM-->>AZ: busy/waiting/done states
   U->>AZ: Space u / Space P
@@ -438,7 +438,7 @@ sequenceDiagram
   AZ->>GH: Create PR
   U->>AZ: Space m (optional local merge)
   U->>AZ: Space d (cleanup)
-  AZ->>BD: Close issue (if chosen)
+  AZ->>SY: Enqueue close sync (if chosen)
 ```
 
 ## 3.23 High-Risk Workflow Surfaces
@@ -454,7 +454,7 @@ These workflows MUST include explicit user feedback and safety checks.
 
 System SHOULD define timeouts for:
 
-- CLI calls to tracker/git/gh
+- CLI calls to sync adapters/git/gh
 - session attach attempts
 - planning generation phase
 
@@ -476,7 +476,7 @@ User-visible logs SHOULD capture:
 
 1. detect required external tools and project validity
 2. if mandatory tooling missing, enter diagnostics-first board state with blocked actions
-3. load last known stable board snapshot if tracker refresh is temporarily unavailable
+3. load last known stable board snapshot if local data load succeeds but external sync state is temporarily unavailable
 
 ### Context Restore
 
@@ -526,11 +526,11 @@ Rules:
 - refresh may update non-edit surfaces while edit overlays remain authoritative for local draft values
 - once overlay closes, board re-synchronizes and revalidates focus/selection
 
-## 3.30 Tracker Lock Contention Workflow
+## 3.30 Local Store Lock Contention Workflow
 
 ### Trigger
 
-- tracker command returns lock/busy indicator
+- local store write/read returns lock/busy indicator
 
 ### Behavior
 
@@ -708,25 +708,28 @@ Applies to user-facing mutations where fast feedback matters, including:
 - dependency add/remove/update
 - fork metadata creation
 
-Linear synchronization contract:
+Local-first synchronization contract:
 
-- linear remains source of truth for persisted state
-- UI applies optimistic mutations immediately
-- periodic/manual hydration polls reconcile non-local external changes
-- hydration MUST NOT clobber locally pending optimistic updates
+- local SQLite store remains source of truth for persisted issue state
+- UI applies optimistic mutations immediately against local state
+- inbound external updates SHOULD be event-driven (Linear webhooks) with manual sync fallback
+- implementations MAY provide polling fallback for adapters that cannot emit events
+- inbound reconciliation MUST NOT clobber locally pending optimistic updates
 
 ### Flow
 
 1. validate input locally
 2. apply optimistic in-memory state update immediately
-3. enqueue async persistence operation
+3. commit local mutation and sync-queue append atomically
 4. on success, confirm state and clear pending marker
-5. on failure, rollback in-memory state to last confirmed snapshot and show error with next action
+5. on local commit failure, rollback in-memory state to last confirmed snapshot and show error with next action
+6. on outbound sync failure, keep local canonical state and surface retryable sync diagnostics
 
 ### Guarantees
 
 - user never sees silent divergence between optimistic and persisted state
 - rollback is explicit and observable in UI/logs
+- mutation handlers do not perform immediate read-after-write queries against sync targets
 
 ## 3.40 Background Operation Workflow
 

@@ -270,7 +270,7 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-AUTH-002 Edit issue manually
 
 - Trigger: `Space e`
-- Expected: changes persisted to tracker
+- Expected: changes persisted to local canonical issue store (and queued for sync if configured)
 
 ### UC-AUTH-003 Create issue via natural language
 
@@ -493,9 +493,9 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: selected items change externally before `Space d` or `Space l`
 - Expected: missing items skipped and reported; remaining items processed
 
-### UC-CONC-004 Tracker lock contention on mutate
+### UC-CONC-004 Local store lock contention on mutate
 
-- Trigger: mutating action while tracker locked
+- Trigger: mutating action while local issue store is locked
 - Expected: explicit busy/lock error with retry guidance and no duplicate writes
 
 ## 8.19 Terminal Constraints Use Cases
@@ -591,7 +591,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-032: merge to base branch canceled at confirmation prompt.
 - UC-EXT-033: merge to base branch conflicts then abort and retry.
 - UC-EXT-034: show diff for binary file changes with graceful fallback.
-- UC-EXT-035: merge-bead flow canceled before target selection.
+- UC-EXT-035: issue-branch-to-issue-branch merge flow canceled before target selection.
 
 ### PR and Network
 
@@ -620,7 +620,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 ### Multi-Project
 
 - UC-EXT-070: switch projects while session operations in flight.
-- UC-EXT-071: project path exists but not linear-enabled.
+- UC-EXT-071: project path exists but Azedarach local store is not initialized.
 - UC-EXT-072: default project removed from registry.
 - UC-EXT-073: duplicate project names in registry handled safely.
 
@@ -678,7 +678,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 
 ### UC-E2E-002 Validate optimistic rollback behavior
 
-- Trigger: harness injects tracker failure during optimistic move/edit
+- Trigger: harness injects local commit failure during optimistic move/edit
 - Expected: UI rolls back to prior confirmed state and emits actionable error
 
 ### UC-E2E-003 Track and cancel background operation

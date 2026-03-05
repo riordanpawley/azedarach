@@ -6,7 +6,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 
 ## Scope
 
-- Product: terminal-first Kanban orchestration tool for linear tasks and parallel AI sessions
+- Product: terminal-first Kanban orchestration tool for issue-centric parallel AI sessions
 - Required client surface: terminal user interface (TUI)
 - Required behavior: modal keyboard workflow, board views, session lifecycle, Git/PR workflows, and task management semantics
 - Excluded by design: specific language/runtime/framework decisions, internal module boundaries, storage engine internals
@@ -63,7 +63,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Epic workflows: child-board drill-down, progress header, and epic detail parity
 - Session workflows: start, start+work, yolo start, chat, attach, pause, resume, stop
 - Dev server workflows: toggle, view, restart, per-worktree ports
-- Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge bead into bead
+- Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge source issue branch into target issue branch
 - Branch-origin workflows: runtime choice between base branch and eligible upstream source branch
 - PR workflows: create PR, open PR, PR status indicators
 - Multi-project workflows: project registry, auto-detection, project selector
@@ -126,11 +126,19 @@ An implementation is complete when:
 - All MUST requirements in `04` pass mapped acceptance scenarios in `06`.
 - No open P0/P1 requirement gaps remain.
 - All keybindings in `02` are implemented with matching mode behavior.
-- Session, git, and linear workflows are fully executable end to end.
+- Session, git, and issue workflows are fully executable end to end.
 - Documented failure handling in `05` is implemented and testable.
 - Acceptance scenarios are automation-ready with deterministic fixtures and probe-backed assertions.
 - High-risk workflows pass both probe assertions and visual snapshot assertions.
 - Performance and stress E2E profiles pass configured latency/responsiveness budgets.
+
+## Data Model and Sync Topology
+
+- Canonical issue state MUST be stored locally in Azedarach-managed SQLite.
+- External trackers are optional sync targets, not runtime sources of truth.
+- Linear is a first-class optional sync target and SHOULD prefer webhook-driven inbound updates over polling.
+- A Beads sync adapter MAY be configured for projects that still mirror to Beads.
+- Local mutations MUST update local canonical state first; outbound sync is asynchronous and must not block board interaction.
 
 ## Canonical E2E Fixture Profiles
 

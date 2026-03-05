@@ -37,7 +37,7 @@ Canonical fixture profile names:
 
 ### AZ-AT-0001 Board loads issues by status
 
-- Preconditions: tracker has issues in all major statuses.
+- Preconditions: local canonical issue store has issues in all major statuses.
 - Steps: open app.
 - Expected: board renders columns with issues in corresponding status lanes.
 - Links: AZ-FR-0001, AZ-FR-0002.
@@ -318,7 +318,7 @@ Canonical fixture profile names:
 - Expected: diff opens against merge-base with readable output.
 - Links: AZ-FR-1006.
 
-### AZ-AT-0906 Merge bead into bead
+### AZ-AT-0906 Merge issue branch into issue branch
 
 - Steps: source issue `Space b`, select target, confirm.
 - Expected: source changes merged to target branch, self-merge prevented.
@@ -374,7 +374,7 @@ Canonical fixture profile names:
 ### AZ-AT-2820 Cleanup entrypoint and schema-safe issue writes
 
 - Steps: invoke `Space d` for focused issue; run create/edit mutations including validation edge values.
-- Expected: cleanup action is available from action palette; edit/create writes preserve tracker schema validity.
+- Expected: cleanup action is available from action palette; edit/create writes preserve canonical local schema validity.
 - Links: AZ-FR-1201, AZ-FR-1307.
 
 ## 6.14 Planning Acceptance
@@ -528,9 +528,9 @@ Canonical fixture profile names:
 - Expected: typed input remains intact; board re-sync occurs after overlay close.
 - Links: AZ-FR-2804.
 
-### AZ-AT-1703 Tracker lock contention behavior
+### AZ-AT-1703 Local store lock contention behavior
 
-- Steps: force tracker write lock then run mutating action.
+- Steps: force local store write lock then run mutating action.
 - Expected: explicit lock feedback; no duplicate write; retry path available.
 - Links: AZ-FR-2806..AZ-FR-2808.
 
@@ -669,7 +669,7 @@ Canonical fixture profile names:
 
 ### AZ-AT-2205 Invalid cyclic dependency handling
 
-- Steps: submit cycle that violates tracker policy.
+- Steps: submit cycle that violates canonical dependency policy.
 - Expected: operation rejected with actionable diagnostics.
 - Links: AZ-FR-3410.
 
@@ -790,7 +790,7 @@ Canonical fixture profile names:
 
 ### AZ-AT-2502 Optimistic move rollback on failure
 
-- Preconditions: inject tracker write failure.
+- Preconditions: inject local commit failure.
 - Steps: move issue status with action key.
 - Expected: immediate optimistic move then rollback to prior lane with actionable error.
 - Links: AZ-FR-3803, AZ-FR-3804.
@@ -804,7 +804,7 @@ Canonical fixture profile names:
 
 ### AZ-AT-2504 Hydration reconciliation preserves pending optimistic state
 
-- Preconditions: optimistic mutation pending; external unrelated change appears in linear.
+- Preconditions: optimistic mutation pending; external unrelated change appears in configured sync target.
 - Steps: run hydration refresh cycle.
 - Expected: external change is applied, pending optimistic entity is preserved until resolution.
 - Links: AZ-FR-3808, AZ-FR-3809.
@@ -815,6 +815,41 @@ Canonical fixture profile names:
 - Steps: force transient persistence failure.
 - Expected: UI enters explicit retryable-pending state instead of immediate hard rollback.
 - Links: AZ-FR-3810.
+
+### AZ-AT-2828 Atomic local commit and sync-queue append
+
+- Preconditions: sync target configured and local store write path instrumented.
+- Steps: perform mutating action (for example status move).
+- Expected: issue-table mutation and sync-queue append commit atomically; no state where one succeeds without the other.
+- Links: AZ-FR-3811.
+
+### AZ-AT-2829 No read-after-write query to sync target
+
+- Preconditions: sync target API calls are observable in harness.
+- Steps: execute local mutation and capture outbound calls.
+- Expected: mutation path does not issue immediate read-after-write fetch against sync target; board state reflects known local post-mutation state.
+- Links: AZ-FR-3812.
+
+### AZ-AT-2830 Local-wins conflict policy
+
+- Preconditions: local state diverges from external sync target for same issue.
+- Steps: trigger inbound reconciliation.
+- Expected: canonical local issue state is retained by default; conflict diagnostics are emitted without implicit destructive overwrite.
+- Links: AZ-FR-3813.
+
+### AZ-AT-2831 Linear webhook-first ingestion path
+
+- Preconditions: Linear sync target configured with webhook events enabled.
+- Steps: mutate issue externally in Linear and deliver webhook event.
+- Expected: local canonical store updates via webhook/event ingestion without requiring periodic poll cycle.
+- Links: AZ-FR-0009, AZ-FR-3814.
+
+### AZ-AT-2832 Outbound sync failure does not rollback local success
+
+- Preconditions: local commit succeeds and outbound sync is forced to fail.
+- Steps: execute mutating action then inspect board and sync diagnostics.
+- Expected: local canonical state remains updated; sync failure is surfaced with retry path and queued pending sync item.
+- Links: AZ-FR-3815, AZ-FR-3816.
 
 ## 6.28 Background Operation Acceptance
 
@@ -974,4 +1009,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2827
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2832

@@ -16,9 +16,12 @@ This section is normative.
 - AZ-FR-0005: Each card SHOULD display issue type.
 - AZ-FR-0006: The board MUST track focused card/column location.
 - AZ-FR-0007: The board MUST handle empty columns without focus corruption.
-- AZ-FR-0008: The board MUST refresh from tracker data on demand.
-- AZ-FR-0009: The board SHOULD support periodic refresh.
+- AZ-FR-0008: The board MUST refresh from local canonical issue data on demand.
+- AZ-FR-0009: The board SHOULD support event-driven external update ingestion and MAY support polling fallback where needed.
 - AZ-FR-0010: Loading states MUST be visible when data is unavailable.
+- AZ-FR-0011: The canonical persisted issue store MUST be local SQLite managed by Azedarach.
+- AZ-FR-0012: Local-only mode (no sync targets configured) MUST preserve full board and mutation workflows.
+- AZ-FR-0013: Sync targets (for example Linear or Beads adapter) MUST remain optional and non-blocking for local operation.
 
 ## 4.3 Modal Interaction Requirements
 
@@ -152,8 +155,8 @@ This section is normative.
 - AZ-FR-1007: `Space m` MUST merge task branch into configured base branch in default context.
 - AZ-FR-1008: Merge flow MUST warn when conflict risk is detected.
 - AZ-FR-1009: Merge to base branch SHOULD keep worktree active post-merge.
-- AZ-FR-1010: `Space b` MUST support merge source bead into target bead branch.
-- AZ-FR-1011: merge-bead flow MUST prevent self-merge.
+- AZ-FR-1010: `Space b` MUST support merge source issue branch into target issue branch.
+- AZ-FR-1011: issue-branch-to-issue-branch merge flow MUST prevent self-merge.
 - AZ-FR-1012: The system MUST provide a bulk "bring up to date" operation across a selected issue set.
 - AZ-FR-1013: For each issue in bulk update, merge source MUST be resolved per policy (configured base branch or eligible parent/upstream branch when relation context applies).
 - AZ-FR-1014: Bulk update execution MUST use a FIFO work queue with bounded maximum concurrency.
@@ -188,13 +191,13 @@ This section is normative.
 - AZ-FR-1304: `C` SHOULD support AI-assisted creation.
 - AZ-FR-1305: `Space e` MUST support manual issue edit.
 - AZ-FR-1306: `Space E` SHOULD support AI-assisted issue edit.
-- AZ-FR-1307: edit/create flows MUST preserve tracker schema validity.
+- AZ-FR-1307: edit/create flows MUST preserve canonical local schema validity.
 
 ## 4.16 Fork Requirements
 
 - AZ-FR-1401: `Space F` MUST support creating forked work items.
 - AZ-FR-1402: Fork flow SHOULD support child, sibling, and epic-related variants.
-- AZ-FR-1403: Forked issue relationships MUST be persisted in tracker dependencies.
+- AZ-FR-1403: Forked issue relationships MUST be persisted in canonical local dependencies.
 - AZ-FR-1404: Fork flow MUST provide runtime branch-origin choice (base branch or eligible upstream-related source branch).
 - AZ-FR-1405: When forking a child from parent drill-down context, parent SHOULD be preselected as upstream branch source.
 
@@ -259,7 +262,7 @@ This section is normative.
 - AZ-FR-2102: Long-running operations SHOULD show progress/loading affordance.
 - AZ-FR-2103: Destructive actions MUST require explicit confirmation or safe mode.
 - AZ-FR-2104: Shell command invocation MUST avoid interactive hangs where possible.
-- AZ-FR-2105: Operations that modify tracker/git state MUST be idempotent where feasible.
+- AZ-FR-2105: Operations that modify local issue/git state MUST be idempotent where feasible.
 
 ## 4.24 Reliability Requirements
 
@@ -321,8 +324,8 @@ This section is normative.
 - AZ-FR-2803: Draft text SHOULD be preserved across stale conflict handling unless user discards.
 - AZ-FR-2804: Background refresh MUST not discard active overlay input state.
 - AZ-FR-2805: Selection and focus reconciliation after refresh MUST avoid selecting non-existent issue IDs.
-- AZ-FR-2806: Tracker lock contention MUST surface explicit lock/busy feedback.
-- AZ-FR-2807: Read operations MAY auto-retry with bounded strategy on transient tracker locks.
+- AZ-FR-2806: Local store lock contention MUST surface explicit lock/busy feedback.
+- AZ-FR-2807: Read operations MAY auto-retry with bounded strategy on transient local-store or adapter lock states.
 - AZ-FR-2808: Mutating operations MUST avoid duplicate submission under retry conditions.
 
 ## 4.32 Terminal Compatibility and Layout Safety Requirements
@@ -364,7 +367,7 @@ This section is normative.
 ## 4.37 Dependency Graph Requirements
 
 - AZ-FR-3401: The system MUST support general issue dependency graphs, not only epic parent/child relationships.
-- AZ-FR-3402: Dependency edges MUST be typed and preserve tracker-native semantics.
+- AZ-FR-3402: Dependency edges MUST be typed and preserve canonical local semantics (with adapter-specific mapping when synced externally).
 - AZ-FR-3403: Issue detail MUST expose incoming and outgoing dependency edges.
 - AZ-FR-3404: UI MUST distinguish at least blockers, blocked-by, and lineage/discovery-style relations when present.
 - AZ-FR-3405: Dependency create/update flows MUST validate target issue existence before persist.
@@ -372,7 +375,7 @@ This section is normative.
 - AZ-FR-3407: Dependency changes MUST refresh blocked/readiness indicators consistently.
 - AZ-FR-3408: Dependency removal MUST require explicit confirmation when it can unblock/retarget workflow.
 - AZ-FR-3409: Planning/fork flows MUST preserve and/or create non-hierarchical dependencies when specified by user intent.
-- AZ-FR-3410: Cyclic dependency validation MUST follow tracker policy and surface actionable feedback when rejected.
+- AZ-FR-3410: Cyclic dependency validation MUST follow canonical local policy and surface actionable feedback when rejected.
 
 ## 4.38 Runtime Branch-Origin Selection Requirements
 
@@ -414,9 +417,15 @@ This section is normative.
 - AZ-FR-3805: Optimistic dependency mutations (add/remove/update) MUST obey the same rollback contract.
 - AZ-FR-3806: Optimistic fork metadata creation MUST rollback cleanly on persistence failure.
 - AZ-FR-3807: Rollback logic MUST be scoped to affected entities and MUST NOT revert unrelated successful changes.
-- AZ-FR-3808: Linear tracker data MUST be treated as source of truth for hydration.
-- AZ-FR-3809: Hydration polling MUST reconcile external changes without clobbering pending optimistic updates.
+- AZ-FR-3808: Local canonical issue data MUST be treated as source of truth for board hydration.
+- AZ-FR-3809: Inbound external sync reconciliation (event-driven and/or manual) MUST not clobber pending optimistic updates.
 - AZ-FR-3810: Selected optimistic flows MAY enter retryable-pending state instead of immediate rollback when safe and user-visible.
+- AZ-FR-3811: Local mutations MUST commit issue-table change and sync-queue append atomically.
+- AZ-FR-3812: Mutation handlers MUST NOT issue immediate read-after-write queries to sync targets.
+- AZ-FR-3813: Sync conflict policy MUST default to local-canonical-wins unless an explicit override workflow is invoked.
+- AZ-FR-3814: Linear adapter SHOULD consume webhook/event ingestion paths to reduce polling load and API round-trips.
+- AZ-FR-3815: Manual sync command MUST drain pending queue items and report per-item success/failure diagnostics.
+- AZ-FR-3816: Outbound sync failures MUST not rollback successful local canonical commits.
 
 ## 4.42 Background Operation Requirements
 

@@ -5,7 +5,10 @@
 - Azedarach: terminal Kanban orchestration application specified in this folder.
 - Board: primary TUI surface listing issues by workflow status.
 - Card: visual representation of one issue on the board.
-- Issue / Bead: task tracker item managed through linear CLI.
+- Issue: canonical work item tracked in Azedarach local issue store.
+- Sync target: optional external system mirrored from local canonical issue state.
+- Beads adapter: optional issue<->Beads sync interface layer.
+- Linear adapter: optional issue<->Linear sync interface layer.
 - Epic: issue that groups child issues for scoped drill-down and progress tracking; one relationship type among many possible dependencies.
 - Drill-down: focused board mode showing only children of selected epic.
 - Dependency edge: typed directed relationship between issues (for example blocks, depends-on, discovered-from, parent-child, related).

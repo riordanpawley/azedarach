@@ -2,7 +2,7 @@
 
 ## 1.1 Product Statement
 
-Azedarach is a terminal user interface that orchestrates parallel AI coding sessions against linear-tracked work, using git worktrees and tmux as execution substrates.
+Azedarach is a terminal user interface that orchestrates parallel AI coding sessions against issue-tracked work, using git worktrees and tmux as execution substrates.
 
 The product value is not code generation itself, but high-throughput coordination:
 
@@ -17,7 +17,7 @@ The product value is not code generation itself, but high-throughput coordinatio
 Teams running many concurrent coding tasks in AI-assisted workflows face coordination bottlenecks:
 
 - difficult parallel visibility across many sessions
-- slow context switching between task tracker and terminal sessions
+- slow context switching between issue management state and terminal sessions
 - inconsistent branch/worktree lifecycle hygiene
 - fragile merge/pr handoffs
 - poor observability when sessions ask questions or fail
@@ -76,14 +76,14 @@ Azedarach solves this by making the board the command center.
 
 ### Out of Scope
 
-- replacing linear as tracker backend
+- replacing core git/tmux execution surfaces
 - replacing git hosting provider concepts
 - introducing mandatory GUI workflows
 - forcing a specific programming-language stack for implementation
 
 ## 1.6 Canonical Domain Objects
 
-### D-01 Issue (bead)
+### D-01 Issue
 
 Fields (canonical minimum):
 
@@ -108,7 +108,7 @@ Fields (canonical minimum):
 
 ### D-04 Project
 
-- registered root containing a linear dataset and git repo
+- registered root containing an Azedarach local issue store and git repo
 
 ### D-05 Attachment
 
@@ -248,15 +248,16 @@ Minimum external capabilities required:
 - terminal emulator supporting interactive keyboard input
 - tmux available and functional
 - git worktree operations supported
-- linear CLI available in active project
+- writable local filesystem for Azedarach SQLite data store
 - AI CLI available and authenticated
 - optional gh for PR workflows
+- optional linear-cli and/or Beads adapter tooling when sync targets are enabled
 
 ## 1.16 Product-Level Constraints
 
 - TUI frontend is mandatory.
 - Product behavior must not depend on mouse-only interactions.
-- Task tracker integration must preserve linear command semantics.
+- Task data persistence must preserve canonical local schema and adapter contract semantics.
 - Session naming and lookup must be deterministic from issue identity.
 
 ## 1.17 Decomposition View
@@ -281,7 +282,10 @@ mindmap
       Diff
       PR
     Data
-      Linear
+      Local SQLite
+      Sync Adapters
+        Linear
+        Beads
       Projects
       Attachments
     Governance

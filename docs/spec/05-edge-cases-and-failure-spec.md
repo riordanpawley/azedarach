@@ -11,23 +11,23 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 - Prefer reversible operations.
 - Provide concrete next step in every error message.
 
-## 5.3 Data Source Failures (Tracker)
+## 5.3 Data Source Failures (Local Store and Sync Adapters)
 
-### Case F-001: Tracker command unavailable
+### Case F-001: Local issue store unavailable
 
-- Symptom: issue load/update commands fail immediately.
+- Symptom: local issue load/update commands fail immediately.
 - Required behavior:
-  - show blocking diagnostic explaining missing tracker CLI.
+  - show blocking diagnostic explaining local store initialization/open failure.
   - keep app responsive for read-only or setup actions where possible.
 
-### Case F-002: Tracker returns malformed output
+### Case F-002: Sync adapter returns malformed payload
 
 - Required behavior:
   - reject malformed payload safely.
   - log parse context.
   - preserve last good board state.
 
-### Case F-003: Permission denied on tracker storage
+### Case F-003: Permission denied on local store path
 
 - Required behavior:
   - show remediation hint (permissions/path).
@@ -365,7 +365,7 @@ On failure, logs SHOULD capture:
   - revalidate target IDs before action execution.
   - skip missing IDs with per-item status report.
 
-### Case F-112: Tracker lock contention on write
+### Case F-112: Local store lock contention on write
 
 - Required behavior:
   - do not spin indefinitely.
@@ -541,11 +541,18 @@ On failure, logs SHOULD capture:
 
 ## 5.27 Optimistic Mutation Edge Cases
 
-### Case F-180: Optimistic issue move accepted locally but tracker write fails
+### Case F-180: Optimistic issue move accepted locally but local commit fails
 
 - Required behavior:
   - rollback issue to prior status lane.
   - show failure toast with retry action.
+
+### Case F-183: Local commit succeeds but outbound sync fails
+
+- Required behavior:
+  - keep local canonical state unchanged.
+  - show retryable sync failure diagnostics without forcing rollback.
+  - preserve pending sync queue entry for background/manual retry.
 
 ### Case F-181: Optimistic edit conflicts with concurrent external edit
 
@@ -610,3 +617,10 @@ On failure, logs SHOULD capture:
 - Required behavior:
   - annotate snapshot artifacts with terminal profile metadata.
   - fail with clear profile mismatch diagnostics before comparing baselines.
+
+### Case F-204: Linear webhook delivery delay or outage
+
+- Required behavior:
+  - keep board fully functional from local canonical state.
+  - show stale-external-sync indicator with last successful sync/event timestamp.
+  - allow manual sync trigger while webhook path is degraded.
