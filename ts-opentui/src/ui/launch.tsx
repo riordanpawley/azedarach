@@ -46,6 +46,8 @@ export async function launchTUI(): Promise<void> {
 	// Register Ctrl-a A to return to az session (fire-and-forget)
 	registerReturnBinding()
 
-	const renderer = await createCliRenderer()
+	const renderer = await createCliRenderer({
+		useMouse: true,
+	})
 	createRoot(renderer).render(<App />)
 }

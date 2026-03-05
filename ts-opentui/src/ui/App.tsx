@@ -6,8 +6,9 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
+import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
@@ -26,6 +27,8 @@ import {
 	handleKeyAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
+	jumpToAtom,
+	jumpToTaskAtom,
 	sessionMonitorStarterAtom,
 	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
@@ -199,6 +202,8 @@ export const App = () => {
 	)?.name
 
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
+	const jumpToTask = useAtomSet(jumpToTaskAtom, { mode: "promise" })
+	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
@@ -354,6 +359,61 @@ export const App = () => {
 		handleKey(keySeq)
 	})
 
+	// ═══════════════════════════════════════════════════════════════════════════
+	// Mouse Handlers - First-pass task focus/open + wheel scroll
+	// ═══════════════════════════════════════════════════════════════════════════
+
+	const DOUBLE_CLICK_WINDOW_MS = 300
+	const lastClickRef = useRef<{ taskId: string; at: number } | null>(null)
+
+	const handleTaskMouseDown = (taskId: string, event: MouseEvent) => {
+		// Keep mouse interactions scoped to the main board surface
+		if (currentOverlay) return
+
+		// Left click = focus, right click = focus + open details/drill-down
+		if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
+		const button = event.button
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		const now = Date.now()
+		const previous = lastClickRef.current
+		const isDoubleClick =
+			event.button === MouseButton.LEFT &&
+			previous?.taskId === taskId &&
+			now - previous.at <= DOUBLE_CLICK_WINDOW_MS
+
+		lastClickRef.current = { taskId, at: now }
+
+		void jumpToTask(taskId).then(() => {
+			const shouldOpen = button === MouseButton.RIGHT || isDoubleClick
+			if (!shouldOpen) return
+			if (mode._tag !== "normal") return
+			void handleKey("return")
+		})
+	}
+
+	const handleColumnMouseScroll = (columnIdx: number, event: MouseEvent) => {
+		if (currentOverlay) return
+		const scroll = event.scroll
+		if (!scroll) return
+		if (scroll.direction !== "up" && scroll.direction !== "down") return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		const columnTasks = tasksByColumn[columnIdx] ?? []
+		if (columnTasks.length === 0) return
+
+		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
+		const direction = scroll.direction === "down" ? 1 : -1
+		const baseIndex = columnIdx === columnIndex ? taskIndex : 0
+		const nextIndex = Math.max(0, Math.min(columnTasks.length - 1, baseIndex + delta * direction))
+
+		void jumpTo({ column: columnIdx, task: nextIndex })
+	}
+
 	const totalTasks = useAtomValue(totalTasksCountAtom)
 	const activeSessions = useAtomValue(activeSessionsCountAtom)
 
@@ -411,6 +471,8 @@ export const App = () => {
 					isActionMode={isAction}
 					mergeSelectSourceId={mergeSelectSourceId}
 					phases={phases}
+					onTaskMouseDown={handleTaskMouseDown}
+					onColumnMouseScroll={handleColumnMouseScroll}
 				/>
 			</box>
 		)

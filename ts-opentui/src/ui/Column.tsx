@@ -1,6 +1,7 @@
 /**
  * Column component - displays a vertical list of tasks for a single status
  */
+import type { MouseEvent } from "@opentui/core"
 import { useMemo } from "react"
 import type { PhaseComputationResult } from "../core/dependencyPhases.js"
 import { PhaseSeparator } from "./PhaseSeparator.js"
@@ -9,6 +10,7 @@ import { columnColors, theme } from "./theme.js"
 import type { ColumnStatus, TaskWithSession } from "./types.js"
 
 export interface ColumnProps {
+	columnIndex: number
 	title: string
 	status: ColumnStatus
 	tasks: TaskWithSession[]
@@ -25,6 +27,10 @@ export interface ColumnProps {
 	mergeSelectSourceId?: string
 	/** Phase computation result for dependency visualization (drill-down mode only) */
 	phases?: PhaseComputationResult
+	/** Mouse task selection/open handler */
+	onTaskMouseDown?: (taskId: string, event: MouseEvent) => void
+	/** Mouse wheel handler for column scrolling */
+	onColumnMouseScroll?: (columnIndex: number, event: MouseEvent) => void
 }
 
 /**
@@ -180,7 +186,12 @@ export const Column = (props: ColumnProps) => {
 	}, [rowItems, props.selectedTaskIndex, maxVisible, props.phases])
 
 	return (
-		<box flexDirection="column" width="25%" marginRight={1}>
+		<box
+			flexDirection="column"
+			width="25%"
+			marginRight={1}
+			onMouseScroll={(event) => props.onColumnMouseScroll?.(props.columnIndex, event)}
+		>
 			{/* Column header */}
 			<box paddingLeft={1}>
 				<text fg={headerColor} attributes={props.isActiveColumn ? ATTR_BOLD | ATTR_UNDERLINE : 0}>
@@ -211,6 +222,7 @@ export const Column = (props: ColumnProps) => {
 							pendingJumpKey={props.pendingJumpKey}
 							isMergeSource={props.mergeSelectSourceId === item.task.id}
 							isBlocked={item.isBlocked}
+							onMouseDown={props.onTaskMouseDown}
 						/>
 					),
 				)}

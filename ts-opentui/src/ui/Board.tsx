@@ -5,6 +5,8 @@
  * - kanban: Traditional column-based view with task cards
  * - compact: Linear list view with minimal row height
  */
+
+import type { MouseEvent } from "@opentui/core"
 import type { Record as R } from "effect"
 import { useMemo } from "react"
 import type { PhaseComputationResult } from "../core/dependencyPhases.js"
@@ -29,6 +31,10 @@ export interface BoardProps {
 	mergeSelectSourceId?: string
 	/** Phase computation result for dependency visualization (drill-down mode only) */
 	phases?: PhaseComputationResult
+	/** Mouse task focus/open handler */
+	onTaskMouseDown?: (taskId: string, event: MouseEvent) => void
+	/** Mouse wheel handler for column scrolling */
+	onColumnMouseScroll?: (columnIndex: number, event: MouseEvent) => void
 }
 
 /**
@@ -99,6 +105,7 @@ export const Board = (props: BoardProps) => {
 				return (
 					<Column
 						key={col.id}
+						columnIndex={colIndex}
 						title={col.title}
 						status={col.status}
 						tasks={columnTasks}
@@ -112,6 +119,8 @@ export const Board = (props: BoardProps) => {
 						isActionMode={props.isActionMode}
 						mergeSelectSourceId={props.mergeSelectSourceId}
 						phases={props.phases}
+						onTaskMouseDown={props.onTaskMouseDown}
+						onColumnMouseScroll={props.onColumnMouseScroll}
 					/>
 				)
 			})}
