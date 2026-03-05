@@ -694,18 +694,29 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			)
 		}
 
-		const buildBootstrapSnapshots = (
-			client: LinearClient,
-		): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
-			Effect.gen(function* () {
-				const [issues, stateNameById, labelNameById] = yield* Effect.all([
-					fetchAllLinearIssues(client),
-					fetchStateNameById(client),
-					fetchLabelNameById(client),
-				])
+			const buildBootstrapSnapshots = (
+				client: LinearClient,
+			): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
+				Effect.gen(function* () {
+					const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
+					const issues = yield* fetchAllLinearIssues(client)
+					const stateNameById = yield* fetchStateNameById(client).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Linear bootstrap: workflow states unavailable, continuing with fallback status mapping (${error.message})`,
+							).pipe(Effect.as(emptyMetadataMap)),
+						),
+					)
+					const labelNameById = yield* fetchLabelNameById(client).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Linear bootstrap: labels unavailable, continuing without label metadata (${error.message})`,
+							).pipe(Effect.as(emptyMetadataMap)),
+						),
+					)
 
-				const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
-				const childCountByParentId = new Map<string, number>()
+					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
+					const childCountByParentId = new Map<string, number>()
 				for (const issue of issues) {
 					if (issue.parentId) {
 						childCountByParentId.set(issue.parentId, (childCountByParentId.get(issue.parentId) ?? 0) + 1)
@@ -713,16 +724,20 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				}
 
 				return issues.map((issue) => {
-					const labels = issue.labelIds
-						.map((labelId) => labelNameById.get(labelId))
-						.filter((label): label is string => label !== undefined)
-					const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
-					const status = normalizeLinearStatus(
-						issue.stateId ? stateNameById.get(issue.stateId) : undefined,
-					)
-					const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
+						const labels = issue.labelIds
+							.map((labelId) => labelNameById.get(labelId))
+							.filter((label): label is string => label !== undefined)
+						const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
+						const stateName = issue.stateId ? stateNameById.get(issue.stateId) : undefined
+						const status =
+							stateName !== undefined
+								? normalizeLinearStatus(stateName)
+								: issue.completedAt != null || issue.canceledAt != null
+									? "closed"
+									: "open"
+						const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
 
-					return {
+						return {
 						localId: issue.identifier,
 						externalId: issue.id,
 						externalKey: issue.identifier,
