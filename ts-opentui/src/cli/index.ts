@@ -695,18 +695,19 @@ const issueGetHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 
 		if (args.verbose) {
 			yield* Console.error(`Loading issue: ${issueId}`)
-			yield* Console.error(`Project: ${cwd}`)
+			yield* Console.error(`Project: ${explicitProjectDir ?? resolverCwd}`)
 		}
 
-		yield* validateIssueTrackerStore(cwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		const issue = yield* issueTrackerClient.show(issueId, cwd).pipe(
+		const issue = yield* issueTrackerClient.show(issueId, explicitProjectDir).pipe(
 			Effect.catchTag("NotFoundError", () =>
 				Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
 			),
@@ -753,11 +754,12 @@ const issueCreateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
 		const resolvedParent = yield* Option.match(args.parent, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, cwd),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
 		})
 
 		const issueTrackerClient = yield* BeadsClient
@@ -779,7 +781,7 @@ const issueCreateHandler = (args: {
 						.filter((label) => label.length > 0),
 			}),
 			parent: resolvedParent,
-			cwd,
+			cwd: explicitProjectDir,
 		})
 
 		if (args.json) {
@@ -817,9 +819,10 @@ const issueUpdateHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const labels = Option.match(args.labels, {
 			onNone: () => undefined,
@@ -832,7 +835,7 @@ const issueUpdateHandler = (args: {
 
 		const resolvedParent = yield* Option.match(args.parent, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, cwd),
+			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
 		})
 
 		const fields = {
@@ -860,7 +863,7 @@ const issueUpdateHandler = (args: {
 		}
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.update(issueId, fields, cwd)
+		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
 			return
@@ -882,12 +885,17 @@ const issueCloseHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), cwd)
+		yield* issueTrackerClient.close(
+			issueId,
+			Option.getOrUndefined(args.reason),
+			explicitProjectDir,
+		)
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -924,12 +932,13 @@ const issueDeleteHandler = (args: {
 			)
 		}
 
-		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		const issueId = yield* resolveCliIssueId(args.issueId, cwd)
-		yield* validateIssueTrackerStore(cwd)
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.delete(issueId, cwd)
+		yield* issueTrackerClient.delete(issueId, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
 			return
