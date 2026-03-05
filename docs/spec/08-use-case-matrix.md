@@ -557,7 +557,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Relationship representation -> AZ-FR-3701..3705
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
-- State probe and harness -> AZ-FR-4001..4008, AZ-FR-4101..4110
+- State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 

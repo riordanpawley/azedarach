@@ -27,6 +27,8 @@ The probe contract is behavioral and transport-agnostic.
   },
   "app": {
     "projectId": "azedarach",
+    "projectPath": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db",
     "view": "kanban",
     "mode": "NOR",
     "overlays": []
@@ -70,6 +72,19 @@ The probe contract is behavioral and transport-agnostic.
       }
     ]
   },
+  "sync": {
+    "linear": {
+      "enabled": true,
+      "rateLimit": {
+        "windowSeconds": 60,
+        "maxRequestsPerWindow": 30,
+        "burstCapacity": 10,
+        "usedInWindow": 10,
+        "queuedOutbound": 6,
+        "nextDispatchAt": "2026-03-03T02:30:20Z"
+      }
+    }
+  },
   "errors": {
     "recent": []
   }
@@ -80,10 +95,13 @@ The probe contract is behavioral and transport-agnostic.
 
 - `snapshot.revision`: monotonically increasing value for ordering assertions.
 - `app.mode`: active primary mode (`NOR`, `ACT`, `GTO`, `SEL`, `SRC`, `FLT`, `SRT`) or overlay-focused mode.
+- `app.projectPath`: active project root path for current board context.
+- `app.canonicalDbPath`: active project canonical SQLite path (for example `<project-root>/.azedarach/azedarach.db`).
 - `app.overlays`: currently active overlays in front-to-back order.
 - `board.visibleWindow.issueIds`: IDs rendered in current viewport.
 - `board.indicators[*].staleness`: freshness hint (`fresh`, `loading`, `stale`) for user-visible indicator convergence checks.
 - `operations.queue[*].state`: one of `queued`, `running`, `succeeded`, `failed`, `canceled`.
+- `sync.linear.rateLimit`: outbound throttling snapshot; present when Linear sync target is enabled.
 
 ## 10.5 Example: Overlay + Selection State
 
@@ -96,6 +114,8 @@ The probe contract is behavioral and transport-agnostic.
   },
   "app": {
     "projectId": "azedarach",
+    "projectPath": "/Users/dev/prog/azedarach",
+    "canonicalDbPath": "/Users/dev/prog/azedarach/.azedarach/azedarach.db",
     "view": "kanban",
     "mode": "SEL",
     "overlays": ["detail"]

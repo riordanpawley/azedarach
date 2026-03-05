@@ -458,7 +458,7 @@ Canonical fixture profile names:
 - Preconditions: two registered projects with distinct issue sets; at least one project starts without `.azedarach/azedarach.db`.
 - Steps: load project A, perform mutation, switch to project B, perform mutation, switch back to project A.
 - Expected: app initializes missing project DB on first load, each project uses `<project-root>/.azedarach/azedarach.db`, and switching projects fully re-scopes canonical reads/writes without cross-project leakage.
-- Links: AZ-FR-0014, AZ-FR-0015, AZ-FR-0016, AZ-FR-1806, AZ-FR-1807.
+- Links: AZ-FR-0014, AZ-FR-0015, AZ-FR-0016, AZ-FR-1806, AZ-FR-1807, section 05 F-083.
 
 ### AZ-AT-2824 Status/help/log and tmux discovery contract
 
@@ -863,7 +863,7 @@ Canonical fixture profile names:
 - Preconditions: Linear sync target configured; outbound adapter calls and queue/backoff state are observable.
 - Steps: enqueue enough outbound sync actions to exceed 30 requests inside a rolling 60-second window while starting with a burst.
 - Expected: adapter enforces 30-requests/minute sustained ceiling, allows configured burst window before throttling, defers excess requests without dropping successful local commits, and exposes throttling/backlog diagnostics.
-- Links: AZ-FR-3816, AZ-FR-3817, AZ-FR-3818.
+- Links: AZ-FR-3816, AZ-FR-3817, AZ-FR-3818, section 05 F-205.
 
 ## 6.28 Background Operation Acceptance
 
@@ -935,6 +935,13 @@ Canonical fixture profile names:
 - Steps: run app in non-interactive test environment and request probe.
 - Expected: probe remains available with full required payload.
 - Links: AZ-FR-4008, AZ-FR-4101.
+
+### AZ-AT-2706 Probe includes project canonical DB context and sync throttling diagnostics
+
+- Preconditions: Linear sync target enabled and enough queued outbound work to trigger throttling.
+- Steps: switch project, trigger outbound sync backlog, request probe.
+- Expected: probe reports active project identity and canonical DB path for selected project, plus Linear throttling/backlog diagnostics sufficient to assert rate-limit behavior.
+- Links: AZ-FR-1806, AZ-FR-3817, AZ-FR-4009, AZ-FR-4010, AZ-FR-4101.
 
 ## 6.30 E2E Testability Meta Acceptance
 
@@ -1021,6 +1028,6 @@ A release candidate MUST pass:
 - upstream follow-on scenarios AZ-AT-2401 through AZ-AT-2409
 - optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2505
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
-- probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
+- probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
 - extended conformance scenarios AZ-AT-2812 through AZ-AT-2834

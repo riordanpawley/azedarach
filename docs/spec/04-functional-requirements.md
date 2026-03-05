@@ -456,6 +456,8 @@ This section is normative.
 - AZ-FR-4006: Probe schema MUST be versioned and include schema version in every response.
 - AZ-FR-4007: Probe snapshots MUST include monotonic revision or timestamp suitable for ordering assertions.
 - AZ-FR-4008: Probe access MUST be available in non-interactive/headless test environments.
+- AZ-FR-4009: Probe payload MUST include active project context with canonical store identity (project ID/path and canonical DB path).
+- AZ-FR-4010: When sync adapters are enabled, probe payload SHOULD expose outbound throttling/backlog diagnostics needed for deterministic sync assertions.
 
 ## 4.44 E2E Testability Requirements
 
