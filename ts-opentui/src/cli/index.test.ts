@@ -141,4 +141,40 @@ describe("formatIssueDetailSections", () => {
 
 		expect(sections).toEqual([])
 	})
+
+	it("includes dependency and dependent ids in non-json detail sections", () => {
+		const sections = formatIssueDetailSections({
+			id: "az-123",
+			title: "Title",
+			status: "open",
+			priority: 2,
+			issue_type: "task",
+			created_at: "2026-03-05T10:00:00.000Z",
+			updated_at: "2026-03-05T11:00:00.000Z",
+			dependencies: [
+				{ id: "AZE-1", dependency_type: "blocks" },
+				{ id: "AZE-1", dependency_type: "related" },
+				{ id: "AZE-2", dependency_type: "related" },
+			],
+			dependents: [{ id: "AZE-9", dependency_type: "parent-child" }],
+		})
+
+		expect(sections).toEqual(["Dependencies:\nAZE-1, AZE-2", "Dependents:\nAZE-9"])
+	})
+
+	it("falls back to dependency counts when ids are unavailable", () => {
+		const sections = formatIssueDetailSections({
+			id: "az-123",
+			title: "Title",
+			status: "open",
+			priority: 2,
+			issue_type: "task",
+			created_at: "2026-03-05T10:00:00.000Z",
+			updated_at: "2026-03-05T11:00:00.000Z",
+			dependency_count: 2,
+			dependent_count: 1,
+		})
+
+		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
+	})
 })

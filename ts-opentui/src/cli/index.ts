@@ -537,12 +537,54 @@ const normalizeIssueTextField = (value: string | undefined): string | undefined 
 	return normalized && normalized.length > 0 ? normalized : undefined
 }
 
+const normalizeDependencyIds = (
+	refs: ReadonlyArray<{ readonly id: string }> | undefined,
+): readonly string[] => {
+	if (!refs || refs.length === 0) {
+		return []
+	}
+	const seen = new Set<string>()
+	const ids: string[] = []
+	for (const ref of refs) {
+		const normalized = ref.id.trim()
+		if (normalized.length === 0 || seen.has(normalized)) continue
+		seen.add(normalized)
+		ids.push(normalized)
+	}
+	return ids
+}
+
+const formatIssueRelationshipSection = (
+	label: "Dependencies" | "Dependents",
+	refs: ReadonlyArray<{ readonly id: string }> | undefined,
+	count: number | undefined,
+): string | undefined => {
+	const ids = normalizeDependencyIds(refs)
+	if (ids.length > 0) {
+		return `${label}:\n${ids.join(", ")}`
+	}
+	if (count !== undefined && count > 0) {
+		return `${label}: ${count}`
+	}
+	return undefined
+}
+
 const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
 	const sections: string[] = []
 	const description = normalizeIssueTextField(issue.description)
 	const design = normalizeIssueTextField(issue.design)
 	const acceptance = normalizeIssueTextField(issue.acceptance)
 	const notes = normalizeIssueTextField(issue.notes)
+	const dependencies = formatIssueRelationshipSection(
+		"Dependencies",
+		issue.dependencies,
+		issue.dependency_count,
+	)
+	const dependents = formatIssueRelationshipSection(
+		"Dependents",
+		issue.dependents,
+		issue.dependent_count,
+	)
 
 	if (description) {
 		sections.push(`Description:\n${description}`)
@@ -555,6 +597,12 @@ const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
 	}
 	if (notes) {
 		sections.push(`Notes:\n${notes}`)
+	}
+	if (dependencies) {
+		sections.push(dependencies)
+	}
+	if (dependents) {
+		sections.push(dependents)
 	}
 
 	return sections
