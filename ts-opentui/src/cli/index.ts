@@ -537,6 +537,26 @@ const normalizeIssueTextField = (value: string | undefined): string | undefined 
 	return normalized && normalized.length > 0 ? normalized : undefined
 }
 
+type DependencyCountLabel =
+	| "blocking"
+	| "blockedBy"
+	| "children"
+	| "parent"
+	| "related"
+	| "discoveredFrom"
+	| "discoveredBy"
+type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
+
+const DEPENDENCY_COUNT_LABEL_ORDER: readonly DependencyCountLabel[] = [
+	"blocking",
+	"blockedBy",
+	"children",
+	"parent",
+	"related",
+	"discoveredFrom",
+	"discoveredBy",
+]
+
 const normalizeDependencyIds = (
 	refs: ReadonlyArray<{ readonly id: string }> | undefined,
 ): readonly string[] => {
@@ -569,12 +589,66 @@ const formatIssueRelationshipSection = (
 	return undefined
 }
 
+const dependencyCountLabelFromDependency = (
+	dependencyType: RelationshipDependencyType,
+): DependencyCountLabel => {
+	switch (dependencyType) {
+		case "blocks":
+			return "blockedBy"
+		case "parent-child":
+			return "parent"
+		case "discovered-from":
+			return "discoveredFrom"
+		case "related":
+		default:
+			return "related"
+	}
+}
+
+const dependencyCountLabelFromDependent = (
+	dependencyType: RelationshipDependencyType,
+): DependencyCountLabel => {
+	switch (dependencyType) {
+		case "blocks":
+			return "blocking"
+		case "parent-child":
+			return "children"
+		case "discovered-from":
+			return "discoveredBy"
+		case "related":
+		default:
+			return "related"
+	}
+}
+
+const formatIssueDependencyTypeCountsSection = (issue: BeadsIssue): string | undefined => {
+	const counts = new Map<DependencyCountLabel, number>()
+	for (const dependency of issue.dependencies ?? []) {
+		const label = dependencyCountLabelFromDependency(dependency.dependency_type)
+		counts.set(label, (counts.get(label) ?? 0) + 1)
+	}
+	for (const dependent of issue.dependents ?? []) {
+		const label = dependencyCountLabelFromDependent(dependent.dependency_type)
+		counts.set(label, (counts.get(label) ?? 0) + 1)
+	}
+
+	const parts = DEPENDENCY_COUNT_LABEL_ORDER.flatMap((label) => {
+		const count = counts.get(label)
+		return count && count > 0 ? `${label}: ${count}` : []
+	})
+	if (parts.length === 0) {
+		return undefined
+	}
+	return `Dependency Counts: ${parts.join(", ")}`
+}
+
 const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
 	const sections: string[] = []
 	const description = normalizeIssueTextField(issue.description)
 	const design = normalizeIssueTextField(issue.design)
 	const acceptance = normalizeIssueTextField(issue.acceptance)
 	const notes = normalizeIssueTextField(issue.notes)
+	const dependencyTypeCounts = formatIssueDependencyTypeCountsSection(issue)
 	const dependencies = formatIssueRelationshipSection(
 		"Dependencies",
 		issue.dependencies,
@@ -597,6 +671,9 @@ const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
 	}
 	if (notes) {
 		sections.push(`Notes:\n${notes}`)
+	}
+	if (dependencyTypeCounts) {
+		sections.push(dependencyTypeCounts)
 	}
 	if (dependencies) {
 		sections.push(dependencies)
@@ -1003,6 +1080,26 @@ const gateHandler = (args: {
 		if (!typeCheckResult.passed) {
 			return yield* Effect.fail(new Error("Type-check failed"))
 		}
+	})
+
+/**
+ * az prime - Print session primer for AI agents
+ */
+const primeHandler = (_args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		yield* Console.log(`Azedarach Session Primer
+
+- Use \`az issue\` commands as the task-tracker interface for this repo.
+- Start each session with: \`az issue get <issue-id>\`
+- Keep issue context current as you work:
+  - \`az issue update <issue-id> --design "..."\`
+  - \`az issue update <issue-id> --notes "..."\`
+- Create follow-up/child work in the tracker:
+  - \`az issue create "Child task title" --parent <epic-id>\`
+- Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
+- When work is complete, update status in tracker:
+  - \`az issue close <issue-id>\`
+`)
 	})
 
 /**
@@ -1476,6 +1573,17 @@ const gateCommand = Command.make(
 	},
 	gateHandler,
 ).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
+
+/**
+ * az prime - Print agent primer
+ */
+const primeCommand = Command.make(
+	"prime",
+	{
+		verbose: verboseOption,
+	},
+	primeHandler,
+).pipe(Command.withDescription("Print session primer for AI agents using az issue as task tracker"))
 
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
@@ -2021,6 +2129,7 @@ const cli = az.pipe(
 		// Top-level shortcuts (most commonly used)
 		addCommand,
 		listCommand,
+		primeCommand,
 		// Session management
 		startCommand,
 		attachCommand,
@@ -2052,6 +2161,7 @@ const commandCli = az.pipe(
 	Command.withSubcommands([
 		addCommand,
 		listCommand,
+		primeCommand,
 		startCommand,
 		attachCommand,
 		pauseCommand,
@@ -2142,6 +2252,7 @@ const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"add",
 	"list",
+	"prime",
 	"start",
 	"attach",
 	"pause",
