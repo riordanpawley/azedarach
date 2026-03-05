@@ -336,6 +336,7 @@ Settings domains:
 - notifications
 - network auto-detection
 - sync target behavior (for example Linear webhook mode, manual sync, adapter enablement)
+- local canonical-store backup policy (enabled flag, stale-check interval, write cooldown, retention count, backup directory)
 - session state detection mode
 - diff presentation preferences
 

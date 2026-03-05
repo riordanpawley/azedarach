@@ -412,6 +412,21 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: run issue retrieval for missing ID in text and JSON modes
 - Expected: user-facing not-found diagnostics are backend-neutral (`Issue not found internally nor externally: <issue-id>`) with deterministic structured failure payloads
 
+### UC-AUTH-031 Auto-backup on stale canonical DB access
+
+- Trigger: open canonical DB path through TUI or top-level `az` command when newest backup is older than configured interval
+- Expected: non-blocking timestamped backup snapshot is created in project-local backup directory
+
+### UC-AUTH-032 Cooldown-gated backup after successful mutation
+
+- Trigger: execute successful mutating issue command sequence in short succession
+- Expected: first eligible mutation triggers backup attempt; subsequent in-window mutations skip backup until cooldown elapses
+
+### UC-AUTH-033 Preserve issue command success when backup fails
+
+- Trigger: force backup snapshot/retention failure during issue read/write workflows
+- Expected: issue command path completes with canonical DB semantics intact while warning feedback is throttled and diagnostics logging records each backup failure
+
 ## 8.11 Attachment Use Cases
 
 ### UC-ATT-001 Attach screenshot from clipboard
@@ -711,6 +726,7 @@ This section expands product behavior into concrete user-centered use cases.
 ## 8.21 Cross-Reference to Requirements
 
 - Board/nav use cases -> AZ-FR-0001..0309
+- Local canonical backup use cases -> AZ-FR-0023..0035
 - Search/filter/sort use cases -> AZ-FR-0501..0518
 - Session/dev use cases -> AZ-FR-0801..0907
 - Git/PR use cases -> AZ-FR-1001..1108
@@ -802,6 +818,8 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-072: default project removed from registry.
 - UC-EXT-073: duplicate project names in registry handled safely.
 - UC-EXT-074: selected project is missing `.azedarach/azedarach.db` and store bootstrap is created automatically.
+- UC-EXT-075: stale canonical DB access creates timestamped backup in `<project-root>/.azedarach/backups`.
+- UC-EXT-076: backup directory/retention failures never block issue commands and always emit diagnostics.
 
 ### Bulk and Scale
 

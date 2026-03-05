@@ -1138,6 +1138,48 @@ Canonical fixture profile names:
 - Expected: resolver still binds to registered base project canonical DB path (not unrelated project DB) and returns deterministic issue payload.
 - Links: AZ-FR-4223, AZ-FR-4263, AZ-FR-4264, AZ-FR-4238, section 05 F-222.
 
+### AZ-AT-2874 Local backup config schema/defaults/migration contract
+
+- Preconditions: one config fixture omits `issueTracker.local.backups`, one fixture provides partial backup fields, and one fixture provides full explicit backup overrides.
+- Steps: run config reload/validation path and inspect effective config (`az config show` or equivalent runtime snapshot).
+- Expected: backup config object shape is accepted, omitted fields resolve to documented defaults, partial legacy configs are backfilled without manual edits, and explicit overrides remain intact.
+- Links: AZ-FR-0023, AZ-FR-0024, AZ-FR-0025, AZ-FR-1710, AZ-FR-1711.
+
+### AZ-AT-2875 Stale-on-open backup trigger and fresh-skip behavior
+
+- Preconditions: canonical DB exists; backup directory contains one stale backup older than configured interval and then one fresh backup for second pass.
+- Steps: execute a DB-open path (for example `az show`/`az list`) with stale backup state, then execute again while latest backup is still fresh.
+- Expected: stale-open pass creates exactly one new timestamped backup; fresh pass skips backup creation.
+- Links: AZ-FR-0026, AZ-FR-0029, AZ-FR-0030, AZ-FR-0034.
+
+### AZ-AT-2876 Post-mutation write-cooldown backup gate
+
+- Preconditions: backup cooldown configured (for example default 300s) and mutation command path is available.
+- Steps: execute a successful mutation, then execute additional successful mutations within cooldown window, then repeat after cooldown elapses.
+- Expected: first eligible mutation triggers backup attempt; in-window mutations do not create extra backups; first eligible mutation after cooldown creates next backup.
+- Links: AZ-FR-0027, AZ-FR-0033, AZ-FR-0034.
+
+### AZ-AT-2877 Backup filename, atomic write, and retention pruning contract
+
+- Preconditions: backup `maxBackups` set to low deterministic value (for example `3`) and backup directory write permissions are valid.
+- Steps: run enough eligible backup-triggering operations to exceed retention limit and inspect resulting backup directory contents.
+- Expected: backups use `issues-YYYYMMDDTHHMMSSZ.db` naming, snapshot creation uses atomic temp-to-final semantics (no partial final files), and retained backups equal newest `maxBackups` entries after prune.
+- Links: AZ-FR-0028, AZ-FR-0029, AZ-FR-0030, AZ-FR-0031.
+
+### AZ-AT-2878 Backup failure non-blocking behavior and warning throttling
+
+- Preconditions: backup path or snapshot operation is forced to fail while canonical DB mutations remain valid.
+- Steps: execute successful issue mutation commands repeatedly inside and outside cooldown window.
+- Expected: issue mutation command succeeds despite backup failure; warning feedback is throttled to at most one toast per cooldown window; diagnostics log records each backup failure event.
+- Links: AZ-FR-0032, AZ-FR-0033, section 05 F-004, section 05 F-005.
+
+### AZ-AT-2879 Cross-surface backup coverage for TUI and top-level `az` commands
+
+- Preconditions: same project fixture tested in local-only mode and with optional sync adapter enabled; backup state starts stale.
+- Steps: in a long-running TUI session, perform eligible mutations across at least one cooldown window; run separate short-lived top-level `az` mutation command invocation against same project; inspect backup artifacts.
+- Expected: both surfaces execute shared auto-backup policy against canonical local DB, backup behavior remains backend-agnostic, stale-trigger/cooldown semantics remain consistent across long-running and short-lived flows, and cadence does not depend on a standalone timer loop.
+- Links: AZ-FR-0034, AZ-FR-0035, AZ-FR-4223, AZ-FR-4224.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs

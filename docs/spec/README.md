@@ -9,7 +9,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Product: terminal-first Kanban orchestration tool for issue-centric parallel AI sessions
 - Required client surface: terminal user interface (TUI)
 - Required behavior: modal keyboard workflow, board views, session lifecycle, Git/PR workflows, and task management semantics
-- Excluded by design: specific language/runtime/framework decisions, internal module boundaries, storage engine internals
+- Excluded by design: specific language/runtime/framework decisions and internal module boundaries; storage internals are excluded except where explicitly required for data safety contracts (for example backup consistency/atomicity semantics)
 
 ## Reading Order
 
@@ -141,6 +141,7 @@ An implementation is complete when:
 
 - Canonical issue state MUST be stored locally in Azedarach-managed SQLite.
 - Canonical project DB path MUST be `<project-root>/.azedarach/azedarach.db` (one isolated DB per registered project).
+- Canonical DB protection MUST include built-in automatic project-local backups (default `<project-root>/.azedarach/backups`) using stale-on-open plus write-cooldown triggers with rolling retention.
 - Internal canonical issue IDs MUST be prefix-agnostic and SHOULD remain short/typable via configurable generation strategy.
 - Agent-facing issue retrieval and mutation commands MUST go through the top-level `az` CLI contract (`az init/prime/show/create/q/update/close/reopen/delete/list/ready/blocked/search/stale/count`, `az dep ...`, `az config ...`, `az stats`, and project management via `az project add/list/remove/switch`).
 - Issue command not-found diagnostics MUST stay backend-neutral (`Issue not found internally nor externally: <issue-id>`).

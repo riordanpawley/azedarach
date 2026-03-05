@@ -33,6 +33,20 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - show remediation hint (permissions/path).
   - disable mutating actions until resolved.
 
+### Case F-004: Auto-backup snapshot attempt fails on stale-open or post-mutation trigger
+
+- Required behavior:
+  - backup failure MUST NOT fail originating issue command path.
+  - show non-blocking warning toast at most once per configured cooldown window.
+  - always log backup diagnostics with project context and attempted backup path/filename.
+
+### Case F-005: Backup retention prune or backup-directory write fails
+
+- Required behavior:
+  - preserve canonical DB availability and originating issue command completion semantics.
+  - retain newest successfully created snapshot when prune/delete operations partially fail.
+  - emit actionable diagnostics for backup directory permissions/path/configuration errors.
+
 ## 5.4 tmux / Session Failures
 
 ### Case F-010: Session start command succeeds but tmux session missing

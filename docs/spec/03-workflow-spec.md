@@ -398,6 +398,11 @@ Priority:
 
 If selected project canonical DB is missing, initialize `<project-root>/.azedarach/azedarach.db` before first hydration.
 
+Backup scope note:
+
+- project-local backups for canonical DB snapshots default to `<project-root>/.azedarach/backups`
+- backup staleness checks are evaluated on canonical DB open for the selected project context
+
 ### Project Registry Management (CLI)
 
 Canonical project-management commands:
@@ -756,21 +761,29 @@ Local-first synchronization contract:
 
 - local SQLite store remains source of truth for persisted issue state
 - canonical local DB path per project is `<project-root>/.azedarach/azedarach.db`
+- project-local backup directory default is `<project-root>/.azedarach/backups`
 - switching projects fully swaps canonical DB context before subsequent reads/writes
+- when canonical DB is opened and latest backup is older than configured `intervalMinutes`, system attempts non-blocking backup
 - UI applies optimistic mutations immediately against local state
+- after successful mutating local writes, backup attempt is gated by configured `writeCooldownSeconds`
+- backup snapshots use SQLite-consistent snapshot creation (`VACUUM INTO`-equivalent), temp file staging, and atomic rename to timestamped filename
+- successful backups enforce rolling retention by deleting oldest snapshots beyond configured `maxBackups`
 - inbound external updates SHOULD be event-driven (Linear webhooks) with manual sync fallback
 - Linear outbound API flow enforces internal throttle of 30 requests per rolling minute with default burst capacity of 10 requests
 - implementations MAY provide polling fallback for adapters that cannot emit events
 - inbound reconciliation MUST NOT clobber locally pending optimistic updates
+- backup failure paths are non-blocking for issue operations, emit throttled user warning feedback, and always emit diagnostics logs
+- backup restore command/workflow is outside current scope; this contract covers snapshot creation and retention only
 
 ### Flow
 
 1. validate input locally
 2. apply optimistic in-memory state update immediately
 3. commit local mutation and sync-queue append atomically
-4. on success, confirm state and clear pending marker
-5. on local commit failure, rollback in-memory state to last confirmed snapshot and show error with next action
-6. on outbound sync failure, keep local canonical state and surface retryable sync diagnostics
+4. after successful local commit, evaluate write-cooldown gate and attempt non-blocking backup when eligible
+5. on success, confirm state and clear pending marker
+6. on local commit failure, rollback in-memory state to last confirmed snapshot and show error with next action
+7. on outbound sync failure, keep local canonical state and surface retryable sync diagnostics
 
 ### Guarantees
 
@@ -858,6 +871,7 @@ Enable full-screen correctness assertions for TUI rendering beyond state-only ch
 3. ensure UI-driven edits and direct file edits are semantically equivalent for shared keys
 4. provide schema metadata for editor autocomplete/type hints on config file
 5. validate reload payload against schema and surface actionable key/value diagnostics on failure
+6. apply migration defaults for omitted backup-policy keys (`issueTracker.local.backups`) without requiring manual edits
 
 ### Postcondition
 
@@ -903,15 +917,16 @@ Canonical CLI surface for issue management:
 1. resolve active project context and canonical DB path before command execution
 2. execute canonical local reads/writes first; sync adapters are follow-on side effects
 3. for mutating commands, commit local canonical changes atomically before outbound sync enqueue
-4. emit deterministic command results and non-zero failures (including machine-readable JSON mode)
-5. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
-6. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
-7. command JSON payloads follow the schema contract defined in Section 12
-8. dependency projection query paths are strictly read-only; cycle prevention occurs during mutation commands before persist
-9. agent bootstrap flows require deterministic priming guidance via `az prime` before substantive task execution
-10. if `--project-dir` is provided, command execution binds to that explicit project scope for the invocation and does not fall back to raw cwd/default scope
-11. if `--project-dir` is omitted, project resolution is deterministic and worktree-aware (including nested sibling worktree subdirectories) and must not force raw cwd directly into issue client binding
-12. issue-not-found diagnostics remain backend-neutral and must not leak sync-adapter/backend-specific implementation details
+4. command paths touching canonical DB participate in shared auto-backup policy (stale-on-open and cooldown-gated post-mutation attempts) without blocking issue command completion on backup failure
+5. emit deterministic command results and non-zero failures (including machine-readable JSON mode)
+6. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
+7. keep command namespace deterministic: `az list` resolves issue queries; project registry listing resolves through `az project list`
+8. command JSON payloads follow the schema contract defined in Section 12
+9. dependency projection query paths are strictly read-only; cycle prevention occurs during mutation commands before persist
+10. agent bootstrap flows require deterministic priming guidance via `az prime` before substantive task execution
+11. if `--project-dir` is provided, command execution binds to that explicit project scope for the invocation and does not fall back to raw cwd/default scope
+12. if `--project-dir` is omitted, project resolution is deterministic and worktree-aware (including nested sibling worktree subdirectories) and must not force raw cwd directly into issue client binding
+13. issue-not-found diagnostics remain backend-neutral and must not leak sync-adapter/backend-specific implementation details
 
 ### Postconditions
 

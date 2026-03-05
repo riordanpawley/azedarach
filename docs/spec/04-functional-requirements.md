@@ -31,6 +31,19 @@ This section is normative.
 - AZ-FR-0020: Built-in ID generation strategies MUST include incrementing numeric IDs and title-derived alphabetic hash IDs.
 - AZ-FR-0021: Title-derived hash strategy IDs MUST be lowercase alphabetic only (`a-z`), SHOULD start at configurable minimal length (default 3), and MAY expand length deterministically on collision up to configured maximum.
 - AZ-FR-0022: ID generation MUST avoid mixed alphanumeric IDs in built-in strategies and MUST resolve collisions deterministically (including deterministic hash-length expansion where configured).
+- AZ-FR-0023: Local issue tracker configuration MUST support `issueTracker.local.backups` with keys `enabled`, `intervalMinutes`, `writeCooldownSeconds`, `maxBackups`, and `directory`.
+- AZ-FR-0024: Default backup configuration MUST resolve to: `enabled=true`, `intervalMinutes=60`, `writeCooldownSeconds=300`, `maxBackups=30`, and `directory=".azedarach/backups"`.
+- AZ-FR-0025: Config schema/defaults/migration paths MUST backfill missing `issueTracker.local.backups` fields for legacy configs without requiring manual user edits.
+- AZ-FR-0026: Canonical local-store access paths MUST evaluate stale-on-open backup trigger: when opening canonical SQLite and latest backup age exceeds `intervalMinutes`, system MUST attempt a backup.
+- AZ-FR-0027: After successful mutating canonical writes (including issue lifecycle writes and sync-queue append writes), system MUST attempt backup only if `writeCooldownSeconds` has elapsed since last successful backup.
+- AZ-FR-0028: Backup creation MUST use SQLite-consistent snapshot semantics from canonical DB connection (`VACUUM INTO`-equivalent behavior) into a temporary file followed by atomic rename to final backup filename.
+- AZ-FR-0029: Backup filenames MUST follow `issues-YYYYMMDDTHHMMSSZ.db` UTC timestamp format.
+- AZ-FR-0030: Backup snapshots MUST be project-local; default directory MUST resolve to `<project-root>/.azedarach/backups` unless explicitly overridden by config.
+- AZ-FR-0031: Retention policy MUST prune oldest backup files immediately after successful backup creation so retained files do not exceed `maxBackups`.
+- AZ-FR-0032: Backup failures MUST be non-blocking and MUST NOT fail the originating issue read/write command path.
+- AZ-FR-0033: Backup failure user feedback MUST be rate-limited to at most one warning toast per cooldown window while diagnostics logging remains unthrottled per failure event.
+- AZ-FR-0034: Auto-backup behavior MUST apply consistently to all product flows that access canonical project SQLite (including TUI and top-level `az` issue command paths) regardless of optional sync backend configuration.
+- AZ-FR-0035: Backup cadence guarantees MUST be satisfied through DB access/write-trigger evaluation; implementation MUST NOT require a standalone global timer loop.
 
 ## 4.3 Modal Interaction Requirements
 

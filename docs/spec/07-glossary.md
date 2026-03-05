@@ -8,6 +8,10 @@
 - Issue: canonical work item tracked in Azedarach local issue store.
 - Project-local canonical DB: SQLite database at `<project-root>/.azedarach/azedarach.db` used as canonical persisted issue store for one project.
 - Worktree-aware project resolution: command resolution behavior mapping sibling git-worktree paths (including nested subdirectories) back to the registered base project canonical DB.
+- Local backup policy: configuration for canonical DB snapshot behavior (`issueTracker.local.backups`) including enablement, stale interval, write cooldown, retention, and target directory.
+- Stale-on-open backup trigger: backup attempt executed when canonical DB is opened and newest retained backup exceeds configured age threshold.
+- Write-cooldown backup trigger: post-mutation backup gate that allows backup attempts only when configured cooldown has elapsed since last successful backup.
+- Rolling backup retention: policy that retains only newest N backup files and prunes older snapshots after successful backup creation.
 - Sync target: optional external system mirrored from local canonical issue state.
 - Beads adapter: optional issue<->Beads sync interface layer.
 - Linear adapter: optional issue<->Linear sync interface layer.
