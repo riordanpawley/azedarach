@@ -31,7 +31,7 @@ Checkpoints:
 - mode returns to `NOR` after each action sequence
 - card session indicator transitions idle -> busy -> paused -> busy
 - operation monitor records successful session start and resume operations
-- session bootstrap guidance uses `az issue get <issue-id>` and does not require backend-specific issue CLI commands
+- session bootstrap guidance uses `az show <issue-id>` and does not require backend-specific issue CLI commands
 - board remains navigable during operation updates
 
 End State:

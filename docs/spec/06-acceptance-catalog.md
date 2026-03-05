@@ -230,8 +230,8 @@ Canonical fixture profile names:
 ### AZ-AT-0702 Start with work prompt
 
 - Steps: `Space S`.
-- Expected: session starts with default work instruction that uses `az issue get <issue-id>` for canonical context retrieval.
-- Links: AZ-FR-0802, AZ-FR-4201, AZ-FR-4209, AZ-FR-4210.
+- Expected: session starts with default work instruction that uses `az show <issue-id>` for canonical context retrieval.
+- Links: AZ-FR-0802, AZ-FR-4204, AZ-FR-4226, AZ-FR-4227.
 
 ### AZ-AT-0703 Yolo start variant
 
@@ -865,63 +865,98 @@ Canonical fixture profile names:
 - Expected: adapter enforces 30-requests/minute sustained ceiling, allows configured burst window before throttling, defers excess requests without dropping successful local commits, and exposes throttling/backlog diagnostics.
 - Links: AZ-FR-3816, AZ-FR-3817, AZ-FR-3818, section 05 F-205.
 
-### AZ-AT-2835 `az issue get` canonical retrieval contract
+### AZ-AT-2835 `az init` workspace bootstrap contract
+
+- Preconditions: active project exists with missing or partial `.azedarach` workspace artifacts.
+- Steps: run `az init --json`, then inspect workspace and startup diagnostics.
+- Expected: project-local workspace artifacts are initialized deterministically for active project context without unrelated file mutation.
+- Links: AZ-FR-4201, AZ-FR-4223, AZ-FR-4225.
+
+### AZ-AT-2836 `az show` canonical retrieval contract
 
 - Preconditions: issue exists in active project canonical DB.
-- Steps: run `az issue get <issue-id> --json`.
+- Steps: run `az show <issue-id> --json`.
 - Expected: command returns canonical issue payload for active project context and deterministic non-zero not-found failure for missing IDs.
-- Links: AZ-FR-4201, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212, section 05 F-206.
+- Links: AZ-FR-4204, AZ-FR-4223, AZ-FR-4225, AZ-FR-4229, section 05 F-206.
 
-### AZ-AT-2836 `az issue list` active-project discovery contract
+### AZ-AT-2837 `az create` and `az q` creation contracts
 
-- Preconditions: active project has mixed issue states.
-- Steps: run `az issue list --json` and compare with canonical local board dataset.
-- Expected: list resolves against active project canonical store and returns deterministic machine-readable output.
-- Links: AZ-FR-4202, AZ-FR-4206, AZ-FR-4208.
+- Preconditions: active project canonical DB is writable.
+- Steps: run `az create "Title" -p 1 --type bug --json` and `az q "Fix typo" --json`, then inspect created issues.
+- Expected: both commands create canonical local issues with deterministic machine-readable payloads and project scoping.
+- Links: AZ-FR-4202, AZ-FR-4203, AZ-FR-4223, AZ-FR-4225.
 
-### AZ-AT-2837 `az issue update` mutation contract
+### AZ-AT-2838 `az update` mutation contract
 
 - Preconditions: mutable issue exists in active project.
-- Steps: run `az issue update <issue-id> ... --json`, then read issue via `az issue get`.
+- Steps: run `az update <issue-id> ... --json`, then read issue via `az show`.
 - Expected: update applies to canonical local state, yields deterministic success/error payloads, and preserves project scoping.
-- Links: AZ-FR-4203, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212.
+- Links: AZ-FR-4205, AZ-FR-4223, AZ-FR-4225, AZ-FR-4229.
 
-### AZ-AT-2838 `az issue close` lifecycle contract
+### AZ-AT-2839 `az close` and `az reopen` lifecycle contract
 
-- Preconditions: open or in-progress issue exists.
-- Steps: run `az issue close <issue-id> --json`, then inspect board/issue payload.
-- Expected: status transitions to closed in canonical local state with deterministic diagnostics on failures.
-- Links: AZ-FR-4204, AZ-FR-4206, AZ-FR-4208, AZ-FR-4212, section 05 F-206.
+- Preconditions: open/in-progress issue and closed issue exist.
+- Steps: run `az close <issue-id> --json`, then `az reopen <issue-id> --json`.
+- Expected: close and reopen state transitions apply in canonical local state with deterministic diagnostics on failures.
+- Links: AZ-FR-4206, AZ-FR-4207, AZ-FR-4223, AZ-FR-4225, AZ-FR-4229, section 05 F-206.
 
-### AZ-AT-2839 `az issue delete` guardrail contract
+### AZ-AT-2840 `az delete` guardrail and tombstone contract
 
 - Preconditions: issue exists and destructive path is testable.
-- Steps: invoke `az issue delete <issue-id>` without confirmation, then with explicit confirmation.
-- Expected: unconfirmed path no-ops safely; confirmed path performs destructive delete with deterministic diagnostics.
-- Links: AZ-FR-4205, AZ-FR-4208, AZ-FR-4211, AZ-FR-4212.
+- Steps: invoke `az delete <issue-id>` without confirmation, then with explicit confirmation.
+- Expected: unconfirmed path no-ops safely; confirmed path performs tombstone delete with deterministic diagnostics and audit metadata preservation.
+- Links: AZ-FR-4208, AZ-FR-4225, AZ-FR-4228, AZ-FR-4229.
 
-### AZ-AT-2840 Backend-agnostic `az issue` behavior across sync configurations
+### AZ-AT-2841 Query command contract (`list/ready/blocked/search/stale/count`)
+
+- Preconditions: active project has mixed states, blocked items, and stale timestamps.
+- Steps: run `az list`, `az ready`, `az blocked`, `az search "authentication"`, `az stale --days 30`, and `az count --by status` in JSON mode.
+- Expected: each query resolves against active-project canonical local store with deterministic machine-readable semantics.
+- Links: AZ-FR-4209, AZ-FR-4210, AZ-FR-4211, AZ-FR-4212, AZ-FR-4213, AZ-FR-4214, AZ-FR-4223, AZ-FR-4225, section 05 F-213.
+
+### AZ-AT-2842 Dependency command contract (`az dep add/remove/list/tree/cycles`)
+
+- Preconditions: fixture includes valid and invalid dependency references plus at least one cycle candidate.
+- Steps: run `az dep add`, `az dep remove`, `az dep list`, `az dep tree`, and `az dep cycles` in JSON mode.
+- Expected: dependency mutations and inspections are deterministic, scoped to canonical local graph, and produce actionable diagnostics for invalid references.
+- Links: AZ-FR-4215, AZ-FR-4216, AZ-FR-4217, AZ-FR-4218, AZ-FR-4219, AZ-FR-4223, AZ-FR-4225, section 05 F-210.
+
+### AZ-AT-2843 Config command contract (`az config validate/show`)
+
+- Preconditions: schema-valid and schema-invalid config fixtures are available.
+- Steps: run `az config validate` against both fixtures and `az config show` in active project.
+- Expected: validate returns schema-path diagnostics for invalid values; show returns effective runtime config snapshot.
+- Links: AZ-FR-4220, AZ-FR-4221, AZ-FR-4225, AZ-FR-1710, AZ-FR-1711, section 05 F-211.
+
+### AZ-AT-2844 `az stats` project summary contract
+
+- Preconditions: one non-empty fixture and one empty fixture.
+- Steps: run `az stats --json` in both fixtures.
+- Expected: command returns deterministic project-local aggregates with zero-safe behavior on empty datasets.
+- Links: AZ-FR-4222, AZ-FR-4223, AZ-FR-4225, section 05 F-212.
+
+### AZ-AT-2845 Backend-agnostic top-level `az` behavior across sync configurations
 
 - Preconditions: one project configured local-only and one with optional sync adapter enabled.
-- Steps: run `az issue get/list/update/close` against equivalent fixture issues in both projects.
+- Steps: run representative top-level commands (`show/list/update/close/ready/stats`) against equivalent fixture issues in both projects.
 - Expected: command semantics remain consistent and project-local canonical store remains runtime source of truth.
-- Links: AZ-FR-4206, AZ-FR-4207.
+- Links: AZ-FR-4223, AZ-FR-4224.
 
-### AZ-AT-2841 Session bootstrap prompt uses `az issue` contract only
+### AZ-AT-2846 Session bootstrap prompt uses top-level `az` contract only
 
 - Preconditions: issue-focused start path with injected prompt visible/inspectable in harness.
 - Steps: run `Space S` and `Space !`, capture bootstrap prompt text.
-- Expected: prompt references `az issue get <issue-id>` (and optional `az issue update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
-- Links: AZ-FR-4209, AZ-FR-4210, section 05 F-208.
+- Expected: prompt references `az show <issue-id>` (and optional `az update/close/delete/list` guidance as configured) and excludes backend-specific issue CLI instructions.
+- Links: AZ-FR-4226, AZ-FR-4227, section 05 F-208.
 
-### AZ-AT-2842 Prefix-free internal issue ID policy
+### AZ-AT-2847 Prefix-free internal issue ID policy
 
 - Preconditions: issue creation path available in active project.
 - Steps: create issue and inspect canonical stored ID plus board rendering.
 - Expected: issue ID is accepted/displayed without requiring fixed textual prefix and remains concise for keyboard entry.
 - Links: AZ-FR-0003, AZ-FR-0017, AZ-FR-0018.
 
-### AZ-AT-2843 Configurable short ID strategy (numeric vs alpha hash)
+### AZ-AT-2848 Configurable short ID strategy (numeric vs alpha hash)
 
 - Preconditions: per-project ID strategy setting is configurable.
 - Steps: set strategy to incrementing numeric and create issue; switch to title-derived hash and create issue including collision-case fixture.
@@ -1093,4 +1128,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2606
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2706
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2843
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2848

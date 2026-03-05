@@ -28,7 +28,7 @@ Workflows are written as behavior contracts, not implementation details.
 4. load latest local canonical issue state for new context
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session
-7. construct agent bootstrap command guidance using `az issue` contract for the active issue/project context
+7. construct agent bootstrap command guidance using top-level `az` contract for the active issue/project context
 8. launch selected AI CLI command
 9. reflect session state as busy/idle/waiting as telemetry arrives
 
@@ -40,10 +40,10 @@ Workflows are written as behavior contracts, not implementation details.
 
 ### Agent Bootstrap Prompt Contract
 
-- Session bootstrap prompts MUST instruct issue context retrieval via `az issue get <issue-id>`.
-- When prompt guidance asks the agent to update issue metadata, it MUST reference `az issue update <issue-id> ...`.
-- When prompt guidance asks the agent to complete/remove issues, it MUST reference `az issue close <issue-id> ...` and/or `az issue delete <issue-id> ...`.
-- Prompt guidance MAY reference `az issue list` for cross-issue discovery in the active project context.
+- Session bootstrap prompts MUST instruct issue context retrieval via `az show <issue-id>`.
+- When prompt guidance asks the agent to update issue metadata, it MUST reference `az update <issue-id> ...`.
+- When prompt guidance asks the agent to complete/remove issues, it MUST reference `az close <issue-id> ...` and/or `az delete <issue-id> ...`.
+- Prompt guidance MAY reference `az list` for cross-issue discovery in the active project context.
 - Session bootstrap prompts MUST NOT require backend-specific issue CLIs (for example `bd`, `linear-cli`) for canonical issue read/write flows.
 
 ### Postconditions
@@ -492,6 +492,8 @@ User-visible logs SHOULD capture:
 1. detect required external tools and project validity
 2. if mandatory tooling missing, enter diagnostics-first board state with blocked actions
 3. load last known stable board snapshot if local data load succeeds but external sync state is temporarily unavailable
+4. hydrate visible viewport cards first, then schedule off-screen hydration work
+5. accept navigation/mode inputs once viewport-priority hydration completes (without waiting for full dataset hydration)
 
 ### Context Restore
 
@@ -815,3 +817,65 @@ Enable full-screen correctness assertions for TUI rendering beyond state-only ch
 
 - snapshots MUST be profile-scoped by terminal size, color capability, and font metrics assumptions
 - snapshot assertions SHOULD be used with probe assertions for robust failure triage
+
+## 3.43 Settings and Config Validation Workflow
+
+### Trigger
+
+- user opens settings overlay (`s`) or reloads config after edit
+
+### Behavior
+
+1. expose full supported configuration domains in keyboard-only settings navigation
+2. apply settings changes through canonical config model and persist
+3. ensure UI-driven edits and direct file edits are semantically equivalent for shared keys
+4. provide schema metadata for editor autocomplete/type hints on config file
+5. validate reload payload against schema and surface actionable key/value diagnostics on failure
+
+### Postcondition
+
+- complete runtime configuration is achievable through settings UI without mandatory raw-file editing
+
+## 3.44 Progressive Hydration and Viewport-Priority Workflow
+
+### Trigger
+
+- startup, project switch, view switch, or large refresh where dataset exceeds viewport
+
+### Behavior
+
+1. render first stable board frame from viewport-relevant card window
+2. prioritize loading card indicators (session/PR/dependency) for visible cards before off-screen rows
+3. run off-screen card hydration and indicator refresh as deferred background work
+4. keep foreground interactions (navigate, mode change, overlay open/close) responsive while backlog drains
+5. expose viewport and backlog diagnostics through operation monitor/probe surfaces for deterministic perf assertions
+
+### Guarantees
+
+- users can interact before full hydration
+- off-screen work never stalls primary interaction loop
+- loading order remains deterministic across identical inputs
+
+## 3.45 Top-Level Az CLI Workflow Contract
+
+### Scope
+
+Canonical CLI surface for issue management:
+
+- lifecycle: `az init`, `az create`, `az q`, `az show`, `az update`, `az close`, `az reopen`, `az delete`
+- querying: `az list`, `az ready`, `az blocked`, `az search`, `az stale`, `az count`
+- dependencies: `az dep add/remove/list/tree/cycles`
+- configuration and reporting: `az config validate`, `az config show`, `az stats`
+
+### Command Execution Rules
+
+1. resolve active project context and canonical DB path before command execution
+2. execute canonical local reads/writes first; sync adapters are follow-on side effects
+3. for mutating commands, commit local canonical changes atomically before outbound sync enqueue
+4. emit deterministic command results and non-zero failures (including machine-readable JSON mode)
+5. never require backend-specific issue CLIs in bootstrap or operator workflows for canonical read/write paths
+
+### Postconditions
+
+- all issue lifecycle/query/dependency/config/stats flows remain available in local-only mode
+- command semantics remain stable across optional adapter configurations

@@ -139,7 +139,7 @@ This section expands product behavior into concrete user-centered use cases.
 ### UC-SESS-002 Start session with explicit work instruction
 
 - Trigger: `Space S`
-- Expected: assistant begins with default work-on-task prompt that instructs `az issue get <issue-id>` for canonical context retrieval
+- Expected: assistant begins with default work-on-task prompt that instructs `az show <issue-id>` for canonical context retrieval
 
 ### UC-SESS-003 Fast autonomous mode
 
@@ -287,32 +287,82 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: `Space F`
 - Expected: dependency relationship created with parent context
 
-### UC-AUTH-006 List active project issues via agent CLI
+### UC-AUTH-006 Initialize CLI workspace for project
 
-- Trigger: run `az issue list` in project context
-- Expected: canonical active-project issue set is returned with backend-agnostic semantics
+- Trigger: run `az init` in project context
+- Expected: `.azedarach` workspace prerequisites are initialized deterministically without mutating unrelated project files
 
-### UC-AUTH-007 Update issue metadata via agent CLI
+### UC-AUTH-007 Create issue via CLI lifecycle command
 
-- Trigger: run `az issue update <issue-id> ...`
+- Trigger: run `az create "Title" -p 1 --type bug`
+- Expected: issue is created in canonical local store with configured ID strategy and appears on board refresh
+
+### UC-AUTH-008 Quick-capture issue via CLI
+
+- Trigger: run `az q "Fix typo"`
+- Expected: minimal-input issue is created with canonical defaults and deterministic output payload
+
+### UC-AUTH-009 Show issue via CLI
+
+- Trigger: run `az show <issue-id>`
+- Expected: command resolves canonical issue details for active project context
+
+### UC-AUTH-010 Update issue metadata via CLI
+
+- Trigger: run `az update <issue-id> ...`
 - Expected: canonical local issue metadata is updated and persists across board refresh
 
-### UC-AUTH-008 Close issue via agent CLI
+### UC-AUTH-011 Close issue via CLI
 
-- Trigger: run `az issue close <issue-id>`
+- Trigger: run `az close <issue-id>`
 - Expected: issue transitions to closed in canonical local state
 
-### UC-AUTH-009 Delete issue via agent CLI (guarded)
+### UC-AUTH-012 Reopen issue via CLI
 
-- Trigger: run `az issue delete <issue-id>`
-- Expected: destructive guardrail path requires explicit confirmation before delete applies
+- Trigger: run `az reopen <issue-id>`
+- Expected: closed issue transitions back to an active workflow state
 
-### UC-AUTH-010 Create issue with prefix-free short internal ID
+### UC-AUTH-013 Delete issue via CLI (guarded tombstone)
+
+- Trigger: run `az delete <issue-id>`
+- Expected: destructive guardrail path requires explicit confirmation before tombstone delete applies
+
+### UC-AUTH-014 Query active issues via list command
+
+- Trigger: run `az list --status open --priority 0-1`
+- Expected: canonical active-project issue set is returned with backend-agnostic semantics
+
+### UC-AUTH-015 Query actionable and blocked work
+
+- Trigger: run `az ready` and `az blocked`
+- Expected: actionable and blocked subsets are returned deterministically from canonical local state
+
+### UC-AUTH-016 Query search, stale, and grouped counts
+
+- Trigger: run `az search "authentication"`, `az stale --days 30`, and `az count --by status`
+- Expected: text search, staleness filters, and grouped aggregates are deterministic and machine-readable
+
+### UC-AUTH-017 Manage and inspect dependencies via CLI
+
+- Trigger: run `az dep add/remove/list/tree/cycles` against fixture issues
+- Expected: dependency graph changes and inspection outputs align with canonical dependency model and cycle policy
+
+### UC-AUTH-018 Validate and inspect configuration via CLI
+
+- Trigger: run `az config validate` and `az config show`
+- Expected: config validation returns schema diagnostics and config show returns effective runtime settings
+
+### UC-AUTH-019 Inspect project statistics via CLI
+
+- Trigger: run `az stats`
+- Expected: command returns canonical project issue/statistical summaries without requiring sync-target reads
+
+### UC-AUTH-020 Create issue with prefix-free short internal ID
 
 - Trigger: create issue through manual or AI create path
 - Expected: internal canonical ID is short/typable and does not require fixed textual prefix
 
-### UC-AUTH-011 Switch ID generation strategy by project
+### UC-AUTH-021 Switch ID generation strategy by project
 
 - Trigger: change ID strategy setting (numeric increment vs alpha hash), then create issues
 - Expected: generated IDs follow configured strategy constraints without mixed alphanumeric typing in built-in modes
@@ -593,7 +643,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3818
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4010, AZ-FR-4101..4110
-- Agent issue CLI -> AZ-FR-4201..4212
+- Az CLI command suite -> AZ-FR-4201..4229
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 
@@ -650,7 +700,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-052: AI create returns multiple issue options for confirmation.
 - UC-EXT-053: planning produces cyclic dependencies and validation rejects.
 - UC-EXT-054: planning partially succeeds; user can continue manually.
-- UC-EXT-055: `az issue` command targets missing issue and returns deterministic diagnostics.
+- UC-EXT-055: top-level `az` command targets missing issue and returns deterministic diagnostics.
 
 ### Attachments
 

@@ -196,8 +196,9 @@ Action mode is a palette of context-sensitive operations.
 
 Session prompt contract:
 
-- default session/chat prompts SHOULD guide issue retrieval through `az issue get <issue-id>`
-- prompts SHOULD avoid backend-specific issue command instructions
+- default session/chat prompts MUST guide issue retrieval through `az show <issue-id>`
+- when prompts include issue mutation guidance, they MUST use `az update/close/delete` for canonical write flows and MAY use `az list` for active-project discovery
+- prompts MUST avoid backend-specific issue command instructions
 
 ### Dev Server Actions
 
@@ -337,6 +338,13 @@ Settings domains:
 - sync target behavior (for example Linear webhook mode, manual sync, adapter enablement)
 - session state detection mode
 - diff presentation preferences
+
+Configuration contract:
+
+- settings overlay MUST expose all supported runtime domains above
+- users MUST be able to reach complete runtime configuration through keyboard-only settings UI without mandatory raw-file edits
+- config schema metadata MUST support editor autocomplete/type hints for known keys/values
+- config reload MUST surface actionable diagnostics for invalid schema values
 
 ## 2.15 Logs / Help / Diagnostics Overlays
 

@@ -86,13 +86,13 @@ The probe contract is behavioral and transport-agnostic.
     }
   },
   "agentBootstrap": {
-    "issueLookupCommand": "az issue get kqd",
+    "issueLookupCommand": "az show kqd",
     "backendSpecificCommandLeakDetected": false
   },
   "commands": {
-    "issue": {
+    "az": {
       "lastOperation": "update",
-      "lastCommand": "az issue update kqd --design \"...\"",
+      "lastCommand": "az update kqd --design \"...\"",
       "lastError": null
     }
   },
@@ -113,9 +113,9 @@ The probe contract is behavioral and transport-agnostic.
 - `board.indicators[*].staleness`: freshness hint (`fresh`, `loading`, `stale`) for user-visible indicator convergence checks.
 - `operations.queue[*].state`: one of `queued`, `running`, `succeeded`, `failed`, `canceled`.
 - `sync.linear.rateLimit`: outbound throttling snapshot; present when Linear sync target is enabled.
-- `agentBootstrap.issueLookupCommand`: active session bootstrap issue lookup command (must use `az issue get <issue-id>` when bootstrap guidance is present).
+- `agentBootstrap.issueLookupCommand`: active session bootstrap issue lookup command (must use `az show <issue-id>` when bootstrap guidance is present).
 - `agentBootstrap.backendSpecificCommandLeakDetected`: diagnostic boolean for backend-specific command leakage in bootstrap guidance.
-- `commands.issue.lastOperation`: last observed `az issue` operation kind (`get`, `list`, `update`, `close`, `delete`) when available.
+- `commands.az.lastOperation`: last observed top-level `az` operation kind (for example `show`, `create`, `q`, `update`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `search`, `stale`, `count`, `dep.*`, `config.*`, `stats`) when available.
 
 ## 10.5 Example: Overlay + Selection State
 
@@ -153,13 +153,13 @@ The probe contract is behavioral and transport-agnostic.
     "queue": []
   },
   "agentBootstrap": {
-    "issueLookupCommand": "az issue get kqt",
+    "issueLookupCommand": "az show kqt",
     "backendSpecificCommandLeakDetected": false
   },
   "commands": {
-    "issue": {
-      "lastOperation": "get",
-      "lastCommand": "az issue get kqt --json",
+    "az": {
+      "lastOperation": "show",
+      "lastCommand": "az show kqt --json",
       "lastError": null
     }
   },

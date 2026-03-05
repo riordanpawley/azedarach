@@ -299,7 +299,7 @@ Every user-visible error SHOULD include:
 
 Example format:
 
-`Failed to create PR for az-123: authentication required. Run gh auth login, then retry Space+P.`
+`Failed to create PR for <issue-id>: authentication required. Run gh auth login, then retry Space+P.`
 
 ## 5.16 Recovery Checklist (User-Facing)
 
@@ -639,26 +639,33 @@ On failure, logs SHOULD capture:
   - enforce internal throttling ceiling and burst policy deterministically.
   - surface retry/backlog diagnostics (queued count and next eligible dispatch window).
 
-## 5.30 Agent Issue CLI Edge Cases
+## 5.30 Top-Level Az CLI Edge Cases
 
-### Case F-206: `az issue get/update/close/delete` targets missing issue
+### Case F-206: `az show/update/close/reopen/delete` targets missing issue
 
 - Required behavior:
   - return deterministic not-found diagnostics with issue ID context.
   - return non-zero exit and machine-readable error payload when JSON mode is requested.
   - avoid partial local mutations.
 
-### Case F-207: `az issue list/update/close/delete` runs while canonical store is unavailable/locked
+### Case F-207: `az update/close/reopen/delete` runs while canonical store is unavailable/locked
 
 - Required behavior:
   - fail with actionable diagnostics including project/canonical DB context.
   - preserve canonical local state and avoid fallback to remote tracker as runtime source of truth.
   - provide explicit retry guidance once lock/unavailability clears.
 
+### Case F-213: `az list/ready/blocked/search/stale/count` runs while canonical store is unavailable/locked
+
+- Required behavior:
+  - fail with actionable diagnostics including project/canonical DB context.
+  - return deterministic non-zero exit in machine-readable mode.
+  - avoid returning partial/ambiguous query payloads.
+
 ### Case F-208: Session bootstrap prompt references backend-specific issue CLI
 
 - Required behavior:
-  - reject or normalize prompt template to `az issue` command contract before session launch.
+  - reject or normalize prompt template to top-level `az` command contract before session launch.
   - expose diagnostics for prompt template mismatch.
   - continue allowing backend adapters internally without leaking backend-specific instructions to agents.
 
@@ -668,3 +675,24 @@ On failure, logs SHOULD capture:
   - resolve collision deterministically without requiring manual DB intervention.
   - preserve configured strategy constraints (for example lowercase alphabetic hash policy).
   - return actionable diagnostics only if collision cannot be resolved automatically.
+
+### Case F-210: `az dep add/remove/list/tree/cycles` receives invalid issue references or graph state
+
+- Required behavior:
+  - dependency mutations reject missing source/target issue IDs with deterministic diagnostics.
+  - cycle detection output remains deterministic for identical graph inputs.
+  - dependency tree/list operations fail clearly if canonical store is unavailable.
+
+### Case F-211: `az config validate/show` called with invalid or incompatible configuration payload
+
+- Required behavior:
+  - `az config validate` returns schema-path-specific errors without mutating runtime config.
+  - `az config show` returns effective config snapshot or explicit unavailable diagnostics.
+  - both commands support deterministic JSON error/success payloads when requested.
+
+### Case F-212: `az stats` on empty or partially hydrated project data
+
+- Required behavior:
+  - return deterministic zero-safe aggregates for empty datasets.
+  - avoid blocking on optional sync targets; stats are sourced from canonical local state.
+  - include freshness/backlog hints when statistic inputs are still converging.

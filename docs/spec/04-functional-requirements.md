@@ -239,6 +239,11 @@ This section is normative.
 - AZ-FR-1704: Setting changes MUST persist to local config file.
 - AZ-FR-1705: `e` in settings MUST open raw config editor.
 - AZ-FR-1706: Configuration reload SHOULD apply changes without restart when safe.
+- AZ-FR-1707: Settings overlay MUST expose all supported configuration domains listed in the interaction spec.
+- AZ-FR-1708: Users MUST be able to configure all runtime-relevant domains through keyboard-only settings UI without requiring direct file edits.
+- AZ-FR-1709: Settings UI writes MUST be semantically equivalent to direct config edits for shared keys.
+- AZ-FR-1710: Configuration schema metadata MUST be available so schema-aware editors can provide key/value autocomplete and type hints.
+- AZ-FR-1711: Config reload MUST validate against schema and return actionable diagnostics for invalid values.
 
 ## 4.20 Multi-Project Requirements
 
@@ -282,6 +287,8 @@ This section is normative.
 - AZ-FR-2203: Partial subsystem failure SHOULD preserve board navigation.
 - AZ-FR-2204: Interrupted operations SHOULD be resumable or abortable.
 - AZ-FR-2205: Data refresh errors SHOULD not wipe last known good board state.
+- AZ-FR-2206: Transient dependency failures for retry-safe operations MUST use bounded exponential backoff before declaring failure.
+- AZ-FR-2207: When retry budget is exhausted, the system MUST emit explicit retry-exhausted diagnostics and manual retry guidance.
 
 ## 4.25 Performance Requirements
 
@@ -289,6 +296,12 @@ This section is normative.
 - AZ-FR-2302: Board refresh SHOULD scale to large issue counts without lockups.
 - AZ-FR-2303: Overlay open/close SHOULD feel immediate.
 - AZ-FR-2304: Search/filter updates SHOULD provide near-live feedback.
+- AZ-FR-2305: Board navigation and mode-change inputs MUST remain available before full dataset hydration completes.
+- AZ-FR-2306: Long-column rendering MUST use virtualization or equivalent windowing so sustained scrolling and view toggles remain responsive at scale.
+- AZ-FR-2307: Initial hydration MUST prioritize visible viewport cards over off-screen content.
+- AZ-FR-2308: Initial hydration of session/PR/dependency indicators MUST prioritize visible viewport cards.
+- AZ-FR-2309: Off-screen hydration and refresh work MUST execute as deferred background tasks that do not block foreground interaction.
+- AZ-FR-2310: Runtime diagnostics SHOULD expose viewport-priority loading/backlog state for deterministic performance assertions.
 
 ## 4.26 Observability Requirements
 
@@ -478,17 +491,34 @@ This section is normative.
 - AZ-FR-4109: E2E suite MUST include stress scenarios for scale datasets and rapid operation concurrency.
 - AZ-FR-4110: E2E release validation SHOULD combine probe assertions with visual assertions for high-risk workflows.
 
-## 4.45 Agent Issue CLI Requirements
+## 4.45 Top-Level Az CLI Requirements
 
-- AZ-FR-4201: The product MUST expose `az issue get <issue-id>` for canonical issue retrieval.
-- AZ-FR-4202: The product MUST expose `az issue list` for active-project issue discovery.
-- AZ-FR-4203: The product MUST expose `az issue update <issue-id> ...` for issue mutation.
-- AZ-FR-4204: The product MUST expose `az issue close <issue-id> ...` for completion workflows.
-- AZ-FR-4205: The product MUST expose `az issue delete <issue-id> ...` for destructive removal workflows.
-- AZ-FR-4206: `az issue` commands MUST operate against the selected project's canonical local store and MUST NOT bypass project context.
-- AZ-FR-4207: `az issue` command semantics MUST remain backend-agnostic across local-only and optional sync-adapter configurations.
-- AZ-FR-4208: `az issue` commands MUST support machine-readable JSON output and deterministic non-zero failures.
-- AZ-FR-4209: Session start/bootstrap prompts MUST instruct issue context retrieval via `az issue get <issue-id>`.
-- AZ-FR-4210: Session start/bootstrap prompts MUST NOT require backend-specific issue CLIs for canonical issue read/write flows.
-- AZ-FR-4211: `az issue delete` MUST require explicit confirmation or safe-mode equivalent before destructive execution.
-- AZ-FR-4212: `az issue` not-found/store-unavailable failures MUST return actionable diagnostics and preserve local canonical state.
+- AZ-FR-4201: The product MUST expose `az init` to initialize project-local Azedarach workspace artifacts when missing.
+- AZ-FR-4202: The product MUST expose `az create "<title>" ...` for issue creation.
+- AZ-FR-4203: The product MUST expose `az q "<text>" ...` for quick-capture issue creation.
+- AZ-FR-4204: The product MUST expose `az show <issue-id>` for canonical issue retrieval.
+- AZ-FR-4205: The product MUST expose `az update <issue-id> ...` for issue mutation.
+- AZ-FR-4206: The product MUST expose `az close <issue-id> ...` for completion workflows.
+- AZ-FR-4207: The product MUST expose `az reopen <issue-id> ...` for closed-issue reopening.
+- AZ-FR-4208: The product MUST expose `az delete <issue-id> ...` for destructive removal workflows using tombstone semantics.
+- AZ-FR-4209: The product MUST expose `az list ...` for active-project issue discovery.
+- AZ-FR-4210: The product MUST expose `az ready ...` for actionable-work discovery.
+- AZ-FR-4211: The product MUST expose `az blocked ...` for blocked-work discovery.
+- AZ-FR-4212: The product MUST expose `az search "<query>" ...` for full-text issue retrieval.
+- AZ-FR-4213: The product MUST expose `az stale ...` for stale-issue discovery.
+- AZ-FR-4214: The product MUST expose `az count ...` including grouping flags (for example `--by status`).
+- AZ-FR-4215: The product MUST expose `az dep add <child-id> <parent-id> ...` for dependency creation.
+- AZ-FR-4216: The product MUST expose `az dep remove <child-id> <parent-id> ...` for dependency removal.
+- AZ-FR-4217: The product MUST expose `az dep list <issue-id> ...` for dependency inspection.
+- AZ-FR-4218: The product MUST expose `az dep tree <issue-id> ...` for dependency tree visualization.
+- AZ-FR-4219: The product MUST expose `az dep cycles ...` for cycle detection.
+- AZ-FR-4220: The product MUST expose `az config validate ...` for config schema validation.
+- AZ-FR-4221: The product MUST expose `az config show ...` for effective config inspection.
+- AZ-FR-4222: The product MUST expose `az stats ...` for project issue/statistical summaries.
+- AZ-FR-4223: Top-level `az` commands MUST operate against the selected project's canonical local store and MUST NOT bypass project context.
+- AZ-FR-4224: Top-level `az` command semantics MUST remain backend-agnostic across local-only and optional sync-adapter configurations.
+- AZ-FR-4225: Top-level `az` commands MUST support machine-readable JSON output and deterministic non-zero failures.
+- AZ-FR-4226: Session start/bootstrap prompts MUST instruct issue context retrieval via `az show <issue-id>`.
+- AZ-FR-4227: Session start/bootstrap prompts MUST NOT require backend-specific issue CLIs for canonical issue read/write flows.
+- AZ-FR-4228: `az delete` MUST require explicit confirmation or safe-mode equivalent before destructive execution and MUST preserve tombstone/audit metadata.
+- AZ-FR-4229: Top-level `az` not-found/store-unavailable failures MUST return actionable diagnostics and preserve local canonical state.
