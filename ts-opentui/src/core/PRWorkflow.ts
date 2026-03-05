@@ -843,97 +843,101 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					Effect.gen(function* () {
 						const { issueId, projectPath, draft = true, baseBranch: explicitBaseBranch } = options
 
-					// Determine effective base branch (epic branch for children, main otherwise)
-					const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, explicitBaseBranch)
-
-					// Check if PR creation is enabled (config + network)
-					const prStatus = yield* offlineService.isPREnabled()
-					if (!prStatus.enabled) {
-						return yield* Effect.fail(
-							new OfflineError({
-								operation: "PR creation",
-								reason: prStatus.reason,
-							}),
+						// Determine effective base branch (epic branch for children, main otherwise)
+						const { baseBranch, parentEpic } = yield* getIssueBaseBranch(
+							issueId,
+							explicitBaseBranch,
 						)
-					}
+
+						// Check if PR creation is enabled (config + network)
+						const prStatus = yield* offlineService.isPREnabled()
+						if (!prStatus.enabled) {
+							return yield* Effect.fail(
+								new OfflineError({
+									operation: "PR creation",
+									reason: prStatus.reason,
+								}),
+							)
+						}
 
 						// Get issue info for PR title/body
 						const issue = yield* issueTrackerClient.show(issueId)
 
-					// Log context for debugging
-					if (parentEpic) {
-						yield* Effect.log(`Creating PR for ${issueId} targeting epic branch ${parentEpic.id}`)
-					}
+						// Log context for debugging
+						if (parentEpic) {
+							yield* Effect.log(`Creating PR for ${issueId} targeting epic branch ${parentEpic.id}`)
+						}
 
-					// Get worktree info
-					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
-					if (!worktree) {
-						return yield* Effect.fail(
-							new PRError({
-								message: `No worktree found for ${issueId}`,
-								issueId,
-							}),
-						)
-					}
-
-					// Sync beads changes (with lock to prevent races)
-					yield* withSyncLock(
-						issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
-					)
-
-					// Stage and commit any changes
-					yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
-
-						yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path).pipe(
-							Effect.catchAll(() => Effect.void),
-						) // Ignore if nothing to commit
-
-					// Push branch to origin
-					yield* runGit(["push", "-u", "origin", issueId], worktree.path).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to push branch: ${e.message}`,
-									command: "git push",
+						// Get worktree info
+						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
+						if (!worktree) {
+							return yield* Effect.fail(
+								new PRError({
+									message: `No worktree found for ${issueId}`,
+									issueId,
 								}),
-						),
-					)
+							)
+						}
 
-					// Generate PR title and body
+						// Sync beads changes (with lock to prevent races)
+						yield* withSyncLock(
+							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+						)
+
+						// Stage and commit any changes
+						yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+
+						yield* runGit(
+							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
+							worktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
+
+						// Push branch to origin
+						yield* runGit(["push", "-u", "origin", issueId], worktree.path).pipe(
+							Effect.mapError(
+								(e) =>
+									new GitError({
+										message: `Failed to push branch: ${e.message}`,
+										command: "git push",
+									}),
+							),
+						)
+
+						// Generate PR title and body
 						const title = options.title ?? generateIssuePRTitle(issue)
 						const body = options.body ?? generateIssuePRBody(issue)
 
-					// Create PR via gh CLI
-					const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]
-					if (draft) {
-						ghArgs.push("--draft")
-					}
+						// Create PR via gh CLI
+						const ghArgs = ["pr", "create", "--title", title, "--body", body, "--base", baseBranch]
+						if (draft) {
+							ghArgs.push("--draft")
+						}
 
-					const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
-						Effect.map((output) => output.trim()),
-					)
+						const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
+							Effect.map((output) => output.trim()),
+						)
 
-					// Extract PR number from URL
-					const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
-					const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0
+						// Extract PR number from URL
+						const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
+						const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : 0
 
-					// Link PR back to bead
-					yield* issueTrackerClient
-						.update(issueId, {
-							notes: `PR: ${prUrl}`,
-						})
-						.pipe(Effect.catchAll(() => Effect.void))
+						// Link PR back to bead
+						yield* issueTrackerClient
+							.update(issueId, {
+								notes: `PR: ${prUrl}`,
+							})
+							.pipe(Effect.catchAll(() => Effect.void))
 
-					return {
-						number: prNumber,
-						url: prUrl,
-						title,
-						state: "open" as const,
-						draft,
-						branch: issueId,
-					}
-				}).pipe(Effect.withSpan("pr.create")),
-			),
+						return {
+							number: prNumber,
+							url: prUrl,
+							title,
+							state: "open" as const,
+							draft,
+							branch: issueId,
+						}
+					}).pipe(Effect.withSpan("pr.create")),
+				),
 
 			getPR: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
@@ -964,51 +968,51 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					Effect.gen(function* () {
 						const { issueId, projectPath, deleteRemoteBranch = true, closeIssue = true } = options
 
-					// 1. Stop any running session (ignore errors)
-					// First try ClaudeSessionManager.stop (handles beads sync from worktree)
-					yield* sessionManager.stop(issueId).pipe(Effect.catchAll(() => Effect.void))
-					// Also directly kill tmux session in case it wasn't tracked in memory
-					yield* tmuxService.killSession(issueId).pipe(Effect.catchAll(() => Effect.void))
+						// 1. Stop any running session (ignore errors)
+						// First try ClaudeSessionManager.stop (handles beads sync from worktree)
+						yield* sessionManager.stop(issueId).pipe(Effect.catchAll(() => Effect.void))
+						// Also directly kill tmux session in case it wasn't tracked in memory
+						yield* tmuxService.killSession(issueId).pipe(Effect.catchAll(() => Effect.void))
 
-					// 2. Delete worktree
-					yield* worktreeManager.remove({ issueId: issueId, projectPath })
+						// 2. Delete worktree
+						yield* worktreeManager.remove({ issueId: issueId, projectPath })
 
-					// 3. Delete remote branch (optional, only if online)
-					if (deleteRemoteBranch) {
-						const pushStatus = yield* offlineService.isGitPushEnabled()
-						if (pushStatus.enabled) {
-							yield* runGit(["push", "origin", "--delete", issueId], projectPath).pipe(
-								Effect.catchAll(() => Effect.void), // Ignore if already deleted
+						// 3. Delete remote branch (optional, only if online)
+						if (deleteRemoteBranch) {
+							const pushStatus = yield* offlineService.isGitPushEnabled()
+							if (pushStatus.enabled) {
+								yield* runGit(["push", "origin", "--delete", issueId], projectPath).pipe(
+									Effect.catchAll(() => Effect.void), // Ignore if already deleted
+								)
+							}
+							// Silently skip if offline - remote branch can be cleaned up later
+						}
+
+						// 4. Delete local branch
+						yield* runGit(["branch", "-D", issueId], projectPath).pipe(
+							Effect.catchAll(() => Effect.void), // Ignore if already deleted
+						)
+
+						// 5. Close bead issue (optional) and sync to persist the change
+						if (closeIssue) {
+							yield* issueTrackerClient
+								.update(issueId, { status: "closed" })
+								.pipe(Effect.catchAll(() => Effect.void))
+
+							// Clean up images for the closed issue (temporary debugging images)
+							// This prevents unbounded growth of local attachment storage
+							yield* imageAttachmentService
+								.cleanupImagesForIssue(issueId)
+								.pipe(Effect.catchAll(() => Effect.void))
+
+							// Sync the closed status to JSONL and commit it
+							// This fixes az-o5m9: merged tasks being left in in_progress status
+							yield* withSyncLock(
+								issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
 							)
 						}
-						// Silently skip if offline - remote branch can be cleaned up later
-					}
-
-					// 4. Delete local branch
-					yield* runGit(["branch", "-D", issueId], projectPath).pipe(
-						Effect.catchAll(() => Effect.void), // Ignore if already deleted
-					)
-
-					// 5. Close bead issue (optional) and sync to persist the change
-					if (closeIssue) {
-						yield* issueTrackerClient
-							.update(issueId, { status: "closed" })
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						// Clean up images for the closed bead (temporary debugging images)
-						// This prevents unbounded growth of .beads/images/ directory
-						yield* imageAttachmentService
-							.cleanupImagesForIssue(issueId)
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						// Sync the closed status to JSONL and commit it
-						// This fixes az-o5m9: merged tasks being left in in_progress status
-						yield* withSyncLock(
-							issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
-						)
-					}
-				}).pipe(Effect.withSpan("pr.cleanup")),
-			),
+					}).pipe(Effect.withSpan("pr.cleanup")),
+				),
 
 			checkGHCLI: () =>
 				Effect.gen(function* () {
@@ -1029,419 +1033,429 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					},
 					Effect.gen(function* () {
 						const gitConfig = yield* getGitConfig()
-					const {
-						issueId,
-						projectPath,
-						pushToOrigin = gitConfig.pushEnabled,
-						closeIssue = false,
-						keepWorktree = true,
-					} = options
-
-					// Determine effective base branch (epic branch for children, main for epics/standalone)
-					const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId)
-
-					// Log context for debugging
-					if (parentEpic) {
-						yield* Effect.log(`Merging ${issueId} into epic branch ${parentEpic.id} (not main)`)
-					}
-
-					// If merging into a parent epic, we need to merge IN the epic's worktree
-					// because git won't let us checkout a branch that's in use by another worktree.
-					// If epic has no worktree, create one first.
-					let mergeDir = projectPath
-					if (parentEpic) {
-						let epicWorktree = yield* worktreeManager.get({
-							issueId: parentEpic.id,
+						const {
+							issueId,
 							projectPath,
-						})
-						if (!epicWorktree) {
-							yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
-							epicWorktree = yield* worktreeManager.create({
+							pushToOrigin = gitConfig.pushEnabled,
+							closeIssue = false,
+							keepWorktree = true,
+						} = options
+
+						// Determine effective base branch (epic branch for children, main for epics/standalone)
+						const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId)
+
+						// Log context for debugging
+						if (parentEpic) {
+							yield* Effect.log(`Merging ${issueId} into epic branch ${parentEpic.id} (not main)`)
+						}
+
+						// If merging into a parent epic, we need to merge IN the epic's worktree
+						// because git won't let us checkout a branch that's in use by another worktree.
+						// If epic has no worktree, create one first.
+						let mergeDir = projectPath
+						if (parentEpic) {
+							let epicWorktree = yield* worktreeManager.get({
 								issueId: parentEpic.id,
 								projectPath,
 							})
+							if (!epicWorktree) {
+								yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
+								epicWorktree = yield* worktreeManager.create({
+									issueId: parentEpic.id,
+									projectPath,
+								})
+							}
+							mergeDir = epicWorktree.path
+							yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
 						}
-						mergeDir = epicWorktree.path
-						yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
-					}
 
 						// Get issue info for merge commit message
 						const issue = yield* issueTrackerClient.show(issueId)
 
-					// Get worktree info
-					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
-					if (!worktree) {
-						return yield* Effect.fail(
-							new PRError({
-								message: `No worktree found for ${issueId}`,
-								issueId,
-							}),
+						// Get worktree info
+						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
+						if (!worktree) {
+							return yield* Effect.fail(
+								new PRError({
+									message: `No worktree found for ${issueId}`,
+									issueId,
+								}),
+							)
+						}
+
+						// 1. Stop any running session first (only if doing full cleanup)
+						// When keepWorktree=true, we want to keep iterating in the same session
+						if (!keepWorktree) {
+							yield* sessionManager
+								.stop(issueId)
+								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
+							yield* tmuxService
+								.killSession(issueId)
+								.pipe(
+									Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)),
+								)
+						}
+
+						// 2. Stage and commit any uncommitted changes in worktree
+						yield* runGit(["add", "-A"], worktree.path).pipe(
+							Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
 						)
-					}
-
-					// 1. Stop any running session first (only if doing full cleanup)
-					// When keepWorktree=true, we want to keep iterating in the same session
-					if (!keepWorktree) {
-						yield* sessionManager
-							.stop(issueId)
-							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to stop session: ${e}`)))
-						yield* tmuxService
-							.killSession(issueId)
-							.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to kill tmux session: ${e}`)))
-					}
-
-					// 2. Stage and commit any uncommitted changes in worktree
-					yield* runGit(["add", "-A"], worktree.path).pipe(
-						Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
-					)
-						yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path).pipe(
+						yield* runGit(
+							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
+							worktree.path,
+						).pipe(
 							Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 						)
 
-					// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
-					// We only care about conflicts in actual code files, not .beads/
-					const mergeTreeResult = yield* Effect.gen(function* () {
-						const command = Command.make(
-							"git",
-							"merge-tree",
-							"--write-tree",
-							"--name-only",
-							baseBranch,
-							issueId,
-						).pipe(Command.workingDirectory(mergeDir))
-
-						const exitCode = yield* Command.exitCode(command).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
-							),
-						)
-
-						if (exitCode === 0) {
-							return { hasConflicts: false, conflictingFiles: [] as string[] }
-						}
-
-						// Get conflicting files
-						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
-							mergeDir,
-						).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
-									Effect.map(() => ""),
-								),
-							),
-						)
-
-						const lines = output.trim().split("\n")
-						const conflictingFiles = lines
-							.slice(1)
-							.filter((f) => f.length > 0)
-							// Filter OUT .beads/ files - we handle those separately
-							.filter((f) => !f.startsWith(".beads/"))
-
-						return {
-							hasConflicts: conflictingFiles.length > 0,
-							conflictingFiles,
-						}
-					})
-
-					// 4. If there are real code conflicts (not .beads/), ask Claude to resolve
-					if (mergeTreeResult.hasConflicts) {
-						const fileList = mergeTreeResult.conflictingFiles.join(", ")
-
-						// Start merge in worktree so Claude can resolve
-						yield* runGit(
-							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
-							worktree.path,
-						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
-
-						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
-
-						const windowName = "merge"
-						const sessionName = getIssueSessionName(issueId)
-
-						const cliTool = yield* appConfig.getCliTool()
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const modelConfig = yield* appConfig.getModelConfig()
-						const toolDef = getToolDefinition(cliTool)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
-						const effectiveModel = toolModelConfig.default ?? modelConfig.default
-
-						const command = toolDef.buildCommand({
-							initialPrompt: resolvePrompt,
-							model: effectiveModel,
-							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
-						})
-
-						yield* worktreeSession.ensureWindow(sessionName, windowName, {
-							cwd: worktree.path,
-							command,
-						})
-
-						const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
-
-						return yield* Effect.fail(
-							new MergeConflictError({
+						// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
+						// We only care about conflicts in actual code files, not .beads/
+						const mergeTreeResult = yield* Effect.gen(function* () {
+							const command = Command.make(
+								"git",
+								"merge-tree",
+								"--write-tree",
+								"--name-only",
+								baseBranch,
 								issueId,
-								branch: issueId,
-								message,
-							}),
-						)
-					}
+							).pipe(Command.workingDirectory(mergeDir))
 
-					// 5. No code conflicts - safe to merge
-					// If merging in main project, checkout base branch first
-					// If merging in epic's worktree, branch is already checked out
-					if (mergeDir === projectPath) {
-						yield* runGit(["checkout", baseBranch], projectPath).pipe(
-							Effect.mapError(
-								(e) =>
-									new GitError({
-										message: `Failed to checkout ${baseBranch}: ${e.message}`,
-										command: `git checkout ${baseBranch}`,
-									}),
-							),
-						)
-					}
+							const exitCode = yield* Command.exitCode(command).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+								),
+							)
 
-					// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
-					// This ensures .beads/issues.jsonl from base branch is preserved during merge
-						const mergeMessage = `Merge ${issueId}: ${issue.title}`
-					yield* runGit(
-						["merge", issueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
-						mergeDir,
-					).pipe(
-						Effect.mapError((e) => {
-							// If merge still fails, report conflict or error
-							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
-								return new MergeConflictError({
-									issueId,
-									branch: issueId,
-									message: `Merge conflict. Resolve manually: git checkout ${baseBranch} && git merge ${issueId}`,
-								})
-							}
-							return new GitError({
-								message: `Merge failed: ${e.message}`,
-								command: `git merge ${issueId} --no-ff`,
-								stderr: e.stderr,
-							})
-						}),
-					)
-
-					// 7. Sync beads AFTER merge to reconcile any bead changes from branch
-					// This imports beads from the branch that might have been excluded by -X ours
-					yield* withSyncLock(
-						Effect.gen(function* () {
-							// Import beads from the merged JSONL
-							yield* issueTrackerClient
-								.syncImportOnly(mergeDir)
-								.pipe(
-									Effect.catchAll((e) =>
-										Effect.logWarning(`Failed to import beads after merge: ${e}`),
-									),
-								)
-
-							// Recover any tombstoned issues
-							yield* issueTrackerClient
-								.recoverTombstones(mergeDir)
-								.pipe(
-									Effect.catchAll((e) =>
-										Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
-									),
-								)
-
-							// Full sync to commit any bead changes
-							yield* issueTrackerClient
-								.sync(mergeDir)
-								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
-						}),
-					)
-
-					// 7.5. Run post-merge validation (configurable via .azedarach.json)
-					// Only runs if merge.validateCommands is configured
-					const mergeConfig = yield* getMergeConfig()
-					if (mergeConfig.validateCommands.length > 0) {
-						yield* Effect.gen(function* () {
-							const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
-								mergeConfig
-
-							/**
-							 * Run all validation commands and return first failure
-							 */
-							const runValidation = (): Effect.Effect<
-								{ success: boolean; output: string; failedCommand?: string },
-								never,
-								CommandExecutor.CommandExecutor
-							> =>
-								Effect.gen(function* () {
-									for (const cmd of validateCommands) {
-										yield* Effect.log(`Running: ${cmd}`)
-										const result = yield* runShellCommand(cmd, mergeDir)
-										if (!result.success) {
-											return { success: false, output: result.output, failedCommand: cmd }
-										}
-									}
-									return { success: true, output: "" }
-								})
-
-							// Initial validation
-							let lastResult = yield* runValidation()
-							if (lastResult.success) {
-								yield* Effect.log("Post-merge validation passed")
-								return
+							if (exitCode === 0) {
+								return { hasConflicts: false, conflictingFiles: [] as string[] }
 							}
 
-							// Try fix attempts if fixCommand is configured
-							if (fixCommand) {
-								for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
-									yield* Effect.log(
-										`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
-									)
-									yield* runShellCommand(fixCommand, mergeDir)
-
-									lastResult = yield* runValidation()
-									if (lastResult.success) {
-										yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
-
-										// Commit the fixes
-										yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
-										yield* runGit(
-											["commit", "-m", `fix: auto-fix after merging ${issueId}`],
-											mergeDir,
-										).pipe(Effect.catchAll(() => Effect.void))
-
-										return
-									}
-								}
-							}
-
-							// Still failing after all fix attempts
-							yield* Effect.log("Validation still failing after auto-fix attempts")
-
-							// Commit any partial fixes
-							yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
-							yield* runGit(
-								["commit", "-m", `wip: partial fix after merging ${issueId}`],
+							// Get conflicting files
+							const output = yield* runGit(
+								["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
 								mergeDir,
-							).pipe(Effect.catchAll(() => Effect.void))
+							).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+										Effect.map(() => ""),
+									),
+								),
+							)
 
-							// Start Claude session if configured
-							if (startClaudeOnFailure) {
-								const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
-								const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
+							const lines = output.trim().split("\n")
+							const conflictingFiles = lines
+								.slice(1)
+								.filter((f) => f.length > 0)
+								// Filter OUT .beads/ files - we handle those separately
+								.filter((f) => !f.startsWith(".beads/"))
 
-								yield* sessionManager
-									.start({
-										issueId,
-										projectPath,
-										initialPrompt: fixPrompt,
-									})
-									.pipe(
-										Effect.catchAll((e) =>
-											Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
-										),
-									)
+							return {
+								hasConflicts: conflictingFiles.length > 0,
+								conflictingFiles,
 							}
+						})
+
+						// 4. If there are real code conflicts (not .beads/), ask Claude to resolve
+						if (mergeTreeResult.hasConflicts) {
+							const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+							// Start merge in worktree so Claude can resolve
+							yield* runGit(
+								["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
+								worktree.path,
+							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
+
+							const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+
+							const windowName = "merge"
+							const sessionName = getIssueSessionName(issueId)
+
+							const cliTool = yield* appConfig.getCliTool()
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const modelConfig = yield* appConfig.getModelConfig()
+							const toolDef = getToolDefinition(cliTool)
+							const toolModelConfig =
+								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+							const command = toolDef.buildCommand({
+								initialPrompt: resolvePrompt,
+								model: effectiveModel,
+								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							})
+
+							yield* worktreeSession.ensureWindow(sessionName, windowName, {
+								cwd: worktree.path,
+								command,
+							})
+
+							const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
 
 							return yield* Effect.fail(
-								new TypeCheckError({
+								new MergeConflictError({
 									issueId,
-									message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
-									output: lastResult.output,
+									branch: issueId,
+									message,
 								}),
 							)
-						})
-					}
-
-					// 8-10. Cleanup worktree and branch (only if not keeping worktree)
-					if (!keepWorktree) {
-						// 8. Merge Claude's local settings from worktree to main
-						// This preserves permission grants (allowedTools, trustedPaths) that Claude
-						// added during the session. Must happen BEFORE worktree deletion.
-						yield* worktreeManager.mergeClaudeLocalSettings({
-							worktreePath: worktree.path,
-							mainProjectPath: projectPath,
-						})
-
-						// 9. Remove worktree directory
-						yield* worktreeManager.remove({ issueId: issueId, projectPath })
-
-						// 10. Delete local branch
-						yield* runGit(["branch", "-d", issueId], projectPath).pipe(
-							Effect.catchAll(() => Effect.void),
-						)
-					}
-
-					// 11. Close bead issue (and children if epic merging to main)
-					if (closeIssue) {
-						yield* issueTrackerClient
-							.update(issueId, { status: "closed" })
-							.pipe(
-								Effect.catchAll((e) => Effect.logWarning(`Failed to close bead ${issueId}: ${e}`)),
-							)
-
-						// Clean up images for the closed bead (temporary debugging images)
-						yield* imageAttachmentService
-							.cleanupImagesForIssue(issueId)
-							.pipe(Effect.catchAll(() => Effect.void))
-
-						// If this is an epic being merged to main (not to another epic branch),
-						// also close all its child tasks
-							if (issue.issue_type === "epic" && !parentEpic) {
-							const children = yield* issueTrackerClient
-								.getEpicChildren(issueId)
-								.pipe(Effect.catchAll(() => Effect.succeed([])))
-
-							for (const child of children) {
-								if (child.status !== "closed") {
-									yield* issueTrackerClient.update(child.id, { status: "closed" }).pipe(
-										Effect.tap(() =>
-											Effect.log(`Closed child task ${child.id} as part of epic merge`),
-										),
-										Effect.catchAll((e) =>
-											Effect.logWarning(`Failed to close child ${child.id}: ${e}`),
-										),
-									)
-									// Clean up images for each closed child
-									yield* imageAttachmentService
-										.cleanupImagesForIssue(child.id)
-										.pipe(Effect.catchAll(() => Effect.void))
-								}
-							}
-
-							if (children.length > 0) {
-								yield* Effect.log(`Closed ${children.length} child task(s) for epic ${issueId}`)
-							}
 						}
 
-						yield* withSyncLock(
-							issueTrackerClient
-								.sync(mergeDir)
-								.pipe(
-									Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
-								),
-						)
-					}
-
-					// 12. Push to origin (if enabled and online)
-					if (pushToOrigin) {
-						const pushStatus = yield* offlineService.isGitPushEnabled()
-						if (pushStatus.enabled) {
-							yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
+						// 5. No code conflicts - safe to merge
+						// If merging in main project, checkout base branch first
+						// If merging in epic's worktree, branch is already checked out
+						if (mergeDir === projectPath) {
+							yield* runGit(["checkout", baseBranch], projectPath).pipe(
 								Effect.mapError(
 									(e) =>
 										new GitError({
-											message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-											command: `git push origin ${baseBranch}`,
-											stderr: e.stderr,
+											message: `Failed to checkout ${baseBranch}: ${e.message}`,
+											command: `git checkout ${baseBranch}`,
 										}),
 								),
 							)
 						}
-						// Silently skip if offline/disabled - merge already succeeded locally
-					}
-				}).pipe(Effect.withSpan("pr.mergeToMain")),
-			),
+
+						// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
+						// This ensures .beads/issues.jsonl from base branch is preserved during merge
+						const mergeMessage = `Merge ${issueId}: ${issue.title}`
+						yield* runGit(
+							["merge", issueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+							mergeDir,
+						).pipe(
+							Effect.mapError((e) => {
+								// If merge still fails, report conflict or error
+								if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
+									return new MergeConflictError({
+										issueId,
+										branch: issueId,
+										message: `Merge conflict. Resolve manually: git checkout ${baseBranch} && git merge ${issueId}`,
+									})
+								}
+								return new GitError({
+									message: `Merge failed: ${e.message}`,
+									command: `git merge ${issueId} --no-ff`,
+									stderr: e.stderr,
+								})
+							}),
+						)
+
+						// 7. Sync beads AFTER merge to reconcile any bead changes from branch
+						// This imports beads from the branch that might have been excluded by -X ours
+						yield* withSyncLock(
+							Effect.gen(function* () {
+								// Import beads from the merged JSONL
+								yield* issueTrackerClient
+									.syncImportOnly(mergeDir)
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to import beads after merge: ${e}`),
+										),
+									)
+
+								// Recover any tombstoned issues
+								yield* issueTrackerClient
+									.recoverTombstones(mergeDir)
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
+										),
+									)
+
+								// Full sync to commit any bead changes
+								yield* issueTrackerClient
+									.sync(mergeDir)
+									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
+							}),
+						)
+
+						// 7.5. Run post-merge validation (configurable via .azedarach.json)
+						// Only runs if merge.validateCommands is configured
+						const mergeConfig = yield* getMergeConfig()
+						if (mergeConfig.validateCommands.length > 0) {
+							yield* Effect.gen(function* () {
+								const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
+									mergeConfig
+
+								/**
+								 * Run all validation commands and return first failure
+								 */
+								const runValidation = (): Effect.Effect<
+									{ success: boolean; output: string; failedCommand?: string },
+									never,
+									CommandExecutor.CommandExecutor
+								> =>
+									Effect.gen(function* () {
+										for (const cmd of validateCommands) {
+											yield* Effect.log(`Running: ${cmd}`)
+											const result = yield* runShellCommand(cmd, mergeDir)
+											if (!result.success) {
+												return { success: false, output: result.output, failedCommand: cmd }
+											}
+										}
+										return { success: true, output: "" }
+									})
+
+								// Initial validation
+								let lastResult = yield* runValidation()
+								if (lastResult.success) {
+									yield* Effect.log("Post-merge validation passed")
+									return
+								}
+
+								// Try fix attempts if fixCommand is configured
+								if (fixCommand) {
+									for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
+										yield* Effect.log(
+											`Validation failed, running fix (attempt ${attempt}/${maxFixAttempts}): ${fixCommand}`,
+										)
+										yield* runShellCommand(fixCommand, mergeDir)
+
+										lastResult = yield* runValidation()
+										if (lastResult.success) {
+											yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
+
+											// Commit the fixes
+											yield* runGit(["add", "-A"], mergeDir).pipe(
+												Effect.catchAll(() => Effect.void),
+											)
+											yield* runGit(
+												["commit", "-m", `fix: auto-fix after merging ${issueId}`],
+												mergeDir,
+											).pipe(Effect.catchAll(() => Effect.void))
+
+											return
+										}
+									}
+								}
+
+								// Still failing after all fix attempts
+								yield* Effect.log("Validation still failing after auto-fix attempts")
+
+								// Commit any partial fixes
+								yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
+								yield* runGit(
+									["commit", "-m", `wip: partial fix after merging ${issueId}`],
+									mergeDir,
+								).pipe(Effect.catchAll(() => Effect.void))
+
+								// Start Claude session if configured
+								if (startClaudeOnFailure) {
+									const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
+									const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
+
+									yield* sessionManager
+										.start({
+											issueId,
+											projectPath,
+											initialPrompt: fixPrompt,
+										})
+										.pipe(
+											Effect.catchAll((e) =>
+												Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
+											),
+										)
+								}
+
+								return yield* Effect.fail(
+									new TypeCheckError({
+										issueId,
+										message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
+										output: lastResult.output,
+									}),
+								)
+							})
+						}
+
+						// 8-10. Cleanup worktree and branch (only if not keeping worktree)
+						if (!keepWorktree) {
+							// 8. Merge Claude's local settings from worktree to main
+							// This preserves permission grants (allowedTools, trustedPaths) that Claude
+							// added during the session. Must happen BEFORE worktree deletion.
+							yield* worktreeManager.mergeClaudeLocalSettings({
+								worktreePath: worktree.path,
+								mainProjectPath: projectPath,
+							})
+
+							// 9. Remove worktree directory
+							yield* worktreeManager.remove({ issueId: issueId, projectPath })
+
+							// 10. Delete local branch
+							yield* runGit(["branch", "-d", issueId], projectPath).pipe(
+								Effect.catchAll(() => Effect.void),
+							)
+						}
+
+						// 11. Close bead issue (and children if epic merging to main)
+						if (closeIssue) {
+							yield* issueTrackerClient
+								.update(issueId, { status: "closed" })
+								.pipe(
+									Effect.catchAll((e) =>
+										Effect.logWarning(`Failed to close bead ${issueId}: ${e}`),
+									),
+								)
+
+							// Clean up images for the closed bead (temporary debugging images)
+							yield* imageAttachmentService
+								.cleanupImagesForIssue(issueId)
+								.pipe(Effect.catchAll(() => Effect.void))
+
+							// If this is an epic being merged to main (not to another epic branch),
+							// also close all its child tasks
+							if (issue.issue_type === "epic" && !parentEpic) {
+								const children = yield* issueTrackerClient
+									.getEpicChildren(issueId)
+									.pipe(Effect.catchAll(() => Effect.succeed([])))
+
+								for (const child of children) {
+									if (child.status !== "closed") {
+										yield* issueTrackerClient.update(child.id, { status: "closed" }).pipe(
+											Effect.tap(() =>
+												Effect.log(`Closed child task ${child.id} as part of epic merge`),
+											),
+											Effect.catchAll((e) =>
+												Effect.logWarning(`Failed to close child ${child.id}: ${e}`),
+											),
+										)
+										// Clean up images for each closed child
+										yield* imageAttachmentService
+											.cleanupImagesForIssue(child.id)
+											.pipe(Effect.catchAll(() => Effect.void))
+									}
+								}
+
+								if (children.length > 0) {
+									yield* Effect.log(`Closed ${children.length} child task(s) for epic ${issueId}`)
+								}
+							}
+
+							yield* withSyncLock(
+								issueTrackerClient
+									.sync(mergeDir)
+									.pipe(
+										Effect.catchAll((e) => Effect.logWarning(`Failed to sync closed status: ${e}`)),
+									),
+							)
+						}
+
+						// 12. Push to origin (if enabled and online)
+						if (pushToOrigin) {
+							const pushStatus = yield* offlineService.isGitPushEnabled()
+							if (pushStatus.enabled) {
+								yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
+									Effect.mapError(
+										(e) =>
+											new GitError({
+												message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
+												command: `git push origin ${baseBranch}`,
+												stderr: e.stderr,
+											}),
+									),
+								)
+							}
+							// Silently skip if offline/disabled - merge already succeeded locally
+						}
+					}).pipe(Effect.withSpan("pr.mergeToMain")),
+				),
 
 			checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {
@@ -1619,149 +1633,150 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					},
 					Effect.gen(function* () {
 						const gitConfig = yield* getGitConfig()
-					const { issueId, projectPath, baseBranch: explicitBaseBranch } = options
+						const { issueId, projectPath, baseBranch: explicitBaseBranch } = options
 
-					// Determine effective base branch (epic branch for children, main for epics/standalone)
-					const { baseBranch } = yield* getIssueBaseBranch(issueId, explicitBaseBranch)
+						// Determine effective base branch (epic branch for children, main for epics/standalone)
+						const { baseBranch } = yield* getIssueBaseBranch(issueId, explicitBaseBranch)
 
-					// Get worktree info
-					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
-					if (!worktree) {
-						return yield* Effect.fail(
-							new PRError({
-								message: `No worktree found for ${issueId}`,
-								issueId,
-							}),
-						)
-					}
-
-					// === Step 1: Update local base branch to match origin ===
-					if (gitConfig.fetchEnabled) {
-						// Fetch latest from origin
-						yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
-							Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
-						)
-
-						// Fast-forward local base branch to origin (done in main project, not worktree)
-						// This updates the local branch without checking it out
-						yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
-							),
-						)
-					}
-
-					// === Step 2: Check for conflicts using git merge-tree (in-memory, safe) ===
-					const mergeTreeResult = yield* Effect.gen(function* () {
-						const command = Command.make(
-							"git",
-							"merge-tree",
-							"--write-tree",
-							"--name-only",
-							baseBranch,
-							issueId,
-						).pipe(Command.workingDirectory(worktree.path))
-
-						const exitCode = yield* Command.exitCode(command).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
-							),
-						)
-
-						if (exitCode === 0) {
-							return { hasConflicts: false, conflictingFiles: [] as string[] }
+						// Get worktree info
+						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
+						if (!worktree) {
+							return yield* Effect.fail(
+								new PRError({
+									message: `No worktree found for ${issueId}`,
+									issueId,
+								}),
+							)
 						}
 
-						// Get conflicting files
-						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
-							worktree.path,
-						).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
-									Effect.map(() => ""),
+						// === Step 1: Update local base branch to match origin ===
+						if (gitConfig.fetchEnabled) {
+							// Fetch latest from origin
+							yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+								Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
+							)
+
+							// Fast-forward local base branch to origin (done in main project, not worktree)
+							// This updates the local branch without checking it out
+							yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`Failed to fast-forward local ${baseBranch}: ${e.message}`),
 								),
-							),
-						)
-
-						const lines = output.trim().split("\n")
-						const conflictingFiles = lines
-							.slice(1)
-							.filter((f) => f.length > 0)
-							// Filter OUT .beads/ files - we handle those separately
-							.filter((f) => !f.startsWith(".beads/"))
-
-						return {
-							hasConflicts: conflictingFiles.length > 0,
-							conflictingFiles,
+							)
 						}
-					})
 
-					// === Step 3: Handle conflicts or merge ===
-					if (mergeTreeResult.hasConflicts) {
-						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+						// === Step 2: Check for conflicts using git merge-tree (in-memory, safe) ===
+						const mergeTreeResult = yield* Effect.gen(function* () {
+							const command = Command.make(
+								"git",
+								"merge-tree",
+								"--write-tree",
+								"--name-only",
+								baseBranch,
+								issueId,
+							).pipe(Command.workingDirectory(worktree.path))
 
-						// Start merge in worktree (will result in conflict state)
+							const exitCode = yield* Command.exitCode(command).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+								),
+							)
+
+							if (exitCode === 0) {
+								return { hasConflicts: false, conflictingFiles: [] as string[] }
+							}
+
+							// Get conflicting files
+							const output = yield* runGit(
+								["merge-tree", "--write-tree", "--name-only", "--no-messages", baseBranch, issueId],
+								worktree.path,
+							).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+										Effect.map(() => ""),
+									),
+								),
+							)
+
+							const lines = output.trim().split("\n")
+							const conflictingFiles = lines
+								.slice(1)
+								.filter((f) => f.length > 0)
+								// Filter OUT .beads/ files - we handle those separately
+								.filter((f) => !f.startsWith(".beads/"))
+
+							return {
+								hasConflicts: conflictingFiles.length > 0,
+								conflictingFiles,
+							}
+						})
+
+						// === Step 3: Handle conflicts or merge ===
+						if (mergeTreeResult.hasConflicts) {
+							const fileList = mergeTreeResult.conflictingFiles.join(", ")
+
+							// Start merge in worktree (will result in conflict state)
+							yield* runGit(
+								["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
+								worktree.path,
+							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+
+							const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
+
+							const windowName = "merge"
+							const sessionName = getIssueSessionName(issueId)
+
+							const cliTool = yield* appConfig.getCliTool()
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const modelConfig = yield* appConfig.getModelConfig()
+							const toolDef = getToolDefinition(cliTool)
+							const toolModelConfig =
+								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+							const command = toolDef.buildCommand({
+								initialPrompt: resolvePrompt,
+								model: effectiveModel,
+								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							})
+
+							yield* worktreeSession.ensureWindow(sessionName, windowName, {
+								cwd: worktree.path,
+								command,
+							})
+
+							const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
+
+							return yield* Effect.fail(
+								new MergeConflictError({
+									issueId,
+									branch: issueId,
+									message,
+								}),
+							)
+						}
+
+						// No conflicts - safe to merge local base branch (fast-forward if possible)
 						yield* runGit(
 							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 							worktree.path,
-						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
-
-						const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
-
-						const windowName = "merge"
-						const sessionName = getIssueSessionName(issueId)
-
-						const cliTool = yield* appConfig.getCliTool()
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const modelConfig = yield* appConfig.getModelConfig()
-						const toolDef = getToolDefinition(cliTool)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
-						const effectiveModel = toolModelConfig.default ?? modelConfig.default
-
-						const command = toolDef.buildCommand({
-							initialPrompt: resolvePrompt,
-							model: effectiveModel,
-							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
-						})
-
-						yield* worktreeSession.ensureWindow(sessionName, windowName, {
-							cwd: worktree.path,
-							command,
-						})
-
-						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
-
-						return yield* Effect.fail(
-							new MergeConflictError({
-								issueId,
-								branch: issueId,
-								message,
-							}),
+						).pipe(
+							Effect.mapError(
+								(e) =>
+									new GitError({
+										message: `Merge failed: ${e.message}`,
+										command: `git merge ${baseBranch}`,
+										stderr: e.stderr,
+									}),
+							),
 						)
-					}
 
-					// No conflicts - safe to merge local base branch (fast-forward if possible)
-					yield* runGit(
-						["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
-						worktree.path,
-					).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Merge failed: ${e.message}`,
-									command: `git merge ${baseBranch}`,
-									stderr: e.stderr,
-								}),
-						),
-					)
-
-					// Sync beads after merge to pick up any bead changes from main
-					yield* withSyncLock(
-						issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
-					)
-				}).pipe(Effect.withSpan("pr.updateFromBase")),
-			),
+						// Sync beads after merge to pick up any bead changes from main
+						yield* withSyncLock(
+							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+						)
+					}).pipe(Effect.withSpan("pr.updateFromBase")),
+				),
 
 			getPRComments: (options: GetPRCommentsOptions) =>
 				Effect.gen(function* () {
@@ -2079,225 +2094,235 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					Effect.gen(function* () {
 						const { sourceIssueId, targetIssueId, projectPath } = options
 
-					// Validate source and target are different
-					if (sourceIssueId === targetIssueId) {
-						return yield* Effect.fail(
-							new PRError({
-								message: "Cannot merge bead into itself",
-								issueId: sourceIssueId,
-							}),
+						// Validate source and target are different
+						if (sourceIssueId === targetIssueId) {
+							return yield* Effect.fail(
+								new PRError({
+									message: "Cannot merge bead into itself",
+									issueId: sourceIssueId,
+								}),
+							)
+						}
+
+						// Get source bead info
+						const sourceIssue = yield* issueTrackerClient.show(sourceIssueId)
+
+						// Validate target bead exists (will throw NotFoundError if not)
+						yield* issueTrackerClient.show(targetIssueId)
+
+						// Check if source has a worktree/branch
+						const sourceWorktree = yield* worktreeManager.get({
+							issueId: sourceIssueId,
+							projectPath,
+						})
+						if (!sourceWorktree) {
+							return yield* Effect.fail(
+								new PRError({
+									message: `No worktree found for source bead ${sourceIssueId}`,
+									issueId: sourceIssueId,
+								}),
+							)
+						}
+
+						// Commit any uncommitted changes in source worktree
+						yield* runGit(["add", "-A"], sourceWorktree.path).pipe(
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to stage changes in source: ${e.message}`),
+							),
 						)
-					}
+						yield* runGit(
+							["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
+							sourceWorktree.path,
+						).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
 
-					// Get source bead info
-					const sourceIssue = yield* issueTrackerClient.show(sourceIssueId)
-
-					// Validate target bead exists (will throw NotFoundError if not)
-					yield* issueTrackerClient.show(targetIssueId)
-
-					// Check if source has a worktree/branch
-					const sourceWorktree = yield* worktreeManager.get({
-						issueId: sourceIssueId,
-						projectPath,
-					})
-					if (!sourceWorktree) {
-						return yield* Effect.fail(
-							new PRError({
-								message: `No worktree found for source bead ${sourceIssueId}`,
-								issueId: sourceIssueId,
-							}),
-						)
-					}
-
-					// Commit any uncommitted changes in source worktree
-					yield* runGit(["add", "-A"], sourceWorktree.path).pipe(
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Failed to stage changes in source: ${e.message}`),
-						),
-					)
-					yield* runGit(
-						["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
-						sourceWorktree.path,
-					).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
-
-					// Ensure target has a worktree (create if needed)
-					let targetWorktree = yield* worktreeManager.get({
-						issueId: targetIssueId,
-						projectPath,
-					})
-					if (!targetWorktree) {
-						yield* Effect.log(`Creating worktree for target bead ${targetIssueId}`)
-						targetWorktree = yield* worktreeManager.create({
+						// Ensure target has a worktree (create if needed)
+						let targetWorktree = yield* worktreeManager.get({
 							issueId: targetIssueId,
 							projectPath,
 						})
-					}
-
-					// Fetch source branch into target worktree
-					// We use the project path since that's where the git repo is
-					yield* runGit(["fetch", ".", sourceIssueId], targetWorktree.path).pipe(
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Failed to fetch source branch: ${e.message}`).pipe(
-								Effect.map(() => undefined),
-							),
-						),
-					)
-
-					// Check for conflicts using git merge-tree (in-memory, safe)
-					const mergeTreeResult = yield* Effect.gen(function* () {
-						const command = Command.make(
-							"git",
-							"merge-tree",
-							"--write-tree",
-							"--name-only",
-							"HEAD",
-							sourceIssueId,
-						).pipe(Command.workingDirectory(targetWorktree.path))
-
-						const exitCode = yield* Command.exitCode(command).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
-							),
-						)
-
-						if (exitCode === 0) {
-							return { hasConflicts: false, conflictingFiles: [] as string[] }
+						if (!targetWorktree) {
+							yield* Effect.log(`Creating worktree for target bead ${targetIssueId}`)
+							targetWorktree = yield* worktreeManager.create({
+								issueId: targetIssueId,
+								projectPath,
+							})
 						}
 
-						// Get conflicting files
-						const output = yield* runGit(
-							["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", sourceIssueId],
-							targetWorktree.path,
-						).pipe(
+						// Fetch source branch into target worktree
+						// We use the project path since that's where the git repo is
+						yield* runGit(["fetch", ".", sourceIssueId], targetWorktree.path).pipe(
 							Effect.catchAll((e) =>
-								Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
-									Effect.map(() => ""),
+								Effect.logWarning(`Failed to fetch source branch: ${e.message}`).pipe(
+									Effect.map(() => undefined),
 								),
 							),
 						)
 
-						const lines = output.trim().split("\n")
-						const conflictingFiles = lines
-							.slice(1)
-							.filter((f) => f.length > 0)
-							// Filter OUT .beads/ files - we handle those separately
-							.filter((f) => !f.startsWith(".beads/"))
+						// Check for conflicts using git merge-tree (in-memory, safe)
+						const mergeTreeResult = yield* Effect.gen(function* () {
+							const command = Command.make(
+								"git",
+								"merge-tree",
+								"--write-tree",
+								"--name-only",
+								"HEAD",
+								sourceIssueId,
+							).pipe(Command.workingDirectory(targetWorktree.path))
 
-						return {
-							hasConflicts: conflictingFiles.length > 0,
-							conflictingFiles,
-						}
-					})
+							const exitCode = yield* Command.exitCode(command).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`merge-tree command failed: ${e}`).pipe(Effect.map(() => 2)),
+								),
+							)
 
-					// If there are conflicts, ask Claude to resolve
-					if (mergeTreeResult.hasConflicts) {
-						const fileList = mergeTreeResult.conflictingFiles.join(", ")
+							if (exitCode === 0) {
+								return { hasConflicts: false, conflictingFiles: [] as string[] }
+							}
 
-						// Start merge in target worktree so Claude can resolve
-						yield* runGit(
-							["merge", sourceIssueId, "-m", `Merge ${sourceIssueId} into ${targetIssueId}`],
-							targetWorktree.path,
-						).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+							// Get conflicting files
+							const output = yield* runGit(
+								[
+									"merge-tree",
+									"--write-tree",
+									"--name-only",
+									"--no-messages",
+									"HEAD",
+									sourceIssueId,
+								],
+								targetWorktree.path,
+							).pipe(
+								Effect.catchAll((e) =>
+									Effect.logWarning(`Failed to get conflicting files: ${e.message}`).pipe(
+										Effect.map(() => ""),
+									),
+								),
+							)
 
-						const resolvePrompt = `There are merge conflicts when merging ${sourceIssueId} into ${targetIssueId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
+							const lines = output.trim().split("\n")
+							const conflictingFiles = lines
+								.slice(1)
+								.filter((f) => f.length > 0)
+								// Filter OUT .beads/ files - we handle those separately
+								.filter((f) => !f.startsWith(".beads/"))
 
-						// Start Claude session in a new "merge" window within the target's session
-						const windowName = "merge"
-						const sessionName = getIssueSessionName(targetIssueId)
-
-						const cliTool = yield* appConfig.getCliTool()
-						const sessionConfig = yield* appConfig.getSessionConfig()
-						const modelConfig = yield* appConfig.getModelConfig()
-						const toolDef = getToolDefinition(cliTool)
-						const toolModelConfig = cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
-						const effectiveModel = toolModelConfig.default ?? modelConfig.default
-
-						const command = toolDef.buildCommand({
-							initialPrompt: resolvePrompt,
-							model: effectiveModel,
-							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							return {
+								hasConflicts: conflictingFiles.length > 0,
+								conflictingFiles,
+							}
 						})
 
-						yield* worktreeSession.ensureWindow(sessionName, windowName, {
-							cwd: targetWorktree.path,
-							command,
-						})
+						// If there are conflicts, ask Claude to resolve
+						if (mergeTreeResult.hasConflicts) {
+							const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
-						const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetIssueId} to resolve. Retry merge after resolution.`
+							// Start merge in target worktree so Claude can resolve
+							yield* runGit(
+								["merge", sourceIssueId, "-m", `Merge ${sourceIssueId} into ${targetIssueId}`],
+								targetWorktree.path,
+							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
 
-						return yield* Effect.fail(
-							new MergeConflictError({
-								issueId: sourceIssueId,
-								branch: sourceIssueId,
-								message,
-							}),
-						)
-					}
+							const resolvePrompt = `There are merge conflicts when merging ${sourceIssueId} into ${targetIssueId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-					// No conflicts - do the merge
-					const mergeMessage = `Merge ${sourceIssueId}: ${sourceIssue.title}`
-					yield* runGit(
-						["merge", sourceIssueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
-						targetWorktree.path,
-					).pipe(
-						Effect.mapError((e) => {
-							if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
-								return new MergeConflictError({
+							// Start Claude session in a new "merge" window within the target's session
+							const windowName = "merge"
+							const sessionName = getIssueSessionName(targetIssueId)
+
+							const cliTool = yield* appConfig.getCliTool()
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const modelConfig = yield* appConfig.getModelConfig()
+							const toolDef = getToolDefinition(cliTool)
+							const toolModelConfig =
+								cliTool === "claude" ? modelConfig.claude : modelConfig.opencode
+							const effectiveModel = toolModelConfig.default ?? modelConfig.default
+
+							const command = toolDef.buildCommand({
+								initialPrompt: resolvePrompt,
+								model: effectiveModel,
+								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							})
+
+							yield* worktreeSession.ensureWindow(sessionName, windowName, {
+								cwd: targetWorktree.path,
+								command,
+							})
+
+							const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetIssueId} to resolve. Retry merge after resolution.`
+
+							return yield* Effect.fail(
+								new MergeConflictError({
 									issueId: sourceIssueId,
 									branch: sourceIssueId,
-									message: `Merge conflict. Resolve manually in ${targetIssueId} worktree`,
+									message,
+								}),
+							)
+						}
+
+						// No conflicts - do the merge
+						const mergeMessage = `Merge ${sourceIssueId}: ${sourceIssue.title}`
+						yield* runGit(
+							["merge", sourceIssueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
+							targetWorktree.path,
+						).pipe(
+							Effect.mapError((e) => {
+								if (e.stderr?.includes("CONFLICT") || e.message.includes("CONFLICT")) {
+									return new MergeConflictError({
+										issueId: sourceIssueId,
+										branch: sourceIssueId,
+										message: `Merge conflict. Resolve manually in ${targetIssueId} worktree`,
+									})
+								}
+								return new GitError({
+									message: `Merge failed: ${e.message}`,
+									command: `git merge ${sourceIssueId} --no-ff`,
+									stderr: e.stderr,
 								})
-							}
-							return new GitError({
-								message: `Merge failed: ${e.message}`,
-								command: `git merge ${sourceIssueId} --no-ff`,
-								stderr: e.stderr,
-							})
-						}),
-					)
+							}),
+						)
 
-					// Sync beads after merge
-					yield* withSyncLock(
-						Effect.gen(function* () {
-							yield* issueTrackerClient
-								.syncImportOnly(targetWorktree.path)
-								.pipe(
-									Effect.catchAll((e) =>
-										Effect.logWarning(`Failed to import beads after merge: ${e}`),
-									),
-								)
+						// Sync beads after merge
+						yield* withSyncLock(
+							Effect.gen(function* () {
+								yield* issueTrackerClient
+									.syncImportOnly(targetWorktree.path)
+									.pipe(
+										Effect.catchAll((e) =>
+											Effect.logWarning(`Failed to import beads after merge: ${e}`),
+										),
+									)
 
-							yield* issueTrackerClient
-								.sync(targetWorktree.path)
-								.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
-						}),
-					)
+								yield* issueTrackerClient
+									.sync(targetWorktree.path)
+									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
+							}),
+						)
 
-					// Close source bead
-					yield* issueTrackerClient.update(sourceIssueId, { status: "closed" }).pipe(
-						Effect.tap(() =>
-							Effect.log(`Closed source bead ${sourceIssueId} after merging into ${targetIssueId}`),
-						),
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Failed to close source bead ${sourceIssueId}: ${e}`),
-						),
-					)
+						// Close source bead
+						yield* issueTrackerClient.update(sourceIssueId, { status: "closed" }).pipe(
+							Effect.tap(() =>
+								Effect.log(
+									`Closed source bead ${sourceIssueId} after merging into ${targetIssueId}`,
+								),
+							),
+							Effect.catchAll((e) =>
+								Effect.logWarning(`Failed to close source bead ${sourceIssueId}: ${e}`),
+							),
+						)
 
-					// Clean up images for the closed source bead
-					yield* imageAttachmentService
-						.cleanupImagesForIssue(sourceIssueId)
-						.pipe(Effect.catchAll(() => Effect.void))
+						// Clean up images for the closed source bead
+						yield* imageAttachmentService
+							.cleanupImagesForIssue(sourceIssueId)
+							.pipe(Effect.catchAll(() => Effect.void))
 
-					// Sync the closed status
-					yield* withSyncLock(
-						issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
-					)
+						// Sync the closed status
+						yield* withSyncLock(
+							issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+						)
 
-					yield* Effect.log(
-						`Successfully merged ${sourceIssueId} into ${targetIssueId}. Source bead closed.`,
-					)
-				}).pipe(Effect.withSpan("pr.mergeIssueIntoIssue")),
-			),
+						yield* Effect.log(
+							`Successfully merged ${sourceIssueId} into ${targetIssueId}. Source bead closed.`,
+						)
+					}).pipe(Effect.withSpan("pr.mergeIssueIntoIssue")),
+				),
 
 			getTargetBranch: (issueId: string) =>
 				Effect.gen(function* () {

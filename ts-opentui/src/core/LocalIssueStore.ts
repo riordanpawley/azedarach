@@ -1,9 +1,10 @@
-import { FileSystem, Path } from "@effect/platform"
 import { Reactivity } from "@effect/experimental"
+import { FileSystem, Path } from "@effect/platform"
 import type * as SqlClient from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Data, Effect, Schema } from "effect"
+import { ProjectService } from "../services/ProjectService.js"
 import type {
 	DependencyRef,
 	DependencyType,
@@ -14,7 +15,6 @@ import type {
 	IssueStatus,
 	IssueType,
 } from "./BeadsClient.js"
-import { ProjectService } from "../services/ProjectService.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
 
@@ -67,6 +67,17 @@ interface ExternalRefRow {
 
 interface MetaRow {
 	readonly value: string
+}
+
+interface IssueAttachmentRow {
+	readonly issue_id: string
+	readonly attachment_id: string
+	readonly filename: string
+	readonly original_path: string
+	readonly mime_type: string
+	readonly size_bytes: number
+	readonly created_at: string
+	readonly content_blob: Uint8Array | ArrayBuffer
 }
 
 interface TableInfoRow {
@@ -129,6 +140,19 @@ export interface ExternalIssueSnapshot {
 	readonly parentLocalId?: string
 }
 
+export interface IssueAttachmentMetadata {
+	readonly id: string
+	readonly filename: string
+	readonly originalPath: string
+	readonly mimeType: string
+	readonly size: number
+	readonly createdAt: string
+}
+
+export interface IssueAttachmentRecord extends IssueAttachmentMetadata {
+	readonly content: Uint8Array
+}
+
 export class LocalIssueStoreError extends Data.TaggedError("LocalIssueStoreError")<{
 	readonly message: string
 	readonly cause?: unknown
@@ -185,6 +209,17 @@ const schemaStatements: readonly string[] = [
 		tombstoned_at TEXT,
 		PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 	)`,
+	`CREATE TABLE IF NOT EXISTS issue_attachments (
+		issue_id TEXT NOT NULL,
+		attachment_id TEXT NOT NULL,
+		filename TEXT NOT NULL,
+		original_path TEXT NOT NULL,
+		mime_type TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL,
+		created_at TEXT NOT NULL,
+		content_blob BLOB NOT NULL,
+		PRIMARY KEY (issue_id, attachment_id)
+	)`,
 	`CREATE TABLE IF NOT EXISTS issue_external_refs (
 		issue_id TEXT NOT NULL,
 		target TEXT NOT NULL,
@@ -215,6 +250,7 @@ const schemaStatements: readonly string[] = [
 	`CREATE INDEX IF NOT EXISTS idx_sync_queue_pending ON sync_queue(target, status, next_attempt_at, id)`,
 	`CREATE INDEX IF NOT EXISTS idx_sync_queue_claimable ON sync_queue(target, status, next_attempt_at, lease_expires_at, id)`,
 	`CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON issue_dependencies(depends_on_id, dependency_type, tombstoned_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_issue_attachments_issue ON issue_attachments(issue_id, created_at, attachment_id)`,
 ]
 
 const nowIso = (): string => new Date().toISOString()
@@ -294,6 +330,23 @@ const decodeLabels = (value: string | null): readonly string[] => {
 
 const encodeLabels = (labels: readonly string[] | undefined): string =>
 	Schema.encodeSync(LabelsJsonSchema)(labels === undefined ? [] : [...labels])
+
+const toUint8Array = (value: Uint8Array | ArrayBuffer): Uint8Array =>
+	value instanceof Uint8Array ? value : new Uint8Array(value)
+
+const rowToIssueAttachmentMetadata = (row: IssueAttachmentRow): IssueAttachmentMetadata => ({
+	id: row.attachment_id,
+	filename: row.filename,
+	originalPath: row.original_path,
+	mimeType: row.mime_type,
+	size: row.size_bytes,
+	createdAt: row.created_at,
+})
+
+const rowToIssueAttachmentRecord = (row: IssueAttachmentRow): IssueAttachmentRecord => ({
+	...rowToIssueAttachmentMetadata(row),
+	content: toUint8Array(row.content_blob),
+})
 
 const buildDependencyView = (
 	issueId: string,
@@ -383,9 +436,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const fs = yield* FileSystem.FileSystem
 		const projectService = yield* ProjectService
 
-		const resolveStorageRoot = (
-			cwd?: string,
-		): Effect.Effect<LocalIssueStorageResolution> =>
+		const resolveStorageRoot = (cwd?: string): Effect.Effect<LocalIssueStorageResolution> =>
 			projectService.getCurrentPath().pipe(
 				Effect.map((projectPath) => {
 					const fallbackCwd = process.cwd()
@@ -404,9 +455,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}),
 			)
 
-		const ensureSyncQueueColumns = (
-			sql: SqlClient.SqlClient,
-		): Effect.Effect<void, SqlError> =>
+		const ensureSyncQueueColumns = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
 			Effect.gen(function* () {
 				const columns = yield* sql<TableInfoRow>`PRAGMA table_info(sync_queue)`
 				const columnNames = new Set(columns.map((column) => column.name))
@@ -510,9 +559,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			return issueRows.map((row) => rowToIssue(row, dependencyRows, issueById))
 		}
 
-		const loadAllIssues = (
-			sql: SqlClient.SqlClient,
-		): Effect.Effect<readonly Issue[], SqlError> =>
+		const loadAllIssues = (sql: SqlClient.SqlClient): Effect.Effect<readonly Issue[], SqlError> =>
 			Effect.all([listIssueRows(sql), listDependencyRows(sql)]).pipe(
 				Effect.map(([rows, links]) => buildIssues(rows, links)),
 			)
@@ -539,7 +586,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		): Effect.Effect<void, SqlError> =>
 			Effect.gen(function* () {
 				const now = nowIso()
-				const normalizedPayload = payloadJson ?? buildDefaultSyncPayloadJson(issueId, operation, target)
+				const normalizedPayload =
+					payloadJson ?? buildDefaultSyncPayloadJson(issueId, operation, target)
 				yield* sql`
 					INSERT INTO sync_queue (
 						issue_id,
@@ -598,7 +646,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							const filtered = issues.filter((issue) => {
 								if (!includeClosed && issue.status === "closed") return false
 								if (filters?.status && issue.status !== filters.status) return false
-								if (filters?.priority !== undefined && issue.priority !== filters.priority) return false
+								if (filters?.priority !== undefined && issue.priority !== filters.priority)
+									return false
 								if (filters?.type && issue.issue_type !== filters.type) return false
 								return true
 							})
@@ -769,7 +818,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						const nextStatus = fields.status === undefined ? existing.status : fields.status
 						const nextClosedAt =
 							normalizeIssueStatus(nextStatus) === "closed"
-								? existing.closed_at ?? now
+								? (existing.closed_at ?? now)
 								: fields.status === undefined
 									? existing.closed_at
 									: null
@@ -876,6 +925,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						yield* sql.withTransaction(
 							Effect.gen(function* () {
 								yield* sql`DELETE FROM issue_dependencies WHERE issue_id = ${id} OR depends_on_id = ${id}`
+								yield* sql`DELETE FROM issue_attachments WHERE issue_id = ${id}`
 								yield* sql`DELETE FROM issues WHERE id = ${id}`
 								if (syncTarget !== undefined) {
 									yield* enqueueSync(sql, id, "delete", syncTarget)
@@ -890,21 +940,23 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				withSql(cwd, (sql) =>
 					loadAllIssues(sql).pipe(
 						Effect.map((issues) =>
-							issues.filter(
-								(issue) => issue.status === "open" || issue.status === "in_progress",
-							),
+							issues.filter((issue) => issue.status === "open" || issue.status === "in_progress"),
 						),
 					),
 				),
 
-			search: (query: string, cwd?: string): Effect.Effect<readonly Issue[], LocalIssueStoreError> =>
+			search: (
+				query: string,
+				cwd?: string,
+			): Effect.Effect<readonly Issue[], LocalIssueStoreError> =>
 				withSql(cwd, (sql) =>
 					loadAllIssues(sql).pipe(
 						Effect.map((issues) => {
 							const needle = query.trim().toLowerCase()
 							if (needle.length === 0) return issues
 							return issues.filter((issue) => {
-								const haystack = `${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
+								const haystack =
+									`${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
 								return haystack.includes(needle)
 							})
 						}),
@@ -977,9 +1029,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								dependency_type: "parent-child",
 								issue_type: issue.issue_type,
 							}
-							return [
-								dependency,
-							]
+							return [dependency]
 						})
 					}),
 				),
@@ -1019,6 +1069,149 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						FROM issues
 						WHERE deleted_at IS NULL
 					`.pipe(Effect.map((rows) => rows[0]?.count ?? 0)),
+				),
+
+			listIssueAttachments: (
+				issueId: string,
+				cwd?: string,
+			): Effect.Effect<readonly IssueAttachmentMetadata[], LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					sql<IssueAttachmentRow>`
+						SELECT
+							issue_id,
+							attachment_id,
+							filename,
+							original_path,
+							mime_type,
+							size_bytes,
+							created_at,
+							content_blob
+						FROM issue_attachments
+						WHERE issue_id = ${issueId}
+						ORDER BY created_at ASC, attachment_id ASC
+					`.pipe(Effect.map((rows) => rows.map(rowToIssueAttachmentMetadata))),
+				),
+
+			getIssueAttachment: (
+				issueId: string,
+				attachmentId: string,
+				cwd?: string,
+			): Effect.Effect<IssueAttachmentRecord | undefined, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					sql<IssueAttachmentRow>`
+						SELECT
+							issue_id,
+							attachment_id,
+							filename,
+							original_path,
+							mime_type,
+							size_bytes,
+							created_at,
+							content_blob
+						FROM issue_attachments
+						WHERE issue_id = ${issueId} AND attachment_id = ${attachmentId}
+						LIMIT 1
+					`.pipe(
+						Effect.map((rows) => {
+							const row = rows[0]
+							return row === undefined ? undefined : rowToIssueAttachmentRecord(row)
+						}),
+					),
+				),
+
+			upsertIssueAttachment: (
+				params: {
+					issueId: string
+					attachmentId: string
+					filename: string
+					originalPath: string
+					mimeType: string
+					size: number
+					createdAt: string
+					content: Uint8Array
+				},
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					sql`
+						INSERT INTO issue_attachments (
+							issue_id,
+							attachment_id,
+							filename,
+							original_path,
+							mime_type,
+							size_bytes,
+							created_at,
+							content_blob
+						)
+						VALUES (
+							${params.issueId},
+							${params.attachmentId},
+							${params.filename},
+							${params.originalPath},
+							${params.mimeType},
+							${params.size},
+							${params.createdAt},
+							${params.content}
+						)
+						ON CONFLICT(issue_id, attachment_id)
+						DO UPDATE SET
+							filename = ${params.filename},
+							original_path = ${params.originalPath},
+							mime_type = ${params.mimeType},
+							size_bytes = ${params.size},
+							created_at = ${params.createdAt},
+							content_blob = ${params.content}
+					`.pipe(Effect.asVoid),
+				),
+
+			removeIssueAttachment: (
+				issueId: string,
+				attachmentId: string,
+				cwd?: string,
+			): Effect.Effect<boolean, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const existing = yield* sql<{ readonly count: number }>`
+								SELECT COUNT(*) as count
+								FROM issue_attachments
+								WHERE issue_id = ${issueId} AND attachment_id = ${attachmentId}
+							`
+							if ((existing[0]?.count ?? 0) === 0) {
+								return false
+							}
+							yield* sql`
+								DELETE FROM issue_attachments
+								WHERE issue_id = ${issueId} AND attachment_id = ${attachmentId}
+							`
+							return true
+						}),
+					),
+				),
+
+			clearIssueAttachments: (
+				issueId: string,
+				cwd?: string,
+			): Effect.Effect<number, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					sql.withTransaction(
+						Effect.gen(function* () {
+							const existing = yield* sql<{ readonly count: number }>`
+								SELECT COUNT(*) as count
+								FROM issue_attachments
+								WHERE issue_id = ${issueId}
+							`
+							const count = existing[0]?.count ?? 0
+							if (count > 0) {
+								yield* sql`
+									DELETE FROM issue_attachments
+									WHERE issue_id = ${issueId}
+								`
+							}
+							return count
+						}),
+					),
 				),
 
 			listPendingSync: (
@@ -1133,27 +1326,29 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				params.claims.length === 0
 					? Effect.void
 					: withSql(cwd, (sql) =>
-							sql.withTransaction(
-								Effect.gen(function* () {
-									for (const claim of params.claims) {
-										yield* sql`
+							sql
+								.withTransaction(
+									Effect.gen(function* () {
+										for (const claim of params.claims) {
+											yield* sql`
 											DELETE FROM sync_queue
 											WHERE
 												id = ${claim.id}
 												AND status = ${"processing"}
 												AND attempt_token = ${claim.attemptToken}
 										`
-									}
+										}
 
-									yield* sql`
+										yield* sql`
 										DELETE FROM sync_queue
 										WHERE
 											issue_id = ${params.issueId}
 											AND target = ${params.target}
 											AND id <= ${params.maxQueueId}
 									`
-								}),
-							).pipe(Effect.asVoid),
+									}),
+								)
+								.pipe(Effect.asVoid),
 						),
 
 			markSyncRetriable: (
@@ -1163,16 +1358,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				params.claims.length === 0
 					? Effect.void
 					: withSql(cwd, (sql) =>
-							sql.withTransaction(
-								Effect.gen(function* () {
-									const nextAttemptAt = new Date(
-										Date.now() + params.delaySeconds * 1000,
-									).toISOString()
-									const now = nowIso()
-									const nextAttempts = Math.max(0, params.nextAttempts)
+							sql
+								.withTransaction(
+									Effect.gen(function* () {
+										const nextAttemptAt = new Date(
+											Date.now() + params.delaySeconds * 1000,
+										).toISOString()
+										const now = nowIso()
+										const nextAttempts = Math.max(0, params.nextAttempts)
 
-									for (const claim of params.claims) {
-										yield* sql`
+										for (const claim of params.claims) {
+											yield* sql`
 											UPDATE sync_queue
 											SET
 												attempts = CASE
@@ -1191,9 +1387,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												AND status = ${"processing"}
 												AND attempt_token = ${claim.attemptToken}
 										`
-									}
-								}),
-							).pipe(Effect.asVoid),
+										}
+									}),
+								)
+								.pipe(Effect.asVoid),
 						),
 
 			markSyncTerminalFailure: (
@@ -1203,12 +1400,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				params.claims.length === 0
 					? Effect.void
 					: withSql(cwd, (sql) =>
-							sql.withTransaction(
-								Effect.gen(function* () {
-									const nextAttempts = Math.max(0, params.nextAttempts)
-									const now = nowIso()
-									for (const claim of params.claims) {
-										yield* sql`
+							sql
+								.withTransaction(
+									Effect.gen(function* () {
+										const nextAttempts = Math.max(0, params.nextAttempts)
+										const now = nowIso()
+										for (const claim of params.claims) {
+											yield* sql`
 											UPDATE sync_queue
 											SET
 												attempts = CASE
@@ -1227,9 +1425,10 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												AND status = ${"processing"}
 												AND attempt_token = ${claim.attemptToken}
 										`
-									}
-								}),
-							).pipe(Effect.asVoid),
+										}
+									}),
+								)
+								.pipe(Effect.asVoid),
 						),
 
 			getIssueForSync: (
