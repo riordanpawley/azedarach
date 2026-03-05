@@ -214,7 +214,9 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
 					Effect.tap((config) =>
-						Effect.log(`[DEBUG] Loaded .azedarach.json: cliTool=${config.cliTool}`),
+						Effect.log(
+							`[DEBUG] Loaded .azedarach.json path=${targetConfigPath} cliTool=${config.cliTool}`,
+						),
 					),
 					Effect.mapError(
 						(e) =>
@@ -399,7 +401,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 				// Try .azedarach.json first
 				const jsonConfig = yield* loadJsonConfig(projectPath).pipe(
-					Effect.catchAll(() => Effect.succeed(null)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`[DEBUG] Failed to load .azedarach.json for projectPath=${projectPath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
+						).pipe(Effect.as(null)),
+					),
 				)
 
 				if (jsonConfig) {
@@ -412,7 +418,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 				// Try package.json "azedarach" key
 				const pkgConfig = yield* loadPackageJsonConfig(projectPath).pipe(
-					Effect.catchAll(() => Effect.succeed(null)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`[DEBUG] Failed to load package.json azedarach config for projectPath=${projectPath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
+						).pipe(Effect.as(null)),
+					),
 				)
 
 				if (pkgConfig) {

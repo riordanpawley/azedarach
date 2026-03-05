@@ -281,17 +281,25 @@ const getEffectiveProjectPath = (cwd: string | undefined): string => {
 	return trimmed.length > 0 ? trimmed : process.cwd()
 }
 
+const formatApiKeyFingerprint = (apiKey: string | undefined): string => {
+	if (apiKey === undefined) {
+		return "missing"
+	}
+	const digest = createHash("sha256").update(apiKey).digest("hex").slice(0, 10)
+	return `set(len=${apiKey.length},sha256=${digest})`
+}
+
 export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueSyncService", {
 	dependencies: [AppConfig.Default, LocalIssueStore.Default, LinearSdk.Default],
-		effect: Effect.gen(function* () {
-			const appConfig = yield* AppConfig
-			const localStore = yield* LocalIssueStore
-			const linearSdk = yield* LinearSdk
-			const fs = yield* FileSystem.FileSystem
-			const pathService = yield* Path.Path
-			const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
-			const warnedMissingApiKeyRef = yield* Ref.make(false)
-			const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
+	effect: Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const localStore = yield* LocalIssueStore
+		const linearSdk = yield* LinearSdk
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
+		const warnedMissingApiKeyRef = yield* Ref.make(false)
+		const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
 
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
@@ -303,149 +311,177 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			effect: Effect.Effect<A, LocalIssueStoreError>,
 		): Effect.Effect<A, IssueSyncError> => effect.pipe(Effect.mapError(mapLocalStoreError))
 
-			const resolveDotEnvProvider = (
-				path: string,
-			): Effect.Effect<Option.Option<ConfigProvider.ConfigProvider>, never> =>
-				Effect.gen(function* () {
-					const exists = yield* fs
-						.exists(path)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
-					if (!exists) {
-						return Option.none()
-					}
+		const resolveDotEnvProvider = (
+			path: string,
+		): Effect.Effect<Option.Option<ConfigProvider.ConfigProvider>, never> =>
+			Effect.gen(function* () {
+				const exists = yield* fs.exists(path).pipe(Effect.catchAll(() => Effect.succeed(false)))
+				if (!exists) {
+					return Option.none()
+				}
 
-					return yield* PlatformConfigProvider.fromDotEnv(path).pipe(
-						Effect.provideService(FileSystem.FileSystem, fs),
-						Effect.map(Option.some),
-						Effect.catchAll((error) =>
-							Effect.logWarning(
-								`IssueSyncService: failed to load dotenv provider path=${path}; continuing with env fallback. cause=${String(error)}`,
-							).pipe(Effect.as(Option.none<ConfigProvider.ConfigProvider>())),
-						),
-					)
+				return yield* PlatformConfigProvider.fromDotEnv(path).pipe(
+					Effect.provideService(FileSystem.FileSystem, fs),
+					Effect.map(Option.some),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`IssueSyncService: failed to load dotenv provider path=${path}; continuing with env fallback. cause=${String(error)}`,
+						).pipe(Effect.as(Option.none<ConfigProvider.ConfigProvider>())),
+					),
+				)
+			})
+
+		const resolveProjectConfigProviders = (
+			projectPath: string,
+		): Effect.Effect<
+			{
+				readonly provider: ConfigProvider.ConfigProvider
+				readonly dotEnvProviderOption: Option.Option<ConfigProvider.ConfigProvider>
+				readonly dotEnvLocalProviderOption: Option.Option<ConfigProvider.ConfigProvider>
+				readonly envProvider: ConfigProvider.ConfigProvider
+			},
+			never
+		> =>
+			Effect.gen(function* () {
+				const dotEnvPath = pathService.join(projectPath, ".env")
+				const dotEnvLocalPath = pathService.join(projectPath, ".env.local")
+				const envProvider = ConfigProvider.fromEnv()
+				const dotEnvProviderOption = yield* resolveDotEnvProvider(dotEnvPath)
+				const dotEnvLocalProviderOption = yield* resolveDotEnvProvider(dotEnvLocalPath)
+
+				const dotenvChain = Option.match(dotEnvProviderOption, {
+					onNone: () => dotEnvLocalProviderOption,
+					onSome: (dotEnvProvider) =>
+						Option.match(dotEnvLocalProviderOption, {
+							onNone: () => Option.some(dotEnvProvider),
+							onSome: (dotEnvLocalProvider) =>
+								Option.some(ConfigProvider.orElse(dotEnvLocalProvider, () => dotEnvProvider)),
+						}),
 				})
 
-			const resolveProjectConfigProvider = (
-				projectPath: string,
-			): Effect.Effect<ConfigProvider.ConfigProvider, never> =>
-				Effect.gen(function* () {
-					const dotEnvPath = pathService.join(projectPath, ".env")
-					const dotEnvLocalPath = pathService.join(projectPath, ".env.local")
-					const envProvider = ConfigProvider.fromEnv()
-					const dotEnvProviderOption = yield* resolveDotEnvProvider(dotEnvPath)
-					const dotEnvLocalProviderOption = yield* resolveDotEnvProvider(dotEnvLocalPath)
-
-					const dotenvChain = Option.match(dotEnvProviderOption, {
-						onNone: () => dotEnvLocalProviderOption,
-						onSome: (dotEnvProvider) =>
-							Option.match(dotEnvLocalProviderOption, {
-								onNone: () => Option.some(dotEnvProvider),
-								onSome: (dotEnvLocalProvider) =>
-									Option.some(
-										ConfigProvider.orElse(dotEnvLocalProvider, () => dotEnvProvider),
-									),
-							}),
-					})
-
-					const provider = Option.match(dotenvChain, {
-						onNone: () => envProvider,
-						onSome: (dotenvProvider) =>
-							ConfigProvider.orElse(dotenvProvider, () => envProvider),
-					})
-
-					yield* Effect.log(
-						`IssueSyncService: resolved config provider for projectPath=${projectPath} usingDotEnv=${Option.isSome(dotenvChain)}`,
-					)
-
-					return provider
+				const provider = Option.match(dotenvChain, {
+					onNone: () => envProvider,
+					onSome: (dotenvProvider) => ConfigProvider.orElse(dotenvProvider, () => envProvider),
 				})
 
-			const requireTeamId = (
-				teamId: string | undefined,
-				message: string,
-			): Effect.Effect<string, IssueSyncError> =>
-				teamId !== undefined
-					? Effect.succeed(teamId)
-					: Effect.fail(
-							new IssueSyncError({
-								message,
-							}),
-						)
+				yield* Effect.log(
+					`IssueSyncService: resolved config provider for projectPath=${projectPath} usingDotEnv=${Option.isSome(dotenvChain)}`,
+				)
 
-			const resolveLinearApiKey = (
-				cwd: string | undefined,
-			): Effect.Effect<Readonly<{ apiKey: string | undefined; source: ApiKeySource }>, IssueSyncError> =>
-				Effect.gen(function* () {
-					const projectPath = getEffectiveProjectPath(cwd)
-					const now = Date.now()
-					const cached = yield* Ref.get(apiKeyCacheRef).pipe(
-						Effect.map((cache) => cache.get(projectPath)),
-					)
-					if (cached !== undefined && now - cached.resolvedAtMs < API_KEY_CACHE_TTL_MS) {
-						return {
-							apiKey: cached.apiKey,
-							source: cached.source,
-						}
-					}
+				return {
+					provider,
+					dotEnvProviderOption,
+					dotEnvLocalProviderOption,
+					envProvider,
+				}
+			})
 
-					const configProvider = yield* resolveProjectConfigProvider(projectPath)
-					const apiKeyFromConfigProvider = yield* Config.option(Config.string("LINEAR_API_KEY")).pipe(
-						Effect.withConfigProvider(configProvider),
-						Effect.mapError(
-							(cause) =>
-								new IssueSyncError({
-									message: "Failed to resolve LINEAR_API_KEY",
-									cause,
-								}),
-						),
+		const readLinearApiKeyFromProvider = (
+			provider: ConfigProvider.ConfigProvider,
+		): Effect.Effect<string | undefined, IssueSyncError> =>
+			Config.option(Config.string("LINEAR_API_KEY")).pipe(
+				Effect.withConfigProvider(provider),
+				Effect.map((apiKeyOption) =>
+					Option.isSome(apiKeyOption) ? apiKeyOption.value : undefined,
+				),
+				Effect.mapError(
+					(cause) =>
+						new IssueSyncError({
+							message: "Failed to resolve LINEAR_API_KEY",
+							cause,
+						}),
+				),
+			)
+
+		const requireTeamId = (
+			teamId: string | undefined,
+			message: string,
+		): Effect.Effect<string, IssueSyncError> =>
+			teamId !== undefined
+				? Effect.succeed(teamId)
+				: Effect.fail(
+						new IssueSyncError({
+							message,
+						}),
 					)
-					const resolvedApiKey = Option.isSome(apiKeyFromConfigProvider)
-						? apiKeyFromConfigProvider.value
-						: undefined
-					const source: ApiKeySource = resolvedApiKey !== undefined ? "config-provider" : "none"
-					yield* Ref.update(apiKeyCacheRef, (cache) => {
-						const next = new Map(cache)
-						next.set(projectPath, {
-							apiKey: resolvedApiKey,
-							source,
-							resolvedAtMs: now,
-						})
-						return next
-					})
-					yield* Effect.log(
-						`IssueSyncService: resolved LINEAR_API_KEY from ${source} for projectPath=${projectPath}`,
-					)
+
+		const resolveLinearApiKey = (
+			cwd: string | undefined,
+		): Effect.Effect<
+			Readonly<{ apiKey: string | undefined; source: ApiKeySource }>,
+			IssueSyncError
+		> =>
+			Effect.gen(function* () {
+				const projectPath = getEffectiveProjectPath(cwd)
+				const now = Date.now()
+				const cached = yield* Ref.get(apiKeyCacheRef).pipe(
+					Effect.map((cache) => cache.get(projectPath)),
+				)
+				if (cached !== undefined && now - cached.resolvedAtMs < API_KEY_CACHE_TTL_MS) {
 					return {
+						apiKey: cached.apiKey,
+						source: cached.source,
+					}
+				}
+
+				const providers = yield* resolveProjectConfigProviders(projectPath)
+				const resolvedApiKey = yield* readLinearApiKeyFromProvider(providers.provider)
+				const dotEnvLocalApiKey = yield* Option.match(providers.dotEnvLocalProviderOption, {
+					onNone: () => Effect.succeed(undefined),
+					onSome: readLinearApiKeyFromProvider,
+				})
+				const dotEnvApiKey = yield* Option.match(providers.dotEnvProviderOption, {
+					onNone: () => Effect.succeed(undefined),
+					onSome: readLinearApiKeyFromProvider,
+				})
+				const envApiKey = yield* readLinearApiKeyFromProvider(providers.envProvider)
+				const source: ApiKeySource = resolvedApiKey !== undefined ? "config-provider" : "none"
+				yield* Effect.log(
+					`IssueSyncService: LINEAR_API_KEY diagnostics projectPath=${projectPath} source=${source} .env.local=${formatApiKeyFingerprint(dotEnvLocalApiKey)} .env=${formatApiKeyFingerprint(dotEnvApiKey)} env=${formatApiKeyFingerprint(envApiKey)} selected=${formatApiKeyFingerprint(resolvedApiKey)}`,
+				)
+				yield* Ref.update(apiKeyCacheRef, (cache) => {
+					const next = new Map(cache)
+					next.set(projectPath, {
 						apiKey: resolvedApiKey,
 						source,
-					}
+						resolvedAtMs: now,
+					})
+					return next
 				})
+				yield* Effect.log(
+					`IssueSyncService: resolved LINEAR_API_KEY from ${source} for projectPath=${projectPath}`,
+				)
+				return {
+					apiKey: resolvedApiKey,
+					source,
+				}
+			})
 
-			const getLinearRuntime = (
-				cwd?: string,
-			): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
-				Effect.gen(function* () {
-					const config = yield* appConfig.getIssueTrackerSyncConfig()
-					if (!("linear" in config.issueTracker)) {
-						return Option.none()
+		const getLinearRuntime = (
+			cwd?: string,
+		): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
+			Effect.gen(function* () {
+				const config = yield* appConfig.getIssueTrackerSyncConfig()
+				if (!("linear" in config.issueTracker)) {
+					return Option.none()
+				}
+
+				const apiKeyResolution = yield* resolveLinearApiKey(cwd)
+				const apiKeyOption =
+					apiKeyResolution.apiKey !== undefined
+						? Option.some(apiKeyResolution.apiKey)
+						: Option.none<string>()
+
+				if (Option.isNone(apiKeyOption)) {
+					const warned = yield* Ref.get(warnedMissingApiKeyRef)
+					if (!warned) {
+						yield* Ref.set(warnedMissingApiKeyRef, true)
+						yield* Effect.logWarning(
+							`LINEAR_API_KEY not set for projectPath=${getEffectiveProjectPath(cwd)} (source=${apiKeyResolution.source}); linear sync is disabled while local tracking remains active.`,
+						)
 					}
-
-					const apiKeyResolution = yield* resolveLinearApiKey(cwd)
-					const apiKeyOption =
-						apiKeyResolution.apiKey !== undefined
-							? Option.some(apiKeyResolution.apiKey)
-							: Option.none<string>()
-
-					if (Option.isNone(apiKeyOption)) {
-						const warned = yield* Ref.get(warnedMissingApiKeyRef)
-						if (!warned) {
-							yield* Ref.set(warnedMissingApiKeyRef, true)
-							yield* Effect.logWarning(
-								`LINEAR_API_KEY not set for projectPath=${getEffectiveProjectPath(cwd)} (source=${apiKeyResolution.source}); linear sync is disabled while local tracking remains active.`,
-							)
-						}
-						return Option.none()
-					}
+					return Option.none()
+				}
 
 				const client = yield* linearSdk.getClient(apiKeyOption.value).pipe(
 					Effect.mapError(
@@ -455,31 +491,31 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							}),
 					),
 				)
-					return Option.some({
-						client,
-						defaultTeam: config.issueTracker.linear.team,
-						defaultProject: config.issueTracker.linear.project,
-					})
+				return Option.some({
+					client,
+					defaultTeam: config.issueTracker.linear.team,
+					defaultProject: config.issueTracker.linear.project,
 				})
+			})
 
-			const fetchAllLinearIssues = (
-				client: LinearClient,
-				scope: LinearIssueScope,
-			): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
-				Effect.tryPromise({
-					try: async () => {
-						const allIssues: LinearSdkIssue[] = []
-						let afterCursor: string | undefined = undefined
-						const filter = buildLinearIssueFilter(scope)
-						while (true) {
-							const page = await client.issues({
-								first: 250,
-								after: afterCursor,
-								filter,
-							})
-							allIssues.push(...page.nodes)
-							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
-								break
+		const fetchAllLinearIssues = (
+			client: LinearClient,
+			scope: LinearIssueScope,
+		): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
+			Effect.tryPromise({
+				try: async () => {
+					const allIssues: LinearSdkIssue[] = []
+					let afterCursor: string | undefined
+					const filter = buildLinearIssueFilter(scope)
+					while (true) {
+						const page = await client.issues({
+							first: 250,
+							after: afterCursor,
+							filter,
+						})
+						allIssues.push(...page.nodes)
+						if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+							break
 						}
 						afterCursor = page.pageInfo.endCursor
 					}
@@ -629,9 +665,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				const externalRef = yield* fromStore(
 					localStore.getExternalRef(issue.id, LINEAR_SYNC_TARGET, request.cwd),
 				)
-				const parentLocalId = issue.dependencies
-					?.find((dependency) => dependency.dependency_type === "parent-child")
-					?.id
+				const parentLocalId = issue.dependencies?.find(
+					(dependency) => dependency.dependency_type === "parent-child",
+				)?.id
 				const parentId = yield* ensureParentExternalId(parentLocalId, request.cwd)
 				const labelIds = yield* resolveLabelIds(runtime.client, issue.labels ?? [])
 				const description = buildMergedDescription(issue)
@@ -873,103 +909,110 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			)
 		}
 
-			const buildBootstrapSnapshots = (
-				client: LinearClient,
-				scope: LinearIssueScope,
-			): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
-				Effect.gen(function* () {
-					yield* Effect.log(
-						`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
-					)
-					const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
-					const issues = yield* fetchAllLinearIssues(client, scope)
-					const stateNameById = yield* fetchStateNameById(client).pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(
-								`Linear bootstrap: workflow states unavailable, continuing with fallback status mapping (${error.message})`,
-							).pipe(Effect.as(emptyMetadataMap)),
-						),
-					)
-					const labelNameById = yield* fetchLabelNameById(client).pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(
-								`Linear bootstrap: labels unavailable, continuing without label metadata (${error.message})`,
-							).pipe(Effect.as(emptyMetadataMap)),
-						),
-					)
+		const buildBootstrapSnapshots = (
+			client: LinearClient,
+			scope: LinearIssueScope,
+		): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
+			Effect.gen(function* () {
+				yield* Effect.log(
+					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
+				)
+				const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
+				const issues = yield* fetchAllLinearIssues(client, scope)
+				yield* Effect.log(
+					`Linear bootstrap: fetched ${issues.length} issues before metadata enrichment`,
+				)
+				const stateNameById = yield* fetchStateNameById(client).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Linear bootstrap: workflow states unavailable, continuing with fallback status mapping (${error.message})`,
+						).pipe(Effect.as(emptyMetadataMap)),
+					),
+				)
+				const labelNameById = yield* fetchLabelNameById(client).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Linear bootstrap: labels unavailable, continuing without label metadata (${error.message})`,
+						).pipe(Effect.as(emptyMetadataMap)),
+					),
+				)
 
-					const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
-					const childCountByParentId = new Map<string, number>()
-					for (const issue of issues) {
-						if (issue.parentId) {
-							childCountByParentId.set(issue.parentId, (childCountByParentId.get(issue.parentId) ?? 0) + 1)
-						}
+				const issuesById = new Map(issues.map((issue) => [issue.id, issue]))
+				const childCountByParentId = new Map<string, number>()
+				for (const issue of issues) {
+					if (issue.parentId) {
+						childCountByParentId.set(
+							issue.parentId,
+							(childCountByParentId.get(issue.parentId) ?? 0) + 1,
+						)
 					}
+				}
 
-					return yield* Effect.forEach(
-						issues,
-						(issue) =>
-							Effect.gen(function* () {
-								const labels = issue.labelIds
-									.map((labelId) => labelNameById.get(labelId))
-									.filter((label): label is string => label !== undefined)
-								const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
-								const stateNameFromMap = issue.stateId ? stateNameById.get(issue.stateId) : undefined
-								const issueState = issue.state
-								const stateNameFromIssue =
-									issueState === undefined
-										? undefined
-										: yield* Effect.tryPromise({
-												try: () => issueState,
-												catch: () => undefined,
-											}).pipe(
-												Effect.map((state) => state?.name),
-												Effect.catchAll(() => Effect.succeed(undefined)),
-											)
-								const stateName =
-									stateNameFromMap ?? stateNameFromIssue
-								const status =
-									stateName !== undefined
-										? normalizeLinearStatus(stateName)
-										: issue.completedAt != null || issue.canceledAt != null
-											? "closed"
-											: issue.startedAt != null
-												? "in_progress"
+				return yield* Effect.forEach(
+					issues,
+					(issue) =>
+						Effect.gen(function* () {
+							const labels = issue.labelIds
+								.map((labelId) => labelNameById.get(labelId))
+								.filter((label): label is string => label !== undefined)
+							const hasChildren = (childCountByParentId.get(issue.id) ?? 0) > 0
+							const stateNameFromMap = issue.stateId ? stateNameById.get(issue.stateId) : undefined
+							const issueState = issue.state
+							const stateNameFromIssue =
+								issueState === undefined
+									? undefined
+									: yield* Effect.tryPromise({
+											try: () => issueState,
+											catch: () => undefined,
+										}).pipe(
+											Effect.map((state) => state?.name),
+											Effect.catchAll(() => Effect.succeed(undefined)),
+										)
+							const stateName = stateNameFromMap ?? stateNameFromIssue
+							const status =
+								stateName !== undefined
+									? normalizeLinearStatus(stateName)
+									: issue.completedAt != null || issue.canceledAt != null
+										? "closed"
+										: issue.startedAt != null
+											? "in_progress"
 											: "open"
-								const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
+							const parentLocalId = issue.parentId
+								? issuesById.get(issue.parentId)?.identifier
+								: undefined
 
-								return {
-									localId: issue.identifier,
-									externalId: issue.id,
-									externalKey: issue.identifier,
-									title: issue.title,
-									description: issue.description ?? undefined,
-									status,
-									priority: normalizeLinearPriority(issue.priority),
-									issueType: inferIssueTypeFromLabels(labels, hasChildren),
-									createdAt: issue.createdAt.toISOString(),
-									updatedAt: issue.updatedAt.toISOString(),
-									closedAt:
-										status === "closed"
-											? (issue.completedAt ?? issue.canceledAt ?? issue.updatedAt).toISOString()
-											: undefined,
-									assignee: issue.assigneeId ?? null,
-									labels,
-									estimate: issue.estimate ?? undefined,
-									parentLocalId,
-								}
-							}),
-						{ concurrency: 16 },
-					)
-				})
+							return {
+								localId: issue.identifier,
+								externalId: issue.id,
+								externalKey: issue.identifier,
+								title: issue.title,
+								description: issue.description ?? undefined,
+								status,
+								priority: normalizeLinearPriority(issue.priority),
+								issueType: inferIssueTypeFromLabels(labels, hasChildren),
+								createdAt: issue.createdAt.toISOString(),
+								updatedAt: issue.updatedAt.toISOString(),
+								closedAt:
+									status === "closed"
+										? (issue.completedAt ?? issue.canceledAt ?? issue.updatedAt).toISOString()
+										: undefined,
+								assignee: issue.assigneeId ?? null,
+								labels,
+								estimate: issue.estimate ?? undefined,
+								parentLocalId,
+							}
+						}),
+					{ concurrency: 16 },
+				)
+			})
 
-			return {
-				bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
-					Effect.gen(function* () {
-						const runtimeOption = yield* getLinearRuntime(cwd)
-						if (Option.isNone(runtimeOption)) {
-							return 0
-						}
+		return {
+			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
+				Effect.gen(function* () {
+					const runtimeOption = yield* getLinearRuntime(cwd)
+					if (Option.isNone(runtimeOption)) {
+						return 0
+					}
 
 					const bootstrapComplete = yield* fromStore(
 						localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
@@ -984,28 +1027,28 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						return 0
 					}
 
-						const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
-							team: runtimeOption.value.defaultTeam,
-							project: runtimeOption.value.defaultProject,
-						})
-						yield* Effect.log(
-							`Linear bootstrap imported ${snapshots.length} issues (team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
-						)
-						const imported = yield* fromStore(
-							localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
-						)
+					const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
+						team: runtimeOption.value.defaultTeam,
+						project: runtimeOption.value.defaultProject,
+					})
+					yield* Effect.log(
+						`Linear bootstrap imported ${snapshots.length} issues (team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
+					)
+					const imported = yield* fromStore(
+						localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
+					)
 					yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
 					return imported
 				}),
 
-				flushLinearQueue: (
-					cwd?: string,
-				): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
-					Effect.gen(function* () {
-						const runtimeOption = yield* getLinearRuntime(cwd)
-						if (Option.isNone(runtimeOption)) {
-							return { pushed: 0, pulled: 0 }
-						}
+			flushLinearQueue: (
+				cwd?: string,
+			): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
+				Effect.gen(function* () {
+					const runtimeOption = yield* getLinearRuntime(cwd)
+					if (Option.isNone(runtimeOption)) {
+						return { pushed: 0, pulled: 0 }
+					}
 
 					const pendingItems = yield* fromStore(
 						localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
@@ -1042,9 +1085,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 											cwd,
 										),
 									).pipe(
-										Effect.zipRight(
-											Ref.update(pushedRef, (count) => count + item.claims.length),
-										),
+										Effect.zipRight(Ref.update(pushedRef, (count) => count + item.claims.length)),
 									),
 								),
 								Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
