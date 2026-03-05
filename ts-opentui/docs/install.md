@@ -2,6 +2,17 @@
 
 > Fast path for coworkers who want a global `az` command quickly.
 
+## Fastest macOS Path (Homebrew Tap)
+
+```bash
+brew tap riordanpawley/azedarach
+brew install azedarach
+az --help
+```
+
+Note:
+- this installs an `az` binary and conflicts with `azure-cli` (same executable name).
+
 ## Recommended Fast Path (Single-File Executable)
 
 From the repo root:
@@ -37,14 +48,14 @@ If `az` is not found after install, ensure `~/.local/bin` is on your `PATH`.
 `az` depends on these tools at runtime:
 - `tmux`
 - `gh` (authenticated)
-- `linear-cli` (authenticated/configured)
+- `az` (authenticated/configured)
 - `claude` (authenticated)
 
 Quick macOS bootstrap:
 
 ```bash
 brew install bun just tmux gh
-# install/configure linear-cli and claude separately
+# install/configure az and claude separately
 ```
 
 ## Updating
@@ -107,8 +118,8 @@ Example release cut:
 ```bash
 git checkout main
 git pull --rebase
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
 ## Homebrew Tap Setup (Maintainers)
@@ -117,8 +128,8 @@ Status:
 - release artifacts are automated
 - tap repository and formula publishing are manual
 
-Suggested tap repo name:
-- `homebrew-azedarach`
+Tap repository:
+- `https://github.com/riordanpawley/homebrew-azedarach`
 
 Bootstrap steps:
 
@@ -129,22 +140,22 @@ Bootstrap steps:
    ```
 2. Generate a formula from a release tag:
    ```bash
-   ./ts-opentui/scripts/generate-homebrew-formula.sh v0.3.0 \
-     --repo <owner>/azedarach \
+   ./ts-opentui/scripts/generate-homebrew-formula.sh v0.3.1 \
+     --repo riordanpawley/azedarach \
      --output /path/to/homebrew-azedarach/Formula/azedarach.rb
    ```
 3. Commit and push in the tap repo:
    ```bash
    cd /path/to/homebrew-azedarach
    git add Formula/azedarach.rb
-   git commit -m "azedarach v0.3.0"
+   git commit -m "azedarach v0.3.1"
    git push
    ```
 
 Coworker install (after tap is published):
 
 ```bash
-brew tap <owner>/azedarach
+brew tap riordanpawley/azedarach
 brew install azedarach
 az --help
 ```
