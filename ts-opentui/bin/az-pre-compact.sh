@@ -1,15 +1,15 @@
 #!/bin/bash
 #
-# az-pre-compact.sh - PreCompact hook for bead context preservation
+# az-pre-compact.sh - PreCompact hook for issue context preservation
 #
 # Usage: az-pre-compact.sh <beadId>
 #
 # This hook fires before Claude compacts its context window.
 # It outputs a reminder that Claude will see, prompting it to update
-# the bead with session progress before context is lost.
+# the Linear issue with session progress before context is lost.
 #
 # Design decisions:
-# - We output text instead of updating beads directly because Claude
+# - We output text instead of updating issues directly because Claude
 #   has better context about what work was actually done
 # - The reminder appears in Claude's context BEFORE compaction
 # - Exit 0 allows compaction to proceed (exit 2 would block it)
@@ -50,11 +50,11 @@ cat << 'EOF'
 <system-reminder>
 PreCompact hook triggered - Context compaction is about to occur.
 
-IMPORTANT: Before compaction, ensure your work is preserved in beads:
+IMPORTANT: Before compaction, ensure your work is preserved in Linear:
 
-1. If you have in-progress work, update the bead with notes:
+1. If you have in-progress work, add a progress comment:
    ```bash
-   bd update <bead-id> --notes="
+   linear-cli i comment <issue-id> --body "
    COMPLETED: [what was done]
    IN PROGRESS: [current state]
    NEXT: [concrete next step]
@@ -62,9 +62,9 @@ IMPORTANT: Before compaction, ensure your work is preserved in beads:
    "
    ```
 
-2. If work is complete, close the bead:
+2. If work is complete, close the issue:
    ```bash
-   bd close <bead-id> --reason="[summary of what was accomplished]"
+   linear-cli i close <issue-id>
    ```
 
 This ensures your progress survives compaction and future sessions can resume seamlessly.

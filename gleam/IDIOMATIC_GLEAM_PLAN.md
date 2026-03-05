@@ -24,7 +24,7 @@ Rationale:
 - Current size is manageable for single actor
 
 If splitting becomes necessary in the future, suggested domains:
-- `BeadsActor` - CRUD operations for beads
+- `BeadsActor` - CRUD operations for linear
 - `SessionActor` - Session lifecycle management
 - `GitActor` - Git operations (merge, PR creation)
 - `DevServerActor` - Dev server management
@@ -35,7 +35,7 @@ If splitting becomes necessary in the future, suggested domains:
 **Decision: Current pattern is acceptable**
 
 All spawns are for async background tasks:
-- `coordinator.gleam` - beads loading, project discovery, scheduling
+- `coordinator.gleam` - linear loading, project discovery, scheduling
 - `sessions_sup.gleam`, `servers_sup.gleam` - async state updates
 - `session_monitor.gleam`, `server_monitor.gleam` - async polling
 

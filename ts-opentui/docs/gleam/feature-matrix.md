@@ -45,7 +45,7 @@
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| List Beads | Fetch from bd CLI | P0 |
+| List Linear | Fetch from linear-cli CLI | P0 |
 | Create Bead | c to create via $EDITOR | P0 |
 | Create via Claude | Shift+c for natural language | P1 |
 | Edit Bead | e in detail panel | P0 |
@@ -170,7 +170,7 @@
 | Theme Config | theme name | P0 |
 | Git Config | workflowMode, pushEnabled, fetchEnabled, baseBranch | P0 |
 | PR Config | enabled, autoDraft, autoMerge | P0 |
-| Beads Config | syncEnabled | P0 |
+| Linear Config | syncEnabled | P0 |
 
 ---
 

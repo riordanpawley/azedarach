@@ -414,7 +414,7 @@ This section is normative.
 - AZ-FR-3805: Optimistic dependency mutations (add/remove/update) MUST obey the same rollback contract.
 - AZ-FR-3806: Optimistic fork metadata creation MUST rollback cleanly on persistence failure.
 - AZ-FR-3807: Rollback logic MUST be scoped to affected entities and MUST NOT revert unrelated successful changes.
-- AZ-FR-3808: Beads tracker data MUST be treated as source of truth for hydration.
+- AZ-FR-3808: Linear tracker data MUST be treated as source of truth for hydration.
 - AZ-FR-3809: Hydration polling MUST reconcile external changes without clobbering pending optimistic updates.
 - AZ-FR-3810: Selected optimistic flows MAY enter retryable-pending state instead of immediate rollback when safe and user-visible.
 

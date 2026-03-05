@@ -223,7 +223,7 @@ Press `` Ctrl-a ` `` (backtick) to open a floating popup terminal. It:
 - Uses your current directory
 - Closes when you exit (`Ctrl-d` or `exit`)
 
-Great for quick `git status`, `bd ready`, or any one-off command!
+Great for quick `git status`, `linear-cli i list --output json --compact --all`, or any one-off command!
 
 ## Common Workflows
 
@@ -319,7 +319,7 @@ tmux kill-session -t claude-test
 
 ```bash
 # 1. Pick a bead ID from your project
-bd ready | head -1
+linear-cli i list --output json --compact --all | head -1
 # Let's say it returns: az-05y
 
 # 2. Create a session with matching name

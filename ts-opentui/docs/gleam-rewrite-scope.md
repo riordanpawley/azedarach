@@ -36,9 +36,9 @@ Full rewrite of Azedarach from TypeScript (Effect + React + OpenTUI) to Gleam us
 
 | Feature | Description |
 |---------|-------------|
-| **Kanban board** | Overview of beads tasks by status (4 columns) |
+| **Kanban board** | Overview of linear tasks by status (4 columns) |
 | **Multi-project** | Project switcher within single instance |
-| **Bead CRUD** | Create/edit beads with image attachment support |
+| **Bead CRUD** | Create/edit linear with image attachment support |
 | **Git integration** | Worktrees, status, diffs, PR creation, merge to main |
 | **Session management** | 1 worktree + 1 tmux session per bead |
 | **Dev servers** | Managed dev server processes with port allocation |
@@ -65,7 +65,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
 | Feature | Description |
 |---------|-------------|
 | **CLI orchestration commands** | `az kill`, `az gate` for programmatic control |
-| **Beads claiming** | `az start` auto-claims bead with session assignee |
+| **Linear claiming** | `az start` auto-claims bead with session assignee |
 | **Orchestrator template** | Prompt template for AI-driven epic orchestration |
 | **Supervisor template** | VC-style continuous supervision loop |
 | **Agent Mail integration** | File leases + messaging for multi-agent coordination |
@@ -84,13 +84,13 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
 
 | Question | Decision |
 |----------|----------|
-| Config format | **JSON** (bd compatibility) |
+| Config format | **JSON** (linear-cli compatibility) |
 | State persistence | **Tmux as source of truth**, in-memory for optimistic updates, files only as last resort |
 | Theme | **Catppuccin Macchiato** default, custom themes supported |
 | Tmux session naming | **`<bead-id>-az`** (suffix) |
 | Worktree location | **Template string**: `"{project}-{bead-id}"` (configurable) |
 | Polling intervals | **Configurable** with current values as defaults |
-| Beads dependency | **Required** - beads is the task persistence layer |
+| Linear dependency | **Required** - linear is the task persistence layer |
 | Dev server ports | **Trust the port we set** (no output polling for port) |
 | Repo location | **Subdirectory** `azedarach/gleam/`, replace eventually |
 | Shore customization | **Fork first**, contribute upstream later |
@@ -102,7 +102,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
 {
   "worktree": {
     "pathTemplate": "../{project}-{bead-id}",
-    "initCommands": ["direnv allow", "bun install", "bd sync"],
+    "initCommands": ["direnv allow", "bun install", "git pull --rebase && git push"],
     "continueOnFailure": true
   },
   "session": {
@@ -132,7 +132,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
     "autoDraft": true,
     "autoMerge": false
   },
-  "beads": {
+  "linear": {
     "syncEnabled": true
   },
   "polling": {
@@ -189,7 +189,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
                             ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Coordinator Actor                         │
-│  - Task cache (from beads)                                   │
+│  - Task cache (from linear)                                   │
 │  - Session registry (optimistic state)                       │
 │  - Dev server registry                                       │
 │  - Routes commands to services                               │
@@ -208,7 +208,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
     └──────────┘         │ Monitor  │
                          └──────────┘
 
-Stateless Modules: Worktree, Beads, Git, Tmux, Clipboard
+Stateless Modules: Worktree, Linear, Git, Tmux, Clipboard
 ```
 
 ### 3.2 State Hierarchy
@@ -339,7 +339,7 @@ Session Creation:
     ├─→ Run init commands ONCE (sequentially):
     │     1. direnv allow  → wait for prompt
     │     2. bun install   → wait for prompt
-    │     3. bd sync       → wait for prompt
+    │     3. git pull --rebase && git push       → wait for prompt
     │     4. Set marker @az_init_done = 1
     │
     └─→ Ready for windows (main, dev, background tasks)
@@ -562,7 +562,7 @@ gleam/
 │   │   └── server_monitor.gleam  # Server state tracking
 │   │
 │   ├── services/
-│   │   ├── beads.gleam           # bd CLI wrapper
+│   │   ├── linear.gleam           # linear-cli CLI wrapper
 │   │   ├── tmux.gleam            # tmux commands
 │   │   ├── worktree.gleam        # git worktree ops
 │   │   ├── git.gleam             # git commands
@@ -605,16 +605,16 @@ gleam/
 
 **Milestone:** App starts, themed board, cursor moves
 
-### Phase 2: Beads & Projects (Week 3-4)
+### Phase 2: Linear & Projects (Week 3-4)
 
-- [ ] Beads module (`bd list/show/create/update`)
+- [ ] Linear module (`linear-cli i list --output json --compact --all/show/create/update`)
 - [ ] Coordinator actor
 - [ ] Task card rendering
 - [ ] Periodic refresh
 - [ ] Bead creation/editing
 - [ ] Project switcher (multi-project)
 
-**Milestone:** Board shows beads, can switch projects
+**Milestone:** Board shows linear, can switch projects
 
 ### Phase 3: Sessions & Worktrees (Week 5-6)
 
@@ -672,7 +672,7 @@ gleam/
 ## 8. Success Criteria
 
 ### Must Have
-- [ ] Kanban board with beads
+- [ ] Kanban board with linear
 - [ ] Multi-project switcher
 - [ ] Bead CRUD with image attachments
 - [ ] Session spawn/attach/pause/resume/stop
@@ -715,8 +715,8 @@ All open questions have been addressed in companion documents:
 
 | Question | Resolution | Document |
 |----------|------------|----------|
-| Testing strategy | Unit (<5s), integration with real tmux/bd (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
-| Start+work prompt format | Bead ID, type, title, `bd show` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
+| Testing strategy | Unit (<5s), integration with real tmux/linear-cli (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
+| Start+work prompt format | Bead ID, type, title, `linear-cli i get` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
 | Merge conflict UX | MergeChoice overlay, git merge-tree detection, Claude spawn for resolution | `docs/gleam/merge-conflict-ux.md` |
 
 ---

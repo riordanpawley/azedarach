@@ -40,8 +40,13 @@ Thumbs.db
 .env.local
 .env*.local
 
-# OpenCode
-.opencode/
+# OpenCode (ignore generated artifacts only)
+.opencode/node_modules/
+.opencode/agent/
+.opencode/skill/
+.opencode/memories/
+.opencode/sessions/
+.opencode/logs/
 
 # direnv (nix flake cache)
 .direnv/

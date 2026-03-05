@@ -49,7 +49,8 @@
       "bun run build *": "allow",
       "bun run build": "allow",
       "bun *": "allow",
-      "br *": "allow",
+      "linear-cli": "allow",
+      "linear-cli *": "allow",
       "tmux *": "allow"
     }
   },

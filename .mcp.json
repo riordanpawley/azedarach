@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "opencode-linear-cli": {
+      "command": "opencode-linear-cli"
+    }
+  }
+}

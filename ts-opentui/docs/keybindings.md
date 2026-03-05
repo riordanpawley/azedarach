@@ -152,8 +152,8 @@ The settings overlay shows all editable configuration options:
 #### Network Settings
 - **Auto Detect Network**: Enable/disable automatic network connectivity detection
 
-#### Beads Settings
-- **Beads Sync**: Enable/disable automatic synchronization with beads backend
+#### Linear Settings
+- **Linear Sync**: Enable/disable automatic synchronization with linear backend
 
 #### State Detection Settings
 - **Pattern Matching**: Enable/disable AI pattern-based state detection for sessions
@@ -217,7 +217,7 @@ Settings are stored in `.azedarach.json` in your project root:
 
 ## Planning Overlay
 
-Press `p` to open the AI-powered planning overlay. This lets you describe a feature in natural language and automatically generates beads with proper epics, tasks, and dependencies.
+Press `p` to open the AI-powered planning overlay. This lets you describe a feature in natural language and automatically generates linear with proper epics, tasks, and dependencies.
 
 ### Input Phase
 
@@ -251,7 +251,7 @@ Press `p` to open the AI-powered planning overlay. This lets you describe a feat
    - Break down large tasks into smaller ones
    - Ensure correct dependency ordering
    - Optimize for parallel development
-4. **Create**: Beads are created with:
+4. **Create**: Linear are created with:
    - An epic as the parent feature
    - Child tasks linked to the epic
    - Blocking dependencies for sequential work
@@ -264,7 +264,7 @@ Press `p` to open the AI-powered planning overlay. This lets you describe a feat
 2. Type: "Add user authentication with OAuth"
 3. Press Enter to start
 4. Wait for generation and review passes
-5. Beads are created automatically
+5. Linear are created automatically
 6. Navigate to the epic and start sessions on children
 ```
 
@@ -320,7 +320,7 @@ The status bar shows the current view mode:
 
 ## Create & Edit Modes
 
-Azedarach provides both manual (via $EDITOR) and AI-assisted (via Claude) modes for creating and editing beads.
+Azedarach provides both manual (via $EDITOR) and AI-assisted (via Claude) modes for creating and editing linear.
 
 | Action | Manual | AI-Assisted |
 |--------|--------|-------------|
@@ -341,7 +341,7 @@ Press `c` to create a new bead using your $EDITOR with a structured template.
    - **Status**: backlog, ready, in_progress, review, done
    - **Description**, **Design**, **Notes**, **Acceptance Criteria**: Optional sections
 3. Save and close the editor
-4. The bead is created via `bd create`
+4. The bead is created via `linear-cli i create`
 
 ### Template Format
 
@@ -376,7 +376,7 @@ Press `e` to edit the selected bead in your $EDITOR.
 2. Press `e` to open your $EDITOR with the bead's current data
 3. Modify any fields you want to change
 4. Save and close the editor
-5. Changes are applied via `bd update`
+5. Changes are applied via `linear-cli i update`
 
 ## Claude Create Mode (`C`)
 
@@ -389,7 +389,7 @@ Press `C` (capital C) to create a task using natural language. This spawns a Cla
 3. Press `Enter` to launch a Claude session
 4. Claude will:
    - Interpret your description
-   - Create a bead with appropriate title, type, and description using `bd create`
+   - Create a bead with appropriate title, type, and description using `linear-cli i create`
    - Remain in the session, ready to work on the task if you want
 
 ### Example
@@ -416,9 +416,9 @@ Press `E` (capital E) to edit the selected bead with Claude's assistance.
 
 1. Select a task with hjkl navigation
 2. Press `E` to launch a Claude edit session
-3. Claude receives the bead's current details and `bd update` syntax
+3. Claude receives the bead's current details and `linear-cli i update` syntax
 4. Describe what changes you want in natural language
-5. Claude will help update the bead using `bd update`
+5. Claude will help update the bead using `linear-cli i update`
 
 ### Example
 
@@ -426,7 +426,7 @@ Press `E` (capital E) to edit the selected bead with Claude's assistance.
 2. Press `E`
 3. Claude shows you the bead details and asks what you'd like to change
 4. Type: `Change the priority to P1 and add a note about the deadline`
-5. Claude runs the appropriate `bd update` command
+5. Claude runs the appropriate `linear-cli i update` command
 
 ### Comparison: Manual vs Claude
 
@@ -505,8 +505,8 @@ When cleaning up multiple worktrees (`Space` `d` with selections), a choice dial
 
 | Key | Action | Description |
 |-----|--------|-------------|
-| `w` | Worktrees only | Delete worktrees but keep beads open |
-| `f` | Full cleanup | Delete worktrees AND close beads |
+| `w` | Worktrees only | Delete worktrees but keep linear open |
+| `f` | Full cleanup | Delete worktrees AND close linear |
 | `Esc` | Cancel | Return without cleanup |
 
 ## Search Mode
@@ -1102,8 +1102,8 @@ Images are scaled to fit the terminal window while preserving aspect ratio.
 
 ### How Image Attachment Works
 
-1. Images are stored in `.beads/images/{bead-id}/`
-2. Metadata is tracked in `.beads/images/index.json`
+1. Images are stored in `.linear/images/{bead-id}/`
+2. Metadata is tracked in `.linear/images/index.json`
 3. Supported formats: PNG, JPG, GIF, WebP, BMP, SVG
 4. Claude sessions can reference attached images for visual context
 
@@ -1193,7 +1193,7 @@ This makes az the central hub for all session navigation.
 
 ## Multi-Project Support
 
-Azedarach supports working with multiple beads-enabled projects. Each project has its own set of tasks (beads), and you can switch between them using the project selector.
+Azedarach supports working with multiple linear-enabled projects. Each project has its own set of tasks (linear), and you can switch between them using the project selector.
 
 ### Project Management (CLI)
 

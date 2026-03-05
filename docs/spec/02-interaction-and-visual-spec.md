@@ -329,7 +329,7 @@ Settings domains:
 - PR defaults
 - notifications
 - network auto-detection
-- beads sync behavior
+- linear sync behavior
 - session state detection mode
 - diff presentation preferences
 

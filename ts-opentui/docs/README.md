@@ -1,6 +1,6 @@
 # Azedarach User Guide
 
-> TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> TUI Kanban board for orchestrating parallel Claude Code sessions with Linear task tracking
 
 ## Table of Contents
 
@@ -40,7 +40,7 @@ bun run dev
 bun run bin/az.ts
 ```
 
-The TUI displays a Kanban board with your beads issues organized by status:
+The TUI displays a Kanban board with your linear issues organized by status:
 - **Open** - Tasks ready to start
 - **In Progress** - Active work
 - **Blocked** - Waiting on dependencies
@@ -177,7 +177,7 @@ Columns automatically scroll when tasks exceed terminal height. Scroll indicator
 Use Action mode (`Space` + `h`/`l`) to move tasks between columns:
 - Moving to "In Progress" starts work on a task
 - Moving to "Closed" completes a task
-- Changes are immediately synced to beads
+- Changes are immediately synced to linear
 
 ### Epics
 
@@ -195,8 +195,10 @@ Epics are container tasks that group related work. Use them to:
 
 Or via CLI:
 ```bash
-bd create --title="User Authentication System" --type=epic
+linear-cli i create "User Authentication System" --output json --compact
 ```
+
+Tip: set `issueTracker.linear.team` in `.azedarach.json` (or run `linear-cli setup`) so create commands do not require `-t`.
 
 #### Adding Children to an Epic
 
@@ -204,10 +206,10 @@ Children are tasks with a parent-child dependency to the epic. Create the depend
 
 ```bash
 # Create a child task
-bd create --title="Implement login form" --type=task
+linear-cli i create "Implement login form" --output json --compact
 
 # Link it to the epic (child depends on parent)
-bd dep add az-xyz az-epic --type=parent-child
+linear-cli i update az-xyz --data '{"parentId":"<epic-linear-id>"}' --output json --compact
 ```
 
 Where `az-xyz` is the child task and `az-epic` is the epic ID.
@@ -243,7 +245,7 @@ See [Keybindings: Epic Drill-Down](keybindings.md#epic-drill-down) for full navi
 
 ### VC Integration (VibeCoder)
 
-Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an AI-supervised orchestration engine that autonomously executes tasks from your beads backlog.
+Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an AI-supervised orchestration engine that autonomously executes tasks from your linear backlog.
 
 #### What is VC?
 
@@ -273,16 +275,16 @@ Azedarach integrates with [steveyegge/vc](https://github.com/steveyegge/vc) - an
 │         └───────────┬───────────┘                                │
 │                     ▼                                            │
 │            ┌─────────────────┐                                   │
-│            │  .beads/beads.db │  ◄── Shared SQLite database      │
-│            │  (Beads Issues)  │                                   │
+│            │  Linear API     │  ◄── Shared issue backend          │
+│            │  (cloud)        │                                   │
 │            └─────────────────┘                                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Key insight:** Both az and VC read/write the same `.beads/beads.db` database. This means:
+**Key insight:** Both az and VC read/write the same Linear workspace. This means:
 - Changes you make in az (moving tasks, changing priority) are immediately visible to VC
 - Tasks VC completes or updates appear in az in real-time
-- No sync conflicts - SQLite handles concurrent access
+- No local tracker sync step is required
 
 #### When to Use Each
 
@@ -369,7 +371,7 @@ tmux new-session -d -s claude-test-session "bash"
 bun run dev
 
 # 3. Create a test bead with matching ID (or use existing)
-bd create --title="Test attachment" --type=task
+linear-cli i create --title="Test attachment" --type=task
 
 # 4. Note the bead ID (e.g., az-xyz)
 
@@ -413,11 +415,11 @@ If you don't have tmux sessions running, you'll see errors in the console (not i
 
 ### "Tasks aren't moving between columns"
 
-**Cause:** Beads sync issue or permission problem
+**Cause:** Linear sync issue or permission problem
 
 **Solution:**
-1. Check that `.beads/` directory exists
-2. Verify `bd list` works from command line
+1. Verify `linear-cli` is installed and authenticated
+2. Verify `linear-cli i list --output json --compact --all` works from command line
 3. Check console for error messages
 
 ### "The TUI looks corrupted"
@@ -479,18 +481,17 @@ You can configure models globally or specifically for each tool in `.azedarach.j
 
 #### Using OpenCode
 
-2. **Install opencode-beads** - The official beads plugin for OpenCode:
+2. **Install opencode-pty** - PTY support for OpenCode sessions:
    ```bash
    # In your project's opencode.json
    {
-     "plugins": ["opencode-beads"]
+     "plugins": ["opencode-pty"]
    }
    ```
 
    This plugin provides:
-   - Automatic `bd prime` on session start
-   - All beads commands as `/bd-*` slash commands
-   - A task agent for autonomous issue work
+   - Reliable PTY/session integration
+   - Better terminal compatibility for agent sessions
 
 3. **Copy the Azedarach plugin** - For session status monitoring:
    ```bash
@@ -502,7 +503,7 @@ You can configure models globally or specifically for each tool in `.azedarach.j
    ```json
    {
      "plugin": [
-       "opencode-beads",
+       "opencode-pty",
        "./plugin/azedarach.js"
      ]
    }
@@ -531,7 +532,7 @@ Both call the same `az notify` command which sets a tmux session option that Aze
 
 ### Resources
 
-- [opencode-beads plugin](https://github.com/joshuadavidthomas/opencode-beads) - Official beads integration
+- [opencode-pty plugin](https://github.com/joshuadavidthomas/opencode-pty) - PTY integration
 - [OpenCode Plugin Docs](https://opencode.ai/docs/plugins/) - How to create OpenCode plugins
 
 ---
@@ -550,7 +551,7 @@ src/
 │   └── HelpOverlay.tsx # Keyboard help
 │
 ├── core/               # Effect services
-│   ├── BeadsClient.ts      # bd CLI wrapper
+│   ├── BeadsClient.ts      # linear-cli CLI wrapper
 │   ├── SessionManager.ts   # Claude session orchestration
 │   ├── TmuxService.ts      # tmux operations
 │   ├── TerminalService.ts  # Terminal detection
@@ -567,7 +568,7 @@ src/
 
 ## Next Steps
 
-See the [beads issues](../.beads/) for planned features:
+See your Linear workspace for planned features:
 - `az-stv`: Full task actions (start/attach/pause/resume)
 - `az-l7a`: Agent Mail for multi-agent coordination
-- `az-8ep`: Beads sync coordination for worktrees
+- `az-8ep`: Linear sync coordination for worktrees

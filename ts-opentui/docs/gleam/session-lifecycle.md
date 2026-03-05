@@ -113,7 +113,7 @@ From any state except IDLE:
 │   │ 2. tmux send-keys -t {session} "bun install" Enter                  │   │
 │   │    └─→ Wait for shell prompt                                        │   │
 │   │                                                                     │   │
-│   │ 3. tmux send-keys -t {session} "bd sync" Enter                      │   │
+│   │ 3. tmux send-keys -t {session} "git pull --rebase && git push" Enter                      │   │
 │   │    └─→ Wait for shell prompt                                        │   │
 │   │                                                                     │   │
 │   │ 4. Set marker: tmux set-option -t {session} @az_init_done 1         │   │
@@ -319,7 +319,7 @@ From any state except IDLE:
 │     │ 4. User can retry attach after Claude resolves                      │ │
 │     └─────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
-│ Note: .beads/ conflicts are excluded (handled by bd sync)                   │
+│ Note: .linear/ conflicts are excluded (handled by git pull --rebase && git push)                   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -372,7 +372,7 @@ From any state except IDLE:
    git branch -D {branch}
 
 5. Optionally close bead:
-   bd close {bead-id}
+   linear-cli i close {bead-id}
 
 6. Update state: removed from model
 ```

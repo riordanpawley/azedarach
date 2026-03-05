@@ -9,7 +9,7 @@ Purpose: Claude Code entry point for Azedarach development
 
 # Azedarach Project Context
 
-> TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
 ## Critical Rules (Always Apply)
 
@@ -17,9 +17,9 @@ Purpose: Claude Code entry point for Azedarach development
 
 2. **Modern CLI Tools**: ALWAYS use `rg` (NOT grep), `fd` (NOT find), `sd` (NOT sed), `bat` (NOT cat). 10x faster, gitignore-aware.
 
-3. **Beads Tracker**: ALWAYS use `bd` CLI commands for beads operations. Use `bd search` for discovery, `bd ready` for unblocked work. NEVER use `bd list` (causes context bloat). See beads-tracking.skill.md for details.
+3. **Issue Tracking**: ALWAYS use `linear-cli` for issue operations. Prefer `linear-cli i list`, `linear-cli i get`, `linear-cli i create`, `linear-cli i update`, and `linear-cli i close`.
 
-4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams and use normal `bd sync`. If you're on a truly ephemeral branch (no upstream), DON'T run `bd sync --from-main` at session end - it overwrites local beads changes.
+4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams and use normal git pull/push flow.
 
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
@@ -130,13 +130,13 @@ bun run type-check                # Full project check
 rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
-# Beads (Task Management)
-bd search "keywords"              # Search issues (PRIMARY - not list!)
-bd ready                          # Find unblocked work
-bd create --title="..." --type=task  # Create issue
-bd update <id> --status=in_progress  # Update status/notes
-bd close <id>                     # Mark complete
-bd sync                           # REQUIRED in worktrees (manual sync)
+# Issue Tracking
+linear-cli i list --output json --compact --all                # List issues
+linear-cli i get <id> --output json --compact                  # Show issue details
+linear-cli i create "..." --output json --compact              # Create issue (uses configured default team)
+linear-cli i start <id>                                         # Start/claim issue
+linear-cli i update <id> --output json --compact ...           # Update status/notes
+linear-cli i close <id>                                         # Mark complete
 ```
 
 ## Project Overview
@@ -148,10 +148,10 @@ bd sync                           # REQUIRED in worktrees (manual sync)
 - OpenTUI + React (TUI framework)
 - Effect (services and state)
 - tmux (session persistence)
-- Beads (task tracking backend)
+- Linear CLI (task tracking backend)
 
 **Core Features:**
-- Kanban board displaying beads issues
+- Kanban board displaying Linear issues
 - Spawn Claude sessions in isolated git worktrees
 - Monitor session state (busy/waiting/done/error)
 - Auto-create GitHub PRs on completion
@@ -175,7 +175,7 @@ src/
 │   ├── SessionManager.ts  # Claude session orchestration
 │   ├── WorktreeManager.ts # Git worktree lifecycle
 │   ├── StateDetector.ts   # Output pattern matching
-│   ├── BeadsClient.ts     # bd CLI wrapper
+│   ├── BeadsClient.ts     # issue tracker CLI wrapper (supports linear-cli backend)
 │   └── PRWorkflow.ts      # GitHub PR automation
 │
 ├── hooks/                 # State transition hooks
@@ -188,31 +188,28 @@ src/
     └── defaults.ts        # Default values
 ```
 
-## Beads Task Management
+## Issue Tracking
 
 **Track ALL work** - preserves context across sessions, enables resumability.
+Configure `issueTracker.linear.team` in `.azedarach.json` (or run `linear-cli setup`) to avoid passing `-t` for every `i create`.
 
 **Quick workflow (CLI):**
-1. User requests work → Search: `bd search "keywords"` or check `bd ready`
-2. Start work → Update: `bd update <id> --status=in_progress`
-3. During work → Add notes: `bd update <id> --notes="..."`
-4. Complete → Close: `bd close <id> --reason="..."`
+1. User requests work → List/search: `linear-cli i list --output json --compact --all`
+2. Start work → `linear-cli i start <id>`
+3. During work → `linear-cli i update <id> --output json --compact ...`
+4. Complete → `linear-cli i close <id>`
 
 **Essential CLI commands:**
-- `bd search "pattern"` - Search issues (PRIMARY discovery tool)
-- `bd ready` - Find unblocked work
-- `bd create --title="..." --type=task` - Create new issue
-- `bd update <id> --status=in_progress` - Update status, notes
-- `bd close <id>` - Mark work complete
-- `bd show <id>` - Get issue details
-- `bd list` - NEVER USE (causes context bloat)
-- `bd dep add <issue> <depends-on>` - Add dependencies
+- `linear-cli i list --output json --compact --all` - List issues
+- `linear-cli i get <id> --output json --compact` - Get issue details
+- `linear-cli i create "..." --output json --compact` - Create new issue (uses configured default team)
+- `linear-cli i start <id>` - Mark in progress
+- `linear-cli i update <id> --output json --compact ...` - Update issue fields
+- `linear-cli i close <id>` - Mark work complete
 
-**Worktree sync:**
-- **Main worktree**: Auto-sync works normally
-- **Other worktrees**: Run `bd sync` manually at session end
+**Worktree sync:** Use normal git workflow (`git pull --rebase`, `git push`) per worktree.
 
-**Full reference:** `.claude/skills/workflow/beads-tracking.skill.md`
+**Full reference:** `.claude/skills/workflow/linear-tracking.skill.md`
 
 ### Epic Orchestration (Swarm Pattern)
 
@@ -220,17 +217,17 @@ src/
 
 ```bash
 # 1. Create the epic
-bd create --title="Implement user settings page" --type=epic --priority=1
+linear-cli i create "Implement user settings page" --output json --compact
 
 # 2. Create child tasks (can be worked in parallel)
-bd create --title="Settings UI components" --type=task
-bd create --title="Settings API endpoints" --type=task
-bd create --title="Settings persistence layer" --type=task
+linear-cli i create "Settings UI components" --output json --compact
+linear-cli i create "Settings API endpoints" --output json --compact
+linear-cli i create "Settings persistence layer" --output json --compact
 
 # 3. Link children to epic (child depends on parent)
-bd dep add az-ui az-epic --type=parent-child
-bd dep add az-api az-epic --type=parent-child
-bd dep add az-persist az-epic --type=parent-child
+linear-cli i update <child-id> --data '{"parentId":"<epic-linear-id>"}' --output json --compact
+linear-cli i update <child-id> --data '{"parentId":"<epic-linear-id>"}' --output json --compact
+linear-cli i update <child-id> --data '{"parentId":"<epic-linear-id>"}' --output json --compact
 ```
 
 **Azedarach swarm workflow:**
@@ -695,7 +692,7 @@ Configurable: Ready PR, auto-merge after CI, immediate merge
 Skills auto-load when you edit files or mention keywords:
 
 **Workflow Skills:**
-- `.claude/skills/workflow/beads-tracking.skill.md` - Issue tracking workflow
+- `.claude/skills/workflow/linear-tracking.skill.md` - Issue tracking workflow (Linear migration in progress)
 
 **Effect Skills:**
 - `.claude/skills/effect/effect-services.skill.md` - Services, layers, dependency injection
@@ -731,7 +728,7 @@ Skills auto-load when you edit files or mention keywords:
 
 ## Quick Help
 
-- Workflow help: Use beads-tracking skill
+- Workflow help: Use the issue-tracking workflow skill
 - Architecture: See README.md for full spec
 - User guide: See `docs/README.md`
 

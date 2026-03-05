@@ -9,7 +9,7 @@ Purpose: Root entry point - redirects to app-specific context
 
 # Azedarach Project - Multi-Implementation
 
-> TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
 This repository contains multiple implementations of Azedarach, each in its own directory:
 
@@ -81,9 +81,9 @@ make test               # Run tests
 
 2. **Modern CLI Tools**: ALWAYS use `rg` (NOT grep), `fd` (NOT find), `bat` (NOT cat). 10x faster, gitignore-aware.
 
-3. **Beads Tracker**: ALWAYS use `bd` CLI commands for beads operations. Use `bd search` for discovery, `bd ready` for unblocked work. NEVER use `bd list` (causes context bloat).
+3. **Issue Tracking**: ALWAYS use `linear-cli` for issue operations. Prefer `linear-cli i list`, `linear-cli i get`, `linear-cli i create`, `linear-cli i update`, and `linear-cli i close`.
 
-4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams and use normal `bd sync`. If you're on a truly ephemeral branch (no upstream), DON'T run `bd sync --from-main` at session end.
+4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams. Use normal git pull/push flow for synchronization.
 
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
@@ -91,19 +91,21 @@ make test               # Run tests
 
 ## Task Management
 
-**Track ALL work in beads** (preserves context across sessions):
+**Track ALL work through issue tracking** (preserves context across sessions):
+Configure `issueTracker.linear.team` in `.azedarach.json` (or run `linear-cli setup`) to avoid passing `-t` for every `i create`.
 
 ```bash
-bd ready                          # Find available work
-bd update <id> --status=in_progress  # Claim it
-bd close <id>                     # Mark complete
+linear-cli i list --output json --compact --all
+linear-cli i start <id>
+linear-cli i update <id> --output json --compact ...
+linear-cli i close <id>
 ```
 
 ## OpenCode Plugins
 
 This project uses two OpenCode plugins:
 
-1. **opencode-beads** - Beads integration (bd prime, /bd-* commands)
+1. **opencode-pty** - PTY integration
 2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
 
 Both are configured in `opencode.json`.

@@ -2,7 +2,7 @@
 
 ## 1.1 Product Statement
 
-Azedarach is a terminal user interface that orchestrates parallel AI coding sessions against beads-tracked work, using git worktrees and tmux as execution substrates.
+Azedarach is a terminal user interface that orchestrates parallel AI coding sessions against linear-tracked work, using git worktrees and tmux as execution substrates.
 
 The product value is not code generation itself, but high-throughput coordination:
 
@@ -76,7 +76,7 @@ Azedarach solves this by making the board the command center.
 
 ### Out of Scope
 
-- replacing beads as tracker backend
+- replacing linear as tracker backend
 - replacing git hosting provider concepts
 - introducing mandatory GUI workflows
 - forcing a specific programming-language stack for implementation
@@ -108,7 +108,7 @@ Fields (canonical minimum):
 
 ### D-04 Project
 
-- registered root containing a beads dataset and git repo
+- registered root containing a linear dataset and git repo
 
 ### D-05 Attachment
 
@@ -239,7 +239,7 @@ As an engineer, I can attach images/screenshots so sessions have visual context.
 - deterministic key handling
 - robust behavior in non-interactive/CI-like shell environments
 - safe handling of credentials and local config files
-- clear compatibility requirements for git/tmux/gh/bd/ai-cli tooling
+- clear compatibility requirements for git/tmux/gh/linear-cli/ai-cli tooling
 
 ## 1.15 Compatibility Envelope
 
@@ -248,7 +248,7 @@ Minimum external capabilities required:
 - terminal emulator supporting interactive keyboard input
 - tmux available and functional
 - git worktree operations supported
-- beads CLI available in active project
+- linear CLI available in active project
 - AI CLI available and authenticated
 - optional gh for PR workflows
 
@@ -256,7 +256,7 @@ Minimum external capabilities required:
 
 - TUI frontend is mandatory.
 - Product behavior must not depend on mouse-only interactions.
-- Task tracker integration must preserve beads command semantics.
+- Task tracker integration must preserve linear command semantics.
 - Session naming and lookup must be deterministic from issue identity.
 
 ## 1.17 Decomposition View
@@ -281,7 +281,7 @@ mindmap
       Diff
       PR
     Data
-      Beads
+      Linear
       Projects
       Attachments
     Governance

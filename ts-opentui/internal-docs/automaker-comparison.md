@@ -259,7 +259,7 @@ Then auto-generates `app_spec.txt` in XML format with project overview, tech sta
 **Inspiration for az:**
 - Could add onboarding flow for new projects
 - Generate initial CLAUDE.md or context files
-- Create initial beads from described features
+- Create initial linear from described features
 
 ### 9. Context File Management ⭐⭐⭐
 
@@ -308,7 +308,7 @@ Then auto-generates `app_spec.txt` in XML format with project overview, tech sta
 
 **Inspiration for az:**
 - Already have search mode (`/`)
-- Could add loading indicator when beads are syncing
+- Could add loading indicator when linear are syncing
 
 ### 12. Board Background Customization ⭐
 
@@ -510,7 +510,7 @@ Seven settings categories:
 | **Multi-selection** | Batch operations with v mode | Limited/none |
 | **Sorting Options** | By session state/priority/updated | Basic |
 | **VC Integration** | Auto-pilot toggle, REPL commands | None |
-| **Beads Backend** | Structured issue tracking with deps | Simple local Zustand |
+| **Linear Backend** | Structured issue tracking with deps | Simple local Zustand |
 | **tmux Integration** | Deep (scrollback, vi-mode, keybindings) | Terminal tabs |
 | **State Detection** | Pattern matching (waiting/done/error/busy) | Event-based |
 | **Worktree Management** | Epic/task inheritance, auto-cleanup | Basic isolation |
@@ -680,7 +680,7 @@ AutoMaker is a polished GUI tool with strong UX patterns. Key takeaways:
 
 ### Keep Our Advantages
 1. **Modal Editing** - Helix-style is far more powerful
-2. **Beads Backend** - Structured > local state
+2. **Linear Backend** - Structured > local state
 3. **CLI-First** - Works everywhere (SSH, tmux, containers)
 4. **tmux Integration** - True session persistence
 5. **Pattern Detection** - More granular state tracking
@@ -693,7 +693,7 @@ AutoMaker is a polished GUI tool with strong UX patterns. Key takeaways:
 
 ---
 
-## Related Beads
+## Related Linear
 
 | Bead | Title | Priority |
 |------|-------|----------|

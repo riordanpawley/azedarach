@@ -804,7 +804,7 @@ Canonical fixture profile names:
 
 ### AZ-AT-2504 Hydration reconciliation preserves pending optimistic state
 
-- Preconditions: optimistic mutation pending; external unrelated change appears in beads.
+- Preconditions: optimistic mutation pending; external unrelated change appears in linear.
 - Steps: run hydration refresh cycle.
 - Expected: external change is applied, pending optimistic entity is preserved until resolution.
 - Links: AZ-FR-3808, AZ-FR-3809.

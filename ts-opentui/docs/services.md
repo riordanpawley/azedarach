@@ -39,7 +39,7 @@ export const method = (arg: string) =>
 
 **Location:** `src/core/BeadsClient.ts`
 
-Wrapper around the `bd` CLI for issue tracking operations.
+Wrapper around the `linear-cli` CLI for issue tracking operations.
 
 ```typescript
 interface BeadsClientI {
@@ -183,7 +183,7 @@ withLock(options, effect): Effect<A, E | LockError, R>
 
 **Location:** `src/core/ImageAttachmentService.ts`
 
-Manages image attachments for beads tasks. Since the beads CLI doesn't natively support file attachments, images are stored in a local directory structure with a JSON metadata index.
+Manages image attachments for linear tasks. Since the linear CLI doesn't natively support file attachments, images are stored in a local directory structure with a JSON metadata index.
 
 ```typescript
 interface ImageAttachmentServiceImpl {
@@ -198,7 +198,7 @@ interface ImageAttachmentServiceImpl {
 
 **Storage structure:**
 ```
-.beads/images/
+.linear/images/
 ├── index.json              # Metadata for all attachments
 ├── az-abc/                 # Issue-specific directory
 │   ├── screenshot-1.png
@@ -288,7 +288,7 @@ const program = Effect.gen(function* () {
 **Integration approach:**
 - Azedarach: TUI Kanban visualization and parallel session orchestration
 - VC: AI-supervised execution engine with quality gates
-- Shared: Same Beads SQLite database for task tracking
+- Shared: Same Linear SQLite database for task tracking
 
 **Auto-pilot mode:** VC runs in a tmux session (`vc-autopilot`), autonomously polling for ready issues, claiming work, running quality gates, and updating issue status.
 

@@ -1,13 +1,13 @@
 # Azedarach
 
-> A TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> A TUI Kanban board for orchestrating parallel Claude Code sessions with Linear task tracking
 
 Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Melia azedarach), whose seeds have been used for prayer beads for millennia.
 
 ## Overview
 
 Azedarach is a terminal-based Kanban board that:
-- Displays tasks from any Beads-enabled project
+- Displays tasks from any Linear-enabled project
 - Spawns Claude Code sessions in isolated git worktrees
 - Enables full parallelization of development work
 - Monitors session state (busy/waiting/done/error)
@@ -22,14 +22,14 @@ The key insight: **Claude Code already handles all the hard parts** (permissions
 2. **Minimal friction**: Start a task with a single keypress
 3. **Full visibility**: See status of all running Claude sessions at a glance
 4. **Easy intervention**: Attach to any session for manual fixes
-5. **Automated workflow**: Sync beads, create PRs, notify on completion
+5. **Automated workflow**: Update Linear status, create PRs, notify on completion
 6. **Zero Claude config**: 100% inherit project's Claude configuration
 
 ## Non-Goals
 
 - Managing Claude permissions (project's `.claude/settings.json` handles this)
 - Implementing custom Claude tools (project's MCP/skills handle this)
-- Replacing beads CLI (we wrap it, not replace it)
+- Replacing Linear CLI (we wrap it, not replace it)
 - IDE integration (this is terminal-native)
 
 ---
@@ -126,7 +126,7 @@ The architecture is shared across implementations:
 │  - Spawn/manage tmux sessions                                       │
 │  - Monitor Claude output for state changes                          │
 │  - Execute hooks on state transitions                               │
-│  - Coordinate with beads via `bd` CLI                               │
+│  - Coordinate with linear via `linear-cli` CLI                               │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
               ┌───────────────────┼───────────────────┐
@@ -155,8 +155,8 @@ User presses Enter on CHE-102
   ↓
 Azedarach:
   1. Creates worktree: ../Chefy-che-102
-  2. Runs `bd sync` in worktree
-  3. Updates status: `bd update che-102 --status=in_progress`
+  2. Loads issue context: `linear-cli i get che-102 --output json --compact`
+  3. Updates status: `linear-cli i update che-102 --status=in_progress`
   4. Spawns tmux session: `tmux new-session -d -s che-102`
   5. Starts Claude: `claude "work on: che-102"`
   ↓
@@ -192,7 +192,7 @@ Claude finishes CHE-103 successfully
 Azedarach detects "done" state
   ↓
 Azedarach:
-  1. Runs `bd sync` (push progress)
+  1. Updates issue status/comments in Linear as needed
   2. Commits changes: `git add -A && git commit -m "..."`
   3. Pushes: `git push -u origin che-103`
   4. Creates PR: `gh pr create --draft`
@@ -204,7 +204,7 @@ User reviews PR, approves, merges
 User marks task verified (or auto-verify if configured)
   ↓
 Azedarach:
-  1. Runs `bd close che-103`
+  1. Runs `linear-cli i close che-103`
   2. Cleans up worktree
   3. Task moves to "closed"
 ```
@@ -219,7 +219,7 @@ Azedarach:
   - Git >= 2.20 (worktree support)
   - tmux >= 3.0
   - gh CLI (authenticated)
-  - Beads (`bd` CLI installed and configured)
+  - Linear (`linear-cli` CLI installed and configured)
   - Claude Code (`claude` CLI installed and authenticated)
 
 - **For go-bubbletea:**
@@ -227,7 +227,7 @@ Azedarach:
   - Git >= 2.20 (worktree support)
   - tmux >= 3.0
   - gh CLI (authenticated)
-  - Beads (`bd` CLI installed and configured)
+  - Linear (`linear-cli` CLI installed and configured)
   - Claude Code (`claude` CLI installed and authenticated)
 
 ---
@@ -248,8 +248,8 @@ See [LICENSE](./LICENSE) for details.
 
 ## References
 
-- [Beads](https://github.com/steveyegge/beads) - Task tracking backend
-- [Beads Worktree Docs](https://github.com/steveyegge/beads/blob/main/docs/ADVANCED.md#git-worktrees)
+- [Linear](https://github.com/steveyegge/linear) - Task tracking backend
+- [Linear Worktree Docs](https://github.com/steveyegge/linear/blob/main/docs/ADVANCED.md#git-worktrees)
 - [CCManager](https://github.com/kbwo/ccmanager) - Session management inspiration
 - [Claude Squad](https://github.com/smtg-ai/claude-squad) - Parallel Claude orchestration
 - [OpenTUI](https://github.com/sst/opentui) - React for CLI (ts-opentui)

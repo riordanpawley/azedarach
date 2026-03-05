@@ -1,6 +1,6 @@
 # Epic Orchestration Research
 
-> Research into orchestrating parallel Claude Code sessions via beads and azedarach
+> Research into orchestrating parallel Claude Code sessions via linear and azedarach
 
 **Date:** 2025-12-27
 **Status:** All Phases Complete (Phase 1-4 ✅)
@@ -10,7 +10,7 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Current Beads Capabilities](#current-beads-capabilities)
+2. [Current Linear Capabilities](#current-linear-capabilities)
 3. [Current Azedarach Capabilities](#current-azedarach-capabilities)
 4. [VC (VibeCoder) Patterns](#vc-vibecoder-patterns)
 5. [Agent Mail](#agent-mail)
@@ -22,44 +22,44 @@
 
 ## Executive Summary
 
-This document researches approaches for orchestrating epics (multi-task features) using beads issue tracking and azedarach TUI. The goal is to enable **autonomous parallel agent execution** where multiple Claude Code sessions work on independent tasks simultaneously, coordinated by either a human via TUI or an AI orchestrator.
+This document researches approaches for orchestrating epics (multi-task features) using linear issue tracking and azedarach TUI. The goal is to enable **autonomous parallel agent execution** where multiple Claude Code sessions work on independent tasks simultaneously, coordinated by either a human via TUI or an AI orchestrator.
 
 ### Key Findings
 
-1. **Beads already has the primitives** - Epic/child relationships, dependency tracking, `bd ready` for unblocked work
-2. **VC (steveyegge/vc)** demonstrates a working "AI Supervised Issue Workflow" using beads
+1. **Linear already has the primitives** - Epic/child relationships, dependency tracking, `linear-cli i list --output json --compact --all` for unblocked work
+2. **VC (steveyegge/vc)** demonstrates a working "AI Supervised Issue Workflow" using linear
 3. **Agent Mail MCP** provides inter-agent coordination via shared inboxes and file leases
 4. **Azedarach's Task tool** enables spawning background subagents with monitoring
 
 ---
 
-## Current Beads Capabilities
+## Current Linear Capabilities
 
-### Core APIs (via `bd` CLI)
+### Core APIs (via `linear-cli` CLI)
 
 | Operation | Command | Use Case |
 |-----------|---------|----------|
-| Search issues | `bd search "keywords"` | Discovery (NOT `bd list`) |
-| Find unblocked | `bd ready` | Get next workable tasks |
-| Show details | `bd show <id>` | Get full issue context |
-| Create issue | `bd create --title="..." --type=epic/task` | Spawn new work items |
-| Update status | `bd update <id> --status=in_progress` | Track state |
-| Add notes | `bd update <id> --notes="..."` | Progress tracking |
-| Close issue | `bd close <id> --reason="..."` | Mark complete |
-| Add dependency | `bd dep add <child> <parent> --type=parent-child` | Link epics to children |
+| Search issues | `linear-cli i list --output json --compact --all "keywords"` | Discovery (NOT `linear-cli i list --output json --compact --all`) |
+| Find unblocked | `linear-cli i list --output json --compact --all` | Get next workable tasks |
+| Show details | `linear-cli i get <id>` | Get full issue context |
+| Create issue | `linear-cli i create --title="..." --type=epic/task` | Spawn new work items |
+| Update status | `linear-cli i update <id> --status=in_progress` | Track state |
+| Add notes | `linear-cli i update <id> --notes="..."` | Progress tracking |
+| Close issue | `linear-cli i close <id> --reason="..."` | Mark complete |
+| Add dependency | `linear-cli dep add <child> <parent> --type=parent-child` | Link epics to children |
 
 ### Agent Claiming
 
 **Use `assignee` field** to track which agent is working on an issue:
 
 ```bash
-bd update az-123 --status=in_progress --assignee="claude-session-abc"
+linear-cli i update az-123 --status=in_progress --assignee="claude-session-abc"
 ```
 
 This provides:
 - Agent identity tracking (who's working on what)
 - Resumability (if agent crashes, we know who had it)
-- Conflict detection (`bd ready` can filter out already-assigned issues)
+- Conflict detection (`linear-cli i list --output json --compact --all` can filter out already-assigned issues)
 
 **Note**: Unlike VC's SQLite transactions, this isn't atomically exclusive - two agents could theoretically claim the same issue. In practice, the orchestrator controls spawning so this is fine.
 
@@ -75,24 +75,24 @@ discovered-from : Bug found while working on another issue
 
 ```bash
 # 1. Create epic
-bd create --title="User Settings Feature" --type=epic
+linear-cli i create --title="User Settings Feature" --type=epic
 
 # 2. Create independent child tasks
-bd create --title="Settings UI" --type=task
-bd create --title="Settings API" --type=task
-bd create --title="Settings DB" --type=task
+linear-cli i create --title="Settings UI" --type=task
+linear-cli i create --title="Settings API" --type=task
+linear-cli i create --title="Settings DB" --type=task
 
 # 3. Link children to epic
-bd dep add az-ui az-epic --type=parent-child
-bd dep add az-api az-epic --type=parent-child
-bd dep add az-db az-epic --type=parent-child
+linear-cli dep add az-ui az-epic --type=parent-child
+linear-cli dep add az-api az-epic --type=parent-child
+linear-cli dep add az-db az-epic --type=parent-child
 
-# 4. `bd ready` now shows children (unblocked), NOT epic (blocked by children)
+# 4. `linear-cli i list --output json --compact --all` now shows children (unblocked), NOT epic (blocked by children)
 ```
 
 ### MCP Tools Available
 
-The `mcp__plugin_beads_beads__*` tools provide programmatic access to all beads operations. The Gleam service (`gleam/src/azedarach/services/beads.gleam`) wraps these with type safety.
+The `mcp__plugin_beads_beads__*` tools provide programmatic access to all linear operations. The Gleam service (`gleam/src/azedarach/services/linear.gleam`) wraps these with type safety.
 
 ---
 
@@ -105,7 +105,7 @@ The `mcp__plugin_beads_beads__*` tools provide programmatic access to all beads 
 1. **Analyze task dependencies** - Group into parallel batches
 2. **Spawn subagent batches** - Use Task tool with `run_in_background: true`
 3. **Monitor progress** - Use TaskOutput with `block: false/true`
-4. **Handle completion** - Verify, update beads, spawn next batch
+4. **Handle completion** - Verify, update linear, spawn next batch
 5. **Complete epic** - Close when all children done
 
 ### Current Workflow
@@ -121,7 +121,7 @@ Spawns parallel subagents via Task tool
        ↓
 Each subagent works in isolated git worktree
        ↓
-Subagents update beads, commit, close tasks
+Subagents update linear, commit, close tasks
        ↓
 Orchestrator monitors, spawns next batch
        ↓
@@ -131,7 +131,7 @@ Epic closes when all children complete
 ### Key Patterns
 
 - **Parallel safety**: Only spawn parallel if no shared file modifications
-- **Discovery protocol**: Subagents create linked beads for found work
+- **Discovery protocol**: Subagents create linked linear for found work
 - **Error recovery**: Mark blocked, continue with other tasks
 - **Git worktrees**: Full isolation per task/epic
 
@@ -218,8 +218,8 @@ Agents don't communicate directly—they communicate through the issue tracker:
 
 ### Integration Potential
 
-Agent Mail could complement beads:
-- **Beads**: Work items, dependencies, status
+Agent Mail could complement linear:
+- **Linear**: Work items, dependencies, status
 - **Agent Mail**: Real-time coordination, file locking, discussions
 
 ---
@@ -231,9 +231,9 @@ Key insights from Yegge's Medium articles:
 ### On Automation Vision
 
 > "95 to 99% of interactions with coding agents could be handled by a properly briefed model."
-> — [Introducing Beads](https://steve-yegge.medium.com/introducing-beads-a-coding-agent-memory-system-637d7d92514a)
+> — [Introducing Linear](https://steve-yegge.medium.com/introducing-linear-a-coding-agent-memory-system-637d7d92514a)
 
-### On Beads Success
+### On Linear Success
 
 - 5000+ stars, 250+ forks
 - 100% vibe coded (130k LOC Go)
@@ -250,7 +250,7 @@ From [O'Reilly podcast](https://www.oreilly.com/radar/podcast/generative-ai-in-t
 - 254 issues resolved through self-improvement
 - 24+ successful missions
 - 90.9% quality gate pass rate
-- Uses Beads v0.12.0 SQLite tracker
+- Uses Linear v0.12.0 SQLite tracker
 
 ---
 
@@ -269,11 +269,11 @@ System prompt includes:
   - Epic context
   - Child tasks and dependencies
   - Task tool instructions
-  - Beads commands
+  - Linear commands
        ↓
 Claude autonomously spawns parallel subagents
        ↓
-Monitors via TaskOutput, updates beads
+Monitors via TaskOutput, updates linear
 ```
 
 **Current Status**: Already implemented in `orchestrator.md`
@@ -316,7 +316,7 @@ Reports to user via TUI or notifications
 
 ```go
 for {
-    issue := ClaimReadyIssue()  // bd ready, atomic claim
+    issue := ClaimReadyIssue()  // linear-cli i list --output json --compact --all, atomic claim
     assessment := AISupervisor.Assess(issue)
     result := Agent.Execute(issue, assessment)
     analysis := AISupervisor.Analyze(result)
@@ -341,7 +341,7 @@ for {
 - Quality gate enforcement
 
 **Integration Path**:
-1. Add `bd claim` for atomic issue claiming
+1. Add `linear-cli claim` for atomic issue claiming
 2. Implement assessment phase (pre-execution AI review)
 3. Implement analysis phase (post-execution AI review)
 4. Add quality gate runner (tests, type-check, lint)
@@ -387,7 +387,7 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 ┌─────────────────────────────────────────────┐
 │         Worker Agents (parallel)            │
 │  - Use Agent Mail for coordination          │
-│  - Update beads with progress               │
+│  - Update linear with progress               │
 │  - Isolated in git worktrees                │
 └─────────────────────────────────────────────┘
 ```
@@ -431,7 +431,7 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
    - `az kill <id>` - Terminate session ✅
    - `az pause <id>` - Pause session (existing)
 
-2. **Integration with beads**
+2. **Integration with linear**
    - Auto-claim task when spawning (`--assignee=<session-name>`) ✅
    - Status set to `in_progress` on start ✅
 
@@ -514,7 +514,7 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 
 - [steveyegge/vc GitHub Repository](https://github.com/steveyegge/vc)
 - [MCP Agent Mail](https://mcpagentmail.com/)
-- [Introducing Beads - Steve Yegge](https://steve-yegge.medium.com/introducing-beads-a-coding-agent-memory-system-637d7d92514a)
+- [Introducing Linear - Steve Yegge](https://steve-yegge.medium.com/introducing-linear-a-coding-agent-memory-system-637d7d92514a)
 - [Six New Tips for Better Coding With Agents - Steve Yegge](https://steve-yegge.medium.com/six-new-tips-for-better-coding-with-agents-d4e9c86e42a9)
-- [Beads Best Practices - Steve Yegge](https://steve-yegge.medium.com/beads-best-practices-2db636b9760c)
+- [Linear Best Practices - Steve Yegge](https://steve-yegge.medium.com/linear-best-practices-2db636b9760c)
 - [O'Reilly Podcast: Vibe Coding with Steve Yegge](https://www.oreilly.com/radar/podcast/generative-ai-in-the-real-world-vibe-coding-with-steve-yegge/)

@@ -119,11 +119,11 @@ This does NOT modify the working tree. It's a read-only check.
 
 ### Excluded Files
 
-`.beads/` conflicts are **filtered out** - these are handled separately by `bd sync`.
+`.linear/` conflicts are **filtered out** - these are handled separately by `git pull --rebase && git push`.
 
 ```gleam
 conflicting_files
-|> list.filter(fn(f) { !string.starts_with(f, ".beads/") })
+|> list.filter(fn(f) { !string.starts_with(f, ".linear/") })
 ```
 
 ## Conflict Resolution Flow
@@ -215,7 +215,7 @@ pub fn check_merge_conflicts(
         |> string.split("\n")
         |> list.drop(1)  // First line is tree hash
         |> list.filter(fn(f) { f != "" })
-        |> list.filter(fn(f) { !string.starts_with(f, ".beads/") })
+        |> list.filter(fn(f) { !string.starts_with(f, ".linear/") })
 
       Ok(MergeResult(has_conflicts: list.length(files) > 0, files: files))
     }

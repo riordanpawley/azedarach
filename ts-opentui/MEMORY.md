@@ -219,7 +219,7 @@ import { Effect } from "effect"
 import { Command } from "@effect/platform"
 
 describe("BeadsClient", () => {
-  it("lists tasks via bd CLI", async () => {
+  it("lists tasks via linear-cli CLI", async () => {
     // Mock Command.run
     const commandRun = mock(() => Effect.succeed(`[{"id":"az-1","title":"Test"}]`))
     mock.module("@effect/platform", {
@@ -235,7 +235,7 @@ describe("BeadsClient", () => {
 
     expect(result).toEqual([{ id: "az-1", title: "Test" }])
     expect(commandRun).toHaveBeenCalledWith({
-      name: "bd",
+      name: "linear-cli",
       args: ["list", "--format=json"]
     })
   })

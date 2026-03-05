@@ -32,7 +32,7 @@
 │  │  - tasks: List(Task)           - Route commands to services           │  │
 │  │  - sessions: Dict(id, state)   - Aggregate state for UI               │  │
 │  │  - dev_servers: Dict(id, st)   - Manage optimistic updates            │  │
-│  │  - projects: List(Project)     - Periodic beads refresh               │  │
+│  │  - projects: List(Project)     - Periodic linear refresh               │  │
 │  │                                                                        │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │           │                    │                    │                        │
@@ -44,7 +44,7 @@
 │           │                    │                    │                        │
 │           ▼                    ▼                    ▼                        │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │ Session Monitor │  │ Server Monitor  │  │ • Beads         │              │
+│  │ Session Monitor │  │ Server Monitor  │  │ • Linear         │              │
 │  │ (per session)   │  │ (per server)    │  │ • Tmux          │              │
 │  │                 │  │                 │  │ • Worktree      │              │
 │  │ - polls tmux    │  │ - tracks port   │  │ • Git           │              │
@@ -60,8 +60,8 @@
 │                           External Systems                                   │
 │                                                                              │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐ │
-│  │   tmux    │  │    git    │  │  bd CLI   │  │  gh CLI   │  │ clipboard │ │
-│  │           │  │           │  │  (beads)  │  │ (GitHub)  │  │  tools    │ │
+│  │   tmux    │  │    git    │  │  linear-cli CLI   │  │  gh CLI   │  │ clipboard │ │
+│  │           │  │           │  │  (linear)  │  │ (GitHub)  │  │  tools    │ │
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘ │
 │                                                                              │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -83,8 +83,8 @@
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                         Beads Database                                 │  │
-│  │  .beads/                                                              │  │
+│  │                         Linear Database                                 │  │
+│  │  .linear/                                                              │  │
 │  │  ├── issues.jsonl      ← task data                                   │  │
 │  │  └── images/           ← attachments                                 │  │
 │  │      └── {bead-id}/                                                  │  │
@@ -161,7 +161,7 @@ User presses 's'
 │ 4. Run init commands (ONCE, sequentially)                    │
 │    └─→ direnv allow → wait prompt                           │
 │    └─→ bun install → wait prompt                            │
-│    └─→ bd sync → wait prompt                                │
+│    └─→ git pull --rebase && git push → wait prompt                                │
 │    └─→ Set @az_init_done marker                             │
 │                                                              │
 │ 5. Create main window with "claude"                          │
@@ -252,8 +252,8 @@ User presses 's'
 │  Priority 3: FILES (Last Resort)                            │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │ • Config             → .azedarach.json                 │ │
-│  │ • Image attachments  → .beads/images/                  │ │
-│  │ • Beads data         → via bd CLI (not direct)         │ │
+│  │ • Image attachments  → .linear/images/                  │ │
+│  │ • Linear data         → via linear-cli CLI (not direct)         │ │
 │  └────────────────────────────────────────────────────────┘ │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
@@ -288,7 +288,7 @@ actors/
 │   └── server_monitor.gleam ──────┘
 │
 services/
-├── beads.gleam      → bd CLI
+├── linear.gleam      → linear-cli CLI
 ├── tmux.gleam       → tmux commands
 ├── worktree.gleam   → git worktree
 ├── git.gleam        → git commands

@@ -8,8 +8,8 @@ This guide explains how to test each feature of Azedarach.
 # Ensure dependencies are installed
 pnpm install
 
-# Verify beads is working
-bd list --status=open
+# Verify linear is working
+linear-cli i list --output json --compact --all --status=open
 ```
 
 ## Testing the TUI
@@ -21,7 +21,7 @@ bd list --status=open
 pnpm dev
 ```
 
-**Expected:** Kanban board with your beads issues organized by status.
+**Expected:** Kanban board with your linear issues organized by status.
 
 ### Navigation Testing
 
@@ -83,8 +83,8 @@ pnpm dev
 
 **Verification:**
 ```bash
-# Check the task status changed in beads
-bd show <task-id>
+# Check the task status changed in linear
+linear-cli i get <task-id>
 ```
 
 ### Batch Movement Testing
@@ -254,11 +254,11 @@ brew install tmux
 ### "BEADS_DIR not found"
 
 ```bash
-# Ensure you're in a beads-enabled project
-ls -la .beads/
+# Ensure you're in a linear-enabled project
+ls -la .linear/
 
-# Initialize beads if needed
-bd init
+# Initialize linear if needed
+linear-cli init
 ```
 
 ### Rendering issues

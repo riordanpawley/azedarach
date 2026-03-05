@@ -6,7 +6,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 
 ## Scope
 
-- Product: terminal-first Kanban orchestration tool for beads tasks and parallel AI sessions
+- Product: terminal-first Kanban orchestration tool for linear tasks and parallel AI sessions
 - Required client surface: terminal user interface (TUI)
 - Required behavior: modal keyboard workflow, board views, session lifecycle, Git/PR workflows, and task management semantics
 - Excluded by design: specific language/runtime/framework decisions, internal module boundaries, storage engine internals
@@ -126,7 +126,7 @@ An implementation is complete when:
 - All MUST requirements in `04` pass mapped acceptance scenarios in `06`.
 - No open P0/P1 requirement gaps remain.
 - All keybindings in `02` are implemented with matching mode behavior.
-- Session, git, and beads workflows are fully executable end to end.
+- Session, git, and linear workflows are fully executable end to end.
 - Documented failure handling in `05` is implemented and testable.
 - Acceptance scenarios are automation-ready with deterministic fixtures and probe-backed assertions.
 - High-risk workflows pass both probe assertions and visual snapshot assertions.

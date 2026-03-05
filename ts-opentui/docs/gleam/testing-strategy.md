@@ -20,7 +20,7 @@ We prioritize:
                     │   E2E Tests   │
                     └───────────────┘
                    ┌─────────────────────┐
-                   │  Integration Tests  │  ← Real tmux, real bd
+                   │  Integration Tests  │  ← Real tmux, real linear-cli
                    │   (with fixtures)   │
                    └─────────────────────┘
               ┌───────────────────────────────┐
@@ -43,7 +43,7 @@ We prioritize:
 | `theme` | Color lookups | `Theme.get("catppuccin-macchiato", "text")` |
 | `ui/model` | Model updates | `update(model, MoveDown) == model with cursor+1` |
 | `ui/keys` | Key mapping | `key_to_action("j", Normal) == MoveDown` |
-| `services/beads` | JSON parsing | `parse_bead_json(json) == Ok(bead)` |
+| `services/linear` | JSON parsing | `parse_bead_json(json) == Ok(bead)` |
 
 ### How to Run
 
@@ -89,7 +89,7 @@ pub fn detect_busy_test() {
 | Component | Test With | Example |
 |-----------|-----------|---------|
 | `tmux` module | Real tmux | Create session, capture pane, send keys |
-| `beads` module | Real bd CLI | List beads, show bead, create bead |
+| `linear` module | Real linear-cli CLI | List linear, show bead, create bead |
 | `worktree` module | Real git | Create worktree, check status |
 | `clipboard` module | Real clipboard | Paste image (on CI, mock or skip) |
 
@@ -146,8 +146,8 @@ jobs:
       - name: Install tmux
         run: sudo apt-get install -y tmux
 
-      - name: Install beads
-        run: cargo install beads  # or however bd is installed
+      - name: Install linear
+        run: cargo install linear  # or however linear-cli is installed
 
       - name: Run tests
         run: gleam test
@@ -171,7 +171,7 @@ Test actor message handling in isolation:
 import azedarach/actors/coordinator
 
 pub fn refresh_updates_tasks_test() {
-  // Start coordinator with mock beads data
+  // Start coordinator with mock linear data
   let coord = coordinator.start_link(MockBeadsClient)
 
   // Send refresh message
@@ -183,7 +183,7 @@ pub fn refresh_updates_tasks_test() {
 
   state.tasks
   |> list.length()
-  |> should.equal(3)  // Mock returns 3 beads
+  |> should.equal(3)  // Mock returns 3 linear
 }
 ```
 
@@ -264,7 +264,7 @@ test/
 │   └── ...
 │
 └── fixtures/
-    ├── beads.json
+    ├── linear.json
     ├── config.json
     └── ...
 ```

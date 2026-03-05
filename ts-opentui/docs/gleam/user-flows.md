@@ -27,7 +27,7 @@
 │  3b. Press 'S' (start+work)                                                  │
 │      └── Same as above but Claude gets prompt:                              │
 │          "work on bead az-123 (task): Fix login bug                         │
-│           Run `bd show az-123` to see full description...                   │
+│           Run `linear-cli i get az-123` to see full description...                   │
 │           Before starting: ASK ME if anything unclear..."                   │
 │                                                                              │
 │  4. Claude starts working                                                    │
@@ -201,12 +201,12 @@
 │                                                                              │
 │  3a. Press 'p' to paste from clipboard                                       │
 │      └── Uses: pbpaste (mac) / wl-paste (wayland) / xclip (x11)             │
-│      └── Saves to: .beads/images/{bead-id}/{id}.png                         │
+│      └── Saves to: .linear/images/{bead-id}/{id}.png                         │
 │      └── Adds markdown link to bead notes                                   │
 │                                                                              │
 │  3b. Press 'f' then type path                                                │
 │      └── /path/to/image.png                                                 │
-│      └── Copies to .beads/images/                                           │
+│      └── Copies to .linear/images/                                           │
 │                                                                              │
 │  4. Image appears in attachment list                                         │
 │     └── j/k to navigate                                                     │
@@ -216,7 +216,7 @@
 │                                                                              │
 │  5. When starting session (Space+S), image paths included:                   │
 │     "Attached images (use Read tool to view):                               │
-│      /path/to/.beads/images/az-123/abc123.png"                              │
+│      /path/to/.linear/images/az-123/abc123.png"                              │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -276,7 +276,7 @@
 │     │ Select Project                      │                                 │
 │     │                                     │                                 │
 │     │ 1. azedarach        /home/user/az   │ ← current                       │
-│     │ 2. beads            /home/user/bd   │                                 │
+│     │ 2. linear            /home/user/linear-cli   │                                 │
 │     │ 3. my-app           /home/user/app  │                                 │
 │     │                                     │                                 │
 │     │ Press 1-9 to select                 │                                 │
@@ -284,7 +284,7 @@
 │                                                                              │
 │  2. Press number to switch                                                   │
 │     └── Loads project config                                                │
-│     └── Refreshes beads                                                     │
+│     └── Refreshes linear                                                     │
 │     └── Discovers existing sessions                                         │
 │                                                                              │
 │  3. Status bar shows current project                                         │
@@ -319,7 +319,7 @@
 
 ## 10. Planning Workflow
 
-**Goal:** Use AI to plan complex features and auto-create beads
+**Goal:** Use AI to plan complex features and auto-create linear
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -367,7 +367,7 @@
 │                              ↓                                               │
 │     ┌───────────────────────────────────────────────────────────────────┐   │
 │     │ Phase 3: CREATE BEADS                                              │   │
-│     │ Once approved, creates beads with bd CLI:                          │   │
+│     │ Once approved, creates linear with linear-cli CLI:                          │   │
 │     │ - Epic for the main feature                                        │   │
 │     │ - Child tasks linked to epic (parent-child deps)                   │   │
 │     │ - Blocking dependencies between sequential tasks                   │   │
@@ -378,7 +378,7 @@
 │     ┌─────────────────────────────────────────────────────────────────────┐ │
 │     │ Planning Complete                                                    │ │
 │     │                                                                      │ │
-│     │ Created 5 beads:                                                     │ │
+│     │ Created 5 linear:                                                     │ │
 │     │   [epic]    az-abc  Add user authentication                          │ │
 │     │   [task]    az-def  Set up OAuth providers                           │ │
 │     │   [task]    az-ghi  Implement JWT token flow                         │ │
@@ -459,7 +459,7 @@ Press `a` during generation or review to attach to the planning tmux session. Th
 │                                                                              │
 │  3. Press 'y' to confirm                                                     │
 │     └── All resources cleaned up                                            │
-│     └── Bead stays in beads (can close separately)                          │
+│     └── Bead stays in linear (can close separately)                          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

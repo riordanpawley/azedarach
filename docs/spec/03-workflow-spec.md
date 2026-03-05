@@ -423,7 +423,7 @@ Notification policy SHOULD be configurable per channel.
 sequenceDiagram
   participant U as User
   participant AZ as Azedarach TUI
-  participant BD as Beads
+  participant BD as Linear
   participant TM as tmux
   participant G as Git
   participant GH as GitHub
@@ -708,9 +708,9 @@ Applies to user-facing mutations where fast feedback matters, including:
 - dependency add/remove/update
 - fork metadata creation
 
-Beads synchronization contract:
+Linear synchronization contract:
 
-- beads remains source of truth for persisted state
+- linear remains source of truth for persisted state
 - UI applies optimistic mutations immediately
 - periodic/manual hydration polls reconcile non-local external changes
 - hydration MUST NOT clobber locally pending optimistic updates

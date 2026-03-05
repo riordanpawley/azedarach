@@ -620,7 +620,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 ### Multi-Project
 
 - UC-EXT-070: switch projects while session operations in flight.
-- UC-EXT-071: project path exists but not beads-enabled.
+- UC-EXT-071: project path exists but not linear-enabled.
 - UC-EXT-072: default project removed from registry.
 - UC-EXT-073: duplicate project names in registry handled safely.
 
