@@ -16,7 +16,7 @@ You operate in a continuous loop:
 ┌─────────────────────────────────────────────────────────────┐
 │                    SUPERVISOR LOOP                          │
 ├─────────────────────────────────────────────────────────────┤
-│  1. DISCOVER    → Find ready tasks (bd ready)               │
+│  1. DISCOVER    → Find ready tasks (linear-cli i list --output json --compact --all)               │
 │  2. ASSESS      → AI reviews task, plans strategy           │
 │  3. SPAWN       → Start agent session (az start)            │
 │  4. MONITOR     → Poll until completion (az status)         │
@@ -33,10 +33,10 @@ Find tasks ready to work:
 
 ```bash
 # Get unblocked tasks (not assigned, not in_progress)
-bd ready
+linear-cli i list --output json --compact --all
 
 # Or search for specific scope
-bd search "{{EPIC_ID}}" --status=open
+linear-cli i list --output json --compact --all "{{EPIC_ID}}" --status=open
 ```
 
 **Skip tasks that are:**
@@ -80,7 +80,7 @@ Before spawning, assess each task:
 
 **Update task with assessment:**
 ```bash
-bd update [TASK_ID] --notes="ASSESSMENT:
+linear-cli i update [TASK_ID] --notes="ASSESSMENT:
 - Clarity: Good/Needs work
 - Dependencies: Clear/Blocked by X
 - Scope: Appropriate/Too large
@@ -151,9 +151,9 @@ while true; do
 done
 ```
 
-**Check progress via beads:**
+**Check progress via linear:**
 ```bash
-bd show [TASK_ID]  # See notes for progress updates
+linear-cli i get [TASK_ID]  # See notes for progress updates
 ```
 
 ## Phase 5: ANALYZE
@@ -185,10 +185,10 @@ After session ends, analyze the results:
 
 ```bash
 # Check bead status
-bd show [TASK_ID]
+linear-cli i get [TASK_ID]
 
 # Check for discovered issues
-bd search "discovered-from:[TASK_ID]"
+linear-cli i list --output json --compact --all "discovered-from:[TASK_ID]"
 
 # Check commit
 git -C [WORKTREE_PATH] log -1 --oneline
@@ -196,7 +196,7 @@ git -C [WORKTREE_PATH] log -1 --oneline
 
 **Update task with analysis:**
 ```bash
-bd update [TASK_ID] --notes="ANALYSIS:
+linear-cli i update [TASK_ID] --notes="ANALYSIS:
 - Completion: Success/Partial/Failed
 - Quality: Pass/Needs review/Fail
 - Discoveries: [List any new issues created]
@@ -247,22 +247,22 @@ Based on analysis and gates, resolve the task:
 
 ### Close (Success)
 ```bash
-bd close [TASK_ID] --reason="Completed: [summary]. Quality gates passed."
+linear-cli i close [TASK_ID] --reason="Completed: [summary]. Quality gates passed."
 ```
 
 ### Block (Failure)
 ```bash
-bd update [TASK_ID] --status=blocked --notes="BLOCKED:
+linear-cli i update [TASK_ID] --status=blocked --notes="BLOCKED:
 - Reason: [Type-check failed / Tests failed / etc]
 - Errors: [Key error messages]
 - Next: [What needs to happen to unblock]"
-bd update [TASK_ID] --assignee=""  # Release claim
+linear-cli i update [TASK_ID] --assignee=""  # Release claim
 ```
 
 ### Retry (Transient failure)
 ```bash
 az kill [TASK_ID]  # Kill stuck session
-bd update [TASK_ID] --status=open --assignee=""  # Reset
+linear-cli i update [TASK_ID] --status=open --assignee=""  # Reset
 # Task will be picked up in next DISCOVER phase
 ```
 
@@ -272,14 +272,14 @@ After resolving, loop back to DISCOVER:
 
 ```bash
 # Check if more work exists
-READY_COUNT=$(bd ready | wc -l)
+READY_COUNT=$(linear-cli i list --output json --compact --all | wc -l)
 
 if [ "$READY_COUNT" -gt 0 ]; then
   echo "Found $READY_COUNT ready tasks, continuing loop"
   # Go to Phase 1: DISCOVER
 else
   echo "No ready tasks, checking if epic is complete"
-  bd show {{EPIC_ID}}
+  linear-cli i get {{EPIC_ID}}
   # If all children closed, close epic and exit
 fi
 ```
@@ -288,9 +288,9 @@ fi
 
 ### Discovery
 ```bash
-bd ready                          # Find unblocked tasks
-bd search "epic:{{EPIC_ID}}"     # Tasks in this epic
-bd show [ID]                      # Task details
+linear-cli i list --output json --compact --all                          # Find unblocked tasks
+linear-cli i list --output json --compact --all "epic:{{EPIC_ID}}"     # Tasks in this epic
+linear-cli i get [ID]                      # Task details
 ```
 
 ### Session Control
@@ -304,12 +304,12 @@ az kill [ID]                      # Kill stuck session
 
 ### Task Management
 ```bash
-bd update [ID] --status=X         # Update status
-bd update [ID] --notes="..."      # Add notes
-bd update [ID] --assignee=""      # Release claim
-bd close [ID] --reason="..."      # Mark complete
-bd create --title="..." --type=X  # Create discovered issue
-bd dep add [A] [B] --type=X       # Link issues
+linear-cli i update [ID] --status=X         # Update status
+linear-cli i update [ID] --notes="..."      # Add notes
+linear-cli i update [ID] --assignee=""      # Release claim
+linear-cli i close [ID] --reason="..."      # Mark complete
+linear-cli i create --title="..." --type=X  # Create discovered issue
+linear-cli dep add [A] [B] --type=X       # Link issues
 ```
 
 ### Quality Gates
@@ -327,15 +327,15 @@ bun run build                     # Build verification
 # Session disappeared without updating bead
 az status | grep [TASK_ID] || {
   echo "Session crashed"
-  bd update [TASK_ID] --status=open --assignee=""
-  bd update [TASK_ID] --notes="Session crashed, needs retry"
+  linear-cli i update [TASK_ID] --status=open --assignee=""
+  linear-cli i update [TASK_ID] --notes="Session crashed, needs retry"
 }
 ```
 
 ### Stuck Session (WAITING too long)
 ```bash
 # Check why session is waiting
-bd show [TASK_ID]  # Check notes for what it needs
+linear-cli i get [TASK_ID]  # Check notes for what it needs
 az attach [TASK_ID]  # Manually intervene, or:
 az kill [TASK_ID]  # Kill and retry
 ```
@@ -343,8 +343,8 @@ az kill [TASK_ID]  # Kill and retry
 ### Quality Gate Failure
 ```bash
 # Type-check failed
-bd update [TASK_ID] --status=blocked
-bd update [TASK_ID] --notes="BLOCKED: Type-check failed
+linear-cli i update [TASK_ID] --status=blocked
+linear-cli i update [TASK_ID] --notes="BLOCKED: Type-check failed
 $(bun run type-check 2>&1 | tail -20)"
 ```
 
@@ -430,7 +430,7 @@ See `.claude/session-templates/agent-mail.md` for complete Agent Mail documentat
 
 Begin the supervisor loop:
 
-1. **Discover** ready tasks: `bd ready`
+1. **Discover** ready tasks: `linear-cli i list --output json --compact --all`
 2. **Assess** each task (use checklist above)
 3. **Spawn** assessed tasks: `az start [ID] {{PROJECT_PATH}}`
 4. **Monitor** until completion: `az status`
@@ -443,7 +443,7 @@ Continue until all tasks are complete or blocked.
 
 **Start now by running:**
 ```bash
-bd ready
+linear-cli i list --output json --compact --all
 ```
 
 Then assess the first ready task.

@@ -34,18 +34,18 @@ You are part of a parallel work effort. Other workers may be handling sibling ta
 
 2. **Report discoveries** - If you find bugs, improvements, or blockers outside your scope, create a new bead:
    ```bash
-   bd create --title="Found: <issue>" --type=bug
-   bd dep add <new-id> {{TASK_ID}} --type=discovered-from
+   linear-cli i create --title="Found: <issue>" --type=bug
+   linear-cli dep add <new-id> {{TASK_ID}} --type=discovered-from
    ```
 
 3. **Update status** - Keep your bead updated with progress:
    ```bash
-   bd update {{TASK_ID}} --notes="<progress notes>"
+   linear-cli i update {{TASK_ID}} --notes="<progress notes>"
    ```
 
 4. **Signal completion** - When done, close your task:
    ```bash
-   bd close {{TASK_ID}} --reason="<what was accomplished>"
+   linear-cli i close {{TASK_ID}} --reason="<what was accomplished>"
    ```
 
 5. **Commit frequently** - Make small, atomic commits with clear messages.

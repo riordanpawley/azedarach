@@ -42,7 +42,7 @@ az dev status az-29ey --json
 # Restart after config changes
 az dev restart az-29ey
 
-# List all running servers across beads
+# List all running servers across linear
 az dev list
 ```
 
@@ -87,7 +87,7 @@ When working in an Azedarach session:
 1. **Start work**: TUI spawned your session, you're ready to go
 2. **Dev servers**: Use `az dev start/stop/restart` for server control
 3. **Complete work**: Clean exit triggers TUI's completion workflow (PR creation, etc.)
-4. **Beads sync**: Run `bd sync` before finishing to persist task state
+4. **Linear sync**: Run `git pull --rebase && git push` before finishing to persist task state
 
 ## Troubleshooting
 

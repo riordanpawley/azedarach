@@ -5,7 +5,7 @@ Run a structured retrospective on recent work and save it to a session file.
 **Workflow:**
 1. This command analyzes recent work and writes a session file
 2. Review the session file when ready
-3. Run `/retro-review` to create beads tasks for selected issues
+3. Run `/retro-review` to create linear tasks for selected issues
 4. Run `/retro-patterns` periodically to find recurring patterns across sessions
 
 ## Your Task
@@ -19,7 +19,7 @@ Conduct a structured retrospective and save to `internal-docs/retrospectives/ses
 - Identify patterns worth repeating
 - **Consider project-specific patterns:**
   - Did skills system help? Which skills were useful?
-  - Did beads integration work smoothly?
+  - Did linear integration work smoothly?
   - Was documentation (CLAUDE.md, skills/) helpful?
   - Were modern CLI tools (rg, fd) effective?
 
@@ -35,7 +35,7 @@ Conduct a structured retrospective and save to `internal-docs/retrospectives/ses
 - **Areas to check:**
   - Missing or unclear documentation in CLAUDE.md/skills files?
   - Skills that should exist but don't?
-  - Beads workflow friction?
+  - Linear workflow friction?
   - Type errors that could be prevented with better patterns?
   - Missing automation or tooling?
   - **Skills system health:**
@@ -61,7 +61,7 @@ Search for related content in:
 
 ### 3. Suggested Action Items
 
-For each issue, suggest appropriate beads task structure (don't create yet):
+For each issue, suggest appropriate linear task structure (don't create yet):
 
 **Discovery failures:**
 - Title: "Fix skill auto-loading for [pattern]"
@@ -89,7 +89,7 @@ For each issue, suggest appropriate beads task structure (don't create yet):
 
 1. **Write session file**: Create `internal-docs/retrospectives/session-YYYY-MM-DD-HHMMSS.md` with timestamp
 2. **Include all analysis**: Full retrospective content in structured format
-3. **Don't create beads**: Just document suggested tasks (run `/retro-review` later to create them)
+3. **Don't create linear**: Just document suggested tasks (run `/retro-review` later to create them)
 4. **Remind user**: End with reminder to run `/retro-review` when ready
 
 ## Example Session File Format
@@ -106,9 +106,9 @@ For each issue, suggest appropriate beads task structure (don't create yet):
 **Details**: React patterns translated well to OpenTUI, component composition worked smoothly
 **Impact**: Clean code, good separation of concerns
 
-### 2. Beads CLI integration
+### 2. Linear CLI integration
 **Classification**: Needs codification
-**Details**: bd CLI commands work great in scripts, pattern worth documenting
+**Details**: linear-cli CLI commands work great in scripts, pattern worth documenting
 **Impact**: Effective automation, but pattern not discoverable
 
 ## What Could Be Better
@@ -139,7 +139,7 @@ For each issue, suggest appropriate beads task structure (don't create yet):
 
 ---
 
-**Next step**: Run `/retro-review` to select which tasks to create in beads
+**Next step**: Run `/retro-review` to select which tasks to create in linear
 ```
 
 ## After Writing Session File
@@ -151,6 +151,6 @@ Retrospective session saved to: internal-docs/retrospectives/session-[timestamp]
 
 Next steps:
 - Review the session file when ready
-- Run `/retro-review` to interactively create beads tasks
+- Run `/retro-review` to interactively create linear tasks
 - Run `/retro-patterns` periodically to find recurring patterns
 ```

@@ -2,7 +2,7 @@
 
 You are orchestrating the implementation of **{{EPIC_TITLE}}**.
 
-Your role is to coordinate subagents that implement the child tasks of this epic. You spawn subagents using the **Task tool**, monitor their progress, and update beads with results.
+Your role is to coordinate subagents that implement the child tasks of this epic. You spawn subagents using the **Task tool**, monitor their progress, and update linear with results.
 
 ## Epic Overview
 
@@ -89,7 +89,7 @@ You are session: [UNIQUE_SESSION_ID]
 ## FIRST: Claim This Task
 Before doing any work, claim the task:
 ```bash
-bd update [TASK_ID] --status=in_progress --assignee="[UNIQUE_SESSION_ID]"
+linear-cli i update [TASK_ID] --status=in_progress --assignee="[UNIQUE_SESSION_ID]"
 ```
 
 ## Task Details
@@ -108,12 +108,12 @@ bd update [TASK_ID] --status=in_progress --assignee="[UNIQUE_SESSION_ID]"
 4. Run type-check: bun run type-check
 5. Commit your changes with a clear message
 6. Update notes with final summary
-7. Close the task: bd close [TASK_ID] --reason="[summary]"
+7. Close the task: linear-cli i close [TASK_ID] --reason="[summary]"
 
 ## Progress Notes Format
 Update notes at key milestones using:
 ```bash
-bd update [TASK_ID] --notes="COMPLETED:
+linear-cli i update [TASK_ID] --notes="COMPLETED:
 - [What's done]
 
 IN PROGRESS:
@@ -171,7 +171,7 @@ az status
 **Check detailed progress:**
 ```bash
 az status -v  # Shows worktree paths
-bd show az-001  # See bead notes for progress
+linear-cli i get az-001  # See bead notes for progress
 ```
 
 **Attach to debug:**
@@ -204,13 +204,13 @@ echo "az-001 completed or needs attention"
 
 **Check bead notes for progress:**
 ```bash
-bd show [TASK_ID]  # See notes field for progress updates
+linear-cli i get [TASK_ID]  # See notes field for progress updates
 ```
 
 ### 5. Handle Completion
 
 When a subagent completes successfully:
-1. Verify the task was closed: `bd show [TASK_ID]`
+1. Verify the task was closed: `linear-cli i get [TASK_ID]`
 2. Verify assignee matches expected session ID
 3. Check for any discovered issues the subagent created
 4. Proceed to spawn next batch of tasks
@@ -218,32 +218,32 @@ When a subagent completes successfully:
 When a subagent reports errors:
 1. Review the error output
 2. Decide whether to retry or mark task as blocked
-3. Update bead status: `bd update [TASK_ID] --status=blocked --notes="[reason]"`
-4. Clear assignee if abandoning: `bd update [TASK_ID] --assignee=""`
+3. Update bead status: `linear-cli i update [TASK_ID] --status=blocked --notes="[reason]"`
+4. Clear assignee if abandoning: `linear-cli i update [TASK_ID] --assignee=""`
 
 ### 6. Complete the Epic
 
 When all child tasks are closed:
-1. Verify all work: `bd show {{EPIC_ID}}`
+1. Verify all work: `linear-cli i get {{EPIC_ID}}`
 2. Run final type-check: `bun run type-check`
 3. Update epic notes with summary
-4. Close the epic: `bd close {{EPIC_ID}} --reason="All child tasks completed"`
+4. Close the epic: `linear-cli i close {{EPIC_ID}} --reason="All child tasks completed"`
 
 ## Quick Reference
 
-### Beads Commands
+### Linear Commands
 
 | Action | Command |
 |--------|---------|
-| Show task details | `bd show [ID]` |
-| Claim task | `bd update [ID] --status=in_progress --assignee="[SESSION]"` |
-| Update progress notes | `bd update [ID] --notes="..."` |
-| Release claim | `bd update [ID] --assignee=""` |
-| Close completed task | `bd close [ID] --reason="..."` |
-| Create discovered issue | `bd create --title="Found: ..." --type=bug` |
-| Link discovered issue | `bd dep add [NEW_ID] [PARENT_ID] --type=discovered-from` |
-| Check blocked tasks | `bd blocked` |
-| Check ready tasks | `bd ready` |
+| Show task details | `linear-cli i get [ID]` |
+| Claim task | `linear-cli i update [ID] --status=in_progress --assignee="[SESSION]"` |
+| Update progress notes | `linear-cli i update [ID] --notes="..."` |
+| Release claim | `linear-cli i update [ID] --assignee=""` |
+| Close completed task | `linear-cli i close [ID] --reason="..."` |
+| Create discovered issue | `linear-cli i create --title="Found: ..." --type=bug` |
+| Link discovered issue | `linear-cli dep add [NEW_ID] [PARENT_ID] --type=discovered-from` |
+| Check blocked tasks | `linear-cli blocked` |
+| Check ready tasks | `linear-cli i list --output json --compact --all` |
 
 ### az CLI Commands (Session Management)
 
@@ -270,7 +270,7 @@ When all child tasks are closed:
    - 50% progress (mid-implementation)
    - Completion (before closing)
 
-4. **Discovery Protocol**: When subagents discover new work, they create linked beads. Review these after each batch and decide whether to:
+4. **Discovery Protocol**: When subagents discover new work, they create linked linear. Review these after each batch and decide whether to:
    - Add them to the current orchestration
    - Defer them for later work
    - Mark the epic as blocked if they're critical

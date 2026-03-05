@@ -201,7 +201,7 @@ For a worker agent implementing a task:
    - file_reservation_paths(project_key, agent_name, [files], 3600, true, "{{TASK_ID}}")
 
 4. Claim bead:
-   - bd update {{TASK_ID}} --status=in_progress --assignee="{{TASK_ID}}-worker"
+   - linear-cli i update {{TASK_ID}} --status=in_progress --assignee="{{TASK_ID}}-worker"
 
 ## During Work
 
@@ -209,8 +209,8 @@ For a worker agent implementing a task:
    - send_message(project_key, agent_name, ["orchestrator"], "[BLOCKED] Need X")
 
 6. If discover new work:
-   - Create bead: bd create --title="Found: ..." --type=bug
-   - Link it: bd dep add NEW_ID {{TASK_ID}} --type=discovered-from
+   - Create bead: linear-cli i create --title="Found: ..." --type=bug
+   - Link it: linear-cli dep add NEW_ID {{TASK_ID}} --type=discovered-from
    - Notify: send_message(project_key, agent_name, ["orchestrator"], "[DISCOVERY] ...")
 
 ## Session End
@@ -219,7 +219,7 @@ For a worker agent implementing a task:
    - release_file_reservations(project_key, agent_name)
 
 8. Close bead:
-   - bd close {{TASK_ID}} --reason="..."
+   - linear-cli i close {{TASK_ID}} --reason="..."
 ```
 
 ### Pattern 2: Orchestrator Coordination
@@ -282,7 +282,7 @@ Enhanced supervisor loop integrating Agent Mail:
 ┌─────────────────────────────────────────────────────────────┐
 │              SUPERVISOR LOOP (with Agent Mail)              │
 ├─────────────────────────────────────────────────────────────┤
-│  1. DISCOVER    → bd ready + check inbox for discoveries    │
+│  1. DISCOVER    → linear-cli i list --output json --compact --all + check inbox for discoveries    │
 │  2. ASSESS      → Check file reservations for conflicts     │
 │  3. SPAWN       → Worker registers + acquires leases        │
 │  4. MONITOR     → az status + fetch_inbox for messages      │
@@ -354,7 +354,7 @@ done
 3. **Release promptly**: Don't hold leases longer than needed
 4. **Check inbox regularly**: Especially when waiting or blocked
 5. **Use meaningful subjects**: Prefix with [TYPE] for easy filtering
-6. **Link to beads**: Use task ID in reservation reasons
+6. **Link to linear**: Use task ID in reservation reasons
 7. **Acknowledge messages**: Keep inbox clean for real-time coordination
 
 ## Troubleshooting

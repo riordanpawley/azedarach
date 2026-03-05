@@ -1,32 +1,3 @@
 #!/usr/bin/env sh
-# Migrated from bd hook shim to explicit br behavior.
-if command -v br >/dev/null 2>&1; then
-  BEADS_DIR=""
-  if git rev-parse --git-dir >/dev/null 2>&1; then
-    if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
-      MAIN_REPO_ROOT="$(git rev-parse --git-common-dir)"
-      MAIN_REPO_ROOT="$(dirname "$MAIN_REPO_ROOT")"
-      if [ -d "$MAIN_REPO_ROOT/.beads" ]; then
-        BEADS_DIR="$MAIN_REPO_ROOT/.beads"
-      fi
-    else
-      if [ -d .beads ]; then
-        BEADS_DIR=".beads"
-      fi
-    fi
-  fi
-
-  if [ -n "$BEADS_DIR" ]; then
-    if ! br sync --flush-only >/dev/null 2>&1; then
-      echo "Error: Failed to flush br changes to JSONL" >&2
-      exit 1
-    fi
-
-    if [ -f "$BEADS_DIR/issues.jsonl" ] && [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
-      git add "$BEADS_DIR/issues.jsonl" 2>/dev/null || true
-    fi
-  fi
-fi
-
-
+# Linear issue tracking does not require local issue-db sync during commit hooks.
 exit 0

@@ -734,6 +734,8 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 								? normalizeLinearStatus(stateName)
 								: issue.completedAt != null || issue.canceledAt != null
 									? "closed"
+									: issue.startedAt != null
+										? "in_progress"
 									: "open"
 						const parentLocalId = issue.parentId ? issuesById.get(issue.parentId)?.identifier : undefined
 

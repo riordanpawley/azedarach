@@ -5,7 +5,8 @@
   "permissions": {
     "allow": [
       "Read(//**/.beads/images/**)",
-      "Bash(br:*)",
+      "Read(//**/.linear/images/**)",
+      "Bash(linear-cli:*)",
       "mcp__effect-docs__*",
       "Bash(rg:*)",
       "Bash(fd:*)",
@@ -49,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/br-hooks.cjs session-start"
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/linear-hooks.cjs session-start"
           }
         ]
       }
@@ -59,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/br-hooks.cjs stop"
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/linear-hooks.cjs stop"
           }
         ]
       }

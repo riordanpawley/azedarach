@@ -3,13 +3,13 @@
 	"metadata": {
 		"project": "Azedarach",
 		"description": "Auto-activating skills configuration for Azedarach TUI",
-		"lastUpdated": "2025-12-14"
+		"lastUpdated": "2026-03-04"
 	},
 	"skills": [
 		{
-			"id": "beads-tracking",
-			"name": "Beads Issue Tracking",
-			"path": ".claude/skills/workflow/beads-tracking.skill.md",
+			"id": "linear-tracking",
+			"name": "Issue Tracking",
+			"path": ".claude/skills/workflow/linear-tracking.skill.md",
 			"type": "workflow",
 			"priority": "high",
 			"confidence": {
@@ -17,25 +17,23 @@
 				"suggested": 0.4
 			},
 			"triggers": {
-				"filePatterns": [".beads/**/*"],
-				"contentPatterns": ["bd ready", "bd create", "bd update", "bd close", "bd search"],
+				"filePatterns": [".azedarach.json", "ts-opentui/src/core/BeadsClient.ts"],
+				"contentPatterns": [
+					"linear-cli i list",
+					"linear-cli i create",
+					"linear-cli i update",
+					"linear-cli i close",
+					"linear-cli i get",
+					"linear-cli i start"
+				],
 				"keywords": [
-					"bead",
-					"beads",
 					"track this work",
 					"create issue",
 					"multi-session",
 					"resume work",
-					"ready work",
-					"bd issue",
-					"bd create",
-					"bd update",
-					"bd cli",
-					"bd tool",
-					"to beads",
-					"with bd",
-					"using bd",
-					"use beads",
+					"linear",
+					"linear-cli",
+					"issue workflow",
 					"add task",
 					"create task",
 					"new task",
@@ -45,19 +43,18 @@
 					"issue tracking",
 					"epic",
 					"dependency"
-				],
-				"directoryExists": [".beads/"]
+				]
 			},
 			"affinities": [],
 			"affinity_threshold": 0.5,
 			"resources": [
-				".claude/skills/resources/beads/workflows.md",
-				".claude/skills/resources/beads/worktree-integration.md"
+				".claude/skills/resources/linear/workflows.md",
+				".claude/skills/resources/linear/worktree-integration.md"
 			],
 			"validation": {
 				"enforces": [
-					"Run 'bd ready' at session start when .beads/ exists",
-					"Use bd for multi-session work, TodoWrite for single-session",
+					"Use linear-cli issue commands for multi-session tracking",
+					"Configure default team once in .azedarach.json when possible",
 					"Write notes for resumability (COMPLETED, IN PROGRESS, NEXT, BLOCKERS)"
 				]
 			}
@@ -85,7 +82,7 @@
 					"tmux session"
 				]
 			},
-			"affinities": ["beads-tracking"],
+			"affinities": ["linear-tracking"],
 			"affinity_threshold": 0.5,
 			"validation": {
 				"enforces": [

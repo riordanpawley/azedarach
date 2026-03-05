@@ -66,7 +66,7 @@ Pattern Group 1: "State management confusion"
 Filter groups to find patterns with:
 - **3+ occurrences** across different sessions
 - **Within date range** (default: last 3 months)
-- **Not all resolved** (at least some without beads created)
+- **Not all resolved** (at least some without linear created)
 
 For each recurring pattern, generate:
 - **Pattern name**: Concise description
@@ -139,7 +139,7 @@ Analyzed: 15 sessions from 2025-09-01 to 2025-12-11
 - Total issues: 42
 - Recurring patterns: 6 (3+ occurrences)
 - Critical patterns: 2 (5+ occurrences)
-- Already addressed: 18 issues (beads created)
+- Already addressed: 18 issues (linear created)
 - Unaddressed: 24 issues
 
 ## Recurring Patterns
@@ -170,7 +170,7 @@ Use AskUserQuestion with multiSelect to let user choose which pattern tasks to c
 For each selected pattern, create a comprehensive bead:
 
 ```bash
-bd create --title="Address recurring pattern: [Pattern Name]" \
+linear-cli i create --title="Address recurring pattern: [Pattern Name]" \
   --type=task \
   --priority=1 \
   --description="
@@ -245,14 +245,14 @@ Analyzed: 15 sessions (2025-09-01 to 2025-12-11)
 Recurring patterns: 6 found
 Critical patterns: 2 (5+ occurrences)
 
-Created beads:
+Created linear:
 - AZ-xxx1: Audit and improve skills auto-loading triggers (P1)
 - AZ-yyy2: Document state detection patterns (P2)
 
 Archived: 24 old sessions → archive/2025-Q3/
 
 Next steps:
-- Work on recurring pattern tasks: bd search "recurring-pattern"
+- Work on recurring pattern tasks: linear-cli i list --output json --compact --all "recurring-pattern"
 - Continue running retrospectives: /retrospective
 - Review patterns again in 1 month
 ```

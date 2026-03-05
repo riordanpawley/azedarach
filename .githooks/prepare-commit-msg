@@ -1,6 +1,4 @@
 #!/usr/bin/env sh
-# prepare-commit-msg hook migrated from bd to br.
-# br has no equivalent "hooks run prepare-commit-msg" subcommand.
-
+# No Linear-specific prepare-commit-msg behavior.
 
 exit 0

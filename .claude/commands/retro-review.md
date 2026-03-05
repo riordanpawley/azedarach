@@ -1,6 +1,6 @@
 # Retro Review Command
 
-Review retrospective session files and create beads tasks for selected issues.
+Review retrospective session files and create linear tasks for selected issues.
 
 ## Workflow
 
@@ -9,8 +9,8 @@ This command helps you triage retrospective findings and create actionable tasks
 1. Find recent session files (default: last 7 days)
 2. Select a session to review
 3. Review suggested action items from the session
-4. Interactively select which issues to track as beads
-5. Create beads tasks with full context from session
+4. Interactively select which issues to track as linear
+5. Create linear tasks with full context from session
 6. Mark session as reviewed
 
 ## Your Task
@@ -94,14 +94,14 @@ Issue 2: tmux integration not documented
   [Create bead?] Yes / No
 ```
 
-Use AskUserQuestion with multiSelect to let user choose which issues to create beads for.
+Use AskUserQuestion with multiSelect to let user choose which issues to create linear for.
 
-### 6. Create Selected Beads
+### 6. Create Selected Linear
 
 For each selected issue, create a bead:
 
 ```bash
-bd create --title="Extracted title from suggested action" \
+linear-cli i create --title="Extracted title from suggested action" \
   --type=task \
   --priority=2 \
   --description="
@@ -117,7 +117,7 @@ From retrospective session [sessionDate]:
 "
 ```
 
-Track created beads and report them to user.
+Track created linear and report them to user.
 
 ### 7. Mark Session as Reviewed
 
@@ -125,7 +125,7 @@ Add review marker to session file:
 
 ```markdown
 <!-- REVIEWED: YYYY-MM-DD -->
-<!-- Created beads: AZ-XXX, AZ-YYY, AZ-ZZZ -->
+<!-- Created linear: AZ-XXX, AZ-YYY, AZ-ZZZ -->
 ```
 
 Add at the very end of the session file.
@@ -137,7 +137,7 @@ Show final summary:
 ```
 Review complete: session-2025-12-11-143022.md
 
-Created beads:
+Created linear:
 - AZ-abc1: Create state-detection skill (task, P2)
 - AZ-def2: Document tmux patterns (chore, P2)
 
@@ -146,8 +146,8 @@ Skipped: 1 issue
 Session marked as reviewed.
 
 Next steps:
-- Review beads: bd search "" --status=open
-- Work on tasks: bd ready
+- Review linear: linear-cli i list --output json --compact --all "" --status=open
+- Work on tasks: linear-cli i list --output json --compact --all
 - Run /retro-patterns periodically to find recurring patterns
 ```
 

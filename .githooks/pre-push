@@ -1,26 +1,3 @@
 #!/usr/bin/env sh
-# Migrated from bd hook shim to explicit br behavior.
-if [ -d .beads ] && command -v br >/dev/null 2>&1; then
-  br sync --flush-only >/dev/null 2>&1 || true
-fi
-
-if [ -d .beads ]; then
-  FILES=""
-  for f in .beads/beads.jsonl .beads/issues.jsonl .beads/deletions.jsonl; do
-    if git ls-files --error-unmatch "$f" >/dev/null 2>&1 || [ -f "$f" ]; then
-      FILES="$FILES $f"
-    fi
-  done
-
-  if [ -n "$FILES" ]; then
-    # shellcheck disable=SC2086
-    if [ -n "$(git status --porcelain -- $FILES 2>/dev/null)" ]; then
-      echo "Error: Uncommitted br JSONL changes detected." >&2
-      echo "Run 'br sync' (or commit .beads JSONL changes) before push." >&2
-      exit 1
-    fi
-  fi
-fi
-
-
+# Linear issue tracking has no repository JSONL state to validate before push.
 exit 0

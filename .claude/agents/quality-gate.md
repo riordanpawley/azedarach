@@ -18,7 +18,7 @@ The orchestrator will provide:
 
 For each task ID, run:
 ```bash
-bd show <task-id>
+linear-cli i get <task-id>
 ```
 
 Extract:
@@ -166,7 +166,7 @@ Orchestrator prompt:
 > Analyze epic az-gds for parallel execution. Child tasks: az-7sr, az-lqb, az-bjp
 
 Your response:
-1. Run `bd show az-7sr`, `bd show az-lqb`, `bd show az-bjp`
+1. Run `linear-cli i get az-7sr`, `linear-cli i get az-lqb`, `linear-cli i get az-bjp`
 2. Extract keywords and file mentions from each
 3. Search codebase for related files
 4. Build mapping, detect conflicts

@@ -1,5 +1,5 @@
 ---
-description: End session with beads update verification and retrospective analysis
+description: End session with linear update verification and retrospective analysis
 argument-hint: Optional - focus area for retrospective
 ---
 
@@ -8,7 +8,7 @@ argument-hint: Optional - focus area for retrospective
 **Purpose:** Replace `/compact` with a comprehensive session-end workflow that preserves context and learns from the session.
 
 **What this does:**
-1. Verify beads are updated with session progress
+1. Verify linear are updated with session progress
 2. Run retrospective analysis
 3. Suggest next steps for resumption
 
@@ -54,14 +54,14 @@ git status
 
 ---
 
-### Phase 1: Beads Update Verification
+### Phase 1: Linear Update Verification
 
-#### 1.1 Check Current Beads Status
+#### 1.1 Check Current Linear Status
 
-Query in-progress beads:
+Query in-progress linear:
 
 ```bash
-bd search "" --status=in_progress
+linear-cli i list --output json --compact --all "" --status=in_progress
 ```
 
 #### 1.2 Analyze Conversation for Work Done
@@ -73,12 +73,12 @@ Review the CURRENT conversation (not transcript) to identify:
 - What blockers were encountered?
 - What's the natural next step?
 
-#### 1.3 Verify Beads Capture All Work
+#### 1.3 Verify Linear Capture All Work
 
 **For EACH piece of work identified:**
 
 **Case A: Work matches existing in-progress bead**
-- Verify bead has recent notes (check with `bd show <id>`)
+- Verify bead has recent notes (check with `linear-cli i get <id>`)
 - If notes missing or stale, UPDATE bead with missing context
 
 **Case B: Work NOT tracked in any bead**
@@ -96,7 +96,7 @@ Review the CURRENT conversation (not transcript) to identify:
 For each in-progress bead, check if notes are comprehensive:
 
 ```bash
-bd update AZ-123 --notes="
+linear-cli i update AZ-123 --notes="
 Session progress ($(date -Iseconds)):
 
 COMPLETED:
@@ -128,19 +128,19 @@ FILES MODIFIED:
 
 #### 1.5 Report Verification Results
 
-Show user what beads were updated/created:
+Show user what linear were updated/created:
 
 ```
-Beads Update Verification Complete
+Linear Update Verification Complete
 
-Updated beads:
+Updated linear:
 - AZ-abc: [title] - Added session notes
 - AZ-def: [title] - Updated with blocker information
 
-Created beads:
+Created linear:
 - AZ-xyz: [title] - New work discovered during session
 
-Closed beads:
+Closed linear:
 - AZ-123: [title] - Work completed
 
 All work tracked
@@ -150,7 +150,7 @@ All work tracked
 
 ### Phase 2: Retrospective Analysis
 
-**After beads are verified**, run the retrospective:
+**After linear are verified**, run the retrospective:
 
 Execute the `/retrospective` command by invoking it directly.
 
@@ -175,7 +175,7 @@ Git Status:
    - Committed: [commit hash] [message summary]
    - Working tree: clean ✓
 
-Beads Status:
+Linear Status:
    - Updated: 2 issue(s) with session notes
    - Created: 1 new issue(s)
    - Closed: 0 issue(s)
@@ -186,11 +186,11 @@ Retrospective:
    - Issues found: 2
 
 To Resume Work:
-   1. Check ready work: bd ready
+   1. Check ready work: linear-cli i list --output json --compact --all
    2. Review retrospective: /retro-review
    3. Continue on: [most likely next bead based on notes]
 
-Tip: Use /retro-review to create beads from retrospective findings
+Tip: Use /retro-review to create linear from retrospective findings
 ================================================================================
 ```
 
@@ -220,8 +220,8 @@ Tip: Use /retro-review to create beads from retrospective findings
 - No guidance for resumption
 
 **Benefits of /session-end:**
-- Proactive beads verification (not just warnings)
-- Creates resumable context via beads notes
+- Proactive linear verification (not just warnings)
+- Creates resumable context via linear notes
 - Learns from session via retrospective
 - Identifies gaps for future improvement
 - Provides clear resumption path
@@ -239,8 +239,8 @@ Tip: Use /retro-review to create beads from retrospective findings
 
 ## Related Skills
 
-- `.claude/skills/workflow/beads-tracking.skill.md` - Beads workflow patterns
+- `.claude/skills/workflow/linear-tracking.skill.md` - Linear workflow patterns
 
 ---
 
-**Remember:** This command is PROACTIVE, not reactive. Don't wait for user permission to update beads - analyze the conversation and ensure everything is tracked with comprehensive notes for future resumability.
+**Remember:** This command is PROACTIVE, not reactive. Don't wait for user permission to update linear - analyze the conversation and ensure everything is tracked with comprehensive notes for future resumability.

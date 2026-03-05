@@ -35,10 +35,10 @@ This directory implements an **auto-activating skills system** that combines:
 │   └── bubbletea-patterns.skill.md
 │
 ├── workflow/                    # Workflow skills
-│   └── beads-tracking.skill.md  # Issue tracking workflow
+│   └── linear-tracking.skill.md  # Issue tracking workflow
 │
 └── resources/                   # Progressive disclosure (detailed docs)
-    └── beads/
+    └── linear/
         ├── workflows.md         # Detailed workflow patterns
         └── worktree-integration.md  # Git worktree patterns
 ```
@@ -68,7 +68,7 @@ This directory implements an **auto-activating skills system** that combines:
 
 ### Workflow Skills
 Development workflow and process patterns:
-- **beads-tracking** - Issue tracking, resumability, multi-session work
+- **linear-tracking** - Issue tracking, resumability, multi-session work
 
 ### Effect Skills (ts-opentui only)
 Effect framework and TypeScript patterns:
@@ -92,9 +92,9 @@ Each skill defined with:
 
 ```json
 {
-  "id": "beads-tracking",
-  "name": "Beads Issue Tracking",
-  "path": ".claude/skills/workflow/beads-tracking.skill.md",
+  "id": "linear-tracking",
+  "name": "Linear Issue Tracking",
+  "path": ".claude/skills/workflow/linear-tracking.skill.md",
   "type": "workflow",
   "priority": "high",
   "confidence": {
@@ -102,13 +102,13 @@ Each skill defined with:
     "suggested": 0.45
   },
   "triggers": {
-    "filePatterns": [".beads/**"],
-    "contentPatterns": ["bd create", "bd update", "bd close"],
-    "keywords": ["beads", "issue", "task", "tracking", "bd"]
+    "filePatterns": [".azedarach.json", "ts-opentui/src/core/BeadsClient.ts"],
+    "contentPatterns": ["linear-cli i create", "linear-cli i update", "linear-cli i close"],
+    "keywords": ["linear", "issue", "task", "tracking", "linear-cli"]
   },
   "resources": [
-    ".claude/skills/resources/beads/workflows.md",
-    ".claude/skills/resources/beads/worktree-integration.md"
+    ".claude/skills/resources/linear/workflows.md",
+    ".claude/skills/resources/linear/worktree-integration.md"
   ]
 }
 ```
