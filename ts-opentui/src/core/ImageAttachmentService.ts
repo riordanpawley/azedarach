@@ -1,14 +1,16 @@
 /**
  * ImageAttachmentService - Effect service for managing image attachments on tasks
  *
- * Images are stored in .beads/images/{issue-id}/ with metadata tracked in
- * .beads/images/index.json since the beads CLI doesn't natively support attachments.
+ * Images are stored in the local SQLite issue store as BLOBs.
+ * Filesystem paths are materialized on-demand under .azedarach/tmp/attachments/
+ * for tools that require file paths (viewer integration + Claude Read tool).
  */
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
-import { Data, Effect, Record, Schema, SubscriptionRef } from "effect"
+import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { ProjectService } from "../services/ProjectService.js"
 import { BeadsClient } from "./BeadsClient.js"
+import { LocalIssueStore } from "./LocalIssueStore.js"
 
 // ============================================================================
 // Schema Definitions
@@ -27,16 +29,6 @@ const ImageAttachmentSchema = Schema.Struct({
 })
 
 export type ImageAttachment = Schema.Schema.Type<typeof ImageAttachmentSchema>
-
-/**
- * Index mapping issue IDs to their attachments
- */
-const AttachmentIndexSchema = Schema.Record({
-	key: Schema.String,
-	value: Schema.Array(ImageAttachmentSchema),
-})
-
-type AttachmentIndex = Schema.Schema.Type<typeof AttachmentIndexSchema>
 
 // ============================================================================
 // Error Types
@@ -60,8 +52,8 @@ export class FileNotFoundError extends Data.TaggedError("FileNotFoundError")<{
 // Constants
 // ============================================================================
 
-const BEADS_IMAGES_DIR = ".beads/images"
-const INDEX_FILE = "index.json"
+const ATTACHMENTS_TMP_DIR = ".azedarach/tmp/attachments"
+const CLIPBOARD_TMP_DIR = ".azedarach/tmp/clipboard"
 
 // Supported image extensions
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]
@@ -87,11 +79,12 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 export class ImageAttachmentService extends Effect.Service<ImageAttachmentService>()(
 	"ImageAttachmentService",
 	{
-		dependencies: [BeadsClient.Default, ProjectService.Default],
+		dependencies: [BeadsClient.Default, LocalIssueStore.Default, ProjectService.Default],
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
 			const issueTrackerClient = yield* BeadsClient
+			const localIssueStore = yield* LocalIssueStore
 			const projectService = yield* ProjectService
 
 			/**
@@ -103,62 +96,39 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					return projectPath ?? process.cwd()
 				})
 
-			// Base directory for all image attachments (relative to project path)
-			const getBaseDirSync = (projectPath: string) => path.join(projectPath, BEADS_IMAGES_DIR)
-			const getIndexPathSync = (projectPath: string) =>
-				path.join(getBaseDirSync(projectPath), INDEX_FILE)
-			const getIssueDirSync = (projectPath: string, issueId: string) =>
-				path.join(getBaseDirSync(projectPath), issueId)
+			const getTmpBaseDir = () =>
+				Effect.map(getProjectPath(), (projectPath) => path.join(projectPath, ATTACHMENTS_TMP_DIR))
+			const getTmpIssueDir = (issueId: string) =>
+				Effect.map(getTmpBaseDir(), (baseDir) => path.join(baseDir, issueId))
+			const getTmpAttachmentDir = (issueId: string, attachmentId: string) =>
+				Effect.map(getTmpIssueDir(issueId), (issueDir) => path.join(issueDir, attachmentId))
 
-			// Effect-returning versions that get projectPath from ProjectService
-			const getBaseDir = () =>
-				Effect.map(getProjectPath(), (projectPath) => getBaseDirSync(projectPath))
-			const getIndexPath = () =>
-				Effect.map(getProjectPath(), (projectPath) => getIndexPathSync(projectPath))
-			const getIssueDir = (issueId: string) =>
-				Effect.map(getProjectPath(), (projectPath) => getIssueDirSync(projectPath, issueId))
+			const getClipboardTmpDir = () =>
+				Effect.map(getProjectPath(), (projectPath) => path.join(projectPath, CLIPBOARD_TMP_DIR))
 
-			/**
-			 * Ensure base directory and index file exist
-			 */
-			const ensureStorage = () =>
+			const removeIssueTmpDir = (issueId: string) =>
 				Effect.gen(function* () {
-					const baseDir = yield* getBaseDir()
-					const indexPath = yield* getIndexPath()
+					const issueTmpDir = yield* getTmpIssueDir(issueId)
+					yield* fs.remove(issueTmpDir, { recursive: true }).pipe(Effect.ignore)
+					yield* fs.remove(issueTmpDir).pipe(Effect.ignore)
+				})
 
-					// Create base directory if not exists
-					yield* fs.makeDirectory(baseDir, { recursive: true }).pipe(Effect.ignore)
-
-					// Create index file if not exists
-					const exists = yield* fs.exists(indexPath)
-					if (!exists) {
-						yield* fs.writeFileString(indexPath, "{}")
+			const materializeAttachment = (issueId: string, attachment: ImageAttachment) =>
+				Effect.gen(function* () {
+					const record = yield* localIssueStore.getIssueAttachment(issueId, attachment.id)
+					if (!record) {
+						return yield* Effect.fail(
+							new ImageAttachmentError({
+								message: `Attachment not found: ${attachment.id}`,
+							}),
+						)
 					}
-				})
 
-			// Decoder for reading index from JSON string
-			const decodeIndex = Schema.decodeUnknown(Schema.parseJson(AttachmentIndexSchema))
-
-			/**
-			 * Read the attachment index
-			 */
-			const readIndex = () =>
-				Effect.gen(function* () {
-					yield* ensureStorage()
-					const indexPath = yield* getIndexPath()
-					const content = yield* fs.readFileString(indexPath)
-					return yield* decodeIndex(content).pipe(
-						Effect.catchAll(() => Effect.succeed<AttachmentIndex>({})),
-					)
-				})
-
-			/**
-			 * Write the attachment index
-			 */
-			const writeIndex = (index: AttachmentIndex) =>
-				Effect.gen(function* () {
-					const indexPath = yield* getIndexPath()
-					yield* fs.writeFileString(indexPath, JSON.stringify(index, null, 2))
+					const attachmentDir = yield* getTmpAttachmentDir(issueId, attachment.id)
+					yield* fs.makeDirectory(attachmentDir, { recursive: true }).pipe(Effect.ignore)
+					const filePath = path.join(attachmentDir, attachment.filename)
+					yield* fs.writeFile(filePath, record.content)
+					return filePath
 				})
 
 			/**
@@ -252,7 +222,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 			): Effect.Effect<void, unknown, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					// Build relative path from project root
-					const relativePath = `.beads/images/${issueId}/${attachment.filename}`
+					const relativePath = `.azedarach/tmp/attachments/${issueId}/${attachment.id}/${attachment.filename}`
 
 					// Create a formatted attachment entry
 					const timestamp = new Date(attachment.createdAt).toLocaleString()
@@ -429,8 +399,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				loadForTask: (taskId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						const attachments = index[taskId] ?? []
+						const attachments = yield* localIssueStore.listIssueAttachments(taskId)
 						yield* SubscriptionRef.set(currentAttachments, {
 							taskId,
 							attachments,
@@ -493,8 +462,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const issueDir = yield* getIssueDir(current.taskId)
-						const filePath = path.join(issueDir, attachment.filename)
+						const filePath = yield* materializeAttachment(current.taskId, attachment)
 
 						// Use platform-specific open command
 						const openCmd = process.platform === "darwin" ? "open" : "xdg-open"
@@ -529,24 +497,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const issueDir = yield* getIssueDir(current.taskId)
+						yield* localIssueStore.removeIssueAttachment(current.taskId, attachment.id)
+						const attachmentDir = yield* getTmpAttachmentDir(current.taskId, attachment.id)
+						yield* fs.remove(attachmentDir, { recursive: true }).pipe(Effect.ignore)
 
-						// Remove file
-						const filePath = path.join(issueDir, attachment.filename)
-						yield* fs.remove(filePath).pipe(Effect.ignore)
-
-						// Update index
-						const index = yield* readIndex()
-						const issueAttachments = index[current.taskId] ?? []
-						const newAttachments = issueAttachments.filter((a) => a.id !== attachment.id)
-						const updatedIndex =
-							newAttachments.length === 0
-								? Record.remove(index, current.taskId)
-								: Record.set(index, current.taskId, newAttachments)
+						const newAttachments = yield* localIssueStore.listIssueAttachments(current.taskId)
 						if (newAttachments.length === 0) {
-							yield* fs.remove(issueDir).pipe(Effect.ignore)
+							yield* removeIssueTmpDir(current.taskId)
 						}
-						yield* writeIndex(updatedIndex)
 
 						// Update reactive state - adjust selected index if needed
 						const newSelectedIndex =
@@ -570,8 +528,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				list: (issueId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						return index[issueId] ?? []
+						return yield* localIssueStore.listIssueAttachments(issueId)
 					}),
 
 				/**
@@ -595,21 +552,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						// Get file stats
+						// Get file stats and content
 						const stats = yield* fs.stat(filePath)
+						const content = yield* fs.readFile(filePath)
 
-						// Create issue directory
-						const issueDir = yield* getIssueDir(issueId)
-						yield* fs.makeDirectory(issueDir, { recursive: true }).pipe(Effect.ignore)
-
-						// Generate unique ID and destination path
+						// Generate unique ID and storage filename
 						const id = generateId()
 						const ext = path.extname(filename)
 						const destFilename = `${id}${ext}`
-						const destPath = path.join(issueDir, destFilename)
-
-						// Copy file to storage
-						yield* fs.copyFile(filePath, destPath)
 
 						// Create attachment metadata
 						const attachment: ImageAttachment = {
@@ -621,11 +571,21 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							createdAt: new Date().toISOString(),
 						}
 
-						// Update index using Effect's Record.set for immutability
-						const index = yield* readIndex()
-						const issueAttachments = index[issueId] ?? []
-						const newAttachments = [...issueAttachments, attachment]
-						yield* writeIndex(Record.set(index, issueId, newAttachments))
+						yield* localIssueStore.upsertIssueAttachment({
+							issueId,
+							attachmentId: attachment.id,
+							filename: attachment.filename,
+							originalPath: attachment.originalPath,
+							mimeType: attachment.mimeType,
+							size: attachment.size,
+							createdAt: attachment.createdAt,
+							content,
+						})
+
+						const newAttachments = yield* localIssueStore.listIssueAttachments(issueId)
+						if (newAttachments.length === 0) {
+							yield* removeIssueTmpDir(issueId)
+						}
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -661,14 +621,13 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						// Create issue directory
-						const issueDir = yield* getIssueDir(issueId)
-						yield* fs.makeDirectory(issueDir, { recursive: true }).pipe(Effect.ignore)
+						const clipboardTmpDir = yield* getClipboardTmpDir()
+						yield* fs.makeDirectory(clipboardTmpDir, { recursive: true }).pipe(Effect.ignore)
 
 						// Generate unique ID
 						const id = generateId()
 						const destFilename = `${id}.png`
-						const destPath = path.join(issueDir, destFilename)
+						const destPath = path.join(clipboardTmpDir, `${issueId}-${destFilename}`)
 
 						// Get image from clipboard using platform-specific command
 						// macOS: Use osascript to write clipboard image data as PNG
@@ -727,11 +686,21 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							createdAt: new Date().toISOString(),
 						}
 
-						// Update index using Effect's Record.set for immutability
-						const index = yield* readIndex()
-						const issueAttachments = index[issueId] ?? []
-						const newAttachments = [...issueAttachments, attachment]
-						yield* writeIndex(Record.set(index, issueId, newAttachments))
+						const content = yield* fs.readFile(destPath)
+						yield* fs.remove(destPath).pipe(Effect.ignore)
+
+						yield* localIssueStore.upsertIssueAttachment({
+							issueId,
+							attachmentId: attachment.id,
+							filename: attachment.filename,
+							originalPath: attachment.originalPath,
+							mimeType: attachment.mimeType,
+							size: attachment.size,
+							createdAt: attachment.createdAt,
+							content,
+						})
+
+						const newAttachments = yield* localIssueStore.listIssueAttachments(issueId)
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -754,8 +723,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				remove: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						const issueAttachments = index[issueId] ?? []
+						const issueAttachments = yield* localIssueStore.listIssueAttachments(issueId)
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
 						if (!attachment) {
@@ -766,23 +734,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const issueDir = yield* getIssueDir(issueId)
+						yield* localIssueStore.removeIssueAttachment(issueId, attachmentId)
+						const attachmentDir = yield* getTmpAttachmentDir(issueId, attachmentId)
+						yield* fs.remove(attachmentDir, { recursive: true }).pipe(Effect.ignore)
 
-						// Remove file
-						const filePath = path.join(issueDir, attachment.filename)
-						yield* fs.remove(filePath).pipe(Effect.ignore)
-
-						// Update index using Effect's Record for immutability
-						const newAttachments = issueAttachments.filter((a) => a.id !== attachmentId)
-						const updatedIndex =
-							newAttachments.length === 0
-								? Record.remove(index, issueId)
-								: Record.set(index, issueId, newAttachments)
-						if (newAttachments.length === 0) {
-							// Also try to remove the empty directory
-							yield* fs.remove(issueDir).pipe(Effect.ignore)
-						}
-						yield* writeIndex(updatedIndex)
+						const newAttachments = yield* localIssueStore.listIssueAttachments(issueId)
 
 						// Update reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -808,8 +764,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				getPath: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						const issueAttachments = index[issueId] ?? []
+						const issueAttachments = yield* localIssueStore.listIssueAttachments(issueId)
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
 						if (!attachment) {
@@ -820,8 +775,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const issueDir = yield* getIssueDir(issueId)
-						return path.join(issueDir, attachment.filename)
+						return yield* materializeAttachment(issueId, attachment)
 					}),
 
 				/**
@@ -829,8 +783,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				open: (issueId: string, attachmentId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						const issueAttachments = index[issueId] ?? []
+						const issueAttachments = yield* localIssueStore.listIssueAttachments(issueId)
 						const attachment = issueAttachments.find((a) => a.id === attachmentId)
 
 						if (!attachment) {
@@ -841,8 +794,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						const issueDir = yield* getIssueDir(issueId)
-						const filePath = path.join(issueDir, attachment.filename)
+						const filePath = yield* materializeAttachment(issueId, attachment)
 
 						// Use platform-specific open command
 						const openCmd = process.platform === "darwin" ? "open" : "xdg-open"
@@ -872,8 +824,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				count: (issueId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						return (index[issueId] ?? []).length
+						const attachments = yield* localIssueStore.listIssueAttachments(issueId)
+						return attachments.length
 					}),
 
 				/**
@@ -881,10 +833,10 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				countBatch: (issueIds: readonly string[]) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
 						const result: Record<string, number> = {}
 						for (const id of issueIds) {
-							result[id] = (index[id] ?? []).length
+							const attachments = yield* localIssueStore.listIssueAttachments(id)
+							result[id] = attachments.length
 						}
 						return result
 					}),
@@ -913,9 +865,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 							)
 						}
 
-						// Get full file path
-						const issueDir = yield* getIssueDir(current.taskId)
-						const filePath = path.join(issueDir, attachment.filename)
+						const filePath = yield* materializeAttachment(current.taskId, attachment)
 
 						// Check if viu is available
 						const viuCheck = yield* Command.make("which", "viu").pipe(
@@ -1037,29 +987,15 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				 */
 				cleanupImagesForIssue: (issueId: string) =>
 					Effect.gen(function* () {
-						const index = yield* readIndex()
-						const attachments = index[issueId]
+						const attachments = yield* localIssueStore.listIssueAttachments(issueId)
 
-						// No attachments for this issue - nothing to clean up
-						if (!attachments || attachments.length === 0) {
+						if (attachments.length === 0) {
+							yield* removeIssueTmpDir(issueId)
 							return 0
 						}
 
-						const issueDir = yield* getIssueDir(issueId)
-						const count = attachments.length
-
-						// Remove the entire issue directory (faster than individual file deletion)
-						yield* fs
-							.remove(issueDir, { recursive: true })
-							.pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Failed to remove image directory ${issueDir}: ${error}`),
-								),
-							)
-
-						// Update index - remove the issue entry
-						const updatedIndex = Record.remove(index, issueId)
-						yield* writeIndex(updatedIndex)
+						const count = yield* localIssueStore.clearIssueAttachments(issueId)
+						yield* removeIssueTmpDir(issueId)
 
 						// Clear reactive state if viewing this task
 						const current = yield* SubscriptionRef.get(currentAttachments)
@@ -1082,21 +1018,8 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					Effect.gen(function* () {
 						let totalDeleted = 0
 						for (const issueId of issueIds) {
-							const deleted = yield* Effect.gen(function* () {
-								const index = yield* readIndex()
-								const attachments = index[issueId]
-								if (!attachments || attachments.length === 0) return 0
-
-								const issueDir = yield* getIssueDir(issueId)
-								const count = attachments.length
-
-								yield* fs.remove(issueDir, { recursive: true }).pipe(Effect.ignore)
-
-								const updatedIndex = Record.remove(index, issueId)
-								yield* writeIndex(updatedIndex)
-
-								return count
-							})
+							const deleted = yield* localIssueStore.clearIssueAttachments(issueId)
+							yield* removeIssueTmpDir(issueId)
 							totalDeleted += deleted
 						}
 

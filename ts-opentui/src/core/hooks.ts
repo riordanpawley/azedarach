@@ -121,8 +121,8 @@ export interface HookConfigOptions {
 export const WORKTREE_PERMISSIONS = {
 	permissions: {
 		allow: [
-			// View images attached to beads
-			"Read(//**/.beads/images/**)",
+			// View materialized issue attachment images
+			"Read(//**/.azedarach/tmp/attachments/**)",
 			// Use beads CLI for issue management
 			"Bash(bd:*)",
 			// Use az CLI for session control (dev server, notify, etc.)
@@ -138,7 +138,7 @@ export const WORKTREE_PERMISSIONS = {
  * This enables authoritative state detection from Claude's native hook system.
  *
  * Also injects essential permissions for:
- * - Viewing bead-attached images (.beads/images/**)
+ * - Viewing issue-attached images (.azedarach/tmp/attachments/**)
  * - Using the beads CLI (bd:*)
  * - Using the az CLI (az:*)
  *
