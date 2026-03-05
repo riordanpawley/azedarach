@@ -370,7 +370,10 @@ const toLinearPriority = (priority: number | undefined): string | undefined => {
 
 const normalizeLinearTypeInput = (value: string | undefined): string | undefined => {
 	if (!value) return undefined
-	const normalized = value.trim().toLowerCase().replace(/\s*:\s*/g, ":")
+	const normalized = value
+		.trim()
+		.toLowerCase()
+		.replace(/\s*:\s*/g, ":")
 	return normalized.length > 0 ? normalized : undefined
 }
 
@@ -488,9 +491,9 @@ const LinearIssueSchema = Schema.Struct({
 	).pipe(Schema.optional),
 	labels: Schema.NullOr(
 		Schema.Struct({
-			nodes: Schema.NullOr(
-				Schema.Array(Schema.NullOr(LinearIssueLabelNodeSchema)),
-			).pipe(Schema.optional),
+			nodes: Schema.NullOr(Schema.Array(Schema.NullOr(LinearIssueLabelNodeSchema))).pipe(
+				Schema.optional,
+			),
 		}),
 	).pipe(Schema.optional),
 	project: Schema.NullOr(
@@ -549,7 +552,8 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const identifier = issue.identifier ?? issue.id
 	const createdAt = issue.createdAt ?? issue.updatedAt ?? toIsoNow()
 	const updatedAt = issue.updatedAt ?? issue.createdAt ?? toIsoNow()
-	const closedAt = status === "closed" ? issue.completedAt ?? issue.canceledAt ?? updatedAt : undefined
+	const closedAt =
+		status === "closed" ? (issue.completedAt ?? issue.canceledAt ?? updatedAt) : undefined
 
 	const dependencies: DependencyRaw[] =
 		issue.parent?.identifier != null
@@ -981,9 +985,8 @@ export const isLocalFirstIssueBackend = (
 	backend: ConfiguredIssueBackend,
 ): backend is LocalFirstIssueBackend => backend === "local" || backend === "linear"
 
-export const getSyncTargetForBackend = (
-	backend: ConfiguredIssueBackend,
-): SyncTarget | undefined => (backend === "linear" ? "linear" : undefined)
+export const getSyncTargetForBackend = (backend: ConfiguredIssueBackend): SyncTarget | undefined =>
+	backend === "linear" ? "linear" : undefined
 
 interface IssueDbClient {
 	readonly flavor: IssueDbFlavor
@@ -1291,7 +1294,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						// Detect sync required errors specifically
 						if (isSyncRequiredError(stderr)) {
 							return new SyncRequiredError({
-								message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+								message:
+									"Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
 							})
 						}
 
@@ -1308,10 +1312,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				if (!trimmed || (!trimmed.startsWith("[") && !trimmed.startsWith("{"))) {
 					// Output is empty or doesn't look like JSON - check if it's a sync error message
 					if (isSyncRequiredError(trimmed)) {
-						yield* Effect.log(`${executable} returned sync error in stdout, triggering auto-recovery`)
+						yield* Effect.log(
+							`${executable} returned sync error in stdout, triggering auto-recovery`,
+						)
 						return yield* Effect.fail(
 							new SyncRequiredError({
-								message: "Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+								message:
+									"Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
 							}),
 						)
 					}
@@ -1415,10 +1422,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			const toIso = (value: Date | null | undefined): string | undefined =>
 				value ? value.toISOString() : undefined
 
-			const parseArgumentValue = (
-				args: readonly string[],
-				flag: string,
-			): string | undefined => {
+			const parseArgumentValue = (args: readonly string[], flag: string): string | undefined => {
 				const index = args.indexOf(flag)
 				if (index === -1) return undefined
 				return args[index + 1]
@@ -1440,31 +1444,55 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				BeadsError,
 				CommandExecutor.CommandExecutor
 			> =>
-				Effect.tryPromise({
-					try: async () => {
-						const allIssues: LinearSdkIssue[] = []
-						let afterCursor: string | null | undefined = undefined
-						while (true) {
-							const page = await linearClient.issues({
-								first: 250,
-								after: afterCursor,
-							})
-							allIssues.push(...page.nodes)
-							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
-								break
+				Effect.gen(function* () {
+					const fetchIssuesPage = (
+						afterCursor: string | null | undefined,
+					): Effect.Effect<
+						{
+							readonly nodes: readonly LinearSdkIssue[]
+							readonly pageInfo: {
+								readonly hasNextPage: boolean
+								readonly endCursor?: string | null
 							}
-							afterCursor = page.pageInfo.endCursor
-						}
-						return allIssues
-					},
-					catch: (error) =>
-						new BeadsError({
-							message:
-								error instanceof Error
-									? error.message
-									: `Failed to fetch Linear issues: ${String(error)}`,
-							command: "linear-sdk issues",
-						}),
+						},
+						BeadsError,
+						CommandExecutor.CommandExecutor
+					> =>
+						Effect.tryPromise({
+							try: () =>
+								linearClient.issues({
+									first: 250,
+									after: afterCursor,
+								}),
+							catch: (error) =>
+								new BeadsError({
+									message:
+										error instanceof Error
+											? error.message
+											: `Failed to fetch Linear issues: ${String(error)}`,
+									command: "linear-sdk issues",
+								}),
+						}).pipe(linearSdk.rateLimit)
+
+					const collectPages = (
+						afterCursor: string | null | undefined,
+						accumulator: readonly LinearSdkIssue[],
+					): Effect.Effect<
+						readonly LinearSdkIssue[],
+						BeadsError,
+						CommandExecutor.CommandExecutor
+					> =>
+						fetchIssuesPage(afterCursor).pipe(
+							Effect.flatMap((page) => {
+								const nextAccumulator = [...accumulator, ...page.nodes]
+								if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+									return Effect.succeed(nextAccumulator)
+								}
+								return collectPages(page.pageInfo.endCursor, nextAccumulator)
+							}),
+						)
+
+					return yield* collectPages(undefined, [])
 				})
 
 			const fetchStateNameById = (): Effect.Effect<
@@ -1485,10 +1513,15 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: `Failed to fetch Linear workflow states: ${String(error)}`,
 							command: "linear-sdk workflowStates",
 						}),
-				})
+				}).pipe(linearSdk.rateLimit)
 
 			const fetchWorkflowStates = (): Effect.Effect<
-				readonly { readonly id: string; readonly teamId?: string; readonly name: string; readonly type: string }[],
+				readonly {
+					readonly id: string
+					readonly teamId?: string
+					readonly name: string
+					readonly type: string
+				}[],
 				BeadsError,
 				CommandExecutor.CommandExecutor
 			> =>
@@ -1510,7 +1543,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: `Failed to fetch Linear workflow states: ${String(error)}`,
 							command: "linear-sdk workflowStates",
 						}),
-				})
+				}).pipe(linearSdk.rateLimit)
 
 			const fetchLabelNameById = (): Effect.Effect<
 				ReadonlyMap<string, string>,
@@ -1530,7 +1563,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: `Failed to fetch Linear labels: ${String(error)}`,
 							command: "linear-sdk issueLabels",
 						}),
-				})
+				}).pipe(linearSdk.rateLimit)
 
 			const fetchUsers = (): Effect.Effect<
 				readonly { readonly id: string; readonly name: string; readonly email: string }[],
@@ -1554,7 +1587,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: `Failed to fetch Linear users: ${String(error)}`,
 							command: "linear-sdk users",
 						}),
-				})
+				}).pipe(linearSdk.rateLimit)
 
 			const resolveTeamId = (
 				reference: string,
@@ -1582,7 +1615,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							}),
 						)
 					}
-					if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed)) {
+					if (
+						/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+							trimmed,
+						)
+					) {
 						return trimmed
 					}
 					const users = yield* fetchUsers()
@@ -1664,7 +1701,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						issue_type: inferLinearIssueType(labels, hasChildren, undefined),
 						created_at: issue.createdAt.toISOString(),
 						updated_at: issue.updatedAt.toISOString(),
-						closed_at: status === "closed" ? toIso(issue.completedAt ?? issue.canceledAt) : undefined,
+						closed_at:
+							status === "closed" ? toIso(issue.completedAt ?? issue.canceledAt) : undefined,
 						assignee: issue.assigneeId ?? undefined,
 						labels,
 						dependency_count: dependencies.length,
@@ -1748,11 +1786,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					switch (targetStatus) {
 						case "closed":
-							return (
-								findByType(["completed"]) ??
-								findByType(["canceled"]) ??
-								teamStates[0]
-							).id
+							return (findByType(["completed"]) ?? findByType(["canceled"]) ?? teamStates[0]).id
 						case "in_progress":
 							return (
 								findByType(["started"]) ??
@@ -1761,17 +1795,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								teamStates[0]
 							).id
 						case "blocked":
-							return (
-								findByName("block") ??
-								findByType(["started"]) ??
-								teamStates[0]
-							).id
+							return (findByName("block") ?? findByType(["started"]) ?? teamStates[0]).id
 						case "open":
 						case "tombstone":
-							return (
-								findByType(["unstarted", "backlog", "triage"]) ??
-								teamStates[0]
-							).id
+							return (findByType(["unstarted", "backlog", "triage"]) ?? teamStates[0]).id
 					}
 				})
 
@@ -1820,10 +1847,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								? Number.parseInt(priorityFilterValue, 10)
 								: undefined
 							const typeFilter = parseArgumentValue(rest, "--type")
-							const snapshot = yield* withLinearSdkTiming(
-								["i", "list"],
-								buildLinearIssueSnapshot(),
-							)
+							const snapshot = yield* withLinearSdkTiming(["i", "list"], buildLinearIssueSnapshot())
 							const filtered = snapshot.issues.filter((issue) => {
 								if (statusFilter !== undefined && issue.status !== statusFilter) return false
 								if (priorityFilter !== undefined && issue.priority !== priorityFilter) return false
@@ -1860,7 +1884,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const query = rest[0]?.trim().toLowerCase() ?? ""
 							const snapshot = yield* withLinearSdkTiming(["i", "list"], buildLinearIssueSnapshot())
 							const filtered = snapshot.issues.filter((issue) => {
-								const haystack = `${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
+								const haystack =
+									`${issue.id} ${issue.title} ${issue.description ?? ""}`.toLowerCase()
 								return haystack.includes(query)
 							})
 							return JSON.stringify(filtered)
@@ -1881,8 +1906,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							if (!configuredTeam) {
 								return yield* Effect.fail(
 									new BeadsError({
-										message:
-											"Linear create requires issueTracker.linear.team in config.",
+										message: "Linear create requires issueTracker.linear.team in config.",
 										command: "linear-sdk createIssue",
 									}),
 								)
@@ -1939,11 +1963,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 										}),
 									catch: (error) =>
 										new BeadsError({
-											message:
-												error instanceof Error ? error.message : String(error),
+											message: error instanceof Error ? error.message : String(error),
 											command: "linear-sdk createIssue",
 										}),
-								}),
+								}).pipe(linearSdk.rateLimit),
 							)
 							const createdIssueId = createdPayload.issueId
 							if (!createdIssueId) {
@@ -1960,11 +1983,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									try: () => linearClient.issue(createdIssueId),
 									catch: (error) =>
 										new BeadsError({
-											message:
-												error instanceof Error ? error.message : String(error),
+											message: error instanceof Error ? error.message : String(error),
 											command: "linear-sdk issue",
 										}),
-								}),
+								}).pipe(linearSdk.rateLimit),
 							)
 							const snapshot = yield* buildLinearIssueSnapshot()
 							const created = snapshot.issues.find(
@@ -2063,8 +2085,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									try: () =>
 										linearClient.updateIssue(linearId, {
 											title,
-											description:
-												mergedDescription.length > 0 ? mergedDescription : undefined,
+											description: mergedDescription.length > 0 ? mergedDescription : undefined,
 											priority,
 											assigneeId,
 											estimate: estimateValue,
@@ -2074,11 +2095,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 										}),
 									catch: (error) =>
 										new BeadsError({
-											message:
-												error instanceof Error ? error.message : String(error),
+											message: error instanceof Error ? error.message : String(error),
 											command: "linear-sdk updateIssue",
 										}),
-								}),
+								}).pipe(linearSdk.rateLimit),
 							)
 							return "{}"
 						}
@@ -2104,11 +2124,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									try: () => linearClient.updateIssue(linearId, { stateId: closedStateId }),
 									catch: (error) =>
 										new BeadsError({
-											message:
-												error instanceof Error ? error.message : String(error),
+											message: error instanceof Error ? error.message : String(error),
 											command: "linear-sdk closeIssue",
 										}),
-								}),
+								}).pipe(linearSdk.rateLimit),
 							)
 							return "{}"
 						}
@@ -2139,8 +2158,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							if (depType !== undefined && depType !== "parent-child") {
 								return yield* Effect.fail(
 									new BeadsError({
-										message:
-											"Linear backend currently supports only parent-child dependencies",
+										message: "Linear backend currently supports only parent-child dependencies",
 										command: "linear-sdk dep add",
 									}),
 								)
@@ -2153,11 +2171,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									try: () => linearClient.updateIssue(childId, { parentId }),
 									catch: (error) =>
 										new BeadsError({
-											message:
-												error instanceof Error ? error.message : String(error),
+											message: error instanceof Error ? error.message : String(error),
 											command: "linear-sdk dep add",
 										}),
-								}),
+								}).pipe(linearSdk.rateLimit),
 							)
 							return "{}"
 						}
@@ -2181,109 +2198,104 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			}
 		}
 
-			const startupConfig = yield* SubscriptionRef.get(appConfig.config)
-			const configuredBackend = resolveConfiguredIssueBackend(startupConfig.issueTracker)
-			const useLocalFirstPath = isLocalFirstIssueBackend(configuredBackend)
-			const mutationSyncTarget = getSyncTargetForBackend(configuredBackend)
-			const legacyIssueDbClient: IssueDbClient | undefined =
-				configuredBackend === "bd"
-					? createBdIssueDbClient("bd")
-					: configuredBackend === "br"
-						? createBrIssueDbClient("br")
-						: undefined
+		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+		const configuredBackend = resolveConfiguredIssueBackend(startupConfig.issueTracker)
+		const useLocalFirstPath = isLocalFirstIssueBackend(configuredBackend)
+		const mutationSyncTarget = getSyncTargetForBackend(configuredBackend)
+		const legacyIssueDbClient: IssueDbClient | undefined =
+			configuredBackend === "bd"
+				? createBdIssueDbClient("bd")
+				: configuredBackend === "br"
+					? createBrIssueDbClient("br")
+					: undefined
 
-			const mapLocalIssueStoreError = (
-				command: string,
-				error: LocalIssueStoreError,
-			): BeadsError =>
-				new BeadsError({
-					message: error.message,
-					command,
-					stderr: error.cause === undefined ? undefined : String(error.cause),
-				})
+		const mapLocalIssueStoreError = (command: string, error: LocalIssueStoreError): BeadsError =>
+			new BeadsError({
+				message: error.message,
+				command,
+				stderr: error.cause === undefined ? undefined : String(error.cause),
+			})
 
-			const mapIssueSyncError = (command: string, error: IssueSyncError): BeadsError =>
-				new BeadsError({
-					message: error.message,
-					command,
-					stderr: error.cause === undefined ? undefined : String(error.cause),
-				})
+		const mapIssueSyncError = (command: string, error: IssueSyncError): BeadsError =>
+			new BeadsError({
+				message: error.message,
+				command,
+				stderr: error.cause === undefined ? undefined : String(error.cause),
+			})
 
-			const fromLocalStore = <A>(
-				command: string,
-				effect: Effect.Effect<A, LocalIssueStoreError>,
-			): Effect.Effect<A, BeadsError> =>
-				effect.pipe(Effect.mapError((error) => mapLocalIssueStoreError(command, error)))
+		const fromLocalStore = <A>(
+			command: string,
+			effect: Effect.Effect<A, LocalIssueStoreError>,
+		): Effect.Effect<A, BeadsError> =>
+			effect.pipe(Effect.mapError((error) => mapLocalIssueStoreError(command, error)))
 
-			const fromIssueSync = <A>(
-				command: string,
-				effect: Effect.Effect<A, IssueSyncError>,
-			): Effect.Effect<A, BeadsError> =>
-				effect.pipe(Effect.mapError((error) => mapIssueSyncError(command, error)))
+		const fromIssueSync = <A>(
+			command: string,
+			effect: Effect.Effect<A, IssueSyncError>,
+		): Effect.Effect<A, BeadsError> =>
+			effect.pipe(Effect.mapError((error) => mapIssueSyncError(command, error)))
 
-			const ensureLinearBootstrapForRead = (cwd?: string): Effect.Effect<void, BeadsError> =>
-				configuredBackend !== "linear"
-					? Effect.void
-					: fromIssueSync(
-							"issue-sync bootstrapLinear",
-							issueSyncService.bootstrapLinear(cwd),
-						).pipe(Effect.asVoid)
+		const ensureLinearBootstrapForRead = (cwd?: string): Effect.Effect<void, BeadsError> =>
+			configuredBackend !== "linear"
+				? Effect.void
+				: fromIssueSync("issue-sync bootstrapLinear", issueSyncService.bootstrapLinear(cwd)).pipe(
+						Effect.asVoid,
+					)
 
-			const runBd = (
-				args: readonly string[],
-				runCwd?: string,
-			): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
-				legacyIssueDbClient !== undefined
-					? legacyIssueDbClient.runJson(args, runCwd)
-					: Effect.fail(
-							new BeadsError({
-								message: `Legacy command path is unavailable for ${configuredBackend} backend`,
-								command: `legacy ${args.join(" ")}`,
-							}),
-						)
+		const runBd = (
+			args: readonly string[],
+			runCwd?: string,
+		): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+			legacyIssueDbClient !== undefined
+				? legacyIssueDbClient.runJson(args, runCwd)
+				: Effect.fail(
+						new BeadsError({
+							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
+							command: `legacy ${args.join(" ")}`,
+						}),
+					)
 
-			const runBdDirect = (
-				args: readonly string[],
-				runCwd?: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-				legacyIssueDbClient !== undefined
-					? legacyIssueDbClient.runDirect(args, runCwd)
-					: Effect.fail(
-							new BeadsError({
-								message: `Legacy command path is unavailable for ${configuredBackend} backend`,
-								command: `legacy ${args.join(" ")}`,
-							}),
-						)
+		const runBdDirect = (
+			args: readonly string[],
+			runCwd?: string,
+		): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			legacyIssueDbClient !== undefined
+				? legacyIssueDbClient.runDirect(args, runCwd)
+				: Effect.fail(
+						new BeadsError({
+							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
+							command: `legacy ${args.join(" ")}`,
+						}),
+					)
 
-			const parseSyncResult = (output: string): Effect.Effect<SyncResult, ParseError> =>
-				legacyIssueDbClient !== undefined
-					? legacyIssueDbClient.parseSyncResult(output)
-					: Effect.succeed(ZERO_SYNC_RESULT)
+		const parseSyncResult = (output: string): Effect.Effect<SyncResult, ParseError> =>
+			legacyIssueDbClient !== undefined
+				? legacyIssueDbClient.parseSyncResult(output)
+				: Effect.succeed(ZERO_SYNC_RESULT)
 
 		return {
-				list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issues = yield* fromLocalStore(
-								"local-store list",
-								localIssueStore.list(filters, effectiveCwd, options),
-							)
-							return [...issues]
-						}
-
-						const pageSize = clampPositiveInt(
-							options?.pageSize ?? DEFAULT_ISSUE_LIST_PAGE_SIZE,
-							DEFAULT_ISSUE_LIST_PAGE_SIZE,
+			list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issues = yield* fromLocalStore(
+							"local-store list",
+							localIssueStore.list(filters, effectiveCwd, options),
 						)
+						return [...issues]
+					}
+
+					const pageSize = clampPositiveInt(
+						options?.pageSize ?? DEFAULT_ISSUE_LIST_PAGE_SIZE,
+						DEFAULT_ISSUE_LIST_PAGE_SIZE,
+					)
 					const targetLimit =
 						options?.limit !== undefined && options.limit > 0
 							? Math.floor(options.limit)
 							: undefined
 
-					let currentLimit =
-						targetLimit !== undefined ? Math.min(targetLimit, pageSize) : pageSize
+					let currentLimit = targetLimit !== undefined ? Math.min(targetLimit, pageSize) : pageSize
 					let previousIssueCount = -1
 					let includeSortFlags = true
 					const sortBy = options?.sortBy ?? "updated_at"
@@ -2299,12 +2311,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									isUnsupportedSortFlagError(error)
 								) {
 									includeSortFlags = false
-									const fallbackArgs = buildListCommandArgs(
-										currentLimit,
-										filters,
-										options,
-										false,
-									)
+									const fallbackArgs = buildListCommandArgs(currentLimit, filters, options, false)
 									return runBd(fallbackArgs, effectiveCwd)
 								}
 
@@ -2342,22 +2349,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 				}),
 
-				show: (id: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issue = yield* fromLocalStore(
-								"local-store show",
-								localIssueStore.show(id, effectiveCwd),
-							)
-							if (issue === undefined || issue.status === "tombstone") {
-								return yield* Effect.fail(new NotFoundError({ issueId: id }))
-							}
-							return issue
+			show: (id: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issue = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(id, effectiveCwd),
+						)
+						if (issue === undefined || issue.status === "tombstone") {
+							return yield* Effect.fail(new NotFoundError({ issueId: id }))
 						}
+						return issue
+					}
 
-						const output = yield* runBd(["show", id], effectiveCwd)
+					const output = yield* runBd(["show", id], effectiveCwd)
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -2376,22 +2383,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					return issue
 				}),
 
-				showMultiple: (ids: readonly string[], cwd?: string) =>
-					Effect.gen(function* () {
-						if (ids.length === 0) return []
+			showMultiple: (ids: readonly string[], cwd?: string) =>
+				Effect.gen(function* () {
+					if (ids.length === 0) return []
 
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issues = yield* fromLocalStore(
-								"local-store showMultiple",
-								localIssueStore.showMultiple(ids, effectiveCwd),
-							)
-							return [...issues]
-						}
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issues = yield* fromLocalStore(
+							"local-store showMultiple",
+							localIssueStore.showMultiple(ids, effectiveCwd),
+						)
+						return [...issues]
+					}
 
-						// bd show accepts multiple IDs: bd show id1 id2 id3 --json
-						const output = yield* runBd(["show", ...ids], effectiveCwd)
+					// bd show accepts multiple IDs: bd show id1 id2 id3 --json
+					const output = yield* runBd(["show", ...ids], effectiveCwd)
 
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
@@ -2416,26 +2423,26 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					parent?: string
 				},
 				cwd?: string,
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							const updated = yield* fromLocalStore(
-								"local-store update",
-								localIssueStore.update(id, fields, mutationSyncTarget, effectiveCwd),
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						const updated = yield* fromLocalStore(
+							"local-store update",
+							localIssueStore.update(id, fields, mutationSyncTarget, effectiveCwd),
+						)
+						if (!updated) {
+							return yield* Effect.fail(
+								new BeadsError({
+									message: `Issue not found: ${id}`,
+									command: `local-store update ${id}`,
+								}),
 							)
-							if (!updated) {
-								return yield* Effect.fail(
-									new BeadsError({
-										message: `Issue not found: ${id}`,
-										command: `local-store update ${id}`,
-									}),
-								)
-							}
-							return
 						}
+						return
+					}
 
-						const args: string[] = ["update", id]
+					const args: string[] = ["update", id]
 
 					if (fields.status) {
 						args.push("--status", fields.status)
@@ -2480,80 +2487,80 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					yield* runBd(args, effectiveCwd)
 				}),
 
-				close: (id: string, reason?: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							const closed = yield* fromLocalStore(
-								"local-store close",
-								localIssueStore.close(id, mutationSyncTarget, effectiveCwd),
+			close: (id: string, reason?: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						const closed = yield* fromLocalStore(
+							"local-store close",
+							localIssueStore.close(id, mutationSyncTarget, effectiveCwd),
+						)
+						if (!closed) {
+							return yield* Effect.fail(
+								new BeadsError({
+									message: `Issue not found: ${id}`,
+									command: `local-store close ${id}`,
+								}),
 							)
-							if (!closed) {
-								return yield* Effect.fail(
-									new BeadsError({
-										message: `Issue not found: ${id}`,
-										command: `local-store close ${id}`,
-									}),
-								)
-							}
-							return
 						}
+						return
+					}
 
-						const args: string[] = ["close", id]
+					const args: string[] = ["close", id]
 
-						if (reason) {
-							args.push("--reason", reason)
+					if (reason) {
+						args.push("--reason", reason)
 					}
 
 					yield* runBd(args, effectiveCwd)
 				}),
 
-				sync: (cwd?: string) =>
-					Effect.gen(function* () {
-						if (configuredBackend === "local") {
-							return ZERO_SYNC_RESULT
-						}
+			sync: (cwd?: string) =>
+				Effect.gen(function* () {
+					if (configuredBackend === "local") {
+						return ZERO_SYNC_RESULT
+					}
 
-						// Check if beads sync is enabled (config + network)
-						const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
-						if (!syncStatus.enabled) {
-							// Return empty result when offline - issues are tracked locally
-							return ZERO_SYNC_RESULT
-						}
+					// Check if beads sync is enabled (config + network)
+					const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
+					if (!syncStatus.enabled) {
+						// Return empty result when offline - issues are tracked locally
+						return ZERO_SYNC_RESULT
+					}
 
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (configuredBackend === "linear") {
-							return yield* fromIssueSync(
-								"issue-sync flushLinearQueue",
-								issueSyncService.flushLinearQueue(effectiveCwd),
-							)
-						}
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (configuredBackend === "linear") {
+						return yield* fromIssueSync(
+							"issue-sync flushLinearQueue",
+							issueSyncService.flushLinearQueue(effectiveCwd),
+						)
+					}
 
-						const output = yield* runBd(["sync"], effectiveCwd)
-						return yield* parseSyncResult(output)
-					}),
+					const output = yield* runBd(["sync"], effectiveCwd)
+					return yield* parseSyncResult(output)
+				}),
 
 			/**
 			 * Import-only sync - re-imports beads from JSONL into database without git operations.
 			 * Use after git merge to recover any beads that might have been incorrectly
 			 * removed by the bd merge driver.
 			 */
-				syncImportOnly: (cwd?: string) =>
-					Effect.gen(function* () {
-						if (useLocalFirstPath) {
-							return ZERO_SYNC_RESULT
-						}
+			syncImportOnly: (cwd?: string) =>
+				Effect.gen(function* () {
+					if (useLocalFirstPath) {
+						return ZERO_SYNC_RESULT
+					}
 
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
-						return yield* parseSyncResult(output)
-					}),
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const output = yield* runBd(["sync", "--import-only"], effectiveCwd)
+					return yield* parseSyncResult(output)
+				}),
 
-				recoverTombstones: (cwd?: string) =>
-					Effect.gen(function* () {
-						if (configuredBackend === "linear" || configuredBackend === "local") {
-							return 0
-						}
+			recoverTombstones: (cwd?: string) =>
+				Effect.gen(function* () {
+					if (configuredBackend === "linear" || configuredBackend === "local") {
+						return 0
+					}
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					// Run recovery script that fixes tombstoned issues from JSONL
@@ -2582,42 +2589,42 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					return match ? Number.parseInt(match[1]!, 10) : 0
 				}),
 
-				ready: (cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issues = yield* fromLocalStore(
-								"local-store ready",
-								localIssueStore.ready(effectiveCwd),
-							)
-							return [...issues]
-						}
+			ready: (cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issues = yield* fromLocalStore(
+							"local-store ready",
+							localIssueStore.ready(effectiveCwd),
+						)
+						return [...issues]
+					}
 
-						const output = yield* runBd(["ready"], effectiveCwd)
-						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-						const normalized = normalizeIssues(parsed)
-						// Filter out tombstone (deleted) issues
-						return normalized.filter((issue) => issue.status !== "tombstone")
+					const output = yield* runBd(["ready"], effectiveCwd)
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
+					// Filter out tombstone (deleted) issues
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
-				search: (query: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issues = yield* fromLocalStore(
-								"local-store search",
-								localIssueStore.search(query, effectiveCwd),
-							)
-							return [...issues]
-						}
+			search: (query: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issues = yield* fromLocalStore(
+							"local-store search",
+							localIssueStore.search(query, effectiveCwd),
+						)
+						return [...issues]
+					}
 
-						const output = yield* runBd(["search", query], effectiveCwd)
-						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
-						const normalized = normalizeIssues(parsed)
-						// Filter out tombstone (deleted) issues
-						return normalized.filter((issue) => issue.status !== "tombstone")
+					const output = yield* runBd(["search", query], effectiveCwd)
+					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
+					const normalized = normalizeIssues(parsed)
+					// Filter out tombstone (deleted) issues
+					return normalized.filter((issue) => issue.status !== "tombstone")
 				}),
 
 			create: (params: {
@@ -2631,31 +2638,31 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				estimate?: number
 				labels?: string[]
 				cwd?: string
-				}) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(params.cwd)
-						if (useLocalFirstPath) {
-							return yield* fromLocalStore(
-								"local-store create",
-								localIssueStore.create(
-									{
-										title: params.title,
-										type: params.type,
-										priority: params.priority,
-										description: params.description,
-										design: params.design,
-										acceptance: params.acceptance,
-										assignee: params.assignee,
-										estimate: params.estimate,
-										labels: params.labels,
-									},
-									mutationSyncTarget,
-									effectiveCwd,
-								),
-							)
-						}
+			}) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(params.cwd)
+					if (useLocalFirstPath) {
+						return yield* fromLocalStore(
+							"local-store create",
+							localIssueStore.create(
+								{
+									title: params.title,
+									type: params.type,
+									priority: params.priority,
+									description: params.description,
+									design: params.design,
+									acceptance: params.acceptance,
+									assignee: params.assignee,
+									estimate: params.estimate,
+									labels: params.labels,
+								},
+								mutationSyncTarget,
+								effectiveCwd,
+							),
+						)
+					}
 
-						const args: string[] = ["create", params.title]
+					const args: string[] = ["create", params.title]
 
 					if (params.type) {
 						args.push("--type", params.type)
@@ -2690,52 +2697,52 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					return normalizeIssue(parsed)
 				}),
 
-				delete: (id: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							const deleted = yield* fromLocalStore(
-								"local-store delete",
-								localIssueStore.delete(id, mutationSyncTarget, effectiveCwd),
+			delete: (id: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						const deleted = yield* fromLocalStore(
+							"local-store delete",
+							localIssueStore.delete(id, mutationSyncTarget, effectiveCwd),
+						)
+						if (!deleted) {
+							return yield* Effect.fail(
+								new BeadsError({
+									message: `Issue not found: ${id}`,
+									command: `local-store delete ${id}`,
+								}),
 							)
-							if (!deleted) {
-								return yield* Effect.fail(
-									new BeadsError({
-										message: `Issue not found: ${id}`,
-										command: `local-store delete ${id}`,
-									}),
-								)
-							}
-							return
+						}
+						return
+					}
+
+					// Use runBdDirect because:
+					// 1. The daemon doesn't support the delete operation
+					// 2. --force is required to actually delete (not just preview)
+					yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
+				}),
+
+			getEpicChildren: (epicId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const epic = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(epicId, effectiveCwd),
+						)
+						if (epic === undefined || epic.status === "tombstone") {
+							return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 						}
 
-						// Use runBdDirect because:
-						// 1. The daemon doesn't support the delete operation
-						// 2. --force is required to actually delete (not just preview)
-						yield* runBdDirect(["delete", id, "--force"], effectiveCwd)
-					}),
+						const children = yield* fromLocalStore(
+							"local-store getEpicChildren",
+							localIssueStore.getEpicChildren(epicId, effectiveCwd),
+						)
+						return [...children]
+					}
 
-				getEpicChildren: (epicId: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const epic = yield* fromLocalStore(
-								"local-store show",
-								localIssueStore.show(epicId, effectiveCwd),
-							)
-							if (epic === undefined || epic.status === "tombstone") {
-								return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
-							}
-
-							const children = yield* fromLocalStore(
-								"local-store getEpicChildren",
-								localIssueStore.getEpicChildren(epicId, effectiveCwd),
-							)
-							return [...children]
-						}
-
-						const output = yield* runBd(["show", epicId], effectiveCwd)
+					const output = yield* runBd(["show", epicId], effectiveCwd)
 
 					// bd show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -2754,27 +2761,27 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					return children
 				}),
 
-				getEpicWithChildren: (epicId: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const epic = yield* fromLocalStore(
-								"local-store show",
-								localIssueStore.show(epicId, effectiveCwd),
-							)
-							if (epic === undefined || epic.status === "tombstone") {
-								return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
-							}
-
-							const children = yield* fromLocalStore(
-								"local-store getEpicChildren",
-								localIssueStore.getEpicChildren(epicId, effectiveCwd),
-							)
-							return { epic, children: [...children] }
+			getEpicWithChildren: (epicId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const epic = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(epicId, effectiveCwd),
+						)
+						if (epic === undefined || epic.status === "tombstone") {
+							return yield* Effect.fail(new NotFoundError({ issueId: epicId }))
 						}
 
-						const output = yield* runBd(["show", epicId], effectiveCwd)
+						const children = yield* fromLocalStore(
+							"local-store getEpicChildren",
+							localIssueStore.getEpicChildren(epicId, effectiveCwd),
+						)
+						return { epic, children: [...children] }
+					}
+
+					const output = yield* runBd(["show", epicId], effectiveCwd)
 
 					// bd returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -2802,24 +2809,24 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				dependsOnId: string,
 				type?: "blocks" | "related" | "parent-child" | "discovered-from",
 				cwd?: string,
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* fromLocalStore(
-								"local-store addDependency",
-								localIssueStore.addDependency(
-									issueId,
-									dependsOnId,
-									type ?? "blocks",
-									mutationSyncTarget,
-									effectiveCwd,
-								),
-							)
-							return
-						}
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* fromLocalStore(
+							"local-store addDependency",
+							localIssueStore.addDependency(
+								issueId,
+								dependsOnId,
+								type ?? "blocks",
+								mutationSyncTarget,
+								effectiveCwd,
+							),
+						)
+						return
+					}
 
-						const args: string[] = ["dep", "add", issueId, dependsOnId]
+					const args: string[] = ["dep", "add", issueId, dependsOnId]
 
 					if (type) {
 						args.push("--type", type)
@@ -2828,26 +2835,26 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					yield* runBd(args, effectiveCwd)
 				}),
 
-				getParentEpic: (issueId: string, cwd?: string) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* getEffectiveCwd(cwd)
-						if (useLocalFirstPath) {
-							yield* ensureLinearBootstrapForRead(effectiveCwd)
-							const issue = yield* fromLocalStore(
-								"local-store show",
-								localIssueStore.show(issueId, effectiveCwd),
-							)
-							if (issue === undefined || issue.status === "tombstone") {
-								return yield* Effect.fail(new NotFoundError({ issueId }))
-							}
-
-							return yield* fromLocalStore(
-								"local-store getParentEpic",
-								localIssueStore.getParentEpic(issueId, effectiveCwd),
-							)
+			getParentEpic: (issueId: string, cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					if (useLocalFirstPath) {
+						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const issue = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(issueId, effectiveCwd),
+						)
+						if (issue === undefined || issue.status === "tombstone") {
+							return yield* Effect.fail(new NotFoundError({ issueId }))
 						}
 
-						const output = yield* runBd(["show", issueId], effectiveCwd)
+						return yield* fromLocalStore(
+							"local-store getParentEpic",
+							localIssueStore.getParentEpic(issueId, effectiveCwd),
+						)
+					}
+
+					const output = yield* runBd(["show", issueId], effectiveCwd)
 
 					// bd show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
