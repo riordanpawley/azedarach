@@ -47,6 +47,21 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "delete" {
 		return handleDeleteCommand(args[1:], stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "ready" {
+		return handleReadyCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "blocked" {
+		return handleBlockedCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "search" {
+		return handleSearchCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "stale" {
+		return handleStaleCommand(args[1:], stdout, stderr)
+	}
+	if len(args) > 0 && args[0] == "count" {
+		return handleCountCommand(args[1:], stdout, stderr)
+	}
 
 	// Load configuration
 	cfg, err := loadConfig()
