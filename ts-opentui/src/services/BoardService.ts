@@ -681,12 +681,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					? Effect.succeed(preferredProjectPath)
 					: getCurrentBoardProjectPath()
 
-			const loadTasks = (preferredProjectPath?: string | null) =>
-				Effect.gen(function* () {
-					const loadStartTime = Date.now()
-					const projectPath = yield* resolveProjectPath(preferredProjectPath)
-					const gitConfig = yield* appConfig.getGitConfig()
-					const { baseBranch, showLineChanges } = gitConfig
+				const loadTasks = (preferredProjectPath?: string | null) =>
+					Effect.gen(function* () {
+						const loadStartTime = Date.now()
+						const projectPath = yield* resolveProjectPath(preferredProjectPath)
+						const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
+						const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
+						yield* Effect.log(
+							`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
+						)
+						const gitConfig = yield* appConfig.getGitConfig()
+						const { baseBranch, showLineChanges } = gitConfig
 					const startupConfig = yield* SubscriptionRef.get(appConfig.config)
 				const isLinearBackend = "linear" in startupConfig.issueTracker
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
@@ -1121,19 +1126,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
 			issueTrackerClient.show(taskId).pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
 
-			const refresh = (preferredProjectPath?: string | null) =>
-				diagnostics
-					.measure(
+				const refresh = (preferredProjectPath?: string | null) =>
+					diagnostics
+						.measure(
 						{
 						source: "BoardService",
 						name: "refresh",
 						thresholdMs: 500,
 					},
-						Effect.gen(function* () {
-							yield* SubscriptionRef.set(isLoading, true)
+							Effect.gen(function* () {
+								yield* SubscriptionRef.set(isLoading, true)
 
-							// Capture project path at refresh START
-							const startProjectPath = yield* resolveProjectPath(preferredProjectPath)
+								// Capture project path at refresh START
+								const startProjectPath = yield* resolveProjectPath(preferredProjectPath)
+								yield* Effect.log(
+									`refresh: startProjectPath=${startProjectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"}`,
+								)
 
 							// Update currentProjectPath SubscriptionRef
 							yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
@@ -1147,12 +1155,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								loadTasks(startProjectPath).pipe(Effect.withSpan("board.loadTasks")),
 							)
 
-							// Verify project hasn't changed during refresh (race condition guard)
-							// If project changed, discard results to avoid showing wrong project's data
-							const activeProjectPath = yield* getCurrentBoardProjectPath()
-							if (startProjectPath !== activeProjectPath) {
+								// Verify project hasn't changed during refresh (race condition guard)
+								// If project changed, discard results to avoid showing wrong project's data
+								const activeProjectPath = yield* getCurrentBoardProjectPath()
 								yield* Effect.log(
-									`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
+									`refresh: race-guard startProjectPath=${startProjectPath ?? "null"} activeProjectPath=${activeProjectPath ?? "null"}`,
+								)
+								if (startProjectPath !== activeProjectPath) {
+									yield* Effect.log(
+										`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
 							)
 							return
 						}

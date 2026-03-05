@@ -152,6 +152,13 @@ export const resolveLocalIssueStorageRoot = ({
 }: ResolveLocalIssueStorageRootInput): string =>
 	explicitProjectPath ?? currentProjectPath ?? fallbackCwd
 
+interface LocalIssueStorageResolution {
+	readonly storageRoot: string
+	readonly explicitProjectPath?: string
+	readonly currentProjectPath?: string
+	readonly fallbackCwd: string
+}
+
 const schemaStatements: readonly string[] = [
 	`CREATE TABLE IF NOT EXISTS issues (
 		id TEXT PRIMARY KEY,
@@ -376,15 +383,25 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 		const fs = yield* FileSystem.FileSystem
 		const projectService = yield* ProjectService
 
-		const getStorageRoot = (cwd?: string): Effect.Effect<string> =>
+		const resolveStorageRoot = (
+			cwd?: string,
+		): Effect.Effect<LocalIssueStorageResolution> =>
 			projectService.getCurrentPath().pipe(
-				Effect.map((projectPath) =>
-					resolveLocalIssueStorageRoot({
+				Effect.map((projectPath) => {
+					const fallbackCwd = process.cwd()
+					const currentProjectPath = projectPath ?? undefined
+					const storageRoot = resolveLocalIssueStorageRoot({
 						explicitProjectPath: cwd,
-						currentProjectPath: projectPath,
-						fallbackCwd: process.cwd(),
-					}),
-				),
+						currentProjectPath,
+						fallbackCwd,
+					})
+					return {
+						storageRoot,
+						explicitProjectPath: cwd,
+						currentProjectPath,
+						fallbackCwd,
+					}
+				}),
 			)
 
 		const ensureSyncQueueColumns = (
@@ -407,9 +424,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			effect: (sql: SqlClient.SqlClient) => Effect.Effect<A, SqlError | LocalIssueStoreError>,
 		): Effect.Effect<A, LocalIssueStoreError> =>
 			Effect.gen(function* () {
-				const storageRoot = yield* getStorageRoot(cwd)
+				const storageResolution = yield* resolveStorageRoot(cwd)
+				const storageRoot = storageResolution.storageRoot
 				const dbDir = pathService.join(storageRoot, LOCAL_ISSUE_DB_DIRECTORY)
 				const dbPath = pathService.join(dbDir, LOCAL_ISSUE_DB_FILENAME)
+				yield* Effect.log(
+					`LocalIssueStore.withSql: dbPath=${dbPath} explicitCwd=${storageResolution.explicitProjectPath ?? "<none>"} currentProjectPath=${storageResolution.currentProjectPath ?? "<none>"} fallbackCwd=${storageResolution.fallbackCwd}`,
+				)
 
 				yield* fs.makeDirectory(dbDir, { recursive: true }).pipe(
 					Effect.catchAll((cause) =>
