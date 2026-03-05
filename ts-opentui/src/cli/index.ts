@@ -76,6 +76,7 @@ import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
+import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 
 // ============================================================================
 // CLI Layers
@@ -305,9 +306,7 @@ const startHandler = (args: {
 			.pipe(
 				Effect.tap(() => {
 					if (args.verbose) {
-						return Console.log(
-							`Claimed issue ${issueId} with assignee ${session.tmuxSessionName}`,
-						)
+						return Console.log(`Claimed issue ${issueId} with assignee ${session.tmuxSessionName}`)
 					}
 					return Effect.void
 				}),
@@ -707,11 +706,13 @@ const issueGetHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		const issue = yield* issueTrackerClient.show(issueId, explicitProjectDir).pipe(
-			Effect.catchTag("NotFoundError", () =>
-				Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
-			),
-		)
+		const issue = yield* issueTrackerClient
+			.show(issueId, explicitProjectDir)
+			.pipe(
+				Effect.catchTag("NotFoundError", () =>
+					Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
+				),
+			)
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(issue, null, 2))
@@ -891,11 +892,7 @@ const issueCloseHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* BeadsClient
-		yield* issueTrackerClient.close(
-			issueId,
-			Option.getOrUndefined(args.reason),
-			explicitProjectDir,
-		)
+		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
@@ -1412,6 +1409,13 @@ const projectAddHandler = (args: {
 				yield* Console.log(`  Beads: ${beadsPath}`)
 			}
 		}
+
+		yield* ensureProjectAzedarachGitignore({
+			projectPath: absolutePath,
+			pathService,
+			fs,
+			verbose: args.verbose,
+		})
 
 		// Add project via ProjectService (provided by cliLayer)
 		const projectService = yield* ProjectService
