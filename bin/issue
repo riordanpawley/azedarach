@@ -104,6 +104,14 @@ Issue Session Primer
 - Delegates to: $delegate
 - Local machine override: export ISSUE_BACKEND=az|linear|br|bd
 
+AI Workflow Guidance:
+- Use the issue CLI as the source of truth for task tracking.
+- Do not use internal TODO tools, markdown task lists, or side trackers for issue state.
+- Keep issue status and notes current as you work.
+- Include the current issue ID in commit messages.
+- Commit code changes before closing the issue.
+- Close the issue only after the commit is created.
+
 Backend API Guide:
 EOF_PRIME
 
