@@ -72,6 +72,7 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
 	})
 
 	it("uses dev-command mode for az dev", () => {
