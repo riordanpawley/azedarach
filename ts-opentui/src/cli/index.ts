@@ -1106,7 +1106,8 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - When work is complete:
-  - Commit your changes first (\`git add -A && git commit -m "..."\`).
+  - Commit your changes first (\`git add -A && git commit -m "AZE-123: ..."\`).
+  - Always include the issue ID in the commit message.
   - Then close the issue (\`az issue close <issue-id>\`).
 `)
 	})
