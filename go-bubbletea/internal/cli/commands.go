@@ -29,8 +29,8 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
 	// Initialize issue client adapter
-	beadsRunner := &beads.ExecRunner{}
-	beadsClient := beads.NewClient(beadsRunner, logger)
+	issueRunner := &beads.ExecRunner{}
+	issueClient := beads.NewClient(issueRunner, logger)
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}
@@ -46,7 +46,7 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 
 	return &Dependencies{
 		Config:          cfg,
-		IssueClient:     beadsClient,
+		IssueClient:     issueClient,
 		TmuxClient:      tmuxClient,
 		WorktreeManager: worktreeManager,
 		Logger:          logger,
