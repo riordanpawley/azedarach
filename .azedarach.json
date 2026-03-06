@@ -4,10 +4,7 @@
   "issueTracker": {
     "linear": {
       "syncEnabled": true,
-      "team": "AZE",
-      "webhooks": {
-        "enabled": false
-      }
+      "team": "AZE"
     }
   },
   "worktree": {

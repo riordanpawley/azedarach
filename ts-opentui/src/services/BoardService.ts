@@ -9,10 +9,12 @@ import { Command } from "@effect/platform"
 import {
 	Array as Arr,
 	Cause,
+	Config,
 	DateTime,
 	Effect,
 	Fiber,
 	HashMap,
+	Option,
 	Order,
 	Record,
 	Ref,
@@ -36,7 +38,12 @@ import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/ty
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
 import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
-import { LinearWebhookService, type LinearIssueWebhookEvent } from "./LinearWebhookService.js"
+import {
+	LinearWebhookService,
+	normalizePublicBaseUrl,
+	parseTailscaleDnsName,
+	type LinearIssueWebhookEvent,
+} from "./LinearWebhookService.js"
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
@@ -48,6 +55,7 @@ const REFRESH_FAILURE_TOAST_DEBOUNCE_MS = 15000
 const LINEAR_WEBHOOK_RESTART_DELAY = "5 seconds"
 const LINEAR_WEBHOOK_DEFAULT_PORT = 9000
 const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
+const LINEAR_WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
 
 const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
 	if (!stateName) return "open"
@@ -1515,7 +1523,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const getLinearWebhookListenerConfig = (options?: {
 			readonly requireCliTransport?: boolean
-		}): Effect.Effect<LinearWebhookListenerConfig | undefined> =>
+		}) =>
 			Effect.gen(function* () {
 				const config = yield* SubscriptionRef.get(appConfig.config)
 				if (!("linear" in config.issueTracker)) {
@@ -1531,9 +1539,49 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				if ((options?.requireCliTransport ?? true) && webhookConfig.transport !== "cli") {
 					return undefined
 				}
-
+				const port =
+					Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
+						? webhookConfig.port
+						: LINEAR_WEBHOOK_DEFAULT_PORT
 				const team = linearConfig.team?.trim()
-				const url = webhookConfig.url?.trim()
+
+				const configuredUrl = normalizePublicBaseUrl(webhookConfig.url)
+				const envUrl = yield* Config.option(Config.string(LINEAR_WEBHOOK_PUBLIC_URL_ENV)).pipe(
+					Effect.map((value) =>
+						Option.isSome(value) ? normalizePublicBaseUrl(value.value) : undefined,
+					),
+					Effect.catchAll(() => Effect.succeed(undefined)),
+				)
+
+				const url =
+					configuredUrl ??
+					envUrl ??
+					(yield* Effect.gen(function* () {
+						const tailscaleStatus = yield* Command.string(
+							Command.make("tailscale", "status", "--json"),
+						).pipe(
+							Effect.map((output) => output.trim()),
+							Effect.catchAll(() => Effect.succeed(undefined)),
+						)
+						if (tailscaleStatus === undefined) {
+							return undefined
+						}
+
+						const dnsName = parseTailscaleDnsName(tailscaleStatus)
+						if (Option.isNone(dnsName)) {
+							return undefined
+						}
+
+						const funnelExitCode = yield* Command.exitCode(
+							Command.make("tailscale", "funnel", "--bg", "--yes", String(port)),
+						).pipe(Effect.catchAll(() => Effect.succeed(1)))
+						if (funnelExitCode !== 0) {
+							return undefined
+						}
+
+						return `https://${dnsName.value}`
+					}))
+
 				if (!team || !url) {
 					return undefined
 				}
@@ -1545,11 +1593,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					configuredEvents !== undefined && configuredEvents.length > 0
 						? configuredEvents
 						: LINEAR_WEBHOOK_DEFAULT_EVENTS
-
-				const port =
-					Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
-						? webhookConfig.port
-						: LINEAR_WEBHOOK_DEFAULT_PORT
 
 				const secret = webhookConfig.secret?.trim()
 
@@ -1565,21 +1608,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const runLinearWebhookListener = (listenerConfig: LinearWebhookListenerConfig) =>
 			Effect.gen(function* () {
-				const args = [
-					"webhooks",
-					"listen",
-					"--json",
-					"--events",
-					listenerConfig.events.join(","),
-					"--team",
-					listenerConfig.team,
-					"--url",
-					listenerConfig.url,
-					"--port",
-					String(listenerConfig.port),
-					"--quiet",
-					"--no-color",
-				]
+				const args = ["webhooks", "listen", "--json", "--events", listenerConfig.events.join(",")]
+				args.push("--team", listenerConfig.team, "--url", listenerConfig.url)
+				args.push("--port", String(listenerConfig.port), "--quiet", "--no-color")
 				if (listenerConfig.secret !== undefined) {
 					args.push("--secret", listenerConfig.secret)
 				}
@@ -1750,22 +1781,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						message: `Using linear-cli webhook listener (team=${linearWebhookListenerConfig.team}, url=${linearWebhookListenerConfig.url}).`,
 					})
 				} else {
-					const missing: string[] = []
-					const linearConfig = startupConfig.issueTracker.linear
-					if (!linearConfig.team?.trim()) {
-						missing.push("issueTracker.linear.team")
-					}
-					if (!webhookConfig.url?.trim()) {
-						missing.push("issueTracker.linear.webhooks.url")
-					}
 					yield* Effect.logWarning(
-						`Linear CLI webhooks not configured (${missing.join(", ")}), using background polling fallback`,
+						"Linear CLI webhook listener configuration unavailable, using background polling fallback",
 					)
 					yield* reportLinearWebhookHealth({
 						mode: "cli",
 						strategy: "polling-fallback",
 						healthy: false,
-						message: `CLI webhook transport missing required config (${missing.join(", ")}); using background polling.`,
+						message: "CLI webhook listener configuration unavailable; using background polling.",
 					})
 					yield* startBackgroundPolling()
 				}
