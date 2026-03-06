@@ -6,7 +6,7 @@ import (
 )
 
 // CurrentVersion is the current config schema version
-const CurrentVersion = 1
+const CurrentVersion = 2
 
 // VersionedConfig wraps a Config with a version field for migrations
 type VersionedConfig struct {
@@ -15,16 +15,17 @@ type VersionedConfig struct {
 
 	// Inline config fields for backwards compatibility
 	// These are used when loading legacy configs without version field
-	CLITool       string          `json:"cliTool,omitempty"`
-	Git           GitConfig       `json:"git,omitempty"`
-	Session       SessionConfig   `json:"session,omitempty"`
-	PR            PRConfig        `json:"pr,omitempty"`
-	Merge         MergeConfig     `json:"merge,omitempty"`
-	Notifications NotifyConfig    `json:"notifications,omitempty"`
-	Linear        LinearConfig    `json:"linear,omitempty"`
-	Network       NetworkConfig   `json:"network,omitempty"`
-	DevServer     DevServerConfig `json:"devServer,omitempty"`
-	Worktree      WorktreeConfig  `json:"worktree,omitempty"`
+	CLITool       string             `json:"cliTool,omitempty"`
+	Git           GitConfig          `json:"git,omitempty"`
+	Session       SessionConfig      `json:"session,omitempty"`
+	PR            PRConfig           `json:"pr,omitempty"`
+	Merge         MergeConfig        `json:"merge,omitempty"`
+	Notifications NotifyConfig       `json:"notifications,omitempty"`
+	Linear        LinearConfig       `json:"linear,omitempty"`
+	IssueTracker  IssueTrackerConfig `json:"issueTracker,omitempty"`
+	Network       NetworkConfig      `json:"network,omitempty"`
+	DevServer     DevServerConfig    `json:"devServer,omitempty"`
+	Worktree      WorktreeConfig     `json:"worktree,omitempty"`
 }
 
 // Migration represents a config migration function
@@ -43,6 +44,16 @@ var migrations = []Migration{
 		Migrate: func(data map[string]interface{}) (map[string]interface{}, error) {
 			// No structural changes in v1, just add version
 			data["version"] = 1
+			return data, nil
+		},
+	},
+	// Migration 1 -> 2: Backfill local backup config defaults
+	{
+		FromVersion: 1,
+		ToVersion:   2,
+		Migrate: func(data map[string]interface{}) (map[string]interface{}, error) {
+			backfillIssueTrackerLocalBackups(data)
+			data["version"] = 2
 			return data, nil
 		},
 	},
@@ -89,6 +100,10 @@ func ParseVersionedConfig(data []byte) (*Config, error) {
 	if version > CurrentVersion {
 		return nil, fmt.Errorf("config version %d is newer than supported version %d", version, CurrentVersion)
 	}
+
+	// Backfill backup config defaults for currently-versioned configs that
+	// still omit newly added optional keys.
+	backfillIssueTrackerLocalBackups(rawConfig)
 
 	// Now parse into proper struct
 	// Re-marshal and unmarshal to get proper types
@@ -171,4 +186,54 @@ func MarshalVersionedConfig(cfg *Config) ([]byte, error) {
 	}
 
 	return json.MarshalIndent(result, "", "  ")
+}
+
+func backfillIssueTrackerLocalBackups(data map[string]interface{}) {
+	backfillIssueTrackerLocalBackupsInContainer(data)
+
+	if nestedConfig, ok := data["config"].(map[string]interface{}); ok {
+		backfillIssueTrackerLocalBackupsInContainer(nestedConfig)
+	}
+}
+
+func backfillIssueTrackerLocalBackupsInContainer(container map[string]interface{}) {
+	defaults := defaultLocalBackupsConfig()
+
+	issueTracker := ensureMapField(container, "issueTracker")
+	local := ensureMapField(issueTracker, "local")
+	backups := ensureMapField(local, "backups")
+
+	if _, ok := backups["enabled"]; !ok {
+		backups["enabled"] = defaults.Enabled
+	}
+	if _, ok := backups["intervalMinutes"]; !ok {
+		backups["intervalMinutes"] = defaults.IntervalMinutes
+	}
+	if _, ok := backups["writeCooldownSeconds"]; !ok {
+		backups["writeCooldownSeconds"] = defaults.WriteCooldownSeconds
+	}
+	if _, ok := backups["maxBackups"]; !ok {
+		backups["maxBackups"] = defaults.MaxBackups
+	}
+	if _, ok := backups["directory"]; !ok {
+		backups["directory"] = defaults.Directory
+	}
+}
+
+func ensureMapField(target map[string]interface{}, key string) map[string]interface{} {
+	existing, ok := target[key]
+	if !ok {
+		next := make(map[string]interface{})
+		target[key] = next
+		return next
+	}
+
+	casted, ok := existing.(map[string]interface{})
+	if !ok {
+		next := make(map[string]interface{})
+		target[key] = next
+		return next
+	}
+
+	return casted
 }

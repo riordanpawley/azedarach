@@ -66,8 +66,8 @@ func TestParseVersionedConfig_FutureVersion(t *testing.T) {
 	}
 }
 
-func TestApplyMigrations_V0ToV1(t *testing.T) {
-	// Legacy config (version 0)
+func TestApplyMigrations_V0ToCurrent(t *testing.T) {
+	// Legacy config (version 0) should migrate through all intermediate versions.
 	data := map[string]interface{}{
 		"cliTool": "claude",
 		"git": map[string]interface{}{
@@ -81,13 +81,65 @@ func TestApplyMigrations_V0ToV1(t *testing.T) {
 	}
 
 	version, ok := migrated["version"].(int)
-	if !ok || version != 1 {
-		t.Errorf("Expected version 1, got %v", migrated["version"])
+	if !ok || version != CurrentVersion {
+		t.Errorf("Expected version %d, got %v", CurrentVersion, migrated["version"])
 	}
 
 	// Verify data is preserved
 	if cliTool, ok := migrated["cliTool"].(string); !ok || cliTool != "claude" {
 		t.Errorf("Expected cliTool 'claude', got %v", migrated["cliTool"])
+	}
+}
+
+func TestApplyMigrations_V1ToV2BackfillsIssueTrackerLocalBackups(t *testing.T) {
+	data := map[string]interface{}{
+		"version": 1,
+		"issueTracker": map[string]interface{}{
+			"local": map[string]interface{}{
+				"backups": map[string]interface{}{
+					"maxBackups": 7,
+				},
+			},
+		},
+	}
+
+	migrated, err := ApplyMigrations(data, 1)
+	if err != nil {
+		t.Fatalf("Migration failed: %v", err)
+	}
+
+	version, ok := migrated["version"].(int)
+	if !ok || version != 2 {
+		t.Fatalf("Expected version 2, got %v", migrated["version"])
+	}
+
+	issueTracker, ok := migrated["issueTracker"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected issueTracker object, got %T", migrated["issueTracker"])
+	}
+	local, ok := issueTracker["local"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected issueTracker.local object, got %T", issueTracker["local"])
+	}
+	backups, ok := local["backups"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected issueTracker.local.backups object, got %T", local["backups"])
+	}
+
+	if enabled, ok := backups["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("Expected backups.enabled=true, got %v", backups["enabled"])
+	}
+	if interval, ok := backups["intervalMinutes"].(int); !ok || interval != 60 {
+		t.Fatalf("Expected backups.intervalMinutes=60, got %v", backups["intervalMinutes"])
+	}
+	if cooldown, ok := backups["writeCooldownSeconds"].(int); !ok || cooldown != 300 {
+		t.Fatalf("Expected backups.writeCooldownSeconds=300, got %v", backups["writeCooldownSeconds"])
+	}
+	if maxBackups, ok := backups["maxBackups"].(int); !ok || maxBackups != 7 {
+		t.Fatalf("Expected backups.maxBackups=7, got %v", backups["maxBackups"])
+	}
+	if directory, ok := backups["directory"].(string); !ok || directory != ".azedarach/backups" {
+		t.Fatalf("Expected backups.directory=.azedarach/backups, got %v", backups["directory"])
 	}
 }
 

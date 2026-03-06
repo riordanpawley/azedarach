@@ -60,6 +60,13 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "{project}-{issueID}", cfg.Worktree.NameFormat)
 	assert.True(t, cfg.Worktree.AutoCleanup)
 	assert.Equal(t, 7, cfg.Worktree.KeepDays)
+
+	// Test local issue tracker backup defaults
+	assert.True(t, cfg.IssueTracker.Local.Backups.Enabled)
+	assert.Equal(t, 60, cfg.IssueTracker.Local.Backups.IntervalMinutes)
+	assert.Equal(t, 300, cfg.IssueTracker.Local.Backups.WriteCooldownSeconds)
+	assert.Equal(t, 30, cfg.IssueTracker.Local.Backups.MaxBackups)
+	assert.Equal(t, ".azedarach/backups", cfg.IssueTracker.Local.Backups.Directory)
 }
 
 func TestLoadConfigFromAzedarachJSON(t *testing.T) {
@@ -455,4 +462,86 @@ func TestComplexConfig(t *testing.T) {
 	assert.Equal(t, "{issueID}-{project}", cfg.Worktree.NameFormat)
 	assert.False(t, cfg.Worktree.AutoCleanup)
 	assert.Equal(t, 30, cfg.Worktree.KeepDays)
+}
+
+func TestLoadConfigBackfillsIssueTrackerLocalBackups(t *testing.T) {
+	tests := []struct {
+		name          string
+		configContent string
+		assertConfig  func(t *testing.T, cfg *Config)
+	}{
+		{
+			name: "omitted backups block resolves to defaults",
+			configContent: `{
+  "cliTool": "claude",
+  "issueTracker": {
+    "local": {}
+  }
+}`,
+			assertConfig: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				assert.True(t, cfg.IssueTracker.Local.Backups.Enabled)
+				assert.Equal(t, 60, cfg.IssueTracker.Local.Backups.IntervalMinutes)
+				assert.Equal(t, 300, cfg.IssueTracker.Local.Backups.WriteCooldownSeconds)
+				assert.Equal(t, 30, cfg.IssueTracker.Local.Backups.MaxBackups)
+				assert.Equal(t, ".azedarach/backups", cfg.IssueTracker.Local.Backups.Directory)
+			},
+		},
+		{
+			name: "partial backups block is backfilled",
+			configContent: `{
+  "issueTracker": {
+    "local": {
+      "backups": {
+        "maxBackups": 12
+      }
+    }
+  }
+}`,
+			assertConfig: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				assert.True(t, cfg.IssueTracker.Local.Backups.Enabled)
+				assert.Equal(t, 60, cfg.IssueTracker.Local.Backups.IntervalMinutes)
+				assert.Equal(t, 300, cfg.IssueTracker.Local.Backups.WriteCooldownSeconds)
+				assert.Equal(t, 12, cfg.IssueTracker.Local.Backups.MaxBackups)
+				assert.Equal(t, ".azedarach/backups", cfg.IssueTracker.Local.Backups.Directory)
+			},
+		},
+		{
+			name: "explicit backups override stays intact",
+			configContent: `{
+  "issueTracker": {
+    "local": {
+      "backups": {
+        "enabled": false,
+        "intervalMinutes": 15,
+        "writeCooldownSeconds": 45,
+        "maxBackups": 6,
+        "directory": ".azedarach/snapshots"
+      }
+    }
+  }
+}`,
+			assertConfig: func(t *testing.T, cfg *Config) {
+				t.Helper()
+				assert.False(t, cfg.IssueTracker.Local.Backups.Enabled)
+				assert.Equal(t, 15, cfg.IssueTracker.Local.Backups.IntervalMinutes)
+				assert.Equal(t, 45, cfg.IssueTracker.Local.Backups.WriteCooldownSeconds)
+				assert.Equal(t, 6, cfg.IssueTracker.Local.Backups.MaxBackups)
+				assert.Equal(t, ".azedarach/snapshots", cfg.IssueTracker.Local.Backups.Directory)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, ".azedarach.json")
+			require.NoError(t, os.WriteFile(configPath, []byte(tt.configContent), 0644))
+
+			cfg, err := LoadConfig(tmpDir)
+			require.NoError(t, err)
+			tt.assertConfig(t, cfg)
+		})
+	}
 }

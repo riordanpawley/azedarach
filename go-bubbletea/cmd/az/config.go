@@ -244,6 +244,18 @@ func validateLoadedConfig(cfg *config.Config) error {
 	if cfg.Worktree.KeepDays < 0 {
 		return fmt.Errorf("worktree.keepDays must be >= 0")
 	}
+	if cfg.IssueTracker.Local.Backups.IntervalMinutes <= 0 {
+		return fmt.Errorf("issueTracker.local.backups.intervalMinutes must be > 0")
+	}
+	if cfg.IssueTracker.Local.Backups.WriteCooldownSeconds <= 0 {
+		return fmt.Errorf("issueTracker.local.backups.writeCooldownSeconds must be > 0")
+	}
+	if cfg.IssueTracker.Local.Backups.MaxBackups <= 0 {
+		return fmt.Errorf("issueTracker.local.backups.maxBackups must be > 0")
+	}
+	if strings.TrimSpace(cfg.IssueTracker.Local.Backups.Directory) == "" {
+		return fmt.Errorf("issueTracker.local.backups.directory must not be empty")
+	}
 
 	return nil
 }

@@ -294,6 +294,58 @@ func TestRunCLIConfigValidateJSONSyncIntervalFailureUsesLinearMessage(t *testing
 	}
 }
 
+func TestValidateLoadedConfigIssueTrackerLocalBackupsValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(cfg *config.Config)
+		wantMessage string
+	}{
+		{
+			name: "interval must be positive",
+			mutate: func(cfg *config.Config) {
+				cfg.IssueTracker.Local.Backups.IntervalMinutes = 0
+			},
+			wantMessage: "issueTracker.local.backups.intervalMinutes must be > 0",
+		},
+		{
+			name: "write cooldown must be positive",
+			mutate: func(cfg *config.Config) {
+				cfg.IssueTracker.Local.Backups.WriteCooldownSeconds = 0
+			},
+			wantMessage: "issueTracker.local.backups.writeCooldownSeconds must be > 0",
+		},
+		{
+			name: "max backups must be positive",
+			mutate: func(cfg *config.Config) {
+				cfg.IssueTracker.Local.Backups.MaxBackups = 0
+			},
+			wantMessage: "issueTracker.local.backups.maxBackups must be > 0",
+		},
+		{
+			name: "directory must not be empty",
+			mutate: func(cfg *config.Config) {
+				cfg.IssueTracker.Local.Backups.Directory = "   "
+			},
+			wantMessage: "issueTracker.local.backups.directory must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			tt.mutate(cfg)
+
+			err := validateLoadedConfig(cfg)
+			if err == nil {
+				t.Fatalf("expected validation error, got nil")
+			}
+			if err.Error() != tt.wantMessage {
+				t.Fatalf("expected error %q, got %q", tt.wantMessage, err.Error())
+			}
+		})
+	}
+}
+
 func stubConfigLoaderForTest(t *testing.T, loader func() (*config.Config, error)) {
 	t.Helper()
 

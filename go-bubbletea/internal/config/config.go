@@ -7,18 +7,26 @@ import (
 	"path/filepath"
 )
 
+const (
+	defaultBackupIntervalMinutes      = 60
+	defaultBackupWriteCooldownSeconds = 300
+	defaultBackupMaxBackups           = 30
+	defaultBackupDirectory            = ".azedarach/backups"
+)
+
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool       string          `json:"cliTool"`
-	Git           GitConfig       `json:"git"`
-	Session       SessionConfig   `json:"session"`
-	PR            PRConfig        `json:"pr"`
-	Merge         MergeConfig     `json:"merge"`
-	Notifications NotifyConfig    `json:"notifications"`
-	Linear        LinearConfig    `json:"linear"`
-	Network       NetworkConfig   `json:"network"`
-	DevServer     DevServerConfig `json:"devServer"`
-	Worktree      WorktreeConfig  `json:"worktree"`
+	CLITool       string             `json:"cliTool"`
+	Git           GitConfig          `json:"git"`
+	Session       SessionConfig      `json:"session"`
+	PR            PRConfig           `json:"pr"`
+	Merge         MergeConfig        `json:"merge"`
+	Notifications NotifyConfig       `json:"notifications"`
+	Linear        LinearConfig       `json:"linear"`
+	IssueTracker  IssueTrackerConfig `json:"issueTracker"`
+	Network       NetworkConfig      `json:"network"`
+	DevServer     DevServerConfig    `json:"devServer"`
+	Worktree      WorktreeConfig     `json:"worktree"`
 }
 
 // GitConfig contains Git-related settings
@@ -63,6 +71,26 @@ type NotifyConfig struct {
 type LinearConfig struct {
 	Path         string `json:"path"`
 	SyncInterval int    `json:"syncInterval"`
+}
+
+// IssueTrackerConfig contains issue tracker backend settings
+type IssueTrackerConfig struct {
+	Local LocalIssueTrackerConfig `json:"local"`
+}
+
+// LocalIssueTrackerConfig contains local backend settings
+type LocalIssueTrackerConfig struct {
+	Backups LocalBackupsConfig `json:"backups"`
+}
+
+// LocalBackupsConfig contains local SQLite backup policy settings.
+// writeCooldownSeconds is also the warning-throttle window for repeated backup failures.
+type LocalBackupsConfig struct {
+	Enabled              bool   `json:"enabled"`
+	IntervalMinutes      int    `json:"intervalMinutes"`
+	WriteCooldownSeconds int    `json:"writeCooldownSeconds"`
+	MaxBackups           int    `json:"maxBackups"`
+	Directory            string `json:"directory"`
 }
 
 // NetworkConfig contains network-related settings
@@ -124,6 +152,11 @@ func DefaultConfig() *Config {
 		Linear: LinearConfig{
 			Path:         ".linear",
 			SyncInterval: 300, // 5 minutes
+		},
+		IssueTracker: IssueTrackerConfig{
+			Local: LocalIssueTrackerConfig{
+				Backups: defaultLocalBackupsConfig(),
+			},
 		},
 		Network: NetworkConfig{
 			CheckInterval:  60,  // 1 minute
@@ -287,6 +320,20 @@ func MergeWithDefaults(cfg *Config) *Config {
 		cfg.Notifications.ErrorThreshold = defaults.Notifications.ErrorThreshold
 	}
 
+	// Merge local issue tracker backup config
+	if cfg.IssueTracker.Local.Backups.IntervalMinutes == 0 {
+		cfg.IssueTracker.Local.Backups.IntervalMinutes = defaults.IssueTracker.Local.Backups.IntervalMinutes
+	}
+	if cfg.IssueTracker.Local.Backups.WriteCooldownSeconds == 0 {
+		cfg.IssueTracker.Local.Backups.WriteCooldownSeconds = defaults.IssueTracker.Local.Backups.WriteCooldownSeconds
+	}
+	if cfg.IssueTracker.Local.Backups.MaxBackups == 0 {
+		cfg.IssueTracker.Local.Backups.MaxBackups = defaults.IssueTracker.Local.Backups.MaxBackups
+	}
+	if cfg.IssueTracker.Local.Backups.Directory == "" {
+		cfg.IssueTracker.Local.Backups.Directory = defaults.IssueTracker.Local.Backups.Directory
+	}
+
 	return cfg
 }
 
@@ -297,4 +344,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to get current directory: %w", err)
 	}
 	return LoadConfig(cwd)
+}
+
+func defaultLocalBackupsConfig() LocalBackupsConfig {
+	return LocalBackupsConfig{
+		Enabled:              true,
+		IntervalMinutes:      defaultBackupIntervalMinutes,
+		WriteCooldownSeconds: defaultBackupWriteCooldownSeconds,
+		MaxBackups:           defaultBackupMaxBackups,
+		Directory:            defaultBackupDirectory,
+	}
 }
