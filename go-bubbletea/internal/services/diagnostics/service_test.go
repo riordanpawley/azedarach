@@ -2,6 +2,8 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -49,6 +51,27 @@ func (m *mockNetworkChecker) IsOnline() bool {
 
 func (m *mockNetworkChecker) LastCheck() time.Time {
 	return m.lastCheck
+}
+
+type mockToolChecker struct {
+	paths map[string]string
+	errs  map[string]error
+}
+
+func (m *mockToolChecker) LookPath(file string) (string, error) {
+	if m.errs != nil {
+		if err, ok := m.errs[file]; ok {
+			return "", err
+		}
+	}
+
+	if m.paths != nil {
+		if path, ok := m.paths[file]; ok {
+			return path, nil
+		}
+	}
+
+	return "", errors.New("not found")
 }
 
 func TestNewService(t *testing.T) {
@@ -466,6 +489,133 @@ func TestFormatBytes(t *testing.T) {
 				t.Errorf("formatBytes(%v) = %v, want %v", tt.bytes, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunStartupGate_MissingMandatoryToolBlocksActions(t *testing.T) {
+	tmux := &mockTmuxClient{}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{}
+	tools := &mockToolChecker{
+		paths: map[string]string{
+			"az":     "/usr/local/bin/az",
+			"git":    "/usr/bin/git",
+			"claude": "/usr/local/bin/claude",
+		},
+		errs: map[string]error{
+			"tmux": errors.New("executable file not found"),
+		},
+	}
+
+	service := NewService(tmux, ports, network, WithToolChecker(tools))
+	gate := service.RunStartupGate(DefaultStartupGateConfig("claude"))
+
+	if gate.OverallState != HealthCritical {
+		t.Fatalf("RunStartupGate() health = %v, want %v", gate.OverallState, HealthCritical)
+	}
+
+	if !reflect.DeepEqual(gate.MissingMandatory, []string{"tmux"}) {
+		t.Fatalf("RunStartupGate() missing mandatory = %v, want [tmux]", gate.MissingMandatory)
+	}
+
+	reason, ok := gate.BlockedActions["s"]
+	if !ok {
+		t.Fatalf("RunStartupGate() expected action 's' to be blocked, got %v", gate.BlockedActions)
+	}
+	if !contains(reason, "tmux") {
+		t.Fatalf("RunStartupGate() block reason = %q, expected tmux context", reason)
+	}
+
+	if len(gate.Errors) == 0 {
+		t.Fatalf("RunStartupGate() expected startup errors, got none")
+	}
+	if !contains(gate.Errors[0], "tmux") {
+		t.Fatalf("RunStartupGate() error = %q, expected tmux context", gate.Errors[0])
+	}
+}
+
+func TestRunStartupGate_DeterministicFailureOrdering(t *testing.T) {
+	tmux := &mockTmuxClient{}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{}
+	tools := &mockToolChecker{
+		errs: map[string]error{
+			"az":   errors.New("not found"),
+			"git":  errors.New("not found"),
+			"tmux": errors.New("not found"),
+		},
+	}
+
+	service := NewService(tmux, ports, network, WithToolChecker(tools))
+	cfg := StartupGateConfig{
+		Tools: []ToolRequirement{
+			{Name: "tmux", Mandatory: true, BlockedActions: []string{"s"}},
+			{Name: "az", Mandatory: true, BlockedActions: []string{"o"}},
+			{Name: "git", Mandatory: true, BlockedActions: []string{"s"}},
+		},
+	}
+
+	first := service.RunStartupGate(cfg)
+	second := service.RunStartupGate(cfg)
+
+	if !reflect.DeepEqual(first.MissingMandatory, second.MissingMandatory) {
+		t.Fatalf("RunStartupGate() missing mandatory not deterministic:\nfirst=%v\nsecond=%v", first.MissingMandatory, second.MissingMandatory)
+	}
+
+	if !reflect.DeepEqual(first.Errors, second.Errors) {
+		t.Fatalf("RunStartupGate() errors not deterministic:\nfirst=%v\nsecond=%v", first.Errors, second.Errors)
+	}
+
+	toolOrder := make([]string, 0, len(first.ToolDiagnostics))
+	for _, tool := range first.ToolDiagnostics {
+		toolOrder = append(toolOrder, tool.Name)
+	}
+	expectedOrder := []string{"az", "git", "tmux"}
+	if !reflect.DeepEqual(toolOrder, expectedOrder) {
+		t.Fatalf("RunStartupGate() tool order = %v, want %v", toolOrder, expectedOrder)
+	}
+}
+
+func TestCollectDiagnostics_IncludesStartupGateErrors(t *testing.T) {
+	tmux := &mockTmuxClient{}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{
+		online:    true,
+		lastCheck: time.Now(),
+	}
+	tools := &mockToolChecker{
+		paths: map[string]string{
+			"az":     "/usr/local/bin/az",
+			"git":    "/usr/bin/git",
+			"claude": "/usr/local/bin/claude",
+		},
+		errs: map[string]error{
+			"tmux": errors.New("not found"),
+		},
+	}
+
+	service := NewService(tmux, ports, network, WithToolChecker(tools))
+	service.RunStartupGate(DefaultStartupGateConfig("claude"))
+
+	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{}, nil)
+	if diag.OverallState != HealthCritical {
+		t.Fatalf("CollectDiagnostics() health = %v, want %v", diag.OverallState, HealthCritical)
+	}
+
+	if diag.Startup.OverallState != HealthCritical {
+		t.Fatalf("CollectDiagnostics() startup health = %v, want %v", diag.Startup.OverallState, HealthCritical)
+	}
+
+	foundTmuxError := false
+	for _, err := range diag.Errors {
+		if contains(err, "tmux") {
+			foundTmuxError = true
+			break
+		}
+	}
+
+	if !foundTmuxError {
+		t.Fatalf("CollectDiagnostics() expected startup tmux error, got %v", diag.Errors)
 	}
 }
 

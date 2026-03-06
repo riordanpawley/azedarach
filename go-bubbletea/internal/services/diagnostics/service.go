@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +73,7 @@ type SystemInfo struct {
 type SystemDiagnostics struct {
 	Timestamp    time.Time
 	OverallState HealthStatus
+	Startup      StartupGate
 	Ports        []PortInfo
 	Sessions     []SessionInfo
 	Worktrees    []WorktreeInfo
@@ -102,6 +105,51 @@ type NetworkChecker interface {
 	LastCheck() time.Time
 }
 
+// ToolChecker resolves external tools in PATH.
+type ToolChecker interface {
+	LookPath(file string) (string, error)
+}
+
+type execToolChecker struct{}
+
+func (execToolChecker) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+
+// ToolRequirement configures startup checks for one external tool.
+type ToolRequirement struct {
+	Name           string
+	Mandatory      bool
+	BlockedActions []string
+}
+
+// ToolDiagnostic captures startup health for one tool.
+type ToolDiagnostic struct {
+	Name           string
+	Mandatory      bool
+	Available      bool
+	Path           string
+	Error          string
+	BlockedActions []string
+}
+
+// StartupGateConfig defines the required tool checks at startup.
+type StartupGateConfig struct {
+	Tools []ToolRequirement
+}
+
+// StartupGate captures startup diagnostics and blocked actions.
+type StartupGate struct {
+	CheckedAt        time.Time
+	OverallState     HealthStatus
+	ToolDiagnostics  []ToolDiagnostic
+	MissingMandatory []string
+	MissingOptional  []string
+	BlockedActions   map[string]string
+	Warnings         []string
+	Errors           []string
+}
+
 // Service provides system diagnostics and health monitoring
 type Service struct {
 	mu sync.RWMutex
@@ -110,19 +158,144 @@ type Service struct {
 	tmuxClient     TmuxClient
 	portAllocator  PortAllocator
 	networkChecker NetworkChecker
+	toolChecker    ToolChecker
 
 	// Cached diagnostics
 	lastDiagnostics *SystemDiagnostics
 	lastUpdate      time.Time
+	startupGate     StartupGate
 }
 
-// NewService creates a new diagnostics service
-func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker) *Service {
-	return &Service{
+// Option configures diagnostics service behavior.
+type Option func(*Service)
+
+// WithToolChecker injects tool resolution behavior for startup checks.
+func WithToolChecker(checker ToolChecker) Option {
+	return func(s *Service) {
+		if checker != nil {
+			s.toolChecker = checker
+		}
+	}
+}
+
+// NewService creates a new diagnostics service.
+func NewService(tmux TmuxClient, ports PortAllocator, network NetworkChecker, opts ...Option) *Service {
+	service := &Service{
 		tmuxClient:     tmux,
 		portAllocator:  ports,
 		networkChecker: network,
+		toolChecker:    execToolChecker{},
 	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+
+	return service
+}
+
+// DefaultStartupGateConfig returns the default mandatory tool checks.
+func DefaultStartupGateConfig(cliTool string) StartupGateConfig {
+	tool := strings.TrimSpace(cliTool)
+	if tool == "" {
+		tool = "claude"
+	}
+
+	return StartupGateConfig{
+		Tools: []ToolRequirement{
+			{Name: "az", Mandatory: true},
+			{Name: "git", Mandatory: true, BlockedActions: []string{"s", "S", "u", "m", "P", "f", "c", "M"}},
+			{Name: "tmux", Mandatory: true, BlockedActions: []string{"s", "S", "a", "p", "x", "R"}},
+			{Name: tool, Mandatory: true, BlockedActions: []string{"s", "S"}},
+		},
+	}
+}
+
+// RunStartupGate validates required tools and computes blocked actions.
+func (s *Service) RunStartupGate(cfg StartupGateConfig) StartupGate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	requirements := normalizeToolRequirements(cfg)
+	now := time.Now()
+
+	toolDiagnostics := make([]ToolDiagnostic, 0, len(requirements))
+	missingMandatory := make([]string, 0, len(requirements))
+	missingOptional := make([]string, 0, len(requirements))
+	warnings := make([]string, 0, len(requirements))
+	errors := make([]string, 0, len(requirements))
+	actionReasons := make(map[string][]string)
+
+	for _, req := range requirements {
+		path, err := s.toolChecker.LookPath(req.Name)
+		available := err == nil && path != ""
+
+		diag := ToolDiagnostic{
+			Name:           req.Name,
+			Mandatory:      req.Mandatory,
+			Available:      available,
+			BlockedActions: sortedUniqueStrings(req.BlockedActions),
+		}
+		if available {
+			diag.Path = path
+		}
+		if err != nil {
+			diag.Error = err.Error()
+		}
+
+		if !available {
+			if req.Mandatory {
+				missingMandatory = append(missingMandatory, req.Name)
+				errors = append(errors, fmt.Sprintf("Missing mandatory tool '%s'. Install '%s' and restart.", req.Name, req.Name))
+				reason := fmt.Sprintf("requires %s", req.Name)
+				for _, action := range diag.BlockedActions {
+					actionReasons[action] = append(actionReasons[action], reason)
+				}
+			} else {
+				missingOptional = append(missingOptional, req.Name)
+				warnings = append(warnings, fmt.Sprintf("Optional tool '%s' not found.", req.Name))
+			}
+		}
+
+		toolDiagnostics = append(toolDiagnostics, diag)
+	}
+
+	blockedActions := make(map[string]string, len(actionReasons))
+	actionKeys := make([]string, 0, len(actionReasons))
+	for action := range actionReasons {
+		actionKeys = append(actionKeys, action)
+	}
+	sort.Strings(actionKeys)
+	for _, action := range actionKeys {
+		reasons := sortedUniqueStrings(actionReasons[action])
+		blockedActions[action] = strings.Join(reasons, "; ")
+	}
+
+	sort.Strings(missingMandatory)
+	sort.Strings(missingOptional)
+
+	overallState := HealthHealthy
+	if len(errors) > 0 {
+		overallState = HealthCritical
+	} else if len(warnings) > 0 {
+		overallState = HealthDegraded
+	}
+
+	gate := StartupGate{
+		CheckedAt:        now,
+		OverallState:     overallState,
+		ToolDiagnostics:  toolDiagnostics,
+		MissingMandatory: missingMandatory,
+		MissingOptional:  missingOptional,
+		BlockedActions:   blockedActions,
+		Warnings:         warnings,
+		Errors:           errors,
+	}
+
+	s.startupGate = gate
+	return gate
 }
 
 // GetSystemStatus returns the overall system health status
@@ -210,6 +383,13 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 
 	var warnings []string
 	var errors []string
+	startupGate := s.startupGate
+	if len(startupGate.Warnings) > 0 {
+		warnings = append(warnings, startupGate.Warnings...)
+	}
+	if len(startupGate.Errors) > 0 {
+		errors = append(errors, startupGate.Errors...)
+	}
 
 	// Collect port information
 	var ports []PortInfo
@@ -296,6 +476,7 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 	diag := &SystemDiagnostics{
 		Timestamp:    now,
 		OverallState: overallState,
+		Startup:      startupGate,
 		Ports:        ports,
 		Sessions:     sessionInfos,
 		Worktrees:    worktreeInfos,
@@ -446,4 +627,70 @@ func formatBytes(bytes uint64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+func normalizeToolRequirements(cfg StartupGateConfig) []ToolRequirement {
+	requirements := cfg.Tools
+	if len(requirements) == 0 {
+		requirements = DefaultStartupGateConfig("claude").Tools
+	}
+
+	byName := make(map[string]ToolRequirement, len(requirements))
+	for _, req := range requirements {
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			continue
+		}
+
+		normalizedActions := sortedUniqueStrings(req.BlockedActions)
+		if existing, ok := byName[name]; ok {
+			merged := append(existing.BlockedActions, normalizedActions...)
+			existing.BlockedActions = sortedUniqueStrings(merged)
+			existing.Mandatory = existing.Mandatory || req.Mandatory
+			byName[name] = existing
+			continue
+		}
+
+		byName[name] = ToolRequirement{
+			Name:           name,
+			Mandatory:      req.Mandatory,
+			BlockedActions: normalizedActions,
+		}
+	}
+
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	normalized := make([]ToolRequirement, 0, len(names))
+	for _, name := range names {
+		normalized = append(normalized, byName[name])
+	}
+
+	return normalized
+}
+
+func sortedUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		unique = append(unique, trimmed)
+	}
+
+	sort.Strings(unique)
+	return unique
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,6 +149,7 @@ type Model struct {
 
 	// Diagnostics service
 	diagnosticsService *diagnostics.Service
+	startupGate        diagnostics.StartupGate
 
 	// Logger
 	logger *slog.Logger
@@ -223,8 +225,13 @@ func New(cfg *config.Config) Model {
 
 	// Initialize diagnostics service
 	diagService := diagnostics.NewService(tmuxClient, portAllocator, networkChecker)
+	cliTool := "claude"
+	if cfg != nil && strings.TrimSpace(cfg.CLITool) != "" {
+		cliTool = strings.TrimSpace(cfg.CLITool)
+	}
+	startupGate := diagService.RunStartupGate(diagnostics.DefaultStartupGateConfig(cliTool))
 
-	return Model{
+	model := Model{
 		tasks:              []domain.Task{},
 		sessions:           make(map[string]*domain.Session),
 		nav:                navigation.NewService(),
@@ -250,9 +257,13 @@ func New(cfg *config.Config) Model {
 		prWorkflow:         prWorkflow,
 		devServerManager:   devServerMgr,
 		diagnosticsService: diagService,
+		startupGate:        startupGate,
 		logger:             logger,
 		usePlaceholder:     false, // Use real data from linear
 	}
+
+	model.applyStartupGate(startupGate)
+	return model
 }
 
 // Init returns the initial command for the application
@@ -1495,6 +1506,15 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if blocked, reason := m.actionBlockedByStartupGate(msg.Key); blocked {
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: fmt.Sprintf("Action '%s' disabled: %s", msg.Key, reason),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+	}
+
 	// Handle the selection based on key
 	switch msg.Key {
 	// Session actions
@@ -1665,6 +1685,47 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *Model) applyStartupGate(gate diagnostics.StartupGate) {
+	m.startupGate = gate
+
+	if len(gate.MissingMandatory) > 0 {
+		missing := append([]string(nil), gate.MissingMandatory...)
+		sort.Strings(missing)
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastError,
+			Message: fmt.Sprintf("Startup diagnostics: missing mandatory tools: %s", strings.Join(missing, ", ")),
+			Expires: time.Now().Add(10 * time.Second),
+		})
+		return
+	}
+
+	if len(gate.MissingOptional) > 0 {
+		missing := append([]string(nil), gate.MissingOptional...)
+		sort.Strings(missing)
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: fmt.Sprintf("Startup diagnostics: optional tools unavailable: %s", strings.Join(missing, ", ")),
+			Expires: time.Now().Add(8 * time.Second),
+		})
+	}
+}
+
+func (m Model) actionBlockedByStartupGate(actionKey string) (bool, string) {
+	if len(m.startupGate.BlockedActions) == 0 {
+		return false, ""
+	}
+
+	reason, blocked := m.startupGate.BlockedActions[actionKey]
+	if !blocked {
+		return false, ""
+	}
+	if strings.TrimSpace(reason) == "" {
+		return true, "disabled by startup diagnostics"
+	}
+
+	return true, reason
 }
 
 type taskDeletedResultMsg struct {
