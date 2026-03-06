@@ -15,7 +15,7 @@
 import { Command } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
-import { PRWorkflow } from "../../core/PRWorkflow.js"
+import { type MergeToMainProgressStage, PRWorkflow } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
@@ -67,31 +67,52 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by merge.
 		 */
-		const doMerge = (issueId: string, targetBranch: string) =>
-			helpers.withQueue(
-				issueId,
-				"merge",
-				Effect.gen(function* () {
-					yield* toast.show("info", `Merging ${issueId} into ${targetBranch}...`)
+			const doMerge = (issueId: string, targetBranch: string) =>
+				helpers.withQueue(
+					issueId,
+					"merge",
+					Effect.gen(function* () {
+						const progressMessage = (stage: MergeToMainProgressStage): string => {
+							switch (stage) {
+								case "prepare":
+									return `Preparing merge for ${issueId}...`
+								case "commit":
+									return `Committing ${issueId} changes...`
+								case "check-conflicts":
+									return `Checking conflicts against ${targetBranch}...`
+								case "merge":
+									return `Merging ${issueId} into ${targetBranch}...`
+								case "validate":
+									return "Running post-merge validation..."
+								case "push":
+									return `Pushing ${targetBranch}...`
+							}
+						}
 
-					// Get current project path (from ProjectService or cwd fallback)
-					const projectPath = yield* helpers.getProjectPath()
+						// Get current project path (from ProjectService or cwd fallback)
+						const projectPath = yield* helpers.getProjectPath()
 
-					yield* prWorkflow.mergeToMain({ issueId, projectPath }).pipe(
-						Effect.tap(() =>
-							Effect.gen(function* () {
-								yield* board.patchTaskFromMutation(issueId, {
+						yield* prWorkflow
+							.mergeToMain({
+								issueId,
+								projectPath,
+								onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
+							})
+							.pipe(
+							Effect.tap(() =>
+								Effect.gen(function* () {
+									yield* board.patchTaskFromMutation(issueId, {
 									hasMergeConflict: false,
 									updated_at: new Date().toISOString(),
 								})
 								yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
 							}),
-						),
-						Effect.tap(() => toast.show("success", `Merged ${issueId} into ${targetBranch}`)),
-						Effect.catchAll(helpers.showErrorToast("Merge failed")),
-					)
-				}),
-			)
+							),
+							Effect.tap(() => toast.show("success", `Merged ${issueId} into ${targetBranch}`)),
+							Effect.catchAll(helpers.showErrorToast("Merge failed")),
+							)
+					}),
+				)
 
 		/**
 		 * Execute the actual cleanup operation (called via confirm dialog)
