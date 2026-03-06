@@ -6,11 +6,13 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/linear"
+	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -800,6 +802,58 @@ func (r *scriptedLinearRunner) Run(_ context.Context, _ string, args ...string) 
 		return []byte(`{}`), nil
 	default:
 		return []byte(`{}`), nil
+	}
+}
+
+type monitorStubTmux struct {
+	output string
+}
+
+func (m *monitorStubTmux) CapturePane(_ context.Context, _ string) (string, error) {
+	return m.output, nil
+}
+
+func TestTickMsgSyncsSessionStatesFromMonitor(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		expected domain.SessionState
+	}{
+		{name: "waiting", output: "Do you want to continue? [y/n]", expected: domain.SessionWaiting},
+		{name: "done", output: "Task completed successfully", expected: domain.SessionDone},
+		{name: "error", output: "Error: something went wrong", expected: domain.SessionError},
+		{name: "busy", output: "Processing files...", expected: domain.SessionBusy},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			tmux := &monitorStubTmux{output: tt.output}
+			m.sessionMonitor = monitor.NewSessionMonitor(tmux)
+			m.sessions["az-1"] = &domain.Session{
+				IssueID: "az-1",
+				State:   domain.SessionIdle,
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			defer m.sessionMonitor.StopAll()
+			m.sessionMonitor.Start(ctx, "az-1", nil)
+
+			// Wait for the monitor poll interval to detect state.
+			time.Sleep(600 * time.Millisecond)
+
+			result, _ := m.Update(tickMsg(time.Now()))
+			updated := result.(Model)
+
+			session := updated.sessions["az-1"]
+			if session == nil {
+				t.Fatal("expected tracked session for az-1")
+			}
+			if session.State != tt.expected {
+				t.Fatalf("expected session state %v, got %v", tt.expected, session.State)
+			}
+		})
 	}
 }
 

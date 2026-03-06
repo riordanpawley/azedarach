@@ -389,6 +389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Expire old toasts and refresh linear
+		m.syncSessionStatesFromMonitor()
 		m.expireToasts()
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
@@ -1335,10 +1336,8 @@ func (m Model) startSessionCmd(issueID string) tea.Cmd {
 		}
 		m.sessions[issueID] = session
 
-		// Start monitoring the session
-		// Note: We need a way to pass the tea.Program to the monitor
-		// For now, we'll skip this and implement it properly later
-		// m.sessionMonitor.Start(ctx, issueID, program)
+		// Start session state monitoring (nil program sender; model polls monitor state on tick).
+		m.sessionMonitor.Start(ctx, issueID, nil)
 
 		return sessionStartedMsg{issueID: issueID, worktreePath: worktree.Path}
 	}
@@ -1417,6 +1416,18 @@ func (m Model) sortTasksInColumn(filteredTasks []domain.Task, status domain.Stat
 func (m Model) getCurrentTaskAndSession() (*domain.Task, *domain.Session) {
 	columns := m.buildColumns()
 	return m.nav.GetCurrentTask(columns)
+}
+
+func (m *Model) syncSessionStatesFromMonitor() {
+	if m.sessionMonitor == nil {
+		return
+	}
+	for issueID, session := range m.sessions {
+		if session == nil {
+			continue
+		}
+		session.State = m.sessionMonitor.GetState(issueID)
+	}
 }
 
 // handleBulkAction handles bulk action menu selections
