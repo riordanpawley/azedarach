@@ -138,6 +138,25 @@ const ERROR_FORMATTERS: Record<
 		category: "git",
 	}),
 
+	WorktreeNameClashError: (error) => {
+		const conflictPath = String(error.conflictingWorktreePath || "")
+		const conflictIssue = String(error.conflictingIssueId || "another issue")
+		const ahead = Number(error.commitsAheadOfBase)
+		const uncommitted = Number(error.uncommittedFileCount)
+		const riskSummary =
+			Number.isFinite(ahead) || Number.isFinite(uncommitted)
+				? `Duplicate worktree risk: ${Number.isFinite(ahead) ? `${ahead} commit(s) ahead` : "ahead unknown"}, ${Number.isFinite(uncommitted) ? `${uncommitted} uncommitted file(s)` : "dirty unknown"}`
+				: undefined
+
+		return {
+			message: `Worktree/branch name clash with ${conflictIssue}${conflictPath ? ` at ${conflictPath}` : ""}`,
+			suggestion: riskSummary
+				? `Try: Resolve or delete the duplicate worktree first. ${riskSummary}`
+				: "Try: Resolve or delete the duplicate worktree first",
+			category: "git",
+		}
+	},
+
 	NotAGitRepoError: (error) => ({
 		message: `Not a git repository: ${error.path}`,
 		suggestion: "Try: Initialize a git repository with 'git init' or navigate to an existing repo",
