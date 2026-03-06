@@ -34,12 +34,9 @@ import { WorktreeManager } from "../core/WorktreeManager.js"
 import { emptyRecord } from "../lib/empty.js"
 import type { ColumnStatus, GitStatus, PRState, TaskWithSession } from "../ui/types.js"
 import { COLUMNS, parsePRInfo } from "../ui/types.js"
-import { DiagnosticsService } from "./DiagnosticsService.js"
+import { DiagnosticsService, type LinearWebhookHealth } from "./DiagnosticsService.js"
 import { EditorService, type FilterConfig, type SortConfig } from "./EditorService.js"
-import {
-	LinearWebhookService,
-	type LinearIssueWebhookEvent,
-} from "./LinearWebhookService.js"
+import { LinearWebhookService, type LinearIssueWebhookEvent } from "./LinearWebhookService.js"
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
@@ -300,11 +297,7 @@ interface LinearWebhookListenerConfig {
 	readonly secret: string | undefined
 }
 
-type BoardRefreshReason =
-	| "default"
-	| "mutation"
-	| "initial-load"
-	| "project-switch"
+type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch"
 
 interface BoardRefreshOptions {
 	readonly reason?: BoardRefreshReason
@@ -381,11 +374,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
-			const refreshFailureToastRef = yield* Ref.make<{
-				readonly message: string
-				readonly timestamp: number
-			} | null>(null)
-			const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
+		const refreshFailureToastRef = yield* Ref.make<{
+			readonly message: string
+			readonly timestamp: number
+		} | null>(null)
+		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 
 		// ====================================================================
 		// Per-Project State Management
@@ -486,9 +479,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					const existing = copy.get(projectPath)
 					if (!existing) return copy // Project not loaded yet, skip
 
-						const updatedTasks = existing.tasks.map((t) =>
-							t.id === issueId ? { ...t, sessionState } : t,
-						)
+					const updatedTasks = existing.tasks.map((t) =>
+						t.id === issueId ? { ...t, sessionState } : t,
+					)
 					const updatedTasksByColumn = groupTasksByColumn(updatedTasks)
 					copy.set(projectPath, {
 						...existing,
@@ -665,34 +658,34 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}).pipe(Effect.withSpan("board.gitStatus")),
 			)
 
-			const getCurrentBoardProjectPath = (): Effect.Effect<string | null> =>
-				SubscriptionRef.get(currentProjectPath).pipe(
-					Effect.flatMap((storedPath) =>
-						storedPath !== null
-							? Effect.succeed(storedPath)
-							: projectService.getCurrentPath().pipe(Effect.map((path) => path ?? null)),
-					),
+		const getCurrentBoardProjectPath = (): Effect.Effect<string | null> =>
+			SubscriptionRef.get(currentProjectPath).pipe(
+				Effect.flatMap((storedPath) =>
+					storedPath !== null
+						? Effect.succeed(storedPath)
+						: projectService.getCurrentPath().pipe(Effect.map((path) => path ?? null)),
+				),
+			)
+
+		const resolveProjectPath = (
+			preferredProjectPath?: string | null,
+		): Effect.Effect<string | null> =>
+			preferredProjectPath !== undefined
+				? Effect.succeed(preferredProjectPath)
+				: getCurrentBoardProjectPath()
+
+		const loadTasks = (preferredProjectPath?: string | null) =>
+			Effect.gen(function* () {
+				const loadStartTime = Date.now()
+				const projectPath = yield* resolveProjectPath(preferredProjectPath)
+				const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
+				const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
+				yield* Effect.log(
+					`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
 				)
-
-			const resolveProjectPath = (
-				preferredProjectPath?: string | null,
-			): Effect.Effect<string | null> =>
-				preferredProjectPath !== undefined
-					? Effect.succeed(preferredProjectPath)
-					: getCurrentBoardProjectPath()
-
-				const loadTasks = (preferredProjectPath?: string | null) =>
-					Effect.gen(function* () {
-						const loadStartTime = Date.now()
-						const projectPath = yield* resolveProjectPath(preferredProjectPath)
-						const boardProjectPath = yield* SubscriptionRef.get(currentProjectPath)
-						const serviceProjectPath = (yield* projectService.getCurrentPath()) ?? null
-						yield* Effect.log(
-							`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
-						)
-						const gitConfig = yield* appConfig.getGitConfig()
-						const { baseBranch, showLineChanges } = gitConfig
-					const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+				const gitConfig = yield* appConfig.getGitConfig()
+				const { baseBranch, showLineChanges } = gitConfig
+				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
 				const isLinearBackend = "linear" in startupConfig.issueTracker
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
 
@@ -703,8 +696,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						thresholdMs: 200,
 						details: projectPath ?? "default",
 					},
-						issueTrackerClient
-							.list(undefined, projectPath ?? undefined, {
+					issueTrackerClient
+						.list(undefined, projectPath ?? undefined, {
 							pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
 							sortBy: "updated_at",
 							sortDirection: "desc",
@@ -797,24 +790,23 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						// Linear list already includes dependency details; avoid an additional fetch.
 						const issuesWithDepDetails = isLinearBackend
 							? issuesWithDeps
-							: yield* diagnostics
-									.measure(
-										{
-											source: "BoardService",
-											name: "tracker.showMultiple",
-											thresholdMs: 200,
-											details: `count=${issuesWithDeps.length}`,
-										},
-											issueTrackerClient
-												.showMultiple(
-													issuesWithDeps.map((i) => i.id),
-													projectPath ?? undefined,
-												)
-											.pipe(
-												Effect.withSpan("tracker.showMultiple"),
-												Effect.catchAll(() => Effect.succeed([])),
-											),
-									)
+							: yield* diagnostics.measure(
+									{
+										source: "BoardService",
+										name: "tracker.showMultiple",
+										thresholdMs: 200,
+										details: `count=${issuesWithDeps.length}`,
+									},
+									issueTrackerClient
+										.showMultiple(
+											issuesWithDeps.map((i) => i.id),
+											projectPath ?? undefined,
+										)
+										.pipe(
+											Effect.withSpan("tracker.showMultiple"),
+											Effect.catchAll(() => Effect.succeed([])),
+										),
+								)
 
 						// Extract parent epic IDs from dependencies
 						for (const issue of issuesWithDepDetails) {
@@ -857,12 +849,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								thresholdMs: 200,
 								details: projectPath,
 							},
-							worktreeManager
-								.list(projectPath)
-								.pipe(Effect.withSpan("worktrees.list"), Effect.catchAll(() => Effect.succeed([]))),
+							worktreeManager.list(projectPath).pipe(
+								Effect.withSpan("worktrees.list"),
+								Effect.catchAll(() => Effect.succeed([])),
+							),
 						)
 					: []
-					const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
+				const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -876,7 +869,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const parentEpicId = parentEpicMap.get(issue.id)
 
 							// Check if worktree exists (using pre-fetched Set - instant lookup)
-								const hasWorktree = worktreeIssueIds.has(issue.id)
+							const hasWorktree = worktreeIssueIds.has(issue.id)
 
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
@@ -950,21 +943,18 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				let prStateMap = new Map<string, PRState>()
 				if (tasksWithPRs.length > 0 && projectPath) {
 					const prInfos = tasksWithPRs.map((t) => ({ prUrl: t.prUrl!, issueId: t.id }))
-					prStateMap = yield* diagnostics
-						.measure(
-							{
-								source: "BoardService",
-								name: "prStates.get",
-								thresholdMs: 300,
-								details: `count=${tasksWithPRs.length}`,
-							},
-							prStateService
-								.getPRStates(prInfos, projectPath)
-								.pipe(
-									Effect.withSpan("prStates.get"),
-									Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())),
-								),
-						)
+					prStateMap = yield* diagnostics.measure(
+						{
+							source: "BoardService",
+							name: "prStates.get",
+							thresholdMs: 300,
+							details: `count=${tasksWithPRs.length}`,
+						},
+						prStateService.getPRStates(prInfos, projectPath).pipe(
+							Effect.withSpan("prStates.get"),
+							Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())),
+						),
+					)
 					yield* Effect.log(
 						`loadTasks: Fetched ${prStateMap.size}/${tasksWithPRs.length} PR states from gh CLI`,
 					)
@@ -1053,7 +1043,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const upsertTaskInMemory = (task: TaskWithSession) =>
 			Effect.gen(function* () {
 				const currentTasks = yield* SubscriptionRef.get(tasks)
-				const nextTasks = [...currentTasks.filter((existing) => existing.id !== task.id), task].sort(
+				const nextTasks = [
+					...currentTasks.filter((existing) => existing.id !== task.id),
+					task,
+				].sort(
 					(left, right) =>
 						new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
 				)
@@ -1068,10 +1061,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* replaceTasks(nextTasks)
 			})
 
-		const patchTaskFromMutation = (
-			taskId: string,
-			patch: Partial<Omit<TaskWithSession, "id">>,
-		) =>
+		const patchTaskFromMutation = (taskId: string, patch: Partial<Omit<TaskWithSession, "id">>) =>
 			Effect.gen(function* () {
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				let changed = false
@@ -1092,7 +1082,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			const prInfo = parsePRInfo(issue.notes)
 			const hasPR = prInfo.hasPR === true
 			const parentEpicId =
-				options?.parentEpicId === undefined ? existingTask?.parentEpicId : options.parentEpicId ?? undefined
+				options?.parentEpicId === undefined
+					? existingTask?.parentEpicId
+					: (options.parentEpicId ?? undefined)
 
 			return {
 				...issue,
@@ -1124,46 +1116,48 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			})
 
 		const syncTaskFromBackend = (taskId: string, options?: MutationTaskUpsertOptions) =>
-			issueTrackerClient.show(taskId).pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
+			issueTrackerClient
+				.show(taskId)
+				.pipe(Effect.flatMap((issue) => upsertIssueFromMutation(issue, options)))
 
-				const refresh = (preferredProjectPath?: string | null) =>
-					diagnostics
-						.measure(
-						{
+		const refresh = (preferredProjectPath?: string | null) =>
+			diagnostics
+				.measure(
+					{
 						source: "BoardService",
 						name: "refresh",
 						thresholdMs: 500,
 					},
-							Effect.gen(function* () {
-								yield* SubscriptionRef.set(isLoading, true)
+					Effect.gen(function* () {
+						yield* SubscriptionRef.set(isLoading, true)
 
-								// Capture project path at refresh START
-								const startProjectPath = yield* resolveProjectPath(preferredProjectPath)
-								yield* Effect.log(
-									`refresh: startProjectPath=${startProjectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"}`,
-								)
+						// Capture project path at refresh START
+						const startProjectPath = yield* resolveProjectPath(preferredProjectPath)
+						yield* Effect.log(
+							`refresh: startProjectPath=${startProjectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"}`,
+						)
 
-							// Update currentProjectPath SubscriptionRef
-							yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
+						// Update currentProjectPath SubscriptionRef
+						yield* SubscriptionRef.set(currentProjectPath, startProjectPath)
 
 						const loadedTasks = yield* diagnostics.measure(
 							{
-									source: "BoardService",
-									name: "loadTasks",
-									thresholdMs: 400,
-								},
-								loadTasks(startProjectPath).pipe(Effect.withSpan("board.loadTasks")),
-							)
+								source: "BoardService",
+								name: "loadTasks",
+								thresholdMs: 400,
+							},
+							loadTasks(startProjectPath).pipe(Effect.withSpan("board.loadTasks")),
+						)
 
-								// Verify project hasn't changed during refresh (race condition guard)
-								// If project changed, discard results to avoid showing wrong project's data
-								const activeProjectPath = yield* getCurrentBoardProjectPath()
-								yield* Effect.log(
-									`refresh: race-guard startProjectPath=${startProjectPath ?? "null"} activeProjectPath=${activeProjectPath ?? "null"}`,
-								)
-								if (startProjectPath !== activeProjectPath) {
-									yield* Effect.log(
-										`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
+						// Verify project hasn't changed during refresh (race condition guard)
+						// If project changed, discard results to avoid showing wrong project's data
+						const activeProjectPath = yield* getCurrentBoardProjectPath()
+						yield* Effect.log(
+							`refresh: race-guard startProjectPath=${startProjectPath ?? "null"} activeProjectPath=${activeProjectPath ?? "null"}`,
+						)
+						if (startProjectPath !== activeProjectPath) {
+							yield* Effect.log(
+								`Refresh discarded: project changed from ${startProjectPath} to ${activeProjectPath}`,
 							)
 							return
 						}
@@ -1177,212 +1171,212 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				)
 				.pipe(Effect.ensuring(SubscriptionRef.set(isLoading, false)))
 
-			const formatRefreshFailureMessage = (cause: Cause.Cause<unknown>): string => {
-				const pretty = Cause.pretty(cause)
-				const firstLine = pretty.split("\n").find((line) => line.trim().length > 0)?.trim()
-				const base = firstLine && firstLine.length > 0 ? firstLine : "Unknown board refresh failure"
-				return base.length > 180 ? `${base.slice(0, 177)}...` : base
-			}
+		const formatRefreshFailureMessage = (cause: Cause.Cause<unknown>): string => {
+			const pretty = Cause.pretty(cause)
+			const firstLine = pretty
+				.split("\n")
+				.find((line) => line.trim().length > 0)
+				?.trim()
+			const base = firstLine && firstLine.length > 0 ? firstLine : "Unknown board refresh failure"
+			return base.length > 180 ? `${base.slice(0, 177)}...` : base
+		}
 
-			const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
-				Effect.gen(function* () {
-					yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
-					const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
-					const now = Date.now()
-					const previousToast = yield* Ref.get(refreshFailureToastRef)
-					const shouldToast =
-						previousToast === null ||
-						previousToast.message !== message ||
-						now - previousToast.timestamp >= REFRESH_FAILURE_TOAST_DEBOUNCE_MS
+		const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
+			Effect.gen(function* () {
+				yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
+				const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
+				const now = Date.now()
+				const previousToast = yield* Ref.get(refreshFailureToastRef)
+				const shouldToast =
+					previousToast === null ||
+					previousToast.message !== message ||
+					now - previousToast.timestamp >= REFRESH_FAILURE_TOAST_DEBOUNCE_MS
 
-					if (shouldToast) {
-						yield* toast.show("error", message)
-						yield* Ref.set(refreshFailureToastRef, { message, timestamp: now })
-					}
-				}).pipe(Effect.asVoid)
-
-			/**
-			 * Refresh with auto-recovery for database sync errors.
-			 *
-			 * If the tracker database is out of sync with JSONL (common after git pull
-			 * or when another worktree modifies issues), this will:
-			 * 1. Detect the SyncRequiredError
-			 * 2. Auto-run 'tracker sync --import-only' to re-import JSONL
-			 * 3. Retry the refresh
-			 */
-				const refreshWithRecovery = (preferredProjectPath?: string | null) =>
-					refresh(preferredProjectPath).pipe(
-						Effect.catchIf(
-							(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
-							() =>
-								Effect.gen(function* () {
-									yield* Effect.log(
-										"IssueTracker database out of sync, auto-recovering with 'tracker sync --import-only'...",
-									)
-									const projectPath = yield* resolveProjectPath(preferredProjectPath)
-									yield* issueTrackerClient
-										.syncImportOnly(projectPath ?? undefined)
-										.pipe(
-										Effect.catchAll((syncError) =>
-											Effect.logError("Auto-sync recovery failed", String(syncError)),
-											),
-										)
-									yield* Effect.log("Auto-sync complete, retrying refresh...")
-									yield* refresh(preferredProjectPath)
-								}),
-						),
-					)
-
-				const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
-					Effect.gen(function* () {
-						const projectPath = yield* resolveProjectPath(preferredProjectPath)
-						const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
-						const activeSessions = yield* sessionManager.listActive(projectPath ?? undefined).pipe(
-							Effect.catchAll(() => Effect.succeed([])),
-					)
-					const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
-					const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
-					const gitConfig = yield* appConfig.getGitConfig()
-					const { baseBranch, showLineChanges } = gitConfig
-					const currentTasks = yield* SubscriptionRef.get(tasks)
-
-					const nextTasks = yield* Effect.all(
-						currentTasks.map((task) =>
-							Effect.gen(function* () {
-								const session = sessionMap.get(task.id)
-								const metricsOpt = HashMap.get(allMetrics, task.id)
-								const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
-								const sessionState = session?.state ?? "idle"
-
-								let gitStatus: GitStatus = {
-									gitBehindCount: undefined,
-									hasUncommittedChanges: undefined,
-									gitAdditions: undefined,
-									gitDeletions: undefined,
-								}
-								if (
-									projectPath &&
-									currentVisibleTaskIds.has(task.id) &&
-									(sessionState !== "idle" || task.hasWorktree === true)
-								) {
-									const worktreePath = getWorktreePath(projectPath, task.id)
-									const effectiveBaseBranch = task.parentEpicId ?? baseBranch
-									const cachedStatus = yield* getCachedGitStatus(
-										worktreePath,
-										effectiveBaseBranch,
-										showLineChanges,
-									)
-									gitStatus = {
-										gitBehindCount: cachedStatus.gitBehindCount,
-										hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
-										gitAdditions: cachedStatus.gitAdditions,
-										gitDeletions: cachedStatus.gitDeletions,
-									}
-								}
-
-								return {
-									...task,
-									sessionState,
-									...gitStatus,
-									sessionStartedAt: session?.startedAt
-										? DateTime.formatIso(session.startedAt)
-										: undefined,
-									estimatedTokens: metrics?.estimatedTokens,
-									recentOutput: metrics?.recentOutput,
-									agentPhase: metrics?.agentPhase,
-								} satisfies TaskWithSession
-							}),
-						),
-						{ concurrency: 4 },
-					)
-
-					yield* SubscriptionRef.set(tasks, nextTasks)
-					yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
-					yield* updateFilteredTasks()
-					yield* saveCurrentToMap()
-				})
-
-			const shouldUseLocalRefreshOnly = (
-				localRefreshOnly: boolean,
-				options: BoardRefreshOptions | undefined,
-			): boolean => {
-				if (!localRefreshOnly) return false
-					if (options?.forceRemote === true) return false
-					switch (options?.reason ?? "default") {
-						case "mutation":
-						case "initial-load":
-						case "project-switch":
-							return false
-						default:
-							return true
+				if (shouldToast) {
+					yield* toast.show("error", message)
+					yield* Ref.set(refreshFailureToastRef, { message, timestamp: now })
 				}
+			}).pipe(Effect.asVoid)
+
+		/**
+		 * Refresh with auto-recovery for database sync errors.
+		 *
+		 * If the tracker database is out of sync with JSONL (common after git pull
+		 * or when another worktree modifies issues), this will:
+		 * 1. Detect the SyncRequiredError
+		 * 2. Auto-run 'tracker sync --import-only' to re-import JSONL
+		 * 3. Retry the refresh
+		 */
+		const refreshWithRecovery = (preferredProjectPath?: string | null) =>
+			refresh(preferredProjectPath).pipe(
+				Effect.catchIf(
+					(error): error is SyncRequiredError => error._tag === "SyncRequiredError",
+					() =>
+						Effect.gen(function* () {
+							yield* Effect.log(
+								"IssueTracker database out of sync, auto-recovering with 'tracker sync --import-only'...",
+							)
+							const projectPath = yield* resolveProjectPath(preferredProjectPath)
+							yield* issueTrackerClient
+								.syncImportOnly(projectPath ?? undefined)
+								.pipe(
+									Effect.catchAll((syncError) =>
+										Effect.logError("Auto-sync recovery failed", String(syncError)),
+									),
+								)
+							yield* Effect.log("Auto-sync complete, retrying refresh...")
+							yield* refresh(preferredProjectPath)
+						}),
+				),
+			)
+
+		const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
+			Effect.gen(function* () {
+				const projectPath = yield* resolveProjectPath(preferredProjectPath)
+				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
+				const activeSessions = yield* sessionManager
+					.listActive(projectPath ?? undefined)
+					.pipe(Effect.catchAll(() => Effect.succeed([])))
+				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
+				const gitConfig = yield* appConfig.getGitConfig()
+				const { baseBranch, showLineChanges } = gitConfig
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+
+				const nextTasks = yield* Effect.all(
+					currentTasks.map((task) =>
+						Effect.gen(function* () {
+							const session = sessionMap.get(task.id)
+							const metricsOpt = HashMap.get(allMetrics, task.id)
+							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
+							const sessionState = session?.state ?? "idle"
+
+							let gitStatus: GitStatus = {
+								gitBehindCount: undefined,
+								hasUncommittedChanges: undefined,
+								gitAdditions: undefined,
+								gitDeletions: undefined,
+							}
+							if (
+								projectPath &&
+								currentVisibleTaskIds.has(task.id) &&
+								(sessionState !== "idle" || task.hasWorktree === true)
+							) {
+								const worktreePath = getWorktreePath(projectPath, task.id)
+								const effectiveBaseBranch = task.parentEpicId ?? baseBranch
+								const cachedStatus = yield* getCachedGitStatus(
+									worktreePath,
+									effectiveBaseBranch,
+									showLineChanges,
+								)
+								gitStatus = {
+									gitBehindCount: cachedStatus.gitBehindCount,
+									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+									gitAdditions: cachedStatus.gitAdditions,
+									gitDeletions: cachedStatus.gitDeletions,
+								}
+							}
+
+							return {
+								...task,
+								sessionState,
+								...gitStatus,
+								sessionStartedAt: session?.startedAt
+									? DateTime.formatIso(session.startedAt)
+									: undefined,
+								estimatedTokens: metrics?.estimatedTokens,
+								recentOutput: metrics?.recentOutput,
+								agentPhase: metrics?.agentPhase,
+							} satisfies TaskWithSession
+						}),
+					),
+					{ concurrency: 4 },
+				)
+
+				yield* SubscriptionRef.set(tasks, nextTasks)
+				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
+				yield* updateFilteredTasks()
+				yield* saveCurrentToMap()
+			})
+
+		const shouldUseLocalRefreshOnly = (
+			localRefreshOnly: boolean,
+			options: BoardRefreshOptions | undefined,
+		): boolean => {
+			if (!localRefreshOnly) return false
+			if (options?.forceRemote === true) return false
+			switch (options?.reason ?? "default") {
+				case "mutation":
+				case "initial-load":
+				case "project-switch":
+					return false
+				default:
+					return true
 			}
+		}
 
-				const refreshWithPolicy = (
-					options?: BoardRefreshOptions,
-					preferredProjectPath?: string | null,
-				) =>
-					Effect.gen(function* () {
-						const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-						const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
-						const refreshEffect = useLocalRefresh
-							? refreshLocalSessionAndGitState(preferredProjectPath)
-							: refreshWithRecovery(preferredProjectPath)
-						yield* refreshEffect
-					})
+		const refreshWithPolicy = (
+			options?: BoardRefreshOptions,
+			preferredProjectPath?: string | null,
+		) =>
+			Effect.gen(function* () {
+				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+				const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
+				const refreshEffect = useLocalRefresh
+					? refreshLocalSessionAndGitState(preferredProjectPath)
+					: refreshWithRecovery(preferredProjectPath)
+				yield* refreshEffect
+			})
 
-			const requestRefresh = (options?: BoardRefreshOptions) =>
-				Effect.gen(function* () {
-					const existingFiber = yield* Ref.get(debounceFiberRef)
-					if (existingFiber) {
-						yield* Fiber.interrupt(existingFiber)
-					}
-					const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-					const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
-					// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
-					const fiber = yield* Effect.gen(function* () {
-						yield* Effect.sleep("500 millis")
-						const refreshEffect = useLocalRefresh
-							? refreshLocalSessionAndGitState()
-							: refreshWithRecovery()
-						yield* refreshEffect.pipe(
-							Effect.catchAllCause((cause) =>
-								logAndToastRefreshFailure(
-									useLocalRefresh ? "debounced-local" : "debounced",
-									cause,
-								),
-							),
-						)
-					}).pipe(Effect.forkIn(serviceScope))
-					yield* Ref.set(debounceFiberRef, fiber)
-				})
+		const requestRefresh = (options?: BoardRefreshOptions) =>
+			Effect.gen(function* () {
+				const existingFiber = yield* Ref.get(debounceFiberRef)
+				if (existingFiber) {
+					yield* Fiber.interrupt(existingFiber)
+				}
+				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+				const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
+				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
+				const fiber = yield* Effect.gen(function* () {
+					yield* Effect.sleep("500 millis")
+					const refreshEffect = useLocalRefresh
+						? refreshLocalSessionAndGitState()
+						: refreshWithRecovery()
+					yield* refreshEffect.pipe(
+						Effect.catchAllCause((cause) =>
+							logAndToastRefreshFailure(useLocalRefresh ? "debounced-local" : "debounced", cause),
+						),
+					)
+				}).pipe(Effect.forkIn(serviceScope))
+				yield* Ref.set(debounceFiberRef, fiber)
+			})
 
 		const isRemoveAction = (action: string): boolean => {
 			const normalized = action.trim().toLowerCase()
 			return normalized === "remove" || normalized === "delete" || normalized === "archive"
 		}
 
-			const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
-				Effect.gen(function* () {
-					const payload = event.data
-					const issueId = payload.identifier
-					const status = normalizeLinearWebhookStatus(payload.state.name)
-					const labels = payload.labels.map((label) => label.name)
-					const priority = normalizeLinearWebhookPriority(payload.priority)
+		const applyLinearWebhookIssueEvent = (event: LinearIssueWebhookEvent) =>
+			Effect.gen(function* () {
+				const payload = event.data
+				const issueId = payload.identifier
+				const status = normalizeLinearWebhookStatus(payload.state.name)
+				const labels = payload.labels.map((label) => label.name)
+				const priority = normalizeLinearWebhookPriority(payload.priority)
 
-					yield* Ref.update(linearIdentifierByEntityIdRef, (current) => {
-						const next = new Map(current)
-						next.set(payload.id, issueId)
-						if (payload.parent && payload.parent.id.trim().length > 0) {
-							next.set(payload.parent.id, payload.parent.identifier)
-						}
-						return next
-					})
-					const identifierByEntityId = yield* Ref.get(linearIdentifierByEntityIdRef)
+				yield* Ref.update(linearIdentifierByEntityIdRef, (current) => {
+					const next = new Map(current)
+					next.set(payload.id, issueId)
+					if (payload.parent && payload.parent.id.trim().length > 0) {
+						next.set(payload.parent.id, payload.parent.identifier)
+					}
+					return next
+				})
+				const identifierByEntityId = yield* Ref.get(linearIdentifierByEntityIdRef)
 
-					const currentTasks = yield* SubscriptionRef.get(tasks)
-					const existingTask = currentTasks.find((task) => task.id === issueId)
-					const withRemoved = currentTasks.filter((task) => task.id !== issueId)
+				const currentTasks = yield* SubscriptionRef.get(tasks)
+				const existingTask = currentTasks.find((task) => task.id === issueId)
+				const withRemoved = currentTasks.filter((task) => task.id !== issueId)
 
 				if (isRemoveAction(event.action)) {
 					yield* SubscriptionRef.set(tasks, withRemoved)
@@ -1390,28 +1384,28 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* updateFilteredTasks()
 					yield* saveCurrentToMap()
 					return
-					}
+				}
 
-					let nextParentEpicId = existingTask?.parentEpicId
-					if (payload.parentId === null || payload.parent === null) {
-						nextParentEpicId = undefined
-					} else if (payload.parent && payload.parent.identifier.trim().length > 0) {
-						nextParentEpicId = payload.parent.identifier.trim()
-					} else if (typeof payload.parentId === "string" && payload.parentId.trim().length > 0) {
-						const parentEntityId = payload.parentId.trim()
-						const mappedParentIdentifier = identifierByEntityId.get(parentEntityId)
-						if (mappedParentIdentifier !== undefined) {
-							nextParentEpicId = mappedParentIdentifier
-						} else if (currentTasks.some((task) => task.id === parentEntityId)) {
-							nextParentEpicId = parentEntityId
-						} else if (existingTask?.parentEpicId !== undefined) {
-							nextParentEpicId = existingTask.parentEpicId
-						} else {
-							yield* Effect.logDebug(
-								`Linear webhook parent mapping unavailable for ${issueId}: parentId=${parentEntityId}`,
-							)
-						}
+				let nextParentEpicId = existingTask?.parentEpicId
+				if (payload.parentId === null || payload.parent === null) {
+					nextParentEpicId = undefined
+				} else if (payload.parent && payload.parent.identifier.trim().length > 0) {
+					nextParentEpicId = payload.parent.identifier.trim()
+				} else if (typeof payload.parentId === "string" && payload.parentId.trim().length > 0) {
+					const parentEntityId = payload.parentId.trim()
+					const mappedParentIdentifier = identifierByEntityId.get(parentEntityId)
+					if (mappedParentIdentifier !== undefined) {
+						nextParentEpicId = mappedParentIdentifier
+					} else if (currentTasks.some((task) => task.id === parentEntityId)) {
+						nextParentEpicId = parentEntityId
+					} else if (existingTask?.parentEpicId !== undefined) {
+						nextParentEpicId = existingTask.parentEpicId
+					} else {
+						yield* Effect.logDebug(
+							`Linear webhook parent mapping unavailable for ${issueId}: parentId=${parentEntityId}`,
+						)
 					}
+				}
 
 				const inferredType = inferLinearIssueType(
 					labels,
@@ -1431,11 +1425,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							updated_at: payload.updatedAt,
 							closed_at:
 								status === "closed"
-									? payload.completedAt ?? payload.canceledAt ?? existingTask.closed_at
+									? (payload.completedAt ?? payload.canceledAt ?? existingTask.closed_at)
 									: undefined,
 							labels,
 							parentEpicId: nextParentEpicId,
-					  }
+						}
 					: {
 							id: issueId,
 							title: payload.title,
@@ -1446,11 +1440,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							created_at: payload.createdAt,
 							updated_at: payload.updatedAt,
 							closed_at:
-								status === "closed" ? payload.completedAt ?? payload.canceledAt ?? null : undefined,
+								status === "closed"
+									? (payload.completedAt ?? payload.canceledAt ?? null)
+									: undefined,
 							labels,
 							parentEpicId: nextParentEpicId,
 							sessionState: "idle",
-					  }
+						}
 
 				const nextTasks = [...withRemoved, updatedTask].sort(
 					(left, right) =>
@@ -1463,13 +1459,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* saveCurrentToMap()
 			})
 
-		const getLinearWebhookListenerConfig = (
-			options?: {
-				readonly requireCliTransport?: boolean
-			},
-		): Effect.Effect<
-			LinearWebhookListenerConfig | undefined
-		> =>
+		const getLinearWebhookListenerConfig = (options?: {
+			readonly requireCliTransport?: boolean
+		}): Effect.Effect<LinearWebhookListenerConfig | undefined> =>
 			Effect.gen(function* () {
 				const config = yield* SubscriptionRef.get(appConfig.config)
 				if (!("linear" in config.issueTracker)) {
@@ -1540,7 +1532,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const projectPath = yield* projectService.getCurrentPath()
 				const command = projectPath
-					? Command.make(listenerConfig.command, ...args).pipe(Command.workingDirectory(projectPath))
+					? Command.make(listenerConfig.command, ...args).pipe(
+							Command.workingDirectory(projectPath),
+						)
 					: Command.make(listenerConfig.command, ...args)
 
 				yield* Stream.runForEach(Command.streamLines(command), (line) => {
@@ -1556,6 +1550,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					)
 				})
 			})
+
+		const reportLinearWebhookHealth = (
+			health: Omit<LinearWebhookHealth, "updatedAt">,
+		): Effect.Effect<void, never> =>
+			diagnostics
+				.setLinearWebhookHealth({
+					...health,
+					updatedAt: new Date(),
+				})
+				.pipe(Effect.orElseSucceed(() => void 0))
 
 		const startBackgroundPolling = () =>
 			Effect.gen(function* () {
@@ -1638,6 +1642,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			if (webhookConfig.enabled === false) {
 				yield* Ref.set(localRefreshOnlyRef, false)
 				yield* Effect.log("Linear webhooks disabled in config, using background polling fallback")
+				yield* reportLinearWebhookHealth({
+					mode: "disabled",
+					strategy: "disabled",
+					healthy: false,
+					message: "Webhooks disabled in config; using background polling.",
+				})
 				yield* startBackgroundPolling()
 			} else if (transport === "cli") {
 				yield* Ref.set(localRefreshOnlyRef, false)
@@ -1662,6 +1672,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						description: "Refreshes board from linear-cli webhook events",
 						fiber: linearWebhookFiber,
 					})
+					yield* reportLinearWebhookHealth({
+						mode: "cli",
+						strategy: "cli-listener",
+						healthy: true,
+						message: `Using linear-cli webhook listener (team=${linearWebhookListenerConfig.team}, url=${linearWebhookListenerConfig.url}).`,
+					})
 				} else {
 					const missing: string[] = []
 					const linearConfig = startupConfig.issueTracker.linear
@@ -1674,6 +1690,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* Effect.logWarning(
 						`Linear CLI webhooks not configured (${missing.join(", ")}), using background polling fallback`,
 					)
+					yield* reportLinearWebhookHealth({
+						mode: "cli",
+						strategy: "polling-fallback",
+						healthy: false,
+						message: `CLI webhook transport missing required config (${missing.join(", ")}); using background polling.`,
+					})
 					yield* startBackgroundPolling()
 				}
 			} else {
@@ -1696,6 +1718,12 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						fiber: linearWebhookFiber,
 					})
 					yield* Ref.set(localRefreshOnlyRef, true)
+					yield* reportLinearWebhookHealth({
+						mode: sdkMode,
+						strategy: "sdk-events",
+						healthy: true,
+						message: "Using SDK webhook events with local refresh-only updates.",
+					})
 				} else {
 					yield* Ref.set(localRefreshOnlyRef, false)
 					const listenerConfig = yield* getLinearWebhookListenerConfig({
@@ -1724,10 +1752,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							description: "Refreshes board from CLI webhook events when SDK mode is unhealthy",
 							fiber: linearWebhookFallbackFiber,
 						})
+						yield* reportLinearWebhookHealth({
+							mode: sdkMode,
+							strategy: "cli-fallback-listener",
+							healthy: true,
+							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`,
+						})
 					} else {
 						yield* Effect.logWarning(
 							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
 						)
+						yield* reportLinearWebhookHealth({
+							mode: sdkMode,
+							strategy: "polling-fallback",
+							healthy: false,
+							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
+						})
 						yield* startBackgroundPolling()
 					}
 				}
@@ -1882,11 +1922,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					cacheHit = legacyCacheHit
 				}
 
-					// Fork the refresh into the service's scope - not a daemon fiber
-					yield* Effect.gen(function* () {
-						yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
-						yield* onRefreshComplete
-					}).pipe(
+				// Fork the refresh into the service's scope - not a daemon fiber
+				yield* Effect.gen(function* () {
+					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
+					yield* onRefreshComplete
+				}).pipe(
 					Effect.catchAllCause((cause) => logAndToastRefreshFailure("project-switch", cause)),
 					Effect.forkIn(serviceScope),
 				)
