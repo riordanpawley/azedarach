@@ -81,6 +81,8 @@ const (
 	ViewModeCompact
 )
 
+const clockSkewFutureThreshold = 2 * time.Minute
+
 // Model is the main application state
 type Model struct {
 	// Core data
@@ -124,6 +126,7 @@ type Model struct {
 	spinner        spinner.Model
 	lastRefresh    time.Time
 	hasRefreshLoop bool
+	clockSkewHintActive bool
 
 	// Linear client
 	issueClient *linear.Client
@@ -383,6 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.loading = false
 		m.lastRefresh = time.Now()
+		m.updateClockSkewHint(msg.tasks, m.lastRefresh)
 		// Show success toast on first load
 		if wasLoading {
 			m.toasts = append(m.toasts, Toast{
@@ -2112,6 +2116,28 @@ func (m Model) renderLoading() string {
 // addToast adds a toast notification to the list
 func (m *Model) addToast(toast Toast) {
 	m.toasts = append(m.toasts, toast)
+}
+
+func (m *Model) updateClockSkewHint(tasks []domain.Task, now time.Time) {
+	hasClockSkew := hasFutureTimestamps(tasks, now, clockSkewFutureThreshold)
+	if hasClockSkew && !m.clockSkewHintActive {
+		m.addToast(Toast{
+			Level:   ToastWarning,
+			Message: "Detected clock skew in issue timestamps; ordering remains stable.",
+			Expires: now.Add(8 * time.Second),
+		})
+	}
+	m.clockSkewHintActive = hasClockSkew
+}
+
+func hasFutureTimestamps(tasks []domain.Task, now time.Time, threshold time.Duration) bool {
+	cutoff := now.Add(threshold)
+	for _, task := range tasks {
+		if !task.UpdatedAt.IsZero() && task.UpdatedAt.After(cutoff) {
+			return true
+		}
+	}
+	return false
 }
 
 // expireToasts removes expired toasts from the list

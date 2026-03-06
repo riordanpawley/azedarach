@@ -53,35 +53,39 @@ func (s *Sort) Apply(tasks []Task) []Task {
 	result := make([]Task, len(tasks))
 	copy(result, tasks)
 
-	// Sort based on field
-	switch s.Field {
-	case SortByPriority:
-		sort.SliceStable(result, func(i, j int) bool {
-			if s.Order == SortAsc {
-				return result[i].Priority < result[j].Priority
-			}
-			return result[i].Priority > result[j].Priority
-		})
+	sort.Slice(result, func(i, j int) bool {
+		left := result[i]
+		right := result[j]
 
-	case SortByUpdated:
-		sort.SliceStable(result, func(i, j int) bool {
-			if s.Order == SortAsc {
-				return result[i].UpdatedAt.Before(result[j].UpdatedAt)
+		switch s.Field {
+		case SortByPriority:
+			if left.Priority != right.Priority {
+				if s.Order == SortAsc {
+					return left.Priority < right.Priority
+				}
+				return left.Priority > right.Priority
 			}
-			return result[i].UpdatedAt.After(result[j].UpdatedAt)
-		})
-
-	case SortBySession:
-		sort.SliceStable(result, func(i, j int) bool {
-			pi := sessionStatePriority(getSessionState(result[i]))
-			pj := sessionStatePriority(getSessionState(result[j]))
-
-			if s.Order == SortAsc {
-				return pi > pj // Higher priority first in ascending
+		case SortByUpdated:
+			if !left.UpdatedAt.Equal(right.UpdatedAt) {
+				if s.Order == SortAsc {
+					return left.UpdatedAt.Before(right.UpdatedAt)
+				}
+				return left.UpdatedAt.After(right.UpdatedAt)
 			}
-			return pi < pj // Lower priority first in descending
-		})
-	}
+		case SortBySession:
+			leftPriority := sessionStatePriority(getSessionState(left))
+			rightPriority := sessionStatePriority(getSessionState(right))
+			if leftPriority != rightPriority {
+				if s.Order == SortAsc {
+					return leftPriority > rightPriority
+				}
+				return leftPriority < rightPriority
+			}
+		}
+
+		// Deterministic secondary tie-breaker for equal or missing sort-field values.
+		return left.ID < right.ID
+	})
 
 	return result
 }

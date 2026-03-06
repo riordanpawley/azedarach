@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -210,4 +211,76 @@ func TestSort_Apply_StableSort(t *testing.T) {
 			t.Errorf("Apply()[%d] = %s, want %s (stable sort failed)", i, task.ID, want[i])
 		}
 	}
+}
+
+func TestAZ_AT_2101_StableOrderingUnderTiedSortKeys(t *testing.T) {
+	now := time.Now()
+	firstRefresh := []Task{
+		{ID: "az-30", Priority: P1, UpdatedAt: now},
+		{ID: "az-10", Priority: P1, UpdatedAt: now},
+		{ID: "az-20", Priority: P1, UpdatedAt: now},
+	}
+	secondRefresh := []Task{
+		{ID: "az-20", Priority: P1, UpdatedAt: now},
+		{ID: "az-30", Priority: P1, UpdatedAt: now},
+		{ID: "az-10", Priority: P1, UpdatedAt: now},
+	}
+
+	s := Sort{Field: SortByPriority, Order: SortAsc}
+	gotFirst := taskIDs(s.Apply(firstRefresh))
+	gotSecond := taskIDs(s.Apply(secondRefresh))
+	want := []string{"az-10", "az-20", "az-30"}
+
+	if !reflect.DeepEqual(gotFirst, want) {
+		t.Fatalf("first refresh ordering mismatch: got=%v want=%v", gotFirst, want)
+	}
+	if !reflect.DeepEqual(gotSecond, want) {
+		t.Fatalf("second refresh ordering mismatch: got=%v want=%v", gotSecond, want)
+	}
+}
+
+func TestAZ_AT_2102_MissingTimestampFallbackOrdering(t *testing.T) {
+	recent := time.Now().Add(-2 * time.Hour)
+	firstRefresh := []Task{
+		{ID: "az-b", UpdatedAt: time.Time{}},
+		{ID: "az-a", UpdatedAt: time.Time{}},
+		{ID: "az-c", UpdatedAt: recent},
+	}
+	secondRefresh := []Task{
+		{ID: "az-c", UpdatedAt: recent},
+		{ID: "az-a", UpdatedAt: time.Time{}},
+		{ID: "az-b", UpdatedAt: time.Time{}},
+	}
+
+	ascending := Sort{Field: SortByUpdated, Order: SortAsc}
+	gotFirstAsc := taskIDs(ascending.Apply(firstRefresh))
+	gotSecondAsc := taskIDs(ascending.Apply(secondRefresh))
+	wantAsc := []string{"az-a", "az-b", "az-c"}
+
+	if !reflect.DeepEqual(gotFirstAsc, wantAsc) {
+		t.Fatalf("ascending first refresh mismatch: got=%v want=%v", gotFirstAsc, wantAsc)
+	}
+	if !reflect.DeepEqual(gotSecondAsc, wantAsc) {
+		t.Fatalf("ascending second refresh mismatch: got=%v want=%v", gotSecondAsc, wantAsc)
+	}
+
+	descending := Sort{Field: SortByUpdated, Order: SortDesc}
+	gotFirstDesc := taskIDs(descending.Apply(firstRefresh))
+	gotSecondDesc := taskIDs(descending.Apply(secondRefresh))
+	wantDesc := []string{"az-c", "az-a", "az-b"}
+
+	if !reflect.DeepEqual(gotFirstDesc, wantDesc) {
+		t.Fatalf("descending first refresh mismatch: got=%v want=%v", gotFirstDesc, wantDesc)
+	}
+	if !reflect.DeepEqual(gotSecondDesc, wantDesc) {
+		t.Fatalf("descending second refresh mismatch: got=%v want=%v", gotSecondDesc, wantDesc)
+	}
+}
+
+func taskIDs(tasks []Task) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	return ids
 }

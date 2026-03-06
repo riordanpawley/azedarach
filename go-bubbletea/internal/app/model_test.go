@@ -1730,6 +1730,204 @@ func TestSearchFilterSortParityPersistsAcrossViewToggles(t *testing.T) {
 	}
 }
 
+func TestAZ_AT_0401_LiveSearchByIDAndTitle(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "az-101", Title: "Alpha parser", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-102", Title: "Beta API", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-220", Title: "Gamma", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+	}
+
+	result, _ := m.Update(overlay.SearchMsg{Query: "az-10"})
+	m = result.(Model)
+	idFiltered := m.editor.ApplyFilter(m.tasks)
+	if len(idFiltered) != 2 {
+		t.Fatalf("expected 2 ID-fragment matches, got %d", len(idFiltered))
+	}
+
+	result, _ = m.Update(overlay.SearchMsg{Query: "A"})
+	m = result.(Model)
+	liveBroadCount := len(m.editor.ApplyFilter(m.tasks))
+
+	result, _ = m.Update(overlay.SearchMsg{Query: "alp"})
+	m = result.(Model)
+	liveNarrow := m.editor.ApplyFilter(m.tasks)
+	if len(liveNarrow) != 1 || liveNarrow[0].ID != "az-101" {
+		t.Fatalf("expected case-insensitive title match for 'alp', got %+v", liveNarrow)
+	}
+
+	if len(liveNarrow) >= liveBroadCount {
+		t.Fatalf("expected live narrowing while typing (broad=%d narrow=%d)", liveBroadCount, len(liveNarrow))
+	}
+}
+
+func TestAZ_AT_0402_SearchCommitAndClear(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "az-101", Title: "Alpha parser", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-102", Title: "Beta API", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+	}
+
+	result, _ := m.Update(overlay.SearchMsg{Query: "alpha"})
+	m = result.(Model)
+	committedMatches := m.editor.ApplyFilter(m.tasks)
+	if len(committedMatches) != 1 || committedMatches[0].ID != "az-101" {
+		t.Fatalf("expected committed search filter to persist, got %+v", committedMatches)
+	}
+
+	// Esc flow emits an empty SearchMsg; model should clear the query.
+	result, _ = m.Update(overlay.SearchMsg{Query: ""})
+	m = result.(Model)
+	clearedMatches := m.editor.ApplyFilter(m.tasks)
+	if len(clearedMatches) != len(m.tasks) {
+		t.Fatalf("expected clear to restore all tasks, got %d/%d", len(clearedMatches), len(m.tasks))
+	}
+}
+
+func TestAZ_AT_0403_StructuredFilterComposition(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "az-o1", Title: "Open P1", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-o2", Title: "Open P2", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-i1", Title: "InProgress P1", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
+	}
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	m = result.(Model)
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected filter overlay to open")
+	}
+
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+
+	filtered := m.editor.ApplyFilter(m.tasks)
+	if len(filtered) != 1 || filtered[0].ID != "az-o1" {
+		t.Fatalf("expected only open P1 tasks, got %+v", filtered)
+	}
+}
+
+func TestAZ_AT_0404_SortTogglesDirectionDeterministically(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "az-1", Title: "P2", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-2", Title: "P0", Status: domain.StatusOpen, Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-3", Title: "P1", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask},
+	}
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{','}})
+	m = result.(Model)
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	ascOpen := boardIDsByStatus(m.buildColumns())[domain.StatusOpen]
+	wantAsc := []string{"az-2", "az-3", "az-1"}
+	if !reflect.DeepEqual(ascOpen, wantAsc) {
+		t.Fatalf("expected ascending priority order %v, got %v", wantAsc, ascOpen)
+	}
+
+	// Close and reopen sort menu, then select the same field to toggle direction.
+	if !m.overlayStack.IsEmpty() {
+		m.overlayStack.Pop()
+	}
+	result, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{','}})
+	m = result.(Model)
+	m = updateAndDispatchCmd(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+
+	descOpen := boardIDsByStatus(m.buildColumns())[domain.StatusOpen]
+	wantDesc := []string{"az-1", "az-3", "az-2"}
+	if !reflect.DeepEqual(descOpen, wantDesc) {
+		t.Fatalf("expected descending priority order %v, got %v", wantDesc, descOpen)
+	}
+}
+
+func TestAZ_AT_2103_ClockSkewHintBehavior(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.toasts = nil
+
+	futureTasks := []domain.Task{
+		{
+			ID:        "az-future",
+			Title:     "future timestamp",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P1,
+			Type:      domain.TypeTask,
+			UpdatedAt: time.Now().Add(10 * time.Minute),
+		},
+	}
+
+	result, _ := m.Update(issuesLoadedMsg{tasks: futureTasks})
+	m = result.(Model)
+	firstHintCount := countToastsContaining(m.toasts, "clock skew")
+	if firstHintCount != 1 {
+		t.Fatalf("expected one clock-skew hint on first anomalous refresh, got %d", firstHintCount)
+	}
+
+	// Same anomaly should not emit duplicate hints on consecutive refreshes.
+	result, _ = m.Update(issuesLoadedMsg{tasks: futureTasks})
+	m = result.(Model)
+	secondHintCount := countToastsContaining(m.toasts, "clock skew")
+	if secondHintCount != 1 {
+		t.Fatalf("expected clock-skew hint to remain deduplicated, got %d", secondHintCount)
+	}
+
+	normalTasks := []domain.Task{
+		{
+			ID:        "az-normal",
+			Title:     "normal timestamp",
+			Status:    domain.StatusOpen,
+			Priority:  domain.P1,
+			Type:      domain.TypeTask,
+			UpdatedAt: time.Now().Add(-10 * time.Minute),
+		},
+	}
+
+	// Clearing the anomaly should reset hint suppression.
+	result, _ = m.Update(issuesLoadedMsg{tasks: normalTasks})
+	m = result.(Model)
+
+	result, _ = m.Update(issuesLoadedMsg{tasks: futureTasks})
+	m = result.(Model)
+	thirdHintCount := countToastsContaining(m.toasts, "clock skew")
+	if thirdHintCount != 2 {
+		t.Fatalf("expected hint to re-emit after anomaly clears and returns, got %d", thirdHintCount)
+	}
+}
+
+func updateAndDispatchCmd(t *testing.T, m Model, key tea.KeyMsg) Model {
+	t.Helper()
+
+	result, cmd := m.Update(key)
+	m = result.(Model)
+	if cmd == nil {
+		return m
+	}
+
+	msg := cmd()
+	if msg == nil {
+		return m
+	}
+
+	result, _ = m.Update(msg)
+	return result.(Model)
+}
+
+func countToastsContaining(toasts []Toast, needle string) int {
+	count := 0
+	for _, toast := range toasts {
+		if strings.Contains(strings.ToLower(toast.Message), strings.ToLower(needle)) {
+			count++
+		}
+	}
+	return count
+}
+
 func boardIDsByStatus(columns []board.Column) map[domain.Status][]string {
 	byStatus := map[domain.Status][]string{
 		domain.StatusOpen:       {},
