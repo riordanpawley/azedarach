@@ -104,7 +104,7 @@ Recommended trigger to start a tap:
 Releases are automated via GitHub Actions in `.github/workflows/release-az-binaries.yml`.
 
 Trigger:
-- push a semver tag matching `v*` (for example `v0.3.0`)
+- run the release script (which bumps `package.json`, commits, tags, and pushes)
 
 What it publishes:
 - `az-darwin-arm64`
@@ -118,9 +118,21 @@ Example release cut:
 ```bash
 git checkout main
 git pull --rebase
-git tag v0.3.1
-git push origin v0.3.1
+just release-ts-opentui patch
 ```
+
+Release script behavior:
+- validates clean working tree on `main`
+- runs `bun run type-check` in `ts-opentui`
+- updates `ts-opentui/package.json` to the requested version
+- commits `release: vX.Y.Z`
+- creates annotated tag `vX.Y.Z`
+- pushes both `main` and the tag
+
+Accepted bump targets:
+- `patch`
+- `minor`
+- `major`
 
 ## Homebrew Tap Setup (Maintainers)
 
