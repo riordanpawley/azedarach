@@ -23,8 +23,8 @@ RuleSync mapping fans this one file out to:
 
 **This repository has multiple implementations:**
 
-- **ts-opentui/** -> [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** -> [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
+- **ts-opentui/** -> [AGENTS.md](./ts-opentui/AGENTS.md), [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
+- **go-bubbletea/** -> [AGENTS.md](./go-bubbletea/AGENTS.md), [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
 
 Select the implementation based on user request or current working directory.
 
@@ -75,7 +75,12 @@ Managed paths are generated from `.rulesync/`:
 - `.claude/hooks/`
 - `.claude/session-templates/`
 - `.claude/skills/`
-- `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`, `go-bubbletea/CLAUDE.md`
+- `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`, `go-bubbletea/AGENTS.md`, `go-bubbletea/CLAUDE.md`
+
+Canonical context sources:
+- `.rulesync/docs/CONTEXT.md` -> `AGENTS.md`, `CLAUDE.md`
+- `.rulesync/docs/ts-opentui/CONTEXT.md` -> `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`
+- `.rulesync/docs/go-bubbletea/CONTEXT.md` -> `go-bubbletea/AGENTS.md`, `go-bubbletea/CLAUDE.md`
 
 Sync behavior:
 - `post-checkout` and `post-merge` run `scripts/rulesync-sync.sh sync`

@@ -20,6 +20,7 @@ Current managed targets:
 - `CLAUDE.md`
 - `ts-opentui/AGENTS.md`
 - `ts-opentui/CLAUDE.md`
+- `go-bubbletea/AGENTS.md`
 - `go-bubbletea/CLAUDE.md`
 
 ## Unified Root Context Source
@@ -30,6 +31,13 @@ Root entrypoint files are now unified to a single canonical source:
 - Targets: `AGENTS.md` and `CLAUDE.md`
 
 `mappings.tsv` fans out this one source to both runtime entrypoint filenames.
+
+## Unified Nested Context Sources
+
+Implementation-specific entrypoints are also unified to canonical nested sources:
+
+- `.rulesync/docs/ts-opentui/CONTEXT.md` -> `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`
+- `.rulesync/docs/go-bubbletea/CONTEXT.md` -> `go-bubbletea/AGENTS.md`, `go-bubbletea/CLAUDE.md`
 
 ## Commands
 
