@@ -726,7 +726,13 @@ done
 		key: "v",
 		mode: "select",
 		description: "Exit select mode",
-		action: bc.editor.exitSelect(),
+		action: bc.editor.exitSelect(true),
+	},
+	{
+		key: "q",
+		mode: "select",
+		description: "Exit select mode",
+		action: bc.editor.exitSelect(true),
 	},
 	{
 		key: "S-5",
@@ -1004,6 +1010,12 @@ done
 		description: "Exit/cancel",
 		action: Effect.suspend(() => bc.inputHandlers.handleEscape()),
 	},
+	{
+		key: "q",
+		mode: ["action", "goto-pending", "sort", "filter"],
+		description: "Exit/cancel",
+		action: Effect.suspend(() => bc.inputHandlers.handleEscape()),
+	},
 
 	// ========================================================================
 	// Overlay Mode
@@ -1013,6 +1025,17 @@ done
 		mode: "overlay",
 		description: "Close overlay",
 		action: bc.overlay.pop().pipe(Effect.asVoid),
+	},
+	{
+		key: "q",
+		mode: "overlay",
+		description: "Close help overlay",
+		action: Effect.gen(function* () {
+			const currentOverlay = yield* bc.overlay.current()
+			if (currentOverlay?._tag === "help") {
+				yield* bc.overlay.pop()
+			}
+		}),
 	},
 
 	// ========================================================================
@@ -1064,7 +1087,7 @@ done
 		action: bc.editor.orchestrateSelectAll(),
 	},
 	{
-		key: "A",
+		key: "n",
 		mode: "orchestrate",
 		description: "Clear all selections",
 		action: bc.editor.orchestrateSelectNone(),
@@ -1077,6 +1100,12 @@ done
 	},
 	{
 		key: "escape",
+		mode: "orchestrate",
+		description: "Exit orchestrate mode",
+		action: bc.editor.exitOrchestrate(),
+	},
+	{
+		key: "q",
 		mode: "orchestrate",
 		description: "Exit orchestrate mode",
 		action: bc.editor.exitOrchestrate(),
@@ -1107,6 +1136,12 @@ done
 	},
 	{
 		key: "escape",
+		mode: "mergeSelect",
+		description: "Cancel",
+		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),
+	},
+	{
+		key: "q",
 		mode: "mergeSelect",
 		description: "Cancel",
 		action: Effect.suspend(() => bc.prHandlers.cancelMergeSelect()),

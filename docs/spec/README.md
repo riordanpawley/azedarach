@@ -72,7 +72,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Planning workflows: natural-language planning to epic+tasks+deps
 - Settings workflows: full UI-driven configuration persisted to JSON config with schema-backed editor support
 - Observability workflows: logs viewer, connection status, toast notifications
-- Startup/re-entry workflows: dependency health checks and context restore
+- Startup/re-entry workflows: dependency health checks, non-blocking startup bootstrap, loading-state convergence, and context restore
 - Concurrency workflows: stale edit conflict handling and lock contention safety
 - Terminal resilience workflows: narrow-width degradation and text-first status fallbacks
 - Guardrail workflows: destructive-operation preflight and target revalidation

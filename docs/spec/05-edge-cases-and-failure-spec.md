@@ -358,6 +358,13 @@ On failure, logs SHOULD capture:
   - either complete operation atomically or cancel safely before process exit.
   - never leave terminal in broken/raw state.
 
+### Case F-104: Slow startup hydration or bootstrap dependency path
+
+- Required behavior:
+  - board shell remains interactable while initial hydration/bootstrap work is still running.
+  - startup loading state remains explicit until first hydration attempt settles.
+  - startup converges without requiring manual relaunch/refresh.
+
 ## 5.20 Concurrency and Mutation Edge Cases
 
 ### Case F-110: Issue edited externally while local edit overlay open

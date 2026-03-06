@@ -12,7 +12,7 @@ This section is a full normative keybinding contract.
 | Key | Context | Required Behavior |
 |---|---|---|
 | `Esc` | all modal contexts | back out to previous stable mode/view |
-| `q` | board/overlays | close overlay or quit/back from board context |
+| `q` | board + designated non-text modal/overlay contexts | close/cancel alias where available; on board it quits/backs out |
 | `Ctrl-l` | board | force full redraw |
 
 ## 9.3 Normal Mode Keys
@@ -27,8 +27,8 @@ This section is a full normative keybinding contract.
 | `Down` | board visible | same as `j` |
 | `Up` | board visible | same as `k` |
 | `Right` | board visible | same as `l` |
-| `Ctrl-Shift-d` | overflow exists | half-page down |
-| `Ctrl-Shift-u` | overflow exists | half-page up |
+| `Ctrl-d` | overflow exists | half-page down |
+| `Ctrl-u` | overflow exists | half-page up |
 | `Enter` | card focused | opens detail panel |
 | `Space` | card focused | enters action mode |
 | `,` | board visible | enters sort mode |
@@ -55,20 +55,19 @@ This section is a full normative keybinding contract.
 | `g l` | >=1 column | focus = last column |
 | `g w` | visible cards | labels shown, then jump by input |
 | `g p` | multiple projects configured | project selector opened |
+| `Esc` or `q` | goto mode active | return NOR |
 
 ## 9.5 Select Mode Keys
 
 | Key | Preconditions | Postconditions |
 |---|---|---|
-| `a` | card focused | toggles selection for focused card |
-| `A` | column focused | selects all in current column |
-| `%` | any board state | selects all visible non-tombstoned |
-| `*` | select mode active | invert visible non-tombstoned selection |
-| `x` | select mode active | clear selection set and remain in SEL |
+| `a` or `5` | card focused | toggles selection for focused card |
+| `A` | select mode active | selects all visible non-tombstoned in current column |
+| `%` (`Shift+5`) | select mode active | selects all visible non-tombstoned tasks |
 | `h/j/k/l` | select mode active | navigates while keeping selection set |
 | `Space` | select mode active | enters action mode for selected set |
-| `v` | select mode active | clear selection + return NOR |
-| `Esc` | select mode active | clear selection + return NOR |
+| `v` | select mode active | return NOR |
+| `Esc` or `q` | select mode active | clear selection + return NOR |
 
 ## 9.6 Search Mode Keys
 
@@ -76,7 +75,7 @@ This section is a full normative keybinding contract.
 |---|---|---|
 | any printable | search mode active | query appended + live filtered view |
 | `Backspace` | query non-empty | remove last char |
-| `Enter` | search mode active | commit query + return NOR |
+| `Enter` | search mode active | exit search + return NOR |
 | `Esc` | search mode active | clear query + return NOR |
 
 ## 9.7 Filter Mode Keys
@@ -87,13 +86,12 @@ This section is a full normative keybinding contract.
 | `p` | filter mode active | priority submenu |
 | `t` | filter mode active | type submenu |
 | `S` | filter mode active | session submenu |
-| `e` | filter mode active | toggle hide epic children |
 | `1` | filter mode active | set age > 1 day |
 | `7` | filter mode active | set age > 7 days |
 | `3` | filter mode active | set age > 30 days |
 | `0` | filter mode active | clear age filter |
 | `c` | filter mode active | clear all filters |
-| `Esc` | filter mode active | return NOR |
+| `Esc` or `q` | filter mode active | return NOR |
 
 ### Status Submenu
 
@@ -143,7 +141,7 @@ This section is a full normative keybinding contract.
 | `p` | sort mode active | sort by priority |
 | `u` | sort mode active | sort by updated timestamp |
 | repeat same key | same sort active | toggle sort direction |
-| `Esc` | sort mode active | cancel/exit sort mode |
+| `Esc` or `q` | sort mode active | cancel/exit sort mode |
 
 ## 9.9 Action Mode Keys - Session
 
@@ -157,13 +155,13 @@ This section is a full normative keybinding contract.
 | `Space p` | busy session | session paused |
 | `Space R` | paused session | session resumed |
 | `Space x` | session exists | session stopped |
+| `q` | action mode active | exit/cancel action mode |
 
 ## 9.10 Action Mode Keys - Dev Server
 
 | Sequence | Preconditions | Postconditions |
 |---|---|---|
 | `Space r` | worktree exists or creatable | dev server toggled |
-| `Space v` | dev server running | attached to dev-server output |
 | `Space Ctrl-r` | dev server running | dev server restarted |
 
 ## 9.11 Action Mode Keys - Git/PR
@@ -190,9 +188,8 @@ This section is a full normative keybinding contract.
 | Sequence | Preconditions | Postconditions |
 |---|---|---|
 | `Space e` | issue focused | manual edit flow opened |
-| `Space E` | issue focused | AI edit flow opened |
+| `Space E` | issue focused | placeholder toast (AI edit not implemented) |
 | `Space F` | issue focused | fork flow opened |
-| `Space G` | epic focused | open epic child-board drill-down |
 | `Space H` | issue focused | editor action opened in task context |
 | `Space i` | issue focused | attachment overlay opened |
 | `Space h` | issue focused | move issue left status |
@@ -210,10 +207,8 @@ This section is a full normative keybinding contract.
 | `o` | attachment selected | external viewer opens |
 | `x` | attachment selected | attachment deleted |
 | `i` | detail open | attachment add overlay opens |
-| `g` | epic detail open | enter epic drill-down |
-| `m` | issue detail with upstream source selected | invoke follow-on merge from upstream source into current issue |
 | `Enter` | detail open | close detail panel |
-| `Esc` | detail open | close detail panel |
+| `Esc` or `q` | detail open | close detail panel |
 
 ## 9.14 Attachment Overlay Keys
 
@@ -223,12 +218,13 @@ This section is a full normative keybinding contract.
 | `v` | overlay open | alias for paste from clipboard |
 | `f` | overlay open | enter path input mode |
 | `Esc` | overlay open | close or step back |
+| `q` | overlay menu mode | close or step back |
 
 ### Path Input Mode
 
 | Key | Postconditions |
 |---|---|
-| printable | append path text |
+| printable (including `q`) | append path text |
 | `Backspace` | remove char |
 | `Enter` | validate and attach file |
 | `Esc` | return to overlay menu |
@@ -242,7 +238,6 @@ This section is a full normative keybinding contract.
 | `Enter` | input phase | submit planning request |
 | `Esc` | input/generation | cancel/close where safe |
 | `a` | generation/review | attach to planning session |
-| `q` | completion phase | close overlay |
 
 ## 9.16 Settings Overlay Keys
 
@@ -253,34 +248,35 @@ This section is a full normative keybinding contract.
 | `Space` | toggleable setting | toggle/cycle value |
 | `Enter` | toggleable setting | toggle/cycle value |
 | `e` | settings open | open raw config editor |
-| `Esc` | settings open | close overlay |
+| `Esc` or `q` | settings open | close overlay |
 
 ## 9.17 Project Selector Keys
 
 | Key | Preconditions | Postconditions |
 |---|---|---|
 | `1`..`9` | selector open, index exists | switch to chosen project |
-| `Esc` | selector open | close without switching |
+| `Esc` or `q` | selector open | close without switching |
 
 ## 9.18 Logs Menu Keys
 
 | Key | Preconditions | Postconditions |
 |---|---|---|
 | `v` | logs menu open | view logs |
-| `p` | logs menu open | open operations monitor |
 | `e` | logs menu open | edit/open logs config/file |
 | `q` | logs menu open | close logs menu |
 
-### Operations Monitor Keys
+## 9.19 Orchestrate Mode Keys
 
 | Key | Preconditions | Postconditions |
 |---|---|---|
-| `j/k` | operations monitor open | move operation selection |
-| `Enter` | operation selected | open operation detail |
-| `c` | cancellable operation selected | request cancel for selected operation |
-| `q` | operations monitor open | close operations monitor |
+| `j/k` or `Up/Down` | orchestrate mode active | move focus through child tasks |
+| `Space` | child task focused | toggle selection |
+| `a` | orchestrate mode active | select all spawnable child tasks |
+| `n` | orchestrate mode active | clear all selected child tasks |
+| `Enter` | orchestrate mode active | spawn selected child tasks |
+| `Esc` or `q` | orchestrate mode active | exit orchestrate mode |
 
-## 9.19 Drill-Down Keys
+## 9.20 Drill-Down Keys
 
 | Key | Preconditions | Postconditions |
 |---|---|---|
@@ -291,13 +287,14 @@ This section is a full normative keybinding contract.
 | `q` | drill-down active | exit drill-down |
 | `Esc` | drill-down active | exit drill-down |
 
-## 9.20 Keybinding Conflict Rules
+## 9.21 Keybinding Conflict Rules
 
 - If same key exists in multiple contexts, focused context wins.
 - Overlay-local keys supersede board mode keys.
 - `Esc` always acts as nearest-scope back/close first.
+- `q` mirrors `Esc` for non-text close/cancel contexts; text-entry contexts keep printable `q`.
 
-## 9.21 Keybinding Stability Policy
+## 9.22 Keybinding Stability Policy
 
 - Key assignments in this section are part of the product contract.
 - Changes require explicit versioned migration documentation.

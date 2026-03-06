@@ -66,7 +66,7 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "F", action: "Fork" },
 		{ key: "P", action: "PR" },
 		{ key: "d", action: "Delete" },
-		{ key: "Esc", action: "Cancel" },
+		{ key: "Esc/q", action: "Cancel" },
 	],
 	goto: [
 		{ key: "w", action: "Jump" },
@@ -74,13 +74,13 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "e", action: "Last" },
 		{ key: "h", action: "Left" },
 		{ key: "l", action: "Right" },
-		{ key: "Esc", action: "Cancel" },
+		{ key: "Esc/q", action: "Cancel" },
 	],
 	select: [
-		{ key: "Space", action: "Toggle" },
+		{ key: "a", action: "Toggle" },
+		{ key: "Space", action: "Menu" },
 		{ key: "hjkl", action: "Nav" },
-		{ key: "v", action: "Exit" },
-		{ key: "Esc", action: "Clear" },
+		{ key: "v/q/Esc", action: "Exit" },
 	],
 	search: [
 		{ key: "Enter", action: "Confirm" },
@@ -90,17 +90,16 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "s", action: "Session" },
 		{ key: "p", action: "Priority" },
 		{ key: "u", action: "Updated" },
-		{ key: "Esc", action: "Cancel" },
+		{ key: "Esc/q", action: "Cancel" },
 	],
 	filter: [
 		{ key: "s", action: "Status" },
 		{ key: "p", action: "Priority" },
 		{ key: "t", action: "Type" },
 		{ key: "S", action: "Session" },
-		{ key: "e", action: "Epic" },
 		{ key: "c", action: "Clear" },
 		{ key: "0-4", action: "P0-P4" },
-		{ key: "Esc", action: "Cancel" },
+		{ key: "Esc/q", action: "Cancel" },
 	],
 	orchestrate: [
 		{ key: "jk", action: "Nav" },
@@ -108,13 +107,13 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "a", action: "All" },
 		{ key: "n", action: "None" },
 		{ key: "Enter", action: "Spawn" },
-		{ key: "Esc", action: "Exit" },
+		{ key: "Esc/q", action: "Exit" },
 	],
 	mergeSelect: [
 		{ key: "hjkl", action: "Nav" },
 		{ key: "Space", action: "Merge" },
 		{ key: "Enter", action: "Merge" },
-		{ key: "Esc", action: "Cancel" },
+		{ key: "Esc/q", action: "Cancel" },
 	],
 }
 

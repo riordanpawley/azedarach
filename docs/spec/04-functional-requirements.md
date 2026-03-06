@@ -329,6 +329,9 @@ This section is normative.
 - AZ-FR-2706: If restored issue focus is invalid, app MUST fall back to nearest valid focus target.
 - AZ-FR-2707: Normal app exit MUST persist UI context without stopping active sessions unless explicitly requested.
 - AZ-FR-2708: Shutdown MUST restore terminal state cleanly (input echo, cursor, alternate screen semantics as applicable).
+- AZ-FR-2709: Startup SHOULD render an interactable board shell before full initial hydration completes.
+- AZ-FR-2710: Startup tasks that do not gate first interaction (for example refresh strategy bootstrap or monitor synchronization) SHOULD execute as scoped background operations.
+- AZ-FR-2711: Initial hydration MUST publish loading state until the first startup refresh attempt settles, then converge to normal board state without requiring relaunch.
 
 ## 4.31 Concurrency and External Mutation Requirements
 

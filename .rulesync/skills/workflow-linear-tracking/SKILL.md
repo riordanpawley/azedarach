@@ -6,12 +6,16 @@ targets: ["claudecode"]
 
 # Issue Tracking Skill (`linear-cli` backend)
 
+> Note for Azedarach sessions: prefer `az prime` + `az issue ...` as the default interface.
+> Use raw `linear-cli` only when a task explicitly requires direct Linear operations that `az issue` does not expose.
+
 **Version:** 2.0
 **Purpose:** Reliable `linear-cli` workflow for issue discovery, updates, and handoff context.
 
 ## Core Rules
 
-- Use `linear-cli` for issue tracking.
+- Default to `az issue` for issue tracking in this repository.
+- Use `linear-cli` only for explicitly requested direct-Linear operations.
 - Configure default team once in `.azedarach.json` under `issueTracker.linear.team` (or run `linear-cli setup`).
 - Keep issue status and notes current during work.
 - Use git pull/push for code sync.

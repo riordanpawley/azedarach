@@ -341,6 +341,7 @@ export const DiagnosticsOverlay = () => {
 	const diagnosticsResult = useAtomValue(diagnosticsAtom)
 	const scrollCommandResult = useAtomValue(diagnosticsScrollAtom)
 	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
+	const initializedScrollHandlingRef = useRef(false)
 	const terminalRows = process.stdout.rows || 24
 	const terminalColumns = process.stdout.columns || 80
 	const panelWidth = Math.max(1, terminalColumns - 2)
@@ -367,6 +368,12 @@ export const DiagnosticsOverlay = () => {
 		return null
 	}, [scrollCommandResult])
 	useEffect(() => {
+		// Ignore any stale command already present in SubscriptionRef when
+		// the overlay mounts; only process commands emitted after mount.
+		if (!initializedScrollHandlingRef.current) {
+			initializedScrollHandlingRef.current = true
+			return
+		}
 		if (!scrollboxRef.current || !scrollCommand || scrollCommand.target !== "diagnostics") return
 		if (scrollCommand.type === "line") {
 			scrollboxRef.current.scrollBy(scrollCommand.amount, "step")
@@ -381,8 +388,9 @@ export const DiagnosticsOverlay = () => {
 		if (scroll.direction !== "up" && scroll.direction !== "down") return
 		event.preventDefault()
 		event.stopPropagation()
-		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
-		const amount = scroll.direction === "down" ? delta : -delta
+		// Wheel delta values vary widely by terminal/input device; clamp to
+		// single-step scrolling to avoid overshooting into blank space.
+		const amount = scroll.direction === "down" ? 1 : -1
 		scrollboxRef.current.scrollBy(amount, "step")
 	}
 
@@ -396,7 +404,6 @@ export const DiagnosticsOverlay = () => {
 			alignItems="center"
 			justifyContent="center"
 			backgroundColor={`${theme.crust}CC`}
-			onMouseScroll={handleMouseScroll}
 		>
 			<box
 				borderStyle="rounded"
@@ -426,6 +433,7 @@ export const DiagnosticsOverlay = () => {
 					scrollY={true}
 					flexDirection="column"
 					flexGrow={1}
+					width="100%"
 					onMouseScroll={handleMouseScroll}
 				>
 					<text> </text>

@@ -18,6 +18,16 @@ describe("session prompts", () => {
 		)
 		expect(prompt).toContain("Only rerun `az issue get az-f4625d` if details are stale or missing")
 		expect(prompt).toContain('`az issue update az-f4625d --design "..."`')
+		expect(prompt).toContain("Issue nesting rule:")
+		expect(prompt).toContain("must be completed before closing `az-f4625d`")
+		expect(prompt).toContain("child of `az-f4625d`")
+		expect(prompt).toContain("`az issue update <new-id> --parent az-f4625d`")
+		expect(prompt).toContain("intentionally deferred to a later session")
+		expect(prompt).toContain("do NOT make it a child")
+		expect(prompt).toContain("Close `az-f4625d` only after its child issues are completed")
+		expect(prompt).toContain(
+			"`az issue dep add --type discovered-from <new-id> az-f4625d`",
+		)
 		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
 	})
