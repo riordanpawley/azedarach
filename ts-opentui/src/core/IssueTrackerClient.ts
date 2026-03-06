@@ -1287,7 +1287,11 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			args: readonly string[],
 			cwd?: string,
 			retryOnEmptyOutput = true,
-		): Effect.Effect<string, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<
+			string,
+			IssueTrackerError | SyncRequiredError,
+			CommandExecutor.CommandExecutor
+		> =>
 			Effect.gen(function* () {
 				// Always add --json flag for structured output
 				const allArgs = [...args, "--json"]
@@ -2219,7 +2223,10 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					? createBrIssueDbClient("legacy")
 					: undefined
 
-		const mapLocalIssueStoreError = (command: string, error: LocalIssueStoreError): IssueTrackerError =>
+		const mapLocalIssueStoreError = (
+			command: string,
+			error: LocalIssueStoreError,
+		): IssueTrackerError =>
 			new IssueTrackerError({
 				message: error.message,
 				command,
@@ -2281,7 +2288,11 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		const runBd = (
 			args: readonly string[],
 			runCwd?: string,
-		): Effect.Effect<string, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<
+			string,
+			IssueTrackerError | SyncRequiredError,
+			CommandExecutor.CommandExecutor
+		> =>
 			legacyIssueDbClient !== undefined
 				? legacyIssueDbClient.runJson(args, runCwd)
 				: Effect.fail(
@@ -2572,6 +2583,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			sync: (cwd?: string) =>
 				Effect.gen(function* () {
 					if (configuredBackend === "local") {
+						yield* Effect.log(
+							"IssueTrackerClient.sync skipped: backend=local reason=local_only_backend",
+						)
 						return ZERO_SYNC_RESULT
 					}
 
@@ -2579,6 +2593,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
 					if (!syncStatus.enabled) {
 						// Return empty result when offline - issues are tracked locally
+						yield* Effect.log(
+							`IssueTrackerClient.sync skipped: backend=${configuredBackend} reason=${syncStatus.reason}`,
+						)
 						return ZERO_SYNC_RESULT
 					}
 
@@ -2586,12 +2603,20 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					if (configuredBackend === "linear") {
 						const backendSync = yield* backendSyncRouter.resolve()
 						if (backendSync === undefined) {
+							yield* Effect.log(
+								`IssueTrackerClient.sync skipped: backend=linear cwd=${effectiveCwd} reason=no_backend_sync_service`,
+							)
 							return ZERO_SYNC_RESULT
 						}
-						return yield* fromIssueSync(
+						yield* Effect.log(`IssueTrackerClient.sync linear flush start: cwd=${effectiveCwd}`)
+						const syncResult = yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
 							backendSync.flushQueue(effectiveCwd),
 						)
+						yield* Effect.log(
+							`IssueTrackerClient.sync linear flush complete: cwd=${effectiveCwd} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+						)
+						return syncResult
 					}
 
 					const output = yield* runBd(["sync"], effectiveCwd)
@@ -3123,7 +3148,10 @@ export const addDependency = (
 	void,
 	IssueTrackerError | SyncRequiredError,
 	IssueTrackerClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(IssueTrackerClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
+> =>
+	Effect.flatMap(IssueTrackerClient, (client) =>
+		client.addDependency(issueId, dependsOnId, type, cwd),
+	)
 
 /**
  * Get the parent epic of an issue, if it has one

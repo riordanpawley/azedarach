@@ -428,6 +428,7 @@ This section is normative.
 - AZ-FR-3812: Equivalent in-flight backend sync requests MUST be deduplicated and MUST NOT be dropped silently.
 - AZ-FR-3813: Read operations SHOULD support bounded wait budgets and MUST return a clear stale/freshness hint when timeout occurs before sync completion.
 - AZ-FR-3814: Explicit wait mode for reads MUST allow a higher wait budget than default non-blocking read mode.
+- AZ-FR-3815: Linear sync queue processing MUST emit lifecycle logs for start/skip/success/retry/terminal-failure with project path, operation, attempt count, issue identity, and known external Linear issue ID.
 
 ## 4.42 Background Operation Requirements
 

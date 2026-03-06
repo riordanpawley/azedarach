@@ -830,6 +830,13 @@ Canonical fixture profile names:
 - Expected: UI enters explicit retryable-pending state instead of immediate hard rollback.
 - Links: AZ-FR-3810.
 
+### AZ-AT-2506 Linear sync lifecycle logging visibility
+
+- Preconditions: linear backend enabled with at least one queued mutation.
+- Steps: trigger a sync flush with one successful dispatch and one forced transient failure.
+- Expected: logs include flush start, per-item dispatch start, success path, and retry-or-terminal failure decision with project path, issue identity, operation type, and attempt context.
+- Links: AZ-FR-3811, AZ-FR-3815.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs

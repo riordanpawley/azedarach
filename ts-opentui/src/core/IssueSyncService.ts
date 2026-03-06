@@ -539,6 +539,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			cwd?: string,
 		): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
 			Effect.gen(function* () {
+				const projectPath = getEffectiveProjectPath(cwd)
 				const config = yield* appConfig.getIssueTrackerSyncConfig()
 				if (!("linear" in config.issueTracker)) {
 					return Option.none()
@@ -555,16 +556,20 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					if (!warned) {
 						yield* Ref.set(warnedMissingApiKeyRef, true)
 						yield* Effect.logWarning(
-							`LINEAR_API_KEY not set for projectPath=${getEffectiveProjectPath(cwd)} (source=${apiKeyResolution.source}); linear sync is disabled while local tracking remains active.`,
+							`LINEAR_API_KEY not set for projectPath=${projectPath} (source=${apiKeyResolution.source}); linear sync is disabled while local tracking remains active.`,
 						)
 					}
 					return Option.none()
 				}
 
-				return Option.some({
+				const runtime: LinearRuntime = {
 					defaultTeam: config.issueTracker.linear.team,
 					defaultProject: config.issueTracker.linear.project,
-				})
+				}
+				yield* Effect.log(
+					`Linear sync runtime ready: projectPath=${projectPath} team=${runtime.defaultTeam ?? "<none>"} project=${runtime.defaultProject ?? "<none>"}`,
+				)
+				return Option.some(runtime)
 			})
 
 		const fetchAllLinearIssues = (
@@ -728,8 +733,15 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			request: LinearSyncRequest,
 		): Effect.Effect<void, IssueSyncError> =>
 			Effect.gen(function* () {
+				const projectPath = getEffectiveProjectPath(request.cwd)
+				yield* Effect.log(
+					`Linear sync upsert start: issue=${request.issueId} projectPath=${projectPath}`,
+				)
 				const issue = yield* fromStore(localStore.getIssueForSync(request.issueId, request.cwd))
 				if (issue === undefined) {
+					yield* Effect.logWarning(
+						`Linear sync upsert skipped: issue=${request.issueId} projectPath=${projectPath} reason=local_issue_missing`,
+					)
 					return
 				}
 
@@ -764,6 +776,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							)
 
 				if (externalRef !== undefined) {
+					yield* Effect.log(
+						`Linear sync upsert update: issue=${issue.id} externalId=${externalRef.externalId} projectPath=${projectPath} status=${issue.status} labels=${labelIds.length} parentLinked=${parentId !== undefined}`,
+					)
 					yield* linearSdk
 						.updateIssue(externalRef.externalId, {
 							title: issue.title,
@@ -796,11 +811,17 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						`Linear issue ${externalRef.externalId} is missing team id`,
 					)
 					yield* applyStateId(externalRef.externalId, teamId)
+					yield* Effect.log(
+						`Linear sync upsert update complete: issue=${issue.id} externalId=${externalRef.externalId} projectPath=${projectPath}`,
+					)
 					return
 				}
 
 				const configuredTeam = runtime.defaultTeam?.trim()
 				if (!configuredTeam) {
+					yield* Effect.logWarning(
+						`Linear sync upsert failed: issue=${issue.id} projectPath=${projectPath} reason=missing_configured_team`,
+					)
 					return yield* Effect.fail(
 						new IssueSyncError({
 							message:
@@ -818,6 +839,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					),
 				)
 				const createExternalId = deterministicLinearCreateId(issue.id, request.payloadJson)
+				yield* Effect.log(
+					`Linear sync upsert create: issue=${issue.id} projectPath=${projectPath} configuredTeam=${configuredTeam} createExternalId=${createExternalId}`,
+				)
 
 				const createIssueId = yield* linearSdk
 					.createIssue({
@@ -853,6 +877,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							),
 						),
 					)
+				yield* Effect.log(
+					`Linear sync upsert create resolved id: issue=${issue.id} externalId=${createIssueId} projectPath=${projectPath}`,
+				)
 
 				yield* fromStore(
 					localStore.upsertExternalRef(
@@ -890,6 +917,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					`Linear issue ${createdLinearIssue.id} is missing team id`,
 				)
 				yield* applyStateId(createdLinearIssue.id, createdIssueTeamId)
+				yield* Effect.log(
+					`Linear sync upsert create complete: issue=${issue.id} externalId=${createdLinearIssue.id} externalKey=${createdLinearIssue.identifier} projectPath=${projectPath}`,
+				)
 			})
 
 		const syncCloseOrDelete = (
@@ -897,10 +927,18 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			request: LinearSyncRequest,
 		): Effect.Effect<void, IssueSyncError> =>
 			Effect.gen(function* () {
+				void runtime
+				const projectPath = getEffectiveProjectPath(request.cwd)
+				yield* Effect.log(
+					`Linear sync ${request.operation} start: issue=${request.issueId} projectPath=${projectPath}`,
+				)
 				const externalRef = yield* fromStore(
 					localStore.getExternalRef(request.issueId, LINEAR_SYNC_TARGET, request.cwd),
 				)
 				if (externalRef === undefined) {
+					yield* Effect.log(
+						`Linear sync ${request.operation} skipped: issue=${request.issueId} projectPath=${projectPath} reason=no_external_ref`,
+					)
 					return
 				}
 
@@ -927,49 +965,95 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							}),
 					),
 				)
+				yield* Effect.log(
+					`Linear sync ${request.operation} complete: issue=${request.issueId} externalId=${externalRef.externalId} projectPath=${projectPath}`,
+				)
 			})
 
 		const linearResolver = (
 			runtime: LinearRuntime,
 		): RequestResolver.RequestResolver<LinearSyncRequest, never> =>
 			RequestResolver.makeBatched<LinearSyncRequest, never>((requests) =>
-				Effect.forEach(
-					requests,
-					(request) => {
-						const runEffect =
-							request.operation === "upsert"
-								? syncUpsert(runtime, request)
-								: syncCloseOrDelete(runtime, request)
+				Effect.gen(function* () {
+					const firstRequest = requests[0]
+					const projectPath =
+						firstRequest === undefined ? process.cwd() : getEffectiveProjectPath(firstRequest.cwd)
+					yield* Effect.log(
+						`Linear sync resolver batch start: size=${requests.length} projectPath=${projectPath}`,
+					)
+					yield* Effect.forEach(
+						requests,
+						(request) => {
+							const runEffect =
+								request.operation === "upsert"
+									? syncUpsert(runtime, request)
+									: syncCloseOrDelete(runtime, request)
 
-						return runEffect.pipe(
-							Effect.flatMap(() => Request.succeed(request, undefined)),
-							Effect.catchAll((error) => Request.fail(request, error)),
-						)
-					},
-					{ concurrency: "unbounded", discard: true },
-				).pipe(Effect.asVoid),
+							return runEffect.pipe(
+								Effect.flatMap(() => Request.succeed(request, undefined)),
+								Effect.catchAll((error) => Request.fail(request, error)),
+							)
+						},
+						{ concurrency: "unbounded", discard: true },
+					)
+					yield* Effect.log(
+						`Linear sync resolver batch complete: size=${requests.length} projectPath=${projectPath}`,
+					)
+				}).pipe(Effect.asVoid),
 			)
 
 		const markRequestFailure = (
 			item: CollapsedSyncItem,
 			error: IssueSyncError,
 			cwd: string | undefined,
-		): Effect.Effect<void, IssueSyncError> => {
-			const nextAttempts = item.attempts + 1
-			const failure: IssueSyncFailure = {
-				issueId: item.issueId,
-				operation: item.operation,
-				error: error.message,
-				attempts: nextAttempts,
-				occurredAt: new Date(),
-			}
-			const shouldTerminal = nextAttempts >= MAX_SYNC_ATTEMPTS
-			if (shouldTerminal) {
-				return fromStore(
-					localStore.markSyncTerminalFailure(
+		): Effect.Effect<void, IssueSyncError> =>
+			Effect.gen(function* () {
+				const nextAttempts = item.attempts + 1
+				const failure: IssueSyncFailure = {
+					issueId: item.issueId,
+					operation: item.operation,
+					error: error.message,
+					attempts: nextAttempts,
+					occurredAt: new Date(),
+				}
+				const projectPath = getEffectiveProjectPath(cwd)
+				const shouldTerminal = nextAttempts >= MAX_SYNC_ATTEMPTS
+				if (shouldTerminal) {
+					yield* Effect.logWarning(
+						`Linear sync dispatch terminal failure: issue=${item.issueId} operation=${item.operation} attempts=${nextAttempts}/${MAX_SYNC_ATTEMPTS} claims=${item.claims.length} projectPath=${projectPath} error=${error.message}`,
+					)
+					yield* fromStore(
+						localStore.markSyncTerminalFailure(
+							{
+								claims: item.claims,
+								errorMessage: error.message,
+								nextAttempts,
+							},
+							cwd,
+						),
+					).pipe(
+						Effect.tap(() =>
+							reportSyncHealth({
+								status: "failure",
+								message: `sync failed for ${item.issueId}`,
+								queueDepth: item.claims.length,
+								failure,
+							}),
+						),
+					)
+					return
+				}
+
+				const delaySeconds = toRetryDelaySeconds(item.attempts)
+				yield* Effect.logWarning(
+					`Linear sync dispatch retry scheduled: issue=${item.issueId} operation=${item.operation} attempts=${nextAttempts}/${MAX_SYNC_ATTEMPTS} delaySeconds=${delaySeconds} claims=${item.claims.length} projectPath=${projectPath} error=${error.message}`,
+				)
+				yield* fromStore(
+					localStore.markSyncRetriable(
 						{
 							claims: item.claims,
 							errorMessage: error.message,
+							delaySeconds,
 							nextAttempts,
 						},
 						cwd,
@@ -978,36 +1062,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					Effect.tap(() =>
 						reportSyncHealth({
 							status: "failure",
-							message: `sync failed for ${item.issueId}`,
+							message: `sync retry scheduled for ${item.issueId}`,
 							queueDepth: item.claims.length,
 							failure,
 						}),
 					),
 				)
-			}
-
-			const delaySeconds = toRetryDelaySeconds(item.attempts)
-			return fromStore(
-				localStore.markSyncRetriable(
-					{
-						claims: item.claims,
-						errorMessage: error.message,
-						delaySeconds,
-						nextAttempts,
-					},
-					cwd,
-				),
-			).pipe(
-				Effect.tap(() =>
-					reportSyncHealth({
-						status: "failure",
-						message: `sync retry scheduled for ${item.issueId}`,
-						queueDepth: item.claims.length,
-						failure,
-					}),
-				),
-			)
-		}
+			})
 
 		const buildBootstrapSnapshots = (
 			scope: LinearIssueScope,
@@ -1251,6 +1312,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						Effect.map((pending) => pending.get(projectPath)),
 					)
 					if (inFlight !== undefined) {
+						yield* Effect.log(`Linear flush: awaiting in-flight run for projectPath=${projectPath}`)
 						return yield* Deferred.await(inFlight)
 					}
 
@@ -1277,6 +1339,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					})
 
 					if (!gate.shouldRun) {
+						yield* Effect.log(`Linear flush: joined concurrent run for projectPath=${projectPath}`)
 						return yield* Deferred.await(gate.join)
 					}
 
@@ -1286,6 +1349,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					> = Effect.gen(function* () {
 						const runtimeOption = yield* getLinearRuntime(cwd)
 						if (Option.isNone(runtimeOption)) {
+							yield* Effect.log(
+								`Linear flush skipped: projectPath=${projectPath} reason=runtime_unavailable`,
+							)
 							yield* reportSyncHealth({
 								status: "skipped",
 								message: "flush skipped (linear sync unavailable)",
@@ -1298,6 +1364,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
 						)
 						if (pendingItems.length === 0) {
+							yield* Effect.log(
+								`Linear flush skipped: projectPath=${projectPath} reason=no_pending_items`,
+							)
 							yield* reportSyncHealth({
 								status: "skipped",
 								message: "flush skipped (no pending sync items)",
@@ -1307,42 +1376,62 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}
 
 						const collapsed = collapsePendingItems(pendingItems)
+						yield* Effect.log(
+							`Linear flush dispatching: projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length}`,
+						)
 						const resolver = linearResolver(runtimeOption.value)
 						const pushedRef = yield* Ref.make(0)
 
 						yield* Effect.forEach(
 							collapsed,
-							(item) =>
-								Effect.request(
-									new LinearSyncRequest({
-										issueId: item.issueId,
-										operation: item.operation,
-										payloadJson: item.payloadJson,
-										cwd,
-									}),
-									resolver,
+							(item) => {
+								const claimCount = item.claims.length
+								const attemptCount = item.attempts + 1
+								return Effect.log(
+									`Linear sync dispatch start: issue=${item.issueId} operation=${item.operation} claims=${claimCount} attempt=${attemptCount}/${MAX_SYNC_ATTEMPTS} projectPath=${projectPath}`,
 								).pipe(
-									Effect.flatMap(() =>
-										fromStore(
-											localStore.markSyncSucceeded(
-												{
-													issueId: item.issueId,
-													target: item.target,
-													maxQueueId: item.maxQueueId,
-													claims: item.claims,
-												},
+									Effect.zipRight(
+										Effect.request(
+											new LinearSyncRequest({
+												issueId: item.issueId,
+												operation: item.operation,
+												payloadJson: item.payloadJson,
 												cwd,
-											),
+											}),
+											resolver,
 										).pipe(
-											Effect.zipRight(Ref.update(pushedRef, (count) => count + item.claims.length)),
+											Effect.flatMap(() =>
+												fromStore(
+													localStore.markSyncSucceeded(
+														{
+															issueId: item.issueId,
+															target: item.target,
+															maxQueueId: item.maxQueueId,
+															claims: item.claims,
+														},
+														cwd,
+													),
+												).pipe(
+													Effect.zipRight(Ref.update(pushedRef, (count) => count + claimCount)),
+													Effect.zipRight(
+														Effect.log(
+															`Linear sync dispatch success: issue=${item.issueId} operation=${item.operation} claims=${claimCount} projectPath=${projectPath}`,
+														),
+													),
+												),
+											),
+											Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
 										),
 									),
-									Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
-								),
+								)
+							},
 							{ concurrency: "unbounded" },
 						)
 
 						const pushed = yield* Ref.get(pushedRef)
+						yield* Effect.log(
+							`Linear flush complete: projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length} pushedClaims=${pushed}`,
+						)
 						yield* reportSyncHealth({
 							status: "success",
 							message: `flush processed ${collapsed.length} item(s), pushed ${pushed} claim(s)`,

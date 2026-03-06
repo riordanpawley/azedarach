@@ -719,6 +719,8 @@ Linear synchronization contract:
 - hydration MUST NOT clobber locally pending optimistic updates
 - backend sync requests MUST flow through a bounded-rate queue with burst allowance
 - queued sync requests MUST be deduplicated by intent key so equivalent in-flight work is not duplicated
+- linear sync lifecycle MUST emit logs for dispatch start, skip decisions, success, retry scheduling, and terminal failure
+- linear sync logs MUST include project path, operation kind, attempt context, and issue identity (`issueId` or bootstrap/flush scope), plus external linear issue ID when known
 - default read operations SHOULD use bounded wait and return local state if refresh wait budget is exceeded
 - explicit wait mode MAY request a larger wait budget when freshness is prioritized over latency
 
