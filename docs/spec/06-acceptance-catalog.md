@@ -902,9 +902,9 @@ Canonical fixture profile names:
 
 ### AZ-AT-2507 Linear metadata pagination respects provider page-size caps
 
-- Preconditions: linear backend fixture/stub exposes paginated workflow state data with provider max page size of 250.
-- Steps: trigger the workflow-state metadata fetch path used for status mapping.
-- Expected: requests use provider-compliant page size, follow cursors through all pages, and complete without argument-validation errors or missing required state mappings.
+- Preconditions: linear backend fixture/stub exposes paginated workflow state and issue-label data with provider max page size of 250.
+- Steps: trigger metadata fetch paths used for status mapping (workflow states) and label resolution (issue labels).
+- Expected: requests use provider-compliant page size (`first <= 250`), follow cursors through all pages, and complete without argument-validation errors or missing required mappings.
 - Links: AZ-FR-3816.
 
 ## 6.28 Background Operation Acceptance
