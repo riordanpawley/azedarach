@@ -234,7 +234,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							} = options
 
 							// Use canonical path functions instead of inline computation
-							const sessionName = getIssueSessionName(issueId)
+							const sessionName = getIssueSessionName(issueId, projectPath)
 							const worktreePath = getWorktreePath(projectPath, issueId)
 							const effectiveCwd = cwd ?? worktreePath
 
@@ -360,7 +360,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 							details: `issueId=${issueId}`,
 						},
 						Effect.gen(function* () {
-							const sessionName = getIssueSessionName(issueId)
+							const sessionName = getIssueSessionName(issueId, options.projectPath)
 							const exists = yield* tmux.hasSession(sessionName)
 							const sessionConfig = yield* appConfig.getSessionConfig()
 							const shell = sessionConfig.shell

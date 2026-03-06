@@ -4,6 +4,10 @@ First command in a new AI session: **`issue prime`**.
 Use **`issue`** for issue tracking commands.
 `issue prime` is the source of backend-specific CLI/API guidance.
 
+Behavior changes MUST update `../docs/spec/*` in the same session.
+- Audit related spec sections for inconsistencies after each behavior change (requirements, workflows, acceptance, edge cases, glossary as needed).
+- Spec edits must read as first-class design updates (baked in), not append-only bolt-ons.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.

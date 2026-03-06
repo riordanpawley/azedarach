@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test"
 import {
 	decodeIssueSessionName,
 	getIssueSessionName,
+	getProjectSessionPrefix,
 	issueIdsEqualForLookup,
 	normalizeIssueIdForLookup,
 	parseIssueSessionName,
@@ -14,6 +15,11 @@ describe("paths session naming", () => {
 
 	it("encodes dotted issue IDs into tmux-safe names", () => {
 		expect(getIssueSessionName("az.foo")).toBe("az_x2e_foo")
+	})
+
+	it("prefixes session names with project shorthand when project path is provided", () => {
+		expect(getIssueSessionName("b", "/Users/user/prog/azedarach")).toBe("az-b")
+		expect(getIssueSessionName("a", "/Users/user/prog/Chefy")).toBe("ch-a")
 	})
 
 	it("round-trips canonical encoded names", () => {
@@ -48,6 +54,17 @@ describe("paths session naming", () => {
 		expect(parseIssueSessionName("az.foo")).toEqual({
 			type: "issue",
 			issueId: "az.foo",
+		})
+	})
+
+	it("parses project-prefixed names with explicit project path", () => {
+		expect(parseIssueSessionName("az-b", "/Users/user/prog/azedarach")).toEqual({
+			type: "issue",
+			issueId: "b",
+		})
+		expect(parseIssueSessionName("ch-AZE-123", "/Users/user/prog/Chefy")).toEqual({
+			type: "issue",
+			issueId: "AZE-123",
 		})
 	})
 
@@ -104,6 +121,11 @@ describe("paths session naming", () => {
 })
 
 describe("paths lookup normalization", () => {
+	it("derives stable two-letter project prefixes", () => {
+		expect(getProjectSessionPrefix("/Users/user/prog/azedarach")).toBe("az")
+		expect(getProjectSessionPrefix("/Users/user/prog/Chefy")).toBe("ch")
+	})
+
 	it("normalizes only Linear identifiers to uppercase", () => {
 		expect(normalizeIssueIdForLookup("aze-123")).toBe("AZE-123")
 		expect(normalizeIssueIdForLookup("AZE-123")).toBe("AZE-123")

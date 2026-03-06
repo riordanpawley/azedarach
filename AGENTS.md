@@ -27,6 +27,9 @@ This file provides a condensed reference for OpenCode sessions.
 2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed).
 3. **Issue Tracker**: Start sessions with `issue prime`, then use `issue` for issue tracking commands.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
+5. **Spec Sync**: Any behavior change to how Az works MUST update `docs/spec/*` in the same session.
+   - Audit related spec sections for inconsistencies after each behavior change (requirements, workflows, acceptance, edge cases, glossary as needed).
+   - Spec edits must read as first-class design updates (baked in), not append-only bolt-ons.
 
 ## Quick Commands
 

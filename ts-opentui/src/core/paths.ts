@@ -48,6 +48,7 @@ export function parseDevWindowName(windowName: string): string | undefined {
 const SESSION_ESCAPE_PREFIX = "_x"
 const SESSION_ESCAPE_SUFFIX = "_"
 const SAFE_SESSION_CHAR_PATTERN = /^[A-Za-z0-9-]$/
+const PROJECT_SESSION_PREFIX_PATTERN = /^[a-z]{2}-/
 
 const encodeSessionChar = (char: string): string => {
 	if (SAFE_SESSION_CHAR_PATTERN.test(char)) {
@@ -63,14 +64,40 @@ const encodeSessionChar = (char: string): string => {
 }
 
 /**
+ * Generate short project prefix for tmux session names.
+ *
+ * Examples:
+ * - /Users/user/prog/azedarach -> az
+ * - /Users/user/prog/Chefy -> ch
+ */
+export function getProjectSessionPrefix(projectPath: string): string {
+	const lastSlash = projectPath.lastIndexOf("/")
+	const projectName = (
+		lastSlash >= 0 ? projectPath.slice(lastSlash + 1) : projectPath
+	).toLowerCase()
+	const lettersOnly = projectName.replace(/[^a-z0-9]/g, "")
+	if (lettersOnly.length >= 2) {
+		return lettersOnly.slice(0, 2)
+	}
+	if (lettersOnly.length === 1) {
+		return `${lettersOnly}x`
+	}
+	return "az"
+}
+
+/**
  * Generate canonical tmux session name for an issue.
  *
  * Tmux session names must be shell-safe and cannot rely on raw issue IDs
  * containing punctuation (for example, dots). We keep the mapping bijective
  * by escaping unsupported characters as _x<hex>_ tokens.
  */
-export function getIssueSessionName(issueId: string): string {
-	return [...issueId].map(encodeSessionChar).join("")
+export function getIssueSessionName(issueId: string, projectPath?: string): string {
+	const encoded = [...issueId].map(encodeSessionChar).join("")
+	if (!projectPath) {
+		return encoded
+	}
+	return `${getProjectSessionPrefix(projectPath)}-${encoded}`
 }
 
 /**
@@ -124,12 +151,33 @@ const decodeLegacyNormalizedIssueId = (sessionName: string): string | undefined 
  */
 export function parseIssueSessionName(
 	sessionName: string,
+	projectPath?: string,
 ): { type: SessionType; issueId: string } | undefined {
 	const aiPrefix = AI_SESSION_PREFIXES.find((prefix) => sessionName.startsWith(prefix))
 	const withoutPrefix = aiPrefix ? sessionName.slice(aiPrefix.length) : sessionName
 
 	if (!withoutPrefix) {
 		return undefined
+	}
+
+	if (projectPath) {
+		const expectedPrefix = `${getProjectSessionPrefix(projectPath)}-`
+		if (withoutPrefix.startsWith(expectedPrefix)) {
+			const prefixedIssueId = decodeIssueSessionName(withoutPrefix.slice(expectedPrefix.length))
+			if (ISSUE_ID_PATTERN.test(prefixedIssueId)) {
+				return { type: "issue", issueId: prefixedIssueId }
+			}
+		}
+	}
+
+	if (PROJECT_SESSION_PREFIX_PATTERN.test(withoutPrefix)) {
+		const prefixedIssueId = decodeIssueSessionName(withoutPrefix.slice(3))
+		if (
+			ISSUE_ID_PATTERN.test(prefixedIssueId) &&
+			(prefixedIssueId.length === 1 || prefixedIssueId.includes("-"))
+		) {
+			return { type: "issue", issueId: prefixedIssueId }
+		}
 	}
 
 	const issueId = decodeIssueSessionName(withoutPrefix)

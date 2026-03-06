@@ -456,7 +456,7 @@ Canonical fixture profile names:
 ### AZ-AT-2824 Status/help/log and tmux discovery contract
 
 - Steps: open board, invoke help and logs overlays, run tmux discovery against known sessions.
-- Expected: status bar shows current mode, help/log overlays are accessible and dismissible, and tmux session naming/discovery contract resolves known sessions.
+- Expected: status bar shows current mode, help/log overlays are accessible and dismissible, and tmux session naming/discovery contract resolves known sessions including project-prefixed names.
 - Links: AZ-FR-1902, AZ-FR-1905, AZ-FR-1906, AZ-FR-2001, AZ-FR-2002.
 
 ## 6.17 Failure Acceptance

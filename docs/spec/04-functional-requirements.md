@@ -144,6 +144,8 @@ This section is normative.
 ## 4.12 Git Workflow Requirements
 
 - AZ-FR-1001: `Space u` MUST update task branch from configured base branch.
+- AZ-FR-1001a: Issue branch names MUST be mapped to stable, human-readable short names derived from issue title (not internal issue IDs).
+- AZ-FR-1001b: Branch-name mapping MUST be deterministic per issue once assigned and MUST be collision-safe across local and relevant remote refs.
 - AZ-FR-1002: Update flow MUST surface merge conflicts clearly.
 - AZ-FR-1003: Conflict resolution path MUST be available.
 - AZ-FR-1004: `Space M` MUST abort in-progress merge.
@@ -249,6 +251,7 @@ This section is normative.
 ## 4.22 tmux Interop Requirements
 
 - AZ-FR-2001: Session naming MUST be deterministic from issue ID.
+- AZ-FR-2001a: Session naming MUST include deterministic project prefix plus issue identity (for example `az-b`, `ch-a`) to avoid cross-project collisions.
 - AZ-FR-2002: App MUST discover existing relevant tmux sessions.
 - AZ-FR-2003: App SHOULD support return-to-board tmux key convention.
 - AZ-FR-2004: App SHOULD support AI<->dev-server toggle tmux key convention.

@@ -79,7 +79,7 @@ From any state except IDLE:
 │                                                                              │
 │   Path: ../project-{bead-id}/ (from pathTemplate config)                    │
 │                                                                              │
-│   git worktree add ../project-{bead-id} -b {bead-id}                        │
+│   git worktree add ../project-{bead-id} -b {title-slug[-n]}                 │
 │                                                                              │
 │   ├─→ EXISTS: Reuse existing worktree                                       │
 │   └─→ CREATED: New isolated git environment                                 │
@@ -91,9 +91,9 @@ From any state except IDLE:
 │ 3. CREATE TMUX SESSION                                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   tmux new-session -d -s {bead-id}-az -c {worktree-path}                    │
+│   tmux new-session -d -s {project-prefix}-{bead-id} -c {worktree-path}      │
 │                                                                              │
-│   Session name: {bead-id}-az (suffix convention)                            │
+│   Session name: {project-prefix}-{bead-id} (e.g. az-b, ch-a)                │
 │   Working directory: worktree path                                          │
 │   Detached mode (-d): runs in background                                    │
 │                                                                              │
