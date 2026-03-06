@@ -157,6 +157,8 @@ This section is normative.
 - AZ-FR-1006: `Space f` MUST show diff from branch merge-base.
 - AZ-FR-1007: `Space m` MUST merge task branch into configured base branch in default context.
 - AZ-FR-1008: Merge flow MUST warn when conflict risk is detected.
+- AZ-FR-1008a: `Space m` MUST fail fast when merge target context is already in merge state (`MERGE_HEAD` present).
+- AZ-FR-1008b: Fail-fast merge-state response MUST include explicit recovery guidance (resolve+commit or `git merge --abort`) before retry.
 - AZ-FR-1009: Merge to base branch SHOULD keep worktree active post-merge.
 - AZ-FR-1010: `Space b` MUST support merge source issue branch into target issue branch.
 - AZ-FR-1011: merge-issue flow MUST prevent self-merge.

@@ -182,10 +182,12 @@ Each failure MUST return explicit remediation guidance.
 
 ### Main Path
 
-1. evaluate potential conflicts against configured base branch
-2. if conflict risk detected, show confirmation dialog
-3. perform merge attempt in safe context
-4. if success, notify and keep worktree/session alive for iterative merges
+1. detect whether merge target context is already in an active merge state (`MERGE_HEAD` present)
+2. if active merge is detected, fail fast with explicit resolve/abort guidance and stop
+3. evaluate potential conflicts against configured base branch
+4. if conflict risk detected, show confirmation dialog
+5. perform merge attempt in safe context
+6. if success, notify and keep worktree/session alive for iterative merges
 
 ### Abort Path
 

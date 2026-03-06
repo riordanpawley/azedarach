@@ -89,6 +89,13 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - keep repository in explicit known state (conflict or aborted).
   - provide exact next command guidance.
 
+### Case F-024a: Merge to base branch requested while target is already mid-merge
+
+- Required behavior:
+  - detect active merge state before conflict-check/merge execution.
+  - fail fast without mutating repository state.
+  - provide explicit resolve/abort guidance and retry instruction.
+
 ### Case F-025: Diff tool unavailable
 
 - Required behavior:

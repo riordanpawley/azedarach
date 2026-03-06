@@ -306,6 +306,13 @@ Canonical fixture profile names:
 - Expected: confirmation appears; cancel preserves state.
 - Links: AZ-FR-1008.
 
+### AZ-AT-0904a Merge to base branch while target is already mid-merge
+
+- Preconditions: merge target context already has `MERGE_HEAD`.
+- Steps: invoke `Space m`.
+- Expected: operation fails fast before merge attempt, shows resolve/abort guidance, and repository state is unchanged.
+- Links: AZ-FR-1008a, AZ-FR-1008b.
+
 ### AZ-AT-2819 Merge-to-base default context behavior
 
 - Steps: invoke `Space m` from default board context.
