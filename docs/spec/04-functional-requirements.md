@@ -117,6 +117,8 @@ This section is normative.
 
 - AZ-FR-0801: `Space s` MUST start session for focused issue.
 - AZ-FR-0802: `Space S` MUST start session with default work prompt.
+- AZ-FR-0802a: `Space S` and `Space !` prompt injection MUST preload `az prime` context and issue-specific details via `az issue get <issue-id>` using runtime issue context from session launch.
+- AZ-FR-0802b: When issue ID cannot be resolved for prompt injection, the system MUST preload `az prime` context and SHOULD include `az issue --help` fallback guidance.
 - AZ-FR-0803: `Space !` MUST support skip-permission start variant.
 - AZ-FR-0804: `Space c` SHOULD support chat session variant.
 - AZ-FR-0805: Session start MUST ensure task worktree context exists.

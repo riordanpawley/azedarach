@@ -150,7 +150,7 @@ This section is a full normative keybinding contract.
 | Sequence | Preconditions | Postconditions |
 |---|---|---|
 | `Space s` | issue focused | session started |
-| `Space S` | issue focused | session started with work prompt |
+| `Space S` | issue focused | session started with work prompt and injected az issue context |
 | `Space !` | issue focused | session started in skip-permission variant |
 | `Space c` | issue focused | chat session started |
 | `Space a` | session exists | attached to session |

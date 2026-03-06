@@ -34,6 +34,8 @@ Workflows are written as behavior contracts, not implementation details.
 ### Variants
 
 - `Space S` injects default work prompt
+  - prompt-injection context MUST preload `az prime` output plus `az issue get <issue-id>` for the focused issue using runtime issue context from session launch
+  - if issue ID is unavailable, prompt-injection MAY fall back to `az issue --help` context
 - `Space !` injects skip-permissions mode
 - `Space c` launches chat-oriented profile
 

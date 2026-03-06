@@ -35,6 +35,8 @@ export type HookStrategy = "hooks+pty" | "events"
 export interface BuildCommandOptions {
 	/** Initial prompt to send (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
+	/** Active issue ID for issue-scoped sessions */
+	readonly issueId?: string
 	/** Model to use (tool-specific format) */
 	readonly model?: string
 	/** Skip permission prompts (Claude: --dangerously-skip-permissions) */
@@ -155,7 +157,13 @@ const openCodeToolDefinition: CliToolDefinition = {
 	hookStrategy: "events",
 
 	buildCommand: (options) => {
-		const parts: string[] = ["opencode"]
+		const parts: string[] = []
+
+		if (options.issueId) {
+			parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+		}
+
+		parts.push("opencode")
 
 		if (options.model) {
 			parts.push(`--model ${options.model}`)

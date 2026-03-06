@@ -14,11 +14,11 @@ Start each session with:
 - \`az prime\`
 
 Use \`az issue --help\` for the current command surface.
-Follow the workflow guidance emitted by \`az prime\` for this repo.`;
+Follow the workflow guidance emitted by \`az prime\` for this repo.`
 
 const AZ_GUIDANCE = `<az-guidance>
 ${AZ_PRIMER_USAGE}
-</az-guidance>`;
+</az-guidance>`
 
 const AZ_TASK_AGENT_PROMPT = `${AZ_PRIMER_USAGE}
 
@@ -26,176 +26,203 @@ You are an az-task-agent.
 - Start delegated tasks by running \`az prime\`.
 - Use \`az issue\` for issue tracking operations.
 - Keep issue status and notes current while executing work.
-- Return concise summaries and avoid dumping raw JSON unless requested.`;
+- Return concise summaries and avoid dumping raw JSON unless requested.`
+
+const AZ_CONTEXT_MARKER = "az-context:v1"
 
 const AZ_COMMANDS = {
-  "az:prime": {
-    description: "Generate current az prime context",
-    template:
-      "Use bash and run `az prime`. Summarize the key workflow guidance and active issue-tracking expectations for this repo.",
-  },
-  "az:issue": {
-    description: "Run az issue operations",
-    template:
-      "Use bash and run `az issue $ARGUMENTS`. If arguments are missing or ambiguous, run `az issue --help` first and then ask for the missing details.",
-  },
-  "az:workflow": {
-    description: "Show az issue workflow guidance",
-    template:
-      "Use bash and run `az prime`. Explain the workflow guidance that it prints, then reference `az issue --help` for command details.",
-  },
-};
+	"az:prime": {
+		description: "Generate current az prime context",
+		template:
+			"Use bash and run `az prime`. Summarize the key workflow guidance and active issue-tracking expectations for this repo.",
+	},
+	"az:issue": {
+		description: "Run az issue operations",
+		template:
+			"Use bash and run `az issue $ARGUMENTS`. If arguments are missing or ambiguous, run `az issue --help` first and then ask for the missing details.",
+	},
+	"az:workflow": {
+		description: "Show az issue workflow guidance",
+		template:
+			"Use bash and run `az prime`. Explain the workflow guidance that it prints, then reference `az issue --help` for command details.",
+	},
+}
 
 const AZ_AGENTS = {
-  "az-task-agent": {
-    description: "Issue workflow task agent (az backend)",
-    prompt: AZ_TASK_AGENT_PROMPT,
-    mode: "subagent",
-  },
-};
+	"az-task-agent": {
+		description: "Issue workflow task agent (az backend)",
+		prompt: AZ_TASK_AGENT_PROMPT,
+		mode: "subagent",
+	},
+}
 
 async function getSessionContext(client, sessionID) {
-  try {
-    const response = await client.session.messages({
-      path: { id: sessionID },
-      query: { limit: 50 },
-    });
+	try {
+		const response = await client.session.messages({
+			path: { id: sessionID },
+			query: { limit: 50 },
+		})
 
-    if (response.data) {
-      for (const msg of response.data) {
-        if (msg.info.role === "user" && "model" in msg.info && msg.info.model) {
-          return { model: msg.info.model, agent: msg.info.agent };
-        }
-      }
-    }
-  } catch {
-    // fall through
-  }
+		if (response.data) {
+			for (const msg of response.data) {
+				if (msg.info.role === "user" && "model" in msg.info && msg.info.model) {
+					return { model: msg.info.model, agent: msg.info.agent }
+				}
+			}
+		}
+	} catch {
+		// fall through
+	}
 
-  return undefined;
+	return undefined
 }
 
 async function canUseAz($) {
-  try {
-    const out = await $`az --version`.text();
-    return Boolean(out && out.trim());
-  } catch {
-    return false;
-  }
+	try {
+		const out = await $`az --version`.text()
+		return Boolean(out && out.trim())
+	} catch {
+		return false
+	}
 }
 
 async function runAzText(commandPromiseFactory) {
-  try {
-    const out = await commandPromiseFactory();
-    return String(out || "").trim();
-  } catch {
-    return "";
-  }
+	try {
+		const out = await commandPromiseFactory()
+		return String(out || "").trim()
+	} catch {
+		return ""
+	}
+}
+
+function normalizeIssueID(raw) {
+	const trimmed = String(raw || "").trim()
+	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : undefined
+}
+
+function getConfiguredIssueID() {
+	return normalizeIssueID(process.env.AZEDARACH_ISSUE_ID)
 }
 
 function section(title, content) {
-  if (!content) {
-    return "";
-  }
+	if (!content) {
+		return ""
+	}
 
-  const trimmed = content.trim();
-  if (!trimmed) {
-    return "";
-  }
+	const trimmed = content.trim()
+	if (!trimmed) {
+		return ""
+	}
 
-  const clipped = trimmed.length > 3000 ? `${trimmed.slice(0, 3000)}\n...` : trimmed;
-  return `## ${title}\n\n\`\`\`\n${clipped}\n\`\`\``;
+	const clipped = trimmed.length > 3000 ? `${trimmed.slice(0, 3000)}\n...` : trimmed
+	return `## ${title}\n\n\`\`\`\n${clipped}\n\`\`\``
 }
 
-async function buildAzContext($) {
-  const [primer, issueHelp] = await Promise.all([
-    runAzText(() => $`az prime`.text()),
-    runAzText(() => $`az issue --help`.text()),
-  ]);
+async function buildAzContext($, issueID) {
+	const normalizedIssueID = normalizeIssueID(issueID)
 
-  const blocks = [section("az prime", primer), section("az issue --help", issueHelp)].filter(Boolean);
+	const [primer, issueDetails, issueHelp] = await Promise.all([
+		runAzText(() => $`az prime`.text()),
+		normalizedIssueID
+			? runAzText(() => $`az issue get ${normalizedIssueID}`.text())
+			: Promise.resolve(""),
+		normalizedIssueID ? Promise.resolve("") : runAzText(() => $`az issue --help`.text()),
+	])
 
-  if (blocks.length === 0) {
-    return "";
-  }
+	const blocks = [
+		section("az prime", primer),
+		normalizedIssueID
+			? section(`az issue get ${normalizedIssueID}`, issueDetails)
+			: section("az issue --help", issueHelp),
+	].filter(Boolean)
 
-  return `<az-context>\n${blocks.join("\n\n")}\n</az-context>\n\n${AZ_GUIDANCE}`;
+	if (blocks.length === 0) {
+		return ""
+	}
+
+	return `<az-context>\n${AZ_CONTEXT_MARKER}\n\n${blocks.join("\n\n")}\n</az-context>\n\n${AZ_GUIDANCE}`
 }
 
 async function injectAzContext(client, $, sessionID, context) {
-  if (!(await canUseAz($))) {
-    return;
-  }
+	if (!(await canUseAz($))) {
+		return
+	}
 
-  const issueContext = await buildAzContext($);
-  if (!issueContext) {
-    return;
-  }
+	const issueContext = await buildAzContext($, getConfiguredIssueID())
+	if (!issueContext) {
+		return
+	}
 
-  await client.session.prompt({
-    path: { id: sessionID },
-    body: {
-      noReply: true,
-      model: context && context.model,
-      agent: context && context.agent,
-      parts: [{ type: "text", text: issueContext, synthetic: true }],
-    },
-  });
+	await client.session.prompt({
+		path: { id: sessionID },
+		body: {
+			noReply: true,
+			model: context && context.model,
+			agent: context && context.agent,
+			parts: [{ type: "text", text: issueContext, synthetic: true }],
+		},
+	})
 }
 
 export const OpencodeAzPlugin = async ({ client, $ }) => {
-  const injectedSessions = new Set();
+	const injectedSessions = new Set()
 
-  return {
-    "chat.message": async (_input, output) => {
-      const sessionID = output.message.sessionID;
+	return {
+		"chat.message": async (_input, output) => {
+			const sessionID = output.message.sessionID
 
-      if (injectedSessions.has(sessionID)) {
-        return;
-      }
+			if (injectedSessions.has(sessionID)) {
+				return
+			}
 
-      try {
-        const existing = await client.session.messages({
-          path: { id: sessionID },
-        });
+			try {
+				const existing = await client.session.messages({
+					path: { id: sessionID },
+				})
 
-        if (existing.data) {
-          const alreadyInjected = existing.data.some((msg) => {
-            const parts = msg.parts || (msg.info && msg.info.parts);
-            if (!parts) {
-              return false;
-            }
-            return parts.some((part) => part.type === "text" && String(part.text || "").includes("<az-context>"));
-          });
+				if (existing.data) {
+					const alreadyInjected = existing.data.some((msg) => {
+						const parts = msg.parts || (msg.info && msg.info.parts)
+						if (!parts) {
+							return false
+						}
+						return parts.some((part) => {
+							if (part.type !== "text") {
+								return false
+							}
+							const text = String(part.text || "")
+							return text.includes(AZ_CONTEXT_MARKER) || text.includes("<az-context>")
+						})
+					})
 
-          if (alreadyInjected) {
-            injectedSessions.add(sessionID);
-            return;
-          }
-        }
-      } catch {
-        // proceed
-      }
+					if (alreadyInjected) {
+						injectedSessions.add(sessionID)
+						return
+					}
+				}
+			} catch {
+				// proceed
+			}
 
-      injectedSessions.add(sessionID);
+			injectedSessions.add(sessionID)
 
-      await injectAzContext(client, $, sessionID, {
-        model: output.message.model,
-        agent: output.message.agent,
-      });
-    },
+			await injectAzContext(client, $, sessionID, {
+				model: output.message.model,
+				agent: output.message.agent,
+			})
+		},
 
-    event: async ({ event }) => {
-      if (event.type === "session.compacted") {
-        const sessionID = event.properties.sessionID;
-        const context = await getSessionContext(client, sessionID);
-        await injectAzContext(client, $, sessionID, context);
-      }
-    },
+		event: async ({ event }) => {
+			if (event.type === "session.compacted") {
+				const sessionID = event.properties.sessionID
+				const context = await getSessionContext(client, sessionID)
+				await injectAzContext(client, $, sessionID, context)
+			}
+		},
 
-    config: async (config) => {
-      config.command = { ...(config.command || {}), ...AZ_COMMANDS };
-      config.agent = { ...(config.agent || {}), ...AZ_AGENTS };
-    },
-  };
-};
+		config: async (config) => {
+			config.command = { ...(config.command || {}), ...AZ_COMMANDS }
+			config.agent = { ...(config.agent || {}), ...AZ_AGENTS }
+		},
+	}
+}
