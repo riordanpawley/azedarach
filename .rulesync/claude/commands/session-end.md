@@ -239,7 +239,7 @@ Tip: Use /retro-review to create linear from retrospective findings
 
 ## Related Skills
 
-- `.claude/skills/workflow/linear-tracking.skill.md` - Linear workflow patterns
+- `.claude/skills/workflow-linear-tracking/SKILL.md` - Linear workflow patterns
 
 ---
 
