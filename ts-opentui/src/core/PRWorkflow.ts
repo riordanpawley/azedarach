@@ -47,6 +47,13 @@ const ISSUE_TRACKER_SYNC_LOCK_PATH = "/tmp/azedarach-tracker-sync.lock"
  */
 const ISSUE_TRACKER_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
 
+/**
+ * Timeout for merge push to origin.
+ * Prevents Space+m from looking stuck when push blocks on network/auth.
+ */
+const MERGE_PUSH_TIMEOUT_SECONDS = 30
+const MERGE_PUSH_TIMEOUT = Duration.seconds(MERGE_PUSH_TIMEOUT_SECONDS)
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -110,7 +117,20 @@ export interface MergeToMainOptions {
 	 * Typical workflow: Space+m to merge (keep iterating), Space+d to cleanup when done
 	 */
 	readonly keepWorktree?: boolean
+	/** Optional progress callback for UX updates during merge flow. */
+	readonly onProgress?: (stage: MergeToMainProgressStage) => Effect.Effect<void, never, never>
 }
+
+/**
+ * Progress stages emitted during mergeToMain.
+ */
+export type MergeToMainProgressStage =
+	| "prepare"
+	| "commit"
+	| "check-conflicts"
+	| "merge"
+	| "validate"
+	| "push"
 
 /**
  * Options for updating worktree from base branch
@@ -612,22 +632,42 @@ const runShellCommand = (
 	cwd: string,
 ): Effect.Effect<{ success: boolean; output: string }, never, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
-		// Split command into program and args
-		const parts = commandStr.split(" ")
-		const [program, ...args] = parts
-		if (!program) {
+		const trimmedCommand = commandStr.trim()
+		if (!trimmedCommand) {
 			return { success: false, output: "Empty command" }
 		}
 
-		const command = Command.make(program, ...args).pipe(Command.workingDirectory(cwd))
-		const result = yield* Effect.all({
-			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
-			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
-		})
-		return {
-			success: result.exitCode === 0,
-			output: result.output,
-		}
+		// Run through a shell so config commands can use syntax like:
+		// - "cd ts-opentui && bun run type-check"
+		// - pipes, redirects, env var assignments, etc.
+		const shellCommand = Command.make("sh", "-lc", trimmedCommand).pipe(
+			Command.workingDirectory(cwd),
+		)
+
+		return yield* Command.string(shellCommand).pipe(
+			Effect.map((output) => ({ success: true, output })),
+			Effect.catchAll((error) => {
+				let stdout = ""
+				if (typeof error === "object" && error !== null && "stdout" in error) {
+					const stdoutCandidate = error.stdout
+					stdout = typeof stdoutCandidate === "string" ? stdoutCandidate : String(stdoutCandidate ?? "")
+				}
+
+				let stderr = ""
+				if (typeof error === "object" && error !== null && "stderr" in error) {
+					const stderrCandidate = error.stderr
+					stderr = typeof stderrCandidate === "string" ? stderrCandidate : String(stderrCandidate ?? "")
+				}
+
+				const fallback = String(error)
+				const output = [stdout, stderr].filter((part) => part.length > 0).join("\n").trim()
+
+				return Effect.succeed({
+					success: false,
+					output: output || fallback,
+				})
+			}),
+		)
 	})
 
 /**
@@ -1095,7 +1135,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							pushToOrigin = gitConfig.pushEnabled,
 							closeIssue = false,
 							keepWorktree = true,
+							onProgress,
 						} = options
+						const reportProgress = (stage: MergeToMainProgressStage) =>
+							onProgress ? onProgress(stage) : Effect.void
+						yield* reportProgress("prepare")
 
 						// Determine effective base branch (epic branch for children, main for epics/standalone)
 						const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, projectPath)
@@ -1165,6 +1209,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 
 						// 2. Stage and commit any uncommitted changes in worktree
+						yield* reportProgress("commit")
 						yield* runGit(["add", "-A"], worktree.path).pipe(
 							Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
 						)
@@ -1177,6 +1222,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// 3. Check for non-tracker conflicts using merge-tree (safe, in-memory)
 						// We only care about conflicts in actual code files, not .azedarach/
+						yield* reportProgress("check-conflicts")
 						const mergeTreeResult = yield* Effect.gen(function* () {
 							const command = Command.make(
 								"git",
@@ -1230,6 +1276,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						})
 
 						// 4. If there are real code conflicts (not .azedarach/), ask Claude to resolve
+						yield* reportProgress("merge")
 						if (mergeTreeResult.hasConflicts) {
 							const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
@@ -1346,6 +1393,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Only runs if merge.validateCommands is configured
 						const mergeConfig = yield* getMergeConfig()
 						if (mergeConfig.validateCommands.length > 0) {
+							yield* reportProgress("validate")
 							yield* Effect.gen(function* () {
 								const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
 									mergeConfig
@@ -1516,14 +1564,27 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						if (pushToOrigin) {
 							const pushStatus = yield* offlineService.isGitPushEnabled()
 							if (pushStatus.enabled) {
+								yield* reportProgress("push")
+								const pushCommand = `git push origin ${baseBranch}`
+								const timeoutMessage = `Push timed out after ${MERGE_PUSH_TIMEOUT_SECONDS}s. Your local merge succeeded - retry push manually.`
+
 								yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
-									Effect.mapError(
-										(e) =>
+									Effect.timeoutFail({
+										duration: MERGE_PUSH_TIMEOUT,
+										onTimeout: () =>
 											new GitError({
-												message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-												command: `git push origin ${baseBranch}`,
-												stderr: e.stderr,
+												message: timeoutMessage,
+												command: pushCommand,
 											}),
+									}),
+									Effect.mapError((e) =>
+										e.message === timeoutMessage
+											? e
+											: new GitError({
+													message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
+													command: pushCommand,
+													stderr: e.stderr,
+												}),
 									),
 								)
 							}
