@@ -38,11 +38,16 @@ func NewActionMenu(task domain.Task, session *domain.Session) *ActionMenu {
 // buildActions creates the action list based on task and session state
 func (m *ActionMenu) buildActions() []Action {
 	actions := []Action{}
+	appendStartVariants := func() {
+		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
+		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
+		actions = append(actions, Action{Key: "!", Label: "Start session (skip permissions)", Enabled: true})
+		actions = append(actions, Action{Key: "c", Label: "Start chat session", Enabled: true})
+	}
 
 	// Session actions
 	if m.session == nil {
-		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
-		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
+		appendStartVariants()
 	} else {
 		// Attach action (always available when session exists)
 		actions = append(actions, Action{Key: "a", Label: "Attach to session", Enabled: true})
@@ -50,7 +55,7 @@ func (m *ActionMenu) buildActions() []Action {
 		// State-specific actions
 		switch m.session.State {
 		case domain.SessionIdle:
-			actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
+			appendStartVariants()
 		case domain.SessionBusy, domain.SessionWaiting:
 			actions = append(actions, Action{Key: "p", Label: "Pause session", Enabled: true})
 			actions = append(actions, Action{Key: "x", Label: "Stop session", Enabled: true})

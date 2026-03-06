@@ -57,16 +57,37 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 
 	menu := NewActionMenu(task, nil)
 
-	// Should have start session actions
+	// Should have start session variants
 	hasStartSession := false
+	hasStartWork := false
+	hasStartSkipPermission := false
+	hasStartChat := false
 	for _, action := range menu.actions {
 		if action.Key == "s" && action.Label == "Start session" {
 			hasStartSession = true
+		}
+		if action.Key == "S" && action.Label == "Start session + work" {
+			hasStartWork = true
+		}
+		if action.Key == "!" && action.Label == "Start session (skip permissions)" {
+			hasStartSkipPermission = true
+		}
+		if action.Key == "c" && action.Label == "Start chat session" {
+			hasStartChat = true
 		}
 	}
 
 	if !hasStartSession {
 		t.Error("expected 'Start session' action when no session exists")
+	}
+	if !hasStartWork {
+		t.Error("expected 'Start session + work' action when no session exists")
+	}
+	if !hasStartSkipPermission {
+		t.Error("expected 'Start session (skip permissions)' action when no session exists")
+	}
+	if !hasStartChat {
+		t.Error("expected 'Start chat session' action when no session exists")
 	}
 
 	// Git actions should be disabled
@@ -75,6 +96,38 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 			if action.Enabled {
 				t.Errorf("expected git action '%s' to be disabled without session", action.Key)
 			}
+		}
+	}
+}
+
+func TestActionMenu_BuildActions_IdleSessionIncludesStartVariants(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusOpen,
+	}
+	session := &domain.Session{
+		IssueID:  "az-123",
+		State:    domain.SessionIdle,
+		Worktree: "/tmp/az-123",
+	}
+
+	menu := NewActionMenu(task, session)
+
+	required := map[string]bool{
+		"s": false,
+		"S": false,
+		"!": false,
+		"c": false,
+	}
+	for _, action := range menu.actions {
+		if _, ok := required[action.Key]; ok && action.Enabled {
+			required[action.Key] = true
+		}
+	}
+
+	for key, found := range required {
+		if !found {
+			t.Fatalf("expected enabled start variant action %q for idle session", key)
 		}
 	}
 }
