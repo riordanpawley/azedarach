@@ -47,6 +47,13 @@ const ISSUE_TRACKER_SYNC_LOCK_PATH = "/tmp/azedarach-tracker-sync.lock"
  */
 const ISSUE_TRACKER_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
 
+/**
+ * Timeout for merge push to origin.
+ * Prevents Space+m from looking stuck when push blocks on network/auth.
+ */
+const MERGE_PUSH_TIMEOUT_SECONDS = 30
+const MERGE_PUSH_TIMEOUT = Duration.seconds(MERGE_PUSH_TIMEOUT_SECONDS)
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -1516,14 +1523,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						if (pushToOrigin) {
 							const pushStatus = yield* offlineService.isGitPushEnabled()
 							if (pushStatus.enabled) {
+								const pushCommand = `git push origin ${baseBranch}`
+								const timeoutMessage = `Push timed out after ${MERGE_PUSH_TIMEOUT_SECONDS}s. Your local merge succeeded - retry push manually.`
+
 								yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
-									Effect.mapError(
-										(e) =>
+									Effect.timeoutFail({
+										duration: MERGE_PUSH_TIMEOUT,
+										onTimeout: () =>
 											new GitError({
-												message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-												command: `git push origin ${baseBranch}`,
-												stderr: e.stderr,
+												message: timeoutMessage,
+												command: pushCommand,
 											}),
+									}),
+									Effect.mapError((e) =>
+										e.message === timeoutMessage
+											? e
+											: new GitError({
+													message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
+													command: pushCommand,
+													stderr: e.stderr,
+												}),
 									),
 								)
 							}

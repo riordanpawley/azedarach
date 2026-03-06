@@ -13,7 +13,7 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Cause, Data, Deferred, Duration, Effect, Exit, HashMap, SubscriptionRef } from "effect"
+import { Cause, Data, Deferred, Duration, Effect, Exit, HashMap, Option, SubscriptionRef } from "effect"
 
 // ============================================================================
 // Type Definitions
@@ -51,7 +51,7 @@ export interface TaskQueueInfo {
 // ============================================================================
 
 /**
- * Command timed out waiting in queue
+ * Command timed out waiting in queue or running
  */
 export class CommandTimeoutError extends Data.TaggedError("CommandTimeoutError")<{
 	readonly taskId: string
@@ -79,12 +79,19 @@ export class CommandCancelledError extends Data.TaggedError("CommandCancelledErr
 interface InternalQueuedCommand extends QueuedCommand {
 	readonly effect: Effect.Effect<void, unknown, CommandExecutor.CommandExecutor>
 	readonly deferred: Deferred.Deferred<void, CommandTimeoutError | CommandCancelledError>
+	readonly timeout: Duration.Duration
 }
 
 interface InternalTaskQueueState {
 	readonly running: InternalQueuedCommand | null
 	readonly queue: InternalQueuedCommand[]
 }
+
+const isCommandTimeoutError = (error: unknown): error is CommandTimeoutError =>
+	typeof error === "object" &&
+	error !== null &&
+	"_tag" in error &&
+	error._tag === "CommandTimeoutError"
 
 // ============================================================================
 // Service Implementation
@@ -165,7 +172,33 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// Run the actual effect with Effect.exit to capture ALL outcomes
 							// Effect.either only catches expected failures, NOT defects (thrown exceptions)
 							// Effect.exit captures: success, failure, AND defects
-							const result = yield* Effect.exit(next.effect)
+							const result = yield* Effect.exit(
+								next.effect.pipe(
+									Effect.timeoutFail({
+										duration: next.timeout,
+										onTimeout: () =>
+											new CommandTimeoutError({
+												taskId,
+												label: next.label,
+												timeout: next.timeout,
+											}),
+									}),
+								),
+							)
+
+							const timeoutError = Exit.isFailure(result)
+								? Cause.failureOption(result.cause).pipe(
+										Option.filter(isCommandTimeoutError),
+									)
+								: Option.none<CommandTimeoutError>()
+
+							if (Option.isSome(timeoutError)) {
+								yield* Effect.logWarning("Command timed out", {
+									taskId,
+									label: next.label,
+									timeout: next.timeout,
+								})
+							}
 
 							// Log defects for debugging - these would otherwise silently crash the fiber
 							if (Exit.isFailure(result) && Cause.isDie(result.cause)) {
@@ -176,9 +209,14 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 								})
 							}
 
-							// Complete the deferred - always succeeds regardless of effect outcome
-							// Caller handles errors within their effect via catchAll
-							yield* Deferred.succeed(next.deferred, undefined)
+							// Complete the deferred.
+							// Timeout errors propagate to caller so handlers can show a clear message.
+							if (Option.isSome(timeoutError)) {
+								yield* Deferred.fail(next.deferred, timeoutError.value)
+							} else {
+								// Caller handles operation errors within their effect via catchAll
+								yield* Deferred.succeed(next.deferred, undefined)
+							}
 
 							// Clear running and process next
 							yield* SubscriptionRef.update(stateRef, (s) => {
@@ -238,6 +276,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							queuedAt: new Date(),
 							effect,
 							deferred,
+							timeout,
 						}
 
 						// Add to queue
