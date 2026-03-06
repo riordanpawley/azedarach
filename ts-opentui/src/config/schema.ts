@@ -231,7 +231,7 @@ const GitConfigSchema = Schema.Struct({
 	/**
 	 * Maximum length for title-derived branch slug segment (default: 24)
 	 *
-	 * Applies to the `<slug>` part of `<author>/<slug>`.
+	 * Applies to the `<slug>` part of `<author>/<issue-id>/<slug>`.
 	 * The author prefix is derived from `git config user.name`.
 	 */
 	branchSlugMaxLength: Schema.optional(Schema.Number),

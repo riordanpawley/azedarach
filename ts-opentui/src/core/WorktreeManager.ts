@@ -55,7 +55,7 @@ export interface CreateWorktreeOptions {
 	/**
 	 * Maximum length for the title-derived slug portion of generated branch names.
 	 *
-	 * Applies only to the `<slug>` segment in `<author>/<slug>`.
+	 * Applies only to the `<slug>` segment in `<author>/<issue-id>/<slug>`.
 	 * Existing branch mappings are not rewritten.
 	 */
 	readonly branchSlugMaxLength?: number
@@ -371,6 +371,50 @@ const branchExistsAnywhere = (
 		)
 	})
 
+const DEFAULT_BRANCH_SLUG_MAX_LENGTH = 24
+const MIN_BRANCH_SLUG_MAX_LENGTH = 4
+
+export const normalizeBranchSlugMaxLength = (value?: number): number => {
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		return DEFAULT_BRANCH_SLUG_MAX_LENGTH
+	}
+
+	const normalized = Math.floor(value)
+	return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH ? normalized : DEFAULT_BRANCH_SLUG_MAX_LENGTH
+}
+
+export const slugifyIssueTitleForBranch = (title: string, maxLength: number): string => {
+	const base = title
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+
+	if (base.length === 0) {
+		return "task"
+	}
+
+	return base.slice(0, maxLength).replace(/-+$/g, "") || "task"
+}
+
+const sanitizeBranchAuthor = (value: string): string =>
+	value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "")
+		.trim()
+
+export const sanitizeIssueIdForBranchSegment = (value: string): string => {
+	const normalized = value
+		.toLowerCase()
+		.trim()
+		.replace(/[^a-z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+
+	return normalized.length > 0 ? normalized : "issue"
+}
+
+export const composeIssueBranchName = (author: string, issueId: string, slug: string): string =>
+	`${author}/${sanitizeIssueIdForBranchSegment(issueId)}/${slug}`
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -409,38 +453,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		// Supports multiple projects for fast project switching
 		const WORKTREE_CACHE_TTL_MS = 2000
 		const BRANCH_NAME_MAP_RELATIVE_PATH = ".azedarach/branch-name-map.json"
-		const DEFAULT_BRANCH_SLUG_MAX_LENGTH = 24
-		const MIN_BRANCH_SLUG_MAX_LENGTH = 4
 		// Map from projectPath to timestamp
 		const cacheTimestampRef = yield* Ref.make<Map<string, number>>(new Map())
-
-		const normalizeBranchSlugMaxLength = (value?: number): number => {
-			if (typeof value !== "number" || !Number.isFinite(value)) {
-				return DEFAULT_BRANCH_SLUG_MAX_LENGTH
-			}
-
-			const normalized = Math.floor(value)
-			return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH ? normalized : DEFAULT_BRANCH_SLUG_MAX_LENGTH
-		}
-
-		const slugifyIssueTitle = (title: string, maxLength: number): string => {
-			const base = title
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, "-")
-				.replace(/^-+|-+$/g, "")
-
-			if (base.length === 0) {
-				return "task"
-			}
-
-			return base.slice(0, maxLength).replace(/-+$/g, "") || "task"
-		}
-
-		const sanitizeBranchAuthor = (value: string): string =>
-			value
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, "")
-				.trim()
 
 		const getBranchAuthor = (
 			projectPath: string,
@@ -551,7 +565,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 				const slugMaxLength = normalizeBranchSlugMaxLength(branchSlugMaxLength)
 				const author = yield* getBranchAuthor(projectPath)
-				const baseSlug = slugifyIssueTitle(issueTitle ?? issueId, slugMaxLength)
+				const baseSlug = slugifyIssueTitleForBranch(issueTitle ?? issueId, slugMaxLength)
 				const reserved = new Set(Object.values(branchMap))
 
 				for (let attempt = 0; attempt < 1000; attempt++) {
@@ -559,7 +573,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const maxBaseLength = Math.max(1, slugMaxLength - suffix.length)
 					const trimmedBase = baseSlug.slice(0, maxBaseLength).replace(/-+$/g, "") || "task"
 					const slugWithSuffix = `${trimmedBase}${suffix}`
-					const candidate = `${author}/${slugWithSuffix}`
+					const candidate = composeIssueBranchName(author, issueId, slugWithSuffix)
 
 					if (reserved.has(candidate)) {
 						continue
