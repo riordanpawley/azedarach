@@ -12,13 +12,14 @@
  * - TmuxSessionMonitor signals always take priority over PTY (2s priority window)
  *
  * State aggregation flow:
- * 1. PTYMonitor polls tmux panes every 500ms
+ * 1. PTYMonitor polls tmux panes every 1s
  * 2. Output is fed to StateDetector for pattern matching
  * 3. Detected state is compared against hook priority window
  * 4. If hooks haven't fired recently, PTY state updates ClaudeSessionManager
  */
 
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
+import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
@@ -49,6 +50,11 @@ export interface ExtractedMetrics {
 	 * by the UI to render activity sparklines showing agent busyness over time.
 	 */
 	readonly hadActivity: boolean
+}
+
+export interface MonitoredSessionTarget {
+	readonly issueId: string
+	readonly tmuxSessionName: string
 }
 
 /**
@@ -312,12 +318,14 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		ClaudeSessionManager.Default,
 		StateDetector.Default,
 		DiagnosticsService.Default,
+		AppConfig.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
 		const sessionManager = yield* ClaudeSessionManager
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
+		const appConfig = yield* AppConfig
 
 		// Register with diagnostics - will mark unhealthy when scope closes
 		yield* diagnostics.trackService("PTYMonitor", "Polling tmux panes every 1s")
@@ -330,16 +338,38 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 			HashMap.empty(),
 		)
 
-		// ========================================================================
-		// Session Registration
-		// ========================================================================
+		const isPatternMatchingEnabled = () =>
+			SubscriptionRef.get(appConfig.config).pipe(
+				Effect.map((config) => config.stateDetection.patternMatching),
+			)
 
-		/**
-		 * Register a session for PTY monitoring
-		 *
-		 * Creates a stateful detector for the session and starts monitoring.
-		 */
-		const registerSession = (issueId: string, tmuxSessionName: string) =>
+		const clearAllSessions = () =>
+			Effect.gen(function* () {
+				const currentMonitors = yield* Ref.get(monitors)
+				const currentMetrics = yield* SubscriptionRef.get(metricsRef)
+				if (HashMap.size(currentMonitors) === 0 && HashMap.size(currentMetrics) === 0) {
+					return false
+				}
+				yield* Ref.set(monitors, HashMap.empty())
+				yield* SubscriptionRef.set(metricsRef, HashMap.empty())
+				return true
+			})
+
+		const clearSession = (issueId: string) =>
+			Effect.gen(function* () {
+				const currentMonitors = yield* Ref.get(monitors)
+				const currentMetrics = yield* SubscriptionRef.get(metricsRef)
+				const hasMonitor = HashMap.get(currentMonitors, issueId)._tag === "Some"
+				const hasMetrics = HashMap.get(currentMetrics, issueId)._tag === "Some"
+				if (!hasMonitor && !hasMetrics) {
+					return false
+				}
+				yield* Ref.update(monitors, (m) => HashMap.remove(m, issueId))
+				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.remove(m, issueId))
+				return true
+			})
+
+		const createSessionMonitor = (issueId: string, tmuxSessionName: string) =>
 			Effect.gen(function* () {
 				const detector = yield* stateDetector.createCombinedDetector()
 				const monitor: SessionMonitor = {
@@ -353,6 +383,33 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					pendingState: null,
 					pendingCount: 0,
 				}
+				return monitor
+			})
+
+		// ========================================================================
+		// Session Registration
+		// ========================================================================
+
+		/**
+		 * Register a session for PTY monitoring
+		 *
+		 * Creates a stateful detector for the session and starts monitoring.
+		 */
+		const registerSession = (issueId: string, tmuxSessionName: string) =>
+			Effect.gen(function* () {
+				const enabled = yield* isPatternMatchingEnabled()
+				if (!enabled) {
+					yield* clearSession(issueId)
+					return
+				}
+
+				const existingMonitors = yield* Ref.get(monitors)
+				const existing = HashMap.get(existingMonitors, issueId)
+				if (existing._tag === "Some" && existing.value.tmuxSessionName === tmuxSessionName) {
+					return
+				}
+
+				const monitor = yield* createSessionMonitor(issueId, tmuxSessionName)
 				yield* Ref.update(monitors, (m) => HashMap.set(m, issueId, monitor))
 				yield* Effect.log(`PTYMonitor: Registered session ${issueId}`)
 			})
@@ -364,9 +421,61 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 		 */
 		const unregisterSession = (issueId: string) =>
 			Effect.gen(function* () {
-				yield* Ref.update(monitors, (m) => HashMap.remove(m, issueId))
-				yield* SubscriptionRef.update(metricsRef, (m) => HashMap.remove(m, issueId))
-				yield* Effect.log(`PTYMonitor: Unregistered session ${issueId}`)
+				const removed = yield* clearSession(issueId)
+				if (removed) {
+					yield* Effect.log(`PTYMonitor: Unregistered session ${issueId}`)
+				}
+			})
+
+		/**
+		 * Reconcile monitored sessions with the authoritative active-session set.
+		 *
+		 * This keeps PTY monitoring consistent for sessions discovered outside
+		 * startSessionAtom (for example orphan recovery / app restart).
+		 */
+		const syncSessions = (sessions: ReadonlyArray<MonitoredSessionTarget>) =>
+			Effect.gen(function* () {
+				const enabled = yield* isPatternMatchingEnabled()
+				if (!enabled) {
+					const cleared = yield* clearAllSessions()
+					if (cleared) {
+						yield* Effect.log("PTYMonitor: Pattern matching disabled; cleared monitored sessions")
+					}
+					return
+				}
+
+				const currentMonitors = yield* Ref.get(monitors)
+				const seenIssueIds = new Set<string>()
+				let nextMonitors = HashMap.empty<string, SessionMonitor>()
+
+				for (const session of sessions) {
+					if (seenIssueIds.has(session.issueId)) {
+						continue
+					}
+					seenIssueIds.add(session.issueId)
+
+					const existing = HashMap.get(currentMonitors, session.issueId)
+					if (
+						existing._tag === "Some" &&
+						existing.value.tmuxSessionName === session.tmuxSessionName
+					) {
+						nextMonitors = HashMap.set(nextMonitors, session.issueId, existing.value)
+						continue
+					}
+
+					const monitor = yield* createSessionMonitor(session.issueId, session.tmuxSessionName)
+					nextMonitors = HashMap.set(nextMonitors, session.issueId, monitor)
+				}
+
+				yield* Ref.set(monitors, nextMonitors)
+
+				const currentMetrics = yield* SubscriptionRef.get(metricsRef)
+				const nextMetrics = Array.from(HashMap.entries(currentMetrics)).reduce(
+					(acc, [issueId, metrics]) =>
+						seenIssueIds.has(issueId) ? HashMap.set(acc, issueId, metrics) : acc,
+					HashMap.empty<string, ExtractedMetrics>(),
+				)
+				yield* SubscriptionRef.set(metricsRef, nextMetrics)
 			})
 
 		/**
@@ -563,7 +672,16 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					thresholdMs: 200,
 				},
 				Effect.gen(function* () {
+					const enabled = yield* isPatternMatchingEnabled()
+					if (!enabled) {
+						yield* clearAllSessions()
+						return
+					}
+
 					const allMonitors = yield* Ref.get(monitors)
+					if (HashMap.size(allMonitors) === 0) {
+						return
+					}
 					yield* Effect.all(
 						Array.from(HashMap.entries(allMonitors)).map(([issueId, monitor]) =>
 							pollSession(issueId, monitor),
@@ -598,6 +716,9 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 
 			/** Unregister a session from monitoring */
 			unregisterSession,
+
+			/** Sync monitored sessions to the active session set */
+			syncSessions,
 
 			/** Record a hook signal for priority handling */
 			recordHookSignal,

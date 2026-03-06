@@ -182,17 +182,18 @@ const PatternsConfigSchema = Schema.Struct({
  * State detection configuration
  *
  * Controls how session state (busy/waiting/done) is detected.
- * By default, prefers native tool signals (hooks/events) when available.
- * Pattern matching can be enabled as a fallback for tools without native signals.
+ * Native tool signals (hooks/events) remain authoritative when available.
+ * Pattern matching may be enabled to activate PTY-based detection/metrics.
  */
 const StateDetectionConfigSchema = Schema.Struct({
 	/**
 	 * Enable regex pattern matching for state detection (default: false)
 	 *
 	 * When enabled, StateDetector analyzes terminal output to detect state.
+	 * When disabled, PTY pattern-based monitoring is inert.
 	 * This can produce false positives and should be treated as best-effort fallback.
 	 *
-	 * Native tool signals (via TmuxSessionMonitor) take precedence when available.
+	 * Native tool signals (via TmuxSessionMonitor) still take precedence.
 	 */
 	patternMatching: Schema.optional(Schema.Boolean),
 })

@@ -26,18 +26,34 @@ import { appRuntime } from "./runtime.js"
  *
  * Usage: useAtomValue(sessionMonitorStarterAtom)
  */
+const mapTmuxStatusToSessionState = (status: "busy" | "waiting" | "idle") => {
+	if (status === "waiting") return "waiting" as const
+	if (status === "idle") return "idle" as const
+	return "busy" as const
+}
+
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
 		const manager = yield* ClaudeSessionManager
+		const ptyMonitor = yield* PTYMonitor
 
-			yield* monitor.start((update) =>
-				Effect.gen(function* () {
-					// Pass full session metadata for orphan recovery
-					yield* manager.updateStateFromTmux(update.issueId, update.status, {
-						sessionName: update.sessionName,
-						createdAt: update.createdAt,
-						worktreePath: update.worktreePath,
+		yield* monitor.start((update) =>
+			Effect.gen(function* () {
+				// Ensure PTY monitor tracks sessions discovered via tmux (orphan recovery/startup).
+				yield* ptyMonitor.registerSession(update.issueId, update.sessionName)
+
+				// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
+				yield* ptyMonitor.recordHookSignal(
+					update.issueId,
+					mapTmuxStatusToSessionState(update.status),
+				)
+
+				// Pass full session metadata for orphan recovery.
+				yield* manager.updateStateFromTmux(update.issueId, update.status, {
+					sessionName: update.sessionName,
+					createdAt: update.createdAt,
+					worktreePath: update.worktreePath,
 					projectPath: update.projectPath,
 				})
 			}).pipe(Effect.catchAll(() => Effect.void)),

@@ -141,9 +141,9 @@ export const DEFAULT_CONFIG = {
 	},
 	stateDetection: {
 		/**
-		 * Pattern matching is disabled by default.
-		 * Native tool signals (hooks/events via TmuxSessionMonitor) are preferred when available.
-		 * Pattern matching remains the fallback for tools without native signals (for example Codex).
+		 * PTY pattern matching is disabled by default.
+		 * When disabled, PTY-driven detection and metrics are inert.
+		 * Native tool signals (hooks/events via TmuxSessionMonitor) remain authoritative.
 		 */
 		patternMatching: false,
 	},

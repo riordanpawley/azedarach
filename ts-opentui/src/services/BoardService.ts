@@ -720,6 +720,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						.pipe(Effect.withSpan("sessions.listActive")),
 				)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+				const ptySessionTargets = activeSessions
+					.filter((session) => session.state !== "idle" && session.state !== "crashed")
+					.map((session) => ({
+						issueId: session.issueId,
+						tmuxSessionName: session.tmuxSessionName,
+					}))
+				yield* ptyMonitor.syncSessions(ptySessionTargets)
 
 				// Auto-recovery of crashed sessions (if enabled)
 				const crashedSessions = activeSessions.filter((s) => s.state === "crashed")

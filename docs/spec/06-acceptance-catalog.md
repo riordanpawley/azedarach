@@ -482,10 +482,17 @@ Canonical fixture profile names:
 
 ### AZ-AT-2827 Waiting-state tmux attention signaling
 
-- Preconditions: issue session is running in tmux with hook notifications enabled.
-- Steps: drive hook notifications through `busy -> waiting -> waiting (repeat) -> busy -> waiting`.
+- Preconditions: issue session is running in tmux. Use either native hook notifications or PTY-detected transitions (`stateDetection.patternMatching=true` for PTY path).
+- Steps: drive session status through `busy -> waiting -> waiting (repeat) -> busy -> waiting`.
 - Expected: first `waiting` transition emits tmux-native bell/alert highlighting for the session window (`prefix+s` attention signal); repeated `waiting` without an intervening non-waiting state does not re-emit; returning to `busy` resets debounce so the next `waiting` alerts again.
 - Links: AZ-FR-0815, AZ-FR-2005.
+
+### AZ-AT-2828 PTY pattern-matching toggle off behavior
+
+- Preconditions: issue session is running in tmux; config sets `stateDetection.patternMatching=false`.
+- Steps: create output that would normally match PTY waiting/busy/done patterns.
+- Expected: PTY monitor does not update session state/metrics from those patterns; only native tmux/hook status updates affect session state.
+- Links: AZ-FR-0815a, AZ-FR-2005.
 
 ## 6.17 Failure Acceptance
 
