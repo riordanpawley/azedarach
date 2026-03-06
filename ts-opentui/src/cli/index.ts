@@ -36,7 +36,7 @@ import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
+import { SessionManager } from "../core/SessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -122,7 +122,7 @@ const fullCliLayer = Layer.mergeAll(
 	KeyboardService.Default,
 	ToastService.Default,
 	NavigationService.Default,
-	ClaudeSessionManager.Default,
+	SessionManager.Default,
 	IssueTrackerClient.Default,
 	AppConfig.Default,
 	VCService.Default,
@@ -155,7 +155,7 @@ const commandCliLayer = Layer.mergeAll(
 	AppConfig.Default,
 	ProjectService.Default,
 	IssueTrackerClient.Default,
-	ClaudeSessionManager.Default,
+	SessionManager.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(telemetryLayer),
@@ -287,8 +287,8 @@ const startHandler = (args: {
 		// Validate issue tracker store
 		yield* validateIssueTrackerStore(cwd)
 
-		// Start the session using ClaudeSessionManager (provided by cliLayer)
-		const sessionManager = yield* ClaudeSessionManager
+		// Start the session using SessionManager (provided by cliLayer)
+		const sessionManager = yield* SessionManager
 		const session = yield* sessionManager.start({
 			issueId,
 			projectPath: cwd,

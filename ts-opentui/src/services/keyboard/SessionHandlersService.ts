@@ -16,7 +16,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
@@ -46,7 +46,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		dependencies: [
 			KeyboardHelpersService.Default,
 			ToastService.Default,
-			ClaudeSessionManager.Default,
+			SessionManager.Default,
 			AttachmentService.Default,
 			ImageAttachmentService.Default,
 			TmuxService.Default,
@@ -61,7 +61,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 		effect: Effect.gen(function* () {
 			const helpers = yield* KeyboardHelpersService
 			const toast = yield* ToastService
-			const sessionManager = yield* ClaudeSessionManager
+			const sessionManager = yield* SessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
 			const tmux = yield* TmuxService
@@ -763,7 +763,7 @@ Delete the duplicate worktree and retry?`
 
 							if (!worktree) return
 
-							// Create tmux session with init commands (same as ClaudeSessionManager)
+							// Create tmux session with init commands (same as SessionManager)
 							yield* worktreeSession
 								.getOrCreateSession(task.id, {
 									worktreePath: worktree.path,

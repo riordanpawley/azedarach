@@ -13,7 +13,7 @@
  * - Ensures environment persists correctly for subsequent commands
  *
  * This service is agnostic about WHAT runs in the session - it could be:
- * - Claude Code (via ClaudeSessionManager)
+ * - Claude Code (via SessionManager)
  * - A dev server (via DevServerService)
  * - Any other long-running process
  *

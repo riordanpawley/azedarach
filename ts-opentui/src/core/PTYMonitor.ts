@@ -4,7 +4,7 @@
  * Continuously monitors tmux pane output for active sessions and:
  * - Detects session state (busy, error, done) via pattern matching
  * - Extracts session metrics (tokens, agent phase, recent output)
- * - Reports state changes to ClaudeSessionManager
+ * - Reports state changes to SessionManager
  *
  * Works in tandem with TmuxSessionMonitor:
  * - PTY provides: busy detection, error detection, done detection, metrics
@@ -15,7 +15,7 @@
  * 1. PTYMonitor polls tmux panes every 1s
  * 2. Output is fed to StateDetector for pattern matching
  * 3. Detected state is compared against hook priority window
- * 4. If hooks haven't fired recently, PTY state updates ClaudeSessionManager
+ * 4. If hooks haven't fired recently, PTY state updates SessionManager
  */
 
 import { Effect, HashMap, Ref, Schedule, SubscriptionRef } from "effect"
@@ -23,7 +23,7 @@ import { AppConfig } from "../config/index.js"
 import { stripAnsi } from "../lib/ansi.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import type { AgentPhase, SessionState } from "../ui/types.js"
-import { ClaudeSessionManager } from "./ClaudeSessionManager.js"
+import { SessionManager } from "./SessionManager.js"
 import { type DetectionResult, StateDetector } from "./StateDetector.js"
 import { TmuxService } from "./TmuxService.js"
 
@@ -315,14 +315,14 @@ const classifyForegroundProcess = (
 export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 	dependencies: [
 		TmuxService.Default,
-		ClaudeSessionManager.Default,
+		SessionManager.Default,
 		StateDetector.Default,
 		DiagnosticsService.Default,
 		AppConfig.Default,
 	],
 	scoped: Effect.gen(function* () {
 		const tmux = yield* TmuxService
-		const sessionManager = yield* ClaudeSessionManager
+		const sessionManager = yield* SessionManager
 		const stateDetector = yield* StateDetector
 		const diagnostics = yield* DiagnosticsService
 		const appConfig = yield* AppConfig
@@ -554,7 +554,7 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 				let newPendingCount = monitor.pendingCount
 
 				if (!hookHasPriority) {
-					// Get current state from ClaudeSessionManager
+					// Get current state from SessionManager
 					const currentState = yield* sessionManager
 						.getState(issueId)
 						.pipe(

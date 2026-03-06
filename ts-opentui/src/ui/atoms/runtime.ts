@@ -12,7 +12,7 @@ import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
-import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PlanningService } from "../../core/PlanningService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
@@ -62,7 +62,7 @@ export const appLayer = Layer.mergeAll(
 	KeyboardService.Default,
 	ToastService.Default,
 	NavigationService.Default,
-	ClaudeSessionManager.Default,
+	SessionManager.Default,
 	IssueTrackerClient.Default,
 	AppConfig.Default,
 	VCService.Default,

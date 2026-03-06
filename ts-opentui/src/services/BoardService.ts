@@ -29,7 +29,7 @@ import {
 	type Issue,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
-import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
+import { SessionManager } from "../core/SessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
 import { WorktreeManager } from "../core/WorktreeManager.js"
@@ -348,7 +348,7 @@ export interface PerProjectBoardState {
 
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
-		ClaudeSessionManager.Default,
+		SessionManager.Default,
 		IssueTrackerClient.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
@@ -363,7 +363,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 	],
 	scoped: Effect.gen(function* () {
 		const issueTrackerClient = yield* IssueTrackerClient
-		const sessionManager = yield* ClaudeSessionManager
+		const sessionManager = yield* SessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService

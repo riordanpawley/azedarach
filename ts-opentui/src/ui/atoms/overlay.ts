@@ -117,7 +117,7 @@ export const pushOverlayAtom = appRuntime.fn(
 						  }
 						| { readonly _tag: "forkEpic"; readonly sourceTaskId: string }
 			  }
-			| { readonly _tag: "claudeCreate" }
+			| { readonly _tag: "aiCreate" }
 			| { readonly _tag: "settings" }
 			| { readonly _tag: "imageAttach"; readonly taskId: string }
 			| { readonly _tag: "imagePreview"; readonly taskId: string }

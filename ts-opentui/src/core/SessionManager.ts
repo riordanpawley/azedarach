@@ -1,15 +1,15 @@
 /**
- * ClaudeSessionManager - Effect service for Claude session orchestration
+ * SessionManager - Effect service for AI session orchestration
  *
- * Core orchestration service that manages the lifecycle of Claude Code sessions:
- * - Spawns Claude in tmux sessions
+ * Core orchestration service that manages the lifecycle of AI coding sessions:
+ * - Spawns the configured AI CLI in tmux sessions
  * - Coordinates with WorktreeManager for isolated git environments
  * - Tracks session state using StateDetector for output pattern matching
  * - Publishes state change events via PubSub
  * - Maintains session registry in Ref<HashMap>
  *
  * Key features:
- * - start(issueId): Create worktree, tmux session, and launch Claude
+ * - start(issueId): Create worktree, tmux session, and launch AI CLI
  * - stop(issueId): Kill tmux session and cleanup
  * - pause(issueId): Send Ctrl+C and create WIP commit
  * - resume(issueId): Continue paused session
@@ -54,7 +54,7 @@ import { WorktreeSessionService } from "./WorktreeSessionService.js"
 // ============================================================================
 
 /**
- * Session information tracked by ClaudeSessionManager
+ * Session information tracked by SessionManager
  */
 export interface Session {
 	readonly issueId: string
@@ -142,13 +142,12 @@ const SessionSchema = Schema.Struct({
 })
 
 /**
- * Claude model to use for session
+ * Model identifier to use for session
  *
- * Supports short names for Claude (haiku, sonnet, opus) or
- * provider/model format for OpenCode (anthropic/claude-sonnet-20241022,
- * google/gemini-flash-1.5, etc.)
+ * Supports CLI/tool-specific model names (for example short aliases or
+ * provider/model identifiers like anthropic/claude-sonnet-20241022).
  */
-export type ClaudeModel = string
+export type SessionModel = string
 
 /**
  * Options for starting a session
@@ -157,11 +156,11 @@ export interface StartSessionOptions {
 	readonly issueId: string
 	readonly projectPath: string
 	readonly baseBranch?: string
-	/** Optional initial prompt to send to Claude on startup (e.g., "work on bead az-123") */
+	/** Optional initial prompt to send on startup (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
-	/** Optional model to use (haiku, sonnet, opus). Uses Claude default if not specified. */
-	readonly model?: ClaudeModel
-	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
+	/** Optional model to use. Uses configured tool default if not specified. */
+	readonly model?: SessionModel
+	/** Run tool with --dangerously-skip-permissions (if supported) (default: false) */
 	readonly dangerouslySkipPermissions?: boolean
 	/** Enable auto-compact for long-running sessions (default: false, uses user setting) */
 	readonly autoCompact?: boolean
@@ -227,21 +226,21 @@ export class InvalidStateError extends Data.TaggedError("InvalidStateError")<{
 // ============================================================================
 
 /**
- * ClaudeSessionManager service interface
+ * SessionManager service interface
  *
- * Provides typed access to Claude session orchestration with Effect error handling.
+ * Provides typed access to AI session orchestration with Effect error handling.
  * All operations compose WorktreeManager, TmuxService, IssueTrackerClient, and StateDetector.
  */
-export interface ClaudeSessionManagerService {
+export interface SessionManagerService {
 	/**
-	 * Start a new Claude session for a bead
+	 * Start a new AI session for a bead
 	 *
-	 * Creates a git worktree, spawns a tmux session, and launches Claude Code.
+	 * Creates a git worktree, spawns a tmux session, and launches the configured AI CLI.
 	 * Idempotent: if session already exists, returns existing session.
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.start({
+	 * SessionManager.start({
 	 *   issueId: "az-05y",
 	 *   projectPath: "/Users/user/project",
 	 *   baseBranch: "main"
@@ -270,7 +269,7 @@ export interface ClaudeSessionManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.stop("az-05y")
+	 * SessionManager.stop("az-05y")
 	 * ```
 	 */
 	readonly stop: (
@@ -280,12 +279,12 @@ export interface ClaudeSessionManagerService {
 	/**
 	 * Pause a running session
 	 *
-	 * Sends Ctrl+C to the tmux session to interrupt Claude, then creates a WIP commit.
+	 * Sends Ctrl+C to the tmux session to interrupt the CLI, then creates a WIP commit.
 	 * Updates session state to "paused".
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.pause("az-05y")
+	 * SessionManager.pause("az-05y")
 	 * ```
 	 */
 	readonly pause: (
@@ -303,7 +302,7 @@ export interface ClaudeSessionManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.resume("az-05y")
+	 * SessionManager.resume("az-05y")
 	 * ```
 	 */
 	readonly resume: (issueId: string) => Effect.Effect<void, SessionError | InvalidStateError, never>
@@ -312,11 +311,11 @@ export interface ClaudeSessionManagerService {
 	 * Recover a crashed session
 	 *
 	 * Respawns a session whose tmux died (e.g., computer restart).
-	 * Uses `claude --resume` to continue the conversation where it left off.
+	 * Uses tool-specific continue-conversation behavior to resume where it left off.
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.recoverSession("az-05y")
+	 * SessionManager.recoverSession("az-05y")
 	 * ```
 	 */
 	readonly recoverSession: (
@@ -332,7 +331,7 @@ export interface ClaudeSessionManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.getState("az-05y")
+	 * SessionManager.getState("az-05y")
 	 * ```
 	 */
 	readonly getState: (issueId: string) => Effect.Effect<SessionState, SessionNotFoundError, never>
@@ -342,7 +341,7 @@ export interface ClaudeSessionManagerService {
 	 *
 	 * @example
 	 * ```ts
-	 * ClaudeSessionManager.listActive()
+	 * SessionManager.listActive()
 	 * ```
 	 */
 	readonly listActive: () => Effect.Effect<Session[], never, never>
@@ -394,7 +393,7 @@ export interface ClaudeSessionManagerService {
 // ============================================================================
 
 /**
- * ClaudeSessionManager service
+ * SessionManager service
  *
  * Creates a service implementation with stateful session tracking via Ref<HashMap>.
  * Composes WorktreeManager, TmuxService, IssueTrackerClient, and StateDetector services.
@@ -402,17 +401,17 @@ export interface ClaudeSessionManagerService {
  * @example
  * ```ts
  * const program = Effect.gen(function* () {
- *   const manager = yield* ClaudeSessionManager
+ *   const manager = yield* SessionManager
  *   const session = yield* manager.start({
  *     issueId: "az-123",
  *     projectPath: process.cwd()
  *   })
  *   return session
- * }).pipe(Effect.provide(ClaudeSessionManager.Default))
+ * }).pipe(Effect.provide(SessionManager.Default))
  * ```
  */
-export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()(
-	"ClaudeSessionManager",
+export class SessionManager extends Effect.Service<SessionManager>()(
+	"SessionManager",
 	{
 		dependencies: [
 			WorktreeManager.Default,
@@ -436,12 +435,12 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
 
-			// Note: ClaudeSessionManager uses effect: not scoped:, so trackService (which uses acquireRelease)
+			// Note: SessionManager uses effect: not scoped:, so trackService (which uses acquireRelease)
 			// would need scoped. Instead we just update health status manually.
 			yield* diagnostics.updateServiceHealth({
-				name: "ClaudeSessionManager",
+				name: "SessionManager",
 				status: "healthy",
-				details: "Claude session orchestration",
+				details: "AI session orchestration",
 			})
 
 			// Track active sessions in memory
@@ -841,7 +840,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Check if bead session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
 
-						// Build session settings object (for tools that support it, like Claude)
+						// Build session settings object (for tools that support session settings)
 						const sessionSettings: Record<string, unknown> = {}
 						if (autoCompact) sessionSettings.autoCompactEnabled = true
 
@@ -911,8 +910,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							// USE: Register session in memory and publish event
 							() =>
 								Effect.gen(function* () {
-									// Session starts as "initializing" - init commands and Claude are now chained
-									// in the tmux session, so if init fails, Claude won't start
+									// Session starts as "initializing" - init commands and AI CLI are chained
+									// in the tmux session, so if init fails, the main command won't start
 									const initialState: SessionState = "initializing"
 
 									// Create session object
@@ -1048,7 +1047,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						const session = sessionOpt.value
 
-						// Send Ctrl+C to interrupt Claude
+						// Send Ctrl+C to interrupt the running AI CLI
 						yield* tmuxService.sendKeys(session.tmuxSessionName, "C-c")
 
 						// Wait a moment for interrupt to process
@@ -1261,7 +1260,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							backgroundTasks,
 						})
 
-						// Create the code window with resumed Claude
+						// Create the code window with resumed session command
 						yield* worktreeSession.ensureWindow(tmuxSessionName, WINDOW_NAMES.CODE, {
 							command: commandWithOptions,
 							cwd: session.worktreePath,

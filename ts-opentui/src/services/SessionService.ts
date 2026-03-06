@@ -1,7 +1,7 @@
 /**
- * SessionService - Claude session orchestration
+ * SessionService - AI session orchestration
  *
- * Manages Claude Code sessions in git worktrees using Effect.Service pattern.
+ * Manages AI coding sessions in git worktrees using Effect.Service pattern.
  * Coordinates with ToastService for notifications and NavigationService for
  * cursor follow mode when spawning sessions.
  */
@@ -23,9 +23,9 @@ export class SessionService extends Effect.Service<SessionService>()("SessionSer
 
 		return {
 			/**
-			 * Spawn a new Claude session for the given task
+			 * Spawn a new AI session for the given task
 			 *
-			 * Creates a git worktree, spawns a tmux session with Claude,
+			 * Creates a git worktree, spawns a tmux session with the configured tool,
 			 * shows a toast notification, and enables follow mode for the task.
 			 *
 			 * @param taskId - The task/bead ID to spawn a session for
@@ -38,7 +38,7 @@ export class SessionService extends Effect.Service<SessionService>()("SessionSer
 				}),
 
 			/**
-			 * Attach to an existing Claude session
+			 * Attach to an existing AI session
 			 *
 			 * Attaches the user's terminal to the tmux session for manual
 			 * intervention. Shows a toast notification.
@@ -54,7 +54,7 @@ export class SessionService extends Effect.Service<SessionService>()("SessionSer
 			/**
 			 * Handle session completion
 			 *
-			 * Called when a Claude session completes successfully.
+			 * Called when an AI session completes successfully.
 			 * Shows a success toast and can trigger PR workflow or
 			 * other post-completion actions.
 			 *
