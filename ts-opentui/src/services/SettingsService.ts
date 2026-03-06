@@ -212,6 +212,29 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		},
 	},
 	{
+		key: "linearWebhooksEnabled",
+		label: "Linear Webhooks",
+		getValue: (c) => {
+			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.webhooks?.enabled ?? true
+			return false
+		},
+		toggle: (c) => {
+			if (c.issueTracker?.linear === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					linear: {
+						...c.issueTracker.linear,
+						webhooks: {
+							...c.issueTracker.linear.webhooks,
+							enabled: !(c.issueTracker.linear.webhooks?.enabled ?? true),
+						},
+					},
+				},
+			}
+		},
+	},
+	{
 		key: "patternMatching",
 		label: "Pattern Matching",
 		getValue: (c) => c.stateDetection?.patternMatching ?? false,

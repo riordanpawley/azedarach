@@ -154,6 +154,7 @@ The settings overlay shows all editable configuration options:
 
 #### Linear Settings
 - **Linear Sync**: Enable/disable automatic synchronization with linear backend
+- **Linear Webhooks**: Enable/disable webhook-driven board refresh for the linear backend
 
 #### State Detection Settings
 - **Pattern Matching**: Enable/disable AI pattern-based state detection for sessions
