@@ -15,6 +15,10 @@ type primeJSONEnvelope struct {
 		QuickReference []string        `json:"quickReference"`
 		Policies       map[string]bool `json:"policies"`
 		CommitTemplate string          `json:"commitTemplate"`
+		AgentBootstrap struct {
+			PrimeCommand       string `json:"primeCommand"`
+			IssueLookupCommand string `json:"issueLookupCommand"`
+		} `json:"agentBootstrap"`
 	} `json:"data"`
 }
 
@@ -51,6 +55,9 @@ func TestRunCLIPrimeHumanIncludesQuickReferencePoliciesAndCommitTemplate(t *test
 	}
 	if !regexp.MustCompile(`AZE-\d+`).MatchString(stdout) {
 		t.Fatalf("expected commit template to include an issue-id example (e.g. AZE-123).\noutput:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "az prime") || !strings.Contains(strings.ToLower(stdout), "before substantive task execution") {
+		t.Fatalf("expected bootstrap guidance to require running az prime before substantive task execution.\noutput:\n%s", stdout)
 	}
 }
 
@@ -129,6 +136,18 @@ func TestRunCLIPrimeJSONReturnsDeterministicEnvelope(t *testing.T) {
 	}
 	if !regexp.MustCompile(`AZE-\d+`).MatchString(envelope.Data.CommitTemplate) {
 		t.Fatalf("expected data.commitTemplate to include issue-id example, got %q", envelope.Data.CommitTemplate)
+	}
+	if envelope.Data.AgentBootstrap.PrimeCommand != "az prime" {
+		t.Fatalf(
+			"expected data.agentBootstrap.primeCommand=az prime, got %q",
+			envelope.Data.AgentBootstrap.PrimeCommand,
+		)
+	}
+	if envelope.Data.AgentBootstrap.IssueLookupCommand != "az show <issue-id>" {
+		t.Fatalf(
+			"expected data.agentBootstrap.issueLookupCommand=az show <issue-id>, got %q",
+			envelope.Data.AgentBootstrap.IssueLookupCommand,
+		)
 	}
 }
 

@@ -12,6 +12,8 @@ const (
 	primeInvalidArgumentCode        = "invalid_argument"
 	primeInvalidArgumentRemediation = "Run az prime --json without positional arguments"
 	primeCommitTemplate             = "git commit -m \"AZE-123: <summary>\""
+	primeBootstrapPrimeCommand      = "az prime"
+	primeBootstrapIssueLookup       = "az show <issue-id>"
 )
 
 var primeCommandPath = []string{"az", "prime"}
@@ -26,6 +28,12 @@ type primeJSONData struct {
 	QuickReference []string        `json:"quickReference"`
 	Policies       map[string]bool `json:"policies"`
 	CommitTemplate string          `json:"commitTemplate"`
+	AgentBootstrap primeBootstrap  `json:"agentBootstrap"`
+}
+
+type primeBootstrap struct {
+	PrimeCommand       string `json:"primeCommand"`
+	IssueLookupCommand string `json:"issueLookupCommand"`
 }
 
 type primeOutputEnvelope struct {
@@ -98,6 +106,10 @@ func buildPrimeJSONData() *primeJSONData {
 			"requireIssueIdInCommitMessage": true,
 		},
 		CommitTemplate: primeCommitTemplate,
+		AgentBootstrap: primeBootstrap{
+			PrimeCommand:       primeBootstrapPrimeCommand,
+			IssueLookupCommand: primeBootstrapIssueLookup,
+		},
 	}
 }
 
@@ -112,6 +124,10 @@ func primeQuickReference() []string {
 
 func printPrimeHuman(stdout io.Writer) {
 	fmt.Fprintln(stdout, "Azedarach Session Primer")
+	fmt.Fprintln(stdout, "")
+	fmt.Fprintln(stdout, "Bootstrap Contract:")
+	fmt.Fprintln(stdout, "- Run az prime before substantive task execution.")
+	fmt.Fprintln(stdout, "- Retrieve issue context with az show <issue-id>.")
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "Quick Reference:")
 	for _, command := range primeQuickReference() {
