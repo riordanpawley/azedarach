@@ -133,6 +133,13 @@ export class WorktreeNameClashError extends Data.TaggedError("WorktreeNameClashE
 	readonly uncommittedFileCount: number
 }> {}
 
+class WorktreeCacheMissAfterCreateError extends Data.TaggedError(
+	"WorktreeCacheMissAfterCreateError",
+)<{
+	readonly foundIssueIds: readonly string[]
+	readonly cacheSize: number
+}> {}
+
 /**
  * Error when project is not a git repository
  */
@@ -1082,34 +1089,32 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Git worktree list can sometimes miss newly created worktrees due to
 						// filesystem sync timing issues, especially on macOS APFS. We retry
 						// a few times with short delays to handle this race condition.
-						const findNewWorktree = Effect.gen(function* () {
-							yield* forceRefreshWorktrees(projectPath)
-							const allUpdated = yield* Ref.get(worktreesRef)
-							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-							const newWorktree = projectUpdated.get(issueId)
+							const findNewWorktree = Effect.gen(function* () {
+								yield* forceRefreshWorktrees(projectPath)
+								const allUpdated = yield* Ref.get(worktreesRef)
+								const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+								const newWorktree = projectUpdated.get(issueId)
 
-							if (!newWorktree) {
-								const foundIssueIds = Array.from(projectUpdated.keys())
-								return yield* Effect.fail({
-									_tag: "NotFound" as const,
-									foundIssueIds,
-									cacheSize: projectUpdated.size,
-								})
-							}
-							return newWorktree
-						})
+								if (!newWorktree) {
+									const foundIssueIds = Array.from(projectUpdated.keys())
+									return yield* Effect.fail(new WorktreeCacheMissAfterCreateError({
+										foundIssueIds,
+										cacheSize: projectUpdated.size,
+									}))
+								}
+								return newWorktree
+							})
 
 						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
 						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
 
-						const result = yield* findNewWorktree.pipe(
-							Effect.retry({
-								schedule: retrySchedule,
-								while: (e) => e._tag === "NotFound",
-							}),
-								Effect.catchIf(
-									(e): e is { _tag: "NotFound"; foundIssueIds: string[]; cacheSize: number } =>
-										"_tag" in e && e._tag === "NotFound",
+							const result = yield* findNewWorktree.pipe(
+								Effect.retry({
+									schedule: retrySchedule,
+									while: (e) => e._tag === "WorktreeCacheMissAfterCreateError",
+								}),
+								Effect.catchTag(
+									"WorktreeCacheMissAfterCreateError",
 									(e) =>
 										Effect.gen(function* () {
 											yield* Effect.logError("Worktree created but not found in cache after retries", {
