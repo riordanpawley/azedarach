@@ -61,6 +61,7 @@ import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
+import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
@@ -902,14 +903,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				return true
 			})
 
-		const buildSessionRecoveryRetrySchedule = (retryBaseDelayMs: number, retryMaxDelayMs: number) =>
-			Schedule.exponential(Duration.millis(retryBaseDelayMs)).pipe(
-				Schedule.jittered,
-				Schedule.modifyDelay((_output, duration) =>
-					Duration.min(duration, Duration.millis(retryMaxDelayMs)),
-				),
-			)
-
 		const runAutoRecoveryForIssue = (issueId: string) =>
 			Effect.gen(function* () {
 				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
@@ -935,7 +928,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						)
 					}),
 					Effect.retry({
-						schedule: buildSessionRecoveryRetrySchedule(retryBaseDelayMs, retryMaxDelayMs),
+						schedule: makeSessionRecoveryRetrySchedule(retryBaseDelayMs, retryMaxDelayMs),
 						while: isTransientSessionRecoveryError,
 					}),
 					Effect.catchAll((error) =>
