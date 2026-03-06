@@ -20,6 +20,11 @@ Before starting implementation:
 
 Goal: Make this issue self-sufficient so any future session could pick it up without extra context.`
 
+	prompt += `
+
+Issue nesting rule:
+- If you or any subagents create additional issues, always set them as children of \`${params.taskId}\` (for example, \`az issue update <new-id> --parent ${params.taskId}\`).`
+
 	if (params.localMode) {
 		prompt += `
 
