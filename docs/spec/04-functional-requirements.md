@@ -438,6 +438,7 @@ This section is normative.
 - AZ-FR-3813: Read operations SHOULD support bounded wait budgets and MUST return a clear stale/freshness hint when timeout occurs before sync completion.
 - AZ-FR-3814: Explicit wait mode for reads MUST allow a higher wait budget than default non-blocking read mode.
 - AZ-FR-3815: Linear sync queue processing MUST emit lifecycle logs for start/skip/success/retry/terminal-failure with project path, operation, attempt count, issue identity, and known external Linear issue ID.
+- AZ-FR-3816: Linear metadata/list reads (including workflow states) MUST honor provider page-size caps and MUST traverse cursor pagination until complete when full dataset coverage is required.
 
 ## 4.42 Background Operation Requirements
 
