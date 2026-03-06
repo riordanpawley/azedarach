@@ -6,6 +6,7 @@ import {
 	issueIdsEqualForLookup,
 	normalizeIssueIdForLookup,
 	parseIssueSessionName,
+	resolveIssueIdFromSessionName,
 } from "./paths.js"
 
 describe("paths session naming", () => {
@@ -61,6 +62,10 @@ describe("paths session naming", () => {
 		expect(parseIssueSessionName("az-b", "/Users/user/prog/azedarach")).toEqual({
 			type: "issue",
 			issueId: "b",
+		})
+		expect(parseIssueSessionName("az-ak", "/Users/user/prog/azedarach")).toEqual({
+			type: "issue",
+			issueId: "ak",
 		})
 		expect(parseIssueSessionName("ch-AZE-123", "/Users/user/prog/Chefy")).toEqual({
 			type: "issue",
@@ -133,6 +138,20 @@ describe("paths session naming", () => {
 			type: "issue",
 			issueId: "AZE-123",
 		})
+	})
+
+	it("resolves issue IDs from session names with project-aware fallback", () => {
+		expect(
+			resolveIssueIdFromSessionName("az-ak", {
+				projectPath: "/Users/user/prog/azedarach",
+			}),
+		).toBe("ak")
+		expect(resolveIssueIdFromSessionName("az-ak")).toBe("az-ak")
+		expect(
+			resolveIssueIdFromSessionName("not a session", {
+				fallbackIssueId: "aw",
+			}),
+		).toBe("aw")
 	})
 })
 

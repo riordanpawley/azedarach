@@ -36,6 +36,7 @@ import {
 	getWorktreePath,
 	normalizeIssueIdForLookup,
 	parseIssueSessionName,
+	resolveIssueIdFromSessionName,
 	WINDOW_NAMES,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
@@ -526,6 +527,73 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					),
 					Effect.orElseSucceed(() => undefined),
 				)
+
+			interface CanonicalSessionCandidate {
+				readonly session: Session
+				readonly isStoredCanonical: boolean
+			}
+
+			const resolveCanonicalIssueIdFromSession = (
+				fallbackIssueId: string,
+				sessionName: string,
+				projectPath?: string | null,
+			): string =>
+				resolveIssueIdFromSessionName(sessionName, {
+					projectPath,
+					fallbackIssueId,
+				}) ?? fallbackIssueId
+
+			const canonicalizeSessionMap = (
+				sessions: HashMap.HashMap<string, Session>,
+				defaultProjectPath: string,
+			): {
+				readonly sessions: HashMap.HashMap<string, Session>
+				readonly changed: boolean
+			} => {
+				let changed = false
+				const canonicalSessions = new Map<string, CanonicalSessionCandidate>()
+
+				for (const [storedIssueId, session] of HashMap.entries(sessions)) {
+					const canonicalIssueId = resolveCanonicalIssueIdFromSession(
+						storedIssueId,
+						session.tmuxSessionName,
+						session.projectPath || defaultProjectPath,
+					)
+					const canonicalSession =
+						session.issueId === canonicalIssueId
+							? session
+							: { ...session, issueId: canonicalIssueId }
+
+					if (storedIssueId !== canonicalIssueId || canonicalSession !== session) {
+						changed = true
+					}
+
+					const candidate: CanonicalSessionCandidate = {
+						session: canonicalSession,
+						isStoredCanonical: storedIssueId === canonicalIssueId,
+					}
+					const existing = canonicalSessions.get(canonicalIssueId)
+					if (!existing) {
+						canonicalSessions.set(canonicalIssueId, candidate)
+						continue
+					}
+
+					changed = true
+					if (!existing.isStoredCanonical && candidate.isStoredCanonical) {
+						canonicalSessions.set(canonicalIssueId, candidate)
+					}
+				}
+
+				let normalizedSessions = HashMap.empty<string, Session>()
+				for (const [issueId, candidate] of canonicalSessions.entries()) {
+					normalizedSessions = HashMap.set(normalizedSessions, issueId, candidate.session)
+				}
+
+				return {
+					sessions: normalizedSessions,
+					changed,
+				}
+			}
 
 			const setTmuxSessionOption = (sessionName: string, optionName: string, value: string) =>
 				Command.exitCode(
@@ -1211,8 +1279,21 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 				listActive: (projectPath?: string) =>
 					Effect.gen(function* () {
-						// Get in-memory sessions
-						const inMemorySessions = yield* Ref.get(sessionsRef)
+						// Falls back to process.cwd() for backwards compatibility
+						const effectiveProjectPath = projectPath ?? process.cwd()
+						let sessionsChanged = false
+
+						// Get and canonicalize in-memory sessions first to collapse stale alias IDs.
+						const inMemorySessionsRaw = yield* Ref.get(sessionsRef)
+						const canonicalInMemoryResult = canonicalizeSessionMap(
+							inMemorySessionsRaw,
+							effectiveProjectPath,
+						)
+						const inMemorySessions = canonicalInMemoryResult.sessions
+						if (canonicalInMemoryResult.changed) {
+							sessionsChanged = true
+							yield* Ref.set(sessionsRef, inMemorySessions)
+						}
 
 						// Query tmux for actual running sessions
 						const tmuxSessions = yield* tmuxService.listSessions().pipe(
@@ -1223,12 +1304,15 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							), // If tmux fails, just use in-memory
 						)
 
-						// Load persisted sessions for state recovery
-						const persistedSessions = yield* loadPersistedSessions
+						// Load and canonicalize persisted sessions for crash recovery.
+						const persistedSessionsRaw = yield* loadPersistedSessions
+						const canonicalPersistedResult = canonicalizeSessionMap(
+							persistedSessionsRaw,
+							effectiveProjectPath,
+						)
+						const persistedSessions = canonicalPersistedResult.sessions
 
 						// Query worktrees to get accurate paths
-						// Falls back to process.cwd() for backwards compatibility
-						const effectiveProjectPath = projectPath ?? process.cwd()
 						const worktrees = yield* worktreeManager
 							.list(effectiveProjectPath)
 							.pipe(
@@ -1281,6 +1365,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								yield* Ref.update(sessionsRef, (sessions) =>
 									HashMap.set(sessions, issueId, orphanedSession),
 								)
+								sessionsChanged = true
+								inMemoryIssueLookup.add(issueLookupKey)
 							}
 						}
 
@@ -1319,11 +1405,24 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								yield* Ref.update(sessionsRef, (sessions) =>
 									HashMap.set(sessions, issueId, crashedSession),
 								)
+								sessionsChanged = true
+								inMemoryIssueLookup.add(issueLookupKey)
 							}
 						}
 
 						// Return updated list
 						const updatedSessions = yield* Ref.get(sessionsRef)
+
+						if (sessionsChanged) {
+							yield* persistSessions(updatedSessions)
+						} else if (canonicalPersistedResult.changed) {
+							let mergedSessions = persistedSessions
+							for (const [activeIssueId, activeSession] of HashMap.entries(updatedSessions)) {
+								mergedSessions = HashMap.set(mergedSessions, activeIssueId, activeSession)
+							}
+							yield* persistSessions(mergedSessions)
+						}
+
 						return Array.from(HashMap.values(updatedSessions))
 					}),
 
@@ -1376,13 +1475,43 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					},
 				) =>
 					Effect.gen(function* () {
-						const sessions = yield* Ref.get(sessionsRef)
-						const sessionOpt = HashMap.get(sessions, issueId)
+						const resolvedIssueId = sessionMeta
+							? resolveCanonicalIssueIdFromSession(
+									issueId,
+									sessionMeta.sessionName,
+									sessionMeta.projectPath,
+								)
+							: issueId
+
+						let sessions = yield* Ref.get(sessionsRef)
+						let sessionOpt = HashMap.get(sessions, resolvedIssueId)
+
+						// Migrate alias keys (for example `az-ak` -> `ak`) before applying updates.
+						if (sessionOpt._tag === "None" && resolvedIssueId !== issueId) {
+							const aliasSessionOpt = HashMap.get(sessions, issueId)
+							if (aliasSessionOpt._tag === "Some") {
+								const aliasSession = aliasSessionOpt.value
+								const migratedAliasSession =
+									aliasSession.issueId === resolvedIssueId
+										? aliasSession
+										: { ...aliasSession, issueId: resolvedIssueId }
+
+								sessions = HashMap.remove(
+									HashMap.set(sessions, resolvedIssueId, migratedAliasSession),
+									issueId,
+								)
+								yield* Ref.set(sessionsRef, sessions)
+								yield* persistSessions(sessions)
+								sessionOpt = HashMap.get(sessions, resolvedIssueId)
+							}
+						}
 
 						// If session doesn't exist but we have metadata, create it (orphan recovery)
 						if (sessionOpt._tag === "None") {
 							if (sessionMeta) {
-								yield* Effect.log(`Recovering orphaned session for ${issueId} (status: ${status})`)
+								yield* Effect.log(
+									`Recovering orphaned session for ${resolvedIssueId} (status: ${status})`,
+								)
 
 								// Map status to SessionState
 								let initialState: SessionState = "busy"
@@ -1390,10 +1519,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								if (status === "idle") initialState = "idle"
 
 								const orphanedSession: Session = {
-									issueId,
+									issueId: resolvedIssueId,
 									worktreePath:
 										sessionMeta.worktreePath ??
-										getWorktreePath(sessionMeta.projectPath ?? process.cwd(), issueId),
+										getWorktreePath(sessionMeta.projectPath ?? process.cwd(), resolvedIssueId),
 									tmuxSessionName: sessionMeta.sessionName,
 									state: initialState,
 									startedAt: DateTime.unsafeFromDate(new Date(sessionMeta.createdAt * 1000)),
@@ -1401,7 +1530,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								}
 
 								yield* Ref.update(sessionsRef, (sessions) =>
-									HashMap.set(sessions, issueId, orphanedSession),
+									HashMap.set(sessions, resolvedIssueId, orphanedSession),
 								)
 
 								// Persist the recovered session
@@ -1409,10 +1538,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								yield* persistSessions(allSessions)
 
 								// Publish as a new session discovery (idle -> currentState)
-								yield* publishStateChange(issueId, "idle", initialState)
+								yield* publishStateChange(resolvedIssueId, "idle", initialState)
 								return
 							}
-							return yield* Effect.fail(new SessionNotFoundError({ issueId }))
+							return yield* Effect.fail(new SessionNotFoundError({ issueId: resolvedIssueId }))
 						}
 
 						const session = sessionOpt.value
@@ -1438,7 +1567,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, issueId, updatedSession),
+							HashMap.set(sessions, resolvedIssueId, updatedSession),
 						)
 
 						// Persist to disk
@@ -1446,7 +1575,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						yield* persistSessions(allSessions)
 
 						// Publish state change
-						yield* publishStateChange(issueId, oldState, newState)
+						yield* publishStateChange(resolvedIssueId, oldState, newState)
 					}),
 
 				subscribeToStateChanges: () => Effect.succeed(stateChangeHub),

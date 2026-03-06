@@ -764,7 +764,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* ptyMonitor.syncSessions(ptySessionTargets)
 
 				// Auto-recovery of crashed sessions (if enabled)
-				const crashedSessions = activeSessions.filter((s) => s.state === "crashed")
+				const crashedSessions = Array.from(
+					activeSessions
+						.filter((session) => session.state === "crashed")
+						.reduce(
+							(map, session) => map.set(session.tmuxSessionName, session),
+							new Map<string, (typeof activeSessions)[number]>(),
+						)
+						.values(),
+				)
 				if (crashedSessions.length > 0) {
 					const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
 
