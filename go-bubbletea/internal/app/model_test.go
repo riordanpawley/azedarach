@@ -443,6 +443,23 @@ func TestActionMenuSpaceThenIOpensImageAttachOverlay(t *testing.T) {
 	}
 }
 
+func TestOpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
+	m := newTestModel()
+
+	result, _ := m.Update(overlay.OpenImagePreviewMsg{
+		IssueID:      "az-1",
+		InitialIndex: 0,
+	})
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected image preview overlay to be open")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ImagePreviewOverlay); !ok {
+		t.Fatalf("expected ImagePreviewOverlay, got %T", m.overlayStack.Current())
+	}
+}
+
 func TestActionMenuSpaceThenRTogglesDevServerForCurrentIssue(t *testing.T) {
 	m := newTestModel()
 	m.nav.SelectTask("az-1", 0)

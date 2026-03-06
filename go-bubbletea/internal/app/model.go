@@ -642,6 +642,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case overlay.OpenImagePreviewMsg:
+		preview := overlay.NewImagePreviewOverlay(msg.IssueID, m.attachmentService, msg.InitialIndex)
+		return m, tea.Batch(m.overlayStack.Push(preview), preview.Init())
+
 	// Cleanup executed result
 	case overlay.CleanupExecutedMsg:
 		m.overlayStack.Pop()
@@ -1027,7 +1031,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.overlayStack.Push(overlay.NewEpicDrillDown(*task, children))
 			} else {
 				// Regular task detail panel
-				return m, m.overlayStack.Push(overlay.NewDetailPanel(*task, session))
+				return m, m.overlayStack.Push(overlay.NewDetailPanelWithAttachments(*task, session, m.attachmentService))
 			}
 		}
 		return m, nil

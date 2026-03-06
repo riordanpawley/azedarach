@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -19,6 +20,8 @@ type Service struct {
 	logger     *slog.Logger
 }
 
+var attachmentIDPattern = regexp.MustCompile(`^[a-f0-9]{8}$`)
+
 // Attachment represents a file attachment
 type Attachment struct {
 	ID       string    `json:"id"`
@@ -28,6 +31,7 @@ type Attachment struct {
 	MimeType string    `json:"mime_type"`
 	Size     int64     `json:"size"`
 	Created  time.Time `json:"created"`
+	Corrupt  bool      `json:"corrupt,omitempty"`
 }
 
 // NewService creates a new attachment service
@@ -126,9 +130,13 @@ func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error
 
 		// Parse ID from filename (format: <id>-<original-name>)
 		id := ""
+		corrupt := false
 		parts := strings.SplitN(entry.Name(), "-", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && attachmentIDPattern.MatchString(parts[0]) {
 			id = parts[0]
+		} else {
+			corrupt = true
+			s.logger.Warn("corrupt attachment metadata: expected <id>-<filename>", "issue_id", issueID, "filename", entry.Name())
 		}
 
 		attachments = append(attachments, Attachment{
@@ -139,6 +147,7 @@ func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error
 			MimeType: mimeType,
 			Size:     info.Size(),
 			Created:  info.ModTime(),
+			Corrupt:  corrupt,
 		})
 	}
 
@@ -149,6 +158,9 @@ func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error
 // Delete removes an attachment by ID
 func (s *Service) Delete(ctx context.Context, issueID, attachmentID string) error {
 	s.logger.Debug("deleting attachment", "issue_id", issueID, "attachment_id", attachmentID)
+	if strings.TrimSpace(attachmentID) == "" {
+		return fmt.Errorf("attachment id is required")
+	}
 
 	imagesDir := s.getImagesDir(issueID)
 
@@ -170,6 +182,25 @@ func (s *Service) Delete(ctx context.Context, issueID, attachmentID string) erro
 	}
 
 	return fmt.Errorf("attachment not found: %s", attachmentID)
+}
+
+// DeleteByFilename removes an attachment by exact filename.
+func (s *Service) DeleteByFilename(ctx context.Context, issueID, filename string) error {
+	s.logger.Debug("deleting attachment by filename", "issue_id", issueID, "filename", filename)
+	if strings.TrimSpace(filename) == "" {
+		return fmt.Errorf("attachment filename is required")
+	}
+
+	imagesDir := s.getImagesDir(issueID)
+	filePath := filepath.Join(imagesDir, filename)
+	if err := os.Remove(filePath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("attachment not found: %s", filename)
+		}
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+
+	return nil
 }
 
 // GetPath returns the full path to an attachment

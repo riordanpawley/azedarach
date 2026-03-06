@@ -1,12 +1,18 @@
 package overlay
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -249,4 +255,149 @@ func TestDetailPanelFormatDuration(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func setupDetailAttachmentService(t *testing.T) (*attachment.Service, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := attachment.NewService(tmpDir, logger)
+	return service, tmpDir
+}
+
+func writeTestImageFile(t *testing.T, dir, name string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	data := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("failed to write test image file: %v", err)
+	}
+	return path
+}
+
+func TestDetailPanelWithAttachments_ViewShowsListAndHints(t *testing.T) {
+	service, tmpDir := setupDetailAttachmentService(t)
+	issueID := "az-attach-1"
+
+	fileA := writeTestImageFile(t, tmpDir, "a.png")
+	fileB := writeTestImageFile(t, tmpDir, "b.png")
+
+	if _, err := service.Attach(context.Background(), issueID, fileA); err != nil {
+		t.Fatalf("failed to attach file a: %v", err)
+	}
+	if _, err := service.Attach(context.Background(), issueID, fileB); err != nil {
+		t.Fatalf("failed to attach file b: %v", err)
+	}
+
+	task := domain.Task{
+		ID:     issueID,
+		Title:  "Attachment detail task",
+		Status: domain.StatusInProgress,
+	}
+	panel := NewDetailPanelWithAttachments(task, nil, service)
+
+	view := panel.View()
+	assert.Contains(t, view, "Attachments")
+	assert.Contains(t, view, "a.png")
+	assert.Contains(t, view, "b.png")
+	assert.Contains(t, view, "j/k")
+	assert.Contains(t, view, "v/o/x")
+}
+
+func TestDetailPanelWithAttachments_NavigationAndPreviewMessage(t *testing.T) {
+	service, tmpDir := setupDetailAttachmentService(t)
+	issueID := "az-attach-2"
+
+	fileA := writeTestImageFile(t, tmpDir, "first.png")
+	fileB := writeTestImageFile(t, tmpDir, "second.png")
+
+	if _, err := service.Attach(context.Background(), issueID, fileA); err != nil {
+		t.Fatalf("failed to attach first file: %v", err)
+	}
+	if _, err := service.Attach(context.Background(), issueID, fileB); err != nil {
+		t.Fatalf("failed to attach second file: %v", err)
+	}
+
+	task := domain.Task{ID: issueID, Title: "Attachment nav task", Status: domain.StatusOpen}
+	panel := NewDetailPanelWithAttachments(task, nil, service)
+
+	model, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	panel = model.(*DetailPanel)
+	assert.Equal(t, 1, panel.attachmentCursor)
+
+	model, cmd := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	panel = model.(*DetailPanel)
+	require.NotNil(t, cmd)
+	msg := cmd()
+	openMsg, ok := msg.(OpenImagePreviewMsg)
+	require.True(t, ok)
+	assert.Equal(t, issueID, openMsg.IssueID)
+	assert.Equal(t, 1, openMsg.InitialIndex)
+}
+
+func TestDetailPanelWithAttachments_DeleteSelectedAttachment(t *testing.T) {
+	service, tmpDir := setupDetailAttachmentService(t)
+	issueID := "az-attach-3"
+
+	file := writeTestImageFile(t, tmpDir, "delete-me.png")
+	if _, err := service.Attach(context.Background(), issueID, file); err != nil {
+		t.Fatalf("failed to attach file: %v", err)
+	}
+
+	task := domain.Task{ID: issueID, Title: "Delete attachment task", Status: domain.StatusOpen}
+	panel := NewDetailPanelWithAttachments(task, nil, service)
+
+	model, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	panel = model.(*DetailPanel)
+	assert.Len(t, panel.attachments, 0)
+
+	attachments, err := service.List(context.Background(), issueID)
+	require.NoError(t, err)
+	assert.Len(t, attachments, 0)
+}
+
+func TestDetailPanelWithCorruptAttachmentMetadataShowsActionableWarning(t *testing.T) {
+	service, issuesPath := setupDetailAttachmentService(t)
+	issueID := "az-corrupt-1"
+	imagesDir := filepath.Join(issuesPath, "images", issueID)
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("failed to create images dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "broken.png"), []byte("not-an-image"), 0o644); err != nil {
+		t.Fatalf("failed to write corrupt attachment fixture: %v", err)
+	}
+
+	task := domain.Task{ID: issueID, Title: "Corrupt metadata task", Status: domain.StatusOpen}
+	panel := NewDetailPanelWithAttachments(task, nil, service)
+	view := panel.View()
+
+	assert.Contains(t, view, "Corrupt attachment metadata")
+	assert.Contains(t, view, "Space i")
+}
+
+func TestDetailPanelWithCorruptAttachment_DeleteFallsBackToFilename(t *testing.T) {
+	service, issuesPath := setupDetailAttachmentService(t)
+	issueID := "az-corrupt-2"
+	imagesDir := filepath.Join(issuesPath, "images", issueID)
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("failed to create images dir: %v", err)
+	}
+	corruptPath := filepath.Join(imagesDir, "broken-file.png")
+	if err := os.WriteFile(corruptPath, []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("failed to write corrupt attachment fixture: %v", err)
+	}
+
+	task := domain.Task{ID: issueID, Title: "Corrupt delete task", Status: domain.StatusOpen}
+	panel := NewDetailPanelWithAttachments(task, nil, service)
+	require.Len(t, panel.attachments, 1)
+	assert.True(t, panel.attachments[0].Corrupt)
+
+	model, _ := panel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	panel = model.(*DetailPanel)
+	assert.Len(t, panel.attachments, 0)
+
+	_, err := os.Stat(corruptPath)
+	assert.True(t, os.IsNotExist(err))
 }

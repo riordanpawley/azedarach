@@ -313,3 +313,76 @@ func TestGenerateID(t *testing.T) {
 		t.Error("expected unique IDs")
 	}
 }
+
+func TestList_MarksCorruptMetadataInsteadOfFailing(t *testing.T) {
+	tmpDir := t.TempDir()
+	issuesPath := filepath.Join(tmpDir, "linear")
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := NewService(issuesPath, logger)
+
+	imagesDir := filepath.Join(issuesPath, "images", "az-corrupt")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("failed to create images dir: %v", err)
+	}
+
+	// Corrupt metadata fixture (missing <id>- prefix)
+	if err := os.WriteFile(filepath.Join(imagesDir, "broken.png"), []byte("bad"), 0o644); err != nil {
+		t.Fatalf("failed to write corrupt fixture: %v", err)
+	}
+	// Valid metadata fixture
+	if err := os.WriteFile(filepath.Join(imagesDir, "1234abcd-good.png"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to write valid fixture: %v", err)
+	}
+
+	attachments, err := service.List(context.Background(), "az-corrupt")
+	if err != nil {
+		t.Fatalf("failed to list attachments with corrupt metadata: %v", err)
+	}
+	if len(attachments) != 2 {
+		t.Fatalf("expected both attachments to be returned, got %d", len(attachments))
+	}
+
+	corruptCount := 0
+	validCount := 0
+	for _, att := range attachments {
+		if att.Corrupt {
+			corruptCount++
+		} else {
+			validCount++
+		}
+	}
+	if corruptCount != 1 {
+		t.Fatalf("expected exactly 1 corrupt attachment, got %d", corruptCount)
+	}
+	if validCount != 1 {
+		t.Fatalf("expected exactly 1 valid attachment, got %d", validCount)
+	}
+}
+
+func TestDeleteByFilename_RemovesExactFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	issuesPath := filepath.Join(tmpDir, "linear")
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	service := NewService(issuesPath, logger)
+
+	imagesDir := filepath.Join(issuesPath, "images", "az-fallback")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		t.Fatalf("failed to create images dir: %v", err)
+	}
+
+	filename := "broken-no-id.png"
+	filePath := filepath.Join(imagesDir, filename)
+	if err := os.WriteFile(filePath, []byte("bad"), 0o644); err != nil {
+		t.Fatalf("failed to write fallback fixture: %v", err)
+	}
+
+	if err := service.DeleteByFilename(context.Background(), "az-fallback", filename); err != nil {
+		t.Fatalf("DeleteByFilename failed: %v", err)
+	}
+
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("expected file to be deleted, stat err=%v", err)
+	}
+}
