@@ -140,6 +140,9 @@ export const parseTailscaleDnsName = (statusJson: string): Option.Option<string>
 
 const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 	Effect.gen(function* () {
+		yield* Effect.logDebug(
+			`LinearWebhookService: attempting tailscale public URL resolution (port=${port})`,
+		)
 		const tailscaleStatus = yield* Command.string(
 			Command.make("tailscale", "status", "--json"),
 		).pipe(
@@ -151,14 +154,23 @@ const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 			),
 		)
 		if (tailscaleStatus === undefined) {
+			yield* Effect.logDebug(
+				"LinearWebhookService: tailscale status unavailable, cannot derive funnel URL",
+			)
 			return undefined
 		}
 
 		const dnsNameOption = parseTailscaleDnsName(tailscaleStatus)
 		if (Option.isNone(dnsNameOption)) {
+			yield* Effect.logDebug(
+				"LinearWebhookService: tailscale status has no usable DNS name",
+			)
 			return undefined
 		}
 
+		yield* Effect.logDebug(
+			`LinearWebhookService: enabling tailscale funnel for webhook port ${port}`,
+		)
 		const funnelExitCode = yield* Command.exitCode(
 			Command.make("tailscale", "funnel", "--bg", "--yes", String(port)),
 		).pipe(
@@ -169,9 +181,15 @@ const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 			),
 		)
 		if (funnelExitCode !== 0) {
+			yield* Effect.logDebug(
+				`LinearWebhookService: tailscale funnel command failed (exit=${funnelExitCode})`,
+			)
 			return undefined
 		}
 
+		yield* Effect.logDebug(
+			`LinearWebhookService: tailscale funnel URL resolved to https://${dnsNameOption.value}`,
+		)
 		return `https://${dnsNameOption.value}`
 	})
 
@@ -224,8 +242,12 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const linearConfig = config.issueTracker.linear
 			const webhookConfig = linearConfig.webhooks
 			const transport = webhookConfig.transport
+			yield* Effect.logDebug(
+				`LinearWebhookService: init backend=linear enabled=${String(webhookConfig.enabled)} transport=${transport}`,
+			)
 			if (webhookConfig.enabled === false) {
 				yield* SubscriptionRef.set(mode, "disabled")
+				yield* Effect.logDebug("LinearWebhookService: disabled in config")
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
@@ -235,6 +257,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 			if (transport === "cli") {
 				yield* SubscriptionRef.set(mode, "cli")
+				yield* Effect.logDebug("LinearWebhookService: CLI transport selected; SDK runtime skipped")
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
@@ -245,19 +268,25 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const resolveWebhookTeamRef = (): Effect.Effect<
 				ResolvedWebhookTeamRef,
 				LinearWebhookRuntimeError
-			> =>
-				Effect.gen(function* () {
-					const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
-					if (configuredTeamRef !== undefined) {
-						return {
-							teamRef: configuredTeamRef,
-							source: "config",
-						} satisfies ResolvedWebhookTeamRef
-					}
+				> =>
+					Effect.gen(function* () {
+						const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
+						if (configuredTeamRef !== undefined) {
+							yield* Effect.logDebug(
+								`LinearWebhookService: using configured team reference ${configuredTeamRef}`,
+							)
+							return {
+								teamRef: configuredTeamRef,
+								source: "config",
+							} satisfies ResolvedWebhookTeamRef
+						}
 
-					const teams = yield* linearSdk.teams({ first: 50 }).pipe(
-						Effect.mapError(
-							(error) =>
+						yield* Effect.logDebug(
+							"LinearWebhookService: no configured team, discovering via Linear API",
+						)
+						const teams = yield* linearSdk.teams({ first: 50 }).pipe(
+							Effect.mapError(
+								(error) =>
 								new LinearWebhookRuntimeError({
 									message: `${error.message}; set issueTracker.linear.team explicitly`,
 								}),
@@ -295,6 +324,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				Effect.gen(function* () {
 					const configuredPublicBaseUrl = normalizePublicBaseUrl(webhookConfig.url)
 					if (configuredPublicBaseUrl !== undefined) {
+						yield* Effect.logDebug(
+							`LinearWebhookService: using configured webhook URL ${configuredPublicBaseUrl}`,
+						)
 						return {
 							publicBaseUrl: configuredPublicBaseUrl,
 							source: "config",
@@ -313,6 +345,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						),
 					)
 					if (envPublicBaseUrl !== undefined) {
+						yield* Effect.logDebug(
+							`LinearWebhookService: using ${WEBHOOK_PUBLIC_URL_ENV}=${envPublicBaseUrl}`,
+						)
 						return {
 							publicBaseUrl: envPublicBaseUrl,
 							source: "env",
@@ -321,6 +356,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 
 					const tailscalePublicBaseUrl = yield* tryResolveTailscaleFunnelPublicUrl(port)
 					if (tailscalePublicBaseUrl !== undefined) {
+						yield* Effect.logDebug(
+							`LinearWebhookService: using tailscale funnel URL ${tailscalePublicBaseUrl}`,
+						)
 						return {
 							publicBaseUrl: tailscalePublicBaseUrl,
 							source: "tailscale-funnel",
@@ -362,6 +400,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			)
 			if (runtimeConfigResult._tag === "Left") {
 				yield* SubscriptionRef.set(mode, "misconfigured")
+				yield* Effect.logDebug(
+					"LinearWebhookService: runtime config resolution failed; entering misconfigured mode",
+				)
 				yield* Effect.logWarning(`${runtimeConfigResult.left.message}; falling back to polling`)
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
@@ -384,6 +425,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				)
 
 			const startSdkWebhookRuntime = Effect.gen(function* () {
+				yield* Effect.logDebug(
+					`LinearWebhookService: starting SDK runtime (teamRef=${runtimeConfig.teamRef}, port=${runtimeConfig.port}, urlSource=${runtimeConfig.publicUrlSource})`,
+				)
 				const teamId = yield* resolveTeamId(runtimeConfig.teamRef)
 				const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
 				const eventTypes = runtimeConfig.eventTypes

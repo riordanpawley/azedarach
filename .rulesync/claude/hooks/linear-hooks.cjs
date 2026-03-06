@@ -47,7 +47,7 @@ function onSessionStart() {
 }
 
 function onStop() {
-  console.log("<!-- Reminder: update/close issues, then git pull --rebase && git push -->");
+  console.log("<!-- Reminder: update/close issues; keep git flow local unless remote sync is explicitly requested -->");
 }
 
 function main() {

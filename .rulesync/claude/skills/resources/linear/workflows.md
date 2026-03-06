@@ -42,8 +42,7 @@ Before ending a session:
 
 1. Update issue status and key notes.
 2. Commit code changes.
-3. Run `git pull --rebase`.
-4. Run `git push`.
+3. Keep git flow local unless remote sync is explicitly requested.
 
 Suggested note format:
 

@@ -55,7 +55,7 @@ export interface CreateWorktreeOptions {
 	/**
 	 * Maximum length for the title-derived slug portion of generated branch names.
 	 *
-	 * Applies only to the `<slug>` segment in `<author>/<slug>`.
+	 * Applies only to the `<slug>` segment in `<author>/<issue-id>/<slug>`.
 	 * Existing branch mappings are not rewritten.
 	 */
 	readonly branchSlugMaxLength?: number
@@ -371,6 +371,50 @@ const branchExistsAnywhere = (
 		)
 	})
 
+const DEFAULT_BRANCH_SLUG_MAX_LENGTH = 24
+const MIN_BRANCH_SLUG_MAX_LENGTH = 4
+
+export const normalizeBranchSlugMaxLength = (value?: number): number => {
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		return DEFAULT_BRANCH_SLUG_MAX_LENGTH
+	}
+
+	const normalized = Math.floor(value)
+	return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH ? normalized : DEFAULT_BRANCH_SLUG_MAX_LENGTH
+}
+
+export const slugifyIssueTitleForBranch = (title: string, maxLength: number): string => {
+	const base = title
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+
+	if (base.length === 0) {
+		return "task"
+	}
+
+	return base.slice(0, maxLength).replace(/-+$/g, "") || "task"
+}
+
+const sanitizeBranchAuthor = (value: string): string =>
+	value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "")
+		.trim()
+
+export const sanitizeIssueIdForBranchSegment = (value: string): string => {
+	const normalized = value
+		.toLowerCase()
+		.trim()
+		.replace(/[^a-z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+
+	return normalized.length > 0 ? normalized : "issue"
+}
+
+export const composeIssueBranchName = (author: string, issueId: string, slug: string): string =>
+	`${author}/${sanitizeIssueIdForBranchSegment(issueId)}/${slug}`
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -409,38 +453,8 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		// Supports multiple projects for fast project switching
 		const WORKTREE_CACHE_TTL_MS = 2000
 		const BRANCH_NAME_MAP_RELATIVE_PATH = ".azedarach/branch-name-map.json"
-		const DEFAULT_BRANCH_SLUG_MAX_LENGTH = 24
-		const MIN_BRANCH_SLUG_MAX_LENGTH = 4
 		// Map from projectPath to timestamp
 		const cacheTimestampRef = yield* Ref.make<Map<string, number>>(new Map())
-
-		const normalizeBranchSlugMaxLength = (value?: number): number => {
-			if (typeof value !== "number" || !Number.isFinite(value)) {
-				return DEFAULT_BRANCH_SLUG_MAX_LENGTH
-			}
-
-			const normalized = Math.floor(value)
-			return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH ? normalized : DEFAULT_BRANCH_SLUG_MAX_LENGTH
-		}
-
-		const slugifyIssueTitle = (title: string, maxLength: number): string => {
-			const base = title
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, "-")
-				.replace(/^-+|-+$/g, "")
-
-			if (base.length === 0) {
-				return "task"
-			}
-
-			return base.slice(0, maxLength).replace(/-+$/g, "") || "task"
-		}
-
-		const sanitizeBranchAuthor = (value: string): string =>
-			value
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, "")
-				.trim()
 
 		const getBranchAuthor = (
 			projectPath: string,
@@ -551,7 +565,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 				const slugMaxLength = normalizeBranchSlugMaxLength(branchSlugMaxLength)
 				const author = yield* getBranchAuthor(projectPath)
-				const baseSlug = slugifyIssueTitle(issueTitle ?? issueId, slugMaxLength)
+				const baseSlug = slugifyIssueTitleForBranch(issueTitle ?? issueId, slugMaxLength)
 				const reserved = new Set(Object.values(branchMap))
 
 				for (let attempt = 0; attempt < 1000; attempt++) {
@@ -559,7 +573,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const maxBaseLength = Math.max(1, slugMaxLength - suffix.length)
 					const trimmedBase = baseSlug.slice(0, maxBaseLength).replace(/-+$/g, "") || "task"
 					const slugWithSuffix = `${trimmedBase}${suffix}`
-					const candidate = `${author}/${slugWithSuffix}`
+					const candidate = composeIssueBranchName(author, issueId, slugWithSuffix)
 
 					if (reserved.has(candidate)) {
 						continue
@@ -1087,7 +1101,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								})
 						})()
 
-						const conflictingByPath = Array.from(projectWorktrees.values()).find(
+						const worktreesBeforeCreate = Array.from(projectWorktrees.values())
+
+						const conflictingByPath = worktreesBeforeCreate.find(
 							(worktree) =>
 								pathsEqualForLookup(worktree.path, worktreePath) && worktree.issueId !== issueId,
 						)
@@ -1099,6 +1115,48 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								conflictKind: "path",
 								requestedWorktreePath: worktreePath,
 								conflictingWorktree: conflictingByPath,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
+						const conflictingByCaseVariantIssueId =
+							!caseInsensitivePathLookup
+								? undefined
+								: worktreesBeforeCreate.find(
+										(worktree) =>
+											worktree.issueId !== issueId &&
+											worktree.issueId.toLowerCase() === issueId.toLowerCase(),
+									)
+
+						if (conflictingByCaseVariantIssueId) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: conflictingByCaseVariantIssueId,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
+						const stalePathExists = yield* fs
+							.exists(worktreePath)
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						if (stalePathExists) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: {
+									path: worktreePath,
+									issueId,
+									branch: "",
+									isLocked: false,
+									head: "",
+								},
 								baseBranch: comparisonBaseBranch,
 							})
 							return yield* Effect.fail(clashError)
@@ -1160,23 +1218,23 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Git worktree list can sometimes miss newly created worktrees due to
 						// filesystem sync timing issues, especially on macOS APFS. We retry
 						// a few times with short delays to handle this race condition.
-						const findNewWorktree = Effect.gen(function* () {
-							yield* forceRefreshWorktrees(projectPath)
-							const allUpdated = yield* Ref.get(worktreesRef)
-							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-							const newWorktree = projectUpdated.get(issueId)
+							const findNewWorktree = Effect.gen(function* () {
+								yield* forceRefreshWorktrees(projectPath)
+								const allUpdated = yield* Ref.get(worktreesRef)
+								const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+								const newWorktree = projectUpdated.get(issueId)
 
-							if (!newWorktree) {
-								const foundIssueIds = Array.from(projectUpdated.keys())
-								return yield* Effect.fail(
-									new WorktreeCacheMissAfterCreateError({
-										foundIssueIds,
-										cacheSize: projectUpdated.size,
-									}),
-								)
-							}
-							return newWorktree
-						})
+								if (!newWorktree) {
+									const foundIssueIds = Array.from(projectUpdated.keys())
+									return yield* Effect.fail(
+										new WorktreeCacheMissAfterCreateError({
+											foundIssueIds,
+											cacheSize: projectUpdated.size,
+										}),
+									)
+								}
+								return newWorktree
+							})
 
 						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
 						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
@@ -1236,6 +1294,30 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 										return yield* Effect.fail(clashError)
 									}
 
+									const stalePathExists = yield* fs
+										.exists(worktreePath)
+										.pipe(Effect.catchAll(() => Effect.succeed(false)))
+									if (stalePathExists) {
+										const comparisonBaseBranch = yield* resolveComparisonBaseBranch().pipe(
+											Effect.catchAll(() => Effect.succeed(baseBranch ?? "main")),
+										)
+										const clashError = yield* buildWorktreeNameClashError({
+											issueId,
+											conflictKind: "path",
+											requestedWorktreePath: worktreePath,
+											requestedBranch: branchName,
+											conflictingWorktree: {
+												path: worktreePath,
+												issueId,
+												branch: branchName,
+												isLocked: false,
+												head: "",
+											},
+											baseBranch: comparisonBaseBranch,
+										})
+										return yield* Effect.fail(clashError)
+									}
+
 									return yield* Effect.fail(
 										new GitError({
 											message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
@@ -1260,10 +1342,35 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
 					const worktree = projectWorktrees.get(issueId)
 
-					if (!worktree) {
-						// Safe no-op if doesn't exist
-						return
-					}
+						if (!worktree) {
+							const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+							const stalePathExists = yield* fs
+								.exists(expectedWorktreePath)
+								.pipe(Effect.catchAll(() => Effect.succeed(false)))
+							if (!stalePathExists) {
+								// Safe no-op if doesn't exist
+								return
+							}
+
+							yield* Effect.logWarning("Removing stale derived worktree directory", {
+								issueId,
+								projectPath,
+								worktreePath: expectedWorktreePath,
+							})
+
+							yield* fs.remove(expectedWorktreePath, { recursive: true }).pipe(
+								Effect.mapError(
+									(error) =>
+										new GitError({
+											message: `Failed to remove stale worktree path: ${String(error)}`,
+											command: `rm -rf ${expectedWorktreePath}`,
+										}),
+								),
+							)
+
+							yield* forceRefreshWorktrees(projectPath)
+							return
+						}
 
 					// Remove worktree
 					yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)

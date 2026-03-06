@@ -775,6 +775,65 @@ const issueGetHandler = (args: {
 	})
 
 /**
+ * List issues
+ */
+const issueListHandler = (args: {
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly issueType: Option.Option<string>
+	readonly limit: Option.Option<number>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const requestedLimit = Option.getOrUndefined(args.limit)
+		if (requestedLimit !== undefined && requestedLimit <= 0) {
+			return yield* Effect.fail(new Error("--limit must be a positive integer"))
+		}
+
+		const filters = {
+			status: Option.getOrUndefined(args.status),
+			priority: Option.getOrUndefined(args.priority),
+			type: Option.getOrUndefined(args.issueType),
+		}
+		const hasFilters = Object.values(filters).some((value) => value !== undefined)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const issues = yield* issueTrackerClient.list(
+			hasFilters ? filters : undefined,
+			explicitProjectDir,
+			{
+				limit: requestedLimit === undefined ? undefined : Math.floor(requestedLimit),
+				sortBy: "updated_at",
+				sortDirection: "desc",
+			},
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(issues, null, 2))
+			return
+		}
+
+		if (issues.length === 0) {
+			yield* Console.log("No issues found.")
+			return
+		}
+
+		for (const issue of issues) {
+			yield* Console.log(formatIssueSummaryLine(issue))
+		}
+
+		if (args.verbose) {
+			yield* Console.error(`Listed ${issues.length} issue(s) sorted by updated_at desc.`)
+		}
+	})
+
+/**
  * Create a new issue
  */
 const issueCreateHandler = (args: {
@@ -1160,6 +1219,7 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az issue get <issue-id>\`
 - Common issue commands:
+  - \`az issue list --limit 20\` (lists most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
@@ -1821,6 +1881,35 @@ const primeCommand = Command.make(
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
 /**
+ * az issue list - List issues
+ */
+const issueListCommand = Command.make(
+	"list",
+	{
+		status: Options.text("status").pipe(
+			Options.optional,
+			Options.withDescription("Filter by status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.optional,
+			Options.withDescription("Filter by priority (1-5)"),
+		),
+		issueType: Options.text("type").pipe(
+			Options.optional,
+			Options.withDescription("Filter by issue type"),
+		),
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum number of issues to return"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+	},
+	issueListHandler,
+).pipe(Command.withDescription("List issues sorted by most recently updated"))
+
+/**
  * az issue get <issue-id> - Show issue details
  */
 const issueGetCommand = Command.make(
@@ -1980,6 +2069,7 @@ const issueCommand = Command.make("issue", {}, () =>
 ).pipe(
 	Command.withDescription("Issue operations"),
 	Command.withSubcommands([
+		issueListCommand,
 		issueGetCommand,
 		issueCreateCommand,
 		issueUpdateCommand,
