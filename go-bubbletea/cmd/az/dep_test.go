@@ -3,7 +3,10 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/config"
 )
 
 type depJSONEnvelope struct {
@@ -220,6 +223,103 @@ func TestRunCLIDepAddCycleRejectedJSONReturnsDeterministicErrorCode(t *testing.T
 	}
 }
 
+func TestRunCLIDepAddRemoveSuccessTriggersBackupOpenAndMutation(t *testing.T) {
+	testCases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "add",
+			args: []string{"dep", "add", "AZE-101", "AZE-102", "--type", "blocks", "--json"},
+		},
+		{
+			name: "remove",
+			args: []string{"dep", "remove", "AZE-101", "AZE-102", "--type", "blocks", "--json"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stubDepDependencies(t, func(_ []string) ([]byte, error) {
+				return []byte(`{"ok":true}`), nil
+			})
+			backupRunner := &depBackupRunnerSpy{}
+			stubDepBackupRunner(t, backupRunner)
+
+			exitCode, _, stderr := runCLIForTest(testCase.args)
+			if exitCode != 0 {
+				t.Fatalf("expected success exit code, got %d (stderr=%q)", exitCode, stderr)
+			}
+			if backupRunner.openCalls != 1 {
+				t.Fatalf("expected OnOpen once, got %d", backupRunner.openCalls)
+			}
+			if backupRunner.mutationCalls != 1 {
+				t.Fatalf("expected OnMutationSuccess once, got %d", backupRunner.mutationCalls)
+			}
+		})
+	}
+}
+
+func TestRunCLIDepReadCommandsTriggerBackupOpenOnly(t *testing.T) {
+	testCases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "list",
+			args: []string{"dep", "list", "AZE-101", "--json"},
+		},
+		{
+			name: "tree",
+			args: []string{"dep", "tree", "AZE-101", "--json"},
+		},
+		{
+			name: "cycles",
+			args: []string{"dep", "cycles", "--json"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stubDepDependencies(t, func(_ []string) ([]byte, error) {
+				return []byte(`{"ok":true}`), nil
+			})
+			backupRunner := &depBackupRunnerSpy{}
+			stubDepBackupRunner(t, backupRunner)
+
+			exitCode, _, stderr := runCLIForTest(testCase.args)
+			if exitCode != 0 {
+				t.Fatalf("expected success exit code, got %d (stderr=%q)", exitCode, stderr)
+			}
+			if backupRunner.openCalls != 1 {
+				t.Fatalf("expected OnOpen once, got %d", backupRunner.openCalls)
+			}
+			if backupRunner.mutationCalls != 0 {
+				t.Fatalf("expected OnMutationSuccess never, got %d", backupRunner.mutationCalls)
+			}
+		})
+	}
+}
+
+func TestRunCLIDepAddFailureDoesNotTriggerBackupMutation(t *testing.T) {
+	stubDepDependencies(t, func(_ []string) ([]byte, error) {
+		return nil, errors.New("backend failed")
+	})
+	backupRunner := &depBackupRunnerSpy{}
+	stubDepBackupRunner(t, backupRunner)
+
+	exitCode, _, _ := runCLIForTest([]string{"dep", "add", "AZE-101", "AZE-102", "--type", "blocks", "--json"})
+	if exitCode == 0 {
+		t.Fatalf("expected non-zero exit code when backend fails")
+	}
+	if backupRunner.openCalls != 1 {
+		t.Fatalf("expected OnOpen once on failing mutation path, got %d", backupRunner.openCalls)
+	}
+	if backupRunner.mutationCalls != 0 {
+		t.Fatalf("expected OnMutationSuccess never on failed mutation, got %d", backupRunner.mutationCalls)
+	}
+}
+
 func assertDepJSONSuccessCommand(t *testing.T, args []string, expectedCommand string) {
 	t.Helper()
 
@@ -261,5 +361,41 @@ func stubDepDependencies(
 
 	t.Cleanup(func() {
 		depBackendExecutorHook = originalExecutor
+	})
+}
+
+type depBackupRunnerSpy struct {
+	openCalls     int
+	mutationCalls int
+}
+
+func (spy *depBackupRunnerSpy) OnOpen() {
+	spy.openCalls++
+}
+
+func (spy *depBackupRunnerSpy) OnMutationSuccess() {
+	spy.mutationCalls++
+}
+
+func stubDepBackupRunner(t *testing.T, runner issueCommandBackupRunner) {
+	t.Helper()
+
+	originalLoadConfig := loadConfig
+	originalBackupRunnerFactory := newIssueCommandBackupRunner
+
+	loadConfig = func() (*config.Config, error) {
+		return config.DefaultConfig(), nil
+	}
+	newIssueCommandBackupRunner = func(
+		_ *config.Config,
+		_ H2ProjectContext,
+		_ io.Writer,
+	) issueCommandBackupRunner {
+		return runner
+	}
+
+	t.Cleanup(func() {
+		loadConfig = originalLoadConfig
+		newIssueCommandBackupRunner = originalBackupRunnerFactory
 	})
 }

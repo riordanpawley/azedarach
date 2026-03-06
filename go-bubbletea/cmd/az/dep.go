@@ -156,6 +156,8 @@ func (err depBackendCommandError) Error() string {
 
 func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 	startedAt := time.Now()
+	project := showProjectContext()
+	backupRunner := depBackupRunnerForCommand(project, stderr)
 
 	if len(args) == 0 {
 		return handleDepInvalidUsage(
@@ -165,7 +167,7 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 			stdout,
 			stderr,
 			showExecutionMeta(startedAt),
-			showProjectContext(),
+			project,
 		)
 	}
 
@@ -183,10 +185,10 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 				stdout,
 				stderr,
 				showExecutionMeta(startedAt),
-				showProjectContext(),
+				project,
 			)
 		}
-		return runDepAdd(parsedArgs, stdout, stderr, showExecutionMeta(startedAt), showProjectContext())
+		return runDepAdd(parsedArgs, backupRunner, stdout, stderr, showExecutionMeta(startedAt), project)
 
 	case depSubcommandRemove:
 		parsedArgs, parseErr := parseDepAddRemoveArgs(subcommandArgs)
@@ -198,10 +200,10 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 				stdout,
 				stderr,
 				showExecutionMeta(startedAt),
-				showProjectContext(),
+				project,
 			)
 		}
-		return runDepRemove(parsedArgs, stdout, stderr, showExecutionMeta(startedAt), showProjectContext())
+		return runDepRemove(parsedArgs, backupRunner, stdout, stderr, showExecutionMeta(startedAt), project)
 
 	case depSubcommandList:
 		parsedArgs, parseErr := parseDepIssueArgs(subcommandArgs)
@@ -213,10 +215,10 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 				stdout,
 				stderr,
 				showExecutionMeta(startedAt),
-				showProjectContext(),
+				project,
 			)
 		}
-		return runDepList(parsedArgs, stdout, stderr, showExecutionMeta(startedAt), showProjectContext())
+		return runDepList(parsedArgs, backupRunner, stdout, stderr, showExecutionMeta(startedAt), project)
 
 	case depSubcommandTree:
 		parsedArgs, parseErr := parseDepIssueArgs(subcommandArgs)
@@ -228,10 +230,10 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 				stdout,
 				stderr,
 				showExecutionMeta(startedAt),
-				showProjectContext(),
+				project,
 			)
 		}
-		return runDepTree(parsedArgs, stdout, stderr, showExecutionMeta(startedAt), showProjectContext())
+		return runDepTree(parsedArgs, backupRunner, stdout, stderr, showExecutionMeta(startedAt), project)
 
 	case depSubcommandCycles:
 		parsedArgs, parseErr := parseDepCyclesArgs(subcommandArgs)
@@ -243,10 +245,10 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 				stdout,
 				stderr,
 				showExecutionMeta(startedAt),
-				showProjectContext(),
+				project,
 			)
 		}
-		return runDepCycles(parsedArgs, stdout, stderr, showExecutionMeta(startedAt), showProjectContext())
+		return runDepCycles(parsedArgs, backupRunner, stdout, stderr, showExecutionMeta(startedAt), project)
 
 	default:
 		return handleDepInvalidUsage(
@@ -256,9 +258,17 @@ func handleDepCommand(args []string, stdout, stderr io.Writer) int {
 			stdout,
 			stderr,
 			showExecutionMeta(startedAt),
-			showProjectContext(),
+			project,
 		)
 	}
+}
+
+func depBackupRunnerForCommand(project H2ProjectContext, warnings io.Writer) issueCommandBackupRunner {
+	cfg, err := loadConfig()
+	if err != nil {
+		return noOpIssueCommandBackupRunner{}
+	}
+	return newIssueCommandBackupRunner(cfg, project, warnings)
 }
 
 func parseDepAddRemoveArgs(args []string) (depAddRemoveParsedArgs, error) {
@@ -345,6 +355,7 @@ func parseDepCyclesArgs(args []string) (depCyclesParsedArgs, error) {
 
 func runDepAdd(
 	args depAddRemoveParsedArgs,
+	backupRunner issueCommandBackupRunner,
 	stdout io.Writer,
 	stderr io.Writer,
 	meta H2Meta,
@@ -358,11 +369,12 @@ func runDepAdd(
 		args.RelationType,
 	}
 	humanOutput := fmt.Sprintf("added %s %s %s", args.SourceID, args.TargetID, args.RelationType)
-	return runDepOperation(depAddSpec, backendArgs, args.JSONMode, humanOutput, stdout, stderr, meta, project)
+	return runDepOperation(depAddSpec, true, backupRunner, backendArgs, args.JSONMode, humanOutput, stdout, stderr, meta, project)
 }
 
 func runDepRemove(
 	args depAddRemoveParsedArgs,
+	backupRunner issueCommandBackupRunner,
 	stdout io.Writer,
 	stderr io.Writer,
 	meta H2Meta,
@@ -376,11 +388,12 @@ func runDepRemove(
 		args.RelationType,
 	}
 	humanOutput := fmt.Sprintf("removed %s %s %s", args.SourceID, args.TargetID, args.RelationType)
-	return runDepOperation(depRemoveSpec, backendArgs, args.JSONMode, humanOutput, stdout, stderr, meta, project)
+	return runDepOperation(depRemoveSpec, true, backupRunner, backendArgs, args.JSONMode, humanOutput, stdout, stderr, meta, project)
 }
 
 func runDepList(
 	args depIssueParsedArgs,
+	backupRunner issueCommandBackupRunner,
 	stdout io.Writer,
 	stderr io.Writer,
 	meta H2Meta,
@@ -390,11 +403,12 @@ func runDepList(
 		depSubcommandList,
 		args.IssueID,
 	}
-	return runDepOperation(depListSpec, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
+	return runDepOperation(depListSpec, false, backupRunner, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
 }
 
 func runDepTree(
 	args depIssueParsedArgs,
+	backupRunner issueCommandBackupRunner,
 	stdout io.Writer,
 	stderr io.Writer,
 	meta H2Meta,
@@ -404,22 +418,25 @@ func runDepTree(
 		depSubcommandTree,
 		args.IssueID,
 	}
-	return runDepOperation(depTreeSpec, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
+	return runDepOperation(depTreeSpec, false, backupRunner, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
 }
 
 func runDepCycles(
 	args depCyclesParsedArgs,
+	backupRunner issueCommandBackupRunner,
 	stdout io.Writer,
 	stderr io.Writer,
 	meta H2Meta,
 	project H2ProjectContext,
 ) int {
 	backendArgs := []string{depSubcommandCycles}
-	return runDepOperation(depCyclesSpec, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
+	return runDepOperation(depCyclesSpec, false, backupRunner, backendArgs, args.JSONMode, "", stdout, stderr, meta, project)
 }
 
 func runDepOperation(
 	spec depCommandSpec,
+	mutating bool,
+	backupRunner issueCommandBackupRunner,
 	backendArgs []string,
 	jsonMode bool,
 	humanOutput string,
@@ -428,6 +445,10 @@ func runDepOperation(
 	meta H2Meta,
 	project H2ProjectContext,
 ) int {
+	if backupRunner != nil {
+		backupRunner.OnOpen()
+	}
+
 	if depBackendExecutorHook == nil {
 		return handleDepInternalError(
 			spec,
@@ -448,6 +469,10 @@ func runDepOperation(
 	normalizedPayload, err := normalizeDepBackendPayload(payload)
 	if err != nil {
 		return handleDepBackendError(spec, err, backendArgs, jsonMode, stdout, stderr, meta, project)
+	}
+
+	if mutating && backupRunner != nil {
+		backupRunner.OnMutationSuccess()
 	}
 
 	if jsonMode {
