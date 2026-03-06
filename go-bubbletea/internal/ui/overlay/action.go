@@ -41,7 +41,7 @@ func (m *ActionMenu) buildActions() []Action {
 	appendStartVariants := func() {
 		actions = append(actions, Action{Key: "s", Label: "Start session", Enabled: true})
 		actions = append(actions, Action{Key: "S", Label: "Start session + work", Enabled: true})
-		actions = append(actions, Action{Key: "!", Label: "Start session (skip permissions)", Enabled: true})
+		actions = append(actions, Action{Key: "!", Label: "Start session (skip-permission)", Enabled: true})
 		actions = append(actions, Action{Key: "c", Label: "Start chat session", Enabled: true})
 	}
 
