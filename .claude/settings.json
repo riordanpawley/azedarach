@@ -25,16 +25,6 @@
     "deny": []
   },
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .claude/hooks/user-prompt-submit-orchestrator.cjs"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [

@@ -1,134 +1,67 @@
-# Claude Code Skills System
+# Claude Code Skills
 
-**Version:** 1.0
+**Version:** 2.0
 **Project:** Azedarach
 
 > Canonical source: `.rulesync/claude/skills/`
-> Synced runtime destination: `.claude/skills/` via `bin/rulesync`
+> Synced runtime destination: `.claude/skills/`
 
 ## Overview
 
-This directory implements an **auto-activating skills system** that combines:
+This directory contains curated skill documents used by agents during implementation work.
 
-1. **Pattern-based activation** - File paths and content patterns trigger relevant skills
-2. **AI-driven detection** - Claude Haiku analyzes prompts for intelligent skill matching
-3. **Prompt clarity checking** - Prevents vague prompts with targeted questions
-4. **Progressive disclosure** - Main skills <500 lines, detailed resources loaded on demand
-5. **Session awareness** - Tracks loaded skills to prevent duplicates
+Skills are plain markdown guidance files grouped by domain. They are loaded when explicitly referenced by workflow instructions or user intent; there is no repo-level auto-activation hook.
 
-## Architecture
-
-### Directory Structure
+## Directory Structure
 
 ```
 .claude/skills/
 ├── README.md                    # This file
-├── skill-rules.json             # Activation rules and configuration
-│
 ├── effect/                      # Effect/TypeScript skills
 │   ├── effect-concurrency.skill.md
 │   ├── effect-errors.skill.md
 │   ├── effect-resources.skill.md
 │   ├── effect-services.skill.md
-│   └── effect-testing.skill.md  # TDD for TypeScript/Effect
+│   └── effect-testing.skill.md
 │
 ├── go/                          # Go/Bubbletea skills
 │   ├── go-concurrency.skill.md
-│   ├── go-testing.skill.md      # TDD for Go
+│   ├── go-testing.skill.md
 │   └── bubbletea-patterns.skill.md
 │
 ├── workflow/                    # Workflow skills
-│   ├── linear-tracking.skill.md   # Issue tracking workflow
-│   └── spec-maintenance.skill.md  # Spec sync workflow
+│   ├── azedarach-cli.skill.md
+│   ├── linear-tracking.skill.md
+│   └── spec-maintenance.skill.md
 │
-└── resources/                   # Progressive disclosure (detailed docs)
+└── resources/                   # Supporting reference docs
     └── linear/
-        ├── workflows.md         # Detailed workflow patterns
-        └── worktree-integration.md  # Git worktree patterns
+        ├── workflows.md
+        └── worktree-integration.md
 ```
 
-### Activation Flow
-
-1. **User submits prompt** → UserPromptSubmit hook intercepts
-2. **Pattern matching** → Check file paths and content patterns in skill-rules.json
-3. **AI analysis** (optional) → Claude Haiku scores skill relevance
-4. **Confidence scoring**:
-   - >= 0.70: Auto-load skill
-   - 0.50-0.69: Suggest to user
-   - < 0.50: Skip
-5. **Session deduplication** → Don't load skills already active
-6. **Skill injection** → Load skill content into conversation context
-
-### Hooks
-
-**user-prompt-submit-orchestrator.cjs**
-- Intercepts all user prompts
-- Runs prompt clarity check
-- Performs pattern matching (file, content, keyword, anti-pattern)
-- Executes AI skill detection
-- Manages skill loading
-
-## Skill Types
+## Skill Categories
 
 ### Workflow Skills
-Development workflow and process patterns:
-- **linear-tracking** - Issue tracking, resumability, multi-session work
-- **spec-maintenance** - Keep docs/spec aligned with behavior changes
+- `workflow/linear-tracking.skill.md`: issue tracking and resumability workflow
+- `workflow/azedarach-cli.skill.md`: Azedarach CLI usage in worktrees
+- `workflow/spec-maintenance.skill.md`: keep `docs/spec/` aligned with behavior changes
 
-### Effect Skills (ts-opentui only)
-Effect framework and TypeScript patterns:
-- **effect-concurrency** - Fibers, forking, scheduling
-- **effect-errors** - Error handling patterns
-- **effect-resources** - Resource management
-- **effect-services** - Service construction patterns
-- **effect-testing** - TDD for TypeScript/Effect with Bun
+### Effect Skills (ts-opentui)
+- `effect/effect-services.skill.md`
+- `effect/effect-errors.skill.md`
+- `effect/effect-concurrency.skill.md`
+- `effect/effect-resources.skill.md`
+- `effect/effect-testing.skill.md`
 
-### Go Skills (go-bubbletea only)
-Go/Bubbletea patterns:
-- **go-concurrency** - Goroutines, channels, context
-- **go-testing** - TDD for Go with table-driven tests
-- **bubbletea-patterns** - TEA architecture, Model-Update-View
+### Go Skills (go-bubbletea)
+- `go/go-testing.skill.md`
+- `go/go-concurrency.skill.md`
+- `go/bubbletea-patterns.skill.md`
 
-## Configuration
+## Maintenance
 
-### skill-rules.json
-
-Each skill defined with:
-
-```json
-{
-  "id": "linear-tracking",
-  "name": "Linear Issue Tracking",
-  "path": ".claude/skills/workflow/linear-tracking.skill.md",
-  "type": "workflow",
-  "priority": "high",
-  "confidence": {
-    "required": 0.60,
-    "suggested": 0.45
-  },
-  "triggers": {
-    "filePatterns": [".azedarach.json", "ts-opentui/src/core/BeadsClient.ts"],
-    "contentPatterns": ["linear-cli i create", "linear-cli i update", "linear-cli i close"],
-    "keywords": ["linear", "issue", "task", "tracking", "linear-cli"]
-  },
-  "resources": [
-    ".claude/skills/resources/linear/workflows.md",
-    ".claude/skills/resources/linear/worktree-integration.md"
-  ]
-}
-```
-
-## Bypass Prefixes
-
-Skip clarity check using:
-- `*` - "Just do it" (skip all checks)
-- `/` - Slash command (skip checks)
-- `#` - Context only (add to memory, no action)
-
-## References
-
-### Source Repositories
-
-1. **Auto-Activating Skills:** [diet103/claude-code-infrastructure-showcase](https://github.com/diet103/claude-code-infrastructure-showcase)
-2. **Prompt Clarity:** [severity1/claude-code-prompt-improver](https://github.com/severity1/claude-code-prompt-improver)
-3. **AI Detection:** [jefflester/claude-skills-supercharged](https://github.com/jefflester/claude-skills-supercharged)
+When adding or updating skills:
+- edit canonical files under `.rulesync/claude/skills/`
+- sync managed outputs to `.claude/skills/`
+- keep this README aligned with the actual folder contents

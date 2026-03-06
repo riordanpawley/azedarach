@@ -653,7 +653,7 @@ Configurable: Ready PR, auto-merge after CI, immediate merge
 
 ## Skills
 
-Skills auto-load when you edit files or mention keywords:
+Skills available in this repository:
 
 **Workflow Skills:**
 - Issue tracking workflow skill (use local workflow skill that documents current `az issue` process)
