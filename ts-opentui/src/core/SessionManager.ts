@@ -132,7 +132,7 @@ const mapSessionStateToTmuxAttentionStatus = (state: SessionState): TmuxAttentio
  * Schema for persisted session - matches Session interface
  * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
  */
-const SessionSchema = Schema.Struct({
+const _SessionSchema = Schema.Struct({
 	issueId: Schema.String,
 	worktreePath: Schema.String,
 	tmuxSessionName: Schema.String,
