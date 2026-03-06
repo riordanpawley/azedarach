@@ -2144,7 +2144,7 @@ const hooksCommand = Command.make("hooks", {}, () =>
 const DEFAULT_OPENCODE_CONFIG = {
 	$schema: "https://opencode.ai/config.json",
 	instructions: ["CLAUDE.md"],
-	plugins: ["opencode-tracker", "opencode-skills"],
+	plugins: ["opencode-tracker"],
 	theme: "tokyonight",
 	permission: {
 		bash: {
@@ -2174,13 +2174,11 @@ const DEFAULT_OPENCODE_CONFIG = {
  * Initialize OpenCode support in a project
  *
  * - Creates/updates opencode.json with recommended plugins
- * - Generates SKILL.md wrappers from .claude/skills if present
  * - Checks for globally installed opencode-az plugin
  */
 const opencodeInitHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
-	readonly skipSkills: boolean
 }) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
@@ -2188,7 +2186,6 @@ const opencodeInitHandler = (args: {
 
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const opencodeJsonPath = pathService.join(cwd, "opencode.json")
-		const claudeSkillsDir = pathService.join(cwd, ".claude", "skills")
 		const configHome =
 			process.env.XDG_CONFIG_HOME ??
 			(process.env.HOME
@@ -2214,7 +2211,7 @@ const opencodeInitHandler = (args: {
 			const existingPlugins = Array.isArray(existingConfig.plugins)
 				? (existingConfig.plugins as string[])
 				: []
-			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker", "opencode-skills"])]
+			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }
 
 			yield* Console.log("✓ Updated existing opencode.json")
@@ -2238,50 +2235,6 @@ const opencodeInitHandler = (args: {
 			yield* Console.log("✓ Global opencode-az plugin found")
 		}
 
-		// Step 3: Generate skill wrappers if .claude/skills exists
-		if (!args.skipSkills) {
-			const claudeSkillsExist = yield* fs.exists(claudeSkillsDir)
-			if (claudeSkillsExist) {
-				yield* Console.log("")
-				yield* Console.log("📚 Generating skill wrappers...")
-
-				// Find the generator script
-				const scriptPath = pathService.join(
-					pathService.dirname(pathService.dirname(import.meta.dirname ?? "")),
-					"scripts",
-					"generate-opencode-skills.sh",
-				)
-
-				const scriptExists = yield* fs.exists(scriptPath)
-				if (scriptExists) {
-					// Run the generator script
-					const command = PlatformCommand.make("bash", scriptPath, cwd)
-					const output = yield* PlatformCommand.string(command).pipe(
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
-								Effect.zipRight(Effect.succeed(`Error: ${e}`)),
-							),
-						),
-					)
-
-					// Count generated skills
-					const generatedCount = (output.match(/Generated:/g) ?? []).length
-					yield* Console.log(`✓ Generated ${generatedCount} skill wrappers`)
-
-					if (args.verbose) {
-						yield* Console.log(output)
-					}
-				} else {
-					yield* Console.log("! Skill generator script not found")
-					yield* Console.log(`  Expected at: ${scriptPath}`)
-					yield* Console.log("  Run manually: generate-opencode-skills.sh <project-dir>")
-				}
-			} else if (args.verbose) {
-				yield* Console.log("")
-				yield* Console.log("i No .claude/skills directory found, skipping skill generation")
-			}
-		}
-
 		// Summary
 		yield* Console.log("")
 		yield* Console.log("✅ OpenCode setup complete!")
@@ -2289,8 +2242,7 @@ const opencodeInitHandler = (args: {
 		yield* Console.log("Next steps:")
 		yield* Console.log("  1. Install AZ plugin: az opencode plugin install")
 		yield* Console.log("  2. Install opencode-tracker: npm install -g opencode-tracker")
-		yield* Console.log("  3. Install opencode-skills: npm install -g opencode-skills")
-		yield* Console.log("  4. Run: opencode")
+		yield* Console.log("  3. Run: opencode")
 	})
 
 /**
@@ -2301,9 +2253,6 @@ const opencodeInitCommand = Command.make(
 	{
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		skipSkills: Options.boolean("skip-skills").pipe(
-			Options.withDescription("Skip generating skill wrappers"),
-		),
 	},
 	opencodeInitHandler,
 ).pipe(Command.withDescription("Initialize OpenCode support in a project"))

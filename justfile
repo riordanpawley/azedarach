@@ -47,10 +47,10 @@ ts-build-link-run: run-sfe-ts
 
 # RuleSync helpers
 rulesync-sync:
-    rulesync generate
+    ./scripts/rulesync-sync.sh sync
 
 rulesync-check:
-    rulesync generate --check
+    ./scripts/rulesync-sync.sh check
 
 # OpenCode plugin installer helper
 install-opencode-az-plugin *repos:

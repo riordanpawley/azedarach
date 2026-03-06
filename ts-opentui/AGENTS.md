@@ -7,7 +7,7 @@ Track any task that takes more than one command in the issue tracker.
 Keep one active parent issue per session whenever possible.
 When spawning subagents, each subagent must create, maintain, and close a child issue linked to the active parent issue.
 For `ts-opentui` behavior changes, keep `docs/spec/` aligned in the same task; if there is no spec delta, log `Spec impact: none` with file-specific rationale in issue notes before completion.
-Use `.claude/skills/workflow/spec-maintenance.skill.md` for spec-sync analysis and validation.
+Use `.claude/skills/workflow-spec-maintenance/SKILL.md` for spec-sync analysis and validation.
 When already in the target worktree/repo, use plain `git` commands (avoid defensive `git -C <same-path>`).
 
 ## Landing the Plane (Session Completion)

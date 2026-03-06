@@ -78,7 +78,7 @@ Managed paths are generated from `.rulesync/`:
 - `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`, `go-bubbletea/CLAUDE.md`
 
 Sync behavior:
-- `post-checkout` and `post-merge` run `rulesync generate --silent`
+- `post-checkout` and `post-merge` run `scripts/rulesync-sync.sh sync`
 - Set `RULESYNC_SKIP=1` to bypass auto-sync for one command/session
 - OpenCode plugin files are intentionally not managed by RuleSync
 

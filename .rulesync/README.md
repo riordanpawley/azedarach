@@ -4,7 +4,11 @@ This repository treats `.rulesync/` as the canonical source for selected Claude-
 
 ## Managed Mappings
 
-Mappings are declared in `.rulesync/mappings.tsv` and synced to runtime locations by the `rulesync` CLI.
+`rulesync` generates RuleSync-native features from `rulesync.jsonc`:
+- `.rulesync/subagents/` -> `.claude/agents/`
+- `.rulesync/skills/` -> `.claude/skills/`
+
+Additional passthrough mappings are declared in `.rulesync/mappings.tsv` and synced by `scripts/rulesync-sync.sh`.
 
 Current managed targets:
 - `.claude/agents/`
