@@ -29,7 +29,7 @@ Workflows are written as behavior contracts, not implementation details.
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session using deterministic project-prefixed session naming
 7. launch selected AI CLI command
-8. reflect session state as busy/idle/waiting as telemetry arrives
+8. reflect session lifecycle state (`initializing`/`busy`/`waiting`/`done`/`error`/`paused`/`idle`) as telemetry arrives
 
 ### Variants
 

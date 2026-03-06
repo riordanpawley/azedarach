@@ -256,7 +256,7 @@ Canonical fixture profile names:
 - Preconditions: issue branch missing for one run; mixed tmux session states present for another run.
 - Steps: start session and inspect card indicators.
 - Expected: session start ensures issue branch context exists; detector maps and displays busy/waiting/done/error/paused accurately.
-- Links: AZ-FR-0806, AZ-FR-0815.
+- Links: AZ-FR-0806, AZ-FR-0815, AZ-FR-0815b, AZ-FR-0815c, AZ-FR-0815d.
 
 ## 6.10 Dev Server Acceptance
 
