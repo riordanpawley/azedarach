@@ -61,17 +61,17 @@ func DetectState(output string) SessionState {
 ```go
 type PortAllocator struct {
     mu        sync.Mutex
-    allocated map[int]string // port -> beadID
+    allocated map[int]string // port -> issueID
     basePort  int
 }
 
-func (p *PortAllocator) Allocate(beadID string, config PortConfig) (int, error) {
+func (p *PortAllocator) Allocate(issueID string, config PortConfig) (int, error) {
     p.mu.Lock()
     defer p.mu.Unlock()
 
     // Check if already allocated
     for port, id := range p.allocated {
-        if id == beadID {
+        if id == issueID {
             return port, nil
         }
     }
@@ -81,7 +81,7 @@ func (p *PortAllocator) Allocate(beadID string, config PortConfig) (int, error) 
     for {
         if _, used := p.allocated[port]; !used {
             if isPortAvailable(port) {
-                p.allocated[port] = beadID
+                p.allocated[port] = issueID
                 return port, nil
             }
         }
@@ -220,22 +220,22 @@ package domain
 
 import "fmt"
 
-// BeadsError for beads CLI failures
-type BeadsError struct {
+// IssueTrackerError for issues CLI failures
+type IssueTrackerError struct {
     Op      string // "list", "create", "update"
-    BeadID  string // optional
+    IssueID  string // optional
     Message string
     Err     error
 }
 
-func (e *BeadsError) Error() string {
-    if e.BeadID != "" {
-        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+func (e *IssueTrackerError) Error() string {
+    if e.IssueID != "" {
+        return fmt.Sprintf("issues %s [%s]: %s", e.Op, e.IssueID, e.Message)
     }
-    return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+    return fmt.Sprintf("issues %s: %s", e.Op, e.Message)
 }
 
-func (e *BeadsError) Unwrap() error { return e.Err }
+func (e *IssueTrackerError) Unwrap() error { return e.Err }
 
 // TmuxError for tmux failures
 type TmuxError struct {
@@ -271,8 +271,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func formatError(err error) string {
     switch e := err.(type) {
-    case *domain.BeadsError:
-        return fmt.Sprintf("Beads %s failed: %s", e.Op, e.Message)
+    case *domain.IssueTrackerError:
+        return fmt.Sprintf("Issue Tracker %s failed: %s", e.Op, e.Message)
     case *domain.TmuxError:
         return fmt.Sprintf("tmux error: %s", e.Err)
     case *domain.GitError:
@@ -288,9 +288,9 @@ func formatError(err error) string {
 ## Optimization Strategies
 
 1. **Lazy rendering**: Only render visible cards, not entire column
-2. **Debounced refresh**: Don't re-fetch beads on every tick if nothing changed
+2. **Debounced refresh**: Don't re-fetch issues on every tick if nothing changed
 3. **Cached styles**: Pre-compute Lip Gloss styles, don't recreate per render
-4. **Parallel I/O**: Fetch beads and session states concurrently
+4. **Parallel I/O**: Fetch issues and session states concurrently
 5. **Incremental updates**: Only update changed cards, not full board
 
 ---
@@ -318,8 +318,8 @@ Both versions read the same config files:
 ### Shared State
 
 Both versions interact with:
-- `.beads/` directory - Bead tracker data
-- tmux sessions - Named consistently (`az-{beadId}`)
+- `.issues/` directory - Issue tracker data
+- tmux sessions - Named consistently (`az-{issueId}`)
 - Git worktrees - Same naming convention
 
 ### Feature Flag for Transition
@@ -383,9 +383,9 @@ func TestBoardRendering(t *testing.T) {
 ### Integration Tests
 
 ```go
-// internal/services/beads/client_test.go
-func TestBeadsClient(t *testing.T) {
-    // Mock bd CLI
+// internal/services/issues/client_test.go
+func TestIssueClient(t *testing.T) {
+    // Mock az issue CLI
     execCommand = fakeExecCommand
     defer func() { execCommand = exec.Command }()
 
@@ -413,11 +413,11 @@ func fakeExecCommand(name string, args ...string) *exec.Cmd {
 - [ ] StatusBar shows mode
 
 ## Phase 2 Smoke Test
-- [ ] Board loads real beads
+- [ ] Board loads real issues
 - [ ] Cards show correct colors
 - [ ] Priority badges visible
 - [ ] Toast appears on error
-- [ ] Periodic refresh works (edit bead externally, see update)
+- [ ] Periodic refresh works (edit issue externally, see update)
 
 ... (continue for each phase)
 ```

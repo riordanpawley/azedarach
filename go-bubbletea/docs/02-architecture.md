@@ -105,7 +105,7 @@ type Model struct {
 
 func (m Model) Init() tea.Cmd {
     return tea.Batch(
-        loadBeads,
+        loadIssues,
         tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
             return tickMsg(t)
         }),
@@ -120,12 +120,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.width = msg.Width
         m.height = msg.Height
         return m, nil
-    case beadsLoadedMsg:
+    case issuesLoadedMsg:
         m.tasks = msg.tasks
         return m, nil
     case tickMsg:
         return m, tea.Batch(
-            loadBeads,
+            loadIssues,
             tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
                 return tickMsg(t)
             }),
@@ -154,28 +154,28 @@ func (m Model) View() string {
 
 ```go
 // Commands return tea.Cmd functions
-func loadBeads() tea.Msg {
-    tasks, err := beads.ListAll()
+func loadIssues() tea.Msg {
+    tasks, err := issues.ListAll()
     if err != nil {
-        return beadsErrorMsg{err}
+        return issuesErrorMsg{err}
     }
-    return beadsLoadedMsg{tasks}
+    return issuesLoadedMsg{tasks}
 }
 
 // Messages for async results
-type beadsLoadedMsg struct {
+type issuesLoadedMsg struct {
     tasks []Task
 }
 
-type beadsErrorMsg struct {
+type issuesErrorMsg struct {
     err error
 }
 
 // In Update, handle results
-case beadsLoadedMsg:
+case issuesLoadedMsg:
     m.tasks = msg.tasks
     return m, nil
-case beadsErrorMsg:
+case issuesErrorMsg:
     m.toast = Toast{Level: Error, Message: msg.err.Error()}
     return m, nil
 ```

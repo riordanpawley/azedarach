@@ -29,7 +29,7 @@ func main() {
 
 // cmd/az/main.go - BAD: business logic in main
 func main() {
-    tasks, _ := beads.List()  // Don't do this
+    tasks, _ := issues.List()  // Don't do this
     // ...
 }
 ```
@@ -39,14 +39,14 @@ func main() {
 **Accept interfaces, return structs:**
 
 ```go
-// internal/services/beads/client.go
+// internal/services/issues/client.go
 
 // CommandRunner abstracts exec.Command for testing
 type CommandRunner interface {
     Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// Client wraps the bd CLI
+// Client wraps the az issue CLI
 type Client struct {
     runner CommandRunner
     logger *slog.Logger
@@ -60,11 +60,11 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
     }
 }
 
-// List fetches all beads
+// List fetches all issues
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "list", "--format=json")
+    out, err := c.runner.Run(ctx, "az issue", "list", "--format=json")
     if err != nil {
-        return nil, &domain.BeadsError{Op: "list", Err: err}
+        return nil, &domain.IssueTrackerError{Op: "list", Err: err}
     }
     return parseTasksJSON(out)
 }
@@ -73,7 +73,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 **Test with mock:**
 
 ```go
-// internal/services/beads/client_test.go
+// internal/services/issues/client_test.go
 
 type mockRunner struct {
     output []byte
@@ -148,7 +148,7 @@ monitor := NewMonitor(
 ```go
 // GOOD: Context flows through entire call chain
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "list")
+    out, err := c.runner.Run(ctx, "az issue", "list")
     // ...
 }
 
@@ -187,10 +187,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 import "fmt"
 
 func (c *Client) Create(ctx context.Context, task domain.Task) error {
-    out, err := c.runner.Run(ctx, "bd", "create", "--title", task.Title)
+    out, err := c.runner.Run(ctx, "az issue", "create", "--title", task.Title)
     if err != nil {
         // Wrap with context about what we were doing
-        return fmt.Errorf("creating bead %q: %w", task.Title, err)
+        return fmt.Errorf("creating issue %q: %w", task.Title, err)
     }
     return nil
 }
@@ -217,25 +217,25 @@ if errors.Is(err, domain.ErrNotFound) {
 **Custom error types with `Is()` and `As()`:**
 
 ```go
-type BeadsError struct {
+type IssueTrackerError struct {
     Op      string
-    BeadID  string
+    IssueID  string
     Message string
     Err     error
 }
 
-func (e *BeadsError) Error() string {
-    if e.BeadID != "" {
-        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+func (e *IssueTrackerError) Error() string {
+    if e.IssueID != "" {
+        return fmt.Sprintf("issues %s [%s]: %s", e.Op, e.IssueID, e.Message)
     }
-    return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+    return fmt.Sprintf("issues %s: %s", e.Op, e.Message)
 }
 
-func (e *BeadsError) Unwrap() error { return e.Err }
+func (e *IssueTrackerError) Unwrap() error { return e.Err }
 
 // Is allows errors.Is(err, target) to work
-func (e *BeadsError) Is(target error) bool {
-    t, ok := target.(*BeadsError)
+func (e *IssueTrackerError) Is(target error) bool {
+    t, ok := target.(*IssueTrackerError)
     if !ok {
         return false
     }
@@ -258,36 +258,36 @@ type SessionMonitor struct {
 }
 
 type monitoredSession struct {
-    beadID string
+    issueID string
     cancel context.CancelFunc
 }
 
-func (m *SessionMonitor) Start(ctx context.Context, beadID string, program *tea.Program) {
+func (m *SessionMonitor) Start(ctx context.Context, issueID string, program *tea.Program) {
     m.mu.Lock()
     defer m.mu.Unlock()
 
     // Don't start duplicate monitors
-    if _, exists := m.sessions[beadID]; exists {
+    if _, exists := m.sessions[issueID]; exists {
         return
     }
 
     ctx, cancel := context.WithCancel(ctx)
-    m.sessions[beadID] = &monitoredSession{beadID: beadID, cancel: cancel}
+    m.sessions[issueID] = &monitoredSession{issueID: issueID, cancel: cancel}
 
     m.wg.Add(1)
     go func() {
         defer m.wg.Done()
-        m.poll(ctx, beadID, program)
+        m.poll(ctx, issueID, program)
     }()
 }
 
-func (m *SessionMonitor) Stop(beadID string) {
+func (m *SessionMonitor) Stop(issueID string) {
     m.mu.Lock()
     defer m.mu.Unlock()
 
-    if session, ok := m.sessions[beadID]; ok {
+    if session, ok := m.sessions[issueID]; ok {
         session.cancel()
-        delete(m.sessions, beadID)
+        delete(m.sessions, issueID)
     }
 }
 
@@ -306,9 +306,9 @@ func (m *SessionMonitor) Shutdown() {
 
 ```go
 // Fan-out: Multiple goroutines reading from one channel
-func pollSessions(ctx context.Context, beadIDs <-chan string) {
-    for beadID := range beadIDs {
-        go pollOne(ctx, beadID)
+func pollSessions(ctx context.Context, issueIDs <-chan string) {
+    for issueID := range issueIDs {
+        go pollOne(ctx, issueID)
     }
 }
 
@@ -338,7 +338,7 @@ func collectResults(ctx context.Context, results chan<- SessionState) {
 **1. Small, focused packages:**
 
 ```
-internal/services/beads/     # Only beads CLI interaction
+internal/services/issues/     # Only issues CLI interaction
 internal/services/git/       # Only git operations
 internal/domain/             # Only data types, no I/O
 ```
@@ -362,14 +362,14 @@ domain/  ←──  services/  ←──  app/
 ```
 # Instead of:
 handlers/
-  beads.go
+  issues.go
   git.go
 services/
-  beads.go
+  issues.go
   git.go
 
 # Consider:
-beads/
+issues/
   client.go      # Service
   handlers.go    # UI handlers
   types.go       # Domain types
@@ -435,17 +435,17 @@ logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{
 }))
 
 // Add fields progressively
-logger = logger.With("component", "beads")
+logger = logger.With("component", "issues")
 
 // Log with structured fields
-logger.Info("fetching beads",
+logger.Info("fetching issues",
     "count", len(tasks),
     "filter", filter.String(),
 )
 
-logger.Error("beads command failed",
+logger.Error("issues command failed",
     "error", err,
-    "command", "bd list",
+    "command", "az issue list",
 )
 ```
 
