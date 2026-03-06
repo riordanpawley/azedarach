@@ -136,6 +136,11 @@ This section is normative.
 - AZ-FR-0815b: When PTY pattern matching is enabled, session-state detection MUST prioritize recent output over stale scrollback so historical error markers do not pin an actively working session in `error`.
 - AZ-FR-0815c: PTY state detection MUST allow recovery from transient `error`/`done` matches; terminal states MUST NOT remain sticky solely due to prior PTY matches.
 - AZ-FR-0815d: PTY high-priority transitions into `waiting`/`error` MUST be gated by active-session context (`initializing`/`busy`/`waiting`) and MUST NOT force `idle`/`done` sessions into those states from stale output alone.
+- AZ-FR-0816: Crashed-session auto-recovery MUST execute through a single scoped worker and MUST deduplicate queued issue IDs so refresh churn cannot trigger duplicate concurrent recovery attempts for the same issue.
+- AZ-FR-0817: Transient auto-recovery failures MUST retry with exponential backoff and jitter.
+- AZ-FR-0818: Auto-recovery retry policy MUST cap each wait duration via configurable `sessionRecovery.retryMaxDelayMs` without requiring a max-attempt cutoff for transient failures.
+- AZ-FR-0819: Auto-recovery failures MUST be logged with issue identity, error classification, and attempt context even when the flow continues retrying.
+- AZ-FR-0820: Session-recovery configuration MUST support `sessionRecovery.autoRecoveryDelayMs`, `sessionRecovery.retryBaseDelayMs`, and `sessionRecovery.retryMaxDelayMs`.
 
 ## 4.11 Dev Server Requirements
 
@@ -172,6 +177,8 @@ This section is normative.
 - AZ-FR-1015: When a bulk item hits merge conflicts and conflict-assistant policy is enabled, the system MUST trigger an automated conflict-resolution assistant attempt for that item.
 - AZ-FR-1016: If automated conflict resolution fails or exhausts allowed attempts, the item MUST remain in recoverable conflict state with explicit manual-resolution guidance.
 - AZ-FR-1017: Bulk update MUST continue processing remaining queued items after per-item failure and report per-item outcomes in completion summary.
+- AZ-FR-1018: Origin-sync behind-count parsing MUST reject invalid numeric output and MUST NOT propagate `NaN` into user-visible state.
+- AZ-FR-1019: On behind-count parse failure, the system MUST retain the previous known behind-count value and emit tagged failure context suitable for diagnostics.
 
 ## 4.13 PR Requirements
 
@@ -240,6 +247,11 @@ This section is normative.
 - AZ-FR-1704: Setting changes MUST persist to local config file.
 - AZ-FR-1705: `e` in settings MUST open raw config editor.
 - AZ-FR-1706: Configuration reload SHOULD apply changes without restart when safe.
+- AZ-FR-1707: Settings persistence failures MUST produce actionable feedback without losing in-memory app context.
+- AZ-FR-1708: The settings surface SHOULD provide UI-driven coverage for all core configurable domains required for day-to-day workflows.
+- AZ-FR-1709: Equivalent settings changes applied through UI or raw JSON edit MUST converge to the same effective runtime behavior.
+- AZ-FR-1710: The configuration file SHOULD expose schema metadata consumable by schema-aware editors.
+- AZ-FR-1711: Invalid configuration values detected on reload MUST return field-level actionable guidance.
 
 ## 4.20 Multi-Project Requirements
 
@@ -284,6 +296,8 @@ This section is normative.
 - AZ-FR-2203: Partial subsystem failure SHOULD preserve board navigation.
 - AZ-FR-2204: Interrupted operations SHOULD be resumable or abortable.
 - AZ-FR-2205: Data refresh errors SHOULD not wipe last known good board state.
+- AZ-FR-2206: Bounded-retry operations SHOULD use exponential backoff with clear transient/terminal handling policy.
+- AZ-FR-2207: When a bounded-retry operation exhausts its retry budget, the system MUST surface explicit retry-exhausted guidance and preserve recoverable state.
 
 ## 4.25 Performance Requirements
 
@@ -291,6 +305,12 @@ This section is normative.
 - AZ-FR-2302: Board refresh SHOULD scale to large issue counts without lockups.
 - AZ-FR-2303: Overlay open/close SHOULD feel immediate.
 - AZ-FR-2304: Search/filter updates SHOULD provide near-live feedback.
+- AZ-FR-2305: Initial interaction SHOULD be possible before full off-screen hydration completes.
+- AZ-FR-2306: Virtualized rendering at scale MUST preserve responsive navigation under sustained scroll input.
+- AZ-FR-2307: Viewport-priority loading SHOULD hydrate visible-window entities before off-screen entities.
+- AZ-FR-2308: Viewport changes (jump/scroll) MUST trigger prompt hydration of newly visible regions without blocking interaction.
+- AZ-FR-2309: Deferred off-screen hydration MUST NOT stall foreground navigation or mode transitions.
+- AZ-FR-2310: Observable loading metadata SHOULD distinguish visible-window hydration from deferred off-screen hydration.
 
 ## 4.26 Observability Requirements
 

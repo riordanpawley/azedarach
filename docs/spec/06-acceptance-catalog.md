@@ -338,6 +338,13 @@ Canonical fixture profile names:
 - Expected: items process in FIFO queue order with bounded concurrent workers; each item resolves source branch per policy; conflicting items trigger automated conflict-resolution attempts; unresolved items remain recoverable with manual guidance; queue continues after per-item failure and ends with per-item summary.
 - Links: AZ-FR-1012, AZ-FR-1013, AZ-FR-1014, AZ-FR-1015, AZ-FR-1016, AZ-FR-1017.
 
+### AZ-AT-2837 Origin-sync behind-count parse failure preserves previous state
+
+- Preconditions: origin sync mode active; behind-count command output can be forced non-numeric for one poll cycle.
+- Steps: run sync cycle with valid behind-count, then force invalid parse output, then restore valid output.
+- Expected: invalid parse is logged with tagged parse context; UI/state retains previous behind-count through failure cycle; subsequent valid parse resumes normal updates.
+- Links: AZ-FR-1018, AZ-FR-1019, section 05 F-026.
+
 ## 6.12 PR Acceptance
 
 ### AZ-AT-1001 Create PR
@@ -494,19 +501,33 @@ Canonical fixture profile names:
 - Expected: PTY monitor does not update session state/metrics from those patterns; only native tmux/hook status updates affect session state.
 - Links: AZ-FR-0815a, AZ-FR-2005.
 
-### AZ-AT-2829 PTY recency-first detection avoids stale error pinning
+### AZ-AT-2832 PTY recency-first detection avoids stale error pinning
 
 - Preconditions: issue session is running with `stateDetection.patternMatching=true`.
 - Steps: emit an error-looking line, then continue with clear active-work output (spinner/tool activity) without stopping the session.
 - Expected: session state returns/remains `busy` (or `waiting` when prompted) instead of staying pinned to `error` from stale scrollback.
 - Links: AZ-FR-0815b, section 05 F-144.
 
-### AZ-AT-2830 PTY transient error recovery
+### AZ-AT-2833 PTY transient error recovery
 
 - Preconditions: issue session is running with `stateDetection.patternMatching=true`.
 - Steps: drive output through `busy -> error-like transient output -> resumed busy/waiting output`.
 - Expected: session state can transition out of `error` back to active states when newer telemetry indicates recovery.
 - Links: AZ-FR-0815c, AZ-FR-0815d, section 05 F-145.
+
+### AZ-AT-2834 Auto-recovery deduplicates crashed session retries under refresh churn
+
+- Preconditions: auto-recovery mode enabled; one crashed session; high-frequency board refresh triggers.
+- Steps: trigger repeated refresh/session scans while crashed issue remains unrecovered.
+- Expected: only one recovery attempt stream is active for the crashed issue at a time; duplicate concurrent recover attempts are not spawned.
+- Links: AZ-FR-0816, AZ-FR-3908, section 05 F-014.
+
+### AZ-AT-2835 Auto-recovery transient retry policy uses capped exponential+jitter behavior
+
+- Preconditions: auto-recovery mode enabled; recovery path can inject transient failures.
+- Steps: run recovery with deterministic test clock/random fixture to observe successive retry delays beyond cap threshold.
+- Expected: retries continue on transient failures; delay growth follows exponential+jitter profile; per-attempt delay never exceeds configured `sessionRecovery.retryMaxDelayMs`; every failed attempt is logged with attempt context.
+- Links: AZ-FR-0817, AZ-FR-0818, AZ-FR-0819, AZ-FR-0820, section 05 F-015.
 
 ## 6.17 Failure Acceptance
 
@@ -583,7 +604,7 @@ Canonical fixture profile names:
 - Expected: explicit lock feedback; no duplicate write; retry path available.
 - Links: AZ-FR-2806..AZ-FR-2808.
 
-### AZ-AT-2830 Refresh selection reconciliation and optimistic dependency/fork rollback
+### AZ-AT-2836 Refresh selection reconciliation and optimistic dependency/fork rollback
 
 - Preconditions: selected set includes items affected by refresh removal; dependency/fork mutation failures can be injected.
 - Steps: trigger refresh during active selections; run optimistic dependency and fork metadata mutations with forced failures.
@@ -1051,4 +1072,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2831
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2837
