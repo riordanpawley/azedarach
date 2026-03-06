@@ -7,6 +7,7 @@ import type {
 	DiagnosticSeverity,
 	FiberStatus,
 	IssueSyncLastStatus,
+	IssueSyncRuntimeReason,
 	LinearWebhookStrategy,
 } from "../services/DiagnosticsService.js"
 import type { LinearWebhookMode } from "../services/LinearWebhookService.js"
@@ -105,6 +106,21 @@ const issueSyncStatusColor = (status: IssueSyncLastStatus): string => {
 			return theme.red
 		case "skipped":
 			return theme.yellow
+		default:
+			return theme.subtext0
+	}
+}
+
+const issueSyncRuntimeReasonColor = (reason: IssueSyncRuntimeReason): string => {
+	switch (reason) {
+		case "ready":
+			return theme.green
+		case "missing_api_key":
+		case "sync_disabled":
+			return theme.yellow
+		case "backend_not_linear":
+		case "config_error":
+			return theme.red
 		default:
 			return theme.subtext0
 	}
@@ -453,24 +469,78 @@ export const DiagnosticsOverlay = () => {
 							<text
 								fg={issueSyncStatusColor(issueSync.lastStatus)}
 							>{`last=${issueSync.lastStatus}`}</text>
-								{issueSync.lastSyncedAt && (
-									<text
-										fg={theme.subtext1}
-									>{` (${formatRelativeTime(issueSync.lastSyncedAt)})`}</text>
-								)}
-								<text fg={theme.subtext0}>
-									{` ${sanitizeDiagnosticInlineText(issueSync.lastMessage)}`}
-								</text>
-							</box>
-							{issueSync.lastFailure && (
+							{issueSync.lastSyncedAt && (
+								<text fg={theme.subtext1}>{` (${formatRelativeTime(issueSync.lastSyncedAt)})`}</text>
+							)}
+							<text fg={theme.subtext0}>
+								{` ${sanitizeDiagnosticInlineText(issueSync.lastMessage)}`}
+							</text>
+						</box>
+						{issueSync.runtime && (
+							<box flexDirection="column">
 								<box flexDirection="row" paddingLeft={2}>
-									<text fg={theme.red}>
+									<text
+										fg={issueSync.runtime.status === "ready" ? theme.green : theme.yellow}
+									>{`runtime=${issueSync.runtime.status} `}</text>
+									<text fg={issueSyncRuntimeReasonColor(issueSync.runtime.reason)}>
+										{`reason=${issueSync.runtime.reason}`}
+									</text>
+									<text fg={theme.subtext1}>
+										{` (${formatRelativeTime(issueSync.runtime.updatedAt)})`}
+									</text>
+								</box>
+								<box flexDirection="row" paddingLeft={4}>
+									<text fg={theme.subtext0}>
 										{sanitizeDiagnosticInlineText(
-											`failure ${issueSync.lastFailure.issueId} ${issueSync.lastFailure.operation}: ${issueSync.lastFailure.error}`,
+											`path=${issueSync.runtime.projectPath} team=${issueSync.runtime.configuredTeam ?? "<none>"} project=${issueSync.runtime.configuredProject ?? "<none>"} apiKey=${issueSync.runtime.apiKeySource}`,
 										)}
 									</text>
 								</box>
-							)}
+							</box>
+						)}
+						{issueSync.queue && (
+							<box flexDirection="column">
+								<box flexDirection="row" paddingLeft={2}>
+									<text fg={theme.subtext1}>
+										{`queue total=${issueSync.queue.total} ready=${issueSync.queue.pendingReady} delayed=${issueSync.queue.pendingDelayed} active=${issueSync.queue.processingActive} stale=${issueSync.queue.processingStale} failed=${issueSync.queue.failed}`}
+									</text>
+									<text fg={theme.subtext1}>
+										{` (${formatRelativeTime(issueSync.queue.updatedAt)})`}
+									</text>
+								</box>
+							</box>
+						)}
+						{issueSync.lastRun && (
+							<box flexDirection="column">
+								<box flexDirection="row" paddingLeft={2}>
+									<text fg={theme.subtext1}>
+										{`run=${issueSync.lastRun.runId} op=${issueSync.lastRun.operation} `}
+									</text>
+									<text fg={issueSyncStatusColor(issueSync.lastRun.status)}>
+										{`status=${issueSync.lastRun.status}`}
+									</text>
+									<text fg={theme.subtext1}>
+										{` (${formatRelativeTime(issueSync.lastRun.finishedAt)})`}
+									</text>
+								</box>
+								<box flexDirection="row" paddingLeft={4}>
+									<text fg={theme.subtext0}>
+										{sanitizeDiagnosticInlineText(
+											`pushed=${issueSync.lastRun.pushed} pulled=${issueSync.lastRun.pulled} ${issueSync.lastRun.message}`,
+										)}
+									</text>
+								</box>
+							</box>
+						)}
+						{issueSync.lastFailure && (
+							<box flexDirection="row" paddingLeft={2}>
+								<text fg={theme.red}>
+									{sanitizeDiagnosticInlineText(
+										`failure ${issueSync.lastFailure.issueId} ${issueSync.lastFailure.operation}: ${issueSync.lastFailure.error}`,
+									)}
+								</text>
+							</box>
+						)}
 					</box>
 				)}
 				<text> </text>

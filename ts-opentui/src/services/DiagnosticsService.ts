@@ -70,6 +70,46 @@ export type IssueDbPerfLastStatus = "success" | "failure"
 
 export type IssueSyncBackend = "linear" | "none"
 export type IssueSyncLastStatus = "idle" | "success" | "failure" | "skipped"
+export type IssueSyncRuntimeStatus = "ready" | "unavailable"
+export type IssueSyncRuntimeReason =
+	| "ready"
+	| "backend_not_linear"
+	| "sync_disabled"
+	| "missing_api_key"
+	| "config_error"
+export type IssueSyncApiKeySource = "config-provider" | "none" | "unknown"
+export type IssueSyncRunOperation = "bootstrap" | "flush"
+
+export interface IssueSyncRuntimeHealth {
+	readonly status: IssueSyncRuntimeStatus
+	readonly reason: IssueSyncRuntimeReason
+	readonly projectPath: string
+	readonly configuredTeam?: string
+	readonly configuredProject?: string
+	readonly apiKeySource: IssueSyncApiKeySource
+	readonly updatedAt: Date
+}
+
+export interface IssueSyncQueueHealth {
+	readonly total: number
+	readonly pendingReady: number
+	readonly pendingDelayed: number
+	readonly processingActive: number
+	readonly processingStale: number
+	readonly failed: number
+	readonly updatedAt: Date
+}
+
+export interface IssueSyncRunHealth {
+	readonly runId: string
+	readonly operation: IssueSyncRunOperation
+	readonly status: Exclude<IssueSyncLastStatus, "idle">
+	readonly startedAt: Date
+	readonly finishedAt: Date
+	readonly message: string
+	readonly pushed: number
+	readonly pulled: number
+}
 
 export interface IssueSyncFailure {
 	readonly issueId: string
@@ -88,6 +128,9 @@ export interface IssueSyncHealth {
 	readonly lastStatus: IssueSyncLastStatus
 	readonly lastMessage: string
 	readonly lastFailure?: IssueSyncFailure
+	readonly runtime?: IssueSyncRuntimeHealth
+	readonly queue?: IssueSyncQueueHealth
+	readonly lastRun?: IssueSyncRunHealth
 }
 
 export type LinearWebhookStrategy =
