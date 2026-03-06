@@ -270,11 +270,13 @@ func isLockContentionError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	indicators := []string{
 		"database is locked",
+		"database table is locked",
 		"failed to acquire lock",
 		"lock timeout",
 		"resource busy",
 		"another process",
 		"busy timeout",
+		"sqlite_busy",
 	}
 	for _, indicator := range indicators {
 		if strings.Contains(msg, indicator) {

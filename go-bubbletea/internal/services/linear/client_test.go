@@ -425,6 +425,27 @@ func TestClient_ListRetriesLockContention(t *testing.T) {
 	assert.Equal(t, 2, runner.calls)
 }
 
+func TestClient_ListRetriesDatabaseTableLocked(t *testing.T) {
+	runner := &mockRunner{
+		outputs: [][]byte{
+			nil,
+			[]byte(`[{"id":"az-2","title":"Task","status":"open","priority":1,"type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}]`),
+		},
+		errs: []error{
+			errors.New("database table is locked"),
+			nil,
+		},
+	}
+	client := NewClient(runner, slog.Default())
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	tasks, err := client.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 2, runner.calls)
+}
+
 func TestClient_UpdateDoesNotRetryNonLockErrors(t *testing.T) {
 	runner := &mockRunner{
 		errs: []error{errors.New("permission denied")},
@@ -477,6 +498,34 @@ func TestClient_CreateDoesNotRetryOnLockContention(t *testing.T) {
 
 	_, err := client.Create(context.Background(), CreateTaskParams{
 		Title:    "Lock-sensitive create",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.Error(t, err)
+	var trackerErr *domain.IssueTrackerError
+	require.ErrorAs(t, err, &trackerErr)
+	require.Error(t, trackerErr.Err)
+	assert.Contains(t, trackerErr.Err.Error(), "prevent duplicate writes")
+	assert.Equal(t, 1, runner.calls)
+}
+
+func TestClient_CreateDetectsDatabaseTableLockAsDuplicateRisk(t *testing.T) {
+	runner := &mockRunner{
+		outputs: [][]byte{
+			nil,
+			[]byte(`{"id":"az-1000"}`),
+		},
+		errs: []error{
+			errors.New("database table is locked"),
+			nil,
+		},
+	}
+	client := NewClient(runner, slog.Default())
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	_, err := client.Create(context.Background(), CreateTaskParams{
+		Title:    "Lock-sensitive create variant",
 		Type:     domain.TypeTask,
 		Priority: domain.P2,
 	})
