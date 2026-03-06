@@ -38,3 +38,15 @@ install-sfe-ts: build-sfe-ts link-sfe-ts
 ts-build-link-run: build-sfe-ts link-sfe-ts
     @echo "Running az"
     az
+
+build-go:
+    @echo "Building go-bubbletea"
+    cd ./go-bubbletea && make build && cd ..
+
+test-go:
+    @echo "Testing go-bubbletea"
+    cd ./go-bubbletea && make test && cd ..
+
+run-go:
+    @echo "Running go-bubbletea"
+    cd ./go-bubbletea && make run && cd ..
