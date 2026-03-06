@@ -17,7 +17,7 @@
  * - listActive(): List all running sessions
  */
 
-import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
+import { Command, type CommandExecutor, FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
 import { Data, DateTime, Effect, Exit, HashMap, PubSub, Ref, Schema } from "effect"
 import { AppConfig } from "../config/index.js"
@@ -40,6 +40,7 @@ import {
 	WINDOW_NAMES,
 } from "./paths.js"
 import { StateDetector } from "./StateDetector.js"
+import { SessionStateStore } from "./SessionStateStore.js"
 import {
 	type TmuxError,
 	TmuxService,
@@ -417,6 +418,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			WorktreeManager.Default,
 			TmuxService.Default,
 			IssueTrackerClient.Default,
+			SessionStateStore.Default,
 			AppConfig.Default,
 			StateDetector.Default,
 			ProjectService.Default,
@@ -429,6 +431,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const tmuxService = yield* TmuxService
 			const worktreeSession = yield* WorktreeSessionService
 			const issueTrackerClient = yield* IssueTrackerClient
+			const sessionStateStore = yield* SessionStateStore
 			const appConfig = yield* AppConfig
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
@@ -451,18 +454,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			// Session Persistence
 			// ====================================================================
 
-			// Schema handles ALL conversions:
-			// - JSON string ↔ array of tuples (Schema.parseJson)
-			// - Array of tuples ↔ HashMap (Schema.HashMap)
-			// - ISO string ↔ DateTime (Schema.DateTimeUtc)
-			const sessionFilePath = ".azedarach/sessions.json"
-			const SessionsSchema = Schema.parseJson(
-				Schema.HashMap({ key: Schema.String, value: SessionSchema }),
-			)
-			const decodeSessions = Schema.decodeUnknown(SessionsSchema)
-			const encodeSessions = Schema.encode(SessionsSchema)
-
-			// Layer for filesystem operations - provides FileSystem and Path services
+			// Layer for filesystem operations (ringing terminal bell).
 			const fsLayer = BunContext.layer
 
 			/**
@@ -474,40 +466,27 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					return projectPath ?? process.cwd()
 				})
 
-			// Helper: Load persisted sessions from disk
-			const loadPersistedSessions = Effect.gen(function* () {
-				const fs = yield* FileSystem.FileSystem
-				const pathSvc = yield* Path.Path
-				const projectPath = yield* getEffectiveProjectPath()
-				const filePath = pathSvc.join(projectPath, sessionFilePath)
-
-				const exists = yield* fs.exists(filePath)
-				if (!exists) return HashMap.empty<string, Session>()
-
-				const content = yield* fs.readFileString(filePath)
-				return yield* decodeSessions(content)
-			}).pipe(
-				Effect.provide(fsLayer),
-				Effect.catchAll((error) =>
-					Effect.logWarning(error).pipe(
-						Effect.zipRight(Effect.succeed(HashMap.empty<string, Session>())),
-					),
-				),
-			)
-
-			// Helper: Save sessions to disk
-			const persistSessions = (sessions: HashMap.HashMap<string, Session>) =>
+			// Helper: Load persisted sessions from sqlite
+			const loadPersistedSessions = (projectPath?: string) =>
 				Effect.gen(function* () {
-					const fs = yield* FileSystem.FileSystem
-					const pathSvc = yield* Path.Path
-					const projectPath = yield* getEffectiveProjectPath()
-					const dirPath = pathSvc.join(projectPath, ".azedarach")
-					const filePath = pathSvc.join(dirPath, "sessions.json")
+					const effectiveProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
+					return yield* sessionStateStore.load(effectiveProjectPath)
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.succeed(HashMap.empty<string, Session>())),
+						),
+					),
+				)
 
-					yield* fs.makeDirectory(dirPath, { recursive: true }).pipe(Effect.ignore)
-					const json = yield* encodeSessions(sessions)
-					yield* fs.writeFileString(filePath, json).pipe(Effect.ignore)
-				}).pipe(Effect.provide(fsLayer))
+			// Helper: Save sessions to sqlite
+			const persistSessions = (sessions: HashMap.HashMap<string, Session>, projectPath?: string) =>
+				Effect.gen(function* () {
+					const effectiveProjectPath = projectPath ?? (yield* getEffectiveProjectPath())
+					yield* sessionStateStore.save(effectiveProjectPath, sessions)
+				}).pipe(
+					Effect.catchAll((error) => Effect.logWarning(error).pipe(Effect.zipRight(Effect.void))),
+				)
 
 			// Helper: Publish state change event
 			const publishStateChange = (
@@ -619,10 +598,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 			const isSessionInProjectScope = (session: Session, projectPath: string): boolean => {
 				const sessionProjectPath = normalizeProjectPathForComparison(session.projectPath)
-				if (
-					sessionProjectPath !== null &&
-					!projectPathsEqual(sessionProjectPath, projectPath)
-				) {
+				if (sessionProjectPath !== null && !projectPathsEqual(sessionProjectPath, projectPath)) {
 					return false
 				}
 
@@ -954,7 +930,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 										HashMap.set(sessions, issueId, sessionObj),
 									)
 
-									// Persist to disk
+									// Persist to sqlite
 									const sessions = yield* Ref.get(sessionsRef)
 									yield* persistSessions(sessions)
 
@@ -1046,7 +1022,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Remove from registry
 						yield* Ref.update(sessionsRef, (sessions) => HashMap.remove(sessions, issueId))
 
-						// Persist to disk
+						// Persist to sqlite
 						const updatedSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(updatedSessions)
 
@@ -1134,7 +1110,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							HashMap.set(sessions, issueId, updatedSession),
 						)
 
-						// Persist to disk
+						// Persist to sqlite
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
 
@@ -1180,7 +1156,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							HashMap.set(sessions, issueId, updatedSession),
 						)
 
-						// Persist to disk
+						// Persist to sqlite
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
 
@@ -1302,7 +1278,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							HashMap.set(sessions, issueId, recoveredSession),
 						)
 
-						// Persist to disk
+						// Persist to sqlite
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
 
@@ -1358,7 +1334,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						)
 
 						// Load and canonicalize persisted sessions for crash recovery.
-						const persistedSessionsRaw = yield* loadPersistedSessions
+						const persistedSessionsRaw = yield* loadPersistedSessions(effectiveProjectPath)
 						const canonicalPersistedResult = canonicalizeSessionMap(
 							persistedSessionsRaw,
 							effectiveProjectPath,
@@ -1471,13 +1447,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const updatedSessions = yield* Ref.get(sessionsRef)
 
 						if (sessionsChanged) {
-							yield* persistSessions(updatedSessions)
+							yield* persistSessions(updatedSessions, effectiveProjectPath)
 						} else if (canonicalPersistedResult.changed) {
 							let mergedSessions = persistedSessions
 							for (const [activeIssueId, activeSession] of HashMap.entries(updatedSessions)) {
 								mergedSessions = HashMap.set(mergedSessions, activeIssueId, activeSession)
 							}
-							yield* persistSessions(mergedSessions)
+							yield* persistSessions(mergedSessions, effectiveProjectPath)
 						}
 
 						const scopedUpdatedSessions = filterSessionsByProjectScope(
@@ -1508,7 +1484,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							HashMap.set(sessions, issueId, updatedSession),
 						)
 
-						// Persist to disk
+						// Persist to sqlite
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
 
@@ -1651,7 +1627,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							HashMap.set(sessions, resolvedIssueId, updatedSession),
 						)
 
-						// Persist to disk
+						// Persist to sqlite
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
 
