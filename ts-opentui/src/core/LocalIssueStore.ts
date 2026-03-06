@@ -176,6 +176,7 @@ const LOCAL_ISSUE_DB_DIRECTORY = ".azedarach"
 const LOCAL_ISSUE_DB_FILENAME = "issues.db"
 const LOCAL_ISSUE_BACKUP_META_LAST_SUCCESS_AT = "backup:last_success_at"
 const LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META = "issue:id_next_alpha_index"
+const RESERVED_LOCAL_ISSUE_IDS = new Set(["az"])
 const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
@@ -415,7 +416,7 @@ export const allocateNextAlphaIssueId = (
 
 	while (true) {
 		const candidateId = encodeAlphaIssueIndex(candidateIndex)
-		if (!existingIds.has(candidateId)) {
+		if (!existingIds.has(candidateId) && !RESERVED_LOCAL_ISSUE_IDS.has(candidateId.toLowerCase())) {
 			return {
 				issueId: candidateId,
 				nextIndex: candidateIndex + 1,
@@ -1201,21 +1202,14 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							sql,
 							LOCAL_ISSUE_ID_NEXT_ALPHA_INDEX_META,
 						).pipe(Effect.map(parseNextAlphaIssueIndex))
-						let nextIssueAlphaIndex = nextAlphaIndex
-						let issueId = encodeAlphaIssueIndex(nextIssueAlphaIndex)
-
-						while (true) {
-							const existing = yield* sql<{ readonly id: string }>`
-								SELECT id FROM issues WHERE id = ${issueId}
-							`
-							if (existing.length === 0) {
-								break
-							}
-							nextIssueAlphaIndex += 1
-							issueId = encodeAlphaIssueIndex(nextIssueAlphaIndex)
-						}
-
-						const nextReservedAlphaIndex = nextIssueAlphaIndex + 1
+						const existingRows = yield* sql<{ readonly id: string }>`
+							SELECT id FROM issues
+						`
+						const existingIds = new Set(existingRows.map((row) => row.id))
+						const { issueId, nextIndex: nextReservedAlphaIndex } = allocateNextAlphaIssueId(
+							nextAlphaIndex,
+							existingIds,
+						)
 
 						yield* sql.withTransaction(
 							Effect.gen(function* () {

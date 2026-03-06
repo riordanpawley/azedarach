@@ -100,6 +100,10 @@ describe("allocateNextAlphaIssueId", () => {
 		const existing = new Set(["a", "b", "c"])
 		expect(allocateNextAlphaIssueId(0, existing)).toEqual({ issueId: "d", nextIndex: 4 })
 	})
+
+	it("skips reserved issue ID az", () => {
+		expect(allocateNextAlphaIssueId(51, new Set())).toEqual({ issueId: "ba", nextIndex: 53 })
+	})
 })
 
 describe("importExternalSnapshot", () => {
