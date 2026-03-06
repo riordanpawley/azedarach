@@ -220,6 +220,7 @@ This section is normative.
 - AZ-FR-1607: `o` on selected attachment MUST open system viewer.
 - AZ-FR-1608: `x` on selected attachment MUST remove attachment.
 - AZ-FR-1609: Attachments MUST be indexed and linked to issue IDs.
+- AZ-FR-1610: Session start prompts that include attachment paths (`Space S`, `Space !`) MUST materialize and reference those files inside the target issue worktree path, not a user-global or sibling project path.
 
 ## 4.19 Settings Requirements
 

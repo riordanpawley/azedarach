@@ -36,6 +36,7 @@ Workflows are written as behavior contracts, not implementation details.
 - `Space S` injects default work prompt
 - `Space !` injects skip-permissions mode
 - `Space c` launches chat-oriented profile
+- for `Space S` / `Space !` with image attachments, attachment file paths in the prompt are materialized under the target issue worktree (`<worktree>/.azedarach/tmp/attachments/...`) rather than a sibling/global project path
 
 ### Postconditions
 
