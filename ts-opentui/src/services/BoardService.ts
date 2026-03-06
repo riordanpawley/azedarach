@@ -1371,7 +1371,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		 * If the tracker database is out of sync with JSONL (common after git pull
 		 * or when another worktree modifies issues), this will:
 		 * 1. Detect the SyncRequiredError
-		 * 2. Auto-run 'tracker sync --import-only' to re-import JSONL
+		 * 2. Auto-run import-only sync to re-import JSONL
 		 * 3. Retry the refresh
 		 */
 		const refreshWithRecovery = (preferredProjectPath?: string | null) =>
@@ -1381,7 +1381,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					() =>
 						Effect.gen(function* () {
 							yield* Effect.log(
-								"IssueTracker database out of sync, auto-recovering with 'tracker sync --import-only'...",
+								"IssueTracker database out of sync, auto-recovering with import-only sync...",
 							)
 							const projectPath = yield* resolveProjectPath(preferredProjectPath)
 							yield* issueTrackerClient
