@@ -75,7 +75,7 @@
                     │  ─────────────────────────     │
                     │  h  Move left                  │
                     │  l  Move right                 │
-                    │  e  Edit bead                  │
+                    │  e  Edit issue                  │
                     │  d  Delete/cleanup             │
                     │                                │
                     │            Esc to close        │
@@ -136,14 +136,14 @@
 │  6   │ az-1    │ Setup CI/CD pipeline           │ done   │ P3  │ ✓       │
 │  7   │ az-2    │ Update documentation           │ done   │ P4  │         │
 └──────┴─────────┴────────────────────────────────┴────────┴─────┴─────────┘
- LIST │ 7 beads │ Sorted by: Priority ↓ │ Tab: Kanban view
+ LIST │ 7 issues │ Sorted by: Priority ↓ │ Tab: Kanban view
 ```
 
 ---
 
 ## Dependencies
 
-- [Phase 2: Beads Integration](phase-2-beads.md)
+- [Phase 2: Issue Tracker Integration](phase-2-tracker-integration.md)
 
 ---
 
@@ -304,7 +304,7 @@ func buildActions(task domain.Task, session *domain.Session) []Action {
         // Task actions
         {Key: "h", Label: "Move left", Enabled: task.Status != domain.StatusOpen},
         {Key: "l", Label: "Move right", Enabled: task.Status != domain.StatusDone},
-        {Key: "e", Label: "Edit bead", Enabled: true},
+        {Key: "e", Label: "Edit issue", Enabled: true},
         {Key: "d", Label: "Delete/cleanup", Enabled: true},
     }
 }
@@ -658,7 +658,7 @@ type SearchOverlay struct {
 
 func NewSearchOverlay() *SearchOverlay {
     ti := textinput.New()
-    ti.Placeholder = "Search beads..."
+    ti.Placeholder = "Search issues..."
     ti.Prompt = "/ "
     ti.Focus()
 
