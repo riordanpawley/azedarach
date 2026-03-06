@@ -114,6 +114,17 @@ func TestStatusBar_FillsWidth(t *testing.T) {
 	}
 }
 
+func TestStatusBar_RenderIncludesViewIndicator(t *testing.T) {
+	style := styles.New()
+	sb := New(types.ModeNormal, 80, style).WithView("KAN")
+
+	result := sb.Render()
+
+	if !strings.Contains(result, "VIEW:KAN") {
+		t.Errorf("Expected status bar to include view indicator, got: %s", result)
+	}
+}
+
 func TestGetHints_AllModes(t *testing.T) {
 	tests := []struct {
 		mode     types.Mode

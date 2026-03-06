@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/ui/board"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -371,6 +374,63 @@ func TestGotoMode(t *testing.T) {
 		pos := getCursorPosition(newModel)
 		if pos.Column != 3 {
 			t.Errorf("Expected column 3, got %d", pos.Column)
+		}
+	})
+}
+
+func TestGotoModeJumpOverlayAndProjectSelector(t *testing.T) {
+	t.Run("gw jump label index maps to visible cards only", func(t *testing.T) {
+		m := newTestModel()
+
+		// Grow first column beyond visible capacity so flat-index mapping can drift.
+		for i := 0; i < 5; i++ {
+			m.tasks = append(m.tasks, domain.Task{
+				ID:       fmt.Sprintf("open-extra-%d", i),
+				Title:    "Extra Open Task",
+				Status:   domain.StatusOpen,
+				Priority: domain.P3,
+				Type:     domain.TypeTask,
+			})
+		}
+
+		m.height = 24
+		m.nav.SelectTask("az-1", 0)
+		m.editor.EnterGoto()
+
+		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+		m = result.(Model)
+
+		if m.overlayStack.IsEmpty() {
+			t.Fatal("expected jump overlay after g w")
+		}
+		if _, ok := m.overlayStack.Current().(*overlay.JumpMode); !ok {
+			t.Fatalf("expected JumpMode overlay, got %T", m.overlayStack.Current())
+		}
+
+		// With height=24, visible-per-column=3. Index 3 should be first In Progress card (az-3).
+		result, _ = m.Update(overlay.JumpSelectedMsg{TaskIndex: 3})
+		m = result.(Model)
+
+		if got := m.nav.GetCursor().TaskID; got != "az-3" {
+			t.Fatalf("expected visible jump target az-3, got %s", got)
+		}
+	})
+
+	t.Run("gp opens project selector and exits goto mode", func(t *testing.T) {
+		m := newTestModel()
+		m.editor.EnterGoto()
+
+		result, _ := m.handleGotoMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+		m = result.(Model)
+
+		if !m.editor.IsNormal() {
+			t.Fatalf("expected normal mode after g p, got %v", m.editor.GetMode())
+		}
+		if m.overlayStack.IsEmpty() {
+			t.Fatal("expected project selector overlay after g p")
+		}
+		if _, ok := m.overlayStack.Current().(*overlay.ProjectSelector); !ok {
+			t.Fatalf("expected ProjectSelector overlay, got %T", m.overlayStack.Current())
 		}
 	})
 }
@@ -1059,4 +1119,176 @@ func TestModeStrings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestViewModeToggleAlternatesAndPreservesFocus(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.toasts = nil
+	m.nav.SelectTask("az-2", 0)
+
+	if got := m.nav.GetCursor().TaskID; got != "az-2" {
+		t.Fatalf("expected initial focus az-2, got %q", got)
+	}
+	if m.viewMode != ViewModeBoard {
+		t.Fatalf("expected initial board view, got %v", m.viewMode)
+	}
+	if !strings.Contains(m.View(), "VIEW:KAN") {
+		t.Fatalf("expected board status output to include VIEW:KAN, got %q", m.View())
+	}
+
+	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	m = result.(Model)
+	if m.viewMode != ViewModeCompact {
+		t.Fatalf("expected compact view after first tab, got %v", m.viewMode)
+	}
+	if got := m.nav.GetCursor().TaskID; got != "az-2" {
+		t.Fatalf("expected focus to remain az-2 after toggle, got %q", got)
+	}
+	m.toasts = nil
+	if !strings.Contains(m.View(), "VIEW:LST") {
+		t.Fatalf("expected compact status output to include VIEW:LST, got %q", m.View())
+	}
+
+	result, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	m = result.(Model)
+	if m.viewMode != ViewModeBoard {
+		t.Fatalf("expected board view after second tab, got %v", m.viewMode)
+	}
+	if got := m.nav.GetCursor().TaskID; got != "az-2" {
+		t.Fatalf("expected focus to remain az-2 after second toggle, got %q", got)
+	}
+	m.toasts = nil
+	if !strings.Contains(m.View(), "VIEW:KAN") {
+		t.Fatalf("expected board status output to include VIEW:KAN after second toggle, got %q", m.View())
+	}
+}
+
+func TestSortSelectionMsgAppliesSortWithoutActionMenuCollision(t *testing.T) {
+	m := newTestModel()
+	m.editor.SetSort(&domain.Sort{Field: domain.SortBySession, Order: domain.SortAsc})
+
+	selection := overlay.SelectionMsg{
+		Key:   "p",
+		Value: &domain.Sort{Field: domain.SortByPriority, Order: domain.SortDesc},
+	}
+	result, cmd := m.Update(selection)
+	m = result.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected no async command from sort selection")
+	}
+	if got := m.editor.GetSort().Field; got != domain.SortByPriority {
+		t.Fatalf("expected sort field to update to priority, got %q", got)
+	}
+	if got := m.editor.GetSort().Order; got != domain.SortDesc {
+		t.Fatalf("expected sort order to remain desc, got %v", got)
+	}
+
+	for _, toast := range m.toasts {
+		if containsAll(toast.Message, []string{"pause", "session"}) {
+			t.Fatalf("expected sort selection not to trigger session action toast, got %q", toast.Message)
+		}
+	}
+}
+
+func TestSearchFilterSortParityPersistsAcrossViewToggles(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	m.tasks = []domain.Task{
+		{ID: "az-101", Title: "alpha-open-high", Status: domain.StatusOpen, Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-102", Title: "alpha-open-low", Status: domain.StatusOpen, Priority: domain.P3, Type: domain.TypeTask},
+		{ID: "az-103", Title: "alpha-prog-mid", Status: domain.StatusInProgress, Priority: domain.P1, Type: domain.TypeTask},
+		{ID: "az-104", Title: "beta-done", Status: domain.StatusDone, Priority: domain.P0, Type: domain.TypeTask},
+		{ID: "az-105", Title: "alpha-prog-low", Status: domain.StatusInProgress, Priority: domain.P2, Type: domain.TypeTask},
+	}
+	m.nav.SelectTask("az-101", 0)
+
+	// Apply search/filter/sort while on board view.
+	result, _ := m.Update(overlay.SearchMsg{Query: "alpha"})
+	m = result.(Model)
+	filter := m.editor.GetFilter()
+	filter.ToggleStatus(domain.StatusOpen)
+	filter.ToggleStatus(domain.StatusInProgress)
+	m.editor.SetSort(&domain.Sort{Field: domain.SortByPriority, Order: domain.SortAsc})
+
+	initialColumns := m.buildColumns()
+	initialBoardByStatus := boardIDsByStatus(initialColumns)
+	initialCompactByStatus := compactIDsByStatus(m.editor.ApplySort(m.editor.ApplyFilter(m.tasks)))
+	if !reflect.DeepEqual(initialBoardByStatus, initialCompactByStatus) {
+		t.Fatalf("expected board/compact status-order parity, board=%v compact=%v", initialBoardByStatus, initialCompactByStatus)
+	}
+
+	result, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	m = result.(Model)
+	if m.viewMode != ViewModeCompact {
+		t.Fatalf("expected compact view after tab, got %v", m.viewMode)
+	}
+
+	result, _ = m.handleNormalMode(tea.KeyMsg{Type: tea.KeyTab})
+	m = result.(Model)
+	if m.viewMode != ViewModeBoard {
+		t.Fatalf("expected board view after second tab, got %v", m.viewMode)
+	}
+
+	afterColumns := m.buildColumns()
+	afterBoardByStatus := boardIDsByStatus(afterColumns)
+	afterCompactByStatus := compactIDsByStatus(m.editor.ApplySort(m.editor.ApplyFilter(m.tasks)))
+
+	if !reflect.DeepEqual(initialBoardByStatus, afterBoardByStatus) {
+		t.Fatalf("expected board ordering to remain stable across toggles, before=%v after=%v", initialBoardByStatus, afterBoardByStatus)
+	}
+	if !reflect.DeepEqual(initialCompactByStatus, afterCompactByStatus) {
+		t.Fatalf("expected compact ordering semantics to remain stable across toggles, before=%v after=%v", initialCompactByStatus, afterCompactByStatus)
+	}
+	if !reflect.DeepEqual(afterBoardByStatus, afterCompactByStatus) {
+		t.Fatalf("expected board/compact parity after toggles, board=%v compact=%v", afterBoardByStatus, afterCompactByStatus)
+	}
+}
+
+func boardIDsByStatus(columns []board.Column) map[domain.Status][]string {
+	byStatus := map[domain.Status][]string{
+		domain.StatusOpen:       {},
+		domain.StatusInProgress: {},
+		domain.StatusBlocked:    {},
+		domain.StatusDone:       {},
+	}
+
+	if len(columns) > 0 {
+		for _, task := range columns[0].Tasks {
+			byStatus[domain.StatusOpen] = append(byStatus[domain.StatusOpen], task.ID)
+		}
+	}
+	if len(columns) > 1 {
+		for _, task := range columns[1].Tasks {
+			byStatus[domain.StatusInProgress] = append(byStatus[domain.StatusInProgress], task.ID)
+		}
+	}
+	if len(columns) > 2 {
+		for _, task := range columns[2].Tasks {
+			byStatus[domain.StatusBlocked] = append(byStatus[domain.StatusBlocked], task.ID)
+		}
+	}
+	if len(columns) > 3 {
+		for _, task := range columns[3].Tasks {
+			byStatus[domain.StatusDone] = append(byStatus[domain.StatusDone], task.ID)
+		}
+	}
+
+	return byStatus
+}
+
+func compactIDsByStatus(tasks []domain.Task) map[domain.Status][]string {
+	byStatus := map[domain.Status][]string{
+		domain.StatusOpen:       {},
+		domain.StatusInProgress: {},
+		domain.StatusBlocked:    {},
+		domain.StatusDone:       {},
+	}
+
+	for _, task := range tasks {
+		byStatus[task.Status] = append(byStatus[task.Status], task.ID)
+	}
+
+	return byStatus
 }

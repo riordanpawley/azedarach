@@ -96,6 +96,7 @@ type Model struct {
 	// UI state
 	overlayStack *overlay.Stack
 	viewMode     ViewMode
+	jumpTargets  []string // visible task IDs in jump-label order
 
 	// Project
 	currentProject string
@@ -318,6 +319,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Overlay messages
 	case overlay.CloseOverlayMsg:
+		m.jumpTargets = nil
 		m.overlayStack.Pop()
 		return m, nil
 
@@ -584,9 +586,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Close overlay
 		m.overlayStack.Pop()
 
-		// Jump to selected task by flat index
+		if msg.TaskIndex < 0 || msg.TaskIndex >= len(m.jumpTargets) {
+			m.jumpTargets = nil
+			return m, nil
+		}
+
+		// Jump to selected visible task by stable ID mapping.
+		targetTaskID := m.jumpTargets[msg.TaskIndex]
+		m.jumpTargets = nil
 		columns := m.buildColumns()
-		m.nav.JumpToTaskByIndex(columns, msg.TaskIndex)
+		m.nav.JumpToTaskByID(columns, targetTaskID)
 		return m, nil
 
 	case overlay.ProjectSelectedMsg:
@@ -902,7 +911,7 @@ func (m Model) View() string {
 		mainView = m.renderBoardView()
 	}
 
-	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles)
+	sb := statusbar.New(m.editor.GetMode(), m.width, m.styles).WithView(m.currentViewIndicator())
 	statusBarView := sb.Render()
 
 	view := lipgloss.JoinVertical(lipgloss.Left, mainView, statusBarView)
@@ -964,6 +973,13 @@ func (m Model) View() string {
 	}
 
 	return view
+}
+
+func (m Model) currentViewIndicator() string {
+	if m.viewMode == ViewModeCompact {
+		return "LST"
+	}
+	return "KAN"
 }
 
 func (m Model) layer(bottom, top string) string {
@@ -1188,6 +1204,7 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	columns := m.buildColumns()
 	// Always return to normal mode after processing
 	m.editor.EnterNormal()
+	m.jumpTargets = nil
 
 	switch msg.String() {
 	case "g":
@@ -1204,31 +1221,56 @@ func (m Model) handleGotoMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nav.GotoLastColumn(columns)
 	case "w":
 		// Jump mode - quick navigation with labels for VISIBLE tasks only
-		// Calculate visible tasks per column based on screen height
-		// Card height is 6 lines (border + content), minus header and status bar
-		cardHeight := 6
-		availableHeight := m.height - 2 // status bar + column header
-		visiblePerColumn := availableHeight / cardHeight
-		if visiblePerColumn < 1 {
-			visiblePerColumn = 1
-		}
-
-		// Count visible tasks (capped by actual task count per column)
-		visibleCount := 0
-		for _, col := range columns {
-			colVisible := len(col.Tasks)
-			if colVisible > visiblePerColumn {
-				colVisible = visiblePerColumn
-			}
-			visibleCount += colVisible
-		}
-		return m, m.overlayStack.Push(overlay.NewJumpMode(visibleCount))
+		m.jumpTargets = m.buildVisibleJumpTargets(columns)
+		return m, m.overlayStack.Push(overlay.NewJumpMode(len(m.jumpTargets)))
 	case "p":
 		// Project selector
 		return m, m.overlayStack.Push(overlay.NewProjectSelector(m.projectRegistry))
 	}
 
 	return m, nil
+}
+
+func (m Model) buildVisibleJumpTargets(columns []board.Column) []string {
+	const linesPerCard = 6 // card (5) + separating newline
+
+	availableHeight := m.height - 2 // status bar + column header
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+	visiblePerColumn := availableHeight / linesPerCard
+	if visiblePerColumn < 1 {
+		visiblePerColumn = 1
+	}
+
+	pos := m.nav.GetPosition(columns)
+	targets := make([]string, 0, len(columns)*visiblePerColumn)
+
+	for colIdx, col := range columns {
+		startTask := 0
+		if pos.Valid && colIdx == pos.Column {
+			scrollLine := pos.Task * linesPerCard
+			totalLines := len(col.Tasks) * linesPerCard
+			maxOffset := totalLines - availableHeight
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			if scrollLine > maxOffset {
+				scrollLine = maxOffset
+			}
+			startTask = scrollLine / linesPerCard
+		}
+
+		endTask := startTask + visiblePerColumn
+		if endTask > len(col.Tasks) {
+			endTask = len(col.Tasks)
+		}
+		for i := startTask; i < endTask; i++ {
+			targets = append(targets, col.Tasks[i].ID)
+		}
+	}
+
+	return targets
 }
 
 // handleSearchMode processes keyboard input in search mode
@@ -1622,6 +1664,17 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 		return m, nil
+	}
+
+	// Sort menu emits SelectionMsg keys that overlap action menu keys.
+	// Disambiguate by value type so sort selections never trigger task/session actions.
+	if sortState, ok := msg.Value.(*domain.Sort); ok {
+		switch msg.Key {
+		case "s", "p", "u":
+			m.overlayStack.Pop()
+			m.editor.SetSort(sortState)
+			return m, nil
+		}
 	}
 
 	// Close the overlay first
