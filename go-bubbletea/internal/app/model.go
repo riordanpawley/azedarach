@@ -120,7 +120,7 @@ type Model struct {
 	hasRefreshLoop bool
 
 	// Beads client
-	beadsClient *beads.Client
+	issueClient *beads.Client
 
 	// Session management services
 	tmuxClient      *tmux.Client
@@ -168,7 +168,7 @@ func New(cfg *config.Config) Model {
 
 	// Initialize beads client
 	beadsRunner := &beads.ExecRunner{}
-	beadsClient := beads.NewClient(beadsRunner, logger)
+	issueClient := beads.NewClient(beadsRunner, logger)
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}
@@ -236,7 +236,7 @@ func New(cfg *config.Config) Model {
 		config:             cfg,
 		loading:            true, // Start with loading state
 		spinner:            s,
-		beadsClient:        beadsClient,
+		issueClient:        issueClient,
 		tmuxClient:         tmuxClient,
 		worktreeManager:    worktreeManager,
 		sessionMonitor:     sessionMonitor,
@@ -259,7 +259,7 @@ func New(cfg *config.Config) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.spinner.Tick,
-		m.loadBeadsCmd(),
+		m.loadIssuesCmd(),
 		m.gitSyncService.FetchAndCheck(),
 	)
 }
@@ -296,14 +296,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Key == "merge_attach" {
 			m.overlayStack.Pop()
-			beadID := msg.Value.(string)
-			session := m.sessions[beadID]
+			issueID := msg.Value.(string)
+			session := m.sessions[issueID]
 			return m, tea.Batch(
 				m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch),
 				func() tea.Msg {
 					return Toast{
 						Level:   ToastInfo,
-						Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+						Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
 						Expires: time.Now().Add(5 * time.Second),
 					}
 				},
@@ -311,10 +311,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Key == "skip_attach" {
 			m.overlayStack.Pop()
-			beadID := msg.Value.(string)
+			issueID := msg.Value.(string)
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastInfo,
-				Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
@@ -325,7 +325,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetSearchQuery(msg.Query)
 		return m, nil
 
-	case beadsLoadedMsg:
+	case issuesLoadedMsg:
 		wasLoading := m.loading
 		m.tasks = msg.tasks
 		m.loading = false
@@ -334,7 +334,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if wasLoading {
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastSuccess,
-				Message: "Beads loaded",
+				Message: "Issues loaded",
 				Expires: time.Now().Add(3 * time.Second),
 			})
 		}
@@ -345,7 +345,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case beadsErrorMsg:
+	case issuesErrorMsg:
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastError,
 			Message: msg.err.Error(),
@@ -359,7 +359,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Expire old toasts and refresh beads
 		m.expireToasts()
 		return m, tea.Batch(
-			m.loadBeadsCmd(),
+			m.loadIssuesCmd(),
 			m.gitSyncService.FetchAndCheck(),
 		)
 
@@ -367,7 +367,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if session, ok := m.sessions[msg.BeadID]; ok {
 			oldState := session.State
 			session.State = msg.State
-			m.logger.Debug("session state updated", "beadID", msg.BeadID, "state", msg.State)
+			m.logger.Debug("session state updated", "issueID", msg.BeadID, "state", msg.State)
 
 			if oldState != msg.State && msg.State == domain.SessionWaiting {
 				fmt.Print("\a")
@@ -383,7 +383,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionStartedMsg:
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Session started: %s", msg.beadID),
+			Message: fmt.Sprintf("Session started: %s", msg.issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil
@@ -391,7 +391,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionErrorMsg:
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastError,
-			Message: fmt.Sprintf("Session error: %s - %v", msg.beadID, msg.err),
+			Message: fmt.Sprintf("Session error: %s - %v", msg.issueID, msg.err),
 			Expires: time.Now().Add(5 * time.Second),
 		})
 		return m, nil
@@ -440,7 +440,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Successfully merged %s into %s", msg.sourceID, msg.targetID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	case fetchAndMergeResultMsg:
 		if msg.err != nil {
@@ -554,7 +554,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		// Reload beads for new project
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	case overlay.TaskCreatedMsg:
 		m.overlayStack.Pop()
@@ -577,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		// Reload beads to show new task
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	// PR creation overlay messages
 	case overlay.PRCreatedMsg:
@@ -667,15 +667,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 		// Reload beads to reflect changes
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	case branchBehindMsg:
 		if msg.err != nil {
-			m.logger.Warn("failed to check branch distance", "beadID", msg.beadID, "error", msg.err)
+			m.logger.Warn("failed to check branch distance", "issueID", msg.issueID, "error", msg.err)
 			// Proceed to attach anyway if check fails
 			m.toasts = append(m.toasts, Toast{
 				Level:   ToastInfo,
-				Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.beadID),
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.issueID),
 				Expires: time.Now().Add(5 * time.Second),
 			})
 			return m, nil
@@ -683,14 +683,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if msg.commitsBehind > 0 {
 			// Show merge choice overlay
-			m.overlayStack.Push(overlay.NewMergeChoiceOverlay(msg.beadID, msg.commitsBehind, m.config.Git.BaseBranch))
+			m.overlayStack.Push(overlay.NewMergeChoiceOverlay(msg.issueID, msg.commitsBehind, m.config.Git.BaseBranch))
 			return m, nil
 		}
 
 		// Not behind, attach directly
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastInfo,
-			Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.beadID),
+			Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.issueID),
 			Expires: time.Now().Add(5 * time.Second),
 		})
 		return m, nil
@@ -704,7 +704,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.beadID))
+		return m, m.overlayStack.Push(overlay.NewPRCreateOverlay(msg.branch, m.config.Git.BaseBranch, msg.issueID))
 
 	case taskDeletedResultMsg:
 		if msg.err != nil {
@@ -720,7 +720,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Task %s deleted", msg.taskID),
 			Expires: time.Now().Add(2 * time.Second),
 		})
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	case taskStatusResultMsg:
 		if msg.err != nil {
@@ -740,13 +740,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.newStatus == domain.StatusDone {
 			if session, ok := m.sessions[msg.taskID]; ok {
 				return m, tea.Batch(
-					m.loadBeadsCmd(),
+					m.loadIssuesCmd(),
 					m.openPROverlayCmd(session.Worktree, msg.taskID),
 				)
 			}
 		}
 
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 
 	case bulkStatusResultMsg:
 		m.loading = false
@@ -766,7 +766,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
-		return m, m.loadBeadsCmd()
+		return m, m.loadIssuesCmd()
 	}
 
 	return m, nil
@@ -1217,39 +1217,39 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // Message types for async operations
 
-type beadsLoadedMsg struct {
+type issuesLoadedMsg struct {
 	tasks []domain.Task
 }
 
-type beadsErrorMsg struct {
+type issuesErrorMsg struct {
 	err error
 }
 
 type tickMsg time.Time
 
 type sessionStartedMsg struct {
-	beadID       string
+	issueID      string
 	worktreePath string
 }
 
 type sessionErrorMsg struct {
-	beadID string
-	err    error
+	issueID string
+	err     error
 }
 
 // Commands
 
-// loadBeadsCmd returns a command that fetches beads from the CLI
-func (m Model) loadBeadsCmd() tea.Cmd {
+// loadIssuesCmd returns a command that fetches beads from the CLI
+func (m Model) loadIssuesCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		tasks, err := m.beadsClient.List(ctx)
+		tasks, err := m.issueClient.List(ctx)
 		if err != nil {
-			return beadsErrorMsg{err: err}
+			return issuesErrorMsg{err: err}
 		}
-		return beadsLoadedMsg{tasks: tasks}
+		return issuesLoadedMsg{tasks: tasks}
 	}
 }
 
@@ -1260,75 +1260,75 @@ func tickEvery(d time.Duration) tea.Cmd {
 }
 
 // startSessionCmd creates a worktree, tmux session, and starts monitoring
-func (m Model) startSessionCmd(beadID string) tea.Cmd {
+func (m Model) startSessionCmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
 		// Create worktree for the task
 		baseBranch := "main" // TODO: Make configurable
-		worktree, err := m.worktreeManager.Create(ctx, beadID, baseBranch)
+		worktree, err := m.worktreeManager.Create(ctx, issueID, baseBranch)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create worktree: %w", err)}
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create worktree: %w", err)}
 		}
 
 		// Create tmux session
-		err = m.tmuxClient.NewSession(ctx, beadID, worktree.Path)
+		err = m.tmuxClient.NewSession(ctx, issueID, worktree.Path)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create tmux session: %w", err)}
 		}
 
 		// Send Claude command to session
 		claudeCmd := "claude" // TODO: Make configurable or add more context
-		err = m.tmuxClient.SendKeys(ctx, beadID, claudeCmd)
+		err = m.tmuxClient.SendKeys(ctx, issueID, claudeCmd)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to send keys: %w", err)}
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send keys: %w", err)}
 		}
 
 		// Create session record
 		now := time.Now()
 		session := &domain.Session{
-			BeadID:    beadID,
+			BeadID:    issueID,
 			State:     domain.SessionBusy,
 			StartedAt: &now,
 			Worktree:  worktree.Path,
 		}
-		m.sessions[beadID] = session
+		m.sessions[issueID] = session
 
 		// Start monitoring the session
 		// Note: We need a way to pass the tea.Program to the monitor
 		// For now, we'll skip this and implement it properly later
-		// m.sessionMonitor.Start(ctx, beadID, program)
+		// m.sessionMonitor.Start(ctx, issueID, program)
 
-		return sessionStartedMsg{beadID: beadID, worktreePath: worktree.Path}
+		return sessionStartedMsg{issueID: issueID, worktreePath: worktree.Path}
 	}
 }
 
 // stopSessionCmd stops the tmux session, monitoring, and optionally cleans up worktree
-func (m Model) stopSessionCmd(beadID string) tea.Cmd {
+func (m Model) stopSessionCmd(issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
 		// Stop monitoring
-		m.sessionMonitor.Stop(beadID)
+		m.sessionMonitor.Stop(issueID)
 
 		// Kill tmux session
-		err := m.tmuxClient.KillSession(ctx, beadID)
+		err := m.tmuxClient.KillSession(ctx, issueID)
 		if err != nil {
-			return sessionErrorMsg{beadID: beadID, err: fmt.Errorf("failed to kill tmux session: %w", err)}
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to kill tmux session: %w", err)}
 		}
 
 		// Remove session record
-		delete(m.sessions, beadID)
+		delete(m.sessions, issueID)
 
 		// Release port if allocated
-		m.portAllocator.Release(beadID)
+		m.portAllocator.Release(issueID)
 
 		// TODO: Optionally delete worktree (should probably ask user first)
-		// err = m.worktreeManager.Delete(ctx, beadID)
+		// err = m.worktreeManager.Delete(ctx, issueID)
 
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Session stopped: %s", beadID),
+			Message: fmt.Sprintf("Session stopped: %s", issueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
 
@@ -1677,7 +1677,7 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.beadsClient.Delete(ctx, taskID)
+		err := m.issueClient.Delete(ctx, taskID)
 		return taskDeletedResultMsg{taskID: taskID, err: err}
 	}
 }
@@ -1706,7 +1706,7 @@ func (m Model) renderLoading() string {
 	content := lipgloss.JoinVertical(
 		lipgloss.Center,
 		m.spinner.View(),
-		"Loading beads...",
+		"Loading issues...",
 	)
 
 	return lipgloss.Place(
@@ -1746,9 +1746,9 @@ type fetchAndMergeResultMsg struct {
 }
 
 type createPRResultMsg struct {
-	beadID string
-	cmd    string
-	err    error
+	issueID string
+	cmd     string
+	err     error
 }
 
 type showDiffResultMsg struct {
@@ -1780,7 +1780,7 @@ func (m Model) fetchAndMergeCmd(worktree, branch string) tea.Cmd {
 }
 
 // createPRCmd generates the gh pr create command
-func (m Model) createPRCmd(worktree, beadID string) tea.Cmd {
+func (m Model) createPRCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -1788,18 +1788,18 @@ func (m Model) createPRCmd(worktree, beadID string) tea.Cmd {
 		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
 		if err != nil {
 			return createPRResultMsg{
-				beadID: beadID,
-				err:    fmt.Errorf("failed to get current branch: %w", err),
+				issueID: issueID,
+				err:     fmt.Errorf("failed to get current branch: %w", err),
 			}
 		}
 
 		// Generate gh pr create command
-		cmd := fmt.Sprintf("gh pr create --head %s --title \"[%s] ...\" --body \"...\"", branch, beadID)
+		cmd := fmt.Sprintf("gh pr create --head %s --title \"[%s] ...\" --body \"...\"", branch, issueID)
 
 		return createPRResultMsg{
-			beadID: beadID,
-			cmd:    cmd,
-			err:    nil,
+			issueID: issueID,
+			cmd:     cmd,
+			err:     nil,
 		}
 	}
 }
@@ -2017,7 +2017,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			newStatus := statusOrder[newIdx]
 
 			// Update via beads client
-			err := m.beadsClient.Update(ctx, taskID, newStatus)
+			err := m.issueClient.Update(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
 				continue
@@ -2039,7 +2039,7 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Delete(ctx, taskID)
+			err := m.issueClient.Delete(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2060,7 +2060,7 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Archive(ctx, taskID)
+			err := m.issueClient.Archive(ctx, taskID)
 			if err != nil {
 				failed++
 				continue
@@ -2082,7 +2082,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 		failed := 0
 
 		for _, taskID := range taskIDs {
-			err := m.beadsClient.Update(ctx, taskID, status)
+			err := m.issueClient.Update(ctx, taskID, status)
 			if err != nil {
 				failed++
 				continue
@@ -2100,7 +2100,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		defer cancel()
 
 		if msg.ID != "" {
-			err := m.beadsClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
+			err := m.issueClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
 				Title:       msg.Title,
 				Description: msg.Description,
 				Type:        msg.Type,
@@ -2109,7 +2109,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
 		}
 
-		taskID, err := m.beadsClient.Create(ctx, beads.CreateTaskParams{
+		taskID, err := m.issueClient.Create(ctx, beads.CreateTaskParams{
 			Title:       msg.Title,
 			Description: msg.Description,
 			Type:        msg.Type,
@@ -2175,7 +2175,7 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 		newStatus := statusOrder[newIdx]
 
 		// Update via beads client
-		err := m.beadsClient.Update(ctx, taskID, newStatus)
+		err := m.issueClient.Update(ctx, taskID, newStatus)
 		if err != nil {
 			return taskStatusResultMsg{taskID: taskID, err: err}
 		}
@@ -2224,20 +2224,20 @@ type prCreatedResultMsg struct {
 }
 
 type openPROverlayResultMsg struct {
-	branch string
-	beadID string
-	err    error
+	branch  string
+	issueID string
+	err     error
 }
 
 // openPROverlayCmd gets the current branch and opens the PR creation overlay
-func (m Model) openPROverlayCmd(worktree, beadID string) tea.Cmd {
+func (m Model) openPROverlayCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		branch, err := m.gitClient.CurrentBranch(ctx, worktree)
 		if err != nil {
 			return openPROverlayResultMsg{err: err}
 		}
-		return openPROverlayResultMsg{branch: branch, beadID: beadID}
+		return openPROverlayResultMsg{branch: branch, issueID: issueID}
 	}
 }
 
@@ -2263,13 +2263,13 @@ func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
 }
 
 type branchBehindMsg struct {
-	beadID        string
+	issueID       string
 	worktree      string
 	commitsBehind int
 	err           error
 }
 
-func (m Model) checkBranchBehindCmd(worktree, beadID string) tea.Cmd {
+func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -2278,17 +2278,17 @@ func (m Model) checkBranchBehindCmd(worktree, beadID string) tea.Cmd {
 		remote := "origin"
 
 		if err := m.gitClient.Fetch(ctx, worktree, remote); err != nil {
-			return branchBehindMsg{beadID: beadID, worktree: worktree, err: err}
+			return branchBehindMsg{issueID: issueID, worktree: worktree, err: err}
 		}
 
 		revRange := fmt.Sprintf("%s..%s/%s", baseBranch, remote, baseBranch)
 		count, err := m.gitClient.RevListCount(ctx, worktree, revRange)
 		if err != nil {
-			return branchBehindMsg{beadID: beadID, worktree: worktree, err: err}
+			return branchBehindMsg{issueID: issueID, worktree: worktree, err: err}
 		}
 
 		return branchBehindMsg{
-			beadID:        beadID,
+			issueID:       issueID,
 			worktree:      worktree,
 			commitsBehind: count,
 		}
@@ -2318,7 +2318,7 @@ func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		if err := m.devServerManager.Toggle(ctx, serverID); err != nil {
-			return sessionErrorMsg{beadID: serverID, err: err}
+			return sessionErrorMsg{issueID: serverID, err: err}
 		}
 		return nil
 	}
@@ -2339,7 +2339,7 @@ func (m Model) restartDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		if err := m.devServerManager.Restart(ctx, serverID); err != nil {
-			return sessionErrorMsg{beadID: serverID, err: err}
+			return sessionErrorMsg{issueID: serverID, err: err}
 		}
 		return nil
 	}
@@ -2465,23 +2465,23 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	orchOverlay := overlay.NewOrchestrationOverlay(
 		sessions,
 		// onAttach
-		func(beadID string) tea.Cmd {
+		func(issueID string) tea.Cmd {
 			return func() tea.Msg {
 				// Show attach instructions
 				return Toast{
 					Level:   ToastInfo,
-					Message: fmt.Sprintf("Run: tmux attach-session -t %s", beadID),
+					Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
 					Expires: time.Now().Add(5 * time.Second),
 				}
 			}
 		},
 		// onKill
-		func(beadID string) tea.Cmd {
-			return m.stopSessionCmd(beadID)
+		func(issueID string) tea.Cmd {
+			return m.stopSessionCmd(issueID)
 		},
 		// onRefresh
 		func() tea.Cmd {
-			return m.loadBeadsCmd()
+			return m.loadIssuesCmd()
 		},
 	)
 
@@ -2499,7 +2499,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			deleted := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone && task.UpdatedAt.Before(cutoff) {
-					err := m.beadsClient.Delete(ctx, task.ID)
+					err := m.issueClient.Delete(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to delete task", "id", task.ID, "error", err)
 						continue
@@ -2513,7 +2513,7 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			archived := 0
 			for _, task := range m.tasks {
 				if task.Status == domain.StatusDone {
-					err := m.beadsClient.Archive(ctx, task.ID)
+					err := m.issueClient.Archive(ctx, task.ID)
 					if err != nil {
 						m.logger.Warn("failed to archive task", "id", task.ID, "error", err)
 						continue
@@ -2543,14 +2543,14 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			// Clean sessions inactive for >24 hours
 			cleaned := 0
 			cutoff := time.Now().Add(-24 * time.Hour)
-			for beadID, session := range m.sessions {
+			for issueID, session := range m.sessions {
 				if session.StartedAt != nil && session.StartedAt.Before(cutoff) {
 					if session.State == domain.SessionIdle || session.State == domain.SessionPaused {
 						// Stop and clean up stale session
-						m.sessionMonitor.Stop(beadID)
-						_ = m.tmuxClient.KillSession(ctx, beadID)
-						delete(m.sessions, beadID)
-						m.portAllocator.Release(beadID)
+						m.sessionMonitor.Stop(issueID)
+						_ = m.tmuxClient.KillSession(ctx, issueID)
+						delete(m.sessions, issueID)
+						m.portAllocator.Release(issueID)
 						cleaned++
 					}
 				}
