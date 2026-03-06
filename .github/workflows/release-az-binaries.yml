@@ -6,9 +6,32 @@ on:
       - "v*"
 
 jobs:
+  verify-version:
+    name: Verify tag matches package version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag and ts-opentui/package.json version are in sync
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(jq -r '.version' ts-opentui/package.json)"
+
+          if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not match ts-opentui/package.json version ${PACKAGE_VERSION}."
+            echo "::error::Update ts-opentui/package.json or retag the release so both versions match."
+            exit 1
+          fi
+
+          echo "Release tag ${GITHUB_REF_NAME} matches ts-opentui/package.json version ${PACKAGE_VERSION}."
+
   build:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
