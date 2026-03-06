@@ -18,7 +18,6 @@ import { sanitizeDiagnosticInlineText, sanitizeDiagnosticTextLines } from "./dia
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
-const PANEL_CHROME_HEIGHT = 10
 
 /**
  * Format a date as relative time (e.g., "2s ago", "5m ago")
@@ -367,11 +366,6 @@ export const DiagnosticsOverlay = () => {
 		}
 		return null
 	}, [scrollCommandResult])
-	const maxScrollHeight = useMemo(
-		() => Math.max(1, panelHeight - PANEL_CHROME_HEIGHT),
-		[panelHeight],
-	)
-
 	useEffect(() => {
 		if (!scrollboxRef.current || !scrollCommand || scrollCommand.target !== "diagnostics") return
 		if (scrollCommand.type === "line") {
@@ -430,7 +424,6 @@ export const DiagnosticsOverlay = () => {
 				<scrollbox
 					ref={scrollboxRef}
 					scrollY={true}
-					maxHeight={maxScrollHeight}
 					flexDirection="column"
 					flexGrow={1}
 					onMouseScroll={handleMouseScroll}
