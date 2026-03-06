@@ -343,6 +343,27 @@ When an effect recovers from an error (`catch*`, `orElseSucceed`, fallback branc
 - Recovery warnings should explicitly state that recovery is happening, not just print the raw error.
 - Keep existing fallback behavior unchanged; add observability only.
 
+### Session Recovery Retry Design
+
+`BoardService` auto-recovery for crashed sessions is implemented as a scoped singleton worker:
+
+- Crashed sessions are deduplicated and enqueued; refreshes do not spawn ad-hoc recovery fibers.
+- The worker runs in service scope (`forkIn(serviceScope)`) and processes one recovery at a time.
+- Retries use Effect `Schedule` combinators:
+  - `Schedule.exponential`
+  - `Schedule.jittered`
+  - `Schedule.modifyDelay` to cap wait at `sessionRecovery.retryMaxDelayMs`
+- Transient failures are retried indefinitely; terminal failures stop retries for that session.
+- All recovery failures are logged, including failures that are later retried successfully.
+
+### Git Sync Parse Guard
+
+`GitSyncService` parses behind counts from `git rev-list --count ...` using a tagged parse error path.
+
+- Invalid parse output is logged.
+- On parse failure, service falls back to the previous `commitsBehind` value.
+- This prevents `NaN` from entering notification/state flows.
+
 ## Testing Services
 
 Each service has a `*Test` layer for mocking:

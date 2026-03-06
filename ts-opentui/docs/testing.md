@@ -6,7 +6,7 @@ This guide explains how to test each feature of Azedarach.
 
 ```bash
 # Ensure dependencies are installed
-pnpm install
+bun install
 
 # Verify linear is working
 az issue list --output json --compact --all --status=open
@@ -18,7 +18,7 @@ az issue list --output json --compact --all --status=open
 
 ```bash
 # Start the TUI
-pnpm dev
+bun run dev
 ```
 
 **Expected:** Kanban board with your linear issues organized by status.
@@ -49,7 +49,7 @@ pnpm dev
 
 ```bash
 # 1. Start TUI with several tasks visible
-pnpm dev
+bun run dev
 
 # 2. Press 'g' then 'w'
 # Expected: Each task gets a 2-char label (aa, as, ad, etc.)
@@ -118,7 +118,7 @@ tmux list-sessions
 
 ```bash
 # 1. Start Azedarach
-pnpm dev
+bun run dev
 
 # 2. Navigate to the task matching your tmux session (az-05y)
 # 3. Press Space, then 'a'
@@ -226,10 +226,23 @@ Effect.runPromise(program.pipe(
 
 ```bash
 # Verify all types are correct
-pnpm type-check
+bun run type-check
 
 # Expected: No errors
 ```
+
+## Effect Schedule Testing (TestClock)
+
+Auto-recovery retry schedules are validated with non-live Effect tests using `@effect/vitest` and `TestClock`.
+
+```bash
+# Run Effect Vitest schedule tests
+bunx vitest run
+```
+
+Coverage includes:
+- Exponential + jitter retry progression under virtual time
+- Max retry-wait cap behavior (`retryMaxDelayMs`)
 
 ## Common Issues
 
@@ -237,7 +250,7 @@ pnpm type-check
 
 ```bash
 # Ensure dependencies are installed
-pnpm install
+bun install
 ```
 
 ### "TmuxNotFoundError"

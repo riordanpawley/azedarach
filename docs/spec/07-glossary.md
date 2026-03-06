@@ -17,6 +17,10 @@
 - Background operation: long-running tracked action with operation ID and lifecycle state.
 - State probe: side-effect-free machine-readable snapshot surface for E2E automation assertions.
 - Session: AI CLI process context tied to an issue, typically in tmux.
+- Session recovery: workflow that restores crashed persisted sessions back to active tmux-backed execution context.
+- Transient failure: recoverable error class expected to succeed on retry without user mutation of core state.
+- Terminal failure: non-retryable error class that stops automatic retry flow and requires explicit user remediation.
+- Retry max delay cap: upper bound on per-attempt retry wait duration; does not imply a max-attempt budget.
 - Worktree: git worktree tied to issue-specific branch context.
 - Dev server session: issue-scoped long-running app server process.
 - Action mode: modal key prefix for operational commands.
