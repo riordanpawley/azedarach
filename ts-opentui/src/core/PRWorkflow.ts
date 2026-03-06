@@ -1079,6 +1079,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								epicWorktree = yield* worktreeManager.create({
 									issueId: parentEpic.id,
 									issueTitle: parentEpic.title,
+									branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 									projectPath,
 								})
 							}
@@ -2153,6 +2154,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Validate target bead exists (will throw NotFoundError if not)
 						const targetIssue = yield* issueTrackerClient.show(targetIssueId)
+						const gitConfig = yield* getGitConfig()
 
 						// Check if source has a worktree/branch
 						const sourceWorktree = yield* worktreeManager.get({
@@ -2189,6 +2191,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							targetWorktree = yield* worktreeManager.create({
 								issueId: targetIssueId,
 								issueTitle: targetIssue.title,
+								branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 								projectPath,
 							})
 						}

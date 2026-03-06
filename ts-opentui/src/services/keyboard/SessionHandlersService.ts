@@ -582,6 +582,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const projectPath = yield* helpers.getProjectPath()
 					const sessionConfig = yield* appConfig.getSessionConfig()
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
+					const gitConfig = yield* appConfig.getGitConfig()
 					const shell = sessionConfig.shell
 					const existingSessionName = yield* findAiSession(task.id, projectPath)
 					const sessionName = existingSessionName ?? getIssueSessionName(task.id, projectPath)
@@ -598,6 +599,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 							.create({
 								issueId: task.id,
 								issueTitle: task.title,
+								branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 								projectPath,
 							})
 							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))

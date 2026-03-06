@@ -229,6 +229,14 @@ const GitConfigSchema = Schema.Struct({
 	branchPrefix: Schema.optional(Schema.String),
 
 	/**
+	 * Maximum length for title-derived branch slug segment (default: 24)
+	 *
+	 * Applies to the `<slug>` part of `<author>/<slug>`.
+	 * The author prefix is derived from `git config user.name`.
+	 */
+	branchSlugMaxLength: Schema.optional(Schema.Number),
+
+	/**
 	 * Base branch for merges, diffs, and PRs (default: "main")
 	 *
 	 * This is the branch that worktree branches are compared against and merged into.

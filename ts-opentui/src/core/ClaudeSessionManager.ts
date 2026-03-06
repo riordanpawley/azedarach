@@ -532,6 +532,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Get worktree and hooks config early - we need copyPaths and preCompactEnabled for worktree creation
 						const worktreeConfig = yield* appConfig.getWorktreeConfig()
 						const hooksConfig = yield* appConfig.getHooksConfig()
+						const gitConfig = yield* appConfig.getGitConfig()
 
 						let effectiveBaseBranch = explicitBaseBranch
 						let epicWorktreePath: string | undefined
@@ -546,6 +547,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								const epicWorktree = yield* worktreeManager.create({
 									issueId: parentEpic.id,
 									issueTitle: parentEpic.title,
+									branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 									projectPath,
 									// Epic branches from main (no baseBranch = uses current branch)
 									// Epic gets copyPaths from config (copies from main project)
@@ -566,6 +568,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const worktree = yield* worktreeManager.create({
 							issueId: issueId,
 							issueTitle: issue.title,
+							branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 							projectPath,
 							baseBranch: effectiveBaseBranch,
 							sourceWorktreePath: epicWorktreePath,

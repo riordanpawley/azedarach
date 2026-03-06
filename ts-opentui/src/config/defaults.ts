@@ -120,6 +120,7 @@ export const DEFAULT_CONFIG = {
 		pushBranchOnCreate: true,
 		remote: "origin",
 		branchPrefix: "az-",
+		branchSlugMaxLength: 24,
 		baseBranch: "main",
 		pushEnabled: true,
 		fetchEnabled: true,
@@ -262,6 +263,7 @@ export interface ResolvedConfig {
 		pushBranchOnCreate: boolean
 		remote: string
 		branchPrefix: string
+		branchSlugMaxLength: number
 		baseBranch: string
 		pushEnabled: boolean
 		fetchEnabled: boolean
@@ -530,6 +532,8 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			pushBranchOnCreate: config.git?.pushBranchOnCreate ?? DEFAULT_CONFIG.git.pushBranchOnCreate,
 			remote: config.git?.remote ?? DEFAULT_CONFIG.git.remote,
 			branchPrefix: config.git?.branchPrefix ?? DEFAULT_CONFIG.git.branchPrefix,
+			branchSlugMaxLength:
+				config.git?.branchSlugMaxLength ?? DEFAULT_CONFIG.git.branchSlugMaxLength,
 			baseBranch: config.git?.baseBranch ?? DEFAULT_CONFIG.git.baseBranch,
 			pushEnabled: config.git?.pushEnabled ?? DEFAULT_CONFIG.git.pushEnabled,
 			fetchEnabled: config.git?.fetchEnabled ?? DEFAULT_CONFIG.git.fetchEnabled,
