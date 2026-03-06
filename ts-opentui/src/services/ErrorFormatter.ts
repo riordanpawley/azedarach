@@ -279,7 +279,18 @@ const ERROR_FORMATTERS: Record<
 	PRError: (error) => {
 		const message = String(error.message || "")
 
-		// Merge in progress in target repository
+		// Generic git operation in progress in target repository
+		const gitOperationInProgressMatch = message.match(/Git ([a-z-]+) in progress in/i)
+		if (gitOperationInProgressMatch) {
+			const operation = gitOperationInProgressMatch[1]?.toLowerCase() ?? "git operation"
+			return {
+				message: `Target repository has ${operation} in progress`,
+				suggestion: `Try: Continue or abort that ${operation} in the target repo, then retry Space+m`,
+				category: "pr",
+			}
+		}
+
+		// Backward-compat for older merge-only message variant
 		if (message.includes("Merge in progress in")) {
 			return {
 				message: "Merge target already has an active merge",

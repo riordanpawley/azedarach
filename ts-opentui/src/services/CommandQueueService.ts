@@ -13,7 +13,18 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Cause, Data, Deferred, Duration, Effect, Exit, HashMap, Option, SubscriptionRef } from "effect"
+import {
+	Cause,
+	Data,
+	DateTime,
+	Deferred,
+	Duration,
+	Effect,
+	Exit,
+	HashMap,
+	Option,
+	SubscriptionRef,
+} from "effect"
 
 // ============================================================================
 // Type Definitions
@@ -26,7 +37,7 @@ export interface QueuedCommand {
 	readonly id: string
 	readonly taskId: string
 	readonly label: string // e.g. "merge", "cleanup" for display
-	readonly queuedAt: Date
+	readonly queuedAt: DateTime.Utc
 }
 
 /**
@@ -80,6 +91,7 @@ interface InternalQueuedCommand extends QueuedCommand {
 	readonly effect: Effect.Effect<void, unknown, CommandExecutor.CommandExecutor>
 	readonly deferred: Deferred.Deferred<void, CommandTimeoutError | CommandCancelledError>
 	readonly timeout: Duration.Duration
+	readonly startedAt: DateTime.Utc | null
 }
 
 interface InternalTaskQueueState {
@@ -98,6 +110,7 @@ const isCommandTimeoutError = (error: unknown): error is CommandTimeoutError =>
 // ============================================================================
 
 const DEFAULT_TIMEOUT = Duration.minutes(5)
+const STALE_COMMAND_GRACE = Duration.seconds(10)
 
 const generateCommandId = Effect.sync(() => crypto.randomUUID())
 
@@ -155,10 +168,16 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					const [next, ...rest] = queue
 					if (!next) return
 
+					const startedAt = yield* DateTime.now
+					const runningCommand: InternalQueuedCommand = {
+						...next,
+						startedAt,
+					}
+
 					// Mark as running
 					yield* SubscriptionRef.update(stateRef, (s) =>
 						HashMap.set(s, taskId, {
-							running: next,
+							running: runningCommand,
 							queue: rest,
 						}),
 					)
@@ -173,30 +192,28 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// Effect.either only catches expected failures, NOT defects (thrown exceptions)
 							// Effect.exit captures: success, failure, AND defects
 							const result = yield* Effect.exit(
-								next.effect.pipe(
+								runningCommand.effect.pipe(
 									Effect.timeoutFail({
-										duration: next.timeout,
+										duration: runningCommand.timeout,
 										onTimeout: () =>
 											new CommandTimeoutError({
 												taskId,
-												label: next.label,
-												timeout: next.timeout,
+												label: runningCommand.label,
+												timeout: runningCommand.timeout,
 											}),
 									}),
 								),
 							)
 
 							const timeoutError = Exit.isFailure(result)
-								? Cause.failureOption(result.cause).pipe(
-										Option.filter(isCommandTimeoutError),
-									)
+								? Cause.failureOption(result.cause).pipe(Option.filter(isCommandTimeoutError))
 								: Option.none<CommandTimeoutError>()
 
 							if (Option.isSome(timeoutError)) {
 								yield* Effect.logWarning("Command timed out", {
 									taskId,
-									label: next.label,
-									timeout: next.timeout,
+									label: runningCommand.label,
+									timeout: runningCommand.timeout,
 								})
 							}
 
@@ -204,7 +221,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							if (Exit.isFailure(result) && Cause.isDie(result.cause)) {
 								yield* Effect.logError("Command failed with defect (unexpected error)", {
 									taskId,
-									label: next.label,
+									label: runningCommand.label,
 									cause: Cause.pretty(result.cause),
 								})
 							}
@@ -212,10 +229,10 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// Complete the deferred.
 							// Timeout errors propagate to caller so handlers can show a clear message.
 							if (Option.isSome(timeoutError)) {
-								yield* Deferred.fail(next.deferred, timeoutError.value)
+								yield* Deferred.fail(runningCommand.deferred, timeoutError.value)
 							} else {
 								// Caller handles operation errors within their effect via catchAll
-								yield* Deferred.succeed(next.deferred, undefined)
+								yield* Deferred.succeed(runningCommand.deferred, undefined)
 							}
 
 							// Clear running and process next
@@ -264,6 +281,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					Effect.gen(function* () {
 						const { taskId, label, effect, timeout = DEFAULT_TIMEOUT } = options
 						const id = yield* generateCommandId
+						const queuedAt = yield* DateTime.now
 						const deferred = yield* Deferred.make<
 							void,
 							CommandTimeoutError | CommandCancelledError
@@ -273,10 +291,11 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							id,
 							taskId,
 							label,
-							queuedAt: new Date(),
+							queuedAt,
 							effect,
 							deferred,
 							timeout,
+							startedAt: null,
 						}
 
 						// Add to queue
@@ -341,6 +360,61 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							queuedCount: queue.length,
 							queuedLabels: queue.map((c) => c.label),
 						}
+					}),
+
+				/**
+				 * Recover a stale running command that has exceeded timeout + grace period.
+				 *
+				 * This is a safety valve for commands that finish side effects but never clear
+				 * queue state due an interruption edge case.
+				 *
+				 * Returns true when recovery was performed, false otherwise.
+				 */
+				recoverStaleRunning: (
+					taskId: string,
+					options?: { readonly grace?: Duration.DurationInput },
+				): Effect.Effect<boolean, never, never> =>
+					Effect.gen(function* () {
+						const state = yield* SubscriptionRef.get(stateRef)
+						const taskState = HashMap.get(state, taskId)
+						if (taskState._tag === "None") return false
+
+						const running = taskState.value.running
+						if (running === null) return false
+
+						const now = yield* DateTime.now
+						const startedAt = running.startedAt ?? running.queuedAt
+						const elapsedMs = DateTime.distance(startedAt, now)
+						const timeoutMs = Duration.toMillis(running.timeout)
+						const staleGrace = options?.grace ?? STALE_COMMAND_GRACE
+						const staleThresholdMs = timeoutMs + Duration.toMillis(staleGrace)
+						if (elapsedMs <= staleThresholdMs) return false
+
+						const timeoutError = new CommandTimeoutError({
+							taskId,
+							label: running.label,
+							timeout: running.timeout,
+						})
+
+						yield* Deferred.fail(running.deferred, timeoutError)
+
+						yield* SubscriptionRef.update(stateRef, (s) => {
+							const current = HashMap.get(s, taskId)
+							if (current._tag === "None") return s
+							return HashMap.set(s, taskId, {
+								...current.value,
+								running: null,
+							})
+						})
+
+						yield* Effect.logWarning("Recovered stale running command", {
+							taskId,
+							label: running.label,
+							elapsedMs,
+							timeoutMs,
+						})
+
+						return true
 					}),
 
 				/**

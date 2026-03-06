@@ -219,7 +219,24 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 					const queueInfo = yield* commandQueue.getQueueInfo(taskId)
 
 					if (queueInfo.runningLabel !== null) {
-						yield* toast.show("error", `${taskId} is busy (${queueInfo.runningLabel} in progress)`)
+						const recovered = yield* commandQueue.recoverStaleRunning(taskId)
+						if (recovered) {
+							yield* toast.show(
+								"warning",
+								`${taskId} had a stale ${queueInfo.runningLabel} operation; recovered. Retry your action.`,
+							)
+							return false
+						}
+
+						const refreshedQueueInfo = yield* commandQueue.getQueueInfo(taskId)
+						if (refreshedQueueInfo.runningLabel === null) {
+							return false
+						}
+
+						yield* toast.show(
+							"error",
+							`${taskId} is busy (${refreshedQueueInfo.runningLabel} in progress)`,
+						)
 						return true
 					}
 
