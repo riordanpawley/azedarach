@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/assert"
@@ -13,11 +14,37 @@ import (
 
 // mockRunner implements CommandRunner for testing
 type mockRunner struct {
-	output []byte
-	err    error
+	output  []byte
+	err     error
+	outputs [][]byte
+	errs    []error
+	calls   int
 }
 
 func (m *mockRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	callIdx := m.calls
+	m.calls++
+
+	if len(m.outputs) > 0 || len(m.errs) > 0 {
+		var out []byte
+		var err error
+		if len(m.outputs) > 0 {
+			idx := callIdx
+			if idx >= len(m.outputs) {
+				idx = len(m.outputs) - 1
+			}
+			out = m.outputs[idx]
+		}
+		if len(m.errs) > 0 {
+			idx := callIdx
+			if idx >= len(m.errs) {
+				idx = len(m.errs) - 1
+			}
+			err = m.errs[idx]
+		}
+		return out, err
+	}
+
 	return m.output, m.err
 }
 
@@ -375,4 +402,88 @@ func TestClient_ErrorWrapping(t *testing.T) {
 		assert.Equal(t, "az-123", trackerErr.IssueID)
 		assert.Contains(t, err.Error(), "az-123")
 	})
+}
+
+func TestClient_ListRetriesLockContention(t *testing.T) {
+	runner := &mockRunner{
+		outputs: [][]byte{
+			nil,
+			[]byte(`[{"id":"az-1","title":"Task","status":"open","priority":1,"type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}]`),
+		},
+		errs: []error{
+			errors.New("database is locked"),
+			nil,
+		},
+	}
+	client := NewClient(runner, slog.Default())
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	tasks, err := client.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, 2, runner.calls)
+}
+
+func TestClient_UpdateDoesNotRetryNonLockErrors(t *testing.T) {
+	runner := &mockRunner{
+		errs: []error{errors.New("permission denied")},
+	}
+	client := NewClient(runner, slog.Default())
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	err := client.Update(context.Background(), "AZE-136", domain.StatusDone)
+	require.Error(t, err)
+	assert.Equal(t, 1, runner.calls)
+}
+
+func TestClient_UpdateLockContentionExhaustedIncludesAttemptCount(t *testing.T) {
+	runner := &mockRunner{
+		errs: []error{
+			errors.New("database is locked"),
+			errors.New("database is locked"),
+			errors.New("database is locked"),
+		},
+	}
+	client := NewClient(runner, slog.Default())
+	client.maxAttempts = 3
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	err := client.Update(context.Background(), "AZE-136", domain.StatusDone)
+	require.Error(t, err)
+	var trackerErr *domain.IssueTrackerError
+	require.ErrorAs(t, err, &trackerErr)
+	require.Error(t, trackerErr.Err)
+	assert.Contains(t, trackerErr.Err.Error(), "after 3 attempts")
+	assert.Equal(t, 3, runner.calls)
+}
+
+func TestClient_CreateDoesNotRetryOnLockContention(t *testing.T) {
+	runner := &mockRunner{
+		outputs: [][]byte{
+			nil,
+			[]byte(`{"id":"az-999"}`),
+		},
+		errs: []error{
+			errors.New("database is locked"),
+			nil,
+		},
+	}
+	client := NewClient(runner, slog.Default())
+	client.retryDelay = 0
+	client.sleep = func(context.Context, time.Duration) error { return nil }
+
+	_, err := client.Create(context.Background(), CreateTaskParams{
+		Title:    "Lock-sensitive create",
+		Type:     domain.TypeTask,
+		Priority: domain.P2,
+	})
+	require.Error(t, err)
+	var trackerErr *domain.IssueTrackerError
+	require.ErrorAs(t, err, &trackerErr)
+	require.Error(t, trackerErr.Err)
+	assert.Contains(t, trackerErr.Err.Error(), "prevent duplicate writes")
+	assert.Equal(t, 1, runner.calls)
 }

@@ -3,22 +3,31 @@ package linear
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
 // Client wraps the issues CLI for task management operations
 type Client struct {
-	runner CommandRunner
-	logger *slog.Logger
+	runner      CommandRunner
+	logger      *slog.Logger
+	maxAttempts int
+	retryDelay  time.Duration
+	sleep       func(context.Context, time.Duration) error
 }
 
 // NewClient creates a new Linear client with dependency injection
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	return &Client{
-		runner: runner,
-		logger: logger,
+		runner:      runner,
+		logger:      logger,
+		maxAttempts: 3,
+		retryDelay:  50 * time.Millisecond,
+		sleep:       sleepWithContext,
 	}
 }
 
@@ -26,7 +35,7 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 	c.logger.Debug("fetching issues list")
 
-	out, err := c.runner.Run(ctx, "az", "issue", "list", "--json")
+	out, err := c.runIssueCommand(ctx, "list", true, false, "list", "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "list", Err: err}
 	}
@@ -44,7 +53,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
 	c.logger.Debug("searching issues", "query", query)
 
-	out, err := c.runner.Run(ctx, "az", "issue", "search", query, "--json")
+	out, err := c.runIssueCommand(ctx, "search", true, false, "search", query, "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "search", Message: query, Err: err}
 	}
@@ -62,7 +71,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 	c.logger.Debug("fetching ready issues")
 
-	out, err := c.runner.Run(ctx, "az", "issue", "ready", "--json")
+	out, err := c.runIssueCommand(ctx, "ready", true, false, "ready", "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "ready", Err: err}
 	}
@@ -80,7 +89,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
 	c.logger.Debug("updating issue status", "id", id, "status", status)
 
-	_, err := c.runner.Run(ctx, "az", "issue", "update", id, "--status="+string(status))
+	_, err := c.runIssueCommand(ctx, "update", true, false, "update", id, "--status="+string(status))
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "update", IssueID: id, Err: err}
 	}
@@ -110,7 +119,7 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 		args = append(args, "--parent", *params.ParentID)
 	}
 
-	out, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
+	out, err := c.runIssueCommand(ctx, "create", false, true, args...)
 	if err != nil {
 		return "", &domain.IssueTrackerError{Op: "create", Message: params.Title, Err: err}
 	}
@@ -142,7 +151,7 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
 		args = append(args, "--reason="+reason)
 	}
 
-	_, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
+	_, err := c.runIssueCommand(ctx, "close", true, false, args...)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "close", IssueID: id, Err: err}
 	}
@@ -154,7 +163,7 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
 func (c *Client) Delete(ctx context.Context, id string) error {
 	c.logger.Debug("deleting issue", "id", id)
 
-	_, err := c.runner.Run(ctx, "az", "issue", "delete", id)
+	_, err := c.runIssueCommand(ctx, "delete", true, false, "delete", id)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "delete", IssueID: id, Err: err}
 	}
@@ -167,7 +176,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 func (c *Client) Archive(ctx context.Context, id string) error {
 	c.logger.Debug("archiving issue", "id", id)
 
-	_, err := c.runner.Run(ctx, "az", "issue", "archive", id)
+	_, err := c.runIssueCommand(ctx, "archive", true, false, "archive", id)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "archive", IssueID: id, Err: err}
 	}
@@ -194,11 +203,94 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 	args = append(args, "--type="+string(params.Type))
 	args = append(args, "--priority="+string(rune('0'+params.Priority)))
 
-	_, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
+	_, err := c.runIssueCommand(ctx, "update-details", true, false, args...)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "update-details", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("issue details updated", "id", id)
 	return nil
+}
+
+func (c *Client) runIssueCommand(
+	ctx context.Context,
+	op string,
+	retryOnLock bool,
+	preventDuplicateWrites bool,
+	issueArgs ...string,
+) ([]byte, error) {
+	attempts := 1
+	if retryOnLock {
+		attempts = c.maxAttempts
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	args := append([]string{"issue"}, issueArgs...)
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		out, err = c.runner.Run(ctx, "az", args...)
+		if err == nil {
+			return out, nil
+		}
+		if !isLockContentionError(err) {
+			return nil, err
+		}
+
+		if preventDuplicateWrites {
+			return nil, fmt.Errorf(
+				"lock contention during %s; auto-retry disabled to prevent duplicate writes: %w",
+				op,
+				err,
+			)
+		}
+
+		if attempt == attempts {
+			return nil, fmt.Errorf("lock contention during %s after %d attempts: %w", op, attempts, err)
+		}
+
+		delay := c.retryDelay * time.Duration(attempt)
+		if delay <= 0 {
+			delay = time.Millisecond
+		}
+		if sleepErr := c.sleep(ctx, delay); sleepErr != nil {
+			return nil, fmt.Errorf("lock retry backoff interrupted during %s: %w", op, sleepErr)
+		}
+	}
+
+	return nil, err
+}
+
+func isLockContentionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	indicators := []string{
+		"database is locked",
+		"failed to acquire lock",
+		"lock timeout",
+		"resource busy",
+		"another process",
+		"busy timeout",
+	}
+	for _, indicator := range indicators {
+		if strings.Contains(msg, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
