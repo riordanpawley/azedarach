@@ -49,7 +49,8 @@
 - Sort mode: ordering mode for issue display.
 - PR: pull request associated with issue branch.
 - Cleanup: deletion of worktree and optionally closure of issue.
-- Yolo start: session start variant that skips permissions prompts.
+- Skip-permission start: session start variant (`Space !`) that skips permissions prompts.
+- Yolo start: legacy alias for skip-permission start; normative docs SHOULD prefer "skip-permission start".
 - Planning overlay: natural-language workflow creating epic/task structures.
 - Attachment: image artifact linked to an issue.
 - Connection state: availability state for remote/network-dependent operations.
@@ -63,12 +64,14 @@
   - Closed: completed/verified work.
 
 - Session status:
-  - Idle: no active session.
-  - Busy: active execution.
-  - Waiting: session needs user input.
-  - Done: execution finished.
-  - Error: execution failed.
-  - Paused: execution intentionally suspended.
+  - Canonical enum values: `idle`, `busy`, `waiting`, `done`, `error`, `paused`.
+  - Display labels may use title-case words and shorthand tokens (`I/U/W/D/X/P`) but MUST map to canonical enum values.
+  - `idle` (Idle): derived presentation state when no active session is detected; the detector pipeline itself emits `busy`/`waiting`/`done`/`error`/`paused`.
+  - `busy` (Busy): active execution.
+  - `waiting` (Waiting): session needs user input.
+  - `done` (Done): execution finished.
+  - `error` (Error): execution failed.
+  - `paused` (Paused): execution intentionally suspended.
 
 ## Requirement/Acceptance IDs
 

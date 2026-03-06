@@ -63,7 +63,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Task operations: move status, edit, create, fork, filter, sort, search
 - Bulk-select ergonomics: invert-visible selection, in-mode clear, hidden-selection awareness, and frozen target previews for destructive actions
 - Epic workflows: child-board drill-down, progress header, and epic detail parity
-- Session workflows: start, start+work, yolo start, chat, attach, pause, resume, stop
+- Session workflows: start, start+work, skip-permission start (legacy alias: yolo start), chat, attach, pause, resume, stop
 - Dev server workflows: toggle, view, restart, per-worktree ports
 - Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge source issue branch into target issue branch
 - Branch-origin workflows: runtime choice between base branch and eligible upstream source branch

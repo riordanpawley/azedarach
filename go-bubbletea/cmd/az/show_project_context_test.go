@@ -149,3 +149,65 @@ func TestRunCLIShowJSONProjectContextResolvesSiblingWorktreeToRegisteredBaseProj
 		)
 	}
 }
+
+func TestRunCLIShowJSONProjectContextFallsBackToDefaultRegisteredProject(t *testing.T) {
+	workspaceRoot := setupProjectCommandSandbox(t)
+	defaultProjectPath := createProjectGitRepoAt(t, workspaceRoot, "azedarach-main")
+	writeProjectsRegistryForTest(t, []config.Project{
+		{Name: "azedarach-main", Path: defaultProjectPath},
+	}, "azedarach-main")
+
+	unregisteredPath := filepath.Join(workspaceRoot, "outside-registered-project")
+	if err := os.MkdirAll(unregisteredPath, 0o755); err != nil {
+		t.Fatalf("failed to create unregistered path %q: %v", unregisteredPath, err)
+	}
+	if err := os.Chdir(unregisteredPath); err != nil {
+		t.Fatalf("failed to change directory to unregistered path %q: %v", unregisteredPath, err)
+	}
+
+	stubShowDependencies(t, func(requestedID string) ([]domain.Task, error) {
+		return []domain.Task{
+			{
+				ID:       requestedID,
+				Title:    "Default project fallback context",
+				Status:   domain.StatusOpen,
+				Priority: domain.P2,
+				Type:     domain.TypeTask,
+			},
+		}, nil
+	})
+
+	exitCode, stdout, stderr := runCLIForTest([]string{"show", "AZE-102", "--json"})
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %q)", exitCode, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	var envelope struct {
+		Project struct {
+			ID              string `json:"id"`
+			Path            string `json:"path"`
+			CanonicalDBPath string `json:"canonicalDbPath"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("expected valid JSON output, got parse error: %v\noutput:\n%s", err, stdout)
+	}
+
+	expectedCanonicalDBPath := filepath.Join(defaultProjectPath, ".azedarach", "azedarach.db")
+	if !samePathForTest(envelope.Project.Path, defaultProjectPath) {
+		t.Fatalf("expected project.path=%q, got %q", defaultProjectPath, envelope.Project.Path)
+	}
+	if envelope.Project.ID != "azedarach-main" {
+		t.Fatalf("expected project.id=azedarach-main, got %q", envelope.Project.ID)
+	}
+	if !samePathForTest(envelope.Project.CanonicalDBPath, expectedCanonicalDBPath) {
+		t.Fatalf(
+			"expected project.canonicalDbPath=%q, got %q",
+			expectedCanonicalDBPath,
+			envelope.Project.CanonicalDBPath,
+		)
+	}
+}

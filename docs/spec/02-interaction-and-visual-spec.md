@@ -157,6 +157,7 @@ Submenus:
 - `D` done
 - `X` error
 - `P` paused
+- canonical status values for storage/probe/filter contracts remain lowercase (`idle|busy|waiting|done|error|paused`); submenu labels are display shortcuts
 
 Combination logic:
 

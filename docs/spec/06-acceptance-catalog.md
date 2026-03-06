@@ -233,7 +233,7 @@ Canonical fixture profile names:
 - Expected: session starts with default work instruction that uses `az prime` before `az show <issue-id>` for canonical context retrieval.
 - Links: AZ-FR-0802, AZ-FR-4204, AZ-FR-4226, AZ-FR-4227.
 
-### AZ-AT-0703 Yolo start variant
+### AZ-AT-0703 Skip-permission start variant (legacy yolo alias)
 
 - Steps: `Space !`.
 - Expected: start variant uses skip-permission mode and is visibly acknowledged.

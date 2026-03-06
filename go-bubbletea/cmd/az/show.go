@@ -682,6 +682,18 @@ func showProjectContext() H2ProjectContext {
 				}
 			}
 		}
+
+		// Fall back to the default registered project when cwd/worktree resolution fails.
+		if projectPath == cwd {
+			if defaultProject := registry.GetDefault(); defaultProject != nil {
+				projectPath = defaultProject.Path
+				if strings.TrimSpace(defaultProject.Name) != "" {
+					projectID = defaultProject.Name
+				} else {
+					projectID = filepath.Base(defaultProject.Path)
+				}
+			}
+		}
 	}
 
 	return H2ProjectContext{

@@ -30,12 +30,12 @@ Workflows are written as behavior contracts, not implementation details.
 6. spawn/ensure task tmux session
 7. construct agent bootstrap command guidance using top-level `az` contract for the active issue/project context
 8. launch selected AI CLI command
-9. reflect session state as busy/idle/waiting as telemetry arrives
+9. reflect session state as busy/waiting/done/error/paused as telemetry arrives; derive idle only when no active session is detected
 
 ### Variants
 
 - `Space S` injects default work prompt
-- `Space !` injects skip-permissions mode
+- `Space !` injects skip-permission mode
 - `Space c` launches chat-oriented profile
 
 ### Agent Bootstrap Prompt Contract
@@ -446,7 +446,9 @@ Rules:
 
 ### Mapping
 
-- detected states update card indicators and optional notifications
+- canonical session status enum values are `idle`, `busy`, `waiting`, `done`, `error`, `paused`
+- detector maps runtime signals to `busy|waiting|done|error|paused`; when no active signal is present, state resolves to `idle`
+- UI indicators (for example `I/U/W/D/X/P`) are display labels and MUST map back to canonical enum values
 
 ### Typical Triggers
 
@@ -492,7 +494,7 @@ sequenceDiagram
 
 - merge to base branch
 - full cleanup with issue closure
-- yolo start mode
+- skip-permission start mode (`Space !`, legacy alias: yolo start)
 - bulk destructive operations
 
 These workflows MUST include explicit user feedback and safety checks.
