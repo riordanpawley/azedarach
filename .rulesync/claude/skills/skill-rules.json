@@ -3,7 +3,7 @@
 	"metadata": {
 		"project": "Azedarach",
 		"description": "Auto-activating skills configuration for Azedarach TUI",
-		"lastUpdated": "2026-03-04"
+		"lastUpdated": "2026-03-07"
 	},
 	"skills": [
 		{
@@ -56,6 +56,53 @@
 					"Use linear-cli issue commands for multi-session tracking",
 					"Configure default team once in .azedarach.json when possible",
 					"Write notes for resumability (COMPLETED, IN PROGRESS, NEXT, BLOCKERS)"
+				]
+			}
+		},
+		{
+			"id": "spec-maintenance",
+			"name": "Spec Maintenance",
+			"path": ".claude/skills/workflow/spec-maintenance.skill.md",
+			"type": "workflow",
+			"priority": "high",
+			"confidence": {
+				"required": 0.68,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": [
+					"docs/spec/*.md",
+					"ts-opentui/src/**/*.ts",
+					"ts-opentui/src/**/*.tsx"
+				],
+				"contentPatterns": [
+					"docs/spec/",
+					"AZ-FR-",
+					"AZ-AT-",
+					"Case F-",
+					"workflowStates",
+					"acceptance catalog"
+				],
+				"keywords": [
+					"update spec",
+					"spec follow-up",
+					"docs/spec",
+					"acceptance criteria",
+					"requirement mapping",
+					"az-fr",
+					"az-at",
+					"edge case",
+					"failure spec",
+					"keep spec up to date"
+				]
+			},
+			"affinities": ["linear-tracking"],
+			"affinity_threshold": 0.5,
+			"validation": {
+				"enforces": [
+					"Behavioral code changes in ts-opentui update relevant docs/spec sections",
+					"New AZ-FR requirements map to acceptance coverage in docs/spec/06-acceptance-catalog.md",
+					"Spec updates pass duplicate-ID consistency checks for AZ-FR, AZ-AT, and Case F IDs"
 				]
 			}
 		},

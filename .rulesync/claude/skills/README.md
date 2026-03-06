@@ -38,7 +38,8 @@ This directory implements an **auto-activating skills system** that combines:
 │   └── bubbletea-patterns.skill.md
 │
 ├── workflow/                    # Workflow skills
-│   └── linear-tracking.skill.md  # Issue tracking workflow
+│   ├── linear-tracking.skill.md   # Issue tracking workflow
+│   └── spec-maintenance.skill.md  # Spec sync workflow
 │
 └── resources/                   # Progressive disclosure (detailed docs)
     └── linear/
@@ -72,6 +73,7 @@ This directory implements an **auto-activating skills system** that combines:
 ### Workflow Skills
 Development workflow and process patterns:
 - **linear-tracking** - Issue tracking, resumability, multi-session work
+- **spec-maintenance** - Keep docs/spec aligned with behavior changes
 
 ### Effect Skills (ts-opentui only)
 Effect framework and TypeScript patterns:
