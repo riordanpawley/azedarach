@@ -23,7 +23,7 @@ Purpose: Claude Code entry point for Go/Bubbletea Azedarach development
 
 3. **Issue Tracking**: ALWAYS start with `az prime`, then use `az issue` for issue operations.
 
-4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams. Use normal git pull/push flow for synchronization. When already in the target worktree, use plain `git` commands; use `git -C <path>` only when intentionally targeting a different path.
+4. **Branch Workflow**: Respect repo mode. In `git.workflowMode: "local"` (or when remote git is disabled), avoid remote sync/cleanup flows (`git pull --rebase`, `git push`) unless explicitly requested. In `git.workflowMode: "origin"`, use normal pull/push synchronization. When already in the target worktree, use plain `git` commands; use `git -C <path>` only when intentionally targeting a different path.
 
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
