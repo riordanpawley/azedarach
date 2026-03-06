@@ -1801,12 +1801,32 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		_ = session
 		return m, m.probeSessionMismatchCmd(task.ID, "attach")
 	case "p":
-		// TODO: Pause session
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if session.State == domain.SessionPaused {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Session already paused: %s", task.ID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		session.State = domain.SessionPaused
+		if m.sessionMonitor != nil {
+			m.sessionMonitor.Stop(task.ID)
+		}
 		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Pause session (TODO)",
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Session paused: %s", task.ID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		return m, nil
 	case "x":
 		// Stop session
 		if session != nil {
@@ -1819,12 +1839,32 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 	case "R":
-		// TODO: Resume session
+		if session == nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: "No active session for this task",
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		if session.State != domain.SessionPaused {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Session is not paused: %s", task.ID),
+				Expires: time.Now().Add(3 * time.Second),
+			})
+			return m, nil
+		}
+		session.State = domain.SessionBusy
+		if m.sessionMonitor != nil {
+			m.sessionMonitor.Start(context.Background(), task.ID, nil)
+		}
 		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Resume session (TODO)",
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Session resumed: %s", task.ID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		return m, nil
 
 	// Git actions
 	case "u":

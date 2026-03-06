@@ -645,6 +645,87 @@ func TestActionMenuSpaceThenChatVariantIncludesChatBootstrapGuidance(t *testing.
 	}
 }
 
+func TestActionMenuSpaceThenPTransitionsBusySessionToPaused(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd != nil {
+		t.Fatal("expected pause transition to run synchronously")
+	}
+
+	session := m.sessions["az-1"]
+	if session == nil {
+		t.Fatal("expected session indicator to remain after pause")
+	}
+	if session.State != domain.SessionPaused {
+		t.Fatalf("expected session state paused, got %v", session.State)
+	}
+}
+
+func TestActionMenuSpaceThenRTransitionsPausedSessionToBusy(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionPaused,
+		Worktree: "/tmp/az-1",
+	}
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd != nil {
+		t.Fatal("expected resume transition to run synchronously")
+	}
+
+	session := m.sessions["az-1"]
+	if session == nil {
+		t.Fatal("expected session indicator to remain after resume")
+	}
+	if session.State != domain.SessionBusy {
+		t.Fatalf("expected session state busy after resume, got %v", session.State)
+	}
+}
+
+func TestActionMenuSpaceThenXStopsSessionAndRemovesIndicator(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	tmuxRunner := &tmuxScriptRunner{}
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.Default())
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected stop command for x action")
+	}
+	if msg := cmd(); msg != nil {
+		if _, isErr := msg.(sessionErrorMsg); isErr {
+			t.Fatalf("expected stop command success, got error msg: %#v", msg)
+		}
+	}
+
+	if _, ok := m.sessions["az-1"]; ok {
+		t.Fatal("expected session indicator to be removed after stop")
+	}
+	if len(tmuxRunner.killedSessions) != 1 || tmuxRunner.killedSessions[0] != "az-1" {
+		t.Fatalf("expected tmux kill-session for az-1, got %v", tmuxRunner.killedSessions)
+	}
+}
+
 func TestOpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
 	m := newTestModel()
 
