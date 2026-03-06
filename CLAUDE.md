@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 1.0.0
-Updated: 2025-12-21
+Version: 1.1.0
+Updated: 2026-03-07
 Purpose: Root entry point - redirects to app-specific context
 -->
 
@@ -88,6 +88,8 @@ make test               # Run tests
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
 6. **Git Restore**: NEVER use `git restore` without EXPLICIT user permission.
+
+7. **ts-opentui Spec Sync Rule**: For `ts-opentui` behavior changes, update `docs/spec/` in the same task or record `Spec impact: none` with explicit file-based rationale in issue notes. Use the workflow spec-maintenance skill to execute this consistently.
 
 ## RuleSync Workflow
 

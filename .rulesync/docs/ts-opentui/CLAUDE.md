@@ -1,7 +1,7 @@
 <!--
 File: CLAUDE.md
-Version: 2.2.0
-Updated: 2025-12-21
+Version: 2.3.0
+Updated: 2026-03-07
 Purpose: Claude Code entry point for Azedarach development
 -->
 
@@ -116,6 +116,12 @@ Purpose: Claude Code entry point for Azedarach development
       command: `${shell} -i -c 'PORT=3000 pnpm run dev; exec ${shell}'`,
     })
     ```
+
+14. **Spec Sync Required for ts-opentui Behavior Changes**:
+    - If a task changes `ts-opentui` product behavior (user-visible flow, workflow semantics, validation, state/status transitions, failure/retry handling, or release-gate expectations), update `docs/spec/` in the same task.
+    - If no spec edit is needed, add an explicit issue note with `Spec impact: none` and a concrete rationale tied to changed files.
+    - Use the workflow spec-maintenance skill to drive analysis and validation: `.claude/skills/workflow/spec-maintenance.skill.md`.
+    - Do not close work as complete until spec updates (or a justified no-impact note) are recorded.
 
 ## Quick Commands
 

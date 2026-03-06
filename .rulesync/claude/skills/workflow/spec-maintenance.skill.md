@@ -1,7 +1,15 @@
 # Spec Maintenance Skill
 
-**Version:** 1.0
+**Version:** 1.1
 **Purpose:** Keep `docs/spec/` synchronized with `ts-opentui` behavior changes using a dedicated Spec Sync subagent.
+
+## Mandatory Policy
+
+For `ts-opentui`, this workflow is required whenever behavior contracts may change. Every such task must end with exactly one documented outcome:
+- `docs/spec/` updated to match behavior changes, or
+- issue notes contain `Spec impact: none` with file-specific justification proving the change is implementation-only.
+
+Do not mark work complete without one of these outcomes.
 
 ## When To Use
 
@@ -15,6 +23,8 @@ Typical triggers:
 - edits in `ts-opentui/src/`
 - edits in `docs/spec/`
 - requests mentioning "spec", "acceptance", "AZ-FR", "AZ-AT", or "docs/spec"
+
+If a trigger appears, assume spec review is required unless you can explicitly prove "implementation-only" scope.
 
 ## Subagent + Skill Combo
 
@@ -36,6 +46,8 @@ The subagent must update linked sections where needed:
 - range/cross-reference updates (`06` and `08`)
 - top-level invariant (`README`) only when cross-cutting
 
+If no section changes are needed, the subagent must produce a concise no-impact rationale tied to changed files.
+
 ### 3) Review and Merge
 
 Before accepting the patch:
@@ -43,6 +55,21 @@ Before accepting the patch:
 - verify no new acceptance scenario without FR link
 - verify ID ranges still match actual IDs
 - verify duplicate ID checks pass
+
+### 4) Record Spec Outcome in Issue
+
+Before completion, add a short "spec follow-up" note:
+- If spec changed: list updated spec files and key ID deltas (AZ-FR/AZ-AT/Case F).
+- If no spec change: include `Spec impact: none`, changed code files, and why behavior contracts did not change.
+
+Suggested no-impact template:
+
+```text
+Spec follow-up:
+- Spec impact: none
+- Changed files: <file1>, <file2>
+- Rationale: <why change is implementation-only and does not alter behavior contract>
+```
 
 ## Integration Checklist
 
@@ -68,9 +95,12 @@ This skill is complete when:
 - FR/AT/F-case IDs and ranges are internally consistent
 - issue notes include a "spec follow-up" summary for resumability
 
+When no spec edit is needed, completion instead requires a `Spec impact: none` note with file-specific rationale.
+
 ## Anti-Patterns
 
 - Adding only one bullet to `docs/spec/README.md` while skipping normative sections
 - Creating new `AZ-FR-*` without acceptance coverage
 - Extending release-gate ranges without adding corresponding scenarios
 - Renumbering existing IDs for cosmetic ordering
+- Skipping spec updates without a `Spec impact: none` issue note

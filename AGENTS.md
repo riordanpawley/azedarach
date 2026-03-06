@@ -1,7 +1,7 @@
 <!--
 File: AGENTS.md
-Version: 1.3.0
-Updated: 2026-03-05
+Version: 1.4.0
+Updated: 2026-03-07
 Purpose: OpenCode entry point - references CLAUDE.md for full context
 -->
 <ai_context version="1.0" tool="opencode">
@@ -29,6 +29,7 @@ This file provides a condensed reference for OpenCode sessions.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 5. **RuleSync Canonical Source**: Edit managed instruction assets in `.rulesync/` and sync, not direct edits in generated targets.
 6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
+7. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 
 ## Quick Commands
 
@@ -131,6 +132,7 @@ Both are configured in `opencode.json`.
 - ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
+- ✅ For `ts-opentui` behavior changes, update `docs/spec/` or document `Spec impact: none` with concrete file-based rationale
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
 
 ## Landing the Plane (Session Completion)
