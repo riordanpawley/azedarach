@@ -33,10 +33,10 @@ import {
 } from "../core/IssueTrackerClient.js"
 import {
 	SessionManager,
-	InvalidStateError,
-	SessionError,
-	SessionLimitError,
-	SessionNotFoundError,
+	type InvalidStateError,
+	type SessionError,
+	type SessionLimitError,
+	type SessionNotFoundError,
 } from "../core/SessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"

@@ -359,6 +359,7 @@ On failure, logs SHOULD capture:
 - exit code/stdout/stderr snippets (sanitized)
 - timestamp
 - for linear sync queue failures, attempt counter, retry delay vs terminal failure decision, and known external Linear issue ID
+- for linear metadata fetch failures, endpoint name, requested page size, and provider validation error details (for example over-cap page size rejections)
 
 ## 5.19 Startup and Shutdown Edge Cases
 
