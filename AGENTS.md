@@ -1,43 +1,44 @@
 <!--
-File: AGENTS.md
-Version: 1.4.0
+File: CONTEXT.md
+Version: 2.0.0
 Updated: 2026-03-07
-Purpose: OpenCode entry point - references CLAUDE.md for full context
+Purpose: Canonical root AI context source synced to AGENTS.md and CLAUDE.md
 -->
-<ai_context version="1.0" tool="opencode">
+
+<ai_context version="1.0" tool="shared">
 
 # Azedarach Project Context
 
 > TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
+## Entrypoint Generation
+
+This file is the canonical root context source in `.rulesync/docs/`.
+
+RuleSync mapping fans this one file out to:
+- `AGENTS.md` (OpenCode/Codex entrypoint filename)
+- `CLAUDE.md` (Claude Code entrypoint filename)
+
 ## Instructions Reference
 
 **This repository has multiple implementations:**
 
-- **ts-opentui/** → [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** → [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
+- **ts-opentui/** -> [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
+- **go-bubbletea/** -> [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
 
 Select the implementation based on user request or current working directory.
 
-This file provides a condensed reference for OpenCode sessions.
-
-## Why This Exists Alongside `CLAUDE.md`
-
-This repository intentionally keeps both files:
-- `AGENTS.md` is the OpenCode/Codex entrypoint.
-- `CLAUDE.md` is the Claude Code entrypoint.
-
-RuleSync can generate both targets from a single source, so this split is a content strategy choice, not a generator limitation. We keep separate source files in `.rulesync/docs/` because framing and metadata can differ by runtime, and we may want independent edits without coupling both entrypoints.
-
 ## Critical Rules (Quick Reference)
 
-1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any' (ts-opentui only).
-2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed).
+1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use `as` casting or `any` (ts-opentui only).
+2. **Modern CLI Tools**: Use `rg` (not grep), `fd` (not find), `sd` (not sed), and `bat` (not cat).
 3. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 5. **RuleSync Canonical Source**: Edit managed instruction assets in `.rulesync/` and sync, not direct edits in generated targets.
 6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
-7. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
+7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
+8. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
+9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 
 ## Quick Commands
 
@@ -59,11 +60,11 @@ rg "pattern" --type ts            # Search content (NOT grep)
 fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
-az prime                                                 # Session primer + AI workflow guide
+az prime                          # Session primer + AI workflow guide
 
 # RuleSync
-just rulesync-sync                                       # Sync managed files from .rulesync/
-just rulesync-check                                      # Verify managed files are in sync
+just rulesync-sync                # Sync managed files from .rulesync/
+just rulesync-check               # Verify managed files are in sync
 ```
 
 ## RuleSync Workflow
@@ -97,13 +98,25 @@ go-bubbletea/
 │   ├── app/          # Bubbletea application logic
 │   ├── services/     # Business logic (Linear, Tmux, Git)
 │   ├── types/        # Domain models
-│   └── ui/          # Bubbletea UI components
+│   └── ui/           # Bubbletea UI components
 └── docs/             # Documentation
 ```
 
 **Stacks:**
 - **ts-opentui**: TypeScript, OpenTUI + React, Effect, tmux, az issue tracker
 - **go-bubbletea**: Go, Bubbletea, Lip Gloss, tmux, az issue tracker
+
+## Decision Matrix
+
+When user requests work, use this matrix to decide which implementation to work on:
+
+| Request | Implementation | Rationale |
+|---------|---------------|------------|
+| Default / unspecified | ts-opentui/ | Primary, most mature |
+| "TypeScript", "Bun", "Effect" | ts-opentui/ | Tech-specific match |
+| "Go", "Bubbletea" | go-bubbletea/ | Tech-specific match |
+| "Gleam", "Erlang", "BEAM" | gleam/ | Experimental match |
+| Explicit app folder mentioned | That folder | User-specified |
 
 ## Task Management
 
@@ -114,17 +127,6 @@ go-bubbletea/
 - Any task expected to take more than one command MUST be tracked in the issue tracker.
 - Keep one active parent issue per session whenever possible.
 - If subagents are used, each subagent MUST create and maintain a child issue under the active parent issue, and close it when that subagent task is done.
-
-## OpenCode Plugins
-
-This project uses two OpenCode plugins:
-
-1. **opencode-pty** - PTY integration
-2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
-
-Both are configured in `opencode.json`.
-
-</ai_context>
 
 ## Issue Tracking Policy
 
@@ -165,3 +167,24 @@ Both are configured in `opencode.json`.
 - When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
 - Avoid remote git flows unless explicitly requested.
 - Never auto-run pull/rebase/push as part of completion.
+
+## Shared Skills
+
+This repository has shared skills in `.claude/skills/` that apply to all implementations:
+
+- **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
+- **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
+- **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
+
+See `.claude/skills/README.md` for skill documentation.
+
+## OpenCode Plugins
+
+This project uses two OpenCode plugins:
+
+1. **opencode-pty** - PTY integration
+2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
+
+Both are configured in `opencode.json`.
+
+</ai_context>

@@ -18,14 +18,14 @@ Current managed targets:
 - `ts-opentui/CLAUDE.md`
 - `go-bubbletea/CLAUDE.md`
 
-## Why Both `AGENTS.md` and `CLAUDE.md` Exist
+## Unified Root Context Source
 
-RuleSync can fan out a single source file to multiple targets. In this repo, we currently keep both files in `.rulesync/docs/` by choice:
+Root entrypoint files are now unified to a single canonical source:
 
-- `AGENTS.md` is the OpenCode/Codex-facing entrypoint.
-- `CLAUDE.md` is the Claude Code-facing entrypoint.
+- Source: `.rulesync/docs/CONTEXT.md`
+- Targets: `AGENTS.md` and `CLAUDE.md`
 
-The core workflow policy is shared, but each file has tool-specific framing and metadata (for example the `<ai_context ... tool=\"...\">` header and tool-oriented guidance), and we allow them to evolve independently when needed. If we decide that divergence is no longer useful, `mappings.tsv` can be collapsed to a single shared source.
+`mappings.tsv` fans out this one source to both runtime entrypoint filenames.
 
 ## Commands
 
