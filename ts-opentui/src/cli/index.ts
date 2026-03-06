@@ -456,7 +456,7 @@ const statusHandler = (args: {
 				continue
 			}
 
-			const parsed = parseIssueSessionName(name)
+			const parsed = parseIssueSessionName(name, process.cwd())
 			if (parsed?.type === "issue") {
 				sessionCount++
 				const statusDisplay = status || "unknown"
@@ -1203,9 +1203,9 @@ const listTmuxSessionNames = Effect.gen(function* () {
 		.filter((line) => line.length > 0)
 })
 
-const findSessionByIssueId = (issueId: string) =>
+const findSessionByIssueId = (issueId: string, projectPath: string = process.cwd()) =>
 	Effect.gen(function* () {
-		const canonicalSessionName = getIssueSessionName(issueId)
+		const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
 		const canonicalExitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
 			Effect.catchAll(() => Effect.succeed(1)),
@@ -1217,7 +1217,7 @@ const findSessionByIssueId = (issueId: string) =>
 
 		const sessionNames = yield* listTmuxSessionNames
 		for (const sessionName of sessionNames) {
-			const parsed = parseIssueSessionName(sessionName)
+			const parsed = parseIssueSessionName(sessionName, projectPath)
 			if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
 				return sessionName
 			}
@@ -1356,7 +1356,7 @@ const hooksInstallHandler = (args: {
 		}
 
 		// Generate and merge hook configuration
-		const hookConfig = generateHookConfig(issueId)
+		const hookConfig = generateHookConfig(issueId, { projectPath: process.cwd() })
 		const mergedSettings = deepMerge(existingSettings, hookConfig)
 
 		// Write merged settings

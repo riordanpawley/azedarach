@@ -44,6 +44,14 @@ export interface Worktree {
  */
 export interface CreateWorktreeOptions {
 	readonly issueId: string
+	/**
+	 * Human-friendly issue title used for branch name generation.
+	 *
+	 * When provided, branch names are derived from this title instead of the
+	 * internal issue ID. The first generated branch for an issue is persisted
+	 * and reused for future operations.
+	 */
+	readonly issueTitle?: string
 	readonly baseBranch?: string
 	readonly projectPath: string
 	/**
@@ -124,7 +132,8 @@ export interface WorktreeManagerService {
 	 * Create a new worktree for a bead
 	 *
 	 * Idempotent: if worktree already exists at expected path, returns existing worktree info.
-	 * Creates a new branch named after the issueId from baseBranch (defaults to current branch).
+	 * Creates/reuses a stable mapped branch name derived from issue title.
+	 * Falls back to issueId-derived mapping when title is unavailable.
 	 *
 	 * @example
 	 * ```ts
@@ -292,6 +301,32 @@ const branchExists = (
 		)
 	})
 
+/**
+ * Check if a branch exists locally or on origin.
+ */
+const branchExistsAnywhere = (
+	branchName: string,
+	projectPath: string,
+): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const localExists = yield* branchExists(branchName, projectPath)
+		if (localExists) {
+			return true
+		}
+
+		const command = Command.make(
+			"git",
+			"rev-parse",
+			"--verify",
+			`refs/remotes/origin/${branchName}`,
+		).pipe(Command.workingDirectory(projectPath))
+
+		return yield* Command.exitCode(command).pipe(
+			Effect.map((code) => code === 0),
+			Effect.catchAll(() => Effect.succeed(false)),
+		)
+	})
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -329,8 +364,117 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		// TTL cache for worktree refresh - avoid repeated git worktree list calls
 		// Supports multiple projects for fast project switching
 		const WORKTREE_CACHE_TTL_MS = 2000
+		const BRANCH_NAME_MAP_RELATIVE_PATH = ".azedarach/branch-name-map.json"
 		// Map from projectPath to timestamp
 		const cacheTimestampRef = yield* Ref.make<Map<string, number>>(new Map())
+
+		const slugifyIssueTitle = (title: string): string => {
+			const base = title
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-+|-+$/g, "")
+
+			if (base.length === 0) {
+				return "task"
+			}
+
+			const MAX_BASE_LENGTH = 24
+			return base.slice(0, MAX_BASE_LENGTH).replace(/-+$/g, "") || "task"
+		}
+
+		const getBranchNameMapPath = (projectPath: string): string =>
+			pathService.join(projectPath, BRANCH_NAME_MAP_RELATIVE_PATH)
+
+		const readBranchNameMap = (
+			projectPath: string,
+		): Effect.Effect<Record<string, string>, never, never> =>
+			Effect.gen(function* () {
+				const mapPath = getBranchNameMapPath(projectPath)
+				const exists = yield* fs.exists(mapPath)
+				if (!exists) {
+					return {}
+				}
+
+				const raw = yield* fs
+					.readFileString(mapPath)
+					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+				const parsed = yield* Effect.try({
+					try: () => JSON.parse(raw) as unknown,
+					catch: () => ({}),
+				})
+
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					return {}
+				}
+
+				const entries = Object.entries(parsed)
+				const map: Record<string, string> = {}
+				for (const [key, value] of entries) {
+					if (typeof value === "string" && value.length > 0) {
+						map[key] = value
+					}
+				}
+
+				return map
+			}).pipe(Effect.catchAll(() => Effect.succeed({})))
+
+		const writeBranchNameMap = (
+			projectPath: string,
+			map: Record<string, string>,
+		): Effect.Effect<void, never, never> =>
+			Effect.gen(function* () {
+				const mapPath = getBranchNameMapPath(projectPath)
+				const mapDir = pathService.dirname(mapPath)
+				yield* fs.makeDirectory(mapDir, { recursive: true }).pipe(Effect.ignore)
+				yield* fs
+					.writeFileString(mapPath, JSON.stringify(map, null, "\t"))
+					.pipe(Effect.catchAll(() => Effect.void))
+			})
+
+		const getOrCreateBranchName = (options: {
+			issueId: string
+			issueTitle?: string
+			projectPath: string
+		}): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				const { issueId, issueTitle, projectPath } = options
+				const branchMap = yield* readBranchNameMap(projectPath)
+
+				const existing = branchMap[issueId]
+				if (existing) {
+					return existing
+				}
+
+				const baseSlug = slugifyIssueTitle(issueTitle ?? issueId)
+				const reserved = new Set(Object.values(branchMap))
+
+				for (let attempt = 0; attempt < 1000; attempt++) {
+					const suffix = attempt === 0 ? "" : `-${attempt + 1}`
+					const maxBaseLength = Math.max(1, 40 - suffix.length)
+					const trimmedBase = baseSlug.slice(0, maxBaseLength).replace(/-+$/g, "") || "task"
+					const candidate = `${trimmedBase}${suffix}`
+
+					if (reserved.has(candidate)) {
+						continue
+					}
+
+					const existsInGit = yield* branchExistsAnywhere(candidate, projectPath)
+					if (existsInGit) {
+						continue
+					}
+
+					const nextMap = { ...branchMap, [issueId]: candidate }
+					yield* writeBranchNameMap(projectPath, nextMap)
+					return candidate
+				}
+
+				return yield* Effect.fail(
+					new GitError({
+						message: `Failed to allocate unique branch name for ${issueId}`,
+						command: "git rev-parse --verify",
+					}),
+				)
+			})
 
 		/**
 		 * Copy untracked files/directories to a new worktree
@@ -574,15 +718,15 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				const normalizedPath = pathService.resolve(path)
-				let issueId = branch
-				if (!issueId) {
-					const lastPart = pathService.basename(normalizedPath)
-					if (lastPart.startsWith(projectNamePrefix) && lastPart.length > projectNamePrefix.length) {
-						issueId = lastPart.slice(projectNamePrefix.length)
-					} else {
-						const match = lastPart.match(/-([A-Za-z0-9]+[.-][A-Za-z0-9._-]+)$/)
-						issueId = match?.[1] ?? ""
-					}
+				const lastPart = pathService.basename(normalizedPath)
+				let issueId = ""
+				if (lastPart.startsWith(projectNamePrefix) && lastPart.length > projectNamePrefix.length) {
+					issueId = lastPart.slice(projectNamePrefix.length)
+				} else if (branch) {
+					issueId = branch
+				} else {
+					const match = lastPart.match(/-([A-Za-z0-9]+[.-][A-Za-z0-9._-]+)$/)
+					issueId = match?.[1] ?? ""
 				}
 
 				if (issueId && normalizedPath !== normalizedProjectPath) {
@@ -675,6 +819,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					Effect.gen(function* () {
 						const {
 							issueId,
+							issueTitle,
 							baseBranch,
 							projectPath,
 							sourceWorktreePath,
@@ -682,66 +827,69 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							preCompactEnabled,
 						} = options
 
-					// Determine effective source for copying untracked files
-					// If sourceWorktreePath is provided (e.g., epic worktree), use that
-					// Otherwise fall back to the main project path
-					const effectiveSourcePath = sourceWorktreePath ?? projectPath
+						// Determine effective source for copying untracked files
+						// If sourceWorktreePath is provided (e.g., epic worktree), use that
+						// Otherwise fall back to the main project path
+						const effectiveSourcePath = sourceWorktreePath ?? projectPath
 
-					// Check if git repo
-					const isRepo = yield* isGitRepo(projectPath)
-					if (!isRepo) {
-						return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
-					}
+						// Check if git repo
+						const isRepo = yield* isGitRepo(projectPath)
+						if (!isRepo) {
+							return yield* Effect.fail(new NotAGitRepoError({ path: projectPath }))
+						}
 
-					// Get expected worktree path
-					const worktreePath = getWorktreePath(projectPath, issueId)
+						// Get expected worktree path
+						const worktreePath = getWorktreePath(projectPath, issueId)
 
-					// Refresh cache and check if already exists
-					yield* refreshWorktrees(projectPath)
-					const allWorktrees = yield* Ref.get(worktreesRef)
-					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
-					const existingWorktree = projectWorktrees.get(issueId)
+						// Refresh cache and check if already exists
+						yield* refreshWorktrees(projectPath)
+						const allWorktrees = yield* Ref.get(worktreesRef)
+						const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
+						const existingWorktree = projectWorktrees.get(issueId)
 
-					if (existingWorktree) {
-						// Idempotent: worktree already exists
-						return existingWorktree
-					}
+						if (existingWorktree) {
+							// Idempotent: worktree already exists
+							return existingWorktree
+						}
 
-					// Check if branch already exists (e.g., from a previously deleted worktree)
-					const hasBranch = yield* branchExists(issueId, projectPath)
+						const branchName = yield* getOrCreateBranchName({ issueId, issueTitle, projectPath })
 
-					if (hasBranch) {
-						// Branch exists - create worktree using the existing branch
-						// git worktree add <path> <branch-name>
-						yield* Effect.logInfo(`Branch ${issueId} already exists, reusing it for worktree`)
-						yield* runGit(["worktree", "add", worktreePath, issueId], projectPath)
-					} else {
-						// Branch doesn't exist - create new branch and worktree
-						// git worktree add -b <branch-name> <path> <start-point>
-						const base = baseBranch || (yield* getCurrentBranch(projectPath))
-						yield* runGit(["worktree", "add", "-b", issueId, worktreePath, base], projectPath)
-					}
+						// Check if branch already exists (e.g., from a previously deleted worktree)
+						const hasBranch = yield* branchExists(branchName, projectPath)
 
-					// Copy Claude's local settings and inject hook configuration
-					// Use effectiveSourcePath so child tasks inherit settings from epic worktree
-					yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, issueId, {
-						preCompactEnabled,
-					})
+						if (hasBranch) {
+							// Branch exists - create worktree using the existing branch
+							// git worktree add <path> <branch-name>
+							yield* Effect.logInfo(`Branch ${branchName} already exists, reusing it for worktree`)
+							yield* runGit(["worktree", "add", worktreePath, branchName], projectPath)
+						} else {
+							// Branch doesn't exist - create new branch and worktree
+							// git worktree add -b <branch-name> <path> <start-point>
+							const base = baseBranch || (yield* getCurrentBranch(projectPath))
+							yield* runGit(["worktree", "add", "-b", branchName, worktreePath, base], projectPath)
+						}
 
-					// Copy configured untracked files from source to new worktree
-					// Default copyPaths includes [".direnv"] for Nix flake cache
-					// When copyPaths is provided, it overrides the default (caller should include .direnv if needed)
-					const effectiveCopyPaths = copyPaths ?? [".direnv"]
-					yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
+						// Copy Claude's local settings and inject hook configuration
+						// Use effectiveSourcePath so child tasks inherit settings from epic worktree
+						yield* copyClaudeLocalSettings(effectiveSourcePath, worktreePath, issueId, {
+							preCompactEnabled,
+							projectPath,
+						})
 
-					// Refresh cache and look for the new worktree with retry logic.
-					// Git worktree list can sometimes miss newly created worktrees due to
-					// filesystem sync timing issues, especially on macOS APFS. We retry
-					// a few times with short delays to handle this race condition.
-					const findNewWorktree = Effect.gen(function* () {
-						yield* forceRefreshWorktrees(projectPath)
-						const allUpdated = yield* Ref.get(worktreesRef)
-						const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+						// Copy configured untracked files from source to new worktree
+						// Default copyPaths includes [".direnv"] for Nix flake cache
+						// When copyPaths is provided, it overrides the default (caller should include .direnv if needed)
+						const effectiveCopyPaths = copyPaths ?? [".direnv"]
+						yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
+
+						// Refresh cache and look for the new worktree with retry logic.
+						// Git worktree list can sometimes miss newly created worktrees due to
+						// filesystem sync timing issues, especially on macOS APFS. We retry
+						// a few times with short delays to handle this race condition.
+						const findNewWorktree = Effect.gen(function* () {
+							yield* forceRefreshWorktrees(projectPath)
+							const allUpdated = yield* Ref.get(worktreesRef)
+							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
 							const newWorktree = projectUpdated.get(issueId)
 
 							if (!newWorktree) {
@@ -753,16 +901,16 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								})
 							}
 							return newWorktree
-					})
+						})
 
-					// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
-					const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
+						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
+						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
 
-					const result = yield* findNewWorktree.pipe(
-						Effect.retry({
-							schedule: retrySchedule,
-							while: (e) => e._tag === "NotFound",
-						}),
+						const result = yield* findNewWorktree.pipe(
+							Effect.retry({
+								schedule: retrySchedule,
+								while: (e) => e._tag === "NotFound",
+							}),
 							Effect.catchIf(
 								(e): e is { _tag: "NotFound"; foundIssueIds: string[]; cacheSize: number } =>
 									"_tag" in e && e._tag === "NotFound",
@@ -778,16 +926,16 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 									return Effect.fail(
 										new GitError({
 											message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
-											command: `git worktree add ${worktreePath} ${issueId}`,
+											command: `git worktree add ${worktreePath}`,
 										}),
 									)
 								},
-						),
-					)
+							),
+						)
 
-					return result
-				}).pipe(Effect.withSpan("worktree.create")),
-			),
+						return result
+					}).pipe(Effect.withSpan("worktree.create")),
+				),
 
 			remove: (options: { issueId: string; projectPath: string }) =>
 				Effect.gen(function* () {

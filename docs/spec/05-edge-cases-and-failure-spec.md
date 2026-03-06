@@ -44,7 +44,7 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 ### Case F-011: Attach requested but no session found
 
 - Required behavior:
-  - show non-blocking toast with issue ID and expected session name.
+  - show non-blocking toast with issue ID and expected project-prefixed session name.
   - keep board focus unchanged.
 
 ### Case F-012: Pause requested for already stopped session

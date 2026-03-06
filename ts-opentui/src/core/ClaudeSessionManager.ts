@@ -24,8 +24,13 @@ import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
-import { IssueTrackerClient, type IssueTrackerError, type NotFoundError, type ParseError } from "./IssueTrackerClient.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
+import {
+	IssueTrackerClient,
+	type IssueTrackerError,
+	type NotFoundError,
+	type ParseError,
+} from "./IssueTrackerClient.js"
 import {
 	getIssueSessionName,
 	getWorktreePath,
@@ -540,6 +545,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								// This is idempotent - if worktree already exists, it returns the existing one
 								const epicWorktree = yield* worktreeManager.create({
 									issueId: parentEpic.id,
+									issueTitle: parentEpic.title,
 									projectPath,
 									// Epic branches from main (no baseBranch = uses current branch)
 									// Epic gets copyPaths from config (copies from main project)
@@ -547,7 +553,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									preCompactEnabled: hooksConfig.preCompact.enabled,
 								})
 								// Use the epic branch as base for the child task
-								effectiveBaseBranch = parentEpic.id
+								effectiveBaseBranch = epicWorktree.branch
 								epicWorktreePath = epicWorktree.path
 								yield* Effect.log(`Child task ${issueId} will branch from epic ${parentEpic.id}`)
 							}
@@ -559,6 +565,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// - Regular tasks: copy from main project (projectPath fallback)
 						const worktree = yield* worktreeManager.create({
 							issueId: issueId,
+							issueTitle: issue.title,
 							projectPath,
 							baseBranch: effectiveBaseBranch,
 							sourceWorktreePath: epicWorktreePath,
@@ -583,7 +590,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const toolDef = getToolDefinition(cliTool)
 
 						// Generate tmux session name (just the issueId)
-						const tmuxSessionName = getIssueSessionName(issueId)
+						const tmuxSessionName = getIssueSessionName(issueId, projectPath)
 
 						// Check if bead session already exists
 						const hasSession = yield* tmuxService.hasSession(tmuxSessionName)
@@ -961,7 +968,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})
 
-						const tmuxSessionName = getIssueSessionName(issueId)
+						const tmuxSessionName = getIssueSessionName(issueId, session.projectPath)
 						const { tmuxPrefix, backgroundTasks } = sessionConfig
 
 						// Get initCommands: merge worktree config + tool-specific init commands
@@ -1054,7 +1061,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
 
 						for (const tmuxSession of tmuxSessions) {
-							const parsed = parseIssueSessionName(tmuxSession.name)
+							const parsed = parseIssueSessionName(tmuxSession.name, effectiveProjectPath)
 							if (!parsed || parsed.type !== "issue") continue
 
 							const issueId = parsed.issueId

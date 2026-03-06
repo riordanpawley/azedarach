@@ -24,10 +24,10 @@ Workflows are written as behavior contracts, not implementation details.
 2. if task branch is missing, present runtime branch-origin chooser:
    - create from configured base branch
    - create from selected upstream-related issue branch (when eligible sources exist)
-3. ensure task-scoped branch exists and is checked out
+3. ensure task-scoped branch exists and is checked out using stable title-based branch mapping for the issue
 4. optionally sync tracker state for new context
 5. update issue status to in_progress when needed
-6. spawn/ensure task tmux session
+6. spawn/ensure task tmux session using deterministic project-prefixed session naming
 7. launch selected AI CLI command
 8. reflect session state as busy/idle/waiting as telemetry arrives
 

@@ -80,11 +80,17 @@ export const getAzPreCompactPath = (): string => AZ_PRE_COMPACT_PATH
  *
  * @param event - Hook event type
  * @param issueId - Bead ID for the session
+ * @param projectPath - Optional project path for project-prefixed session IDs
  * @param azNotifyPath - Optional absolute path to az-notify.sh (auto-detected if not provided)
  */
-const buildNotifyCommand = (event: string, issueId: string, azNotifyPath?: string): string => {
+const buildNotifyCommand = (
+	event: string,
+	issueId: string,
+	projectPath?: string,
+	azNotifyPath?: string,
+): string => {
 	const notifyPath = azNotifyPath ?? getAzNotifyPath()
-	const sessionName = getIssueSessionName(issueId)
+	const sessionName = getIssueSessionName(issueId, projectPath)
 	// Use the shell script directly - no bun/node overhead
 	return `"${notifyPath}" ${event} "${issueId}" "${sessionName}"`
 }
@@ -106,6 +112,8 @@ const buildPreCompactCommand = (issueId: string, azPreCompactPath?: string): str
 export interface HookConfigOptions {
 	/** Whether to include the PreCompact hook (default: true) */
 	preCompactEnabled?: boolean
+	/** Optional project path for project-prefixed session IDs */
+	projectPath?: string
 	/** Optional absolute path to az-notify.sh (auto-detected if not provided) */
 	azNotifyPath?: string
 	/** Optional absolute path to az-pre-compact.sh (auto-detected if not provided) */
@@ -156,7 +164,7 @@ export const WORKTREE_PERMISSIONS = {
  * @returns Hook and permission configuration object to merge into settings.local.json
  */
 export const generateHookConfig = (issueId: string, options: HookConfigOptions = {}) => {
-	const { preCompactEnabled = true, azNotifyPath, azPreCompactPath } = options
+	const { preCompactEnabled = true, projectPath, azNotifyPath, azPreCompactPath } = options
 
 	// Build the hooks object with required hooks
 	const hooks: Record<string, unknown[]> = {
@@ -167,7 +175,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("user_prompt", issueId, azNotifyPath),
+						command: buildNotifyCommand("user_prompt", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},
@@ -179,7 +187,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("pretooluse", issueId, azNotifyPath),
+						command: buildNotifyCommand("pretooluse", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},
@@ -190,7 +198,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("idle_prompt", issueId, azNotifyPath),
+						command: buildNotifyCommand("idle_prompt", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},
@@ -200,7 +208,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("permission_request", issueId, azNotifyPath),
+						command: buildNotifyCommand("permission_request", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},
@@ -210,7 +218,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("stop", issueId, azNotifyPath),
+						command: buildNotifyCommand("stop", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},
@@ -220,7 +228,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 				hooks: [
 					{
 						type: "command",
-						command: buildNotifyCommand("session_end", issueId, azNotifyPath),
+						command: buildNotifyCommand("session_end", issueId, projectPath, azNotifyPath),
 					},
 				],
 			},

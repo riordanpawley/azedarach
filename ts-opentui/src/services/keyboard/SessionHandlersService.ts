@@ -287,8 +287,11 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						chatModel,
 					})
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
+					const projectPath = yield* helpers
+						.getProjectPath()
+						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
 
-					const sessionName = yield* findAiSession(task.id)
+					const sessionName = yield* findAiSession(task.id, projectPath)
 
 					if (!sessionName) {
 						yield* toast.show(
@@ -311,9 +314,9 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						)
 				})
 
-			const findAiSession = (issueId: string) =>
+			const findAiSession = (issueId: string, projectPath?: string) =>
 				Effect.gen(function* () {
-					const canonicalSessionName = getIssueSessionName(issueId)
+					const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
 					if (hasCanonicalSession) {
 						return canonicalSessionName
@@ -321,7 +324,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 					const sessions = yield* tmux.listSessions()
 					for (const session of sessions) {
-						const parsed = parseIssueSessionName(session.name)
+						const parsed = parseIssueSessionName(session.name, projectPath)
 						if (parsed?.type === "issue" && issueIdsEqualForLookup(parsed.issueId, issueId)) {
 							return session.name
 						}
@@ -332,7 +335,10 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 			const doAttach = (issueId: string) =>
 				Effect.gen(function* () {
-					const sessionName = yield* findAiSession(issueId)
+					const projectPath = yield* helpers
+						.getProjectPath()
+						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
+					const sessionName = yield* findAiSession(issueId, projectPath)
 					if (!sessionName) {
 						yield* toast.show("error", `No session for ${issueId} - press Space+s to start`)
 						return
@@ -571,8 +577,8 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 					const sessionConfig = yield* appConfig.getSessionConfig()
 					const worktreeConfig = yield* appConfig.getWorktreeConfig()
 					const shell = sessionConfig.shell
-					const existingSessionName = yield* findAiSession(task.id)
-					const sessionName = existingSessionName ?? getIssueSessionName(task.id)
+					const existingSessionName = yield* findAiSession(task.id, projectPath)
+					const sessionName = existingSessionName ?? getIssueSessionName(task.id, projectPath)
 
 					// Check if session already exists
 					const hasSession = yield* tmux.hasSession(sessionName)
@@ -585,6 +591,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						const worktree = yield* worktreeManager
 							.create({
 								issueId: task.id,
+								issueTitle: task.title,
 								projectPath,
 							})
 							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))

@@ -318,7 +318,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Get target branch (epic branch for children, main otherwise)
 				const { targetBranch } = yield* prWorkflow
-					.getTargetBranch(task.id)
+					.getTargetBranch(task.id, projectPath)
 					.pipe(Effect.catchAll(() => Effect.succeed({ targetBranch: "main", isEpicChild: false })))
 
 				// Check for uncommitted changes in worktree BEFORE merge

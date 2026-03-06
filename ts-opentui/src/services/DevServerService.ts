@@ -12,8 +12,8 @@ import {
 } from "effect"
 import { AppConfig } from "../config/index.js"
 import {
-	getIssueSessionName,
 	getDevWindowName,
+	getIssueSessionName,
 	getWorktreePath,
 	parseDevWindowName,
 	parseIssueSessionName,
@@ -216,16 +216,16 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		}
 
 		const discoverDevServers = (
-			_currentProjectPath: string,
+			currentProjectPath: string,
 		): Effect.Effect<DiscoveryResult, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const sessions = yield* tmux.listSessions()
 				let servers: DevServersState = HashMap.empty()
 				const issuePorts = new Map<string, Record<string, number>>()
 
-					for (const session of sessions) {
-						const parsed = parseIssueSessionName(session.name)
-						if (!parsed || parsed.type !== "issue") continue
+				for (const session of sessions) {
+					const parsed = parseIssueSessionName(session.name, currentProjectPath)
+					if (!parsed || parsed.type !== "issue") continue
 
 					// First try to restore from tmux metadata
 					const metadataOpt = yield* readTmuxMetadata(session.name)
@@ -587,7 +587,7 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					: (Object.values(issuePorts)[0] ?? 3000)
 
 				// Use canonical session name and window naming
-				const tmuxSessionName = getIssueSessionName(issueId)
+				const tmuxSessionName = getIssueSessionName(issueId, projectPath)
 				const windowName = getDevWindowName(name)
 				const targetWindow = `${tmuxSessionName}:${windowName}`
 				const cwd = srvConfig?.cwd ? pathService.join(worktreePath, srvConfig.cwd) : worktreePath
