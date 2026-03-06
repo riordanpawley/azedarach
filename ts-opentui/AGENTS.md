@@ -6,6 +6,7 @@ Use **`az issue`** for issue tracking commands.
 Track any task that takes more than one command in the issue tracker.
 Keep one active parent issue per session whenever possible.
 When spawning subagents, each subagent must create, maintain, and close a child issue linked to the active parent issue.
+When already in the target worktree/repo, use plain `git` commands (avoid defensive `git -C <same-path>`).
 
 ## Landing the Plane (Session Completion)
 
