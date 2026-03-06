@@ -25,6 +25,8 @@ export interface BoardProps {
 	pendingJumpKey?: string | null
 	terminalHeight?: number
 	viewMode?: ViewMode
+	/** Render only the active kanban column (used for small-screen terminals). */
+	singleColumnMode?: boolean
 	/** Whether action mode is active (selected card gets prominent border) */
 	isActionMode?: boolean
 	/** Source bead ID when in merge select mode (highlighted differently) */
@@ -96,11 +98,18 @@ export const Board = (props: BoardProps) => {
 	}
 
 	// Render kanban view
+	const useSingleColumn = props.singleColumnMode === true
+	const activeColumnIndex = props.activeColumnIndex ?? 0
+	const clampedActiveColumnIndex = Math.max(0, Math.min(COLUMNS.length - 1, activeColumnIndex))
+	const singleColumn = COLUMNS[clampedActiveColumnIndex]
+	const columnsToRender = useSingleColumn && singleColumn ? [singleColumn] : COLUMNS
+
 	return (
 		<box flexDirection="row" width="100%" height="100%">
-			{COLUMNS.map((col, colIndex) => {
+			{columnsToRender.map((col, renderIndex) => {
+				const colIndex = useSingleColumn ? clampedActiveColumnIndex : renderIndex
 				const columnTasks = tasksByStatus.get(col.status) || []
-				const isActiveColumn = colIndex === props.activeColumnIndex
+				const isActiveColumn = colIndex === clampedActiveColumnIndex
 
 				return (
 					<Column
@@ -119,6 +128,8 @@ export const Board = (props: BoardProps) => {
 						isActionMode={props.isActionMode}
 						mergeSelectSourceId={props.mergeSelectSourceId}
 						phases={props.phases}
+						width={useSingleColumn ? "100%" : "25%"}
+						marginRight={useSingleColumn ? 0 : 1}
 						onTaskMouseDown={props.onTaskMouseDown}
 						onColumnMouseScroll={props.onColumnMouseScroll}
 					/>
