@@ -87,7 +87,7 @@ When working in an Azedarach session:
 1. **Start work**: TUI spawned your session, you're ready to go
 2. **Dev servers**: Use `az dev start/stop/restart` for server control
 3. **Complete work**: Clean exit triggers TUI's completion workflow (PR creation, etc.)
-4. **Linear sync**: Run `git pull --rebase && git push` before finishing to persist task state
+4. **Linear sync**: Update issue status/notes before finishing; keep git flow local unless remote sync is explicitly requested
 
 ## Troubleshooting
 

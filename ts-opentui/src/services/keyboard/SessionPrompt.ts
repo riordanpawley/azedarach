@@ -26,8 +26,8 @@ Goal: Make this issue self-sufficient so any future session could pick it up wit
 Local workflow mode guardrails:
 - Use plain \`git\` commands in this worktree.
 - Do not use \`git -C <path>\` unless intentionally targeting a different repository/path.
-- Do not run remote cleanup/sync commands (\`git pull --rebase\`, \`git push\`, remote branch pruning) unless explicitly asked.`
-	}
+- Do not run remote cleanup/sync commands unless explicitly asked.`
+		}
 
 	if (params.hasWorktree) {
 		prompt += `

@@ -59,8 +59,7 @@ linear-cli i update <child-id> \
 - Update issue notes/status with current state
 - Close completed issues
 - Commit code changes
-- `git pull --rebase`
-- `git push`
+- Keep git flow local unless remote sync is explicitly requested
 
 ## Handoff Notes Template
 
