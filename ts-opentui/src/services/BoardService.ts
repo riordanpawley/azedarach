@@ -1823,7 +1823,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							yield* reportLinearWebhookHealth({
 								mode: "disabled",
 								strategy: "disabled",
-								healthy: false,
+								healthy: true,
 								message: "Linear backend not active; using background polling.",
 							})
 							return yield* startBackgroundPollingFiber()
@@ -1843,7 +1843,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							yield* reportLinearWebhookHealth({
 								mode: "disabled",
 								strategy: "disabled",
-								healthy: false,
+								healthy: true,
 								message: "Webhooks disabled in config; using background polling.",
 							})
 							return yield* startBackgroundPollingFiber()
