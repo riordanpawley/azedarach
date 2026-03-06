@@ -20,7 +20,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { issueIdsEqualForLookup, parseIssueSessionName } from "./paths.js"
+import { issueIdsEqualForLookup, resolveIssueIdFromSessionName } from "./paths.js"
 
 // ============================================================================
 // Type Definitions
@@ -180,16 +180,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					return output
 						.split("\n")
 						.map((line) => line.trim())
+						.filter((line) => line.length > 0)
 						.map((line) => {
 							const [name, createdStr] = line.split("|")
-							const parsed = parseIssueSessionName(name ?? "")
 							return {
 								name: name ?? "",
 								createdAt: parseInt(createdStr ?? "0", 10) || 0,
-								parsed,
 							}
 						})
-						.filter((s) => s.parsed !== undefined && s.parsed.type === "issue")
 				}).pipe(Effect.withSpan("tmux.listSessions")),
 			)
 
@@ -226,14 +224,13 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				return "busy" as const
 			})
 
-		const extractIssueIdFromSession = (sessionName: string): string | null => {
-			const parsed = parseIssueSessionName(sessionName)
-			if (parsed && parsed.type === "issue") {
-				return parsed.issueId
-			}
-
-			return null
-		}
+		const extractIssueIdFromSession = (
+			sessionName: string,
+			projectPath?: string | null,
+		): string | null =>
+			resolveIssueIdFromSessionName(sessionName, {
+				projectPath,
+			}) ?? null
 
 		/**
 		 * List all sessions with their current status and creation time
@@ -244,14 +241,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				const results: SessionStateUpdate[] = []
 
 				for (const session of sessions) {
-					const issueId = extractIssueIdFromSession(session.name)
+					const projectPath = yield* getTmuxOption(session.name, "@az_project")
+					const issueId = extractIssueIdFromSession(session.name, projectPath)
 					if (!issueId) continue
 
 					const status = yield* getSessionOption(session.name)
 					if (status) {
 						// Fetch worktree and project paths from tmux session options
 						const worktreePath = yield* getTmuxOption(session.name, "@az_worktree")
-						const projectPath = yield* getTmuxOption(session.name, "@az_project")
 
 						results.push({
 							issueId: issueId,
@@ -277,7 +274,8 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 			Effect.gen(function* () {
 				const sessions = yield* listIssueSessions()
 				for (const session of sessions) {
-					const sessionIssueId = extractIssueIdFromSession(session.name)
+					const projectPath = yield* getTmuxOption(session.name, "@az_project")
+					const sessionIssueId = extractIssueIdFromSession(session.name, projectPath)
 					if (sessionIssueId !== null && issueIdsEqualForLookup(sessionIssueId, issueId)) {
 						return session.name
 					}

@@ -202,6 +202,37 @@ export function parseIssueSessionName(
 }
 
 /**
+ * Resolve an issue ID from a tmux session name with optional project context.
+ *
+ * Parsing with explicit projectPath is preferred because project-prefixed
+ * session names (for example `az-ak`) are ambiguous without context.
+ *
+ * If parsing fails, fallbackIssueId is returned when provided.
+ */
+export function resolveIssueIdFromSessionName(
+	sessionName: string,
+	options?: {
+		readonly projectPath?: string | null
+		readonly fallbackIssueId?: string
+	},
+): string | undefined {
+	const projectPath = options?.projectPath ?? undefined
+	if (projectPath) {
+		const parsedWithProject = parseIssueSessionName(sessionName, projectPath)
+		if (parsedWithProject && parsedWithProject.type === "issue") {
+			return parsedWithProject.issueId
+		}
+	}
+
+	const parsed = parseIssueSessionName(sessionName)
+	if (parsed && parsed.type === "issue") {
+		return parsed.issueId
+	}
+
+	return options?.fallbackIssueId
+}
+
+/**
  * Normalize issue IDs for lookup comparisons.
  *
  * Linear identifiers are case-insensitive in practice (`AZE-123`), so we
