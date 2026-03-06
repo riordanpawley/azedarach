@@ -52,6 +52,13 @@ export interface CreateWorktreeOptions {
 	 * and reused for future operations.
 	 */
 	readonly issueTitle?: string
+	/**
+	 * Maximum length for the title-derived slug portion of generated branch names.
+	 *
+	 * Applies only to the `<slug>` segment in `<author>/<slug>`.
+	 * Existing branch mappings are not rewritten.
+	 */
+	readonly branchSlugMaxLength?: number
 	readonly baseBranch?: string
 	readonly projectPath: string
 	/**
@@ -365,10 +372,23 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		// Supports multiple projects for fast project switching
 		const WORKTREE_CACHE_TTL_MS = 2000
 		const BRANCH_NAME_MAP_RELATIVE_PATH = ".azedarach/branch-name-map.json"
+		const DEFAULT_BRANCH_SLUG_MAX_LENGTH = 24
+		const MIN_BRANCH_SLUG_MAX_LENGTH = 4
 		// Map from projectPath to timestamp
 		const cacheTimestampRef = yield* Ref.make<Map<string, number>>(new Map())
 
-		const slugifyIssueTitle = (title: string): string => {
+		const normalizeBranchSlugMaxLength = (value?: number): number => {
+			if (typeof value !== "number" || !Number.isFinite(value)) {
+				return DEFAULT_BRANCH_SLUG_MAX_LENGTH
+			}
+
+			const normalized = Math.floor(value)
+			return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH
+				? normalized
+				: DEFAULT_BRANCH_SLUG_MAX_LENGTH
+		}
+
+		const slugifyIssueTitle = (title: string, maxLength: number): string => {
 			const base = title
 				.toLowerCase()
 				.replace(/[^a-z0-9]+/g, "-")
@@ -378,9 +398,35 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				return "task"
 			}
 
-			const MAX_BASE_LENGTH = 24
-			return base.slice(0, MAX_BASE_LENGTH).replace(/-+$/g, "") || "task"
+			return base.slice(0, maxLength).replace(/-+$/g, "") || "task"
 		}
+
+		const sanitizeBranchAuthor = (value: string): string =>
+			value
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "")
+				.trim()
+
+		const getBranchAuthor = (
+			projectPath: string,
+		): Effect.Effect<string, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				const configuredName = yield* runGit(["config", "user.name"], projectPath).pipe(
+					Effect.map((value) => value.trim()),
+					Effect.catchAll(() => Effect.succeed("")),
+				)
+				const configuredAuthor = sanitizeBranchAuthor(configuredName)
+				if (configuredAuthor.length > 0) {
+					return configuredAuthor
+				}
+
+				const envAuthor = sanitizeBranchAuthor(process.env.USER ?? "")
+				if (envAuthor.length > 0) {
+					return envAuthor
+				}
+
+				return "author"
+			})
 
 		const getBranchNameMapPath = (projectPath: string): string =>
 			pathService.join(projectPath, BRANCH_NAME_MAP_RELATIVE_PATH)
@@ -434,10 +480,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		const getOrCreateBranchName = (options: {
 			issueId: string
 			issueTitle?: string
+			branchSlugMaxLength?: number
 			projectPath: string
 		}): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
-				const { issueId, issueTitle, projectPath } = options
+				const { issueId, issueTitle, branchSlugMaxLength, projectPath } = options
 				const branchMap = yield* readBranchNameMap(projectPath)
 
 				const existing = branchMap[issueId]
@@ -445,14 +492,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					return existing
 				}
 
-				const baseSlug = slugifyIssueTitle(issueTitle ?? issueId)
+				const slugMaxLength = normalizeBranchSlugMaxLength(branchSlugMaxLength)
+				const author = yield* getBranchAuthor(projectPath)
+				const baseSlug = slugifyIssueTitle(issueTitle ?? issueId, slugMaxLength)
 				const reserved = new Set(Object.values(branchMap))
 
 				for (let attempt = 0; attempt < 1000; attempt++) {
 					const suffix = attempt === 0 ? "" : `-${attempt + 1}`
-					const maxBaseLength = Math.max(1, 40 - suffix.length)
+					const maxBaseLength = Math.max(1, slugMaxLength - suffix.length)
 					const trimmedBase = baseSlug.slice(0, maxBaseLength).replace(/-+$/g, "") || "task"
-					const candidate = `${trimmedBase}${suffix}`
+					const slugWithSuffix = `${trimmedBase}${suffix}`
+					const candidate = `${author}/${slugWithSuffix}`
 
 					if (reserved.has(candidate)) {
 						continue
@@ -820,6 +870,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						const {
 							issueId,
 							issueTitle,
+							branchSlugMaxLength,
 							baseBranch,
 							projectPath,
 							sourceWorktreePath,
@@ -852,7 +903,12 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							return existingWorktree
 						}
 
-						const branchName = yield* getOrCreateBranchName({ issueId, issueTitle, projectPath })
+						const branchName = yield* getOrCreateBranchName({
+							issueId,
+							issueTitle,
+							branchSlugMaxLength,
+							projectPath,
+						})
 
 						// Check if branch already exists (e.g., from a previously deleted worktree)
 						const hasBranch = yield* branchExists(branchName, projectPath)

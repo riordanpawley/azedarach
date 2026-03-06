@@ -24,7 +24,7 @@ Workflows are written as behavior contracts, not implementation details.
 2. if task branch is missing, present runtime branch-origin chooser:
    - create from configured base branch
    - create from selected upstream-related issue branch (when eligible sources exist)
-3. ensure task-scoped branch exists and is checked out using stable title-based branch mapping for the issue
+3. ensure task-scoped branch exists and is checked out using stable title-based branch mapping for the issue (`<author>/<title-slug>` for new mappings; preserve previously assigned legacy mappings for existing issues)
 4. optionally sync tracker state for new context
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session using deterministic project-prefixed session naming

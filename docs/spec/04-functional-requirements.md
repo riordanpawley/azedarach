@@ -146,8 +146,10 @@ This section is normative.
 ## 4.12 Git Workflow Requirements
 
 - AZ-FR-1001: `Space u` MUST update task branch from configured base branch.
-- AZ-FR-1001a: Issue branch names MUST be mapped to stable, human-readable short names derived from issue title (not internal issue IDs).
+- AZ-FR-1001a: New issue branch mappings MUST use stable, human-readable names in `<author>/<slug>` format where `author` is derived from `git config user.name` and `slug` is title-derived (not internal issue IDs).
 - AZ-FR-1001b: Branch-name mapping MUST be deterministic per issue once assigned and MUST be collision-safe across local and relevant remote refs.
+- AZ-FR-1001c: Title-derived slug generation MUST enforce a configurable maximum length via truncation (applies to the slug segment only).
+- AZ-FR-1001d: Existing pre-author-prefix branch mappings MUST remain supported and MUST NOT be auto-migrated during normal operations.
 - AZ-FR-1002: Update flow MUST surface merge conflicts clearly.
 - AZ-FR-1003: Conflict resolution path MUST be available.
 - AZ-FR-1004: `Space M` MUST abort in-progress merge.
