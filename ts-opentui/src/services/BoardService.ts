@@ -52,6 +52,7 @@ import { ToastService } from "./ToastService.js"
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
 const REFRESH_FAILURE_TOAST_DEBOUNCE_MS = 15000
+const WEBHOOK_FALLBACK_TOAST_DEBOUNCE_MS = 30000
 const LINEAR_WEBHOOK_RESTART_DELAY = "5 seconds"
 const LINEAR_WEBHOOK_DEFAULT_PORT = 9000
 const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
@@ -382,11 +383,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
-		const refreshFailureToastRef = yield* Ref.make<{
-			readonly message: string
-			readonly timestamp: number
-		} | null>(null)
-		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
+			const refreshFailureToastRef = yield* Ref.make<{
+				readonly message: string
+				readonly timestamp: number
+			} | null>(null)
+			const webhookFallbackToastRef = yield* Ref.make<{
+				readonly message: string
+				readonly timestamp: number
+			} | null>(null)
+			const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 
 		// ====================================================================
 		// Per-Project State Management
@@ -1230,9 +1235,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			return base.length > 180 ? `${base.slice(0, 177)}...` : base
 		}
 
-		const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
-			Effect.gen(function* () {
-				yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
+			const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
+				Effect.gen(function* () {
+					yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
 				const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
 				const now = Date.now()
 				const previousToast = yield* Ref.get(refreshFailureToastRef)
@@ -1245,7 +1250,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* toast.show("error", message)
 					yield* Ref.set(refreshFailureToastRef, { message, timestamp: now })
 				}
-			}).pipe(Effect.asVoid)
+				}).pipe(Effect.asVoid)
+
+			const toastWebhookFallback = (message: string) =>
+				Effect.gen(function* () {
+					const now = Date.now()
+					const previousToast = yield* Ref.get(webhookFallbackToastRef)
+					const shouldToast =
+						previousToast === null ||
+						previousToast.message !== message ||
+						now - previousToast.timestamp >= WEBHOOK_FALLBACK_TOAST_DEBOUNCE_MS
+
+					if (shouldToast) {
+						yield* toast.show("warning", message)
+						yield* Ref.set(webhookFallbackToastRef, { message, timestamp: now })
+					}
+				}).pipe(Effect.asVoid)
 
 		/**
 		 * Refresh with auto-recovery for database sync errors.
@@ -1780,19 +1800,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						healthy: true,
 						message: `Using linear-cli webhook listener (team=${linearWebhookListenerConfig.team}, url=${linearWebhookListenerConfig.url}).`,
 					})
+					} else {
+						yield* Effect.logWarning(
+							"Linear CLI webhook listener configuration unavailable, using background polling fallback",
+						)
+						yield* reportLinearWebhookHealth({
+							mode: "cli",
+							strategy: "polling-fallback",
+							healthy: false,
+							message: "CLI webhook listener configuration unavailable; using background polling.",
+						})
+						yield* toastWebhookFallback(
+							"Linear webhook listener configuration unavailable. Falling back to background polling.",
+						)
+						yield* startBackgroundPolling()
+					}
 				} else {
-					yield* Effect.logWarning(
-						"Linear CLI webhook listener configuration unavailable, using background polling fallback",
-					)
-					yield* reportLinearWebhookHealth({
-						mode: "cli",
-						strategy: "polling-fallback",
-						healthy: false,
-						message: "CLI webhook listener configuration unavailable; using background polling.",
-					})
-					yield* startBackgroundPolling()
-				}
-			} else {
 				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
 				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
 				if (sdkMode === "sdk" && sdkHealthy) {
@@ -1854,20 +1877,25 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							healthy: true,
 							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`,
 						})
-					} else {
-						yield* Effect.logWarning(
-							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
-						)
-						yield* reportLinearWebhookHealth({
-							mode: sdkMode,
-							strategy: "polling-fallback",
-							healthy: false,
-							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
-						})
-						yield* startBackgroundPolling()
+						} else {
+							yield* Effect.logWarning(
+								`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
+							)
+							yield* reportLinearWebhookHealth({
+								mode: sdkMode,
+								strategy: "polling-fallback",
+								healthy: false,
+								message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
+							})
+							yield* toastWebhookFallback(
+								sdkMode === "misconfigured"
+									? "Linear webhooks unavailable: missing public webhook URL. Falling back to background polling."
+									: `Linear webhooks unavailable (mode=${sdkMode}). Falling back to background polling.`,
+							)
+							yield* startBackgroundPolling()
+						}
 					}
 				}
-			}
 		} else {
 			yield* Ref.set(localRefreshOnlyRef, false)
 			// Background polling for non-linear backends

@@ -19,6 +19,11 @@ const WEBHOOK_PATH = "/linear/webhook"
 const DEFAULT_WEBHOOK_PORT = 9000
 const DEFAULT_WEBHOOK_EVENTS: readonly string[] = ["Issue"]
 const WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
+const LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS = 5000
+const LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS = 3000
+const LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS = 3000
+const LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS = 4000
+const TAILSCALE_RESOLUTION_TIMEOUT_MS = 2000
 
 export type LinearWebhookMode = "disabled" | "cli" | "misconfigured" | "sdk" | "failed"
 
@@ -31,6 +36,22 @@ const hasMessage = (value: unknown): value is { readonly message: unknown } =>
 
 const formatErrorMessage = (error: unknown): string =>
 	hasMessage(error) ? String(error.message) : String(error)
+
+const failOnTimeout = <A, E>(params: {
+	readonly effect: Effect.Effect<A, E>
+	readonly timeoutMs: number
+	readonly timeoutMessage: string
+	readonly mapError: (error: E) => LinearWebhookRuntimeError
+}): Effect.Effect<A, LinearWebhookRuntimeError> =>
+	params.effect.pipe(
+		Effect.mapError(params.mapError),
+		Effect.timeout(`${params.timeoutMs} millis`),
+		Effect.flatMap((result) =>
+			result !== undefined
+				? Effect.succeed(result)
+				: Effect.fail(new LinearWebhookRuntimeError({ message: params.timeoutMessage })),
+		),
+	)
 
 const WorkflowStateChildSchema = Schema.Struct({
 	id: Schema.String,
@@ -284,14 +305,15 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						yield* Effect.logDebug(
 							"LinearWebhookService: no configured team, discovering via Linear API",
 						)
-						const teams = yield* linearSdk.teams({ first: 50 }).pipe(
-							Effect.mapError(
-								(error) =>
+						const teams = yield* failOnTimeout({
+							effect: linearSdk.teams({ first: 50 }),
+							timeoutMs: LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS,
+							timeoutMessage: `Timed out discovering Linear teams after ${LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS}ms; set issueTracker.linear.team explicitly`,
+							mapError: (error) =>
 								new LinearWebhookRuntimeError({
 									message: `${error.message}; set issueTracker.linear.team explicitly`,
 								}),
-						),
-					)
+						})
 
 					const discoveredTeamRefs = teams.nodes
 						.map((team) => normalizeNonEmpty(team.key) ?? normalizeNonEmpty(team.id))
@@ -354,7 +376,15 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						} satisfies ResolvedWebhookPublicUrl
 					}
 
-					const tailscalePublicBaseUrl = yield* tryResolveTailscaleFunnelPublicUrl(port)
+						const tailscalePublicBaseUrlResult = yield* tryResolveTailscaleFunnelPublicUrl(port).pipe(
+							Effect.timeout(`${TAILSCALE_RESOLUTION_TIMEOUT_MS} millis`),
+						)
+						if (tailscalePublicBaseUrlResult === undefined) {
+							yield* Effect.logDebug(
+								`LinearWebhookService: tailscale URL resolution timed out after ${TAILSCALE_RESOLUTION_TIMEOUT_MS}ms`,
+							)
+						}
+						const tailscalePublicBaseUrl = tailscalePublicBaseUrlResult
 					if (tailscalePublicBaseUrl !== undefined) {
 						yield* Effect.logDebug(
 							`LinearWebhookService: using tailscale funnel URL ${tailscalePublicBaseUrl}`,
@@ -414,15 +444,16 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const runtimeConfig = runtimeConfigResult.right
 			const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
 
-			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
-				linearSdk.resolveTeamId(reference).pipe(
-					Effect.mapError(
-						(error) =>
+				const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
+					failOnTimeout({
+						effect: linearSdk.resolveTeamId(reference),
+						timeoutMs: LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS,
+						timeoutMessage: `Timed out resolving Linear team '${reference}' after ${LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS}ms`,
+						mapError: (error) =>
 							new LinearWebhookRuntimeError({
 								message: error.message,
 							}),
-					),
-				)
+					})
 
 			const startSdkWebhookRuntime = Effect.gen(function* () {
 				yield* Effect.logDebug(
@@ -494,22 +525,21 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					}),
 				)
 
-				const registrationPayload = yield* linearSdk
-					.createWebhook({
-						teamId,
-						url: webhookUrl,
-						resourceTypes: [...eventTypes],
-						secret: runtimeConfig.webhookSecret,
-						enabled: true,
+					const registrationPayload = yield* failOnTimeout({
+						effect: linearSdk.createWebhook({
+							teamId,
+							url: webhookUrl,
+							resourceTypes: [...eventTypes],
+							secret: runtimeConfig.webhookSecret,
+							enabled: true,
+						}),
+						timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+						timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+						mapError: (error) =>
+							new LinearWebhookRuntimeError({
+								message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
+							}),
 					})
-					.pipe(
-						Effect.mapError(
-							(error) =>
-								new LinearWebhookRuntimeError({
-									message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
-								}),
-						),
-					)
 
 				const registeredWebhookId = registrationPayload.webhookId
 				if (registeredWebhookId) {
@@ -523,17 +553,27 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				)
 			})
 
-			yield* startSdkWebhookRuntime.pipe(
-				Effect.catchAll((error) =>
-					Effect.gen(function* () {
-						yield* SubscriptionRef.set(mode, "failed")
-						yield* SubscriptionRef.set(healthy, false)
-						yield* Effect.logWarning(
-							`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}`,
-						)
-					}),
-				),
-			)
+				yield* startSdkWebhookRuntime.pipe(
+					Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
+					Effect.flatMap((result) =>
+						result !== undefined
+							? Effect.void
+							: Effect.fail(
+									new LinearWebhookRuntimeError({
+										message: `Linear SDK webhook startup timed out after ${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS}ms`,
+									}),
+								),
+					),
+					Effect.catchAll((error) =>
+						Effect.gen(function* () {
+							yield* SubscriptionRef.set(mode, "failed")
+							yield* SubscriptionRef.set(healthy, false)
+							yield* Effect.logWarning(
+								`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}; falling back to polling`,
+							)
+						}),
+					),
+				)
 
 			return {
 				issueEvents: Stream.fromQueue(issueEventsQueue),
