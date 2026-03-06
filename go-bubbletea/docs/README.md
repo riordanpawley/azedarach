@@ -18,3 +18,9 @@ Any local documentation in `go-bubbletea/` must be:
 - Updated in the same change as code that alters behavior
 
 If a local doc conflicts with `docs/spec`, `docs/spec` is authoritative.
+
+## G5 Validation Gates
+
+- `make test-scripts`: run script-level tests for G5 gate logic.
+- `make g5-validate`: run deterministic G5 traceability, profile-variance, and performance-budget gates.
+- `make g5-checklist`: run `g5-validate` plus full `go test ./...` completion checklist.
