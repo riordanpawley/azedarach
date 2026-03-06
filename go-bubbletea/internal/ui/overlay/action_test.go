@@ -69,7 +69,7 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 		if action.Key == "S" && action.Label == "Start session + work" {
 			hasStartWork = true
 		}
-		if action.Key == "!" && action.Label == "Start session (skip permissions)" {
+		if action.Key == "!" && action.Label == "Start session (skip-permission)" {
 			hasStartSkipPermission = true
 		}
 		if action.Key == "c" && action.Label == "Start chat session" {
@@ -84,7 +84,7 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 		t.Error("expected 'Start session + work' action when no session exists")
 	}
 	if !hasStartSkipPermission {
-		t.Error("expected 'Start session (skip permissions)' action when no session exists")
+		t.Error("expected 'Start session (skip-permission)' action when no session exists")
 	}
 	if !hasStartChat {
 		t.Error("expected 'Start chat session' action when no session exists")

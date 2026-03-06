@@ -427,11 +427,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionStartedMsg:
+		for i := range m.tasks {
+			if m.tasks[i].ID == msg.issueID {
+				m.tasks[i].Status = domain.StatusInProgress
+				break
+			}
+		}
+
+		message := fmt.Sprintf("Session started: %s", msg.issueID)
+		switch msg.variant {
+		case sessionStartVariantWithWorkPrompt:
+			message = fmt.Sprintf("Session started (+work): %s", msg.issueID)
+		case sessionStartVariantSkipPermission:
+			message = fmt.Sprintf("Session started (skip-permission): %s", msg.issueID)
+		case sessionStartVariantChat:
+			message = fmt.Sprintf("Session started (chat): %s", msg.issueID)
+		}
+
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastSuccess,
-			Message: fmt.Sprintf("Session started: %s", msg.issueID),
+			Message: message,
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		if msg.statusErr != nil {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Session started but status update failed for %s: %v", msg.issueID, msg.statusErr),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
 		return m, nil
 
 	case sessionErrorMsg:
@@ -1382,9 +1406,20 @@ type issuesErrorMsg struct {
 
 type tickMsg time.Time
 
+type sessionStartVariant string
+
+const (
+	sessionStartVariantStandard         sessionStartVariant = "standard"
+	sessionStartVariantWithWorkPrompt   sessionStartVariant = "with-work-prompt"
+	sessionStartVariantSkipPermission   sessionStartVariant = "skip-permission"
+	sessionStartVariantChat             sessionStartVariant = "chat"
+)
+
 type sessionStartedMsg struct {
 	issueID      string
 	worktreePath string
+	variant      sessionStartVariant
+	statusErr    error
 }
 
 type sessionErrorMsg struct {
@@ -1428,8 +1463,39 @@ func tickEvery(d time.Duration) tea.Cmd {
 	})
 }
 
+func (m Model) buildSessionLaunchCommand(variant sessionStartVariant) string {
+	cliTool := "claude"
+	if m.config != nil && strings.TrimSpace(m.config.CLITool) != "" {
+		cliTool = strings.TrimSpace(m.config.CLITool)
+	}
+
+	if variant == sessionStartVariantSkipPermission {
+		return cliTool + " --yolo"
+	}
+
+	return cliTool
+}
+
+func (m Model) buildSessionBootstrapPrompt(issueID string, variant sessionStartVariant) string {
+	prompt := fmt.Sprintf(
+		"Run az prime first, then az show %s for canonical context retrieval before substantive execution.",
+		issueID,
+	)
+
+	switch variant {
+	case sessionStartVariantWithWorkPrompt:
+		return prompt + " After context retrieval, propose a concrete implementation plan and begin execution."
+	case sessionStartVariantSkipPermission:
+		return prompt + " Skip-permission start mode is requested for this session."
+	case sessionStartVariantChat:
+		return prompt + " Use a chat-oriented interaction style while remaining task-focused."
+	default:
+		return prompt
+	}
+}
+
 // startSessionCmd creates a worktree, tmux session, and starts monitoring
-func (m Model) startSessionCmd(issueID string) tea.Cmd {
+func (m Model) startSessionCmd(issueID string, variant sessionStartVariant) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
@@ -1446,11 +1512,17 @@ func (m Model) startSessionCmd(issueID string) tea.Cmd {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create tmux session: %w", err)}
 		}
 
-		// Send Claude command to session
-		claudeCmd := "claude" // TODO: Make configurable or add more context
-		err = m.tmuxClient.SendKeys(ctx, issueID, claudeCmd)
+		// Launch AI CLI command for selected variant.
+		launchCmd := m.buildSessionLaunchCommand(variant)
+		err = m.tmuxClient.SendKeys(ctx, issueID, launchCmd)
 		if err != nil {
 			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send keys: %w", err)}
+		}
+		// Inject backend-agnostic bootstrap guidance.
+		bootstrapPrompt := m.buildSessionBootstrapPrompt(issueID, variant)
+		err = m.tmuxClient.SendKeys(ctx, issueID, bootstrapPrompt)
+		if err != nil {
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send bootstrap prompt: %w", err)}
 		}
 
 		// Create session record
@@ -1466,7 +1538,14 @@ func (m Model) startSessionCmd(issueID string) tea.Cmd {
 		// Start session state monitoring (nil program sender; model polls monitor state on tick).
 		m.sessionMonitor.Start(ctx, issueID, nil)
 
-		return sessionStartedMsg{issueID: issueID, worktreePath: worktree.Path}
+		statusErr := m.issueClient.Update(ctx, issueID, domain.StatusInProgress)
+
+		return sessionStartedMsg{
+			issueID:      issueID,
+			worktreePath: worktree.Path,
+			variant:      variant,
+			statusErr:    statusErr,
+		}
 	}
 }
 
@@ -1699,14 +1778,16 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 	// Session actions
 	case "s":
 		// Start session
-		return m, m.startSessionCmd(task.ID)
+		return m, m.startSessionCmd(task.ID, sessionStartVariantStandard)
 	case "S":
-		// TODO: Start session + work
-		m.toasts = append(m.toasts, Toast{
-			Level:   ToastInfo,
-			Message: "Start session + work (TODO)",
-			Expires: time.Now().Add(3 * time.Second),
-		})
+		// Start session with default work prompt.
+		return m, m.startSessionCmd(task.ID, sessionStartVariantWithWorkPrompt)
+	case "!":
+		// Start session in skip-permission mode.
+		return m, m.startSessionCmd(task.ID, sessionStartVariantSkipPermission)
+	case "c":
+		// Start session in chat variant mode.
+		return m, m.startSessionCmd(task.ID, sessionStartVariantChat)
 	case "a":
 		// Attach to session after probing indicator/tmux consistency.
 		_ = session

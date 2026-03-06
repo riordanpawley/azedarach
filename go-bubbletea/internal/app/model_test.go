@@ -14,6 +14,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
+	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -510,6 +511,140 @@ func TestActionMenuSpaceThenIOpensImageAttachOverlay(t *testing.T) {
 	}
 }
 
+func TestActionMenuSpaceThenSStartsSessionWithBootstrapPromptAndStatusUpdate(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	issueRunner := &scriptedLinearRunner{listPayload: []byte(`[]`)}
+	m.issueClient = linear.NewClient(issueRunner, slog.Default())
+
+	gitRunner := &gitScriptRunner{}
+	m.worktreeManager = git.NewWorktreeManager(gitRunner, "/tmp/azedarach", slog.Default())
+
+	tmuxRunner := &tmuxScriptRunner{}
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.Default())
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected start session + work command")
+	}
+
+	msg := cmd()
+	started, ok := msg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("expected sessionStartedMsg, got %T", msg)
+	}
+	if started.variant != sessionStartVariantWithWorkPrompt {
+		t.Fatalf("expected with-work start variant, got %q", started.variant)
+	}
+
+	sent := tmuxRunner.sentKeys["az-1"]
+	if len(sent) < 2 {
+		t.Fatalf("expected launch + bootstrap tmux commands, got %v", sent)
+	}
+	if sent[0] != "claude" {
+		t.Fatalf("expected default cli launch command 'claude', got %q", sent[0])
+	}
+	if !containsAll(sent[1], []string{"az prime", "az show az-1"}) {
+		t.Fatalf("expected bootstrap guidance to include az prime/show, got %q", sent[1])
+	}
+
+	result, _ = m.Update(started)
+	m = result.(Model)
+	if !issueRunner.hasStatusUpdate("az-1", domain.StatusInProgress) {
+		t.Fatal("expected issue status update call to in_progress on start")
+	}
+	for _, task := range m.tasks {
+		if task.ID == "az-1" && task.Status != domain.StatusInProgress {
+			t.Fatalf("expected az-1 status in_progress after session start, got %s", task.Status)
+		}
+	}
+}
+
+func TestActionMenuSpaceThenSkipPermissionVariantUsesYoloAndAcknowledges(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{listPayload: []byte(`[]`)}, slog.Default())
+	m.worktreeManager = git.NewWorktreeManager(&gitScriptRunner{}, "/tmp/azedarach", slog.Default())
+	tmuxRunner := &tmuxScriptRunner{}
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.Default())
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'!'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected skip-permission start command")
+	}
+
+	msg := cmd()
+	started, ok := msg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("expected sessionStartedMsg, got %T", msg)
+	}
+	if started.variant != sessionStartVariantSkipPermission {
+		t.Fatalf("expected skip-permission variant, got %q", started.variant)
+	}
+
+	sent := tmuxRunner.sentKeys["az-1"]
+	if len(sent) == 0 {
+		t.Fatal("expected tmux launch command")
+	}
+	if !strings.Contains(sent[0], "--yolo") {
+		t.Fatalf("expected skip-permission launch command to include --yolo, got %q", sent[0])
+	}
+
+	result, _ = m.Update(started)
+	m = result.(Model)
+	last := m.toasts[len(m.toasts)-1]
+	if !containsAll(last.Message, []string{"skip-permission", "az-1"}) {
+		t.Fatalf("expected visible skip-permission acknowledgement toast, got %q", last.Message)
+	}
+}
+
+func TestActionMenuSpaceThenChatVariantIncludesChatBootstrapGuidance(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{listPayload: []byte(`[]`)}, slog.Default())
+	m.worktreeManager = git.NewWorktreeManager(&gitScriptRunner{}, "/tmp/azedarach", slog.Default())
+	tmuxRunner := &tmuxScriptRunner{}
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.Default())
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected chat-variant session start command")
+	}
+
+	msg := cmd()
+	started, ok := msg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("expected sessionStartedMsg, got %T", msg)
+	}
+	if started.variant != sessionStartVariantChat {
+		t.Fatalf("expected chat variant, got %q", started.variant)
+	}
+
+	sent := tmuxRunner.sentKeys["az-1"]
+	if len(sent) < 2 {
+		t.Fatalf("expected launch + bootstrap tmux commands, got %v", sent)
+	}
+	if !containsAll(sent[1], []string{"chat-oriented", "az prime", "az show az-1"}) {
+		t.Fatalf("expected chat bootstrap guidance with az contract, got %q", sent[1])
+	}
+
+	result, _ = m.Update(started)
+	m = result.(Model)
+	last := m.toasts[len(m.toasts)-1]
+	if !containsAll(last.Message, []string{"chat", "az-1"}) {
+		t.Fatalf("expected visible chat variant acknowledgement toast, got %q", last.Message)
+	}
+}
+
 func TestOpenImagePreviewMsgPushesPreviewOverlay(t *testing.T) {
 	m := newTestModel()
 
@@ -984,9 +1119,13 @@ func (r *recordingBackupRunner) OnMutationSuccess() {
 type scriptedLinearRunner struct {
 	listPayload []byte
 	updateErr   error
+	updateCalls []linearStatusUpdateCall
 }
 
 func (r *scriptedLinearRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "az" {
+		args = args[1:]
+	}
 	if len(args) < 2 || args[0] != "issue" {
 		return []byte(`{}`), nil
 	}
@@ -998,6 +1137,12 @@ func (r *scriptedLinearRunner) Run(_ context.Context, _ string, args ...string) 
 		}
 		return r.listPayload, nil
 	case "update":
+		if len(args) >= 4 {
+			r.updateCalls = append(r.updateCalls, linearStatusUpdateCall{
+				IssueID: args[2],
+				Status:  strings.TrimPrefix(args[3], "--status="),
+			})
+		}
 		if r.updateErr != nil {
 			return nil, r.updateErr
 		}
@@ -1009,6 +1154,50 @@ func (r *scriptedLinearRunner) Run(_ context.Context, _ string, args ...string) 
 	default:
 		return []byte(`{}`), nil
 	}
+}
+
+func (r *scriptedLinearRunner) hasStatusUpdate(issueID string, status domain.Status) bool {
+	for _, call := range r.updateCalls {
+		if call.IssueID == issueID && call.Status == string(status) {
+			return true
+		}
+	}
+	return false
+}
+
+type linearStatusUpdateCall struct {
+	IssueID string
+	Status  string
+}
+
+type gitScriptRunner struct {
+	worktreeListOutput string
+	addErr             error
+	addCalls           []gitWorktreeAddCall
+}
+
+func (r *gitScriptRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) >= 3 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" {
+		return r.worktreeListOutput, nil
+	}
+	if len(args) >= 6 && args[0] == "worktree" && args[1] == "add" {
+		r.addCalls = append(r.addCalls, gitWorktreeAddCall{
+			Branch:      args[3],
+			WorktreeDir: args[4],
+			BaseBranch:  args[5],
+		})
+		if r.addErr != nil {
+			return "", r.addErr
+		}
+		return "", nil
+	}
+	return "", nil
+}
+
+type gitWorktreeAddCall struct {
+	Branch      string
+	WorktreeDir string
+	BaseBranch  string
 }
 
 type monitorStubTmux struct {
@@ -1067,6 +1256,9 @@ type tmuxScriptRunner struct {
 	hasSessions    map[string]bool
 	killErr        error
 	killedSessions []string
+	newSessionErr  error
+	sendKeysErr    error
+	sentKeys       map[string][]string
 }
 
 func (r *tmuxScriptRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -1074,6 +1266,24 @@ func (r *tmuxScriptRunner) Run(_ context.Context, args ...string) (string, error
 		return "", nil
 	}
 	switch args[0] {
+	case "new-session":
+		if r.newSessionErr != nil {
+			return "", r.newSessionErr
+		}
+		return "", nil
+	case "send-keys":
+		if len(args) < 4 {
+			return "", errors.New("missing send-keys target")
+		}
+		target := args[2]
+		if r.sentKeys == nil {
+			r.sentKeys = make(map[string][]string)
+		}
+		r.sentKeys[target] = append(r.sentKeys[target], args[3])
+		if r.sendKeysErr != nil {
+			return "", r.sendKeysErr
+		}
+		return "", nil
 	case "has-session":
 		if len(args) < 3 {
 			return "", errors.New("missing target")
