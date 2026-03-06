@@ -84,6 +84,8 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "h", Label: "Move left", Enabled: m.task.Status != domain.StatusOpen},
 		Action{Key: "l", Label: "Move right", Enabled: m.task.Status != domain.StatusDone},
 		Action{Key: "i", Label: "Image attachments", Enabled: true},
+		Action{Key: "r", Label: "Toggle dev server", Enabled: true},
+		Action{Key: "v", Label: "View dev server", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
 		Action{Key: "d", Label: "Delete task", Enabled: true},
 	)

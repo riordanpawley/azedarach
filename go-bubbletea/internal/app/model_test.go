@@ -441,6 +441,88 @@ func TestActionMenuSpaceThenIOpensImageAttachOverlay(t *testing.T) {
 	}
 }
 
+func TestActionMenuSpaceThenROpensDevServerOverlay(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected action menu overlay after pressing space")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ActionMenu); !ok {
+		t.Fatalf("expected ActionMenu overlay, got %T", m.overlayStack.Current())
+	}
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = result.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected selection command from action menu for key 'r'")
+	}
+
+	msg := cmd()
+	selectionMsg, ok := msg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg from action menu, got %T", msg)
+	}
+	if selectionMsg.Key != "r" {
+		t.Fatalf("expected selection key 'r', got %q", selectionMsg.Key)
+	}
+
+	result, _ = m.Update(selectionMsg)
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected dev server overlay to be open")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
+		t.Fatalf("expected DevServerOverlay, got %T", m.overlayStack.Current())
+	}
+}
+
+func TestActionMenuSpaceThenVOpensDevServerOverlay(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected action menu overlay after pressing space")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ActionMenu); !ok {
+		t.Fatalf("expected ActionMenu overlay, got %T", m.overlayStack.Current())
+	}
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = result.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected selection command from action menu for key 'v'")
+	}
+
+	msg := cmd()
+	selectionMsg, ok := msg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg from action menu, got %T", msg)
+	}
+	if selectionMsg.Key != "v" {
+		t.Fatalf("expected selection key 'v', got %q", selectionMsg.Key)
+	}
+
+	result, _ = m.Update(selectionMsg)
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected dev server overlay to be open")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
+		t.Fatalf("expected DevServerOverlay, got %T", m.overlayStack.Current())
+	}
+}
+
 func TestModeStrings(t *testing.T) {
 	tests := []struct {
 		mode     Mode

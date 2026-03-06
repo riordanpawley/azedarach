@@ -78,6 +78,9 @@ func (m *DevServerOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			// Toggle start/stop
+			if len(m.servers) == 0 && m.onToggle != nil && m.issueID != "" {
+				return m, m.onToggle(m.issueID)
+			}
 			if m.cursor >= 0 && m.cursor < len(m.servers) && m.onToggle != nil {
 				return m, m.onToggle(m.servers[m.cursor].ID)
 			}
@@ -109,7 +112,7 @@ func (m *DevServerOverlay) View() string {
 	if len(m.servers) == 0 {
 		b.WriteString(m.styles.MenuItemDisabled.Render("No dev servers configured"))
 		b.WriteString("\n\n")
-		b.WriteString(m.styles.Footer.Render("Press Escape to close"))
+		b.WriteString(m.styles.Footer.Render("Enter: start server • Esc: close"))
 		return b.String()
 	}
 

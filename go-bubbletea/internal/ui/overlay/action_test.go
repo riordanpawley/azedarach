@@ -105,6 +105,39 @@ func TestActionMenu_BuildActions_IncludesImageAttachments(t *testing.T) {
 	}
 }
 
+func TestActionMenu_BuildActions_IncludesDevServerActions(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusOpen,
+	}
+
+	menu := NewActionMenu(task, nil)
+
+	hasToggleDevServer := false
+	hasViewDevServer := false
+	for _, action := range menu.actions {
+		if action.Key == "r" {
+			hasToggleDevServer = true
+			if !action.Enabled {
+				t.Error("expected dev server toggle action to be enabled")
+			}
+		}
+		if action.Key == "v" {
+			hasViewDevServer = true
+			if !action.Enabled {
+				t.Error("expected dev server view action to be enabled")
+			}
+		}
+	}
+
+	if !hasToggleDevServer {
+		t.Fatal("expected dev server toggle action with key 'r'")
+	}
+	if !hasViewDevServer {
+		t.Fatal("expected dev server view action with key 'v'")
+	}
+}
+
 func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-123",
@@ -344,6 +377,40 @@ func TestActionMenu_Update_DirectSelection_ImageAttachments(t *testing.T) {
 
 	if selectionMsg.Key != "i" {
 		t.Errorf("expected key 'i', got %s", selectionMsg.Key)
+	}
+}
+
+func TestActionMenu_Update_DirectSelection_DevServerActions(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
+	menu := NewActionMenu(task, nil)
+
+	tests := []struct {
+		name string
+		key  rune
+	}{
+		{name: "toggle dev server", key: 'r'},
+		{name: "view dev server", key: 'v'},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tt.key}}
+			_, cmd := menu.Update(msg)
+
+			if cmd == nil {
+				t.Fatalf("expected command from direct key selection for %q", string(tt.key))
+			}
+
+			result := cmd()
+			selectionMsg, ok := result.(SelectionMsg)
+			if !ok {
+				t.Fatalf("expected SelectionMsg, got %T", result)
+			}
+
+			if selectionMsg.Key != string(tt.key) {
+				t.Errorf("expected key %q, got %q", string(tt.key), selectionMsg.Key)
+			}
+		})
 	}
 }
 

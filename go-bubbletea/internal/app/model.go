@@ -1624,7 +1624,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
 		return m, tea.Batch(m.overlayStack.Push(attachOverlay), attachOverlay.Init())
 
-	case "r":
+	case "r", "v":
 		// Dev server menu
 		servers := m.getDevServerInfo()
 		devOverlay := overlay.NewDevServerOverlay(
