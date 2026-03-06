@@ -118,11 +118,29 @@ export class WorktreeExistsError extends Data.TaggedError("WorktreeExistsError")
 }> {}
 
 /**
+ * Error when issue-derived worktree or branch names collide with another worktree
+ */
+export class WorktreeNameClashError extends Data.TaggedError("WorktreeNameClashError")<{
+	readonly issueId: string
+	readonly conflictKind: "path" | "branch"
+	readonly requestedWorktreePath: string
+	readonly requestedBranch?: string
+	readonly conflictingIssueId: string
+	readonly conflictingWorktreePath: string
+	readonly conflictingBranch: string
+	readonly baseBranch: string
+	readonly commitsAheadOfBase?: number
+	readonly uncommittedFileCount: number
+}> {}
+
+/**
  * Error when project is not a git repository
  */
 export class NotAGitRepoError extends Data.TaggedError("NotAGitRepoError")<{
 	readonly path: string
 }> {}
+
+export type WorktreeCreateError = GitError | NotAGitRepoError | WorktreeNameClashError
 
 // ============================================================================
 // Service Definition
@@ -153,7 +171,7 @@ export interface WorktreeManagerService {
 	 */
 	readonly create: (
 		options: CreateWorktreeOptions,
-	) => Effect.Effect<Worktree, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<Worktree, WorktreeCreateError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Remove a worktree by bead ID
@@ -787,11 +805,73 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		}
 
 		// Pure helper to get worktree path (uses captured pathService)
-		const getWorktreePath = (projectPath: string, issueId: string): string => {
-			const projectName = pathService.basename(projectPath)
-			const parentDir = pathService.dirname(projectPath)
-			return pathService.join(parentDir, `${projectName}-${issueId}`)
-		}
+			const getWorktreePath = (projectPath: string, issueId: string): string => {
+				const projectName = pathService.basename(projectPath)
+				const parentDir = pathService.dirname(projectPath)
+				return pathService.join(parentDir, `${projectName}-${issueId}`)
+			}
+
+			const countUncommittedFiles = (
+				worktreePath: string,
+			): Effect.Effect<number, never, CommandExecutor.CommandExecutor> =>
+				runGit(["status", "--porcelain"], worktreePath).pipe(
+					Effect.map((output) =>
+						output
+							.split("\n")
+							.map((line) => line.trim())
+							.filter((line) => line.length > 0).length,
+					),
+					Effect.catchAll(() => Effect.succeed(0)),
+				)
+
+			const countCommitsAheadOfBase = (
+				worktreePath: string,
+				baseBranch: string,
+			): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
+				runGit(["rev-list", "--count", `${baseBranch}..HEAD`], worktreePath).pipe(
+					Effect.map((output) => {
+						const parsed = Number.parseInt(output.trim(), 10)
+						return Number.isFinite(parsed) ? parsed : undefined
+					}),
+					Effect.catchAll(() => Effect.succeed(undefined)),
+				)
+
+			const buildWorktreeNameClashError = (options: {
+				issueId: string
+				conflictKind: "path" | "branch"
+				requestedWorktreePath: string
+				requestedBranch?: string
+				conflictingWorktree: Worktree
+				baseBranch: string
+			}): Effect.Effect<WorktreeNameClashError, never, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const {
+						issueId,
+						conflictKind,
+						requestedWorktreePath,
+						requestedBranch,
+						conflictingWorktree,
+						baseBranch,
+					} = options
+					const commitsAheadOfBase = yield* countCommitsAheadOfBase(
+						conflictingWorktree.path,
+						baseBranch,
+					)
+					const uncommittedFileCount = yield* countUncommittedFiles(conflictingWorktree.path)
+
+					return new WorktreeNameClashError({
+						issueId,
+						conflictKind,
+						requestedWorktreePath,
+						requestedBranch,
+						conflictingIssueId: conflictingWorktree.issueId,
+						conflictingWorktreePath: conflictingWorktree.path,
+						conflictingBranch: conflictingWorktree.branch,
+						baseBranch,
+						commitsAheadOfBase,
+						uncommittedFileCount,
+					})
+				})
 
 		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
 		// Now supports multiple projects - each project has its own cache entry
@@ -903,12 +983,66 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							return existingWorktree
 						}
 
+						const resolveComparisonBaseBranch = (() => {
+							let cachedBaseBranch: string | undefined
+							return (): Effect.Effect<
+								string,
+								GitError,
+								CommandExecutor.CommandExecutor
+							> =>
+								Effect.gen(function* () {
+									if (cachedBaseBranch) {
+										return cachedBaseBranch
+									}
+
+									const resolvedBaseBranch = baseBranch || (yield* getCurrentBranch(projectPath))
+									cachedBaseBranch = resolvedBaseBranch
+									return resolvedBaseBranch
+								})
+						})()
+
+						const normalizedWorktreePath = pathService.resolve(worktreePath)
+						const conflictingByPath = Array.from(projectWorktrees.values()).find(
+							(worktree) =>
+								pathService.resolve(worktree.path) === normalizedWorktreePath &&
+								worktree.issueId !== issueId,
+						)
+
+						if (conflictingByPath) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: conflictingByPath,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
 						const branchName = yield* getOrCreateBranchName({
 							issueId,
 							issueTitle,
 							branchSlugMaxLength,
 							projectPath,
 						})
+
+						const conflictingByBranch = Array.from(projectWorktrees.values()).find(
+							(worktree) => worktree.branch === branchName && worktree.issueId !== issueId,
+						)
+
+						if (conflictingByBranch) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "branch",
+								requestedWorktreePath: worktreePath,
+								requestedBranch: branchName,
+								conflictingWorktree: conflictingByBranch,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
 
 						// Check if branch already exists (e.g., from a previously deleted worktree)
 						const hasBranch = yield* branchExists(branchName, projectPath)
@@ -1064,7 +1198,7 @@ export const create = (
 	options: CreateWorktreeOptions,
 ): Effect.Effect<
 	Worktree,
-	GitError | NotAGitRepoError,
+	WorktreeCreateError,
 	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.create(options))
 
@@ -1138,7 +1272,7 @@ export const acquireWorktree = (
 	options: CreateWorktreeOptions,
 ): Effect.Effect<
 	Worktree,
-	GitError | NotAGitRepoError,
+	WorktreeCreateError,
 	Scope.Scope | WorktreeManager | CommandExecutor.CommandExecutor
 > =>
 	Effect.acquireRelease(create(options), (worktree) =>
