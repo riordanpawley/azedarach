@@ -223,7 +223,7 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		if (!exists) {
 			return yield* Effect.fail(
 				new Error(
-					`No .azedarach directory found in ${projectDir}. Run 'tracker init' to initialize issue tracking storage.`,
+					`No .azedarach directory found in ${projectDir}. Initialize issue tracking for this project, then retry your \`az issue\` command.`,
 				),
 			)
 		}
@@ -1740,7 +1740,7 @@ const projectAddHandler = (args: {
 			if (!issueStoreExists) {
 				return yield* Effect.fail(
 					new Error(
-						`No .azedarach directory found in ${absolutePath}. Run 'tracker init' to initialize tracker tracking.`,
+						`No .azedarach directory found in ${absolutePath}. Initialize issue tracking for this project, then retry with \`az issue\`.`,
 					),
 				)
 			}

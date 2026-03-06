@@ -631,7 +631,7 @@ export class ParseError extends Data.TaggedError("ParseError")<{
 /**
  * Error when tracker database is out of sync with JSONL file.
  * This happens after git pull or when another worktree modifies issues.
- * Can be auto-recovered by running `tracker sync --import-only`.
+ * Can be auto-recovered by running import-only sync.
  */
 export class SyncRequiredError extends Data.TaggedError("SyncRequiredError")<{
 	readonly message: string
@@ -1304,7 +1304,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						if (isSyncRequiredError(stderr)) {
 							return new SyncRequiredError({
 								message:
-									"IssueTracker database out of sync with JSONL. Run 'tracker sync --import-only' to fix.",
+									"IssueTracker database out of sync with JSONL. Run `az sync` (or retry from board for auto-recovery).",
 							})
 						}
 
@@ -1327,7 +1327,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						return yield* Effect.fail(
 							new SyncRequiredError({
 								message:
-									"IssueTracker database out of sync with JSONL. Run 'tracker sync --import-only' to fix.",
+									"IssueTracker database out of sync with JSONL. Run `az sync` (or retry from board for auto-recovery).",
 							}),
 						)
 					}
