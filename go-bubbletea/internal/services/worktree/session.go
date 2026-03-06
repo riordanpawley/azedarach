@@ -75,33 +75,33 @@ func NewWorktreeSessionService(
 	}
 }
 
-// Create creates a new worktree and tmux session for the given bead ID
-func (s *WorktreeSessionService) Create(ctx context.Context, beadID, branch string) (*WorktreeSession, error) {
+// Create creates a new worktree and tmux session for the given issue ID
+func (s *WorktreeSessionService) Create(ctx context.Context, issueID, branch string) (*WorktreeSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.logger.Info("creating worktree session", "beadID", beadID, "branch", branch)
+	s.logger.Info("creating worktree session", "issueID", issueID, "branch", branch)
 
 	// Check if session already exists
-	if existing, ok := s.sessions[beadID]; ok {
-		s.logger.Warn("session already exists", "beadID", beadID)
+	if existing, ok := s.sessions[issueID]; ok {
+		s.logger.Warn("session already exists", "issueID", issueID)
 		return existing, nil
 	}
 
 	// Create worktree using git worktree manager
-	worktree, err := s.worktree.Create(ctx, beadID, branch)
+	worktree, err := s.worktree.Create(ctx, issueID, branch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
 	s.logger.Debug("worktree created", "path", worktree.Path, "branch", worktree.Branch)
 
-	// Create tmux session with the bead ID as the session name
-	tmuxSessionName := beadID
+	// Create tmux session with the issue ID as the session name
+	tmuxSessionName := issueID
 	if err := s.tmux.NewSession(ctx, tmuxSessionName, worktree.Path); err != nil {
 		// Clean up worktree on tmux session creation failure
-		if delErr := s.worktree.Delete(ctx, beadID); delErr != nil {
-			s.logger.Error("failed to clean up worktree after tmux error", "beadID", beadID, "error", delErr)
+		if delErr := s.worktree.Delete(ctx, issueID); delErr != nil {
+			s.logger.Error("failed to clean up worktree after tmux error", "issueID", issueID, "error", delErr)
 		}
 		return nil, fmt.Errorf("failed to create tmux session: %w", err)
 	}
@@ -110,7 +110,7 @@ func (s *WorktreeSessionService) Create(ctx context.Context, beadID, branch stri
 
 	// Create session record
 	session := &WorktreeSession{
-		BeadID:       beadID,
+		BeadID:       issueID,
 		WorktreePath: worktree.Path,
 		TmuxSession:  tmuxSessionName,
 		Branch:       worktree.Branch,
@@ -118,25 +118,25 @@ func (s *WorktreeSessionService) Create(ctx context.Context, beadID, branch stri
 		CreatedAt:    time.Now(),
 	}
 
-	s.sessions[beadID] = session
+	s.sessions[issueID] = session
 
-	s.logger.Info("worktree session created successfully", "beadID", beadID)
+	s.logger.Info("worktree session created successfully", "issueID", issueID)
 
 	return session, nil
 }
 
 // Start starts Claude in the tmux session
 // If yolo is true, Claude will run in "YOLO mode" with auto-approvals
-func (s *WorktreeSessionService) Start(ctx context.Context, beadID string, yolo bool) error {
+func (s *WorktreeSessionService) Start(ctx context.Context, issueID string, yolo bool) error {
 	s.mu.RLock()
-	session, exists := s.sessions[beadID]
+	session, exists := s.sessions[issueID]
 	s.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session not found: %s", beadID)
+		return fmt.Errorf("session not found: %s", issueID)
 	}
 
-	s.logger.Info("starting Claude session", "beadID", beadID, "yolo", yolo)
+	s.logger.Info("starting Claude session", "issueID", issueID, "yolo", yolo)
 
 	// Build Claude command
 	claudeCmd := s.buildClaudeCommand(yolo)
@@ -155,23 +155,23 @@ func (s *WorktreeSessionService) Start(ctx context.Context, beadID string, yolo 
 	session.Status = SessionActive
 	s.mu.Unlock()
 
-	s.logger.Info("Claude session started", "beadID", beadID)
+	s.logger.Info("Claude session started", "issueID", issueID)
 
 	return nil
 }
 
-// Attach attaches to the tmux session for the given bead ID
+// Attach attaches to the tmux session for the given issue ID
 // This is a blocking operation that takes over the terminal
-func (s *WorktreeSessionService) Attach(ctx context.Context, beadID string) error {
+func (s *WorktreeSessionService) Attach(ctx context.Context, issueID string) error {
 	s.mu.RLock()
-	session, exists := s.sessions[beadID]
+	session, exists := s.sessions[issueID]
 	s.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session not found: %s", beadID)
+		return fmt.Errorf("session not found: %s", issueID)
 	}
 
-	s.logger.Info("attaching to tmux session", "beadID", beadID)
+	s.logger.Info("attaching to tmux session", "issueID", issueID)
 
 	// Attach to the tmux session (blocking operation)
 	if err := s.tmux.AttachSession(ctx, session.TmuxSession); err != nil {
@@ -182,16 +182,16 @@ func (s *WorktreeSessionService) Attach(ctx context.Context, beadID string) erro
 }
 
 // Stop stops the Claude session by sending Ctrl+C to the tmux session
-func (s *WorktreeSessionService) Stop(ctx context.Context, beadID string) error {
+func (s *WorktreeSessionService) Stop(ctx context.Context, issueID string) error {
 	s.mu.RLock()
-	session, exists := s.sessions[beadID]
+	session, exists := s.sessions[issueID]
 	s.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session not found: %s", beadID)
+		return fmt.Errorf("session not found: %s", issueID)
 	}
 
-	s.logger.Info("stopping Claude session", "beadID", beadID)
+	s.logger.Info("stopping Claude session", "issueID", issueID)
 
 	// Send Ctrl+C to interrupt the session
 	if err := s.tmux.SendKeys(ctx, session.TmuxSession, "C-c"); err != nil {
@@ -203,50 +203,50 @@ func (s *WorktreeSessionService) Stop(ctx context.Context, beadID string) error 
 	session.Status = SessionIdle
 	s.mu.Unlock()
 
-	s.logger.Info("Claude session stopped", "beadID", beadID)
+	s.logger.Info("Claude session stopped", "issueID", issueID)
 
 	return nil
 }
 
 // Delete removes the worktree and kills the tmux session
-func (s *WorktreeSessionService) Delete(ctx context.Context, beadID string) error {
+func (s *WorktreeSessionService) Delete(ctx context.Context, issueID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.logger.Info("deleting worktree session", "beadID", beadID)
+	s.logger.Info("deleting worktree session", "issueID", issueID)
 
-	session, exists := s.sessions[beadID]
+	session, exists := s.sessions[issueID]
 	if !exists {
-		return fmt.Errorf("session not found: %s", beadID)
+		return fmt.Errorf("session not found: %s", issueID)
 	}
 
 	// Kill tmux session
 	if err := s.tmux.KillSession(ctx, session.TmuxSession); err != nil {
-		s.logger.Warn("failed to kill tmux session", "beadID", beadID, "error", err)
+		s.logger.Warn("failed to kill tmux session", "issueID", issueID, "error", err)
 		// Continue with cleanup even if tmux session kill fails
 	}
 
 	// Remove worktree
-	if err := s.worktree.Delete(ctx, beadID); err != nil {
+	if err := s.worktree.Delete(ctx, issueID); err != nil {
 		return fmt.Errorf("failed to delete worktree: %w", err)
 	}
 
 	// Remove session from map
-	delete(s.sessions, beadID)
+	delete(s.sessions, issueID)
 
-	s.logger.Info("worktree session deleted successfully", "beadID", beadID)
+	s.logger.Info("worktree session deleted successfully", "issueID", issueID)
 
 	return nil
 }
 
 // GetStatus returns the current status of the session
-func (s *WorktreeSessionService) GetStatus(ctx context.Context, beadID string) (SessionStatus, error) {
+func (s *WorktreeSessionService) GetStatus(ctx context.Context, issueID string) (SessionStatus, error) {
 	s.mu.RLock()
-	session, exists := s.sessions[beadID]
+	session, exists := s.sessions[issueID]
 	s.mu.RUnlock()
 
 	if !exists {
-		return "", fmt.Errorf("session not found: %s", beadID)
+		return "", fmt.Errorf("session not found: %s", issueID)
 	}
 
 	// Check if tmux session still exists
@@ -282,13 +282,13 @@ func (s *WorktreeSessionService) List() []*WorktreeSession {
 
 // UpdateStatus updates the status of a session
 // This is typically called by the monitor when it detects state changes
-func (s *WorktreeSessionService) UpdateStatus(beadID string, status SessionStatus) {
+func (s *WorktreeSessionService) UpdateStatus(issueID string, status SessionStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if session, exists := s.sessions[beadID]; exists {
+	if session, exists := s.sessions[issueID]; exists {
 		session.Status = status
-		s.logger.Debug("session status updated", "beadID", beadID, "status", status)
+		s.logger.Debug("session status updated", "issueID", issueID, "status", status)
 	}
 }
 

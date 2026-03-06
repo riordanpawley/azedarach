@@ -62,18 +62,18 @@ func newMockWorktreeManager() *mockWorktreeManager {
 	}
 }
 
-func (m *mockWorktreeManager) Create(ctx context.Context, beadID string, baseBranch string) (*mockWorktree, error) {
+func (m *mockWorktreeManager) Create(ctx context.Context, issueID string, baseBranch string) (*mockWorktree, error) {
 	wt := &mockWorktree{
-		Path:   "/tmp/test-" + beadID,
-		Branch: "az/" + beadID,
-		BeadID: beadID,
+		Path:   "/tmp/test-" + issueID,
+		Branch: "az/" + issueID,
+		BeadID: issueID,
 	}
-	m.worktrees[beadID] = wt
+	m.worktrees[issueID] = wt
 	return wt, nil
 }
 
-func (m *mockWorktreeManager) Delete(ctx context.Context, beadID string) error {
-	delete(m.worktrees, beadID)
+func (m *mockWorktreeManager) Delete(ctx context.Context, issueID string) error {
+	delete(m.worktrees, issueID)
 	return nil
 }
 
@@ -133,21 +133,21 @@ func TestUpdateStatus(t *testing.T) {
 	)
 
 	// Create a test session
-	beadID := "test-123"
-	service.sessions[beadID] = &WorktreeSession{
-		BeadID:       beadID,
+	issueID := "test-123"
+	service.sessions[issueID] = &WorktreeSession{
+		BeadID:       issueID,
 		WorktreePath: "/tmp/test-123",
-		TmuxSession:  beadID,
+		TmuxSession:  issueID,
 		Branch:       "az/test-123",
 		Status:       SessionIdle,
 		CreatedAt:    time.Now(),
 	}
 
 	// Update status
-	service.UpdateStatus(beadID, SessionActive)
+	service.UpdateStatus(issueID, SessionActive)
 
 	// Verify status was updated
-	session := service.sessions[beadID]
+	session := service.sessions[issueID]
 	if session.Status != SessionActive {
 		t.Errorf("Expected status to be %v, got %v", SessionActive, session.Status)
 	}
