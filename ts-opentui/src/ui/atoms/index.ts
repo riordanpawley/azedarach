@@ -116,6 +116,11 @@ export {
 	toggleSelectionAtom,
 	updateSearchAtom,
 } from "./mode.js"
+// Mouse interaction atoms
+export {
+	handleColumnPagerMouseInteractionAtom,
+	handleTaskMouseInteractionAtom,
+} from "./mouse.js"
 // Navigation atoms
 export {
 	blockerTitlesAtom,

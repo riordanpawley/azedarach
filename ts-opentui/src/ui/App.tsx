@@ -24,11 +24,12 @@ import {
 	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
 	forkCreateEpicAtom,
+	handleColumnPagerMouseInteractionAtom,
 	handleKeyAtom,
+	handleTaskMouseInteractionAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
 	jumpToAtom,
-	jumpToTaskAtom,
 	sessionMonitorStarterAtom,
 	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
@@ -203,7 +204,10 @@ export const App = () => {
 	)?.name
 
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
-	const jumpToTask = useAtomSet(jumpToTaskAtom, { mode: "promise" })
+	const handleTaskMouseInteraction = useAtomSet(handleTaskMouseInteractionAtom, { mode: "promise" })
+	const handleColumnPagerMouseInteraction = useAtomSet(handleColumnPagerMouseInteractionAtom, {
+		mode: "promise",
+	})
 	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
@@ -366,51 +370,19 @@ export const App = () => {
 	// Mouse Handlers - First-pass task focus/open + wheel scroll
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const openActionPaletteForCurrentTask = async () => {
-		// In most modes, escape returns to normal and allows entering action mode.
-		if (mode._tag !== "normal" && mode._tag !== "select") {
-			await handleKey("escape")
-		}
-		await handleKey("space")
-	}
-
-	const openDetailForCurrentTask = async () => {
-		if (mode._tag !== "normal") {
-			await handleKey("escape")
-		}
-		await handleKey("return")
-	}
-
 	const handleTaskMouseDown = (taskId: string, event: MouseEvent) => {
-		// Keep mouse interactions scoped to the main board surface
-		if (currentOverlay) return
-
 		// Left click = focus, right click = focus + open action menu
 		if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
-		const button = event.button
-		const isAlreadySelected = selectedTask?.id === taskId
 
 		event.preventDefault()
 		event.stopPropagation()
 
-		void jumpToTask(taskId)
-			.then(async () => {
-				if (button === MouseButton.RIGHT) {
-					await openActionPaletteForCurrentTask()
-					return
-				}
-
-				// Mobile-friendly flow:
-				// - tap unselected task -> focus + open action menu
-				// - tap selected task -> open details
-				if (isAlreadySelected) {
-					await openDetailForCurrentTask()
-					return
-				}
-
-				await openActionPaletteForCurrentTask()
-			})
-			.catch(() => undefined)
+		const button = event.button === MouseButton.RIGHT ? "right" : "left"
+		void handleTaskMouseInteraction({
+			taskId,
+			button,
+			selectedTaskId: selectedTask?.id,
+		})
 	}
 
 	const handleColumnMouseScroll = (columnIdx: number, event: MouseEvent) => {
@@ -434,18 +406,17 @@ export const App = () => {
 	}
 
 	const handleColumnPagerMouseDown = (delta: -1 | 1, event: MouseEvent) => {
-		if (currentOverlay) return
 		if (event.button !== MouseButton.LEFT) return
 
 		event.preventDefault()
 		event.stopPropagation()
 
-		const nextColumn = Math.max(0, Math.min(COLUMNS.length - 1, columnIndex + delta))
-		if (nextColumn === columnIndex) return
-
-		const nextColumnTasks = tasksByColumn[nextColumn] ?? []
-		const nextTask = Math.min(taskIndex, Math.max(0, nextColumnTasks.length - 1))
-		void jumpTo({ column: nextColumn, task: nextTask })
+		void handleColumnPagerMouseInteraction({
+			delta,
+			columnIndex,
+			taskIndex,
+			tasksByColumn,
+		})
 	}
 
 	const totalTasks = useAtomValue(totalTasksCountAtom)
