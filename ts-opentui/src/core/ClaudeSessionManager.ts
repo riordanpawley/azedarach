@@ -19,7 +19,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
+import { Data, DateTime, Effect, Exit, HashMap, PubSub, Ref, Schema } from "effect"
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -652,9 +652,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Check session limit
 						const configForLimit = yield* appConfig.getSessionConfig()
-						// Cast to any to access the new field since TS might not pick up the schema change immediately in this context
-						// In a real build, the schema change should propagate types correctly
-						const maxSessions = (configForLimit as any).maxSessions ?? 10
+						const maxSessions =
+							(configForLimit as { readonly maxSessions?: number }).maxSessions ?? 10
 						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
 							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
 						)
@@ -1124,7 +1123,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const modelConfig = yield* appConfig.getModelConfig()
 
 						// Check session limit
-						const maxSessions = (sessionConfig as any).maxSessions ?? 10
+						const maxSessions =
+							(sessionConfig as { readonly maxSessions?: number }).maxSessions ?? 10
 						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
 							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
 						)

@@ -143,7 +143,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						Effect.flatMap((result) =>
 							Effect.gen(function* () {
 								const epicId = yield* nav.getDrillDownEpic()
-								let parentEpicId: string | null | undefined = undefined
+								let parentEpicId: string | null | undefined
 
 								if (epicId) {
 									yield* issueTrackerClient.addDependency(result.id, epicId, "parent-child").pipe(

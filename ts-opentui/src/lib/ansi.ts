@@ -12,7 +12,15 @@
  * - Charset designators: ESC ( ) followed by A, B, 0, 1, 2
  * - Shift-in / Shift-out control characters
  */
-export const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x0f|\x0e/g
+const ESC = "\\x1b"
+const BEL = "\\x07"
+const SHIFT_IN = "\\x0f"
+const SHIFT_OUT = "\\x0e"
+
+export const ANSI_ESCAPE_RE = new RegExp(
+	`${ESC}\\[[0-9;]*[a-zA-Z]|${ESC}\\][^${BEL}]*${BEL}|${ESC}[()][AB012]|${SHIFT_IN}|${SHIFT_OUT}`,
+	"g",
+)
 
 /**
  * Strip ANSI/VT100 escape codes from terminal output.

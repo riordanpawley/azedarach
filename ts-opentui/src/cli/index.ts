@@ -612,7 +612,6 @@ const dependencyCountLabelFromDependency = (
 			return "parent"
 		case "discovered-from":
 			return "discoveredFrom"
-		case "related":
 		default:
 			return "related"
 	}
@@ -628,7 +627,6 @@ const dependencyCountLabelFromDependent = (
 			return "children"
 		case "discovered-from":
 			return "discoveredBy"
-		case "related":
 		default:
 			return "related"
 	}
