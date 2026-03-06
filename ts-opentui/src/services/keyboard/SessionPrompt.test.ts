@@ -9,6 +9,7 @@ describe("session prompts", () => {
 			title: "Fix prompt backend",
 			hasWorktree: false,
 			attachmentPaths: [],
+			localMode: false,
 		})
 
 		expect(prompt).toContain("work on issue az-f4625d")
@@ -19,6 +20,21 @@ describe("session prompts", () => {
 		expect(prompt).toContain('`az issue update az-f4625d --design "..."`')
 		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
+	})
+
+	it("adds local workflow guardrails when local mode is enabled", () => {
+		const prompt = buildStartWorkPrompt({
+			taskId: "ar",
+			issueType: "task",
+			title: "Keep local workflow local",
+			hasWorktree: false,
+			attachmentPaths: [],
+			localMode: true,
+		})
+
+		expect(prompt).toContain("Local workflow mode guardrails:")
+		expect(prompt).toContain("Do not use `git -C <path>` unless intentionally targeting")
+		expect(prompt).toContain("Do not run remote cleanup/sync commands (`git pull --rebase`, `git push`")
 	})
 
 	it("mentions injected az issue context in chat prompt", () => {

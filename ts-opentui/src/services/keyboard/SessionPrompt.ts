@@ -4,6 +4,7 @@ export const buildStartWorkPrompt = (params: {
 	readonly title: string
 	readonly hasWorktree: boolean
 	readonly attachmentPaths: readonly string[]
+	readonly localMode: boolean
 }): string => {
 	const showCommand = `az issue get ${params.taskId}`
 	const updateCommand = `az issue update ${params.taskId} --design "..."`
@@ -18,6 +19,15 @@ Before starting implementation:
 2. Once you understand the task, update the issue with your implementation plan using \`${updateCommand}\`
 
 Goal: Make this issue self-sufficient so any future session could pick it up without extra context.`
+
+	if (params.localMode) {
+		prompt += `
+
+Local workflow mode guardrails:
+- Use plain \`git\` commands in this worktree.
+- Do not use \`git -C <path>\` unless intentionally targeting a different repository/path.
+- Do not run remote cleanup/sync commands (\`git pull --rebase\`, \`git push\`, remote branch pruning) unless explicitly asked.`
+	}
 
 	if (params.hasWorktree) {
 		prompt += `
