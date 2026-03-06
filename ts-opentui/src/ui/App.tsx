@@ -14,7 +14,7 @@ import { ActionPalette } from "./ActionPalette.js"
 import {
 	activeSessionsCountAtom,
 	boardIsLoadingAtom,
-	claudeCreateSessionAtom,
+	aiCreateTaskAtom,
 	createTaskAtom,
 	currentProjectAtom,
 	drillDownEpicAtom,
@@ -37,7 +37,7 @@ import {
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { BulkCleanupOverlay } from "./BulkCleanupOverlay.js"
-import { ClaudeCreatePrompt } from "./ClaudeCreatePrompt.js"
+import { AICreatePrompt } from "./AICreatePrompt.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
@@ -155,7 +155,7 @@ export const App = () => {
 		showingHelp,
 		showingDetail,
 		showingCreate,
-		showingClaudeCreate,
+		showingAICreate,
 		showingSettings,
 		showingImageAttach,
 		showingImagePreview,
@@ -215,7 +215,7 @@ export const App = () => {
 	const createTask = useAtomSet(createTaskAtom, { mode: "promise" })
 	const forkCreateChild = useAtomSet(forkCreateChildAtom, { mode: "promise" })
 	const forkCreateEpic = useAtomSet(forkCreateEpicAtom, { mode: "promise" })
-	const claudeCreateSession = useAtomSet(claudeCreateSessionAtom, { mode: "promise" })
+	const aiCreateTask = useAtomSet(aiCreateTaskAtom, { mode: "promise" })
 
 	const viewMode = useAtomValue(
 		viewModeAtom,
@@ -337,8 +337,8 @@ export const App = () => {
 			return
 		}
 
-		// Claude create prompt handling - ClaudeCreatePrompt handles its own keyboard input
-		if (showingClaudeCreate) {
+		// AI create prompt handling - AICreatePrompt handles its own keyboard input
+		if (showingAICreate) {
 			return
 		}
 
@@ -597,11 +597,11 @@ export const App = () => {
 			{/* Fork overlay */}
 			{showingFork && <ForkOverlay />}
 
-			{/* Claude create prompt */}
-			{showingClaudeCreate && (
-				<ClaudeCreatePrompt
+			{/* AI create prompt */}
+			{showingAICreate && (
+				<AICreatePrompt
 					onSubmit={(description) => {
-						claudeCreateSession(description)
+						aiCreateTask(description)
 					}}
 					onCancel={() => dismissOverlay()}
 				/>

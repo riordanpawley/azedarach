@@ -292,7 +292,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					.pipe(
 						Effect.match({
 							onFailure: (error) => {
-								// MergeConflictError means Claude is resolving - don't proceed
+								// MergeConflictError means AI is resolving - don't proceed
 								if (
 									error &&
 									typeof error === "object" &&
@@ -309,7 +309,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					)
 
 				if (updateResult._tag === "conflict") {
-					yield* toast.show("info", "Resolving conflicts - retry PR after Claude finishes")
+					yield* toast.show("info", "Resolving conflicts - retry PR after AI finishes")
 					return
 				}
 
@@ -350,9 +350,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 *
 		 * - Uncommitted changes: shows confirmation dialog warning about autostash risks
 		 * - Clean merges proceed directly without confirmation
-		 * - If conflicts detected, offers to ask Claude to resolve them
-		 * - Claude resolution merges main into worktree, then prompts Claude
-		 * - User retries Space+m after Claude resolves
+		 * - If conflicts detected, offers to ask AI to resolve them
+		 * - AI resolution merges main into worktree, then prompts AI
+		 * - User retries Space+m after AI resolves
 		 * Requires a worktree (active session or orphaned worktree).
 		 * Blocked if task already has an operation in progress.
 		 *
@@ -497,7 +497,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const conflictCheck = conflictCheckResult.check
 
 				if (conflictCheck.hasConflictRisk) {
-					// Offer to ask Claude to resolve the conflicts
+					// Offer to ask AI to resolve the conflicts
 					const fileList =
 						conflictCheck.conflictingFiles.length > 0
 							? conflictCheck.conflictingFiles.slice(0, 5).join(", ") +
@@ -506,7 +506,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									: "")
 							: "unknown files"
 
-					const message = `Conflicts detected in: ${fileList}\n\nAsk Claude to resolve them?`
+					const message = `Conflicts detected in: ${fileList}\n\nAsk AI to resolve them?`
 
 					yield* overlay.push({
 						_tag: "confirm",

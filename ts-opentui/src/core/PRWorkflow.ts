@@ -14,7 +14,7 @@ import { Data, Duration, Effect, Option, Schema } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
-import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
+import { SessionManager, type SessionError } from "./SessionManager.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 import { FileLockManager } from "./FileLockManager.js"
 import { ImageAttachmentService } from "./ImageAttachmentService.js"
@@ -479,13 +479,13 @@ export interface PRWorkflowService {
 	/**
 	 * Update worktree from base branch (typically main)
 	 *
-	 * Merges the base branch into the worktree, resolving conflicts with Claude if needed.
+	 * Merges the base branch into the worktree, resolving conflicts with AI assistance if needed.
 	 * This is the inverse of mergeToMain - it brings main INTO the worktree.
 	 *
 	 * Workflow:
 	 * 1. Fetch latest from origin
 	 * 2. Check for conflicts using git merge-tree
-	 * 3. If conflicts: start merge, have Claude resolve
+	 * 3. If conflicts: start merge, have AI resolve
 	 * 4. If no conflicts: fast-forward merge
 	 *
 	 * @example
@@ -517,7 +517,7 @@ export interface PRWorkflowService {
 	 *   projectPath: "/Users/user/project"
 	 * })
 	 * if (comments.length > 0) {
-	 *   // Inject into Claude context
+	 *   // Inject into AI session context
 	 * }
 	 * ```
 	 */
@@ -565,7 +565,7 @@ export interface PRWorkflowService {
 	 * 2. Ensure target bead has a branch/worktree (create if needed)
 	 * 3. Fetch source branch
 	 * 4. Check for conflicts using git merge-tree
-	 * 5. If conflicts: start merge in target worktree, spawn Claude to resolve
+	 * 5. If conflicts: start merge in target worktree, spawn AI to resolve
 	 * 6. If clean: merge source into target
 	 * 7. Sync tracker
 	 * 8. Close source bead
@@ -904,7 +904,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	dependencies: [
 		WorktreeManager.Default,
 		IssueTrackerClient.Default,
-		ClaudeSessionManager.Default,
+		SessionManager.Default,
 		TmuxService.Default,
 		WorktreeSessionService.Default,
 		FileLockManager.Default,
@@ -916,7 +916,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
 		const issueTrackerClient = yield* IssueTrackerClient
-		const sessionManager = yield* ClaudeSessionManager
+		const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
 		const fileLockManager = yield* FileLockManager
@@ -1162,7 +1162,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const issueBranch = yield* getIssueBranchName(issueId, projectPath)
 
 						// 1. Stop any running session (ignore errors)
-						// First try ClaudeSessionManager.stop (handles tracker sync from worktree)
+						// First try SessionManager.stop (handles tracker sync from worktree)
 						yield* sessionManager
 							.stop(issueId)
 							.pipe(
@@ -1432,12 +1432,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}
 						})
 
-						// 4. If there are real code conflicts (not .azedarach/), ask Claude to resolve
+						// 4. If there are real code conflicts (not .azedarach/), ask AI to resolve
 						yield* reportProgress("merge")
 						if (mergeTreeResult.hasConflicts) {
 							const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
-							// Start merge in worktree so Claude can resolve
+							// Start merge in worktree so AI can resolve
 							yield* runGit(
 								["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueBranch}`],
 								worktree.path,
@@ -1473,7 +1473,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								command,
 							})
 
-							const message = `Code conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry merge after resolution.`
+							const message = `Code conflicts detected in: ${fileList}. Started AI session in '${windowName}' window to resolve. Retry merge after resolution.`
 
 							return yield* Effect.fail(
 								new MergeConflictError({
@@ -1558,7 +1558,12 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						if (mergeConfig.validateCommands.length > 0) {
 							yield* reportProgress("validate")
 							yield* Effect.gen(function* () {
-								const { validateCommands, fixCommand, maxFixAttempts, startClaudeOnFailure } =
+								const {
+									validateCommands,
+									fixCommand,
+									maxFixAttempts,
+									startAiSessionOnFailure,
+								} =
 									mergeConfig
 
 								/**
@@ -1645,8 +1650,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									),
 								)
 
-								// Start Claude session if configured
-								if (startClaudeOnFailure) {
+								// Start an AI session if configured
+								if (startAiSessionOnFailure) {
 									const failedCmd = lastResult.failedCommand ?? validateCommands[0] ?? "validation"
 									const fixPrompt = `Post-merge validation failed. Please fix the errors:\n\nFailed command: ${failedCmd}\n\n${lastResult.output}\n\nRun the validation commands after fixing to verify.`
 
@@ -1658,7 +1663,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 										})
 										.pipe(
 											Effect.catchAll((e) =>
-												Effect.logWarning(`Failed to start Claude session for fixes: ${e}`),
+												Effect.logWarning(`Failed to start AI session for fixes: ${e}`),
 											),
 										)
 								}
@@ -1666,7 +1671,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								return yield* Effect.fail(
 									new TypeCheckError({
 										issueId,
-										message: `Post-merge validation failed. ${startClaudeOnFailure ? "Claude session started to fix. " : ""}Retry merge after fixing.`,
+										message: `Post-merge validation failed. ${startAiSessionOnFailure ? "AI session started to fix. " : ""}Retry merge after fixing.`,
 										output: lastResult.output,
 									}),
 								)
@@ -2144,7 +2149,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								command,
 							})
 
-							const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry update after resolution.`
+							const message = `Conflicts detected in: ${fileList}. Started AI session in '${windowName}' window to resolve. Retry update after resolution.`
 
 							return yield* Effect.fail(
 								new MergeConflictError({
@@ -2323,7 +2328,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			 *
 			 * Auto-stashes uncommitted changes, merges base branch, pops stash.
 			 * For epic children, merges the parent epic's branch instead of main.
-			 * If conflicts, spawns Claude session to resolve them.
+			 * If conflicts, spawns an AI session to resolve them.
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
 			 */
@@ -2426,7 +2431,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 					})
 
-					// 3. If conflicts, start merge and spawn Claude
+					// 3. If conflicts, start merge and spawn AI
 					if (mergeTreeResult.hasConflicts) {
 						const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
@@ -2466,7 +2471,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							command,
 						})
 
-						const message = `Merge conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window to resolve. Retry attach after resolution.`
+						const message = `Merge conflicts detected in: ${fileList}. Started AI session in '${windowName}' window to resolve. Retry attach after resolution.`
 
 						return yield* Effect.fail(
 							new MergeConflictError({
@@ -2667,11 +2672,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}
 						})
 
-						// If there are conflicts, ask Claude to resolve
+						// If there are conflicts, ask AI to resolve
 						if (mergeTreeResult.hasConflicts) {
 							const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
-							// Start merge in target worktree so Claude can resolve
+							// Start merge in target worktree so AI can resolve
 							yield* runGit(
 								["merge", sourceBranch, "-m", `Merge ${sourceIssueId} into ${targetIssueId}`],
 								targetWorktree.path,
@@ -2685,7 +2690,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							const resolvePrompt = `There are merge conflicts when merging ${sourceIssueId} into ${targetIssueId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
-							// Start Claude session in a new "merge" window within the target's session
+							// Start AI session in a new "merge" window within the target's session
 							const windowName = "merge"
 							const sessionName = getIssueSessionName(targetIssueId, projectPath)
 
@@ -2708,7 +2713,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								command,
 							})
 
-							const message = `Conflicts detected in: ${fileList}. Started Claude session in '${windowName}' window of ${targetIssueId} to resolve. Retry merge after resolution.`
+							const message = `Conflicts detected in: ${fileList}. Started AI session in '${windowName}' window of ${targetIssueId} to resolve. Retry merge after resolution.`
 
 							return yield* Effect.fail(
 								new MergeConflictError({

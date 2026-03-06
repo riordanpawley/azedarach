@@ -7,7 +7,7 @@
 
 import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
@@ -35,7 +35,7 @@ const mapTmuxStatusToSessionState = (status: "busy" | "waiting" | "idle") => {
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
-		const manager = yield* ClaudeSessionManager
+		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
 
 		yield* monitor.start((update) =>
@@ -100,7 +100,7 @@ export const sessionMetricsAtom = appRuntime.subscriptionRef(
  */
 export const startSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* ClaudeSessionManager
+		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
 		const projectService = yield* ProjectService
 
@@ -122,7 +122,7 @@ export const startSessionAtom = appRuntime.fn((issueId: string) =>
  */
 export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* ClaudeSessionManager
+		const manager = yield* SessionManager
 		yield* manager.pause(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -132,7 +132,7 @@ export const pauseSessionAtom = appRuntime.fn((issueId: string) =>
  */
 export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* ClaudeSessionManager
+		const manager = yield* SessionManager
 		yield* manager.resume(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -144,7 +144,7 @@ export const resumeSessionAtom = appRuntime.fn((issueId: string) =>
  */
 export const stopSessionAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const manager = yield* ClaudeSessionManager
+		const manager = yield* SessionManager
 		const ptyMonitor = yield* PTYMonitor
 
 		// Unregister from PTYMonitor first (before session is stopped)

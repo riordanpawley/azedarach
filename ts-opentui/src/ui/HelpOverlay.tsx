@@ -102,7 +102,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="c" description="Chat (Haiku)" />
 				<KeyLine keys="H" description="Open Helix editor" />
 				<KeyLine keys="h / l" description="Move task(s) left / right" />
-				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (Claude)" />
+				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (AI)" />
 				<KeyLine keys="i" description="Attach image" />
 				<KeyLine keys="F" description="Fork bead" />
 				<KeyLine keys="f" description="Show diff vs main" />
@@ -115,8 +115,8 @@ export const HelpOverlay = () => {
 
 				{/* Create/Edit section */}
 				<SectionHeader title="Create & Edit:" />
-				<KeyLine keys="c / C" description="Create bead ($EDITOR / Claude)" />
-				<KeyLine keys="Space+e/E" description="Edit bead ($EDITOR / Claude)" />
+				<KeyLine keys="c / C" description="Create bead ($EDITOR / AI)" />
+				<KeyLine keys="Space+e/E" description="Edit bead ($EDITOR / AI)" />
 				<text> </text>
 
 				{/* Sort mode section */}

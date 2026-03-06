@@ -178,7 +178,7 @@ export {
 } from "./session.js"
 // Task CRUD atoms
 export {
-	claudeCreateSessionAtom,
+	aiCreateTaskAtom,
 	createIssueViaEditorAtom,
 	createTaskAtom,
 	deleteIssueAtom,

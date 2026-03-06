@@ -34,7 +34,7 @@ export type OverlayType =
 				  }
 				| { readonly _tag: "forkEpic"; readonly sourceTaskId: string }
 	  }
-	| { readonly _tag: "claudeCreate" }
+	| { readonly _tag: "aiCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "imagePreview"; readonly taskId: string }
@@ -113,8 +113,8 @@ export function useOverlays() {
 				push({ _tag: "create" })
 			},
 
-			showClaudeCreate: () => {
-				push({ _tag: "claudeCreate" })
+			showAICreate: () => {
+				push({ _tag: "aiCreate" })
 			},
 
 			showSettings: () => {
@@ -166,7 +166,7 @@ export function useOverlays() {
 			showingHelp: currentOverlay?._tag === "help",
 			showingDetail: currentOverlay?._tag === "detail",
 			showingCreate: currentOverlay?._tag === "create",
-			showingClaudeCreate: currentOverlay?._tag === "claudeCreate",
+			showingAICreate: currentOverlay?._tag === "aiCreate",
 			showingSettings: currentOverlay?._tag === "settings",
 			showingConfirm: currentOverlay?._tag === "confirm",
 			showingGitPull: currentOverlay?._tag === "gitPull",

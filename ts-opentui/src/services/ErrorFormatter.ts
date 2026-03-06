@@ -366,7 +366,7 @@ const ERROR_FORMATTERS: Record<
 
 	TypeCheckError: (error) => ({
 		message: `Type errors after merging ${error.issueId}`,
-		suggestion: "Try: Claude session started to fix. Run 'bun run type-check' after fixing",
+		suggestion: "Try: AI session started to fix. Run 'bun run type-check' after fixing",
 		category: "pr",
 	}),
 
