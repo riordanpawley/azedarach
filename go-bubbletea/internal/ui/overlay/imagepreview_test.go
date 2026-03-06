@@ -13,21 +13,21 @@ import (
 )
 
 func setupTestAttachmentService(t *testing.T) (*attachment.Service, string, func()) {
-	// Create temp directory for test beads
+	// Create temp directory for test linear
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, ".beads")
+	issuesPath := filepath.Join(tmpDir, ".linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	service := attachment.NewService(beadsPath, logger)
+	service := attachment.NewService(issuesPath, logger)
 
 	cleanup := func() {
 		os.RemoveAll(tmpDir)
 	}
 
-	return service, beadsPath, cleanup
+	return service, issuesPath, cleanup
 }
 
-func createTestImage(t *testing.T, service *attachment.Service, beadID string) *attachment.Attachment {
+func createTestImage(t *testing.T, service *attachment.Service, issueID string) *attachment.Attachment {
 	ctx := context.Background()
 
 	// Create a small test PNG
@@ -46,7 +46,7 @@ func createTestImage(t *testing.T, service *attachment.Service, beadID string) *
 	}
 
 	// Attach the file
-	img, err := service.Attach(ctx, beadID, tmpFile)
+	img, err := service.Attach(ctx, issueID, tmpFile)
 	if err != nil {
 		t.Fatalf("Failed to attach test image: %v", err)
 	}
@@ -58,8 +58,8 @@ func TestImagePreviewOverlay_Init(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	if overlay == nil {
 		t.Fatal("NewImagePreviewOverlay returned nil")
@@ -86,14 +86,14 @@ func TestImagePreviewOverlay_Navigation(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
+	issueID := "test-issue"
 
 	// Create multiple test images
-	createTestImage(t, service, beadID)
-	createTestImage(t, service, beadID)
-	createTestImage(t, service, beadID)
+	createTestImage(t, service, issueID)
+	createTestImage(t, service, issueID)
+	createTestImage(t, service, issueID)
 
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Load images first
 	cmd := overlay.Init()
@@ -153,10 +153,10 @@ func TestImagePreviewOverlay_DeleteConfirmation(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	createTestImage(t, service, beadID)
+	issueID := "test-issue"
+	createTestImage(t, service, issueID)
 
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Load images
 	cmd := overlay.Init()
@@ -207,8 +207,8 @@ func TestImagePreviewOverlay_CloseOnEscape(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	_, cmd := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc})
 
@@ -239,10 +239,10 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
+	issueID := "test-issue"
 
 	// Test empty view
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 	cmd := overlay.Init()
 	msg := cmd()
 	model, _ := overlay.Update(msg)
@@ -259,9 +259,9 @@ func TestImagePreviewOverlay_View(t *testing.T) {
 	}
 
 	// Test view with images (create multiple for navigation hints)
-	createTestImage(t, service, beadID)
-	createTestImage(t, service, beadID)
-	overlay = NewImagePreviewOverlay(beadID, service, 0)
+	createTestImage(t, service, issueID)
+	createTestImage(t, service, issueID)
+	overlay = NewImagePreviewOverlay(issueID, service, 0)
 	cmd = overlay.Init()
 	msg = cmd()
 	model, _ = overlay.Update(msg)
@@ -304,8 +304,8 @@ func TestImagePreviewOverlay_TitleAndSize(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	title := overlay.Title()
 	if title != "Image Preview" {
@@ -331,8 +331,8 @@ func TestImagePreviewOverlay_Refresh(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Load initial images
 	cmd := overlay.Init()
@@ -360,8 +360,8 @@ func TestImagePreviewOverlay_EmptyImages(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Load images (should be empty)
 	cmd := overlay.Init()
@@ -393,14 +393,14 @@ func TestImagePreviewOverlay_LoadedMessage(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	createTestImage(t, service, beadID)
+	issueID := "test-issue"
+	createTestImage(t, service, issueID)
 
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Test that imagesLoadedMsg updates the overlay
 	ctx := context.Background()
-	images, _ := service.List(ctx, beadID)
+	images, _ := service.List(ctx, issueID)
 
 	msg := imagesLoadedMsg{images: images}
 	model, _ := overlay.Update(msg)
@@ -416,8 +416,8 @@ func TestImagePreviewOverlay_ErrorHandling(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	overlay := NewImagePreviewOverlay(beadID, service, 0)
+	issueID := "test-issue"
+	overlay := NewImagePreviewOverlay(issueID, service, 0)
 
 	// Test error message handling
 	errMsg := imagePreviewErrorMsg{err: os.ErrNotExist}
@@ -447,11 +447,11 @@ func TestImagePreviewOverlay_IndexClamping(t *testing.T) {
 	service, _, cleanup := setupTestAttachmentService(t)
 	defer cleanup()
 
-	beadID := "test-bead"
-	createTestImage(t, service, beadID)
+	issueID := "test-issue"
+	createTestImage(t, service, issueID)
 
 	// Start with an out-of-bounds index
-	overlay := NewImagePreviewOverlay(beadID, service, 10)
+	overlay := NewImagePreviewOverlay(issueID, service, 10)
 
 	// Load images should clamp the index
 	cmd := overlay.Init()
@@ -466,7 +466,7 @@ func TestImagePreviewOverlay_IndexClamping(t *testing.T) {
 	}
 
 	// Test negative index
-	overlay = NewImagePreviewOverlay(beadID, service, -5)
+	overlay = NewImagePreviewOverlay(issueID, service, -5)
 	cmd = overlay.Init()
 	msg = cmd()
 	model, _ = overlay.Update(msg)

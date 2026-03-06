@@ -52,19 +52,19 @@ func TestSessionMonitor_StartStop(t *testing.T) {
 	defer cancel()
 
 	// Start monitoring
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 
 	// Verify session is tracked
-	state := monitor.GetState("test-bead")
+	state := monitor.GetState("test-issue")
 	if state == domain.SessionIdle {
 		// Initial state is idle, which is expected before first poll
 	}
 
 	// Stop monitoring
-	monitor.Stop("test-bead")
+	monitor.Stop("test-issue")
 
 	// Verify session is no longer tracked
-	state = monitor.GetState("test-bead")
+	state = monitor.GetState("test-issue")
 	if state != domain.SessionIdle {
 		t.Errorf("GetState() after Stop() = %v, want %v", state, domain.SessionIdle)
 	}
@@ -79,13 +79,13 @@ func TestSessionMonitor_GetState(t *testing.T) {
 	defer cancel()
 
 	// Start monitoring
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 
 	// Wait a bit for initial state to be set
 	time.Sleep(100 * time.Millisecond)
 
 	// Get state
-	state := monitor.GetState("test-bead")
+	state := monitor.GetState("test-issue")
 	if state != domain.SessionBusy && state != domain.SessionIdle {
 		t.Errorf("GetState() = %v, want %v or %v", state, domain.SessionBusy, domain.SessionIdle)
 	}
@@ -96,7 +96,7 @@ func TestSessionMonitor_GetState(t *testing.T) {
 		t.Errorf("GetState() for non-existent session = %v, want %v", state, domain.SessionIdle)
 	}
 
-	monitor.Stop("test-bead")
+	monitor.Stop("test-issue")
 }
 
 func TestSessionMonitor_StopAll(t *testing.T) {
@@ -108,9 +108,9 @@ func TestSessionMonitor_StopAll(t *testing.T) {
 	defer cancel()
 
 	// Start monitoring multiple sessions
-	monitor.Start(ctx, "bead-1", program)
-	monitor.Start(ctx, "bead-2", program)
-	monitor.Start(ctx, "bead-3", program)
+	monitor.Start(ctx, "issue-1", program)
+	monitor.Start(ctx, "issue-2", program)
+	monitor.Start(ctx, "issue-3", program)
 
 	// Verify all sessions are tracked
 	if len(monitor.sessions) != 3 {
@@ -126,10 +126,10 @@ func TestSessionMonitor_StopAll(t *testing.T) {
 	}
 
 	// Verify states return idle
-	for _, beadID := range []string{"bead-1", "bead-2", "bead-3"} {
-		state := monitor.GetState(beadID)
+	for _, issueID := range []string{"issue-1", "issue-2", "issue-3"} {
+		state := monitor.GetState(issueID)
 		if state != domain.SessionIdle {
-			t.Errorf("GetState(%q) after StopAll() = %v, want %v", beadID, state, domain.SessionIdle)
+			t.Errorf("GetState(%q) after StopAll() = %v, want %v", issueID, state, domain.SessionIdle)
 		}
 	}
 }
@@ -156,18 +156,18 @@ func TestSessionMonitor_StateDetection(t *testing.T) {
 			defer cancel()
 
 			// Start monitoring
-			monitor.Start(ctx, "test-bead", program)
+			monitor.Start(ctx, "test-issue", program)
 
 			// Wait for polling cycle to detect state
 			time.Sleep(600 * time.Millisecond)
 
 			// Check state
-			state := monitor.GetState("test-bead")
+			state := monitor.GetState("test-issue")
 			if state != tt.expectedState {
 				t.Errorf("GetState() = %v, want %v", state, tt.expectedState)
 			}
 
-			monitor.Stop("test-bead")
+			monitor.Stop("test-issue")
 		})
 	}
 }
@@ -181,7 +181,7 @@ func TestSessionMonitor_StateChangeMessage(t *testing.T) {
 	defer cancel()
 
 	// Start monitoring
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 
 	// Wait for initial polling
 	time.Sleep(600 * time.Millisecond)
@@ -196,7 +196,7 @@ func TestSessionMonitor_StateChangeMessage(t *testing.T) {
 	foundStateChange := false
 	for _, msg := range program.messages {
 		if stateMsg, ok := msg.(SessionStateMsg); ok {
-			if stateMsg.BeadID == "test-bead" && stateMsg.State == domain.SessionError {
+			if stateMsg.IssueID == "test-issue" && stateMsg.State == domain.SessionError {
 				foundStateChange = true
 				break
 			}
@@ -207,7 +207,7 @@ func TestSessionMonitor_StateChangeMessage(t *testing.T) {
 		t.Error("Expected SessionStateMsg with Error state, but none found")
 	}
 
-	monitor.Stop("test-bead")
+	monitor.Stop("test-issue")
 }
 
 func TestSessionMonitor_RestartSession(t *testing.T) {
@@ -219,11 +219,11 @@ func TestSessionMonitor_RestartSession(t *testing.T) {
 	defer cancel()
 
 	// Start monitoring
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 	time.Sleep(100 * time.Millisecond)
 
 	// Start again (should cancel previous)
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 	time.Sleep(100 * time.Millisecond)
 
 	// Should still have only one session
@@ -235,7 +235,7 @@ func TestSessionMonitor_RestartSession(t *testing.T) {
 		t.Errorf("Expected 1 session after restart, got %d", count)
 	}
 
-	monitor.Stop("test-bead")
+	monitor.Stop("test-issue")
 }
 
 func TestSessionMonitor_ConcurrentAccess(t *testing.T) {
@@ -250,11 +250,11 @@ func TestSessionMonitor_ConcurrentAccess(t *testing.T) {
 	done := make(chan bool)
 	for i := 0; i < 10; i++ {
 		go func(id int) {
-			beadID := "bead-" + string(rune('0'+id))
-			monitor.Start(ctx, beadID, program)
+			issueID := "issue-" + string(rune('0'+id))
+			monitor.Start(ctx, issueID, program)
 			time.Sleep(50 * time.Millisecond)
-			_ = monitor.GetState(beadID)
-			monitor.Stop(beadID)
+			_ = monitor.GetState(issueID)
+			monitor.Stop(issueID)
 			done <- true
 		}(i)
 	}
@@ -282,7 +282,7 @@ func TestSessionMonitor_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Start monitoring
-	monitor.Start(ctx, "test-bead", program)
+	monitor.Start(ctx, "test-issue", program)
 	time.Sleep(100 * time.Millisecond)
 
 	// Cancel context
@@ -291,10 +291,10 @@ func TestSessionMonitor_ContextCancellation(t *testing.T) {
 
 	// Session should still be in map (Stop() wasn't called)
 	// but the monitoring goroutine should have exited
-	state := monitor.GetState("test-bead")
+	state := monitor.GetState("test-issue")
 	if state == domain.SessionIdle {
 		// This is acceptable - session might have been cleaned up
 	}
 
-	monitor.Stop("test-bead")
+	monitor.Stop("test-issue")
 }

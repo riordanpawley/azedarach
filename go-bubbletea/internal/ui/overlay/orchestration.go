@@ -13,7 +13,7 @@ import (
 
 // SessionInfo represents information about an active session for orchestration view
 type SessionInfo struct {
-	BeadID       string
+	IssueID      string
 	TaskTitle    string
 	State        domain.SessionState
 	StartedAt    *time.Time
@@ -30,16 +30,16 @@ type OrchestrationOverlay struct {
 	styles   *Styles
 
 	// Callbacks
-	onAttach  func(beadID string) tea.Cmd
-	onKill    func(beadID string) tea.Cmd
+	onAttach  func(issueID string) tea.Cmd
+	onKill    func(issueID string) tea.Cmd
 	onRefresh func() tea.Cmd
 }
 
 // NewOrchestrationOverlay creates a new orchestration overlay
 func NewOrchestrationOverlay(
 	sessions []SessionInfo,
-	onAttach func(beadID string) tea.Cmd,
-	onKill func(beadID string) tea.Cmd,
+	onAttach func(issueID string) tea.Cmd,
+	onKill func(issueID string) tea.Cmd,
 	onRefresh func() tea.Cmd,
 ) *OrchestrationOverlay {
 	return &OrchestrationOverlay{
@@ -94,9 +94,9 @@ func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter", "a":
 			// Attach to selected session
 			if o.cursor >= 0 && o.cursor < len(o.sessions) {
-				beadID := o.sessions[o.cursor].BeadID
+				issueID := o.sessions[o.cursor].IssueID
 				if o.onAttach != nil {
-					return o, o.onAttach(beadID)
+					return o, o.onAttach(issueID)
 				}
 			}
 			return o, nil
@@ -104,9 +104,9 @@ func (o *OrchestrationOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "x":
 			// Kill selected session
 			if o.cursor >= 0 && o.cursor < len(o.sessions) {
-				beadID := o.sessions[o.cursor].BeadID
+				issueID := o.sessions[o.cursor].IssueID
 				if o.onKill != nil {
-					return o, o.onKill(beadID)
+					return o, o.onKill(issueID)
 				}
 			}
 			return o, nil
@@ -183,7 +183,7 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 
 	var b strings.Builder
 
-	// Line 1: Cursor indicator + Bead ID + State
+	// Line 1: Cursor indicator + Issue ID + State
 	cursor := "  "
 	if isActive {
 		cursor = lipgloss.NewStyle().
@@ -199,7 +199,7 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 	idStyle := lipgloss.NewStyle().
 		Foreground(styles.Mauve).
 		Bold(true)
-	idStr := idStyle.Render(session.BeadID)
+	idStr := idStyle.Render(session.IssueID)
 
 	line1 := baseStyle.Render(fmt.Sprintf("%s%s %s", cursor, idStr, stateStr))
 	b.WriteString(line1)
@@ -208,7 +208,7 @@ func (o *OrchestrationOverlay) renderSession(index int, session SessionInfo) str
 	// Line 2: Task title
 	titleStyle := lipgloss.NewStyle().
 		Foreground(styles.Text).
-		Padding(0, 1, 0, 3) // Indent to align with bead ID
+		Padding(0, 1, 0, 3) // Indent to align with issue ID
 	if isActive {
 		titleStyle = titleStyle.Background(styles.Surface0)
 	}
@@ -283,7 +283,7 @@ func (o *OrchestrationOverlay) renderEmptyState() string {
 		Foreground(styles.Overlay1).
 		Italic(true).
 		Align(lipgloss.Center).
-		Width(o.width - 4).
+		Width(o.width-4).
 		Padding(4, 0)
 
 	return emptyStyle.Render("No active sessions\n\nPress Space on a task to start a session")

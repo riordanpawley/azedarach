@@ -1,21 +1,21 @@
-package beads_test
+package linear_test
 
 import (
 	"context"
 	"log/slog"
 	"os"
 
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/linear"
 )
 
-// Example shows how to use the Beads client with real command execution
+// Example shows how to use the Linear client with real command execution
 func Example() {
 	// Create a logger
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Create client with real command runner
-	runner := &beads.ExecRunner{}
-	client := beads.NewClient(runner, logger)
+	runner := &linear.ExecRunner{}
+	client := linear.NewClient(runner, logger)
 
 	// Fetch tasks
 	ctx := context.Background()

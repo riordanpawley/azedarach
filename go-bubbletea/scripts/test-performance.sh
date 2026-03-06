@@ -64,7 +64,7 @@ func BenchmarkUpdateLoop(b *testing.B) {
 		
 		// Simulate a session monitor message
 		sessionMsg := monitor.SessionStateMsg{
-			BeadID: "az-1",
+			IssueID: "az-1",
 			State:  domain.SessionBusy,
 		}
 		newSessionM, _ := m.Update(sessionMsg)

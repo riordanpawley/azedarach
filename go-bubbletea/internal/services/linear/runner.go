@@ -1,4 +1,4 @@
-package beads
+package linear
 
 import (
 	"context"

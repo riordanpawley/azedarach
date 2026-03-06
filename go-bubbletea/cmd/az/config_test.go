@@ -228,9 +228,9 @@ func TestRunCLIConfigInvalidUsagePaths(t *testing.T) {
 	})
 }
 
-func TestValidateLoadedConfigSyncIntervalUsesTrackerNeutralMessage(t *testing.T) {
+func TestValidateLoadedConfigSyncIntervalUsesLinearMessage(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Beads.SyncInterval = 0
+	cfg.Linear.SyncInterval = 0
 
 	err := validateLoadedConfig(cfg)
 	if err == nil {
@@ -238,19 +238,19 @@ func TestValidateLoadedConfigSyncIntervalUsesTrackerNeutralMessage(t *testing.T)
 	}
 
 	got := err.Error()
-	want := "issueTracker.syncInterval must be > 0"
+	want := "linear.syncInterval must be > 0"
 	if got != want {
 		t.Fatalf("expected error %q, got %q", want, got)
 	}
-	if strings.Contains(strings.ToLower(got), "beads") {
-		t.Fatalf("expected tracker-neutral error message, got %q", got)
+	if strings.Contains(strings.ToLower(got), "issuetracker") {
+		t.Fatalf("expected linear-only error message, got %q", got)
 	}
 }
 
-func TestRunCLIConfigValidateJSONSyncIntervalFailureUsesTrackerNeutralMessage(t *testing.T) {
+func TestRunCLIConfigValidateJSONSyncIntervalFailureUsesLinearMessage(t *testing.T) {
 	stubConfigLoaderForTest(t, func() (*config.Config, error) {
 		cfg := config.DefaultConfig()
-		cfg.Beads.SyncInterval = 0
+		cfg.Linear.SyncInterval = 0
 		return cfg, nil
 	})
 
@@ -282,13 +282,13 @@ func TestRunCLIConfigValidateJSONSyncIntervalFailureUsesTrackerNeutralMessage(t 
 			envelope.Error.Code,
 		)
 	}
-	if strings.Contains(strings.ToLower(envelope.Error.Message), "beads") {
-		t.Fatalf("expected tracker-neutral error message, got %q", envelope.Error.Message)
+	if strings.Contains(strings.ToLower(envelope.Error.Message), "issuetracker") {
+		t.Fatalf("expected linear-only error message, got %q", envelope.Error.Message)
 	}
-	if envelope.Error.Message != "issueTracker.syncInterval must be > 0" {
+	if envelope.Error.Message != "linear.syncInterval must be > 0" {
 		t.Fatalf(
 			"expected error.message=%q, got %q",
-			"issueTracker.syncInterval must be > 0",
+			"linear.syncInterval must be > 0",
 			envelope.Error.Message,
 		)
 	}

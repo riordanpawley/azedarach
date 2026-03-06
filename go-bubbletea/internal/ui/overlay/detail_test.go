@@ -79,7 +79,7 @@ func TestDetailPanelViewWithSession(t *testing.T) {
 	}
 
 	session := &domain.Session{
-		BeadID:    "az-456",
+		IssueID:   "az-456",
 		State:     domain.SessionBusy,
 		StartedAt: &startTime,
 		Worktree:  "/path/to/worktree",

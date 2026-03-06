@@ -21,8 +21,8 @@ func TestNewImageAttachOverlay(t *testing.T) {
 		t.Fatal("expected overlay to be created")
 	}
 
-	if overlay.beadID != "az-123" {
-		t.Errorf("expected bead_id to be az-123, got %s", overlay.beadID)
+	if overlay.issueID != "az-123" {
+		t.Errorf("expected issue_id to be az-123, got %s", overlay.issueID)
 	}
 
 	if overlay.mode != imageAttachModeList {
@@ -77,9 +77,9 @@ func TestImageAttachOverlay_NavigationKeys(t *testing.T) {
 
 	// Set up some mock files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
-		{ID: "2", BeadID: "az-123", Filename: "file2.png"},
-		{ID: "3", BeadID: "az-123", Filename: "file3.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
+		{ID: "2", IssueID: "az-123", Filename: "file2.png"},
+		{ID: "3", IssueID: "az-123", Filename: "file3.png"},
 	}
 
 	// Test down key
@@ -152,7 +152,7 @@ func TestImageAttachOverlay_OpenPreviewOverlay(t *testing.T) {
 
 	// Set up some mock files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
 	}
 
 	// Test enter sends OpenImagePreviewMsg
@@ -201,8 +201,8 @@ func TestImageAttachOverlay_AttachmentsLoadedMsg(t *testing.T) {
 
 	// Simulate attachments loaded message
 	files := []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png"},
-		{ID: "2", BeadID: "az-123", Filename: "file2.png"},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png"},
+		{ID: "2", IssueID: "az-123", Filename: "file2.png"},
 	}
 
 	msg := attachmentsLoadedMsg{attachments: files}
@@ -248,7 +248,7 @@ func TestImageAttachOverlay_View(t *testing.T) {
 
 	// Test view with files
 	overlay.files = []attachment.Attachment{
-		{ID: "1", BeadID: "az-123", Filename: "file1.png", Size: 1024},
+		{ID: "1", IssueID: "az-123", Filename: "file1.png", Size: 1024},
 	}
 	view = overlay.View()
 	if view == "" {
@@ -322,10 +322,10 @@ func TestTruncate(t *testing.T) {
 func TestImageAttachOverlay_Integration(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := attachment.NewService(beadsPath, logger)
+	service := attachment.NewService(issuesPath, logger)
 
 	overlay := NewImageAttachOverlay("az-123", service)
 

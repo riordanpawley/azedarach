@@ -18,7 +18,7 @@ type PlanningStartMsg struct {
 
 // PlanningCompleteMsg signals that planning is complete
 type PlanningCompleteMsg struct {
-	Beads []domain.Task
+	Linear []domain.Task
 }
 
 // planningPhase represents the current UI phase
@@ -82,7 +82,7 @@ func (p *PlanningOverlay) UpdateState(state domain.PlanningState) {
 	switch state.Status {
 	case domain.PlanningIdle:
 		p.phase = phaseInput
-	case domain.PlanningGenerating, domain.PlanningReviewing, domain.PlanningRefining, domain.PlanningCreatingBeads:
+	case domain.PlanningGenerating, domain.PlanningReviewing, domain.PlanningRefining, domain.PlanningCreatingIssues:
 		p.phase = phaseProgress
 	case domain.PlanningComplete:
 		p.phase = phaseComplete
@@ -191,7 +191,7 @@ func (p *PlanningOverlay) handleCompletePhase(msg tea.KeyMsg) (tea.Model, tea.Cm
 	case "esc", "enter":
 		return p, tea.Batch(
 			func() tea.Msg {
-				return PlanningCompleteMsg{Beads: p.state.CreatedBeads}
+				return PlanningCompleteMsg{Linear: p.state.CreatedIssues}
 			},
 			func() tea.Msg { return CloseOverlayMsg{} },
 		)
@@ -351,19 +351,19 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 	b.WriteString("\n\n")
 
 	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
-	b.WriteString(textStyle.Render(fmt.Sprintf("Created %d beads:", len(p.state.CreatedBeads))))
+	b.WriteString(textStyle.Render(fmt.Sprintf("Created %d issues:", len(p.state.CreatedIssues))))
 	b.WriteString("\n\n")
 
-	// List created beads (limit to 10)
-	count := len(p.state.CreatedBeads)
+	// List created linear (limit to 10)
+	count := len(p.state.CreatedIssues)
 	if count > 10 {
 		count = 10
 	}
 
 	for i := 0; i < count; i++ {
-		bead := p.state.CreatedBeads[i]
+		issue := p.state.CreatedIssues[i]
 		var color lipgloss.Color
-		if bead.Type == domain.TypeEpic {
+		if issue.Type == domain.TypeEpic {
 			color = lipgloss.Color("#cba6f7")
 		} else {
 			color = lipgloss.Color("#89b4fa")
@@ -373,15 +373,15 @@ func (p *PlanningOverlay) renderCompletePhase() string {
 		titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
 
 		b.WriteString("  ")
-		b.WriteString(idStyle.Render(bead.ID + ": "))
-		b.WriteString(titleStyle.Render(truncateText(bead.Title, 50)))
+		b.WriteString(idStyle.Render(issue.ID + ": "))
+		b.WriteString(titleStyle.Render(truncateText(issue.Title, 50)))
 		b.WriteString("\n")
 	}
 
-	if len(p.state.CreatedBeads) > 10 {
+	if len(p.state.CreatedIssues) > 10 {
 		subtext := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
 		b.WriteString("\n")
-		b.WriteString(subtext.Render(fmt.Sprintf("  ... and %d more", len(p.state.CreatedBeads)-10)))
+		b.WriteString(subtext.Render(fmt.Sprintf("  ... and %d more", len(p.state.CreatedIssues)-10)))
 	}
 
 	b.WriteString("\n\n")
@@ -427,7 +427,7 @@ func (p *PlanningOverlay) renderStatusIndicator() string {
 		domain.PlanningGenerating:     lipgloss.Color("#f9e2af"),
 		domain.PlanningReviewing:      lipgloss.Color("#89b4fa"),
 		domain.PlanningRefining:       lipgloss.Color("#cba6f7"),
-		domain.PlanningCreatingBeads:  lipgloss.Color("#a6e3a1"),
+		domain.PlanningCreatingIssues: lipgloss.Color("#a6e3a1"),
 		domain.PlanningComplete:       lipgloss.Color("#a6e3a1"),
 		domain.PlanningErrorStatus:    lipgloss.Color("#f38ba8"),
 	}
@@ -437,7 +437,7 @@ func (p *PlanningOverlay) renderStatusIndicator() string {
 		domain.PlanningGenerating:     "Generating plan...",
 		domain.PlanningReviewing:      "Reviewing plan...",
 		domain.PlanningRefining:       "Refining plan...",
-		domain.PlanningCreatingBeads:  "Creating beads...",
+		domain.PlanningCreatingIssues: "Creating issues...",
 		domain.PlanningComplete:       "Complete!",
 		domain.PlanningErrorStatus:    "Error",
 	}

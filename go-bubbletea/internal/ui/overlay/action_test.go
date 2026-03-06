@@ -86,7 +86,7 @@ func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 	}
 
 	session := &domain.Session{
-		BeadID:   "az-123",
+		IssueID:  "az-123",
 		State:    domain.SessionBusy,
 		Worktree: "/path/to/worktree",
 	}
@@ -130,7 +130,7 @@ func TestActionMenu_BuildActions_PausedSession(t *testing.T) {
 	}
 
 	session := &domain.Session{
-		BeadID:   "az-123",
+		IssueID:  "az-123",
 		State:    domain.SessionPaused,
 		Worktree: "/path/to/worktree",
 	}
@@ -152,9 +152,9 @@ func TestActionMenu_BuildActions_PausedSession(t *testing.T) {
 
 func TestActionMenu_MoveActions(t *testing.T) {
 	tests := []struct {
-		name           string
-		status         domain.Status
-		expectMoveLeft bool
+		name            string
+		status          domain.Status
+		expectMoveLeft  bool
 		expectMoveRight bool
 	}{
 		{
@@ -340,8 +340,8 @@ func TestActionMenu_View(t *testing.T) {
 func TestActionMenu_SelectByKey_Disabled(t *testing.T) {
 	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
 	session := &domain.Session{
-		BeadID: "az-123",
-		State:  domain.SessionBusy,
+		IssueID: "az-123",
+		State:   domain.SessionBusy,
 		// No worktree, so git actions disabled
 	}
 	menu := NewActionMenu(task, session)

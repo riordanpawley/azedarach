@@ -18,7 +18,7 @@ type Dependency struct {
 	Type DependencyType `json:"dependency_type"`
 }
 
-// Task represents a bead/issue
+// Task represents a issue/issue
 type Task struct {
 	ID           string       `json:"id"`
 	Title        string       `json:"title"`

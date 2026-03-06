@@ -21,8 +21,8 @@ type MergeTarget struct {
 
 // MergeSelectOverlay allows selecting a merge target task
 type MergeSelectOverlay struct {
-	source     *domain.Task  // The bead being merged FROM
-	candidates []MergeTarget // Beads that can be merged INTO (including main)
+	source     *domain.Task  // The issue being merged FROM
+	candidates []MergeTarget // Linear that can be merged INTO (including main)
 	cursor     int
 	onMerge    func(targetID string) tea.Cmd
 	onCancel   func() tea.Cmd
@@ -88,7 +88,7 @@ func (m *MergeSelectOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *MergeSelectOverlay) View() string {
 	var b strings.Builder
 
-	// Header showing source bead
+	// Header showing source issue
 	header := fmt.Sprintf("Merge %s into:", m.overlayStyles.MenuKey.Render(m.source.ID))
 	b.WriteString(m.overlayStyles.Title.Render(header))
 	b.WriteString("\n\n")

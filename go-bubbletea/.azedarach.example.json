@@ -28,8 +28,8 @@
 		"failedTask": true,
 		"errorThreshold": 3
 	},
-	"beads": {
-		"path": ".beads",
+	"linear": {
+		"path": ".linear",
 		"syncInterval": 300
 	},
 	"network": {
@@ -47,7 +47,7 @@
 	},
 	"worktree": {
 		"basePath": "../",
-		"nameFormat": "{project}-{beadID}",
+		"nameFormat": "{project}-{issueID}",
 		"autoCleanup": true,
 		"keepDays": 7
 	}

@@ -57,7 +57,7 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "feature/x",
 				BaseBranch: "main",
 				Draft:      true,
-				BeadID:     "az-123",
+				IssueID:    "az-123",
 			},
 			createOut: "https://github.com/owner/repo/pull/42\n",
 			getOut: `{
@@ -80,7 +80,7 @@ func TestPRWorkflow_Create(t *testing.T) {
 				Branch:     "fix/bug-y",
 				BaseBranch: "main",
 				Draft:      false,
-				BeadID:     "az-456",
+				IssueID:    "az-456",
 			},
 			createOut: "https://github.com/owner/repo/pull/99\n",
 			getOut: `{

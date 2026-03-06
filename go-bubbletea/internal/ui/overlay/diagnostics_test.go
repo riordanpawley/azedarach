@@ -16,7 +16,7 @@ type mockDiagnosticsService struct {
 	diagnostics *diagnostics.SystemDiagnostics
 }
 
-func (m *mockDiagnosticsService) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, beadsPath *string) *diagnostics.SystemDiagnostics {
+func (m *mockDiagnosticsService) CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, issuesPath *string) *diagnostics.SystemDiagnostics {
 	return m.diagnostics
 }
 

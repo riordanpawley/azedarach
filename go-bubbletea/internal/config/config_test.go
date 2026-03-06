@@ -41,9 +41,9 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.Notifications.FailedTask)
 	assert.Equal(t, 3, cfg.Notifications.ErrorThreshold)
 
-	// Test beads defaults
-	assert.Equal(t, ".beads", cfg.Beads.Path)
-	assert.Equal(t, 300, cfg.Beads.SyncInterval)
+	// Test linear defaults
+	assert.Equal(t, ".linear", cfg.Linear.Path)
+	assert.Equal(t, 300, cfg.Linear.SyncInterval)
 
 	// Test network defaults
 	assert.Equal(t, 60, cfg.Network.CheckInterval)
@@ -57,7 +57,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	// Test worktree defaults
 	assert.Equal(t, "../", cfg.Worktree.BasePath)
-	assert.Equal(t, "{project}-{beadID}", cfg.Worktree.NameFormat)
+	assert.Equal(t, "{project}-{issueID}", cfg.Worktree.NameFormat)
 	assert.True(t, cfg.Worktree.AutoCleanup)
 	assert.Equal(t, 7, cfg.Worktree.KeepDays)
 }
@@ -103,7 +103,7 @@ func TestLoadConfigFromAzedarachJSON(t *testing.T) {
 	// Check defaults are filled in
 	assert.Equal(t, "worktree", cfg.Git.WorkflowMode)
 	assert.Equal(t, 3100, cfg.DevServer.MaxPort)
-	assert.Equal(t, ".beads", cfg.Beads.Path)
+	assert.Equal(t, ".linear", cfg.Linear.Path)
 }
 
 func TestLoadConfigFromPackageJSON(t *testing.T) {
@@ -282,7 +282,7 @@ func TestMergeWithDefaults(t *testing.T) {
 	assert.Equal(t, 3100, merged.DevServer.MaxPort)
 	assert.NotEmpty(t, merged.Session.LogDir)
 	assert.NotNil(t, merged.Session.InitCommands)
-	assert.Equal(t, ".beads", merged.Beads.Path)
+	assert.Equal(t, ".linear", merged.Linear.Path)
 }
 
 func TestMergeWithDefaultsEmptyConfig(t *testing.T) {
@@ -379,8 +379,8 @@ func TestComplexConfig(t *testing.T) {
     "failedTask": false,
     "errorThreshold": 5
   },
-  "beads": {
-    "path": ".custom-beads",
+  "linear": {
+    "path": ".custom-linear",
     "syncInterval": 600
   },
   "network": {
@@ -399,7 +399,7 @@ func TestComplexConfig(t *testing.T) {
   },
   "worktree": {
     "basePath": "/tmp/worktrees",
-    "nameFormat": "{beadID}-{project}",
+    "nameFormat": "{issueID}-{project}",
     "autoCleanup": false,
     "keepDays": 30
   }
@@ -438,8 +438,8 @@ func TestComplexConfig(t *testing.T) {
 	assert.False(t, cfg.Notifications.FailedTask)
 	assert.Equal(t, 5, cfg.Notifications.ErrorThreshold)
 
-	assert.Equal(t, ".custom-beads", cfg.Beads.Path)
-	assert.Equal(t, 600, cfg.Beads.SyncInterval)
+	assert.Equal(t, ".custom-linear", cfg.Linear.Path)
+	assert.Equal(t, 600, cfg.Linear.SyncInterval)
 
 	assert.Equal(t, 120, cfg.Network.CheckInterval)
 	assert.Equal(t, 600, cfg.Network.OfflineTimeout)
@@ -452,7 +452,7 @@ func TestComplexConfig(t *testing.T) {
 	assert.Equal(t, "false", cfg.DevServer.Environments["DEBUG"])
 
 	assert.Equal(t, "/tmp/worktrees", cfg.Worktree.BasePath)
-	assert.Equal(t, "{beadID}-{project}", cfg.Worktree.NameFormat)
+	assert.Equal(t, "{issueID}-{project}", cfg.Worktree.NameFormat)
 	assert.False(t, cfg.Worktree.AutoCleanup)
 	assert.Equal(t, 30, cfg.Worktree.KeepDays)
 }

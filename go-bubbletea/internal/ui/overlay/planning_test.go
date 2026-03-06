@@ -45,8 +45,8 @@ func TestPlanningOverlay_UpdateState(t *testing.T) {
 			wantPhase: phaseProgress,
 		},
 		{
-			name:      "creating beads status",
-			status:    domain.PlanningCreatingBeads,
+			name:      "creating linear status",
+			status:    domain.PlanningCreatingIssues,
 			wantPhase: phaseProgress,
 		},
 		{
@@ -88,9 +88,9 @@ func TestPlanningOverlay_InputPhase(t *testing.T) {
 			expectClose: true,
 		},
 		{
-			name:       "tab switches focus",
-			key:        "tab",
-			expectMsg:  false,
+			name:      "tab switches focus",
+			key:       "tab",
+			expectMsg: false,
 		},
 		{
 			name:       "enter with empty input does nothing",
@@ -193,7 +193,7 @@ func TestPlanningOverlay_CompletePhase(t *testing.T) {
 			overlay := NewPlanningOverlay()
 			overlay.phase = phaseComplete
 			overlay.state.Status = domain.PlanningComplete
-			overlay.state.CreatedBeads = []domain.Task{
+			overlay.state.CreatedIssues = []domain.Task{
 				{ID: "az-1", Title: "Epic"},
 				{ID: "az-2", Title: "Task 1"},
 			}
@@ -261,7 +261,7 @@ func TestPlanningOverlay_View(t *testing.T) {
 			overlay.phase = tt.phase
 
 			if tt.phase == phaseComplete {
-				overlay.state.CreatedBeads = []domain.Task{
+				overlay.state.CreatedIssues = []domain.Task{
 					{ID: "az-1", Title: "Epic"},
 				}
 			}

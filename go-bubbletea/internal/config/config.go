@@ -15,7 +15,7 @@ type Config struct {
 	PR            PRConfig        `json:"pr"`
 	Merge         MergeConfig     `json:"merge"`
 	Notifications NotifyConfig    `json:"notifications"`
-	Beads         BeadsConfig     `json:"beads"`
+	Linear        LinearConfig    `json:"linear"`
 	Network       NetworkConfig   `json:"network"`
 	DevServer     DevServerConfig `json:"devServer"`
 	Worktree      WorktreeConfig  `json:"worktree"`
@@ -59,8 +59,8 @@ type NotifyConfig struct {
 	ErrorThreshold int  `json:"errorThreshold"`
 }
 
-// BeadsConfig contains beads task tracking settings
-type BeadsConfig struct {
+// LinearConfig contains linear task tracking settings
+type LinearConfig struct {
 	Path         string `json:"path"`
 	SyncInterval int    `json:"syncInterval"`
 }
@@ -121,8 +121,8 @@ func DefaultConfig() *Config {
 			FailedTask:     true,
 			ErrorThreshold: 3,
 		},
-		Beads: BeadsConfig{
-			Path:         ".beads",
+		Linear: LinearConfig{
+			Path:         ".linear",
 			SyncInterval: 300, // 5 minutes
 		},
 		Network: NetworkConfig{
@@ -137,7 +137,7 @@ func DefaultConfig() *Config {
 		},
 		Worktree: WorktreeConfig{
 			BasePath:    "../",
-			NameFormat:  "{project}-{beadID}",
+			NameFormat:  "{project}-{issueID}",
 			AutoCleanup: true,
 			KeepDays:    7,
 		},
@@ -241,12 +241,12 @@ func MergeWithDefaults(cfg *Config) *Config {
 		cfg.Merge.Strategy = defaults.Merge.Strategy
 	}
 
-	// Merge Beads config
-	if cfg.Beads.Path == "" {
-		cfg.Beads.Path = defaults.Beads.Path
+	// Merge Linear config
+	if cfg.Linear.Path == "" {
+		cfg.Linear.Path = defaults.Linear.Path
 	}
-	if cfg.Beads.SyncInterval == 0 {
-		cfg.Beads.SyncInterval = defaults.Beads.SyncInterval
+	if cfg.Linear.SyncInterval == 0 {
+		cfg.Linear.SyncInterval = defaults.Linear.SyncInterval
 	}
 
 	// Merge Network config

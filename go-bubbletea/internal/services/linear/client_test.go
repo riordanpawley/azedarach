@@ -1,4 +1,4 @@
-package beads
+package linear
 
 import (
 	"context"
@@ -362,7 +362,7 @@ func TestClient_ErrorWrapping(t *testing.T) {
 		assert.Contains(t, err.Error(), "issue tracker list")
 	})
 
-	t.Run("update error contains bead id", func(t *testing.T) {
+	t.Run("update error contains issue id", func(t *testing.T) {
 		runner := &mockRunner{err: errors.New("cmd failed")}
 		client := NewClient(runner, slog.Default())
 

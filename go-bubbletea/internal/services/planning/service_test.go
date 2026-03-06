@@ -26,7 +26,7 @@ func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	return m.response, m.err
 }
 
-// mockIssueClient mocks beads operations
+// mockIssueClient mocks linear operations
 type mockIssueClient struct {
 	createdTasks []domain.Task
 	nextID       int
@@ -317,12 +317,12 @@ func TestService_RefinePlan(t *testing.T) {
 	assert.Equal(t, domain.PlanningRefining, svc.state.Status)
 }
 
-func TestService_CreateBeadsFromPlan(t *testing.T) {
+func TestService_CreateIssuesFromPlan(t *testing.T) {
 	tests := []struct {
 		name      string
 		plan      *domain.Plan
 		createErr error
-		wantBeads int
+		wantIssues int
 		wantErr   bool
 	}{
 		{
@@ -356,7 +356,7 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 					},
 				},
 			},
-			wantBeads: 3, // 1 epic + 2 tasks
+			wantIssues: 3, // 1 epic + 2 tasks
 		},
 		{
 			name: "plan with dependencies",
@@ -389,7 +389,7 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 					},
 				},
 			},
-			wantBeads: 3, // 1 epic + 2 tasks
+			wantIssues: 3, // 1 epic + 2 tasks
 		},
 		{
 			name: "epic creation error",
@@ -417,15 +417,15 @@ func TestService_CreateBeadsFromPlan(t *testing.T) {
 			svc, err := NewService(&mockHTTPClient{}, issueClient, slog.Default())
 			require.NoError(t, err)
 
-			beads, err := svc.CreateBeadsFromPlan(context.Background(), tt.plan)
+			linear, err := svc.CreateIssuesFromPlan(context.Background(), tt.plan)
 
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Nil(t, beads)
+				assert.Nil(t, linear)
 				assert.Equal(t, domain.PlanningErrorStatus, svc.state.Status)
 			} else {
 				require.NoError(t, err)
-				assert.Len(t, beads, tt.wantBeads)
+				assert.Len(t, linear, tt.wantIssues)
 				assert.Equal(t, domain.PlanningComplete, svc.state.Status)
 			}
 		})
@@ -482,10 +482,10 @@ func TestService_RunPlanningWorkflow(t *testing.T) {
 	svc, err := NewService(httpClient, issueClient, slog.Default())
 	require.NoError(t, err)
 
-	beads, err := svc.RunPlanningWorkflow(context.Background(), "Add test feature")
+	linear, err := svc.RunPlanningWorkflow(context.Background(), "Add test feature")
 
 	require.NoError(t, err)
-	assert.NotNil(t, beads)
+	assert.NotNil(t, linear)
 	assert.Equal(t, domain.PlanningComplete, svc.state.Status)
 	assert.Len(t, svc.state.ReviewHistory, 1)
 	assert.True(t, svc.state.ReviewHistory[0].IsApproved)

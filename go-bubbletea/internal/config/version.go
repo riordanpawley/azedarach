@@ -21,7 +21,7 @@ type VersionedConfig struct {
 	PR            PRConfig        `json:"pr,omitempty"`
 	Merge         MergeConfig     `json:"merge,omitempty"`
 	Notifications NotifyConfig    `json:"notifications,omitempty"`
-	Beads         BeadsConfig     `json:"beads,omitempty"`
+	Linear        LinearConfig    `json:"linear,omitempty"`
 	Network       NetworkConfig   `json:"network,omitempty"`
 	DevServer     DevServerConfig `json:"devServer,omitempty"`
 	Worktree      WorktreeConfig  `json:"worktree,omitempty"`

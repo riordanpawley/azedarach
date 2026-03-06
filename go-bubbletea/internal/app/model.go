@@ -17,11 +17,11 @@ import (
 	"github.com/riordanpawley/azedarach/internal/core/phases"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/devserver"
 	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/editor"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
 	"github.com/riordanpawley/azedarach/internal/services/navigation"
 	"github.com/riordanpawley/azedarach/internal/services/network"
@@ -119,8 +119,8 @@ type Model struct {
 	lastRefresh    time.Time
 	hasRefreshLoop bool
 
-	// Beads client
-	issueClient *beads.Client
+	// Linear client
+	issueClient *linear.Client
 
 	// Session management services
 	tmuxClient      *tmux.Client
@@ -166,9 +166,9 @@ func New(cfg *config.Config) Model {
 	// Initialize logger
 	logger := slog.Default()
 
-	// Initialize beads client
-	beadsRunner := &beads.ExecRunner{}
-	issueClient := beads.NewClient(beadsRunner, logger)
+	// Initialize linear client
+	linearRunner := &linear.ExecRunner{}
+	issueClient := linear.NewClient(linearRunner, logger)
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}
@@ -211,8 +211,8 @@ func New(cfg *config.Config) Model {
 	}
 
 	// Initialize attachment service
-	beadsPath := filepath.Join(repoDir, ".beads")
-	attachmentSvc := attachment.NewService(beadsPath, logger)
+	issuesPath := filepath.Join(repoDir, ".linear")
+	attachmentSvc := attachment.NewService(issuesPath, logger)
 
 	// Initialize PR workflow
 	prRunner := &pr.ExecRunner{}
@@ -251,7 +251,7 @@ func New(cfg *config.Config) Model {
 		devServerManager:   devServerMgr,
 		diagnosticsService: diagService,
 		logger:             logger,
-		usePlaceholder:     false, // Use real data from beads
+		usePlaceholder:     false, // Use real data from linear
 	}
 }
 
@@ -356,7 +356,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickEvery(5 * time.Second)
 
 	case tickMsg:
-		// Expire old toasts and refresh beads
+		// Expire old toasts and refresh linear
 		m.expireToasts()
 		return m, tea.Batch(
 			m.loadIssuesCmd(),
@@ -364,16 +364,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case monitor.SessionStateMsg:
-		if session, ok := m.sessions[msg.BeadID]; ok {
+		if session, ok := m.sessions[msg.IssueID]; ok {
 			oldState := session.State
 			session.State = msg.State
-			m.logger.Debug("session state updated", "issueID", msg.BeadID, "state", msg.State)
+			m.logger.Debug("session state updated", "issueID", msg.IssueID, "state", msg.State)
 
 			if oldState != msg.State && msg.State == domain.SessionWaiting {
 				fmt.Print("\a")
 				m.toasts = append(m.toasts, Toast{
 					Level:   ToastWarning,
-					Message: fmt.Sprintf("Session %s is waiting for input", msg.BeadID),
+					Message: fmt.Sprintf("Session %s is waiting for input", msg.IssueID),
 					Expires: time.Now().Add(10 * time.Second),
 				})
 			}
@@ -553,7 +553,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 
-		// Reload beads for new project
+		// Reload linear for new project
 		return m, m.loadIssuesCmd()
 
 	case overlay.TaskCreatedMsg:
@@ -576,7 +576,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 
-		// Reload beads to show new task
+		// Reload linear to show new task
 		return m, m.loadIssuesCmd()
 
 	// PR creation overlay messages
@@ -666,7 +666,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(5 * time.Second),
 		})
 
-		// Reload beads to reflect changes
+		// Reload linear to reflect changes
 		return m, m.loadIssuesCmd()
 
 	case branchBehindMsg:
@@ -1239,7 +1239,7 @@ type sessionErrorMsg struct {
 
 // Commands
 
-// loadIssuesCmd returns a command that fetches beads from the CLI
+// loadIssuesCmd returns a command that fetches linear from the CLI
 func (m Model) loadIssuesCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1287,7 +1287,7 @@ func (m Model) startSessionCmd(issueID string) tea.Cmd {
 		// Create session record
 		now := time.Now()
 		session := &domain.Session{
-			BeadID:    issueID,
+			IssueID:   issueID,
 			State:     domain.SessionBusy,
 			StartedAt: &now,
 			Worktree:  worktree.Path,
@@ -1614,7 +1614,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		return m, m.overlayStack.Push(devOverlay)
 
 	case "b":
-		// Merge bead into... (merge select mode)
+		// Merge issue into... (merge select mode)
 		candidates := m.getMergeCandidates(task)
 		mergeOverlay := overlay.NewMergeSelectOverlay(
 			task,
@@ -2016,7 +2016,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			// Update via beads client
+			// Update via linear client
 			err := m.issueClient.Update(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
@@ -2100,7 +2100,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 		defer cancel()
 
 		if msg.ID != "" {
-			err := m.issueClient.UpdateDetails(ctx, msg.ID, beads.UpdateTaskParams{
+			err := m.issueClient.UpdateDetails(ctx, msg.ID, linear.UpdateTaskParams{
 				Title:       msg.Title,
 				Description: msg.Description,
 				Type:        msg.Type,
@@ -2109,7 +2109,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
 		}
 
-		taskID, err := m.issueClient.Create(ctx, beads.CreateTaskParams{
+		taskID, err := m.issueClient.Create(ctx, linear.CreateTaskParams{
 			Title:       msg.Title,
 			Description: msg.Description,
 			Type:        msg.Type,
@@ -2174,7 +2174,7 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 
 		newStatus := statusOrder[newIdx]
 
-		// Update via beads client
+		// Update via linear client
 		err := m.issueClient.Update(ctx, taskID, newStatus)
 		if err != nil {
 			return taskStatusResultMsg{taskID: taskID, err: err}
@@ -2252,7 +2252,7 @@ func (m Model) createPRWithOverlayCmd(msg overlay.PRCreatedMsg) tea.Cmd {
 			Branch:     msg.Branch,
 			BaseBranch: msg.BaseBranch,
 			Draft:      msg.Draft,
-			BeadID:     msg.BeadID,
+			IssueID:    msg.IssueID,
 		})
 		if err != nil {
 			return prCreatedResultMsg{err: err}
@@ -2451,7 +2451,7 @@ func (m Model) openOrchestrationOverlay() tea.Cmd {
 	for _, task := range m.tasks {
 		if task.Session != nil {
 			sessions = append(sessions, overlay.SessionInfo{
-				BeadID:       task.ID,
+				IssueID:      task.ID,
 				TaskTitle:    task.Title,
 				State:        task.Session.State,
 				StartedAt:    task.Session.StartedAt,
@@ -2530,8 +2530,8 @@ func (m Model) performCleanup(ctx context.Context, categoryIDs []string) (overla
 			// List all worktrees, check if they have sessions, delete orphaned ones
 			// worktrees, err := m.worktreeManager.List(ctx)
 			// for _, wt := range worktrees {
-			//     if _, hasSession := m.sessions[wt.BeadID]; !hasSession {
-			//         err := m.worktreeManager.Delete(ctx, wt.BeadID)
+			//     if _, hasSession := m.sessions[wt.IssueID]; !hasSession {
+			//         err := m.worktreeManager.Delete(ctx, wt.IssueID)
 			//         if err == nil {
 			//             removed++
 			//         }

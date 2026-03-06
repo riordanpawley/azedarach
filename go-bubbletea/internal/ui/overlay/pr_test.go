@@ -13,7 +13,7 @@ func TestNewPRCreateOverlay(t *testing.T) {
 	require.NotNil(t, overlay)
 	assert.Equal(t, "feature/x", overlay.branch)
 	assert.Equal(t, "main", overlay.baseBranch)
-	assert.Equal(t, "az-123", overlay.beadID)
+	assert.Equal(t, "az-123", overlay.issueID)
 	assert.True(t, overlay.draft) // Default to draft
 	assert.Equal(t, prFocusTitle, overlay.focusIndex)
 }
@@ -153,7 +153,7 @@ func TestPRCreateOverlaySubmitWithCtrlS(t *testing.T) {
 	assert.Equal(t, "Test PR", prMsg.Title)
 	assert.Equal(t, "feature/test", prMsg.Branch)
 	assert.Equal(t, "main", prMsg.BaseBranch)
-	assert.Equal(t, "az-99", prMsg.BeadID)
+	assert.Equal(t, "az-99", prMsg.IssueID)
 	assert.True(t, prMsg.Draft)
 }
 

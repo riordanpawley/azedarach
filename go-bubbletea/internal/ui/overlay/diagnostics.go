@@ -14,7 +14,7 @@ import (
 
 // DiagnosticsCollector defines the interface for collecting diagnostics
 type DiagnosticsCollector interface {
-	CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, beadsPath *string) *diagnostics.SystemDiagnostics
+	CollectDiagnostics(ctx context.Context, sessions map[string]*domain.Session, issuesPath *string) *diagnostics.SystemDiagnostics
 }
 
 // DiagnosticsSection represents a section in the diagnostics panel
@@ -336,7 +336,7 @@ func (d *DiagnosticsPanel) renderPorts(b *strings.Builder) {
 		Foreground(lipgloss.Color("#94e2d5")).
 		Bold(true)
 
-	b.WriteString(tableHeaderStyle.Render("  PORT     BEAD ID          STATUS"))
+	b.WriteString(tableHeaderStyle.Render("  PORT     ISSUE ID         STATUS"))
 	b.WriteString("\n")
 	b.WriteString(d.styles.MenuItem.Render("  ───────────────────────────────────────────"))
 	b.WriteString("\n")
@@ -359,7 +359,7 @@ func (d *DiagnosticsPanel) renderPorts(b *strings.Builder) {
 
 		line := fmt.Sprintf("  %-8d %-16s %s",
 			port.Port,
-			truncateDiagString(port.BeadID, 16),
+			truncateDiagString(port.IssueID, 16),
 			statusStyle.Render(status),
 		)
 		b.WriteString(line)
@@ -388,7 +388,7 @@ func (d *DiagnosticsPanel) renderSessions(b *strings.Builder) {
 		Foreground(lipgloss.Color("#94e2d5")).
 		Bold(true)
 
-	b.WriteString(tableHeaderStyle.Render("  BEAD ID          STATE        UPTIME"))
+	b.WriteString(tableHeaderStyle.Render("  ISSUE ID         STATE        UPTIME"))
 	b.WriteString("\n")
 	b.WriteString(d.styles.MenuItem.Render("  ─────────────────────────────────────────"))
 	b.WriteString("\n")
@@ -402,7 +402,7 @@ func (d *DiagnosticsPanel) renderSessions(b *strings.Builder) {
 		}
 
 		line := fmt.Sprintf("  %-16s %s %-7s  %s",
-			truncateDiagString(session.BeadID, 16),
+			truncateDiagString(session.IssueID, 16),
 			stateIcon,
 			session.State,
 			uptimeStr,
@@ -448,7 +448,7 @@ func (d *DiagnosticsPanel) renderWorktrees(b *strings.Builder) {
 		healthStyle := lipgloss.NewStyle().Foreground(healthColor)
 
 		b.WriteString(healthStyle.Render(fmt.Sprintf("  %s ", healthIcon)))
-		b.WriteString(d.styles.MenuItem.Render(wt.BeadID))
+		b.WriteString(d.styles.MenuItem.Render(wt.IssueID))
 		b.WriteString("\n")
 
 		pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))

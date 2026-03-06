@@ -17,9 +17,9 @@ type WorktreeManager struct {
 
 // Worktree represents a git worktree associated with a issue.
 type Worktree struct {
-	Path   string // Absolute path to the worktree
-	Branch string // Branch name (e.g., "az/issue-123")
-	BeadID string // Associated issue ID
+	Path    string // Absolute path to the worktree
+	Branch  string // Branch name (e.g., "az/issue-123")
+	IssueID string // Associated issue ID
 }
 
 // NewWorktreeManager creates a new WorktreeManager.
@@ -72,9 +72,9 @@ func (w *WorktreeManager) Create(ctx context.Context, issueID string, baseBranch
 	w.logger.Info("worktree created successfully", "issueID", issueID, "path", worktreePath)
 
 	return &Worktree{
-		Path:   worktreePath,
-		Branch: branchName,
-		BeadID: issueID,
+		Path:    worktreePath,
+		Branch:  branchName,
+		IssueID: issueID,
 	}, nil
 }
 
@@ -116,7 +116,7 @@ func (w *WorktreeManager) Get(ctx context.Context, issueID string) (*Worktree, e
 	}
 
 	for _, wt := range worktrees {
-		if wt.BeadID == issueID {
+		if wt.IssueID == issueID {
 			return &wt, nil
 		}
 	}
@@ -179,9 +179,9 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 			if strings.HasPrefix(currentBranch, "az/") {
 				issueID := strings.TrimPrefix(currentBranch, "az/")
 				worktrees = append(worktrees, Worktree{
-					Path:   currentPath,
-					Branch: currentBranch,
-					BeadID: issueID,
+					Path:    currentPath,
+					Branch:  currentBranch,
+					IssueID: issueID,
 				})
 			}
 
@@ -195,9 +195,9 @@ func (w *WorktreeManager) parseWorktreeList(output string) []Worktree {
 	if currentPath != "" && currentBranch != "" && strings.HasPrefix(currentBranch, "az/") {
 		issueID := strings.TrimPrefix(currentBranch, "az/")
 		worktrees = append(worktrees, Worktree{
-			Path:   currentPath,
-			Branch: currentBranch,
-			BeadID: issueID,
+			Path:    currentPath,
+			Branch:  currentBranch,
+			IssueID: issueID,
 		})
 	}
 

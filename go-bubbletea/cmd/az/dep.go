@@ -492,7 +492,7 @@ func normalizeDepBackendPayload(payload []byte) (json.RawMessage, error) {
 
 func defaultDepBackendExecutor(args []string) ([]byte, error) {
 	commandArgs := depBackendCommandArgs(args)
-	cmd := exec.Command("bd", commandArgs...)
+	cmd := exec.Command("az issue", commandArgs...)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -525,7 +525,7 @@ func depBackendCommandArgs(args []string) []string {
 
 func depBackendDisplayCommand(args []string) []string {
 	display := make([]string, 0, len(args)+3)
-	display = append(display, "bd")
+	display = append(display, "az issue")
 	display = append(display, depBackendCommandArgs(args)...)
 	return display
 }

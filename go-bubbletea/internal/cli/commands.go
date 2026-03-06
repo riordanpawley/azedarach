@@ -10,15 +10,15 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 // Dependencies holds all the services needed for CLI commands
 type Dependencies struct {
 	Config          *config.Config
-	IssueClient     *beads.Client
+	IssueClient     *linear.Client
 	TmuxClient      *tmux.Client
 	WorktreeManager *git.WorktreeManager
 	Logger          *slog.Logger
@@ -29,8 +29,8 @@ func NewDependencies(cfg *config.Config) (*Dependencies, error) {
 	logger := slog.Default()
 
 	// Initialize issue client adapter
-	issueRunner := &beads.ExecRunner{}
-	issueClient := beads.NewClient(issueRunner, logger)
+	issueRunner := &linear.ExecRunner{}
+	issueClient := linear.NewClient(issueRunner, logger)
 
 	// Initialize tmux client
 	tmuxRunner := &tmux.ExecRunner{}

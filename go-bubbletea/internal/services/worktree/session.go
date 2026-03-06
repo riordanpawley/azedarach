@@ -27,7 +27,7 @@ const (
 
 // WorktreeSession represents an active Claude session in a git worktree
 type WorktreeSession struct {
-	BeadID       string
+	IssueID      string
 	WorktreePath string
 	TmuxSession  string
 	Branch       string
@@ -110,7 +110,7 @@ func (s *WorktreeSessionService) Create(ctx context.Context, issueID, branch str
 
 	// Create session record
 	session := &WorktreeSession{
-		BeadID:       issueID,
+		IssueID:      issueID,
 		WorktreePath: worktree.Path,
 		TmuxSession:  tmuxSessionName,
 		Branch:       worktree.Branch,

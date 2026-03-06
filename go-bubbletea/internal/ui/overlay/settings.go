@@ -59,7 +59,7 @@ func NewDefaultSettingsOverlay() *SettingsOverlay {
 	items := []SettingItem{
 		{
 			Key:   "refresh",
-			Label: "Auto-refresh beads",
+			Label: "Auto-refresh linear",
 			Type:  SettingToggle,
 			Value: true,
 			OnChange: func(value any) {
@@ -456,7 +456,7 @@ func NewSettingsOverlayWithEditor(editor interface {
 		},
 		{
 			Key:   "refresh",
-			Label: "Auto-refresh beads",
+			Label: "Auto-refresh linear",
 			Type:  SettingToggle,
 			Value: true,
 			OnChange: func(value any) {

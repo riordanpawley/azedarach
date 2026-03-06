@@ -12,7 +12,7 @@ import (
 )
 
 // StateChangeCallback is called when a session's state changes
-type StateChangeCallback func(beadID string, state domain.SessionState)
+type StateChangeCallback func(issueID string, state domain.SessionState)
 
 // SessionMonitor monitors tmux sessions for Claude state changes
 type SessionMonitor struct {
@@ -26,7 +26,7 @@ type SessionMonitor struct {
 
 // monitorState tracks the monitoring state for a single session
 type monitorState struct {
-	beadID   string
+	issueID  string
 	cancel   context.CancelFunc
 	state    domain.SessionState
 	callback StateChangeCallback
@@ -48,15 +48,15 @@ func NewSessionMonitor(tmuxClient *tmux.Client, logger *slog.Logger) *SessionMon
 
 // Start starts monitoring a session for state changes
 // The callback will be invoked whenever the session state changes
-func (m *SessionMonitor) Start(ctx context.Context, beadID string, callback StateChangeCallback) {
+func (m *SessionMonitor) Start(ctx context.Context, issueID string, callback StateChangeCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.logger.Info("starting session monitor", "beadID", beadID)
+	m.logger.Info("starting session monitor", "issueID", issueID)
 
 	// Stop existing monitor if any
-	if existing, ok := m.monitors[beadID]; ok {
-		m.logger.Debug("stopping existing monitor", "beadID", beadID)
+	if existing, ok := m.monitors[issueID]; ok {
+		m.logger.Debug("stopping existing monitor", "issueID", issueID)
 		existing.cancel()
 	}
 
@@ -64,12 +64,12 @@ func (m *SessionMonitor) Start(ctx context.Context, beadID string, callback Stat
 	monitorCtx, cancel := context.WithCancel(ctx)
 
 	state := &monitorState{
-		beadID:   beadID,
+		issueID:  issueID,
 		cancel:   cancel,
 		state:    domain.SessionIdle,
 		callback: callback,
 	}
-	m.monitors[beadID] = state
+	m.monitors[issueID] = state
 
 	// Start monitoring goroutine
 	m.wg.Add(1)
@@ -77,24 +77,24 @@ func (m *SessionMonitor) Start(ctx context.Context, beadID string, callback Stat
 }
 
 // Stop stops monitoring a session
-func (m *SessionMonitor) Stop(beadID string) {
+func (m *SessionMonitor) Stop(issueID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.logger.Info("stopping session monitor", "beadID", beadID)
+	m.logger.Info("stopping session monitor", "issueID", issueID)
 
-	if state, ok := m.monitors[beadID]; ok {
+	if state, ok := m.monitors[issueID]; ok {
 		state.cancel()
-		delete(m.monitors, beadID)
+		delete(m.monitors, issueID)
 	}
 }
 
 // GetState returns the current state of a monitored session
-func (m *SessionMonitor) GetState(beadID string) domain.SessionState {
+func (m *SessionMonitor) GetState(issueID string) domain.SessionState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if state, ok := m.monitors[beadID]; ok {
+	if state, ok := m.monitors[issueID]; ok {
 		return state.state
 	}
 	return domain.SessionIdle
@@ -105,10 +105,10 @@ func (m *SessionMonitor) StopAll() {
 	m.logger.Info("stopping all session monitors")
 
 	m.mu.Lock()
-	for beadID, state := range m.monitors {
-		m.logger.Debug("stopping monitor", "beadID", beadID)
+	for issueID, state := range m.monitors {
+		m.logger.Debug("stopping monitor", "issueID", issueID)
 		state.cancel()
-		delete(m.monitors, beadID)
+		delete(m.monitors, issueID)
 	}
 	m.mu.Unlock()
 
@@ -122,7 +122,7 @@ func (m *SessionMonitor) StopAll() {
 func (m *SessionMonitor) monitorLoop(ctx context.Context, state *monitorState) {
 	defer m.wg.Done()
 
-	m.logger.Debug("monitor loop started", "beadID", state.beadID)
+	m.logger.Debug("monitor loop started", "issueID", state.issueID)
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -130,15 +130,15 @@ func (m *SessionMonitor) monitorLoop(ctx context.Context, state *monitorState) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.logger.Debug("monitor loop stopped", "beadID", state.beadID)
+			m.logger.Debug("monitor loop stopped", "issueID", state.issueID)
 			return
 
 		case <-ticker.C:
 			// Capture tmux pane output
-			output, err := m.tmux.CapturePane(ctx, state.beadID, m.pollLines)
+			output, err := m.tmux.CapturePane(ctx, state.issueID, m.pollLines)
 			if err != nil {
 				// Session might not be ready yet or was killed
-				m.logger.Debug("failed to capture pane", "beadID", state.beadID, "error", err)
+				m.logger.Debug("failed to capture pane", "issueID", state.issueID, "error", err)
 				continue
 			}
 
@@ -149,7 +149,7 @@ func (m *SessionMonitor) monitorLoop(ctx context.Context, state *monitorState) {
 			m.mu.Lock()
 			if state.state != newState {
 				m.logger.Info("session state changed",
-					"beadID", state.beadID,
+					"issueID", state.issueID,
 					"oldState", state.state,
 					"newState", newState,
 				)
@@ -160,11 +160,11 @@ func (m *SessionMonitor) monitorLoop(ctx context.Context, state *monitorState) {
 				if state.callback != nil {
 					// Call callback outside of lock to avoid deadlock
 					callback := state.callback
-					beadID := state.beadID
+					issueID := state.issueID
 					m.mu.Unlock()
 
 					// Execute callback
-					callback(beadID, newState)
+					callback(issueID, newState)
 				} else {
 					m.mu.Unlock()
 				}

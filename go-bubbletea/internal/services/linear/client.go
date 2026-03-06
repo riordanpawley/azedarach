@@ -1,4 +1,4 @@
-package beads
+package linear
 
 import (
 	"context"
@@ -8,13 +8,13 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-// Client wraps the beads CLI for task management operations
+// Client wraps the issues CLI for task management operations
 type Client struct {
 	runner CommandRunner
 	logger *slog.Logger
 }
 
-// NewClient creates a new Beads client with dependency injection
+// NewClient creates a new Linear client with dependency injection
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	return &Client{
 		runner: runner,
@@ -22,11 +22,11 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	}
 }
 
-// List fetches all beads using `bd list --json`
+// List fetches all issues using `az issue list --json`
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-	c.logger.Debug("fetching beads list")
+	c.logger.Debug("fetching issues list")
 
-	out, err := c.runner.Run(ctx, "bd", "list", "--json")
+	out, err := c.runner.Run(ctx, "az", "issue", "list", "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "list", Err: err}
 	}
@@ -36,15 +36,15 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 		return nil, &domain.IssueTrackerError{Op: "list", Message: "failed to parse JSON", Err: err}
 	}
 
-	c.logger.Debug("fetched beads", "count", len(tasks))
+	c.logger.Debug("fetched issues", "count", len(tasks))
 	return tasks, nil
 }
 
-// Search queries beads using `bd search query --json`
+// Search queries issues using `az issue search query --json`
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
-	c.logger.Debug("searching beads", "query", query)
+	c.logger.Debug("searching issues", "query", query)
 
-	out, err := c.runner.Run(ctx, "bd", "search", query, "--json")
+	out, err := c.runner.Run(ctx, "az", "issue", "search", query, "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "search", Message: query, Err: err}
 	}
@@ -54,15 +54,15 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 		return nil, &domain.IssueTrackerError{Op: "search", Message: "failed to parse JSON", Err: err}
 	}
 
-	c.logger.Debug("found beads", "count", len(tasks))
+	c.logger.Debug("found issues", "count", len(tasks))
 	return tasks, nil
 }
 
-// Ready fetches unblocked tasks using `bd ready --json`
+// Ready fetches unblocked tasks using `az issue ready --json`
 func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
-	c.logger.Debug("fetching ready beads")
+	c.logger.Debug("fetching ready issues")
 
-	out, err := c.runner.Run(ctx, "bd", "ready", "--json")
+	out, err := c.runner.Run(ctx, "az", "issue", "ready", "--json")
 	if err != nil {
 		return nil, &domain.IssueTrackerError{Op: "ready", Err: err}
 	}
@@ -72,20 +72,20 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 		return nil, &domain.IssueTrackerError{Op: "ready", Message: "failed to parse JSON", Err: err}
 	}
 
-	c.logger.Debug("found ready beads", "count", len(tasks))
+	c.logger.Debug("found ready issues", "count", len(tasks))
 	return tasks, nil
 }
 
-// Update changes a bead's status using `bd update id --status=status`
+// Update changes a issue's status using `az issue update id --status=status`
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
-	c.logger.Debug("updating bead status", "id", id, "status", status)
+	c.logger.Debug("updating issue status", "id", id, "status", status)
 
-	_, err := c.runner.Run(ctx, "bd", "update", id, "--status="+string(status))
+	_, err := c.runner.Run(ctx, "az", "issue", "update", id, "--status="+string(status))
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "update", IssueID: id, Err: err}
 	}
 
-	c.logger.Debug("bead updated", "id", id)
+	c.logger.Debug("issue updated", "id", id)
 	return nil
 }
 
@@ -98,9 +98,9 @@ type CreateTaskParams struct {
 	ParentID    *string
 }
 
-// Create creates a new task using `bd create "title" -t type -p priority --json`
+// Create creates a new task using `az issue create "title" -t type -p priority --json`
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
-	c.logger.Debug("creating bead", "title", params.Title)
+	c.logger.Debug("creating issue", "title", params.Title)
 
 	args := []string{"create", params.Title, "--json"}
 	args = append(args, "-t", string(params.Type))
@@ -110,12 +110,12 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 		args = append(args, "--parent", *params.ParentID)
 	}
 
-	out, err := c.runner.Run(ctx, "bd", args...)
+	out, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
 	if err != nil {
 		return "", &domain.IssueTrackerError{Op: "create", Message: params.Title, Err: err}
 	}
 
-	// Response from bd create --json is the created task
+	// Response from az issue create --json is the created task
 	var task domain.Task
 	if err := json.Unmarshal(out, &task); err != nil {
 		// If it's not a full task, it might just be the ID as a string
@@ -129,50 +129,50 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 		return "", &domain.IssueTrackerError{Op: "create", Message: "failed to parse JSON", Err: err}
 	}
 
-	c.logger.Debug("bead created", "id", task.ID)
+	c.logger.Debug("issue created", "id", task.ID)
 	return task.ID, nil
 }
 
-// Close marks a bead as complete using `bd close id --reason=reason`
+// Close marks a issue as complete using `az issue close id --reason=reason`
 func (c *Client) Close(ctx context.Context, id string, reason string) error {
-	c.logger.Debug("closing bead", "id", id, "reason", reason)
+	c.logger.Debug("closing issue", "id", id, "reason", reason)
 
 	args := []string{"close", id}
 	if reason != "" {
 		args = append(args, "--reason="+reason)
 	}
 
-	_, err := c.runner.Run(ctx, "bd", args...)
+	_, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "close", IssueID: id, Err: err}
 	}
 
-	c.logger.Debug("bead closed", "id", id)
+	c.logger.Debug("issue closed", "id", id)
 	return nil
 }
 
 func (c *Client) Delete(ctx context.Context, id string) error {
-	c.logger.Debug("deleting bead", "id", id)
+	c.logger.Debug("deleting issue", "id", id)
 
-	_, err := c.runner.Run(ctx, "bd", "delete", id)
+	_, err := c.runner.Run(ctx, "az", "issue", "delete", id)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "delete", IssueID: id, Err: err}
 	}
 
-	c.logger.Debug("bead deleted", "id", id)
+	c.logger.Debug("issue deleted", "id", id)
 	return nil
 }
 
-// Archive archives a bead using `bd archive id`
+// Archive archives a issue using `az issue archive id`
 func (c *Client) Archive(ctx context.Context, id string) error {
-	c.logger.Debug("archiving bead", "id", id)
+	c.logger.Debug("archiving issue", "id", id)
 
-	_, err := c.runner.Run(ctx, "bd", "archive", id)
+	_, err := c.runner.Run(ctx, "az", "issue", "archive", id)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "archive", IssueID: id, Err: err}
 	}
 
-	c.logger.Debug("bead archived", "id", id)
+	c.logger.Debug("issue archived", "id", id)
 	return nil
 }
 
@@ -184,7 +184,7 @@ type UpdateTaskParams struct {
 }
 
 func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTaskParams) error {
-	c.logger.Debug("updating bead details", "id", id)
+	c.logger.Debug("updating issue details", "id", id)
 
 	args := []string{"update", id}
 	if params.Title != "" {
@@ -194,11 +194,11 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 	args = append(args, "--type="+string(params.Type))
 	args = append(args, "--priority="+string(rune('0'+params.Priority)))
 
-	_, err := c.runner.Run(ctx, "bd", args...)
+	_, err := c.runner.Run(ctx, "az", append([]string{"issue"}, args...)...)
 	if err != nil {
 		return &domain.IssueTrackerError{Op: "update-details", IssueID: id, Err: err}
 	}
 
-	c.logger.Debug("bead details updated", "id", id)
+	c.logger.Debug("issue details updated", "id", id)
 	return nil
 }

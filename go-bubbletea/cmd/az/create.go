@@ -9,7 +9,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/beads"
+	"github.com/riordanpawley/azedarach/internal/services/linear"
 )
 
 const (
@@ -254,7 +254,7 @@ func defaultIssueCreatorFactory() issueCreateFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		return deps.IssueClient.Create(ctx, beads.CreateTaskParams{
+		return deps.IssueClient.Create(ctx, linear.CreateTaskParams{
 			Title:    request.Title,
 			Type:     domain.TypeTask,
 			Priority: domain.P2,

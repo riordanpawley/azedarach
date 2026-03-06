@@ -10,24 +10,24 @@ import (
 
 func TestNewService(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService("/tmp/beads", logger)
+	service := NewService("/tmp/linear", logger)
 
 	if service == nil {
 		t.Fatal("expected service to be created")
 	}
 
-	if service.beadsPath != "/tmp/beads" {
-		t.Errorf("expected beadsPath to be /tmp/beads, got %s", service.beadsPath)
+	if service.issuesPath != "/tmp/linear" {
+		t.Errorf("expected issuesPath to be /tmp/linear, got %s", service.issuesPath)
 	}
 }
 
 func TestAttach(t *testing.T) {
 	// Create temporary directory
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	// Create a test file
 	testFile := filepath.Join(tmpDir, "test.png")
@@ -44,8 +44,8 @@ func TestAttach(t *testing.T) {
 	}
 
 	// Verify attachment
-	if attachment.BeadID != "az-123" {
-		t.Errorf("expected bead_id to be az-123, got %s", attachment.BeadID)
+	if attachment.IssueID != "az-123" {
+		t.Errorf("expected issue_id to be az-123, got %s", attachment.IssueID)
 	}
 
 	if attachment.MimeType != "image/png" {
@@ -64,10 +64,10 @@ func TestAttach(t *testing.T) {
 
 func TestAttachNonExistentFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	ctx := context.Background()
 	_, err := service.Attach(ctx, "az-123", "/nonexistent/file.png")
@@ -78,10 +78,10 @@ func TestAttachNonExistentFile(t *testing.T) {
 
 func TestList(t *testing.T) {
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	ctx := context.Background()
 
@@ -128,8 +128,8 @@ func TestList(t *testing.T) {
 
 	// Verify attachments have correct data
 	for _, att := range attachments {
-		if att.BeadID != "az-123" {
-			t.Errorf("expected bead_id to be az-123, got %s", att.BeadID)
+		if att.IssueID != "az-123" {
+			t.Errorf("expected issue_id to be az-123, got %s", att.IssueID)
 		}
 
 		if att.ID == "" {
@@ -144,10 +144,10 @@ func TestList(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	ctx := context.Background()
 
@@ -191,10 +191,10 @@ func TestDelete(t *testing.T) {
 
 func TestDeleteNonExistent(t *testing.T) {
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	ctx := context.Background()
 
@@ -207,13 +207,13 @@ func TestDeleteNonExistent(t *testing.T) {
 
 func TestGetPath(t *testing.T) {
 	tmpDir := t.TempDir()
-	beadsPath := filepath.Join(tmpDir, "beads")
+	issuesPath := filepath.Join(tmpDir, "linear")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	service := NewService(beadsPath, logger)
+	service := NewService(issuesPath, logger)
 
 	path := service.GetPath("az-123", "test.png")
-	expected := filepath.Join(beadsPath, "images", "az-123", "test.png")
+	expected := filepath.Join(issuesPath, "images", "az-123", "test.png")
 
 	if path != expected {
 		t.Errorf("expected path to be %s, got %s", expected, path)

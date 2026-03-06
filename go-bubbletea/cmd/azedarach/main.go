@@ -1,7 +1,7 @@
 // Package main provides the entry point for the Azedarach TUI application.
 //
 // Azedarach is a TUI Kanban board for orchestrating parallel Claude Code sessions
-// with Beads task tracking. This Go/Bubbletea implementation uses The Elm
+// with Linear task tracking. This Go/Bubbletea implementation uses The Elm
 // Architecture (TEA) for state management.
 //
 // Usage:

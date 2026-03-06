@@ -72,7 +72,7 @@ func TestWorktreeManager_Create(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, worktree)
-	assert.Equal(t, issueID, worktree.BeadID)
+	assert.Equal(t, issueID, worktree.IssueID)
 	assert.Equal(t, "az/issue-123", worktree.Branch)
 	assert.Equal(t, "/home/user/test-repo-issue-123", worktree.Path)
 
@@ -209,7 +209,7 @@ branch refs/heads/az/issue-456
 
 	require.NoError(t, err)
 	assert.NotNil(t, worktree)
-	assert.Equal(t, issueID, worktree.BeadID)
+	assert.Equal(t, issueID, worktree.IssueID)
 	assert.Equal(t, "az/issue-123", worktree.Branch)
 	assert.Equal(t, "/home/user/test-repo-issue-123", worktree.Path)
 }
@@ -277,12 +277,12 @@ branch refs/heads/feature/something
 	assert.Len(t, worktrees, 2) // Only az/ branches
 
 	// Check first worktree
-	assert.Equal(t, "issue-123", worktrees[0].BeadID)
+	assert.Equal(t, "issue-123", worktrees[0].IssueID)
 	assert.Equal(t, "az/issue-123", worktrees[0].Branch)
 	assert.Equal(t, "/home/user/test-repo-issue-123", worktrees[0].Path)
 
 	// Check second worktree
-	assert.Equal(t, "issue-456", worktrees[1].BeadID)
+	assert.Equal(t, "issue-456", worktrees[1].IssueID)
 	assert.Equal(t, "az/issue-456", worktrees[1].Branch)
 	assert.Equal(t, "/home/user/test-repo-issue-456", worktrees[1].Path)
 }
@@ -459,9 +459,9 @@ branch refs/heads/az/issue-123
 `,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-issue-123",
-					Branch: "az/issue-123",
-					BeadID: "issue-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 			},
 		},
@@ -485,14 +485,14 @@ branch refs/heads/az/issue-456
 `,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-issue-123",
-					Branch: "az/issue-123",
-					BeadID: "issue-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 				{
-					Path:   "/home/user/test-repo-issue-456",
-					Branch: "az/issue-456",
-					BeadID: "issue-456",
+					Path:    "/home/user/test-repo-issue-456",
+					Branch:  "az/issue-456",
+					IssueID: "issue-456",
 				},
 			},
 		},
@@ -507,9 +507,9 @@ HEAD def456
 branch refs/heads/az/issue-123`,
 			expected: []Worktree{
 				{
-					Path:   "/home/user/test-repo-issue-123",
-					Branch: "az/issue-123",
-					BeadID: "issue-123",
+					Path:    "/home/user/test-repo-issue-123",
+					Branch:  "az/issue-123",
+					IssueID: "issue-123",
 				},
 			},
 		},

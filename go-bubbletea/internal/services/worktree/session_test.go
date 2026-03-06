@@ -51,9 +51,9 @@ type mockWorktreeManager struct {
 }
 
 type mockWorktree struct {
-	Path   string
-	Branch string
-	BeadID string
+	Path    string
+	Branch  string
+	IssueID string
 }
 
 func newMockWorktreeManager() *mockWorktreeManager {
@@ -64,9 +64,9 @@ func newMockWorktreeManager() *mockWorktreeManager {
 
 func (m *mockWorktreeManager) Create(ctx context.Context, issueID string, baseBranch string) (*mockWorktree, error) {
 	wt := &mockWorktree{
-		Path:   "/tmp/test-" + issueID,
-		Branch: "az/" + issueID,
-		BeadID: issueID,
+		Path:    "/tmp/test-" + issueID,
+		Branch:  "az/" + issueID,
+		IssueID: issueID,
 	}
 	m.worktrees[issueID] = wt
 	return wt, nil
@@ -135,7 +135,7 @@ func TestUpdateStatus(t *testing.T) {
 	// Create a test session
 	issueID := "test-123"
 	service.sessions[issueID] = &WorktreeSession{
-		BeadID:       issueID,
+		IssueID:      issueID,
 		WorktreePath: "/tmp/test-123",
 		TmuxSession:  issueID,
 		Branch:       "az/test-123",
@@ -167,7 +167,7 @@ func TestList(t *testing.T) {
 	// Create test sessions
 	sessions := []*WorktreeSession{
 		{
-			BeadID:       "test-1",
+			IssueID:      "test-1",
 			WorktreePath: "/tmp/test-1",
 			TmuxSession:  "test-1",
 			Branch:       "az/test-1",
@@ -175,7 +175,7 @@ func TestList(t *testing.T) {
 			CreatedAt:    time.Now(),
 		},
 		{
-			BeadID:       "test-2",
+			IssueID:      "test-2",
 			WorktreePath: "/tmp/test-2",
 			TmuxSession:  "test-2",
 			Branch:       "az/test-2",
@@ -185,7 +185,7 @@ func TestList(t *testing.T) {
 	}
 
 	for _, s := range sessions {
-		service.sessions[s.BeadID] = s
+		service.sessions[s.IssueID] = s
 	}
 
 	// List sessions
@@ -198,7 +198,7 @@ func TestList(t *testing.T) {
 
 	// Verify sessions are copies (not references)
 	for _, s := range result {
-		if s == service.sessions[s.BeadID] {
+		if s == service.sessions[s.IssueID] {
 			t.Errorf("Expected session copy, got reference")
 		}
 	}
