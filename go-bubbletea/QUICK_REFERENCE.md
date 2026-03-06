@@ -320,9 +320,9 @@ func tmuxCapture(session string) (string, error) {
     return runCommand("tmux", "capture-pane", "-t", session, "-p", "-S", "-50")
 }
 
-// Example: bd CLI
+// Example: az CLI
 func beadsList() ([]Task, error) {
-    out, err := runCommand("bd", "list", "--format=json")
+    out, err := runCommand("az", "list", "--format=json")
     if err != nil {
         return nil, err
     }

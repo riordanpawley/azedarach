@@ -276,7 +276,7 @@
 │     │ Select Project                      │                                 │
 │     │                                     │                                 │
 │     │ 1. azedarach        /home/user/az   │ ← current                       │
-│     │ 2. linear            /home/user/linear-cli   │                                 │
+│     │ 2. linear            /home/user/az   │                                 │
 │     │ 3. my-app           /home/user/app  │                                 │
 │     │                                     │                                 │
 │     │ Press 1-9 to select                 │                                 │
@@ -367,7 +367,7 @@
 │                              ↓                                               │
 │     ┌───────────────────────────────────────────────────────────────────┐   │
 │     │ Phase 3: CREATE BEADS                                              │   │
-│     │ Once approved, creates linear with linear-cli CLI:                          │   │
+│     │ Once approved, creates linear with az CLI:                          │   │
 │     │ - Epic for the main feature                                        │   │
 │     │ - Child tasks linked to epic (parent-child deps)                   │   │
 │     │ - Blocking dependencies between sequential tasks                   │   │

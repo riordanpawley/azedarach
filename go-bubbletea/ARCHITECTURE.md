@@ -37,7 +37,7 @@
 │           │                    │                    │                        │
 │           ▼                    ▼                    ▼                        │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │  Beads Client   │  │  Tmux Client    │  │   Git Client    │              │
+│  │  Issue Tracker Client   │  │  Tmux Client    │  │   Git Client    │              │
 │  │                 │  │                 │  │                 │              │
 │  │ • ListAll()     │  │ • NewSession()  │  │ • CreateWorktree│              │
 │  │ • Create()      │  │ • Attach()      │  │ • MergeMain()   │              │
@@ -52,8 +52,8 @@
 │                           External Systems                                   │
 │                                                                              │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐ │
-│  │   tmux    │  │    git    │  │  bd CLI   │  │  gh CLI   │  │  claude   │ │
-│  │           │  │           │  │  (beads)  │  │ (GitHub)  │  │           │ │
+│  │   tmux    │  │    git    │  │  az CLI   │  │  gh CLI   │  │  claude   │ │
+│  │           │  │           │  │  (linear)  │  │ (GitHub)  │  │           │ │
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -337,7 +337,7 @@ type BeadsError struct {
 }
 
 func (e BeadsError) Error() string {
-    return fmt.Sprintf("beads %s: %v", e.Op, e.Err)
+    return fmt.Sprintf("linear %s: %v", e.Op, e.Err)
 }
 
 // In Update, show toast on error

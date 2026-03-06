@@ -220,7 +220,7 @@ package domain
 
 import "fmt"
 
-// BeadsError for beads CLI failures
+// BeadsError for linear CLI failures
 type BeadsError struct {
     Op      string // "list", "create", "update"
     BeadID  string // optional
@@ -230,9 +230,9 @@ type BeadsError struct {
 
 func (e *BeadsError) Error() string {
     if e.BeadID != "" {
-        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+        return fmt.Sprintf("linear %s [%s]: %s", e.Op, e.BeadID, e.Message)
     }
-    return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+    return fmt.Sprintf("linear %s: %s", e.Op, e.Message)
 }
 
 func (e *BeadsError) Unwrap() error { return e.Err }
@@ -272,7 +272,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func formatError(err error) string {
     switch e := err.(type) {
     case *domain.BeadsError:
-        return fmt.Sprintf("Beads %s failed: %s", e.Op, e.Message)
+        return fmt.Sprintf("Linear %s failed: %s", e.Op, e.Message)
     case *domain.TmuxError:
         return fmt.Sprintf("tmux error: %s", e.Err)
     case *domain.GitError:
@@ -288,9 +288,9 @@ func formatError(err error) string {
 ## Optimization Strategies
 
 1. **Lazy rendering**: Only render visible cards, not entire column
-2. **Debounced refresh**: Don't re-fetch beads on every tick if nothing changed
+2. **Debounced refresh**: Don't re-fetch linear on every tick if nothing changed
 3. **Cached styles**: Pre-compute Lip Gloss styles, don't recreate per render
-4. **Parallel I/O**: Fetch beads and session states concurrently
+4. **Parallel I/O**: Fetch linear and session states concurrently
 5. **Incremental updates**: Only update changed cards, not full board
 
 ---
@@ -318,7 +318,7 @@ Both versions read the same config files:
 ### Shared State
 
 Both versions interact with:
-- `.beads/` directory - Bead tracker data
+- `.linear/` directory - Bead tracker data
 - tmux sessions - Named consistently (`az-{beadId}`)
 - Git worktrees - Same naming convention
 
@@ -383,9 +383,9 @@ func TestBoardRendering(t *testing.T) {
 ### Integration Tests
 
 ```go
-// internal/services/beads/client_test.go
+// internal/services/linear/client_test.go
 func TestBeadsClient(t *testing.T) {
-    // Mock bd CLI
+    // Mock az CLI
     execCommand = fakeExecCommand
     defer func() { execCommand = exec.Command }()
 
@@ -413,7 +413,7 @@ func fakeExecCommand(name string, args ...string) *exec.Cmd {
 - [ ] StatusBar shows mode
 
 ## Phase 2 Smoke Test
-- [ ] Board loads real beads
+- [ ] Board loads real linear
 - [ ] Cards show correct colors
 - [ ] Priority badges visible
 - [ ] Toast appears on error

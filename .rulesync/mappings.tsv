@@ -1,0 +1,12 @@
+# kind|source|target|flags
+# flags: exec (all synced files must be executable)
+dir|.rulesync/claude/hooks|.claude/hooks|
+dir|.rulesync/claude/agents|.claude/agents|
+dir|.rulesync/claude/commands|.claude/commands|
+dir|.rulesync/claude/session-templates|.claude/session-templates|
+dir|.rulesync/claude/skills|.claude/skills|
+file|.rulesync/docs/AGENTS.md|AGENTS.md|
+file|.rulesync/docs/CLAUDE.md|CLAUDE.md|
+file|.rulesync/docs/ts-opentui/AGENTS.md|ts-opentui/AGENTS.md|
+file|.rulesync/docs/ts-opentui/CLAUDE.md|ts-opentui/CLAUDE.md|
+file|.rulesync/docs/go-bubbletea/CLAUDE.md|go-bubbletea/CLAUDE.md|

@@ -17,6 +17,7 @@ build-sfe-ts:
     @echo "Building ts-opentui single-file executable"
     cd ./ts-opentui && bun run build-sfe
 
+# Link standalone az into PATH (respects AZ_LINK_DIR when set)
 link-sfe-ts:
     @echo "Linking az into PATH"
     @set -eu; \
@@ -44,5 +45,17 @@ run-sfe-ts: install-sfe-ts
 # Backward-compatible alias
 ts-build-link-run: run-sfe-ts
 
+# RuleSync helpers
+rulesync-sync:
+    rulesync generate
+
+rulesync-check:
+    rulesync generate --check
+
+# OpenCode plugin installer helper
+install-opencode-az-plugin *repos:
+    ./bin/install-opencode-az-plugin {{ repos }}
+
+# Release helper: just release-ts-opentui [minor|patch|major]
 release-ts-opentui bump='patch' *args:
     ./ts-opentui/scripts/release.sh {{ bump }} {{ args }}

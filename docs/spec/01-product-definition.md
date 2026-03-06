@@ -239,7 +239,7 @@ As an engineer, I can attach images/screenshots so sessions have visual context.
 - deterministic key handling
 - robust behavior in non-interactive/CI-like shell environments
 - safe handling of credentials and local config files
-- clear compatibility requirements for git/tmux/gh/linear-cli/ai-cli tooling
+- clear compatibility requirements for git/tmux/gh/az/ai-cli tooling
 
 ## 1.15 Compatibility Envelope
 

@@ -45,7 +45,7 @@
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
-| List Linear | Fetch from linear-cli CLI | P0 |
+| List Linear | Fetch from az CLI | P0 |
 | Create Bead | c to create via $EDITOR | P0 |
 | Create via Claude | Shift+c for natural language | P1 |
 | Edit Bead | e in detail panel | P0 |

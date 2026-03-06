@@ -61,7 +61,7 @@ This document outlines a potential rewrite of Azedarach in Go using the [Bubblet
 | Memory usage | < 50MB | With 100+ tasks loaded |
 | Refresh rate | 60 FPS | Smooth scrolling |
 | State detection | < 500ms | From Claude output to UI update |
-| Beads refresh | < 200ms | `bd list` round trip |
+| Linear refresh | < 200ms | `az issue list --output json --compact --all` round trip |
 
 ## Next Steps
 

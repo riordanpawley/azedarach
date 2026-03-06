@@ -66,7 +66,7 @@ case overlay.ProjectSelectedMsg:
         Expires: time.Now().Add(3 * time.Second),
     })
 
-    // Reload beads for new project
+    // Reload linear for new project
     return m, m.loadBeadsCmd()
 ```
 
@@ -76,7 +76,7 @@ case overlay.TaskCreatedMsg:
     // Close overlay
     m.overlayStack.Pop()
 
-    // Create task via beads client
+    // Create task via linear client
     return m, m.createTaskCmd(msg)
 
 case taskCreatedResultMsg:
@@ -95,7 +95,7 @@ case taskCreatedResultMsg:
         Expires: time.Now().Add(3 * time.Second),
     })
 
-    // Reload beads to show new task
+    // Reload linear to show new task
     return m, m.loadBeadsCmd()
 ```
 
@@ -194,14 +194,14 @@ type taskCreatedResultMsg struct {
     err    error
 }
 
-// createTaskCmd creates a new task via the beads client
+// createTaskCmd creates a new task via the linear client
 func (m Model) createTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
     return func() tea.Msg {
-        // TODO: Implement beads.Client.Create() method
+        // TODO: Implement linear.Client.Create() method
         // For now, return a placeholder error message
 
         return taskCreatedResultMsg{
-            err: fmt.Errorf("task creation not yet implemented - need to add Create() method to beads.Client"),
+            err: fmt.Errorf("task creation not yet implemented - need to add Create() method to linear.Client"),
         }
     }
 }
@@ -256,17 +256,17 @@ ok  	github.com/riordanpawley/azedarach/internal/app	0.022s
 The `beadsClient.Create()` method doesn't exist yet. Current implementation returns a placeholder error.
 
 **Required implementation:**
-- Add `Create()` method to `/internal/services/beads/client.go`
+- Add `Create()` method to `/internal/services/linear/client.go`
 - Expected signature:
   ```go
   func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error)
   ```
-- Should call `bd create --title="..." --type=... --priority=...`
+- Should call `az issue create --title="..." --type=... --priority=...`
 
 ### 2. Project Switching Not Fully Functional
-While project switching is wired in, the beads client doesn't currently support project-specific operations. Future work:
-- Pass current project context to beads commands
-- Add project-specific beads filtering
+While project switching is wired in, the linear client doesn't currently support project-specific operations. Future work:
+- Pass current project context to linear commands
+- Add project-specific linear filtering
 - Handle multi-project worktree scenarios
 
 ### 3. Settings Persistence

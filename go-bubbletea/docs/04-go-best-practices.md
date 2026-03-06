@@ -29,7 +29,7 @@ func main() {
 
 // cmd/az/main.go - BAD: business logic in main
 func main() {
-    tasks, _ := beads.List()  // Don't do this
+    tasks, _ := linear.List()  // Don't do this
     // ...
 }
 ```
@@ -39,14 +39,14 @@ func main() {
 **Accept interfaces, return structs:**
 
 ```go
-// internal/services/beads/client.go
+// internal/services/linear/client.go
 
 // CommandRunner abstracts exec.Command for testing
 type CommandRunner interface {
     Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// Client wraps the bd CLI
+// Client wraps the az CLI
 type Client struct {
     runner CommandRunner
     logger *slog.Logger
@@ -60,9 +60,9 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
     }
 }
 
-// List fetches all beads
+// List fetches all linear
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "list", "--format=json")
+    out, err := c.runner.Run(ctx, "az", "list", "--format=json")
     if err != nil {
         return nil, &domain.BeadsError{Op: "list", Err: err}
     }
@@ -73,7 +73,7 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 **Test with mock:**
 
 ```go
-// internal/services/beads/client_test.go
+// internal/services/linear/client_test.go
 
 type mockRunner struct {
     output []byte
@@ -148,7 +148,7 @@ monitor := NewMonitor(
 ```go
 // GOOD: Context flows through entire call chain
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "list")
+    out, err := c.runner.Run(ctx, "az", "list")
     // ...
 }
 
@@ -187,7 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 import "fmt"
 
 func (c *Client) Create(ctx context.Context, task domain.Task) error {
-    out, err := c.runner.Run(ctx, "bd", "create", "--title", task.Title)
+    out, err := c.runner.Run(ctx, "az", "create", "--title", task.Title)
     if err != nil {
         // Wrap with context about what we were doing
         return fmt.Errorf("creating bead %q: %w", task.Title, err)
@@ -226,9 +226,9 @@ type BeadsError struct {
 
 func (e *BeadsError) Error() string {
     if e.BeadID != "" {
-        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+        return fmt.Sprintf("linear %s [%s]: %s", e.Op, e.BeadID, e.Message)
     }
-    return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+    return fmt.Sprintf("linear %s: %s", e.Op, e.Message)
 }
 
 func (e *BeadsError) Unwrap() error { return e.Err }
@@ -338,7 +338,7 @@ func collectResults(ctx context.Context, results chan<- SessionState) {
 **1. Small, focused packages:**
 
 ```
-internal/services/beads/     # Only beads CLI interaction
+internal/services/linear/     # Only linear CLI interaction
 internal/services/git/       # Only git operations
 internal/domain/             # Only data types, no I/O
 ```
@@ -362,14 +362,14 @@ domain/  ←──  services/  ←──  app/
 ```
 # Instead of:
 handlers/
-  beads.go
+  linear.go
   git.go
 services/
-  beads.go
+  linear.go
   git.go
 
 # Consider:
-beads/
+linear/
   client.go      # Service
   handlers.go    # UI handlers
   types.go       # Domain types
@@ -435,17 +435,17 @@ logger := slog.New(slog.NewJSONHandler(logFile, &slog.HandlerOptions{
 }))
 
 // Add fields progressively
-logger = logger.With("component", "beads")
+logger = logger.With("component", "linear")
 
 // Log with structured fields
-logger.Info("fetching beads",
+logger.Info("fetching linear",
     "count", len(tasks),
     "filter", filter.String(),
 )
 
-logger.Error("beads command failed",
+logger.Error("linear command failed",
     "error", err,
-    "command", "bd list",
+    "command", "az issue list --output json --compact --all",
 )
 ```
 

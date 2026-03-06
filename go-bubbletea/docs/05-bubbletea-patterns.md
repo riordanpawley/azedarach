@@ -134,7 +134,7 @@ func (m Model) View() string {
 ```go
 // BAD: Blocking I/O in Update
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    tasks, _ := beads.List()  // ❌ Blocks the UI!
+    tasks, _ := linear.List()  // ❌ Blocks the UI!
     m.tasks = tasks
     return m, nil
 }
@@ -154,7 +154,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // Command with closure for arguments
 func loadBeadsCmd(filter Filter) tea.Cmd {
     return func() tea.Msg {
-        tasks, err := beads.List(filter)
+        tasks, err := linear.List(filter)
         if err != nil {
             return beadsErrorMsg{err}
         }

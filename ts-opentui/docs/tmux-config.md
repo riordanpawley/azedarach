@@ -83,7 +83,7 @@ This keybinding is **auto-installed** by Azedarach when sessions are created. If
 
 Press `` Ctrl-a ` `` for a floating terminal overlay. Perfect for:
 - Quick `git status` checks
-- Running `linear-cli i list --output json --compact --all` to find work
+- Running `az issue list --output json --compact --all` to find work
 - Any one-off command without disrupting your layout
 
 The popup closes automatically when you exit.

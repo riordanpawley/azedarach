@@ -136,14 +136,14 @@
 │  6   │ az-1    │ Setup CI/CD pipeline           │ done   │ P3  │ ✓       │
 │  7   │ az-2    │ Update documentation           │ done   │ P4  │         │
 └──────┴─────────┴────────────────────────────────┴────────┴─────┴─────────┘
- LIST │ 7 beads │ Sorted by: Priority ↓ │ Tab: Kanban view
+ LIST │ 7 linear │ Sorted by: Priority ↓ │ Tab: Kanban view
 ```
 
 ---
 
 ## Dependencies
 
-- [Phase 2: Beads Integration](phase-2-beads.md)
+- [Phase 2: Linear Integration](phase-2-linear.md)
 
 ---
 
@@ -658,7 +658,7 @@ type SearchOverlay struct {
 
 func NewSearchOverlay() *SearchOverlay {
     ti := textinput.New()
-    ti.Placeholder = "Search beads..."
+    ti.Placeholder = "Search linear..."
     ti.Prompt = "/ "
     ti.Focus()
 

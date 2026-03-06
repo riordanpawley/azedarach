@@ -196,10 +196,10 @@ Epics are container tasks that group related work. Use them to:
 
 Or via CLI:
 ```bash
-linear-cli i create "User Authentication System" --output json --compact
+az issue create "User Authentication System" --output json --compact
 ```
 
-Tip: set `issueTracker.linear.team` in `.azedarach.json` (or run `linear-cli setup`) so create commands do not require `-t`.
+Tip: run `az prime` at session start and follow the command guidance it prints for this project.
 
 #### Adding Children to an Epic
 
@@ -207,10 +207,10 @@ Children are tasks with a parent-child dependency to the epic. Create the depend
 
 ```bash
 # Create a child task
-linear-cli i create "Implement login form" --output json --compact
+az issue create "Implement login form" --output json --compact
 
 # Link it to the epic (child depends on parent)
-linear-cli i update az-xyz --data '{"parentId":"<epic-linear-id>"}' --output json --compact
+az issue create "Child task" --parent <epic-id>
 ```
 
 Where `az-xyz` is the child task and `az-epic` is the epic ID.
@@ -372,7 +372,7 @@ tmux new-session -d -s claude-test-session "bash"
 bun run dev
 
 # 3. Create a test bead with matching ID (or use existing)
-linear-cli i create --title="Test attachment" --type=task
+az issue create --title="Test attachment" --type=task
 
 # 4. Note the bead ID (e.g., az-xyz)
 
@@ -419,8 +419,8 @@ If you don't have tmux sessions running, you'll see errors in the console (not i
 **Cause:** Linear sync issue or permission problem
 
 **Solution:**
-1. Verify `linear-cli` is installed and authenticated
-2. Verify `linear-cli i list --output json --compact --all` works from command line
+1. Verify `az` is installed and authenticated
+2. Verify `az issue list --output json --compact --all` works from command line
 3. Check console for error messages
 
 ### "The TUI looks corrupted"
@@ -558,7 +558,7 @@ src/
 │   └── HelpOverlay.tsx # Keyboard help
 │
 ├── core/               # Effect services
-│   ├── BeadsClient.ts      # linear-cli CLI wrapper
+│   ├── BeadsClient.ts      # az CLI wrapper
 │   ├── SessionManager.ts   # Claude session orchestration
 │   ├── TmuxService.ts      # tmux operations
 │   ├── TerminalService.ts  # Terminal detection

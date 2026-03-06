@@ -84,7 +84,7 @@ Based on research in `internal-docs/epic-orchestration-research.md`, v2 adds mul
 
 | Question | Decision |
 |----------|----------|
-| Config format | **JSON** (linear-cli compatibility) |
+| Config format | **JSON** (az compatibility) |
 | State persistence | **Tmux as source of truth**, in-memory for optimistic updates, files only as last resort |
 | Theme | **Catppuccin Macchiato** default, custom themes supported |
 | Tmux session naming | **`<bead-id>-az`** (suffix) |
@@ -562,7 +562,7 @@ gleam/
 │   │   └── server_monitor.gleam  # Server state tracking
 │   │
 │   ├── services/
-│   │   ├── linear.gleam           # linear-cli CLI wrapper
+│   │   ├── linear.gleam           # az CLI wrapper
 │   │   ├── tmux.gleam            # tmux commands
 │   │   ├── worktree.gleam        # git worktree ops
 │   │   ├── git.gleam             # git commands
@@ -607,7 +607,7 @@ gleam/
 
 ### Phase 2: Linear & Projects (Week 3-4)
 
-- [ ] Linear module (`linear-cli i list --output json --compact --all/show/create/update`)
+- [ ] Linear module (`az issue list --output json --compact --all/show/create/update`)
 - [ ] Coordinator actor
 - [ ] Task card rendering
 - [ ] Periodic refresh
@@ -715,7 +715,7 @@ All open questions have been addressed in companion documents:
 
 | Question | Resolution | Document |
 |----------|------------|----------|
-| Testing strategy | Unit (<5s), integration with real tmux/linear-cli (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
+| Testing strategy | Unit (<5s), integration with real tmux/az (<30s total), snapshot tests | `docs/gleam/testing-strategy.md` |
 | Start+work prompt format | Issue ID, type, title, `az issue get` instruction, ask-first directive, image paths | `docs/gleam/start-work-prompt.md` |
 | Merge conflict UX | MergeChoice overlay, git merge-tree detection, Claude spawn for resolution | `docs/gleam/merge-conflict-ux.md` |
 

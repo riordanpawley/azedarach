@@ -341,7 +341,7 @@ Press `c` to create a new bead using your $EDITOR with a structured template.
    - **Status**: backlog, ready, in_progress, review, done
    - **Description**, **Design**, **Notes**, **Acceptance Criteria**: Optional sections
 3. Save and close the editor
-4. The bead is created via `linear-cli i create`
+4. The bead is created via `az issue create`
 
 ### Template Format
 
@@ -389,7 +389,7 @@ Press `C` (capital C) to create a task using natural language. This spawns a Cla
 3. Press `Enter` to launch a Claude session
 4. Claude will:
    - Interpret your description
-   - Create a bead with appropriate title, type, and description using `linear-cli i create`
+   - Create a bead with appropriate title, type, and description using `az issue create`
    - Remain in the session, ready to work on the task if you want
 
 ### Example

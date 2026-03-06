@@ -79,3 +79,4 @@ coverage/
 .bv/
 /ts-opentui/bin/az
 /.beads
+/ts-opentui/az

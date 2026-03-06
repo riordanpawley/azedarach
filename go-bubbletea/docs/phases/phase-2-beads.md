@@ -1,4 +1,4 @@
-# Phase 2: Beads Integration
+# Phase 2: Linear Integration
 
 **Goal**: Load and display real bead data
 
@@ -11,7 +11,7 @@
 ## Deliverables
 
 - [ ] Domain types (Task, Session, DevServer, Project)
-- [ ] Beads CLI client (list, search, ready, create, update, close)
+- [ ] az issue CLI client (list, search, ready, create, update, close)
 - [ ] JSON parsing with proper error handling
 - [ ] Async loading with `tea.Cmd`
 - [ ] Task cards with status/priority/type badges
@@ -25,7 +25,7 @@
 
 ## Acceptance Criteria
 
-- [ ] Board shows real beads from `bd list`
+- [ ] Board shows real linear from `az issue list --output json --compact --all`
 - [ ] Cards show correct status colors
 - [ ] Priority badges (P0-P4) visible
 - [ ] Toasts appear and auto-dismiss
@@ -52,8 +52,8 @@
 │ └─────────────┘ ││ │ [3/5] ████░░│ ││                ││ └─────────────┘ │
 └─────────────────┘└─────────────────┘└────────────────┘└─────────────────┘
 ────────────────────────────────────────────────────────────────────────────
- NORMAL │ 11 beads │ ● Online │ ⟳ 2s ago          ╔═════════════════════╗
-                                                   ║ ✓ Beads loaded (11) ║
+ NORMAL │ 11 linear │ ● Online │ ⟳ 2s ago          ╔═════════════════════╗
+                                                   ║ ✓ Linear loaded (11) ║
                                                    ╚═════════════════════╝
 ```
 
@@ -69,9 +69,9 @@
 
 | Type | Scope |
 |------|-------|
-| Unit | Beads client parsing, JSON unmarshaling |
+| Unit | Linear client parsing, JSON unmarshaling |
 | Golden | Card rendering with various states |
-| Integration | Mock `bd` CLI responses |
+| Integration | Mock `az` CLI responses |
 
 ---
 
@@ -213,11 +213,11 @@ type DevServer struct {
 }
 ```
 
-### Beads Client with Dependency Injection
+### Issue Tracker Client with Dependency Injection
 
 ```go
-// internal/services/beads/client.go
-package beads
+// internal/services/linear/client.go
+package linear
 
 import (
     "context"
@@ -245,9 +245,9 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 }
 
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
-    c.logger.Debug("fetching beads list")
+    c.logger.Debug("fetching linear list")
 
-    out, err := c.runner.Run(ctx, "bd", "list", "--format=json")
+    out, err := c.runner.Run(ctx, "az", "list", "--format=json")
     if err != nil {
         return nil, &domain.BeadsError{Op: "list", Err: err}
     }
@@ -257,12 +257,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
         return nil, &domain.BeadsError{Op: "list", Message: "failed to parse JSON", Err: err}
     }
 
-    c.logger.Debug("fetched beads", "count", len(tasks))
+    c.logger.Debug("fetched linear", "count", len(tasks))
     return tasks, nil
 }
 
 func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "search", query, "--format=json")
+    out, err := c.runner.Run(ctx, "az", "search", query, "--format=json")
     if err != nil {
         return nil, &domain.BeadsError{Op: "search", Message: query, Err: err}
     }
@@ -276,7 +276,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 }
 
 func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
-    out, err := c.runner.Run(ctx, "bd", "ready", "--format=json")
+    out, err := c.runner.Run(ctx, "az", "ready", "--format=json")
     if err != nil {
         return nil, &domain.BeadsError{Op: "ready", Err: err}
     }
@@ -290,7 +290,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 }
 
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
-    _, err := c.runner.Run(ctx, "bd", "update", id, "--status="+string(status))
+    _, err := c.runner.Run(ctx, "az", "update", id, "--status="+string(status))
     if err != nil {
         return &domain.BeadsError{Op: "update", BeadID: id, Err: err}
     }
@@ -302,7 +302,7 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
     if reason != "" {
         args = append(args, "--reason="+reason)
     }
-    _, err := c.runner.Run(ctx, "bd", args...)
+    _, err := c.runner.Run(ctx, "az", args...)
     if err != nil {
         return &domain.BeadsError{Op: "close", BeadID: id, Err: err}
     }
@@ -313,8 +313,8 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
 ### Real Command Runner
 
 ```go
-// internal/services/beads/runner.go
-package beads
+// internal/services/linear/runner.go
+package linear
 
 import (
     "context"
@@ -650,7 +650,7 @@ func (m Model) renderLoading() string {
         lipgloss.Center, lipgloss.Center,
         lipgloss.JoinVertical(lipgloss.Center,
             m.spinner.View(),
-            "Loading beads...",
+            "Loading linear...",
         ),
     )
 }
@@ -665,9 +665,9 @@ internal/domain/task.go           # Task, Status, Priority, Type
 internal/domain/session.go        # Session, SessionState, DevServer
 internal/domain/project.go        # Project type
 internal/domain/errors.go         # BeadsError, TmuxError, etc.
-internal/services/beads/client.go # Beads CLI wrapper
-internal/services/beads/runner.go # Real command runner
-internal/services/beads/parser.go # JSON parsing helpers
+internal/services/linear/client.go # az issue CLI wrapper
+internal/services/linear/runner.go # Real command runner
+internal/services/linear/parser.go # JSON parsing helpers
 internal/app/commands.go          # tea.Cmd functions
 internal/app/messages.go          # Message types
 internal/ui/board/card.go         # Enhanced card rendering
@@ -693,15 +693,15 @@ type BeadsError struct {
 
 func (e *BeadsError) Error() string {
     if e.BeadID != "" {
-        return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+        return fmt.Sprintf("linear %s [%s]: %s", e.Op, e.BeadID, e.Message)
     }
     if e.Message != "" {
-        return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+        return fmt.Sprintf("linear %s: %s", e.Op, e.Message)
     }
     if e.Err != nil {
-        return fmt.Sprintf("beads %s: %v", e.Op, e.Err)
+        return fmt.Sprintf("linear %s: %v", e.Op, e.Err)
     }
-    return fmt.Sprintf("beads %s failed", e.Op)
+    return fmt.Sprintf("linear %s failed", e.Op)
 }
 
 func (e *BeadsError) Unwrap() error {
@@ -714,8 +714,8 @@ func (e *BeadsError) Unwrap() error {
 ## Unit Tests
 
 ```go
-// internal/services/beads/client_test.go
-package beads
+// internal/services/linear/client_test.go
+package linear
 
 import (
     "context"
@@ -786,7 +786,7 @@ func TestClient_List(t *testing.T) {
 
 - [ ] All deliverables implemented
 - [ ] All acceptance criteria pass
-- [ ] Unit tests for beads client parsing
+- [ ] Unit tests for linear client parsing
 - [ ] Golden tests for card rendering
 - [ ] Integration tests with mock CLI
 - [ ] Error handling covers all edge cases

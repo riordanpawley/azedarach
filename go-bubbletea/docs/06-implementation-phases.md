@@ -9,7 +9,7 @@ The Go/Bubbletea rewrite is divided into 6 phases, each building on the previous
 | Phase | Focus | Status | Document |
 |-------|-------|--------|----------|
 | **1** | Core Framework | 🔲 | [phase-1-core.md](phases/phase-1-core.md) |
-| **2** | Beads Integration | 🔲 | [phase-2-beads.md](phases/phase-2-beads.md) |
+| **2** | Linear Integration | 🔲 | [phase-2-linear.md](phases/phase-2-linear.md) |
 | **3** | Overlays & Filters | 🔲 | [phase-3-overlays.md](phases/phase-3-overlays.md) |
 | **4** | Session Management | 🔲 | [phase-4-sessions.md](phases/phase-4-sessions.md) |
 | **5** | Git Operations | 🔲 | [phase-5-git.md](phases/phase-5-git.md) |
@@ -23,7 +23,7 @@ The Go/Bubbletea rewrite is divided into 6 phases, each building on the previous
 Phase 1 (Core)
     │
     ▼
-Phase 2 (Beads)
+Phase 2 (Linear)
     │
     ▼
 Phase 3 (Overlays) ─────────────────┐
@@ -50,7 +50,7 @@ Phase 4 (Sessions) ──────────► Phase 5 (Git)
 ### Phase 1: Core Framework
 TEA loop, navigation (hjkl), Catppuccin theme, StatusBar, half-page scroll
 
-### Phase 2: Beads Integration
+### Phase 2: Linear Integration
 Domain types, CLI client, cards with badges, toasts, periodic refresh, elapsed timer
 
 ### Phase 3: Overlays & Filters

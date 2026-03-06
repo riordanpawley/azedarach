@@ -84,7 +84,7 @@ type Config struct {
     PR            PRConfig
     Merge         MergeConfig
     Notifications NotifyConfig
-    Beads         BeadsConfig
+    Linear         BeadsConfig
     Network       NetworkConfig
     DevServer     DevServerConfig
     Worktree      WorktreeConfig
@@ -187,7 +187,7 @@ All configuration fields have sensible defaults:
 - **Shell**: `zsh`
 - **Timeout**: `30000ms` (30 seconds)
 - **Dev Server Port**: `3000`
-- **Beads Path**: `.beads`
+- **Linear Path**: `.linear`
 - **Worktree Path**: `../`
 - **Worktree Format**: `{project}-{beadID}`
 

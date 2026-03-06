@@ -155,7 +155,7 @@ func (m Model) View() string {
 ```go
 // Commands return tea.Cmd functions
 func loadBeads() tea.Msg {
-    tasks, err := beads.ListAll()
+    tasks, err := linear.ListAll()
     if err != nil {
         return beadsErrorMsg{err}
     }

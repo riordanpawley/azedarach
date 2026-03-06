@@ -45,8 +45,8 @@ go-bubbletea/
 │   │   ├── filter.go         # Filter state
 │   │   └── sort.go           # Sort state
 │   ├── services/
-│   │   ├── beads/
-│   │   │   ├── client.go     # bd CLI wrapper
+│   │   ├── linear/
+│   │   │   ├── client.go     # az CLI wrapper
 │   │   │   └── parser.go     # JSON parsing
 │   │   ├── tmux/
 │   │   │   ├── client.go     # tmux operations
@@ -140,7 +140,7 @@ type Config struct {
     DevServer DevServerConfig `json:"devServer"`
     Notifications NotifyConfig `json:"notifications"`
     Network  NetworkConfig `json:"network"`
-    Beads    BeadsConfig   `json:"beads"`
+    Linear    BeadsConfig   `json:"linear"`
     StateDetection StateConfig `json:"stateDetection"`
 }
 

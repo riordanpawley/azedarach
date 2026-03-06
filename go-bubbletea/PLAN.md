@@ -20,7 +20,7 @@
 | Phase | Focus | Status | Document |
 |-------|-------|--------|----------|
 | **1** | Core Framework | 🔲 | [phases/phase-1-core.md](docs/phases/phase-1-core.md) |
-| **2** | Beads Integration | 🔲 | [phases/phase-2-beads.md](docs/phases/phase-2-beads.md) |
+| **2** | Linear Integration | 🔲 | [phases/phase-2-linear.md](docs/phases/phase-2-linear.md) |
 | **3** | Overlays & Filters | 🔲 | [phases/phase-3-overlays.md](docs/phases/phase-3-overlays.md) |
 | **4** | Session Management | 🔲 | [phases/phase-4-sessions.md](docs/phases/phase-4-sessions.md) |
 | **5** | Git Operations | 🔲 | [phases/phase-5-git.md](docs/phases/phase-5-git.md) |
@@ -29,7 +29,7 @@
 **Legend**: 🔲 Not Started | 🟡 In Progress | ✅ Complete
 
 ```
-Phase 1 (Core)       →  Phase 2 (Beads)      →  Phase 3 (Overlays)
+Phase 1 (Core)       →  Phase 2 (Linear)      →  Phase 3 (Overlays)
      ↓                                                ↓
 Phase 4 (Sessions)  ←──────────────────────→  Phase 5 (Git)
                               ↓
@@ -150,7 +150,7 @@ go-bubbletea/
 │   ├── 08-technical-deep-dive.md
 │   └── phases/                 # Individual phase plans
 │       ├── phase-1-core.md
-│       ├── phase-2-beads.md
+│       ├── phase-2-linear.md
 │       ├── phase-3-overlays.md
 │       ├── phase-4-sessions.md
 │       ├── phase-5-git.md

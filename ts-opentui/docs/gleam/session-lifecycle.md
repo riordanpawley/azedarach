@@ -372,7 +372,7 @@ From any state except IDLE:
    git branch -D {branch}
 
 5. Optionally close bead:
-   linear-cli i close {bead-id}
+   az issue close {bead-id}
 
 6. Update state: removed from model
 ```

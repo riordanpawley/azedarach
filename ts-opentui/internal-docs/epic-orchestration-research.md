@@ -26,7 +26,7 @@ This document researches approaches for orchestrating epics (multi-task features
 
 ### Key Findings
 
-1. **Linear already has the primitives** - Epic/child relationships, dependency tracking, `linear-cli i list --output json --compact --all` for unblocked work
+1. **Linear already has the primitives** - Epic/child relationships, dependency tracking, `az issue list --output json --compact --all` for unblocked work
 2. **VC (steveyegge/vc)** demonstrates a working "AI Supervised Issue Workflow" using linear
 3. **Agent Mail MCP** provides inter-agent coordination via shared inboxes and file leases
 4. **Azedarach's Task tool** enables spawning background subagents with monitoring
@@ -35,31 +35,31 @@ This document researches approaches for orchestrating epics (multi-task features
 
 ## Current Linear Capabilities
 
-### Core APIs (via `linear-cli` CLI)
+### Core APIs (via `az` CLI)
 
 | Operation | Command | Use Case |
 |-----------|---------|----------|
-| Search issues | `linear-cli i list --output json --compact --all "keywords"` | Discovery (NOT `linear-cli i list --output json --compact --all`) |
-| Find unblocked | `linear-cli i list --output json --compact --all` | Get next workable tasks |
-| Show details | `linear-cli i get <id>` | Get full issue context |
-| Create issue | `linear-cli i create --title="..." --type=epic/task` | Spawn new work items |
-| Update status | `linear-cli i update <id> --status=in_progress` | Track state |
-| Add notes | `linear-cli i update <id> --notes="..."` | Progress tracking |
-| Close issue | `linear-cli i close <id> --reason="..."` | Mark complete |
-| Add dependency | `linear-cli dep add <child> <parent> --type=parent-child` | Link epics to children |
+| Search issues | `az issue list --output json --compact --all "keywords"` | Discovery (NOT `az issue list --output json --compact --all`) |
+| Find unblocked | `az issue list --output json --compact --all` | Get next workable tasks |
+| Show details | `az issue get <id>` | Get full issue context |
+| Create issue | `az issue create "..." --type epic|task` | Spawn new work items |
+| Update status | `az issue update <id> --status=in_progress` | Track state |
+| Add notes | `az issue update <id> --notes="..."` | Progress tracking |
+| Close issue | `az issue close <id> --reason="..."` | Mark complete |
+| Add dependency | `az issue create "Child task" --parent <epic-id>` | Link child work under epic |
 
 ### Agent Claiming
 
 **Use `assignee` field** to track which agent is working on an issue:
 
 ```bash
-linear-cli i update az-123 --status=in_progress --assignee="claude-session-abc"
+az issue update az-123 --status=in_progress --assignee="claude-session-abc"
 ```
 
 This provides:
 - Agent identity tracking (who's working on what)
 - Resumability (if agent crashes, we know who had it)
-- Conflict detection (`linear-cli i list --output json --compact --all` can filter out already-assigned issues)
+- Conflict detection (`az issue list --output json --compact --all` can filter out already-assigned issues)
 
 **Note**: Unlike VC's SQLite transactions, this isn't atomically exclusive - two agents could theoretically claim the same issue. In practice, the orchestrator controls spawning so this is fine.
 
@@ -75,24 +75,24 @@ discovered-from : Bug found while working on another issue
 
 ```bash
 # 1. Create epic
-linear-cli i create --title="User Settings Feature" --type=epic
+az issue create "User Settings Feature" --type epic
 
 # 2. Create independent child tasks
-linear-cli i create --title="Settings UI" --type=task
-linear-cli i create --title="Settings API" --type=task
-linear-cli i create --title="Settings DB" --type=task
+az issue create "Settings UI" --type task
+az issue create "Settings API" --type task
+az issue create "Settings DB" --type task
 
 # 3. Link children to epic
-linear-cli dep add az-ui az-epic --type=parent-child
-linear-cli dep add az-api az-epic --type=parent-child
-linear-cli dep add az-db az-epic --type=parent-child
+az issue create "Settings UI" --type task --parent az-epic
+az issue create "Settings API" --type task --parent az-epic
+az issue create "Settings DB" --type task --parent az-epic
 
-# 4. `linear-cli i list --output json --compact --all` now shows children (unblocked), NOT epic (blocked by children)
+# 4. `az issue list --output json --compact --all` now shows children (unblocked), NOT epic (blocked by children)
 ```
 
 ### MCP Tools Available
 
-The `mcp__plugin_beads_beads__*` tools provide programmatic access to all linear operations. The Gleam service (`gleam/src/azedarach/services/linear.gleam`) wraps these with type safety.
+The `mcp__plugin_beads_beads__*` tools provide programmatic access to issue operations. The Gleam service (`gleam/src/azedarach/services/linear.gleam`) wraps these with type safety.
 
 ---
 
@@ -316,7 +316,7 @@ Reports to user via TUI or notifications
 
 ```go
 for {
-    issue := ClaimReadyIssue()  // linear-cli i list --output json --compact --all, atomic claim
+    issue := ClaimReadyIssue()  // az issue list --output json --compact --all, atomic claim
     assessment := AISupervisor.Assess(issue)
     result := Agent.Execute(issue, assessment)
     analysis := AISupervisor.Analyze(result)
@@ -341,7 +341,7 @@ for {
 - Quality gate enforcement
 
 **Integration Path**:
-1. Add `linear-cli claim` for atomic issue claiming
+1. Add `az claim` for atomic issue claiming
 2. Implement assessment phase (pre-execution AI review)
 3. Implement analysis phase (post-execution AI review)
 4. Add quality gate runner (tests, type-check, lint)

@@ -202,7 +202,7 @@ This matrix ensures no features are lost in the rewrite. Checked items are cover
 | PR Enabled/Auto Draft/Auto Merge | ⚠️ Missing | 6 |
 | Bell/System Notifications | ⚠️ Missing | 6 |
 | Auto Detect Network | ⚠️ Missing | 6 |
-| Beads Sync | ⚠️ Missing | 6 |
+| Linear Sync | ⚠️ Missing | 6 |
 | Pattern Matching state detection | ⚠️ Missing | 6 |
 
 ## tmux Integration

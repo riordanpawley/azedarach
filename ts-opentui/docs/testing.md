@@ -9,7 +9,7 @@ This guide explains how to test each feature of Azedarach.
 pnpm install
 
 # Verify linear is working
-linear-cli i list --output json --compact --all --status=open
+az issue list --output json --compact --all --status=open
 ```
 
 ## Testing the TUI
@@ -254,11 +254,11 @@ brew install tmux
 ### "BEADS_DIR not found"
 
 ```bash
-# Ensure you're in a linear-enabled project
-ls -la .linear/
+# Ensure you're in a project with issue tracker data
+ls -la .azedarach/
 
-# Initialize linear if needed
-linear-cli init
+# Prime issue guidance for the session
+az prime
 ```
 
 ### Rendering issues

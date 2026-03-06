@@ -39,7 +39,7 @@ export const method = (arg: string) =>
 
 **Location:** `src/core/BeadsClient.ts`
 
-Wrapper around the `linear-cli` CLI for issue tracking operations.
+Wrapper around the `az` CLI for issue tracking operations.
 
 ```typescript
 interface BeadsClientI {

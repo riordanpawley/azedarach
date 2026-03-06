@@ -6,7 +6,7 @@
     "allow": [
       "Read(//**/.beads/images/**)",
       "Read(//**/.linear/images/**)",
-      "Bash(linear-cli:*)",
+      "Bash(az:*)",
       "mcp__effect-docs__*",
       "Bash(rg:*)",
       "Bash(fd:*)",

@@ -60,7 +60,7 @@
 │                           External Systems                                   │
 │                                                                              │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐ │
-│  │   tmux    │  │    git    │  │  linear-cli CLI   │  │  gh CLI   │  │ clipboard │ │
+│  │   tmux    │  │    git    │  │  az CLI   │  │  gh CLI   │  │ clipboard │ │
 │  │           │  │           │  │  (linear)  │  │ (GitHub)  │  │  tools    │ │
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘ │
 │                                                                              │
@@ -253,7 +253,7 @@ User presses 's'
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │ • Config             → .azedarach.json                 │ │
 │  │ • Image attachments  → .linear/images/                  │ │
-│  │ • Linear data         → via linear-cli CLI (not direct)         │ │
+│  │ • Linear data         → via az CLI (not direct)         │ │
 │  └────────────────────────────────────────────────────────┘ │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
@@ -288,7 +288,7 @@ actors/
 │   └── server_monitor.gleam ──────┘
 │
 services/
-├── linear.gleam      → linear-cli CLI
+├── linear.gleam      → az CLI
 ├── tmux.gleam       → tmux commands
 ├── worktree.gleam   → git worktree
 ├── git.gleam        → git commands

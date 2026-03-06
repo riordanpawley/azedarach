@@ -49,17 +49,9 @@
       "bun run build *": "allow",
       "bun run build": "allow",
       "bun *": "allow",
-      "linear-cli": "allow",
-      "linear-cli *": "allow",
-      "tmux *": "allow",
+      "az": "allow",
       "az *": "allow",
-      "az issue *": "allow"
-      "az issue update *": "allow"
-      "az issue create *": "allow"
-      "az issue close *": "allow"
-      "az issue dep *": "allow"
-      "az issue delete *": "allow"
-      "az issue get *": "allow"
+      "tmux *": "allow"
     }
   },
   "mcp": {

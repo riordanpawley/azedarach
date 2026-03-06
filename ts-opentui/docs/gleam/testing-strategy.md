@@ -20,7 +20,7 @@ We prioritize:
                     │   E2E Tests   │
                     └───────────────┘
                    ┌─────────────────────┐
-                   │  Integration Tests  │  ← Real tmux, real linear-cli
+                   │  Integration Tests  │  ← Real tmux, real az
                    │   (with fixtures)   │
                    └─────────────────────┘
               ┌───────────────────────────────┐
@@ -89,7 +89,7 @@ pub fn detect_busy_test() {
 | Component | Test With | Example |
 |-----------|-----------|---------|
 | `tmux` module | Real tmux | Create session, capture pane, send keys |
-| `linear` module | Real linear-cli CLI | List linear, show bead, create bead |
+| `linear` module | Real az CLI | List linear, show bead, create bead |
 | `worktree` module | Real git | Create worktree, check status |
 | `clipboard` module | Real clipboard | Paste image (on CI, mock or skip) |
 
@@ -147,7 +147,7 @@ jobs:
         run: sudo apt-get install -y tmux
 
       - name: Install linear
-        run: cargo install linear  # or however linear-cli is installed
+        run: cargo install linear  # or however az is installed
 
       - name: Run tests
         run: gleam test

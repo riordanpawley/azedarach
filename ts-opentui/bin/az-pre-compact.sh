@@ -6,7 +6,7 @@
 #
 # This hook fires before Claude compacts its context window.
 # It outputs a reminder that Claude will see, prompting it to update
-# the Linear issue with session progress before context is lost.
+# the issue tracker with session progress before context is lost.
 #
 # Design decisions:
 # - We output text instead of updating issues directly because Claude
@@ -50,11 +50,11 @@ cat << 'EOF'
 <system-reminder>
 PreCompact hook triggered - Context compaction is about to occur.
 
-IMPORTANT: Before compaction, ensure your work is preserved in Linear:
+IMPORTANT: Before compaction, ensure your work is preserved in the issue tracker:
 
 1. If you have in-progress work, add a progress comment:
    ```bash
-   linear-cli i comment <issue-id> --body "
+   az issue update <issue-id> --notes "
    COMPLETED: [what was done]
    IN PROGRESS: [current state]
    NEXT: [concrete next step]
@@ -64,7 +64,7 @@ IMPORTANT: Before compaction, ensure your work is preserved in Linear:
 
 2. If work is complete, close the issue:
    ```bash
-   linear-cli i close <issue-id>
+   az issue close <issue-id>
    ```
 
 This ensures your progress survives compaction and future sessions can resume seamlessly.

@@ -21,7 +21,7 @@
 - [ ] Project auto-detection from cwd
 - [ ] CLI: `az project add/list/remove/switch`
 
-### Create/Edit Beads
+### Create/Edit Linear
 - [ ] Manual create (`c`) via $EDITOR
 - [ ] Claude create (`C`) with prompt overlay
 - [ ] Manual edit (`Space` `e`)
