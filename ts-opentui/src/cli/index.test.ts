@@ -54,6 +54,11 @@ describe("normalizeIssueJsonFlagOrder", () => {
 			"Child task",
 		])
 	})
+
+	it("keeps issue list options unchanged", () => {
+		const argv = ["bun", "az", "issue", "list", "--limit", "5", "--status", "open"]
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
 })
 
 describe("resolveCliExecutionMode", () => {
