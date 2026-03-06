@@ -170,7 +170,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					)
 
 					const output = yield* Command.string(command).pipe(
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 
 					return output
@@ -197,7 +201,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				const command = Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName)
 
 				const output = yield* Command.string(command).pipe(
-					Effect.catchAll(() => Effect.succeed("")),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
 				)
 
 				const value = output.trim()
@@ -310,7 +318,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				)
 
 				const output = yield* Command.string(command).pipe(
-					Effect.catchAll(() => Effect.succeed("")),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
 				)
 
 				const timestamp = parseInt(output.trim(), 10)

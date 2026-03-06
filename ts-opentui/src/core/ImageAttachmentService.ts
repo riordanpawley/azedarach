@@ -195,7 +195,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				if (process.platform === "darwin") {
 					const pbpasteCheck = yield* Command.make("which", "pbpaste").pipe(
 						Command.exitCode,
-						Effect.catchAll(() => Effect.succeed(1)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(1)),
+							),
+						),
 					)
 
 					if (pbpasteCheck === 0) {
@@ -206,7 +210,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				// Try wl-paste (Wayland)
 				const wlPasteCheck = yield* Command.make("which", "wl-paste").pipe(
 					Command.exitCode,
-					Effect.catchAll(() => Effect.succeed(1)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(1)),
+						),
+					),
 				)
 
 				if (wlPasteCheck === 0) {
@@ -216,7 +224,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 				// Try xclip (X11)
 				const xclipCheck = yield* Command.make("which", "xclip").pipe(
 					Command.exitCode,
-					Effect.catchAll(() => Effect.succeed(1)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(1)),
+						),
+					),
 				)
 
 				if (xclipCheck === 0) {
@@ -246,7 +258,13 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					// Get current issue to read existing notes
 					const issue = yield* issueTrackerClient
 						.show(issueId)
-						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(null)),
+								),
+							),
+						)
 
 					// Append to existing notes or create new
 					const existingNotes = issue?.notes ?? ""
@@ -275,7 +293,13 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					// Get current issue to read existing notes
 					const issue = yield* issueTrackerClient
 						.show(issueId)
-						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(null)),
+								),
+							),
+						)
 
 					const existingNotes = issue?.notes
 					if (!existingNotes) return
@@ -483,10 +507,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						yield* Command.make(openCmd, filePath).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
-								Effect.fail(
-									new ImageAttachmentError({
-										message: `Failed to open image: ${error}`,
-									}),
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new ImageAttachmentError({
+												message: `Failed to open image: ${error}`,
+											}),
+										),
+									),
 								),
 							),
 						)
@@ -659,11 +687,15 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						yield* Command.make("sh", "-c", shellCmd).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
-								Effect.fail(
-									new ClipboardError({
-										message: `Failed to get image from clipboard: ${error}`,
-										tool,
-									}),
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new ClipboardError({
+												message: `Failed to get image from clipboard: ${error}`,
+												tool,
+											}),
+										),
+									),
 								),
 							),
 						)
@@ -837,10 +869,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						yield* Command.make(openCmd, filePath).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
-								Effect.fail(
-									new ImageAttachmentError({
-										message: `Failed to open image: ${error}`,
-									}),
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new ImageAttachmentError({
+												message: `Failed to open image: ${error}`,
+											}),
+										),
+									),
 								),
 							),
 						)
@@ -906,7 +942,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						// Check if viu is available
 						const viuCheck = yield* Command.make("which", "viu").pipe(
 							Command.exitCode,
-							Effect.catchAll(() => Effect.succeed(1)),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(1)),
+								),
+							),
 						)
 
 						if (viuCheck !== 0) {
@@ -951,10 +991,14 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						).pipe(
 							Command.exitCode,
 							Effect.catchAll((error) =>
-								Effect.fail(
-									new ImageAttachmentError({
-										message: `Failed to open image popup: ${error}`,
-									}),
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new ImageAttachmentError({
+												message: `Failed to open image popup: ${error}`,
+											}),
+										),
+									),
 								),
 							),
 						)

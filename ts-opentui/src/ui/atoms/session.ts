@@ -56,7 +56,13 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 					worktreePath: update.worktreePath,
 					projectPath: update.projectPath,
 				})
-			}).pipe(Effect.catchAll(() => Effect.void)),
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.void),
+					),
+				),
+			),
 		)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )

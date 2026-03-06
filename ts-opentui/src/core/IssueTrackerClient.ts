@@ -52,8 +52,6 @@ const DependencyLinkSchema = Schema.Struct({
 
 const DependencySchema = Schema.Union(DependencyRefSchema, DependencyLinkSchema)
 
-type DependencyRefRaw = Schema.Schema.Type<typeof DependencyRefSchema>
-type DependencyLinkRaw = Schema.Schema.Type<typeof DependencyLinkSchema>
 type DependencyRaw = Schema.Schema.Type<typeof DependencySchema>
 
 export interface DependencyRef {
@@ -63,8 +61,6 @@ export interface DependencyRef {
 	readonly dependency_type: DependencyType
 	readonly issue_type?: IssueType
 }
-
-type DependencyLink = DependencyLinkRaw
 
 /**
  * Issue schema matching tracker/legacy --json output
@@ -322,9 +318,9 @@ const ZERO_SYNC_RESULT: SyncResult = {
 const LINEAR_STATUS_CLOSED = "closed"
 const LINEAR_STATUS_IN_PROGRESS = "in_progress"
 const LINEAR_STATUS_BLOCKED = "blocked"
-const LINEAR_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000
-const LINEAR_DETAIL_FETCH_LIMIT_PER_LIST = 80
-const LINEAR_DETAIL_FETCH_CHUNK_SIZE = 20
+const _LINEAR_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000
+const _LINEAR_DETAIL_FETCH_LIMIT_PER_LIST = 80
+const _LINEAR_DETAIL_FETCH_CHUNK_SIZE = 20
 
 const normalizeLinearStatus = (stateName: string | null | undefined): IssueStatus => {
 	if (!stateName) return "open"
@@ -544,7 +540,7 @@ const extractLinearIssueTypeName = (
 	return typeof typeValue === "string" ? typeValue : (typeValue.name ?? undefined)
 }
 
-const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
+const _normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 	const labels = (issue.labels?.nodes ?? [])
 		.map((label) => label?.name)
 		.filter((value): value is string => value != null)
@@ -1412,7 +1408,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			readonly defaultTeam?: string
 		}
 
-		const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
+		const _createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
 			const withLinearSdkTiming = <A>(
 				linearArgs: readonly string[],
 				effect: Effect.Effect<A, IssueTrackerError, CommandExecutor.CommandExecutor>,
@@ -2359,10 +2355,14 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								) {
 									includeSortFlags = false
 									const fallbackArgs = buildListCommandArgs(currentLimit, filters, options, false)
-									return runBd(fallbackArgs, effectiveCwd)
+									return Effect.logWarning(error).pipe(
+										Effect.zipRight(runBd(fallbackArgs, effectiveCwd)),
+									)
 								}
 
-								return Effect.fail(error)
+								return Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.fail(error)),
+								)
 							}),
 						)
 						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)

@@ -47,8 +47,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const nav = yield* NavigationService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-				const issueTrackerClient = yield* IssueTrackerClient
-				const issueEditor = yield* IssueEditorService
+			const issueTrackerClient = yield* IssueTrackerClient
+			const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
 
@@ -81,7 +81,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* toast.show("error", `Fork failed: ${formatted}`)
 				})
 
-				const deleteIssueAndCleanup = (taskId: string, hasSession: boolean) =>
+			const deleteIssueAndCleanup = (taskId: string, hasSession: boolean) =>
 				Effect.gen(function* () {
 					if (hasSession) {
 						yield* toast.show("info", `Cleaning up worktree for ${taskId}...`)
@@ -112,12 +112,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* nav.initialize()
 				})
 
-				const editIssue = () =>
-					Effect.gen(function* () {
-						const task = yield* helpers.getActionTargetTask()
-						if (!task) return
+			const editIssue = () =>
+				Effect.gen(function* () {
+					const task = yield* helpers.getActionTargetTask()
+					if (!task) return
 
-						yield* issueEditor.editIssue(task).pipe(
+					yield* issueEditor.editIssue(task).pipe(
 						Effect.tap(() => toast.show("success", `Updated ${task.id}`)),
 						Effect.tap(() => syncTaskFromBackend(task.id)),
 						Effect.catchAll((error) => {
@@ -137,16 +137,16 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-				const createIssue = () =>
-					Effect.gen(function* () {
-						yield* issueEditor.createIssue().pipe(
+			const createIssue = () =>
+				Effect.gen(function* () {
+					yield* issueEditor.createIssue().pipe(
 						Effect.flatMap((result) =>
 							Effect.gen(function* () {
 								const epicId = yield* nav.getDrillDownEpic()
-								let parentEpicId: string | null | undefined = undefined
+								let parentEpicId: string | null | undefined
 
 								if (epicId) {
-										yield* issueTrackerClient.addDependency(result.id, epicId, "parent-child").pipe(
+									yield* issueTrackerClient.addDependency(result.id, epicId, "parent-child").pipe(
 										Effect.tap(() => {
 											parentEpicId = epicId
 											return toast.show("success", `Created ${result.id} (added to epic)`)
@@ -188,8 +188,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					)
 				})
 
-				const deleteIssue = () =>
-					Effect.gen(function* () {
+			const deleteIssue = () =>
+				Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
@@ -198,12 +198,12 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 						? "\n\nThis will also remove the worktree and session."
 						: ""
 
-						yield* overlay.push({
-							_tag: "confirm",
-							message: `Permanently delete issue ${task.id}?${sessionWarning}`,
-							onConfirm: deleteIssueAndCleanup(task.id, hasSession),
-						})
+					yield* overlay.push({
+						_tag: "confirm",
+						message: `Permanently delete issue ${task.id}?${sessionWarning}`,
+						onConfirm: deleteIssueAndCleanup(task.id, hasSession),
 					})
+				})
 
 			const moveTasksToColumn = (direction: "left" | "right") =>
 				Effect.gen(function* () {
@@ -264,8 +264,8 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					}
 				})
 
-				const forkIssue = () =>
-					Effect.gen(function* () {
+			const forkIssue = () =>
+				Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
@@ -287,7 +287,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 
 					if (task.issue_type !== "epic") {
 						yield* toast.show("info", `Converting ${task.id} to epic...`)
-							yield* issueTrackerClient.update(task.id, { type: "epic" })
+						yield* issueTrackerClient.update(task.id, { type: "epic" })
 						yield* board.patchTaskFromMutation(task.id, {
 							issue_type: "epic",
 							updated_at: new Date().toISOString(),
@@ -340,16 +340,16 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					})
 				}).pipe(Effect.catchAll(handleForkError))
 
-				return {
-					editIssue,
-					createIssue,
-					deleteIssue,
-					moveTasksToColumn,
-					forkIssue,
-					forkFromCurrent,
-					forkWithNewEpic,
-					forkUnderParent,
-				}
+			return {
+				editIssue,
+				createIssue,
+				deleteIssue,
+				moveTasksToColumn,
+				forkIssue,
+				forkFromCurrent,
+				forkWithNewEpic,
+				forkUnderParent,
+			}
 		}),
 	},
 ) {}

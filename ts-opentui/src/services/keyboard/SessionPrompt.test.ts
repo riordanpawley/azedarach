@@ -34,7 +34,9 @@ describe("session prompts", () => {
 
 			expect(prompt).toContain("Local workflow mode guardrails:")
 			expect(prompt).toContain("Do not use `git -C <path>` unless intentionally targeting")
-			expect(prompt).toContain("Do not run remote cleanup/sync commands unless explicitly asked.")
+			expect(prompt).toContain(
+				"Do not run remote cleanup/sync commands unless explicitly asked.",
+			)
 		})
 
 	it("mentions injected az issue context in chat prompt", () => {

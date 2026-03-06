@@ -359,9 +359,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			readonly failure?: IssueSyncFailure
 		}): Effect.Effect<void, never> =>
 			Effect.gen(function* () {
-				const config = yield* appConfig
-					.getIssueTrackerSyncConfig()
-					.pipe(Effect.orElseSucceed(() => undefined))
+				const config = yield* appConfig.getIssueTrackerSyncConfig().pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => undefined),
+				)
 				const backend = config !== undefined && "linear" in config.issueTracker ? "linear" : "none"
 				const syncEnabled =
 					config !== undefined && "linear" in config.issueTracker
@@ -392,14 +395,27 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						lastMessage: params.message,
 						lastFailure,
 					})
-					.pipe(Effect.orElseSucceed(() => void 0))
+					.pipe(
+						Effect.tapError((error) =>
+							Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+						),
+						Effect.orElseSucceed(() => void 0),
+					)
 			})
 
 		const resolveDotEnvProvider = (
 			path: string,
 		): Effect.Effect<Option.Option<ConfigProvider.ConfigProvider>, never> =>
 			Effect.gen(function* () {
-				const exists = yield* fs.exists(path).pipe(Effect.catchAll(() => Effect.succeed(false)))
+				const exists = yield* fs
+					.exists(path)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
 				if (!exists) {
 					return Option.none()
 				}
@@ -985,9 +1001,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 									),
 						),
 						Effect.catchAll((createError) =>
-							linearSdk.issue(createExternalId).pipe(
-								Effect.map((existingIssue) => existingIssue.id),
-								Effect.mapError(() => createError),
+							Effect.logWarning(createError).pipe(
+								Effect.zipRight(
+									linearSdk.issue(createExternalId).pipe(
+										Effect.map((existingIssue) => existingIssue.id),
+										Effect.mapError(() => createError),
+									),
+								),
 							),
 						),
 					)
@@ -1105,7 +1125,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 							return runEffect.pipe(
 								Effect.flatMap(() => Request.succeed(request, undefined)),
-								Effect.catchAll((error) => Request.fail(request, error)),
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Request.fail(request, error)),
+									),
+								),
 							)
 						},
 						{ concurrency: "unbounded", discard: true },
@@ -1541,7 +1565,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 													),
 												),
 											),
-											Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
+											Effect.catchAll((error) =>
+												Effect.logWarning(error).pipe(
+													Effect.zipRight(markRequestFailure(item, error, cwd)),
+												),
+											),
 										),
 									),
 								)

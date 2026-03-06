@@ -41,9 +41,7 @@ const resolveConfiguredLinearPrefix = (config: ResolvedConfig): string | undefin
  * Returns undefined when there are no Linear identifiers, or if the
  * highest-frequency prefix is tied with another prefix.
  */
-export const inferLinearIssuePrefixFromIds = (
-	issueIds: readonly string[],
-): string | undefined => {
+export const inferLinearIssuePrefixFromIds = (issueIds: readonly string[]): string | undefined => {
 	const counts = new Map<string, number>()
 
 	for (const issueId of issueIds) {
@@ -88,10 +86,7 @@ export const inferLinearIssuePrefixFromIds = (
  * Linear prefix from config (`issueTracker.linear.team`) or, when missing,
  * from existing project issue IDs.
  */
-export const resolveCliIssueId = (
-	rawIssueId: string,
-	projectPath: string,
-) =>
+export const resolveCliIssueId = (rawIssueId: string, projectPath: string) =>
 	Effect.gen(function* () {
 		const trimmedIssueId = rawIssueId.trim()
 		if (!NUMERIC_ISSUE_SUFFIX_PATTERN.test(trimmedIssueId)) {
@@ -111,7 +106,13 @@ export const resolveCliIssueId = (
 				includeClosed: true,
 				limit: INFER_PREFIX_SAMPLE_LIMIT,
 			})
-			.pipe(Effect.catchAll(() => Effect.succeed([])))
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed([])),
+					),
+				),
+			)
 
 		const inferredPrefix = inferLinearIssuePrefixFromIds(issueSample.map((issue) => issue.id))
 		return inferredPrefix ? `${inferredPrefix}-${trimmedIssueId}` : trimmedIssueId

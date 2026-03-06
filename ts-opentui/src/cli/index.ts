@@ -314,7 +314,9 @@ const startHandler = (args: {
 				}),
 				Effect.catchAll((e) => {
 					// Non-fatal: log warning but continue
-					return Console.log(`Warning: Could not claim issue: ${e}`)
+					return Effect.logWarning(e).pipe(
+						Effect.zipRight(Console.log(`Warning: Could not claim issue: ${e}`)),
+					)
 				}),
 			)
 
@@ -407,7 +409,9 @@ const killHandler = (args: {
 		const killCommand = PlatformCommand.make("tmux", "kill-session", "-t", sessionName)
 		yield* PlatformCommand.exitCode(killCommand).pipe(
 			Effect.catchAll((e) => {
-				return Console.error(`Failed to kill session: ${e}`).pipe(Effect.as(1))
+				return Effect.logError(e).pipe(
+					Effect.zipRight(Console.error(`Failed to kill session: ${e}`).pipe(Effect.as(1))),
+				)
 			}),
 		)
 
@@ -439,7 +443,11 @@ const statusHandler = (args: {
 		)
 
 		const output = yield* PlatformCommand.string(listCommand).pipe(
-			Effect.catchAll(() => Effect.succeed("")),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed("")),
+				),
+			),
 		)
 
 		if (!output.trim()) {
@@ -479,7 +487,11 @@ const statusHandler = (args: {
 					)
 					const wtPath = yield* PlatformCommand.string(wtCommand).pipe(
 						Effect.map((s) => s.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 					if (wtPath) {
 						yield* Console.log(`    Path: ${wtPath}`)
@@ -600,7 +612,6 @@ const dependencyCountLabelFromDependency = (
 			return "parent"
 		case "discovered-from":
 			return "discoveredFrom"
-		case "related":
 		default:
 			return "related"
 	}
@@ -616,7 +627,6 @@ const dependencyCountLabelFromDependent = (
 			return "children"
 		case "discovered-from":
 			return "discoveredBy"
-		case "related":
 		default:
 			return "related"
 	}
@@ -1002,7 +1012,11 @@ const gateHandler = (args: {
 
 			worktreePath = yield* PlatformCommand.string(wtCommand).pipe(
 				Effect.map((s) => s.trim()),
-				Effect.catchAll(() => Effect.succeed("")),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed("")),
+					),
+				),
 			)
 		}
 
@@ -1038,7 +1052,11 @@ const gateHandler = (args: {
 		)
 		const typeCheckResult = yield* PlatformCommand.string(typeCheckCmd).pipe(
 			Effect.map((output) => ({ passed: true, output })),
-			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+			Effect.catchAll((e) =>
+				Effect.logWarning(e).pipe(
+					Effect.zipRight(Effect.succeed({ passed: false, output: String(e) })),
+				),
+			),
 		)
 		results.push({ gate: "type-check", ...typeCheckResult })
 		yield* Console.log(typeCheckResult.passed ? "  ✓ Passed" : "  ✗ Failed")
@@ -1051,7 +1069,11 @@ const gateHandler = (args: {
 		)
 		const lintResult = yield* PlatformCommand.string(lintCommand).pipe(
 			Effect.map((output) => ({ passed: true, output })),
-			Effect.catchAll((e) => Effect.succeed({ passed: false, output: String(e) })),
+			Effect.catchAll((e) =>
+				Effect.logWarning(e).pipe(
+					Effect.zipRight(Effect.succeed({ passed: false, output: String(e) })),
+				),
+			),
 		)
 		results.push({ gate: "lint", ...lintResult })
 		yield* Console.log(lintResult.passed ? "  ✓ Passed" : "  ✗ Failed (advisory)")
@@ -1067,9 +1089,13 @@ const gateHandler = (args: {
 				const output = String(e)
 				// "test" script not found is not a failure
 				if (output.includes("not found") || output.includes("missing script")) {
-					return Effect.succeed({ passed: true, output: "No test script" })
+					return Effect.logWarning(e).pipe(
+						Effect.zipRight(Effect.succeed({ passed: true, output: "No test script" })),
+					)
 				}
-				return Effect.succeed({ passed: false, output })
+				return Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+					Effect.zipRight(Effect.succeed({ passed: false, output })),
+				)
 			}),
 		)
 		results.push({ gate: "test", ...testResult })
@@ -1085,9 +1111,13 @@ const gateHandler = (args: {
 			Effect.catchAll((e) => {
 				const output = String(e)
 				if (output.includes("not found") || output.includes("missing script")) {
-					return Effect.succeed({ passed: true, output: "No build script" })
+					return Effect.logWarning(e).pipe(
+						Effect.zipRight(Effect.succeed({ passed: true, output: "No build script" })),
+					)
 				}
-				return Effect.succeed({ passed: false, output })
+				return Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+					Effect.zipRight(Effect.succeed({ passed: false, output })),
+				)
 			}),
 		)
 		results.push({ gate: "build", ...buildResult })
@@ -1229,9 +1259,13 @@ const setTmuxSessionOption = (
 		PlatformCommand.make("tmux", "set-option", "-t", sessionName, optionName, value),
 	).pipe(
 		Effect.catchAll((error) =>
-			verbose
-				? Console.log(`Could not set tmux option ${optionName}: ${error}`).pipe(Effect.as(1))
-				: Effect.succeed(1),
+			Effect.logWarning(error).pipe(
+				Effect.zipRight(
+					verbose
+						? Console.log(`Could not set tmux option ${optionName}: ${error}`).pipe(Effect.as(1))
+						: Effect.succeed(1),
+				),
+			),
 		),
 	)
 
@@ -1240,7 +1274,11 @@ const getTmuxSessionOption = (sessionName: string, optionName: string) =>
 		PlatformCommand.make("tmux", "show-option", "-t", sessionName, "-v", optionName),
 	).pipe(
 		Effect.map((value) => value.trim()),
-		Effect.catchAll(() => Effect.succeed("")),
+		Effect.catchAll((error) =>
+			Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+				Effect.zipRight(Effect.succeed("")),
+			),
+		),
 	)
 
 const ringSessionPaneBell = (sessionName: string) =>
@@ -1249,7 +1287,11 @@ const ringSessionPaneBell = (sessionName: string) =>
 			PlatformCommand.make("tmux", "display-message", "-p", "-t", sessionName, "#{pane_tty}"),
 		).pipe(
 			Effect.map((value) => value.trim()),
-			Effect.catchAll(() => Effect.succeed("")),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed("")),
+				),
+			),
 		)
 		if (paneTty.length === 0) {
 			return false
@@ -1258,7 +1300,11 @@ const ringSessionPaneBell = (sessionName: string) =>
 		const fs = yield* FileSystem.FileSystem
 		return yield* fs.writeFileString(paneTty, BELL_CHAR).pipe(
 			Effect.as(true),
-			Effect.catchAll(() => Effect.succeed(false)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(false)),
+				),
+			),
 		)
 	})
 
@@ -1309,7 +1355,11 @@ const applyTmuxWaitingAttentionSignal = (
 const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
 	const output = yield* PlatformCommand.string(listCommand).pipe(
-		Effect.catchAll(() => Effect.succeed("")),
+		Effect.catchAll((error) =>
+			Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+				Effect.zipRight(Effect.succeed("")),
+			),
+		),
 	)
 
 	return output
@@ -1323,7 +1373,11 @@ const findSessionByIssueId = (issueId: string, projectPath: string = process.cwd
 		const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 		const checkCommand = PlatformCommand.make("tmux", "has-session", "-t", canonicalSessionName)
 		const canonicalExitCode = yield* PlatformCommand.exitCode(checkCommand).pipe(
-			Effect.catchAll(() => Effect.succeed(1)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(1)),
+				),
+			),
 		)
 
 		if (canonicalExitCode === 0) {
@@ -1444,11 +1498,23 @@ const hooksInstallHandler = (args: {
 		if (settingsExist) {
 			const content = yield* fs
 				.readFileString(settingsPath)
-				.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("{}")),
+						),
+					),
+				)
 			existingSettings = yield* Effect.try({
 				try: () => JSON.parse(content),
 				catch: () => ({}),
-			}).pipe(Effect.catchAll(() => Effect.succeed({})))
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed({})),
+					),
+				),
+			)
 
 			if (args.verbose) {
 				yield* Console.log(`Read existing settings from: ${settingsPath}`)
@@ -1497,11 +1563,23 @@ const projectAddHandler = (args: {
 		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
 		const hasLocalConfig = yield* fs
 			.exists(localConfigPath)
-			.pipe(Effect.catchAll(() => Effect.succeed(false)))
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
 		if (hasLocalConfig) {
 			const localConfigRaw = yield* fs
 				.readFileString(localConfigPath)
-				.pipe(Effect.catchAll(() => Effect.succeed("")))
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
+				)
 			const decodedConfig = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
 				localConfigRaw,
 			).pipe(Effect.option)
@@ -2089,7 +2167,11 @@ const opencodeInitHandler = (args: {
 					// Run the generator script
 					const command = PlatformCommand.make("bash", scriptPath, cwd)
 					const output = yield* PlatformCommand.string(command).pipe(
-						Effect.catchAll((e) => Effect.succeed(`Error: ${e}`)),
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+								Effect.zipRight(Effect.succeed(`Error: ${e}`)),
+							),
+						),
 					)
 
 					// Count generated skills

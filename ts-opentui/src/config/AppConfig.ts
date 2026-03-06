@@ -185,7 +185,13 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 				const exists = yield* fs
 					.exists(targetConfigPath)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
 				if (!exists) {
 					return null
 				}
@@ -266,7 +272,15 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			Effect.gen(function* () {
 				const pkgPath = pathService.join(targetPath, "package.json")
 
-				const exists = yield* fs.exists(pkgPath).pipe(Effect.catchAll(() => Effect.succeed(false)))
+				const exists = yield* fs
+					.exists(pkgPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
 				if (!exists) {
 					return null
 				}
@@ -297,7 +311,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				})
 
 				const pkgResult = yield* Schema.decodeUnknown(PackageJsonSchema)(pkg).pipe(
-					Effect.catchAll(() => Effect.succeed({ azedarach: undefined })),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.succeed({ azedarach: undefined })),
+						),
+					),
 				)
 
 				if (pkgResult.azedarach === undefined) {
