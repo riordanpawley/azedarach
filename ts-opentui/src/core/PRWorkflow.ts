@@ -650,6 +650,46 @@ const runGit = (
 					stderr,
 				})
 			}),
+			)
+		})
+
+/**
+ * Check whether a git repository has an in-progress merge.
+ *
+ * Uses MERGE_HEAD presence as the canonical signal.
+ */
+const hasMergeInProgress = (
+	cwd: string,
+): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
+			Command.workingDirectory(cwd),
+		)
+		const exitCode = yield* Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1)))
+		return exitCode === 0
+	})
+
+/**
+ * Fail fast when merge target repository is already in an active merge state.
+ *
+ * This prevents ambiguous failures later in merge flow and gives clear recovery guidance.
+ */
+const ensureNoMergeInProgress = (options: {
+	cwd: string
+	issueId: string
+	baseBranch: string
+	contextLabel: string
+}): Effect.Effect<void, PRError, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const { cwd, issueId, baseBranch, contextLabel } = options
+		const mergeInProgress = yield* hasMergeInProgress(cwd)
+		if (!mergeInProgress) return
+
+		return yield* Effect.fail(
+			new PRError({
+				issueId,
+				message: `Merge in progress in ${contextLabel} for ${baseBranch}. Resolve and commit it, or run 'git -C ${cwd} merge --abort', then retry Space+m.`,
+			}),
 		)
 	})
 
@@ -1069,11 +1109,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// because git won't let us checkout a branch that's in use by another worktree.
 						// If epic has no worktree, create one first.
 						let mergeDir = projectPath
-						if (parentEpic) {
-							let epicWorktree = yield* worktreeManager.get({
-								issueId: parentEpic.id,
-								projectPath,
-							})
+							if (parentEpic) {
+								let epicWorktree = yield* worktreeManager.get({
+									issueId: parentEpic.id,
+									projectPath,
+								})
 							if (!epicWorktree) {
 								yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
 								epicWorktree = yield* worktreeManager.create({
@@ -1084,11 +1124,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								})
 							}
 							mergeDir = epicWorktree.path
-							yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
-						}
+								yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
+							}
 
-						// Get issue info for merge commit message
-						const issue = yield* issueTrackerClient.show(issueId)
+							// Fail fast if the merge target repository is already mid-merge.
+							// Continuing would produce opaque git errors and non-deterministic outcomes.
+							yield* ensureNoMergeInProgress({
+								cwd: mergeDir,
+								issueId,
+								baseBranch,
+								contextLabel: parentEpic ? `epic ${parentEpic.id} worktree` : "project base branch",
+							})
+
+							// Get issue info for merge commit message
+							const issue = yield* issueTrackerClient.show(issueId)
 
 						// Get worktree info
 						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
@@ -1483,17 +1532,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}).pipe(Effect.withSpan("pr.mergeToMain")),
 				),
 
-			checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
-				Effect.gen(function* () {
-					const { issueId, projectPath } = options
-					const { baseBranch: effectiveBaseBranch } = yield* getIssueBaseBranch(
-						issueId,
-						projectPath,
-					)
-					const issueBranch = yield* getIssueBranchName(issueId, projectPath)
+				checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
+					Effect.gen(function* () {
+						const { issueId, projectPath } = options
+						const { baseBranch: effectiveBaseBranch } = yield* getIssueBaseBranch(
+							issueId,
+							projectPath,
+						)
+						const issueBranch = yield* getIssueBranchName(issueId, projectPath)
 
-					// Use git merge-tree to perform an actual 3-way merge in memory
-					// This detects real line-level conflicts, not just file overlap
+						// Fail fast if repository is already in merge state.
+						// Conflict probing is not reliable while merge is unresolved.
+						yield* ensureNoMergeInProgress({
+							cwd: projectPath,
+							issueId,
+							baseBranch: effectiveBaseBranch,
+							contextLabel: "project base branch",
+						})
+
+						// Use git merge-tree to perform an actual 3-way merge in memory
+						// This detects real line-level conflicts, not just file overlap
 					// Exit code 0 = clean merge, 1 = conflicts, other = error
 					const mergeTreeCommand = Command.make(
 						"git",

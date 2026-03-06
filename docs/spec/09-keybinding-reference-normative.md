@@ -174,7 +174,7 @@ This section is a full normative keybinding contract.
 | `Space f` | worktree exists | diff viewer opened |
 | `Space P` | branch exists | PR created or existing surfaced |
 | `Space O` | PR metadata exists | PR opened in browser |
-| `Space m` | merge path valid | local merge attempted/completed |
+| `Space m` | merge path valid and target merge context is not already mid-merge | local merge attempted/completed, or fail-fast with resolve/abort guidance when target is mid-merge |
 | `Space M` | merge in progress | merge aborted |
 | `Space b` | source work exists | merge-select mode then target merge |
 | `Space d` | worktree exists | cleanup dialog/action executed |

@@ -260,6 +260,16 @@ const ERROR_FORMATTERS: Record<
 	PRError: (error) => {
 		const message = String(error.message || "")
 
+		// Merge in progress in target repository
+		if (message.includes("Merge in progress in")) {
+			return {
+				message: "Merge target already has an active merge",
+				suggestion:
+					"Try: Resolve and commit that merge, or run 'git merge --abort' in that repo, then retry",
+				category: "pr",
+			}
+		}
+
 		// Branch protection
 		if (message.includes("protected branch") || message.includes("branch protection")) {
 			return {

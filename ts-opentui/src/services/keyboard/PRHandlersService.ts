@@ -99,10 +99,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by cleanup.
 		 */
-		const doCleanup = (issueId: string, projectPath: string) =>
-			helpers.withQueue(
-				issueId,
-				"cleanup",
+			const doCleanup = (issueId: string, projectPath: string) =>
+				helpers.withQueue(
+					issueId,
+					"cleanup",
 				Effect.gen(function* () {
 					// DIAGNOSTIC: Log the bead ID when cleanup actually executes (az-f3iw)
 					yield* Effect.log(`[cleanup:execute] Running cleanup for issueId=${issueId}`)
@@ -112,12 +112,24 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						Effect.tap(() => toast.show("success", `Cleaned up ${issueId}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
-				}),
-			)
+					}),
+				)
 
-		// ================================================================
-		// PR Handler Methods
-		// ================================================================
+			/**
+			 * Check whether repository has an active merge (MERGE_HEAD present).
+			 */
+			const hasMergeInProgress = (cwd: string) =>
+				Effect.gen(function* () {
+					const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
+						Command.workingDirectory(cwd),
+					)
+					const exitCode = yield* Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1)))
+					return exitCode === 0
+				})
+
+			// ================================================================
+			// PR Handler Methods
+			// ================================================================
 
 		/**
 		 * Update from base action (Space+u)
@@ -313,12 +325,23 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-				// Get current project path (from ProjectService or cwd fallback)
-				const projectPath = yield* helpers.getProjectPath()
+					// Get current project path (from ProjectService or cwd fallback)
+					const projectPath = yield* helpers.getProjectPath()
 
-				// Get target branch (epic branch for children, main otherwise)
-				const { targetBranch } = yield* prWorkflow
-					.getTargetBranch(task.id, projectPath)
+					// Fail fast if the base-branch repository is already in merge state.
+					// We do not auto-abort; user must explicitly resolve or abort first.
+					const baseMergeInProgress = yield* hasMergeInProgress(projectPath)
+					if (baseMergeInProgress) {
+						yield* toast.show(
+							"error",
+							`Cannot merge: project base branch is already mid-merge.\nResolve and commit it, or run 'git -C ${projectPath} merge --abort', then retry Space+m.`,
+						)
+						return
+					}
+
+					// Get target branch (epic branch for children, main otherwise)
+					const { targetBranch } = yield* prWorkflow
+						.getTargetBranch(task.id, projectPath)
 					.pipe(Effect.catchAll(() => Effect.succeed({ targetBranch: "main", isEpicChild: false })))
 
 				// Check for uncommitted changes in worktree BEFORE merge
