@@ -918,6 +918,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Message: fmt.Sprintf("Bulk action completed: %d updated, %d failed", msg.updated, msg.failed),
 			Expires: time.Now().Add(3 * time.Second),
 		})
+		if len(msg.failedDetails) > 0 {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Failed items: %s", summarizeFailureDetails(msg.failedDetails, 3)),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+		}
 		m.editor.ClearSelection()
 		m.editor.EnterNormal()
 		return m, m.loadIssuesCmd()
@@ -2341,9 +2348,21 @@ func (m Model) abortMergeCmd(worktree string) tea.Cmd {
 // Bulk status commands
 
 type bulkStatusResultMsg struct {
-	updated int
-	failed  int
-	err     error
+	updated       int
+	failed        int
+	failedDetails []string
+	err           error
+}
+
+func summarizeFailureDetails(details []string, limit int) string {
+	if len(details) == 0 {
+		return ""
+	}
+	if limit <= 0 || len(details) <= limit {
+		return strings.Join(details, "; ")
+	}
+	remaining := len(details) - limit
+	return fmt.Sprintf("%s; +%d more", strings.Join(details[:limit], "; "), remaining)
 }
 
 // bulkMoveStatusCmd moves tasks by delta (-1 = left, +1 = right)
@@ -2362,6 +2381,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		failedDetails := []string{}
 
 		for _, taskID := range taskIDs {
 			// Find the task to get current status
@@ -2375,6 +2395,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			if currentTask == nil {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: task not found", taskID))
 				continue
 			}
 
@@ -2389,6 +2410,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			if currentIdx == -1 {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: invalid current status", taskID))
 				continue
 			}
 
@@ -2405,6 +2427,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			err := m.issueClient.Update(ctx, taskID, newStatus)
 			if err != nil {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: %v", taskID, err))
 				continue
 			}
 
@@ -2412,7 +2435,11 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 			updated++
 		}
 
-		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+		return m.wrapBackupWarnings(bulkStatusResultMsg{
+			updated:       updated,
+			failed:        failed,
+			failedDetails: failedDetails,
+		})
 	}
 }
 
@@ -2424,18 +2451,24 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		failedDetails := []string{}
 
 		for _, taskID := range taskIDs {
 			err := m.issueClient.Delete(ctx, taskID)
 			if err != nil {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: %v", taskID, err))
 				continue
 			}
 			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+		return m.wrapBackupWarnings(bulkStatusResultMsg{
+			updated:       updated,
+			failed:        failed,
+			failedDetails: failedDetails,
+		})
 	}
 }
 
@@ -2447,18 +2480,24 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 
 		updated := 0
 		failed := 0
+		failedDetails := []string{}
 
 		for _, taskID := range taskIDs {
 			err := m.issueClient.Archive(ctx, taskID)
 			if err != nil {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: %v", taskID, err))
 				continue
 			}
 			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+		return m.wrapBackupWarnings(bulkStatusResultMsg{
+			updated:       updated,
+			failed:        failed,
+			failedDetails: failedDetails,
+		})
 	}
 }
 
@@ -2471,18 +2510,24 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 
 		updated := 0
 		failed := 0
+		failedDetails := []string{}
 
 		for _, taskID := range taskIDs {
 			err := m.issueClient.Update(ctx, taskID, status)
 			if err != nil {
 				failed++
+				failedDetails = append(failedDetails, fmt.Sprintf("%s: %v", taskID, err))
 				continue
 			}
 			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+		return m.wrapBackupWarnings(bulkStatusResultMsg{
+			updated:       updated,
+			failed:        failed,
+			failedDetails: failedDetails,
+		})
 	}
 }
 

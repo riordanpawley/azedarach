@@ -1175,6 +1175,73 @@ func TestSessionReconciliationActionTerminateOrphanTmuxSession(t *testing.T) {
 	}
 }
 
+func TestBulkSetStatusCmdCapturesPerItemFailureDetails(t *testing.T) {
+	m := newTestModel()
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{
+		listPayload: []byte(`[]`),
+		updateErr:   errors.New("simulated update failure"),
+	}, slog.Default())
+
+	cmd := m.bulkSetStatusCmd([]string{"az-1", "az-2"}, domain.StatusDone)
+	if cmd == nil {
+		t.Fatal("expected bulk set status command")
+	}
+
+	msg := cmd()
+	var result bulkStatusResultMsg
+	switch typed := msg.(type) {
+	case bulkStatusResultMsg:
+		result = typed
+	case backupWrappedMsg:
+		inner, ok := typed.inner.(bulkStatusResultMsg)
+		if !ok {
+			t.Fatalf("expected backupWrappedMsg inner bulkStatusResultMsg, got %T", typed.inner)
+		}
+		result = inner
+	default:
+		t.Fatalf("expected bulkStatusResultMsg or backupWrappedMsg, got %T", msg)
+	}
+
+	if result.updated != 0 || result.failed != 2 {
+		t.Fatalf("expected 0 updated / 2 failed, got %d/%d", result.updated, result.failed)
+	}
+	if len(result.failedDetails) != 2 {
+		t.Fatalf("expected 2 failure detail entries, got %v", result.failedDetails)
+	}
+	if !containsAll(strings.Join(result.failedDetails, " "), []string{"az-1", "az-2", "issue tracker update"}) {
+		t.Fatalf("expected per-item failure details with issue IDs, got %v", result.failedDetails)
+	}
+}
+
+func TestBulkStatusResultMsgShowsFailureDetailToast(t *testing.T) {
+	m := newTestModel()
+
+	result, _ := m.Update(bulkStatusResultMsg{
+		updated: 1,
+		failed:  2,
+		failedDetails: []string{
+			"az-1: simulated update failure",
+			"az-2: simulated update failure",
+		},
+	})
+	m = result.(Model)
+
+	if len(m.toasts) < 2 {
+		t.Fatalf("expected success + warning toasts for bulk failure details, got %+v", m.toasts)
+	}
+
+	found := false
+	for _, entry := range m.toasts {
+		if containsAll(entry.Message, []string{"Failed items", "az-1", "az-2"}) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected warning toast with per-item failure details, got %+v", m.toasts)
+	}
+}
+
 func openActionAndSelect(t *testing.T, m Model, key tea.KeyMsg) (Model, overlay.SelectionMsg) {
 	t.Helper()
 
