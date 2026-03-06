@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# migrate-images-to-lfs.sh - Migrate existing bead images to Git LFS
+# migrate-images-to-lfs.sh - Migrate existing issue images to Git LFS
 #
-# This script converts existing .beads/images/** to Git LFS tracking.
+# This script converts existing .linear/images/** to Git LFS tracking.
 # It rewrites git history, so coordinate with your team before running.
 #
 # Prerequisites:
@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}=== Bead Images to Git LFS Migration ===${NC}"
+echo -e "${GREEN}=== Issue Images to Git LFS Migration ===${NC}"
 echo
 
 # Check if git-lfs is installed
@@ -50,14 +50,14 @@ if ! git diff-index --quiet HEAD --; then
 fi
 
 # Show current image stats
-echo -e "${YELLOW}Current .beads/images/ statistics:${NC}"
-if [ -d ".beads/images" ]; then
-    image_count=$(find .beads/images -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" -o -name "*.bmp" -o -name "*.svg" \) 2>/dev/null | wc -l | tr -d ' ')
-    image_size=$(du -sh .beads/images 2>/dev/null | cut -f1)
+echo -e "${YELLOW}Current .linear/images/ statistics:${NC}"
+if [ -d ".linear/images" ]; then
+    image_count=$(find .linear/images -type f \( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" -o -name "*.bmp" -o -name "*.svg" \) 2>/dev/null | wc -l | tr -d ' ')
+    image_size=$(du -sh .linear/images 2>/dev/null | cut -f1)
     echo "  Files: $image_count"
     echo "  Size: $image_size"
 else
-    echo "  No .beads/images directory found"
+    echo "  No .linear/images directory found"
 fi
 echo
 
@@ -85,24 +85,24 @@ git lfs install
 echo
 echo -e "${GREEN}Step 2: Verifying .gitattributes...${NC}"
 # Check if .gitattributes already has LFS rules for images
-if grep -q ".beads/images/\*\*/\*.png filter=lfs" .gitattributes 2>/dev/null; then
+if grep -q ".linear/images/\*\*/\*.png filter=lfs" .gitattributes 2>/dev/null; then
     echo "  LFS rules already present in .gitattributes"
 else
     echo "  Adding LFS rules to .gitattributes..."
     cat >> .gitattributes << 'EOF'
 
-# Track bead images with Git LFS to prevent repository bloat
+# Track issue images with Git LFS to prevent repository bloat
 # Images are lazy-loaded on access rather than downloaded on clone
-.beads/images/**/*.png filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.jpg filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.gif filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.webp filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.bmp filter=lfs diff=lfs merge=lfs -text
-.beads/images/**/*.svg filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.png filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.gif filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.webp filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.bmp filter=lfs diff=lfs merge=lfs -text
+.linear/images/**/*.svg filter=lfs diff=lfs merge=lfs -text
 EOF
     git add .gitattributes
-    git commit -m "chore: add Git LFS tracking for bead images"
+    git commit -m "chore: add Git LFS tracking for issue images"
 fi
 
 echo
@@ -111,7 +111,7 @@ echo "  This may take a while depending on your git history size..."
 
 # Migrate images in history
 # Use --include-ref to specify which refs to migrate
-git lfs migrate import --include=".beads/images/**" --everything --yes
+git lfs migrate import --include=".linear/images/**" --everything --yes
 
 echo
 echo -e "${GREEN}=== Migration Complete ===${NC}"

@@ -34,7 +34,7 @@ find "$CLAUDE_SKILLS_DIR" -name "*.skill.md" -type f | while read -r skill_file;
     # Get parent directory name for categorization
     parent_dir=$(dirname "$rel_path")
 
-    # Create a unique skill name: parent-basename (e.g., layers-db, workflow-beads-tracking)
+    # Create a unique skill name: parent-basename (e.g., layers-db, workflow-issue-tracking)
     if [[ "$parent_dir" == "." ]]; then
         skill_name="$skill_basename"
     else
