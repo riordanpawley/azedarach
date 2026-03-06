@@ -381,8 +381,9 @@ export const DiagnosticsOverlay = () => {
 		if (scroll.direction !== "up" && scroll.direction !== "down") return
 		event.preventDefault()
 		event.stopPropagation()
-		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
-		const amount = scroll.direction === "down" ? delta : -delta
+		// Wheel delta values vary widely by terminal/input device; clamp to
+		// single-step scrolling to avoid overshooting into blank space.
+		const amount = scroll.direction === "down" ? 1 : -1
 		scrollboxRef.current.scrollBy(amount, "step")
 	}
 
@@ -396,7 +397,6 @@ export const DiagnosticsOverlay = () => {
 			alignItems="center"
 			justifyContent="center"
 			backgroundColor={`${theme.crust}CC`}
-			onMouseScroll={handleMouseScroll}
 		>
 			<box
 				borderStyle="rounded"
