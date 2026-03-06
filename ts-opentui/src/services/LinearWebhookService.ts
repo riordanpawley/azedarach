@@ -45,12 +45,10 @@ const failOnTimeout = <A, E>(params: {
 }): Effect.Effect<A, LinearWebhookRuntimeError> =>
 	params.effect.pipe(
 		Effect.mapError(params.mapError),
-		Effect.timeout(`${params.timeoutMs} millis`),
-		Effect.flatMap((result) =>
-			result !== undefined
-				? Effect.succeed(result)
-				: Effect.fail(new LinearWebhookRuntimeError({ message: params.timeoutMessage })),
-		),
+		Effect.timeoutFail({
+			duration: `${params.timeoutMs} millis`,
+			onTimeout: () => new LinearWebhookRuntimeError({ message: params.timeoutMessage }),
+		}),
 	)
 
 const WorkflowStateChildSchema = Schema.Struct({

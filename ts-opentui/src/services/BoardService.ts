@@ -57,6 +57,8 @@ const LINEAR_WEBHOOK_RESTART_DELAY = "5 seconds"
 const LINEAR_WEBHOOK_DEFAULT_PORT = 9000
 const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
 const LINEAR_WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
+const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
+const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 
 const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
 	if (!stateName) return "open"
@@ -1585,24 +1587,38 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					configuredUrl ??
 					envUrl ??
 					(yield* Effect.gen(function* () {
-						const tailscaleStatus = yield* Command.string(
+						const tailscaleStatusResult = yield* Command.string(
 							Command.make("tailscale", "status", "--json"),
 						).pipe(
-							Effect.map((output) => output.trim()),
+							Effect.timeout(`${LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS} millis`),
 							Effect.catchAll(() => Effect.succeed(undefined)),
 						)
-						if (tailscaleStatus === undefined) {
+						if (tailscaleStatusResult === undefined) {
+							yield* Effect.logDebug(
+								`Linear webhook listener config: tailscale status unavailable or timed out after ${LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS}ms`,
+							)
 							return undefined
 						}
+						const tailscaleStatus = tailscaleStatusResult.trim()
 
 						const dnsName = parseTailscaleDnsName(tailscaleStatus)
 						if (Option.isNone(dnsName)) {
 							return undefined
 						}
 
-						const funnelExitCode = yield* Command.exitCode(
+						const funnelExitCodeResult = yield* Command.exitCode(
 							Command.make("tailscale", "funnel", "--bg", "--yes", String(port)),
-						).pipe(Effect.catchAll(() => Effect.succeed(1)))
+						).pipe(
+							Effect.timeout(`${LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS} millis`),
+							Effect.catchAll(() => Effect.succeed(undefined)),
+						)
+						if (funnelExitCodeResult === undefined) {
+							yield* Effect.logDebug(
+								`Linear webhook listener config: tailscale funnel unavailable or timed out after ${LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS}ms`,
+							)
+							return undefined
+						}
+						const funnelExitCode = funnelExitCodeResult
 						if (funnelExitCode !== 0) {
 							return undefined
 						}
