@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { inferLinearIssueType } from "./BeadsClient.js"
+import { inferLinearIssueType } from "./IssueTrackerClient.js"
 
 describe("inferLinearIssueType", () => {
 	it("maps native Linear Epic type to epic", () => {

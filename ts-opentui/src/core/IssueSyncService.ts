@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { FileSystem, Path, PlatformConfigProvider } from "@effect/platform"
-import type { Issue as LinearSdkIssue, LinearClient } from "@linear/sdk"
+import type { LinearClient, Issue as LinearSdkIssue } from "@linear/sdk"
 import {
 	Config,
 	ConfigProvider,
@@ -14,15 +14,15 @@ import {
 	Schedule,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import { LinearSdk } from "./LinearSdk.js"
 import {
+	type ExternalIssueSnapshot,
 	LocalIssueStore,
 	type LocalIssueStoreError,
-	type ExternalIssueSnapshot,
 	type PendingSyncItem,
 	type SyncOperation,
 	type SyncQueueClaim,
 } from "./LocalIssueStore.js"
-import { LinearSdk } from "./LinearSdk.js"
 
 const LINEAR_SYNC_TARGET: "linear" = "linear"
 const MAX_SYNC_BATCH = 500
@@ -46,7 +46,6 @@ interface CollapsedSyncItem {
 }
 
 interface LinearRuntime {
-	readonly client: LinearClient
 	readonly defaultTeam: string | undefined
 	readonly defaultProject: string | undefined
 }
@@ -316,6 +315,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const bootstrapInFlightRef = yield* Ref.make<
 			Map<string, Deferred.Deferred<number, IssueSyncError>>
 		>(new Map())
+		const flushInFlightRef = yield* Ref.make<
+			Map<
+				string,
+				Deferred.Deferred<{ readonly pushed: number; readonly pulled: number }, IssueSyncError>
+			>
+		>(new Map())
 
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
@@ -326,9 +331,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const fromStore = <A>(
 			effect: Effect.Effect<A, LocalIssueStoreError>,
 		): Effect.Effect<A, IssueSyncError> => effect.pipe(Effect.mapError(mapLocalStoreError))
-
-		const withLinearRateLimit = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-			linearSdk.rateLimit(effect)
 
 		const resolveDotEnvProvider = (
 			path: string,
@@ -502,41 +504,32 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return Option.none()
 				}
 
-				const client = yield* linearSdk.getClient(apiKeyOption.value).pipe(
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: error.message,
-							}),
-					),
-				)
 				return Option.some({
-					client,
 					defaultTeam: config.issueTracker.linear.team,
 					defaultProject: config.issueTracker.linear.project,
 				})
 			})
 
 		const fetchAllLinearIssues = (
-			client: LinearClient,
 			scope: LinearIssueScope,
 		): Effect.Effect<readonly LinearSdkIssue[], IssueSyncError> =>
 			Effect.gen(function* () {
 				const filter = buildLinearIssueFilter(scope)
 				const fetchIssuesPage = (afterCursor: string | undefined) =>
-					Effect.tryPromise({
-						try: () =>
-							client.issues({
-								first: 250,
-								after: afterCursor,
-								filter,
-							}),
-						catch: (cause) =>
-							new IssueSyncError({
-								message: "Failed to fetch issues from Linear",
-								cause,
-							}),
-					}).pipe(withLinearRateLimit)
+					linearSdk
+						.issues({
+							first: 250,
+							after: afterCursor,
+							filter,
+						})
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: error.message,
+									}),
+							),
+						)
 
 				const collectPages = (
 					afterCursor: string | undefined,
@@ -555,45 +548,40 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				return yield* collectPages(undefined, [])
 			})
 
-		const fetchLabelNameById = (
-			client: LinearClient,
-		): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
-			Effect.tryPromise({
-				try: async () => {
-					const labels = await client.issueLabels({ first: 500 })
-					return new Map(labels.nodes.map((label) => [label.id, label.name] as const))
-				},
-				catch: (cause) =>
-					new IssueSyncError({
-						message: "Failed to fetch issue labels from Linear",
-						cause,
-					}),
-			}).pipe(withLinearRateLimit)
+		const fetchLabelNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+			linearSdk.issueLabels({ first: 500 }).pipe(
+				Effect.map(
+					(labels) => new Map(labels.nodes.map((label) => [label.id, label.name] as const)),
+				),
+				Effect.mapError(
+					(error) =>
+						new IssueSyncError({
+							message: error.message,
+						}),
+				),
+			)
 
-		const fetchStateNameById = (
-			client: LinearClient,
-		): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
-			Effect.tryPromise({
-				try: async () => {
-					const states = await client.workflowStates({ first: 500 })
-					return new Map(states.nodes.map((state) => [state.id, state.name] as const))
-				},
-				catch: (cause) =>
-					new IssueSyncError({
-						message: "Failed to fetch workflow states from Linear",
-						cause,
-					}),
-			}).pipe(withLinearRateLimit)
+		const fetchStateNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+			linearSdk.workflowStates({ first: 500 }).pipe(
+				Effect.map(
+					(states) => new Map(states.nodes.map((state) => [state.id, state.name] as const)),
+				),
+				Effect.mapError(
+					(error) =>
+						new IssueSyncError({
+							message: error.message,
+						}),
+				),
+			)
 
 		const resolveLabelIds = (
-			client: LinearClient,
 			labels: readonly string[],
 		): Effect.Effect<readonly string[], IssueSyncError> =>
 			Effect.gen(function* () {
 				if (labels.length === 0) {
 					return []
 				}
-				const labelNameById = yield* fetchLabelNameById(client)
+				const labelNameById = yield* fetchLabelNameById()
 				const normalized = labels.map((label) => label.trim().toLowerCase())
 				const ids: string[] = []
 				for (const [id, labelName] of labelNameById.entries()) {
@@ -605,7 +593,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			})
 
 		const findStateIdForStatus = (
-			client: LinearClient,
 			teamId: string,
 			targetStatus: IssueStatus,
 		): Effect.Effect<string, IssueSyncError> =>
@@ -618,22 +605,22 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return cached
 				}
 
-				const workflowStates = yield* Effect.tryPromise({
-					try: async () => {
-						const states = await client.workflowStates({ first: 500 })
-						return states.nodes.map((state) => ({
+				const workflowStates = yield* linearSdk.workflowStates({ first: 500 }).pipe(
+					Effect.map((states) =>
+						states.nodes.map((state) => ({
 							id: state.id,
 							teamId: state.teamId,
 							type: state.type,
 							name: state.name,
-						}))
-					},
-					catch: (cause) =>
-						new IssueSyncError({
-							message: "Failed to fetch workflow states from Linear",
-							cause,
-						}),
-				}).pipe(withLinearRateLimit)
+						})),
+					),
+					Effect.mapError(
+						(error) =>
+							new IssueSyncError({
+								message: error.message,
+							}),
+					),
+				)
 
 				const teamStates = workflowStates.filter((state) => state.teamId === teamId)
 				if (teamStates.length === 0) {
@@ -696,7 +683,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					(dependency) => dependency.dependency_type === "parent-child",
 				)?.id
 				const parentId = yield* ensureParentExternalId(parentLocalId, request.cwd)
-				const labelIds = yield* resolveLabelIds(runtime.client, issue.labels ?? [])
+				const labelIds = yield* resolveLabelIds(issue.labels ?? [])
 				const description = buildMergedDescription(issue)
 
 				const applyStateId = (
@@ -705,45 +692,48 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				): Effect.Effect<void, IssueSyncError> =>
 					issue.status === "open"
 						? Effect.void
-						: findStateIdForStatus(runtime.client, teamId, issue.status).pipe(
+						: findStateIdForStatus(teamId, issue.status).pipe(
 								Effect.flatMap((stateId) =>
-									Effect.tryPromise({
-										try: () => runtime.client.updateIssue(externalIssueId, { stateId }),
-										catch: (cause) =>
-											new IssueSyncError({
-												message: `Failed to apply status for ${issue.id}`,
-												cause,
-											}),
-									}).pipe(withLinearRateLimit),
+									linearSdk.updateIssue(externalIssueId, { stateId }).pipe(
+										Effect.asVoid,
+										Effect.mapError(
+											(error) =>
+												new IssueSyncError({
+													message: `Failed to apply status for ${issue.id}: ${error.message}`,
+												}),
+										),
+									),
 								),
 							)
 
 				if (externalRef !== undefined) {
-					yield* Effect.tryPromise({
-						try: () =>
-							runtime.client.updateIssue(externalRef.externalId, {
-								title: issue.title,
-								description,
-								priority: toLinearPriority(issue.priority),
-								estimate: issue.estimate,
-								labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
-								parentId,
-							}),
-						catch: (cause) =>
-							new IssueSyncError({
-								message: `Failed to update Linear issue for ${issue.id}`,
-								cause,
-							}),
-					}).pipe(withLinearRateLimit)
+					yield* linearSdk
+						.updateIssue(externalRef.externalId, {
+							title: issue.title,
+							description,
+							priority: toLinearPriority(issue.priority),
+							estimate: issue.estimate,
+							labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+							parentId,
+						})
+						.pipe(
+							Effect.asVoid,
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: `Failed to update Linear issue for ${issue.id}: ${error.message}`,
+									}),
+							),
+						)
 
-					const externalIssue = yield* Effect.tryPromise({
-						try: () => runtime.client.issue(externalRef.externalId),
-						catch: (cause) =>
-							new IssueSyncError({
-								message: `Failed to fetch Linear issue metadata for ${issue.id}`,
-								cause,
-							}),
-					}).pipe(withLinearRateLimit)
+					const externalIssue = yield* linearSdk.issue(externalRef.externalId).pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to fetch Linear issue metadata for ${issue.id}: ${error.message}`,
+								}),
+						),
+					)
 					const teamId = yield* requireTeamId(
 						externalIssue.teamId,
 						`Linear issue ${externalRef.externalId} is missing team id`,
@@ -762,7 +752,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					)
 				}
 
-				const createTeamId = yield* linearSdk.resolveTeamId(runtime.client, configuredTeam).pipe(
+				const createTeamId = yield* linearSdk.resolveTeamId(configuredTeam).pipe(
 					Effect.mapError(
 						(error) =>
 							new IssueSyncError({
@@ -772,44 +762,40 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				)
 				const createExternalId = deterministicLinearCreateId(issue.id, request.payloadJson)
 
-				const createIssueId = yield* Effect.tryPromise({
-					try: () =>
-						runtime.client.createIssue({
-							id: createExternalId,
-							teamId: createTeamId,
-							title: issue.title,
-							description,
-							priority: toLinearPriority(issue.priority),
-							estimate: issue.estimate,
-							labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
-							parentId,
-						}),
-					catch: (cause) =>
-						new IssueSyncError({
-							message: `Failed to create Linear issue for ${issue.id}`,
-							cause,
-						}),
-				}).pipe(
-					withLinearRateLimit,
-					Effect.flatMap((createPayload) =>
-						createPayload.issueId
-							? Effect.succeed(createPayload.issueId)
-							: Effect.fail(
-									new IssueSyncError({
-										message: `Linear create returned no issue id for ${issue.id}`,
-									}),
-								),
-					),
-					Effect.catchAll((createError) =>
-						Effect.tryPromise({
-							try: () => runtime.client.issue(createExternalId),
-							catch: () => createError,
-						}).pipe(
-							withLinearRateLimit,
-							Effect.map((existingIssue) => existingIssue.id),
+				const createIssueId = yield* linearSdk
+					.createIssue({
+						id: createExternalId,
+						teamId: createTeamId,
+						title: issue.title,
+						description,
+						priority: toLinearPriority(issue.priority),
+						estimate: issue.estimate,
+						labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+						parentId,
+					})
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: `Failed to create Linear issue for ${issue.id}: ${error.message}`,
+								}),
 						),
-					),
-				)
+						Effect.flatMap((createPayload) =>
+							createPayload.issueId
+								? Effect.succeed(createPayload.issueId)
+								: Effect.fail(
+										new IssueSyncError({
+											message: `Linear create returned no issue id for ${issue.id}`,
+										}),
+									),
+						),
+						Effect.catchAll((createError) =>
+							linearSdk.issue(createExternalId).pipe(
+								Effect.map((existingIssue) => existingIssue.id),
+								Effect.mapError(() => createError),
+							),
+						),
+					)
 
 				yield* fromStore(
 					localStore.upsertExternalRef(
@@ -822,14 +808,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					),
 				)
 
-				const createdLinearIssue = yield* Effect.tryPromise({
-					try: () => runtime.client.issue(createIssueId),
-					catch: (cause) =>
-						new IssueSyncError({
-							message: `Failed to fetch newly created Linear issue for ${issue.id}`,
-							cause,
-						}),
-				}).pipe(withLinearRateLimit)
+				const createdLinearIssue = yield* linearSdk.issue(createIssueId).pipe(
+					Effect.mapError(
+						(error) =>
+							new IssueSyncError({
+								message: `Failed to fetch newly created Linear issue for ${issue.id}: ${error.message}`,
+							}),
+					),
+				)
 
 				yield* fromStore(
 					localStore.upsertExternalRef(
@@ -861,28 +847,29 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return
 				}
 
-				const externalIssue = yield* Effect.tryPromise({
-					try: () => runtime.client.issue(externalRef.externalId),
-					catch: (cause) =>
-						new IssueSyncError({
-							message: `Failed to fetch Linear issue metadata for ${request.issueId}`,
-							cause,
-						}),
-				}).pipe(withLinearRateLimit)
+				const externalIssue = yield* linearSdk.issue(externalRef.externalId).pipe(
+					Effect.mapError(
+						(error) =>
+							new IssueSyncError({
+								message: `Failed to fetch Linear issue metadata for ${request.issueId}: ${error.message}`,
+							}),
+					),
+				)
 
 				const teamId = yield* requireTeamId(
 					externalIssue.teamId,
 					`Linear issue ${externalRef.externalId} is missing team id`,
 				)
-				const closedStateId = yield* findStateIdForStatus(runtime.client, teamId, "closed")
-				yield* Effect.tryPromise({
-					try: () => runtime.client.updateIssue(externalRef.externalId, { stateId: closedStateId }),
-					catch: (cause) =>
-						new IssueSyncError({
-							message: `Failed to close Linear issue for ${request.issueId}`,
-							cause,
-						}),
-				}).pipe(withLinearRateLimit)
+				const closedStateId = yield* findStateIdForStatus(teamId, "closed")
+				yield* linearSdk.updateIssue(externalRef.externalId, { stateId: closedStateId }).pipe(
+					Effect.asVoid,
+					Effect.mapError(
+						(error) =>
+							new IssueSyncError({
+								message: `Failed to close Linear issue for ${request.issueId}: ${error.message}`,
+							}),
+					),
+				)
 			})
 
 		const linearResolver = (
@@ -941,7 +928,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		}
 
 		const buildBootstrapSnapshots = (
-			client: LinearClient,
 			scope: LinearIssueScope,
 		): Effect.Effect<readonly ExternalIssueSnapshot[], IssueSyncError> =>
 			Effect.gen(function* () {
@@ -949,7 +935,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					`Linear bootstrap scope: team=${scope.team ?? "<none>"} project=${scope.project ?? "<none>"}`,
 				)
 				const emptyMetadataMap: ReadonlyMap<string, string> = new Map()
-				const issues = yield* fetchAllLinearIssues(client, scope).pipe(
+				const issues = yield* fetchAllLinearIssues(scope).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Linear bootstrap: fetch issues failed (${error.message}); retrying`),
 					),
@@ -963,14 +949,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				yield* Effect.log(
 					`Linear bootstrap: fetched ${issues.length} issues before metadata enrichment`,
 				)
-				const stateNameById = yield* fetchStateNameById(client).pipe(
+				const stateNameById = yield* fetchStateNameById().pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
 							`Linear bootstrap: workflow states unavailable, continuing with fallback status mapping (${error.message})`,
 						).pipe(Effect.as(emptyMetadataMap)),
 					),
 				)
-				const labelNameById = yield* fetchLabelNameById(client).pipe(
+				const labelNameById = yield* fetchLabelNameById().pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
 							`Linear bootstrap: labels unavailable, continuing without label metadata (${error.message})`,
@@ -1040,6 +1026,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			readonly shouldRun: boolean
 		}
 
+		interface FlushGate {
+			readonly join: Deferred.Deferred<
+				{ readonly pushed: number; readonly pulled: number },
+				IssueSyncError
+			>
+			readonly shouldRun: boolean
+		}
+
 		return {
 			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
 				Effect.gen(function* () {
@@ -1099,7 +1093,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							return 0
 						}
 
-						const snapshots = yield* buildBootstrapSnapshots(runtimeOption.value.client, {
+						const snapshots = yield* buildBootstrapSnapshots({
 							team: runtimeOption.value.defaultTeam,
 							project: runtimeOption.value.defaultProject,
 						})
@@ -1136,56 +1130,109 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				cwd?: string,
 			): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
 				Effect.gen(function* () {
-					const runtimeOption = yield* getLinearRuntime(cwd)
-					if (Option.isNone(runtimeOption)) {
-						return { pushed: 0, pulled: 0 }
-					}
-
-					const pendingItems = yield* fromStore(
-						localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
+					const projectPath = getEffectiveProjectPath(cwd)
+					const inFlight = yield* Ref.get(flushInFlightRef).pipe(
+						Effect.map((pending) => pending.get(projectPath)),
 					)
-					if (pendingItems.length === 0) {
-						return { pushed: 0, pulled: 0 }
+					if (inFlight !== undefined) {
+						return yield* Deferred.await(inFlight)
 					}
 
-					const collapsed = collapsePendingItems(pendingItems)
-					const resolver = linearResolver(runtimeOption.value)
-					const pushedRef = yield* Ref.make(0)
+					const completion = yield* Deferred.make<
+						{ readonly pushed: number; readonly pulled: number },
+						IssueSyncError
+					>()
+					const gate: FlushGate = yield* Ref.modify(flushInFlightRef, (pending) => {
+						const existing = pending.get(projectPath)
+						if (existing !== undefined) {
+							const value: FlushGate = {
+								join: existing,
+								shouldRun: false,
+							}
+							return [value, pending] as const
+						}
+						const next = new Map(pending)
+						next.set(projectPath, completion)
+						const value: FlushGate = {
+							join: completion,
+							shouldRun: true,
+						}
+						return [value, next] as const
+					})
 
-					yield* Effect.forEach(
-						collapsed,
-						(item) =>
-							Effect.request(
-								new LinearSyncRequest({
-									issueId: item.issueId,
-									operation: item.operation,
-									payloadJson: item.payloadJson,
-									cwd,
-								}),
-								resolver,
-							).pipe(
-								Effect.flatMap(() =>
-									fromStore(
-										localStore.markSyncSucceeded(
-											{
-												issueId: item.issueId,
-												target: item.target,
-												maxQueueId: item.maxQueueId,
-												claims: item.claims,
-											},
-											cwd,
+					if (!gate.shouldRun) {
+						return yield* Deferred.await(gate.join)
+					}
+
+					const runFlush: Effect.Effect<
+						{ readonly pushed: number; readonly pulled: number },
+						IssueSyncError
+					> = Effect.gen(function* () {
+						const runtimeOption = yield* getLinearRuntime(cwd)
+						if (Option.isNone(runtimeOption)) {
+							return { pushed: 0, pulled: 0 }
+						}
+
+						const pendingItems = yield* fromStore(
+							localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
+						)
+						if (pendingItems.length === 0) {
+							return { pushed: 0, pulled: 0 }
+						}
+
+						const collapsed = collapsePendingItems(pendingItems)
+						const resolver = linearResolver(runtimeOption.value)
+						const pushedRef = yield* Ref.make(0)
+
+						yield* Effect.forEach(
+							collapsed,
+							(item) =>
+								Effect.request(
+									new LinearSyncRequest({
+										issueId: item.issueId,
+										operation: item.operation,
+										payloadJson: item.payloadJson,
+										cwd,
+									}),
+									resolver,
+								).pipe(
+									Effect.flatMap(() =>
+										fromStore(
+											localStore.markSyncSucceeded(
+												{
+													issueId: item.issueId,
+													target: item.target,
+													maxQueueId: item.maxQueueId,
+													claims: item.claims,
+												},
+												cwd,
+											),
+										).pipe(
+											Effect.zipRight(Ref.update(pushedRef, (count) => count + item.claims.length)),
 										),
-									).pipe(
-										Effect.zipRight(Ref.update(pushedRef, (count) => count + item.claims.length)),
 									),
+									Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
 								),
-								Effect.catchAll((error) => markRequestFailure(item, error, cwd)),
-							),
-						{ concurrency: "unbounded" },
-					)
+							{ concurrency: "unbounded" },
+						)
 
-					const pushed = yield* Ref.get(pushedRef)
-					return { pushed, pulled: 0 }
+						const pushed = yield* Ref.get(pushedRef)
+						return { pushed, pulled: 0 }
+					})
+
+					return yield* runFlush.pipe(
+						Effect.tap((result) => Deferred.succeed(completion, result)),
+						Effect.tapError((error) => Deferred.fail(completion, error)),
+						Effect.ensuring(
+							Ref.update(flushInFlightRef, (pending) => {
+								const next = new Map(pending)
+								if (next.get(projectPath) === completion) {
+									next.delete(projectPath)
+								}
+								return next
+							}),
+						),
+					)
 				}).pipe(Effect.withRequestBatching(true)),
 		}
 	}),

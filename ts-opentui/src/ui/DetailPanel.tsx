@@ -9,7 +9,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { DependencyRef } from "../core/BeadsClient.js"
+import type { DependencyRef } from "../core/IssueTrackerClient.js"
 import { formatElapsedMs } from "../services/ClockService.js"
 import {
 	currentAttachmentsAtom,

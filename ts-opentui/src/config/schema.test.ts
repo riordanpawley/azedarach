@@ -77,28 +77,28 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("v2/v3 → v4 migration: nested issueTracker config", () => {
-		it("migrates legacy beads.issueTracker=bd to issueTracker.beads", () => {
+		it("migrates legacy tracker.issueTracker=tracker to issueTracker.azedarach", () => {
 			const result = decodeConfig({
 				$schema: 2,
-				beads: {
+				tracker: {
 					syncEnabled: false,
-					issueTracker: "bd",
+					issueTracker: "tracker",
 				},
 			})
 
-			expect(result.issueTracker?.beads?.syncEnabled).toBe(false)
+			expect(result.issueTracker?.tracker?.syncEnabled).toBe(false)
 		})
 
-		it("migrates legacy beads.issueTracker=br to issueTracker.beads_rust", () => {
+		it("migrates legacy tracker.issueTracker=legacy to issueTracker.legacy", () => {
 			const result = decodeConfig({
 				$schema: 2,
-				beads: {
+				tracker: {
 					syncEnabled: false,
-					issueTracker: "br",
+					issueTracker: "legacy",
 				},
 			})
 
-			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(false)
+			expect(result.issueTracker?.legacy?.syncEnabled).toBe(false)
 		})
 
 		it("migrates v3 flat linear config to nested issueTracker.linear", () => {
@@ -126,24 +126,24 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("v4 issueTracker shape", () => {
-		it("accepts nested beads config", () => {
+		it("accepts nested tracker config", () => {
 			const result = decodeConfig({
 				issueTracker: {
-					beads: { syncEnabled: false },
+					tracker: { syncEnabled: false },
 				},
 			})
 
-			expect(result.issueTracker?.beads?.syncEnabled).toBe(false)
+			expect(result.issueTracker?.tracker?.syncEnabled).toBe(false)
 		})
 
-		it("accepts nested beads_rust config", () => {
+		it("accepts nested legacy config", () => {
 			const result = decodeConfig({
 				issueTracker: {
-					beads_rust: { syncEnabled: true },
+					legacy: { syncEnabled: true },
 				},
 			})
 
-			expect(result.issueTracker?.beads_rust?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.legacy?.syncEnabled).toBe(true)
 		})
 
 		it("accepts nested linear config", () => {
@@ -256,7 +256,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(() =>
 				decodeConfig({
 					issueTracker: {
-						beads: { syncEnabled: true },
+						tracker: { syncEnabled: true },
 						linear: { syncEnabled: true },
 					},
 				}),
@@ -268,17 +268,17 @@ describe("AzedarachConfigSchema", () => {
 		it("rejects mismatched issueTracker/backend block", () => {
 			expect(() =>
 				decodeConfig({
-					issueTracker: "bd",
-					beads_rust: { syncEnabled: true },
+					issueTracker: "tracker",
+					legacy: { syncEnabled: true },
 				}),
-			).toThrow(/issueTracker='bd' does not match backend block/)
+			).toThrow(/issueTracker='tracker' does not match backend block/)
 		})
 
 		it("rejects multiple backend blocks", () => {
 			expect(() =>
 				decodeConfig({
-					issueTracker: "br",
-					beads_rust: { syncEnabled: true },
+					issueTracker: "legacy",
+					legacy: { syncEnabled: true },
 					linear: { syncEnabled: true },
 				}),
 			).toThrow(/only one issue backend block is allowed/)
@@ -328,7 +328,7 @@ describe("AzedarachConfigSchema", () => {
 					continueOnFailure: false,
 				},
 				issueTracker: {
-					beads_rust: { syncEnabled: true },
+					legacy: { syncEnabled: true },
 				},
 			})
 
@@ -340,17 +340,17 @@ describe("AzedarachConfigSchema", () => {
 			const result = decodeConfig({
 				projects: [
 					{ name: "project1", path: "/path/to/project1" },
-					{ name: "project2", path: "/path/to/project2", beadsPath: "/custom/beads" },
+					{ name: "project2", path: "/path/to/project2", issueStorePath: "/custom/tracker" },
 				],
 				defaultProject: "project1",
 				issueTracker: {
-					beads: { syncEnabled: true },
+					tracker: { syncEnabled: true },
 				},
 			})
 
 			expect(result.projects).toHaveLength(2)
 			expect(result.projects?.[0]).toEqual({ name: "project1", path: "/path/to/project1" })
-			expect(result.projects?.[1]?.beadsPath).toBe("/custom/beads")
+			expect(result.projects?.[1]?.issueStorePath).toBe("/custom/tracker")
 			expect(result.defaultProject).toBe("project1")
 		})
 	})
@@ -360,7 +360,7 @@ describe("AzedarachConfigSchema", () => {
 			const config = {
 				$schema: CURRENT_CONFIG_VERSION,
 				issueTracker: {
-					beads_rust: { syncEnabled: true },
+					legacy: { syncEnabled: true },
 				},
 				git: { baseBranch: "main" },
 				pr: { autoDraft: true },
@@ -377,7 +377,7 @@ describe("AzedarachConfigSchema", () => {
 			) {
 				throw new Error("Expected encoded issueTracker object")
 			}
-			expect(encodedIssueTracker.beads_rust?.syncEnabled).toBe(true)
+			expect(encodedIssueTracker.legacy?.syncEnabled).toBe(true)
 			expect(encoded.git?.baseBranch).toBe("main")
 		})
 	})

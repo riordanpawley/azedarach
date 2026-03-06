@@ -51,7 +51,8 @@
       "bun *": "allow",
       "linear-cli": "allow",
       "linear-cli *": "allow",
-      "tmux *": "allow"
+      "tmux *": "allow",
+      "az *": "allow"
     }
   },
   "mcp": {

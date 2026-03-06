@@ -7,7 +7,7 @@
  * 3. package.json under "azedarach" key
  * 4. Defaults
  *
- * Follows the service patterns established in BeadsClient.ts and ClaudeSessionManager.ts.
+ * Follows the service patterns established in IssueTrackerClient.ts and ClaudeSessionManager.ts.
  */
 
 import { FileSystem, Path } from "@effect/platform"
@@ -439,11 +439,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// ============================================================================
 
 		const getIssueBackendSyncEnabled = (config: ResolvedConfig): boolean => {
-			if ("beads" in config.issueTracker) {
-				return config.issueTracker.beads.syncEnabled
+			if ("tracker" in config.issueTracker) {
+				return config.issueTracker.tracker.syncEnabled
 			}
-			if ("beads_rust" in config.issueTracker) {
-				return config.issueTracker.beads_rust.syncEnabled
+			if ("legacy" in config.issueTracker) {
+				return config.issueTracker.legacy.syncEnabled
 			}
 			if ("linear" in config.issueTracker) {
 				return config.issueTracker.linear.syncEnabled

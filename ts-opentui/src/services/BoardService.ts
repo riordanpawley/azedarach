@@ -2,7 +2,7 @@
  * BoardService - Task and board data management
  *
  * Manages board state (columns, tasks) using fine-grained Effect Refs.
- * Interfaces with BeadsClient for task data and provides methods for task access.
+ * Interfaces with IssueTrackerClient for task data and provides methods for task access.
  */
 
 import { Command } from "@effect/platform"
@@ -22,11 +22,11 @@ import {
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
-	BeadsClient,
+	IssueTrackerClient,
 	inferLinearIssueType,
 	type Issue,
 	type SyncRequiredError,
-} from "../core/BeadsClient.js"
+} from "../core/IssueTrackerClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { getWorktreePath } from "../core/paths.js"
@@ -335,7 +335,7 @@ export interface PerProjectBoardState {
 export class BoardService extends Effect.Service<BoardService>()("BoardService", {
 	dependencies: [
 		ClaudeSessionManager.Default,
-		BeadsClient.Default,
+		IssueTrackerClient.Default,
 		EditorService.Default,
 		PTYMonitor.Default,
 		ProjectService.Default,
@@ -348,7 +348,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		ToastService.Default,
 	],
 	scoped: Effect.gen(function* () {
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* ClaudeSessionManager
 		const editorService = yield* EditorService
 		const ptyMonitor = yield* PTYMonitor
@@ -503,7 +503,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const gitStatusCache = yield* Ref.make<GitStatusCache>(new Map())
 
 		// Parent epic map cache - rarely changes, so cache for longer (30 seconds)
-		// This avoids the expensive batch bd show call on every refresh
+		// This avoids the expensive batch tracker show call on every refresh
 		// Now supports multiple projects for fast project switching
 		const PARENT_EPIC_CACHE_TTL_MS = 30000
 		interface ParentEpicCacheEntry {
@@ -622,7 +622,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						)
 
 						// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
-						// Excludes .beads/ directory - users care about code changes, not beads metadata
+						// Excludes .azedarach/ directory - users care about code changes, not tracker metadata
 						const diffCommand = Command.make(
 							"git",
 							"-C",
@@ -632,7 +632,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							mergeBase,
 							"HEAD",
 							"--",
-							":^.beads",
+							":^.azedarach",
 						).pipe(Command.string)
 
 						const diffStats = yield* diffCommand.pipe(
@@ -699,7 +699,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const issues = yield* diagnostics.measure(
 					{
 						source: "BoardService",
-						name: "beads.list",
+						name: "tracker.list",
 						thresholdMs: 200,
 						details: projectPath ?? "default",
 					},
@@ -710,7 +710,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							sortDirection: "desc",
 							includeClosed: true,
 						})
-						.pipe(Effect.withSpan("beads.list")),
+						.pipe(Effect.withSpan("tracker.list")),
 				)
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
@@ -770,7 +770,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Get optimistic mutations
 				const pendingMutations = yield* mutationQueue.getMutations()
 
-				// Get parent epic map (cached for 30s to avoid expensive bd show calls)
+				// Get parent epic map (cached for 30s to avoid expensive tracker show calls)
 				// This enables filtering epic children and using correct base branch for git diff
 				// Cache supports multiple projects for fast project switching
 				const batchStartTime = Date.now()
@@ -801,7 +801,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 									.measure(
 										{
 											source: "BoardService",
-											name: "beads.showMultiple",
+											name: "tracker.showMultiple",
 											thresholdMs: 200,
 											details: `count=${issuesWithDeps.length}`,
 										},
@@ -811,7 +811,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 													projectPath ?? undefined,
 												)
 											.pipe(
-												Effect.withSpan("beads.showMultiple"),
+												Effect.withSpan("tracker.showMultiple"),
 												Effect.catchAll(() => Effect.succeed([])),
 											),
 									)
@@ -1204,10 +1204,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			/**
 			 * Refresh with auto-recovery for database sync errors.
 			 *
-			 * If the beads database is out of sync with JSONL (common after git pull
+			 * If the tracker database is out of sync with JSONL (common after git pull
 			 * or when another worktree modifies issues), this will:
 			 * 1. Detect the SyncRequiredError
-			 * 2. Auto-run 'bd sync --import-only' to re-import JSONL
+			 * 2. Auto-run 'tracker sync --import-only' to re-import JSONL
 			 * 3. Retry the refresh
 			 */
 				const refreshWithRecovery = (preferredProjectPath?: string | null) =>
@@ -1217,7 +1217,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							() =>
 								Effect.gen(function* () {
 									yield* Effect.log(
-										"Beads database out of sync, auto-recovering with 'bd sync --import-only'...",
+										"IssueTracker database out of sync, auto-recovering with 'tracker sync --import-only'...",
 									)
 									const projectPath = yield* resolveProjectPath(preferredProjectPath)
 									yield* issueTrackerClient

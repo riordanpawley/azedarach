@@ -1,14 +1,14 @@
 /**
  * IssueEditorService - Bead editor using $EDITOR
  *
- * Serializes beads to structured markdown, opens $EDITOR, parses changes,
- * and applies updates via BeadsClient.
+ * Serializes tracker to structured markdown, opens $EDITOR, parses changes,
+ * and applies updates via IssueTrackerClient.
  */
 
 import { type CommandExecutor, FileSystem } from "@effect/platform"
 import { Data, Effect } from "effect"
-import type { Issue } from "./BeadsClient.js"
-import { BeadsClient } from "./BeadsClient.js"
+import type { Issue } from "./IssueTrackerClient.js"
+import { IssueTrackerClient } from "./IssueTrackerClient.js"
 
 // ============================================================================
 // Popup State Tracking (for cleanup on SIGINT)
@@ -123,9 +123,9 @@ export interface IssueEditorServiceImpl {
 	 * 2. Writes to /tmp/azedarach-{id}.md
 	 * 3. Opens $EDITOR (blocking)
 	 * 4. Parses result
-	 * 5. Applies changes via bd update
+	 * 5. Applies changes via tracker update
 	 *
-	 * If type changed: bd delete + bd create (preserve deps)
+	 * If type changed: tracker delete + tracker create (preserve deps)
 	 */
 	readonly editIssue: (
 		issue: Issue,
@@ -138,7 +138,7 @@ export interface IssueEditorServiceImpl {
 	 * 2. Writes to /tmp/azedarach-new.md
 	 * 3. Opens $EDITOR in tmux popup (blocking via tmux wait-for)
 	 * 4. Parses result
-	 * 5. Creates issue via bd create
+	 * 5. Creates issue via tracker create
 	 */
 	readonly createIssue: () => Effect.Effect<
 		CreatedIssue,
@@ -681,9 +681,9 @@ const parseMarkdownToNewIssue = (
  * ```
  */
 export class IssueEditorService extends Effect.Service<IssueEditorService>()("IssueEditorService", {
-	dependencies: [BeadsClient.Default],
+	dependencies: [IssueTrackerClient.Default],
 	effect: Effect.gen(function* () {
-		const client = yield* BeadsClient
+		const client = yield* IssueTrackerClient
 		// Inject FileSystem at service construction - never leak it through method return types
 		const fs = yield* FileSystem.FileSystem
 
@@ -771,12 +771,12 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 						// For now, just throw an error
 						yield* Effect.fail(
 							new EditorError({
-								message: "Type changes not yet implemented. Please use bd CLI directly.",
+								message: "Type changes not yet implemented. Please use tracker CLI directly.",
 							}),
 						)
 					}
 
-					// 9. Apply updates via BeadsClient
+					// 9. Apply updates via IssueTrackerClient
 					yield* client
 						.update(issue.id, {
 							status: updates.status,
@@ -882,7 +882,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 					// 6. Parse new issue fields
 					const fields = yield* parseMarkdownToNewIssue(editedMarkdown)
 
-					// 7. Create issue via BeadsClient
+					// 7. Create issue via IssueTrackerClient
 					const createdIssue = yield* client
 						.create({
 							title: fields.title,
@@ -904,7 +904,7 @@ export class IssueEditorService extends Effect.Service<IssueEditorService>()("Is
 							),
 						)
 
-					// 8. If status or notes were set, update the issue (bd create doesn't support these)
+					// 8. If status or notes were set, update the issue (tracker create doesn't support these)
 					const needsUpdate = (fields.status && fields.status !== "open") || fields.notes
 					if (needsUpdate) {
 						yield* client

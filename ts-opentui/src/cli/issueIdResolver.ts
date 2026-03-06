@@ -1,7 +1,7 @@
 import { Effect, SubscriptionRef } from "effect"
 import type { ResolvedConfig } from "../config/defaults.js"
 import { AppConfig } from "../config/AppConfig.js"
-import { BeadsClient } from "../core/BeadsClient.js"
+import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
 
 const LINEAR_IDENTIFIER_PATTERN = /^([A-Za-z][A-Za-z0-9]*)-([0-9]+)$/
 const NUMERIC_ISSUE_SUFFIX_PATTERN = /^[0-9]+$/
@@ -105,8 +105,8 @@ export const resolveCliIssueId = (
 			return `${configuredPrefix}-${trimmedIssueId}`
 		}
 
-		const beadsClient = yield* BeadsClient
-		const issueSample = yield* beadsClient
+		const issueClient = yield* IssueTrackerClient
+		const issueSample = yield* issueClient
 			.list(undefined, projectPath, {
 				includeClosed: true,
 				limit: INFER_PREFIX_SAMPLE_LIMIT,

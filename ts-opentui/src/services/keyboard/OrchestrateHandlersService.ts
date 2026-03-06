@@ -10,7 +10,7 @@
  */
 
 import { Effect, Option } from "effect"
-import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import type { OrchestrationTask } from "../EditorService.js"
@@ -31,7 +31,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			ToastService.Default,
 			EditorService.Default,
 			OverlayService.Default,
-			BeadsClient.Default,
+			IssueTrackerClient.Default,
 			ClaudeSessionManager.Default,
 			TemplateService.Default,
 		],
@@ -42,7 +42,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const toast = yield* ToastService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-				const issueTrackerClient = yield* BeadsClient
+				const issueTrackerClient = yield* IssueTrackerClient
 			const sessionManager = yield* ClaudeSessionManager
 			const templateService = yield* TemplateService
 

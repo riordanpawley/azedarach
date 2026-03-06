@@ -1,12 +1,12 @@
 import type { CommandExecutor } from "@effect/platform"
 import { Cause, Effect, Ref } from "effect"
-import { BeadsClient } from "../core/BeadsClient.js"
+import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
 import type { ColumnStatus } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 import { ToastService } from "./ToastService.js"
 
 /**
- * Fields that can be updated on a bead - matches BeadsClient.update signature
+ * Fields that can be updated on a bead - matches IssueTrackerClient.update signature
  */
 export interface IssueUpdateFields {
 	readonly status?: string
@@ -47,9 +47,9 @@ export interface QueuedMutation {
 }
 
 export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueue", {
-	dependencies: [BeadsClient.Default, ToastService.Default, DiagnosticsService.Default],
+	dependencies: [IssueTrackerClient.Default, ToastService.Default, DiagnosticsService.Default],
 	scoped: Effect.gen(function* () {
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const toast = yield* ToastService
 		const diagnostics = yield* DiagnosticsService
 
@@ -77,7 +77,7 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 		const executeMutation = (mutation: Mutation) => {
 			switch (mutation._tag) {
 				case "Update":
-					// IssueUpdateFields is structurally compatible with BeadsClient.update's fields parameter
+					// IssueUpdateFields is structurally compatible with IssueTrackerClient.update's fields parameter
 					return issueTrackerClient.update(mutation.id, {
 						status: mutation.fields.status,
 						notes: mutation.fields.notes,

@@ -585,6 +585,18 @@ On failure, logs SHOULD capture:
   - migrate action to background execution path when non-blocking by policy.
   - preserve interactive navigation during execution.
 
+### Case F-194: Read refresh exceeds bounded wait budget
+
+- Required behavior:
+  - return local state without hard blocking once wait budget is exceeded.
+  - surface explicit "result may be stale" feedback to user.
+
+### Case F-195: Sync queue receives duplicate equivalent requests under load
+
+- Required behavior:
+  - coalesce/deduplicate equivalent in-flight work deterministically.
+  - ensure at-least-once completion semantics for each unique intent key.
+
 ## 5.29 Probe and E2E Harness Edge Cases
 
 ### Case F-200: Probe returns inconsistent snapshot during rapid UI updates

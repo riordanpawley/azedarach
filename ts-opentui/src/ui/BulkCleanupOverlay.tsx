@@ -3,8 +3,8 @@
  *
  * Displays when multiple tasks are selected and cleanup is requested.
  * Offers two choices:
- * - w: Worktree only - delete worktrees/sessions but keep beads open
- * - f: Full cleanup - delete worktrees AND close beads
+ * - w: Worktree only - delete worktrees/sessions but keep tracker open
+ * - f: Full cleanup - delete worktrees AND close tracker
  * - Esc: Cancel
  *
  * Note: Keyboard handling is in InputHandlersService, this component just renders.
@@ -20,8 +20,8 @@ const ATTR_BOLD = 1
  * BulkCleanupOverlay component
  *
  * Two-option dialog for bulk cleanup decision. Press:
- * - 'w' to delete worktrees only (keep beads open)
- * - 'f' to do full cleanup (delete worktrees and close beads)
+ * - 'w' to delete worktrees only (keep tracker open)
+ * - 'f' to do full cleanup (delete worktrees and close tracker)
  * - 'Esc' to cancel
  *
  * All keyboard handling is in the Effect layer (InputHandlersService).
@@ -85,12 +85,12 @@ export const BulkCleanupOverlay = () => {
 					<box>
 						<text fg={theme.green}>w</text>
 						<text fg={theme.overlay0}>: Worktrees only </text>
-						<text fg={theme.subtext0}>(keep beads open)</text>
+						<text fg={theme.subtext0}>(keep tracker open)</text>
 					</box>
 					<box marginTop={0}>
 						<text fg={theme.blue}>f</text>
 						<text fg={theme.overlay0}>: Full cleanup </text>
-						<text fg={theme.subtext0}>(close beads too)</text>
+						<text fg={theme.subtext0}>(close tracker too)</text>
 					</box>
 					<box marginTop={0}>
 						<text fg={theme.red}>Esc</text>

@@ -17,7 +17,7 @@ import type {
 	IssueListSortField,
 	IssueStatus,
 	IssueType,
-} from "./BeadsClient.js"
+} from "./IssueTrackerClient.js"
 
 const LabelsJsonSchema = Schema.parseJson(Schema.Array(Schema.String))
 

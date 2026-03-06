@@ -8,14 +8,14 @@
  *    - Proper task decomposition (small, focused tasks)
  *    - Parallelization opportunities
  *    - Dependency optimization
- * 4. Generate beads (epic + child tasks) with dependencies
+ * 4. Generate tracker (epic + child tasks) with dependencies
  *
- * The generated beads are optimized for parallel Claude Code session development.
+ * The generated tracker are optimized for parallel Claude Code session development.
  */
 
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
-import { BeadsClient, type Issue } from "./BeadsClient.js"
+import { IssueTrackerClient, type Issue } from "./IssueTrackerClient.js"
 
 // ============================================================================
 // Schema Definitions
@@ -208,9 +208,9 @@ Output the refined plan in the same JSON format as the original.`
 // ============================================================================
 
 export class PlanningService extends Effect.Service<PlanningService>()("PlanningService", {
-	dependencies: [BeadsClient.Default],
+	dependencies: [IssueTrackerClient.Default],
 	effect: Effect.gen(function* () {
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const state = yield* SubscriptionRef.make<PlanningState>(initialState)
 
 		// Get API key from environment

@@ -15,13 +15,13 @@ import { AppConfig } from "../config/AppConfig.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import {
-	BeadsClient,
-	type BeadsError,
+	IssueTrackerClient,
+	type IssueTrackerError,
 	type Issue,
 	type NotFoundError,
 	type ParseError,
 	type SyncRequiredError,
-} from "./BeadsClient.js"
+} from "./IssueTrackerClient.js"
 import { ClaudeSessionManager, type SessionError } from "./ClaudeSessionManager.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 import { FileLockManager } from "./FileLockManager.js"
@@ -32,17 +32,17 @@ import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeMana
 import { WorktreeSessionService } from "./WorktreeSessionService.js"
 
 // ============================================================================
-// Beads Sync Locking
+// IssueTracker Sync Locking
 // ============================================================================
 
 /**
- * Lock path for beads sync operations.
+ * Lock path for tracker sync operations.
  * Using a fixed path ensures all processes use the same lock.
  */
-const ISSUE_TRACKER_SYNC_LOCK_PATH = "/tmp/azedarach-beads-sync.lock"
+const ISSUE_TRACKER_SYNC_LOCK_PATH = "/tmp/azedarach-tracker-sync.lock"
 
 /**
- * Timeout for acquiring the beads sync lock.
+ * Timeout for acquiring the tracker sync lock.
  * Should be long enough to allow slow syncs to complete.
  */
 const ISSUE_TRACKER_SYNC_LOCK_TIMEOUT = Duration.seconds(60)
@@ -260,7 +260,7 @@ export interface PRWorkflowService {
 	 * Create a PR for a bead's worktree branch
 	 *
 	 * Workflow:
-	 * 1. Sync beads changes
+	 * 1. Sync tracker changes
 	 * 2. Commit any uncommitted changes
 	 * 3. Push branch to origin
 	 * 4. Create PR via gh CLI
@@ -282,7 +282,7 @@ export interface PRWorkflowService {
 		| GHCLIError
 		| GitError
 		| NotAGitRepoError
-		| BeadsError
+		| IssueTrackerError
 		| NotFoundError
 		| ParseError
 		| OfflineError,
@@ -333,7 +333,7 @@ export interface PRWorkflowService {
 		options: CleanupOptions,
 	) => Effect.Effect<
 		void,
-		PRError | GitError | NotAGitRepoError | SessionError | TmuxError | BeadsError,
+		PRError | GitError | NotAGitRepoError | SessionError | TmuxError | IssueTrackerError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -350,7 +350,7 @@ export interface PRWorkflowService {
 	 *
 	 * Workflow:
 	 * 1. Stop any running session
-	 * 2. Sync beads in worktree (bd sync --from-main)
+	 * 2. Sync tracker in worktree (tracker sync --from-main)
 	 * 3. Commit any uncommitted changes in worktree
 	 * 4. Switch to main branch in main repo
 	 * 5. Merge branch with --no-ff
@@ -378,7 +378,7 @@ export interface PRWorkflowService {
 		| NotAGitRepoError
 		| SessionError
 		| TmuxError
-		| BeadsError
+		| IssueTrackerError
 		| NotFoundError,
 		CommandExecutor.CommandExecutor
 	>
@@ -480,7 +480,7 @@ export interface PRWorkflowService {
 		options: UpdateFromBaseOptions,
 	) => Effect.Effect<
 		void,
-		PRError | MergeConflictError | GitError | NotAGitRepoError | BeadsError | NotFoundError,
+		PRError | MergeConflictError | GitError | NotAGitRepoError | IssueTrackerError | NotFoundError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -530,7 +530,7 @@ export interface PRWorkflowService {
 		projectPath: string
 	}) => Effect.Effect<
 		{ baseBranch: string; parentEpic: Issue | undefined },
-		BeadsError | NotFoundError | ParseError,
+		IssueTrackerError | NotFoundError | ParseError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -547,7 +547,7 @@ export interface PRWorkflowService {
 	 * 4. Check for conflicts using git merge-tree
 	 * 5. If conflicts: start merge in target worktree, spawn Claude to resolve
 	 * 6. If clean: merge source into target
-	 * 7. Sync beads
+	 * 7. Sync tracker
 	 * 8. Close source bead
 	 *
 	 * @example
@@ -569,7 +569,7 @@ export interface PRWorkflowService {
 		| MergeConflictError
 		| GitError
 		| NotAGitRepoError
-		| BeadsError
+		| IssueTrackerError
 		| NotFoundError
 		| TmuxError,
 		CommandExecutor.CommandExecutor
@@ -592,7 +592,7 @@ export interface PRWorkflowService {
 		issueId: string,
 	) => Effect.Effect<
 		{ targetBranch: string; isEpicChild: boolean },
-		BeadsError | NotFoundError | ParseError,
+		IssueTrackerError | NotFoundError | ParseError,
 		CommandExecutor.CommandExecutor
 	>
 }
@@ -640,7 +640,7 @@ const runGit = (
 		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 		return yield* Command.string(command).pipe(
 			Effect.mapError((error) => {
-				// Extract stderr from platform error (like BeadsClient does)
+				// Extract stderr from platform error (like IssueTrackerClient does)
 				// This is critical for conflict detection which checks stderr for "CONFLICT"
 				const stderr = "stderr" in error ? String(error.stderr) : String(error)
 				return new GitError({
@@ -759,7 +759,7 @@ const parsePRJson = (json: string): PR => {
 export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	dependencies: [
 		WorktreeManager.Default,
-		BeadsClient.Default,
+		IssueTrackerClient.Default,
 		ClaudeSessionManager.Default,
 		TmuxService.Default,
 		WorktreeSessionService.Default,
@@ -771,7 +771,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 	],
 	effect: Effect.gen(function* () {
 		const worktreeManager = yield* WorktreeManager
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const sessionManager = yield* ClaudeSessionManager
 		const tmuxService = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
@@ -784,7 +784,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		const getGitConfig = () => appConfig.getGitConfig()
 
 		/**
-		 * Execute an effect with exclusive beads sync lock.
+		 * Execute an effect with exclusive tracker sync lock.
 		 * Uses Effect.acquireUseRelease for guaranteed cleanup.
 		 * Fails gracefully if lock cannot be acquired.
 		 */
@@ -814,7 +814,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			explicitBaseBranch?: string,
 		): Effect.Effect<
 			{ baseBranch: string; parentEpic: Issue | undefined },
-			BeadsError | NotFoundError | ParseError | SyncRequiredError,
+			IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
 			CommandExecutor.CommandExecutor
 		> =>
 			Effect.gen(function* () {
@@ -879,7 +879,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							)
 						}
 
-						// Sync beads changes (with lock to prevent races)
+						// Sync tracker changes (with lock to prevent races)
 						yield* withSyncLock(
 							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
 						)
@@ -969,7 +969,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const { issueId, projectPath, deleteRemoteBranch = true, closeIssue = true } = options
 
 						// 1. Stop any running session (ignore errors)
-						// First try ClaudeSessionManager.stop (handles beads sync from worktree)
+						// First try ClaudeSessionManager.stop (handles tracker sync from worktree)
 						yield* sessionManager.stop(issueId).pipe(Effect.catchAll(() => Effect.void))
 						// Also directly kill tmux session in case it wasn't tracked in memory
 						yield* tmuxService.killSession(issueId).pipe(Effect.catchAll(() => Effect.void))
@@ -1107,8 +1107,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
 						)
 
-						// 3. Check for non-beads conflicts using merge-tree (safe, in-memory)
-						// We only care about conflicts in actual code files, not .beads/
+						// 3. Check for non-tracker conflicts using merge-tree (safe, in-memory)
+						// We only care about conflicts in actual code files, not .azedarach/
 						const mergeTreeResult = yield* Effect.gen(function* () {
 							const command = Command.make(
 								"git",
@@ -1145,8 +1145,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const conflictingFiles = lines
 								.slice(1)
 								.filter((f) => f.length > 0)
-								// Filter OUT .beads/ files - we handle those separately
-								.filter((f) => !f.startsWith(".beads/"))
+								// Filter OUT .azedarach/ files - we handle those separately
+								.filter((f) => !f.startsWith(".azedarach/"))
 
 							return {
 								hasConflicts: conflictingFiles.length > 0,
@@ -1154,7 +1154,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}
 						})
 
-						// 4. If there are real code conflicts (not .beads/), ask Claude to resolve
+						// 4. If there are real code conflicts (not .azedarach/), ask Claude to resolve
 						if (mergeTreeResult.hasConflicts) {
 							const fileList = mergeTreeResult.conflictingFiles.join(", ")
 
@@ -1213,8 +1213,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							)
 						}
 
-						// 6. Merge branch with strategy to favor 'ours' for .beads/ conflicts
-						// This ensures .beads/issues.jsonl from base branch is preserved during merge
+						// 6. Merge branch with strategy to favor 'ours' for .azedarach/ conflicts
+						// This ensures .azedarach/issues.jsonl from base branch is preserved during merge
 						const mergeMessage = `Merge ${issueId}: ${issue.title}`
 						yield* runGit(
 							["merge", issueId, "--no-ff", "-m", mergeMessage, "-X", "ours"],
@@ -1237,16 +1237,16 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}),
 						)
 
-						// 7. Sync beads AFTER merge to reconcile any bead changes from branch
-						// This imports beads from the branch that might have been excluded by -X ours
+						// 7. Sync tracker AFTER merge to reconcile any bead changes from branch
+						// This imports tracker from the branch that might have been excluded by -X ours
 						yield* withSyncLock(
 							Effect.gen(function* () {
-								// Import beads from the merged JSONL
+								// Import tracker from the merged JSONL
 								yield* issueTrackerClient
 									.syncImportOnly(mergeDir)
 									.pipe(
 										Effect.catchAll((e) =>
-											Effect.logWarning(`Failed to import beads after merge: ${e}`),
+											Effect.logWarning(`Failed to import tracker after merge: ${e}`),
 										),
 									)
 
@@ -1255,14 +1255,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									.recoverTombstones(mergeDir)
 									.pipe(
 										Effect.catchAll((e) =>
-											Effect.logWarning(`Failed to recover tombstoned beads: ${e}`),
+											Effect.logWarning(`Failed to recover tombstoned tracker: ${e}`),
 										),
 									)
 
 								// Full sync to commit any bead changes
 								yield* issueTrackerClient
 									.sync(mergeDir)
-									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
+									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync tracker: ${e}`)))
 							}),
 						)
 
@@ -1611,10 +1611,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						.filter((line) => line.length > 0)
 						.map((line) => line.slice(3)) // Remove "XY " prefix to get filename
 
-					// Filter out .beads/ files - these are expected to change during normal
-					// operation and are handled separately via `bd sync`. We only want to
+					// Filter out .azedarach/ files - these are expected to change during normal
+					// operation and are handled separately via `tracker sync`. We only want to
 					// warn about actual code changes that could cause autostash conflicts.
-					const changedFiles = allChangedFiles.filter((file) => !file.startsWith(".beads/"))
+					const changedFiles = allChangedFiles.filter((file) => !file.startsWith(".azedarach/"))
 
 					return {
 						hasUncommittedChanges: changedFiles.length > 0,
@@ -1701,8 +1701,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const conflictingFiles = lines
 								.slice(1)
 								.filter((f) => f.length > 0)
-								// Filter OUT .beads/ files - we handle those separately
-								.filter((f) => !f.startsWith(".beads/"))
+								// Filter OUT .azedarach/ files - we handle those separately
+								.filter((f) => !f.startsWith(".azedarach/"))
 
 							return {
 								hasConflicts: conflictingFiles.length > 0,
@@ -1769,7 +1769,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							),
 						)
 
-						// Sync beads after merge to pick up any bead changes from main
+						// Sync tracker after merge to pick up any bead changes from main
 						yield* withSyncLock(
 							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
 						)
@@ -1975,8 +1975,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const conflictingFiles = lines
 							.slice(1)
 							.filter((f) => f.length > 0)
-							// Filter OUT .beads/ files - we handle those separately via bd sync
-							.filter((f) => !f.startsWith(".beads/"))
+							// Filter OUT .azedarach/ files - we handle those separately via tracker sync
+							.filter((f) => !f.startsWith(".azedarach/"))
 
 						return {
 							hasConflicts: conflictingFiles.length > 0,
@@ -2200,8 +2200,8 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const conflictingFiles = lines
 								.slice(1)
 								.filter((f) => f.length > 0)
-								// Filter OUT .beads/ files - we handle those separately
-								.filter((f) => !f.startsWith(".beads/"))
+								// Filter OUT .azedarach/ files - we handle those separately
+								.filter((f) => !f.startsWith(".azedarach/"))
 
 							return {
 								hasConflicts: conflictingFiles.length > 0,
@@ -2276,20 +2276,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}),
 						)
 
-						// Sync beads after merge
+						// Sync tracker after merge
 						yield* withSyncLock(
 							Effect.gen(function* () {
 								yield* issueTrackerClient
 									.syncImportOnly(targetWorktree.path)
 									.pipe(
 										Effect.catchAll((e) =>
-											Effect.logWarning(`Failed to import beads after merge: ${e}`),
+											Effect.logWarning(`Failed to import tracker after merge: ${e}`),
 										),
 									)
 
 								yield* issueTrackerClient
 									.sync(targetWorktree.path)
-									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync beads: ${e}`)))
+									.pipe(Effect.catchAll((e) => Effect.logWarning(`Failed to sync tracker: ${e}`)))
 							}),
 						)
 

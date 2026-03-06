@@ -83,7 +83,7 @@ Azedarach solves this by making the board the command center.
 
 ## 1.6 Canonical Domain Objects
 
-### D-01 Issue (bead)
+### D-01 Issue
 
 Fields (canonical minimum):
 

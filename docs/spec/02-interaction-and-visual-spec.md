@@ -212,16 +212,16 @@ Action mode is a palette of context-sensitive operations.
 | `Space O` | open PR in browser |
 | `Space m` | context merge: default merge to configured base branch; in relationship-follow context merge selected upstream source into focused issue branch |
 | `Space M` | abort ongoing merge |
-| `Space b` | merge bead branch into another bead branch |
+| `Space b` | merge issue branch into another issue branch |
 | `Space d` | cleanup/delete worktree (and optionally close issue) |
 
 ### Editing and Authoring Actions
 
 | Sequence | Behavior |
 |---|---|
-| `Space e` | edit bead manually |
-| `Space E` | edit bead via AI assistant |
-| `Space F` | fork bead (child/sibling/new epic relation) |
+| `Space e` | edit issue manually |
+| `Space E` | edit issue via AI assistant |
+| `Space F` | fork issue (child/sibling/new epic relation) |
 | `Space G` | open epic child-board drill-down (epic only) |
 | `Space H` | open editor (Helix-style action) in task context |
 | `Space i` | image attachment overlay |

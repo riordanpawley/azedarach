@@ -303,8 +303,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * @param key - The key that was pressed
 			 * @returns true if the key was handled.
 			 *
-			 * w → execute onWorktreeOnly effect (cleanup worktrees, keep beads open)
-			 * f → execute onFullCleanup effect (cleanup worktrees AND close beads)
+			 * w → execute onWorktreeOnly effect (cleanup worktrees, keep tracker open)
+			 * f → execute onFullCleanup effect (cleanup worktrees AND close tracker)
 			 * Escape → just pop overlay (cancel)
 			 */
 			const handleBulkCleanupInput = (key: string) =>

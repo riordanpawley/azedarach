@@ -152,8 +152,8 @@ This section is normative.
 - AZ-FR-1007: `Space m` MUST merge task branch into configured base branch in default context.
 - AZ-FR-1008: Merge flow MUST warn when conflict risk is detected.
 - AZ-FR-1009: Merge to base branch SHOULD keep worktree active post-merge.
-- AZ-FR-1010: `Space b` MUST support merge source bead into target bead branch.
-- AZ-FR-1011: merge-bead flow MUST prevent self-merge.
+- AZ-FR-1010: `Space b` MUST support merge source issue branch into target issue branch.
+- AZ-FR-1011: merge-issue flow MUST prevent self-merge.
 - AZ-FR-1012: The system MUST provide a bulk "bring up to date" operation across a selected issue set.
 - AZ-FR-1013: For each issue in bulk update, merge source MUST be resolved per policy (configured base branch or eligible parent/upstream branch when relation context applies).
 - AZ-FR-1014: Bulk update execution MUST use a FIFO work queue with bounded maximum concurrency.
@@ -417,6 +417,10 @@ This section is normative.
 - AZ-FR-3808: Linear tracker data MUST be treated as source of truth for hydration.
 - AZ-FR-3809: Hydration polling MUST reconcile external changes without clobbering pending optimistic updates.
 - AZ-FR-3810: Selected optimistic flows MAY enter retryable-pending state instead of immediate rollback when safe and user-visible.
+- AZ-FR-3811: Backend sync requests MUST be processed through a bounded-rate queue with configurable sustained rate and burst allowance.
+- AZ-FR-3812: Equivalent in-flight backend sync requests MUST be deduplicated and MUST NOT be dropped silently.
+- AZ-FR-3813: Read operations SHOULD support bounded wait budgets and MUST return a clear stale/freshness hint when timeout occurs before sync completion.
+- AZ-FR-3814: Explicit wait mode for reads MUST allow a higher wait budget than default non-blocking read mode.
 
 ## 4.42 Background Operation Requirements
 

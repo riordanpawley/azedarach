@@ -11,7 +11,7 @@ import { Layer, Logger } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PlanningService } from "../../core/PlanningService.js"
@@ -63,7 +63,7 @@ export const appLayer = Layer.mergeAll(
 	ToastService.Default,
 	NavigationService.Default,
 	ClaudeSessionManager.Default,
-	BeadsClient.Default,
+	IssueTrackerClient.Default,
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,

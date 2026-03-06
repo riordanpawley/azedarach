@@ -24,7 +24,7 @@ import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
 import type { SessionState } from "../ui/types.js"
-import { BeadsClient, type BeadsError, type NotFoundError, type ParseError } from "./BeadsClient.js"
+import { IssueTrackerClient, type IssueTrackerError, type NotFoundError, type ParseError } from "./IssueTrackerClient.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 import {
 	getIssueSessionName,
@@ -179,7 +179,7 @@ export class InvalidStateError extends Data.TaggedError("InvalidStateError")<{
  * ClaudeSessionManager service interface
  *
  * Provides typed access to Claude session orchestration with Effect error handling.
- * All operations compose WorktreeManager, TmuxService, BeadsClient, and StateDetector.
+ * All operations compose WorktreeManager, TmuxService, IssueTrackerClient, and StateDetector.
  */
 export interface ClaudeSessionManagerService {
 	/**
@@ -205,7 +205,7 @@ export interface ClaudeSessionManagerService {
 		| GitError
 		| NotAGitRepoError
 		| TmuxError
-		| BeadsError
+		| IssueTrackerError
 		| NotFoundError
 		| ParseError
 		| SessionLimitError,
@@ -346,7 +346,7 @@ export interface ClaudeSessionManagerService {
  * ClaudeSessionManager service
  *
  * Creates a service implementation with stateful session tracking via Ref<HashMap>.
- * Composes WorktreeManager, TmuxService, BeadsClient, and StateDetector services.
+ * Composes WorktreeManager, TmuxService, IssueTrackerClient, and StateDetector services.
  *
  * @example
  * ```ts
@@ -366,7 +366,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 		dependencies: [
 			WorktreeManager.Default,
 			TmuxService.Default,
-			BeadsClient.Default,
+			IssueTrackerClient.Default,
 			AppConfig.Default,
 			StateDetector.Default,
 			ProjectService.Default,
@@ -378,7 +378,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 			const worktreeManager = yield* WorktreeManager
 			const tmuxService = yield* TmuxService
 			const worktreeSession = yield* WorktreeSessionService
-			const issueTrackerClient = yield* BeadsClient
+			const issueTrackerClient = yield* IssueTrackerClient
 			const appConfig = yield* AppConfig
 			const projectService = yield* ProjectService
 			const diagnostics = yield* DiagnosticsService
@@ -644,7 +644,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 								})
 
 								// Step 2: Update bead status to in_progress
-								// Done AFTER session creation to ensure we don't leave beads
+								// Done AFTER session creation to ensure we don't leave tracker
 								// in "in_progress" state with no actual session (az-g7p bug fix)
 								if (needsStatusUpdate) {
 									yield* issueTrackerClient.update(issueId, { status: "in_progress" })
@@ -734,10 +734,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						yield* Effect.log(`Stopping session for ${issueId}`)
 
-						// Sync beads changes from worktree before killing session
-						// This ensures any bd update/close commands run in the worktree get synced back to main
+						// Sync tracker changes from worktree before killing session
+						// This ensures any tracker update/close commands run in the worktree get synced back to main
 						yield* issueTrackerClient.sync(session.worktreePath).pipe(
-							Effect.tap(() => Effect.log(`Synced beads from worktree for ${issueId}`)),
+							Effect.tap(() => Effect.log(`Synced tracker from worktree for ${issueId}`)),
 							Effect.catchAll((error) =>
 								Effect.logWarning(`Sync failed for ${issueId}: ${error}`).pipe(Effect.asVoid),
 							),
@@ -786,14 +786,14 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Wait a moment for interrupt to process
 						yield* Effect.sleep("500 millis")
 
-						// Sync beads changes from worktree before creating WIP commit
-						// This ensures any bd update/close commands are synced before we pause
+						// Sync tracker changes from worktree before creating WIP commit
+						// This ensures any tracker update/close commands are synced before we pause
 						yield* issueTrackerClient.sync(session.worktreePath).pipe(
 							Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
 						)
 
 						// Create WIP commit in worktree
-						// Git add all changes (including synced .beads/ directory)
+						// Git add all changes (including synced .azedarach/ directory)
 						const addCmd = Command.make("git", "add", "-A").pipe(
 							Command.workingDirectory(session.worktreePath),
 						)

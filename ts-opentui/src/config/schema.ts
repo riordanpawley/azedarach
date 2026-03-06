@@ -45,12 +45,12 @@ export type CliTool = Schema.Schema.Type<typeof CliToolSchema>
 /**
  * Supported issue tracker backend selectors (legacy / internal).
  *
- * - bd: legacy beads backend
- * - br: rust beads backend
+ * - tracker: legacy tracker backend
+ * - legacy: rust tracker backend
  * - linear: Linear backend through linear-cli
  * - local: local-first sqlite backend (no external tracker required)
  */
-export const IssueTrackerSchema = Schema.Literal("bd", "br", "linear", "local")
+export const IssueTrackerSchema = Schema.Literal("tracker", "legacy", "linear", "local")
 export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
 
 /**
@@ -217,7 +217,7 @@ const GitConfigSchema = Schema.Struct({
 	 * Push branches after worktree creation (default: true)
 	 *
 	 * When true, runs `git push -u <remote> <branch>` after creating worktrees.
-	 * This makes branches non-ephemeral, enabling normal `bd sync` behavior.
+	 * This makes branches non-ephemeral, enabling normal `tracker sync` behavior.
 	 * Set to false for local-only development without a remote.
 	 */
 	pushBranchOnCreate: Schema.optional(Schema.Boolean),
@@ -366,30 +366,30 @@ const LegacyPRConfigSchema = Schema.Struct({
 })
 
 /**
- * Beads (bd) backend configuration
+ * IssueTracker (tracker) backend configuration
  *
- * Controls legacy beads issue tracker behavior.
+ * Controls legacy tracker issue tracker behavior.
  */
-const BeadsConfigSchema = Schema.Struct({
+const LegacyBdConfigSchema = Schema.Struct({
 	/**
-	 * Enable beads sync operations (default: true)
+	 * Enable tracker sync operations (default: true)
 	 *
-	 * When false, `bd sync` is silently skipped. Issues are still
+	 * When false, `tracker sync` is silently skipped. Issues are still
 	 * tracked locally but not synced to the remote repository.
 	 */
 	syncEnabled: Schema.optional(Schema.Boolean),
 })
 
 /**
- * Beads Rust (br) backend configuration
+ * IssueTracker Rust (legacy) backend configuration
  *
- * Controls rust beads issue tracker behavior.
+ * Controls rust tracker issue tracker behavior.
  */
-const BeadsRustConfigSchema = Schema.Struct({
+const LegacyBrConfigSchema = Schema.Struct({
 	/**
-	 * Enable beads sync operations (default: true)
+	 * Enable tracker sync operations (default: true)
 	 *
-	 * When false, `bd sync`/`br sync` is silently skipped.
+	 * When false, `tracker sync`/`legacy sync` is silently skipped.
 	 */
 	syncEnabled: Schema.optional(Schema.Boolean),
 })
@@ -486,6 +486,24 @@ const LinearWebhookConfigSchema = Schema.Struct({
 })
 
 /**
+ * Linear sync throttle policy
+ *
+ * Applies to all Linear SDK sync calls to avoid exceeding API limits while
+ * still allowing short bursts.
+ */
+const LinearSyncThrottleConfigSchema = Schema.Struct({
+	/**
+	 * Sustained request rate (per minute) for Linear sync calls.
+	 */
+	maxPerMinute: Schema.optional(Schema.Number),
+
+	/**
+	 * Token bucket burst capacity.
+	 */
+	burst: Schema.optional(Schema.Number),
+})
+
+/**
  * Linear backend configuration
  *
  * Controls linear-cli integration.
@@ -517,6 +535,11 @@ const LinearConfigSchema = Schema.Struct({
 	 * Webhook listener configuration for event-driven refresh
 	 */
 	webhooks: Schema.optional(LinearWebhookConfigSchema),
+
+	/**
+	 * Sync throttle configuration for Linear API calls.
+	 */
+	syncThrottle: Schema.optional(LinearSyncThrottleConfigSchema),
 })
 
 /**
@@ -525,15 +548,15 @@ const LinearConfigSchema = Schema.Struct({
  * Exactly one backend block must be set.
  */
 const IssueTrackerConfigSchema = Schema.Struct({
-	beads: Schema.optional(BeadsConfigSchema),
-	beads_rust: Schema.optional(BeadsRustConfigSchema),
+	tracker: Schema.optional(LegacyBdConfigSchema),
+	legacy: Schema.optional(LegacyBrConfigSchema),
 	linear: Schema.optional(LinearConfigSchema),
 	local: Schema.optional(LocalConfigSchema),
 }).pipe(
 	Schema.filter((value) => {
 		const configuredCount =
-			(value.beads !== undefined ? 1 : 0) +
-			(value.beads_rust !== undefined ? 1 : 0) +
+			(value.tracker !== undefined ? 1 : 0) +
+			(value.legacy !== undefined ? 1 : 0) +
 			(value.linear !== undefined ? 1 : 0) +
 			(value.local !== undefined ? 1 : 0)
 		return configuredCount === 1
@@ -541,11 +564,11 @@ const IssueTrackerConfigSchema = Schema.Struct({
 )
 
 /**
- * Legacy beads schema used for migration.
+ * Legacy tracker schema used for migration.
  *
- * v1/v2 had backend selection nested under `beads.issueTracker`.
+ * v1/v2 had backend selection nested under `tracker.issueTracker`.
  */
-const LegacyBeadsConfigSchema = Schema.Struct({
+const LegacyLegacyBdConfigSchema = Schema.Struct({
 	syncEnabled: Schema.optional(Schema.Boolean),
 	issueTracker: Schema.optional(IssueTrackerSchema),
 })
@@ -669,8 +692,8 @@ const ProjectConfigSchema = Schema.Struct({
 	/** Absolute path to the project root */
 	path: Schema.String,
 
-	/** Optional path to the beads database for this project */
-	beadsPath: Schema.optional(Schema.String),
+	/** Optional path to the tracker database for this project */
+	issueStorePath: Schema.optional(Schema.String),
 })
 
 // ============================================================================
@@ -751,14 +774,14 @@ const migrations: readonly Migration[] = [
 		toVersion: 3,
 		description: "Move backend selection to top-level issueTracker + backend blocks",
 		migrate: (config) => {
-			type BackendKey = "beads" | "beads_rust" | "linear" | "local"
+			type BackendKey = "tracker" | "legacy" | "linear" | "local"
 
 			const trackerToBackend = (tracker: IssueTracker): BackendKey => {
 				switch (tracker) {
-					case "bd":
-						return "beads"
-					case "br":
-						return "beads_rust"
+					case "tracker":
+						return "tracker"
+					case "legacy":
+						return "legacy"
 					case "linear":
 						return "linear"
 					case "local":
@@ -768,10 +791,10 @@ const migrations: readonly Migration[] = [
 
 			const backendToTracker = (backend: BackendKey): IssueTracker => {
 				switch (backend) {
-					case "beads":
-						return "bd"
-					case "beads_rust":
-						return "br"
+					case "tracker":
+						return "tracker"
+					case "legacy":
+						return "legacy"
 					case "linear":
 						return "linear"
 					case "local":
@@ -780,8 +803,8 @@ const migrations: readonly Migration[] = [
 			}
 
 			const explicitTracker: IssueTracker | undefined =
-				config.issueTracker === "bd" ||
-				config.issueTracker === "br" ||
+				config.issueTracker === "tracker" ||
+				config.issueTracker === "legacy" ||
 				config.issueTracker === "linear" ||
 				config.issueTracker === "local"
 					? config.issueTracker
@@ -794,15 +817,15 @@ const migrations: readonly Migration[] = [
 					? config.issueTracker
 					: undefined
 
-			const beadsConfig =
-				config.beads ??
-				(nestedIssueTracker?.beads !== undefined
-					? { syncEnabled: nestedIssueTracker.beads.syncEnabled }
+			const bdConfig =
+				config.tracker ??
+				(nestedIssueTracker?.tracker !== undefined
+					? { syncEnabled: nestedIssueTracker.tracker.syncEnabled }
 					: undefined)
-			const beadsRustConfig =
-				config.beads_rust ??
-				(nestedIssueTracker?.beads_rust !== undefined
-					? { syncEnabled: nestedIssueTracker.beads_rust.syncEnabled }
+			const brConfig =
+				config.legacy ??
+				(nestedIssueTracker?.legacy !== undefined
+					? { syncEnabled: nestedIssueTracker.legacy.syncEnabled }
 					: undefined)
 			const linearConfig =
 				config.linear ??
@@ -825,20 +848,20 @@ const migrations: readonly Migration[] = [
 					: undefined)
 
 			const configuredBackends: BackendKey[] = []
-			if (beadsConfig !== undefined) configuredBackends.push("beads")
-			if (beadsRustConfig !== undefined) configuredBackends.push("beads_rust")
+			if (bdConfig !== undefined) configuredBackends.push("tracker")
+			if (brConfig !== undefined) configuredBackends.push("legacy")
 			if (linearConfig !== undefined) configuredBackends.push("linear")
 			if (localConfig !== undefined) configuredBackends.push("local")
 
 			if (configuredBackends.length > 1) {
 				throw new Error(
-					"Invalid config: only one issue backend block is allowed (beads, beads_rust, linear, or local)",
+					"Invalid config: only one issue backend block is allowed (tracker, legacy, linear, or local)",
 				)
 			}
 
 			const inferredTracker =
 				configuredBackends.length === 1 ? backendToTracker(configuredBackends[0]!) : undefined
-			const legacyTracker = config.beads?.issueTracker
+			const legacyTracker = config.tracker?.issueTracker
 
 			if (
 				explicitTracker !== undefined &&
@@ -853,23 +876,23 @@ const migrations: readonly Migration[] = [
 			const tracker: IssueTracker = explicitTracker ?? legacyTracker ?? inferredTracker ?? "local"
 			const selectedBackend = trackerToBackend(tracker)
 
-			const legacySyncEnabled = config.beads?.syncEnabled
+			const legacySyncEnabled = config.tracker?.syncEnabled
 			const syncEnabledDefault = legacySyncEnabled ?? true
 
 			return {
 				...config,
 				$schema: 3,
 				issueTracker: tracker,
-				beads:
-					selectedBackend === "beads"
+				tracker:
+					selectedBackend === "tracker"
 						? {
-								syncEnabled: beadsConfig?.syncEnabled ?? syncEnabledDefault,
+								syncEnabled: bdConfig?.syncEnabled ?? syncEnabledDefault,
 							}
 						: undefined,
-				beads_rust:
-					selectedBackend === "beads_rust"
+				legacy:
+					selectedBackend === "legacy"
 						? {
-								syncEnabled: beadsRustConfig?.syncEnabled ?? syncEnabledDefault,
+								syncEnabled: brConfig?.syncEnabled ?? syncEnabledDefault,
 							}
 						: undefined,
 				linear:
@@ -897,8 +920,8 @@ const migrations: readonly Migration[] = [
 		description: "Nest backend config under top-level issueTracker object",
 		migrate: (config) => {
 			const explicitTracker: IssueTracker | undefined =
-				config.issueTracker === "bd" ||
-				config.issueTracker === "br" ||
+				config.issueTracker === "tracker" ||
+				config.issueTracker === "legacy" ||
 				config.issueTracker === "linear" ||
 				config.issueTracker === "local"
 					? config.issueTracker
@@ -916,8 +939,8 @@ const migrations: readonly Migration[] = [
 					...config,
 					$schema: 4,
 					issueTracker: issueTrackerObject,
-					beads: undefined,
-					beads_rust: undefined,
+					tracker: undefined,
+					legacy: undefined,
 					linear: undefined,
 					local: undefined,
 				}
@@ -925,30 +948,30 @@ const migrations: readonly Migration[] = [
 
 			const inferredTracker: IssueTracker =
 				explicitTracker ??
-				(config.beads !== undefined
-					? "bd"
-					: config.beads_rust !== undefined
-						? "br"
+				(config.tracker !== undefined
+					? "tracker"
+					: config.legacy !== undefined
+						? "legacy"
 						: config.linear !== undefined
 							? "linear"
 							: config.local !== undefined
 								? "local"
 								: "local")
 
-			const legacySyncEnabled = config.beads?.syncEnabled
+			const legacySyncEnabled = config.tracker?.syncEnabled
 			const syncEnabledDefault = legacySyncEnabled ?? true
 
 			const nestedIssueTracker =
-				inferredTracker === "bd"
+				inferredTracker === "tracker"
 					? {
-							beads: {
-								syncEnabled: config.beads?.syncEnabled ?? syncEnabledDefault,
+							tracker: {
+								syncEnabled: config.tracker?.syncEnabled ?? syncEnabledDefault,
 							},
 						}
-					: inferredTracker === "br"
+					: inferredTracker === "legacy"
 						? {
-								beads_rust: {
-									syncEnabled: config.beads_rust?.syncEnabled ?? syncEnabledDefault,
+								legacy: {
+									syncEnabled: config.legacy?.syncEnabled ?? syncEnabledDefault,
 								},
 							}
 						: inferredTracker === "linear"
@@ -972,8 +995,8 @@ const migrations: readonly Migration[] = [
 				...config,
 				$schema: 4,
 				issueTracker: nestedIssueTracker,
-				beads: undefined,
-				beads_rust: undefined,
+				tracker: undefined,
+				legacy: undefined,
 				linear: undefined,
 				local: undefined,
 			}
@@ -1018,7 +1041,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 
 	if (current.issueTracker !== undefined && issueTrackerConfig === undefined) {
 		throw new Error(
-			"Invalid config: issueTracker must be an object with exactly one backend block (beads, beads_rust, linear, or local)",
+			"Invalid config: issueTracker must be an object with exactly one backend block (tracker, legacy, linear, or local)",
 		)
 	}
 
@@ -1097,10 +1120,10 @@ const RawConfigSchema = Schema.Struct({
 	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 
-	/** Legacy beads config (supports nested issueTracker for migration) */
-	beads: Schema.optional(LegacyBeadsConfigSchema),
-	/** Beads rust backend config */
-	beads_rust: Schema.optional(BeadsRustConfigSchema),
+	/** Legacy tracker config (supports nested issueTracker for migration) */
+	tracker: Schema.optional(LegacyLegacyBdConfigSchema),
+	/** IssueTracker rust backend config */
+	legacy: Schema.optional(LegacyBrConfigSchema),
 	/** Linear backend config */
 	linear: Schema.optional(LinearConfigSchema),
 	/** Local backend config */
@@ -1211,11 +1234,11 @@ export type MergeConfig = Schema.Schema.Type<typeof MergeConfigSchema>
 /** Notifications config section type */
 export type NotificationsConfig = Schema.Schema.Type<typeof NotificationsConfigSchema>
 
-/** Beads config section type */
-export type BeadsConfig = Schema.Schema.Type<typeof BeadsConfigSchema>
+/** IssueTracker config section type */
+export type LegacyBdConfig = Schema.Schema.Type<typeof LegacyBdConfigSchema>
 
-/** Beads rust config section type */
-export type BeadsRustConfig = Schema.Schema.Type<typeof BeadsRustConfigSchema>
+/** IssueTracker rust config section type */
+export type LegacyBrConfig = Schema.Schema.Type<typeof LegacyBrConfigSchema>
 
 /** Linear config section type */
 export type LinearConfig = Schema.Schema.Type<typeof LinearConfigSchema>

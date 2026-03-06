@@ -81,7 +81,7 @@ export interface CliToolDefinition {
 	 * Get tool-specific init commands to inject at session start
 	 *
 	 * For tools without native hooks (like OpenCode), this returns
-	 * commands that replicate hook behavior (e.g., "bd prime").
+	 * commands that replicate hook behavior (e.g., "tracker prime").
 	 */
 	readonly getInitCommands: () => readonly string[]
 }

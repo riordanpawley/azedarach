@@ -7,7 +7,7 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
@@ -50,7 +50,7 @@ class ClaudeTaskCreateError extends Data.TaggedError("ClaudeTaskCreateError")<{
 export const moveTaskAtom = appRuntime.fn(
 	({ taskId, newStatus }: { taskId: string; newStatus: string }) =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			yield* client.update(taskId, { status: newStatus })
 		}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -61,7 +61,7 @@ export const moveTaskAtom = appRuntime.fn(
 export const moveTasksAtom = appRuntime.fn(
 	({ taskIds, newStatus }: { taskIds: string[]; newStatus: string }) =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			yield* Effect.all(
 				taskIds.map((id) => client.update(id, { status: newStatus })),
 				{ concurrency: "unbounded" },
@@ -85,7 +85,7 @@ export const moveTasksAtom = appRuntime.fn(
 export const createTaskAtom = appRuntime.fn(
 	(params: { title: string; type?: string; priority?: number; description?: string }) =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -117,7 +117,7 @@ export const forkCreateChildAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			const board = yield* BoardService
 			const navigation = yield* NavigationService
 			const toast = yield* ToastService
@@ -175,7 +175,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
 		params: { title: string; type: string; priority: number }
 	}) =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			const board = yield* BoardService
 			const toast = yield* ToastService
 			const overlay = yield* OverlayService
@@ -239,7 +239,7 @@ export const forkCreateEpicAtom = appRuntime.fn(
  * Edit a bead in $EDITOR
  *
  * Opens the issue in $EDITOR as structured markdown, parses changes on save,
- * and applies updates via bd update.
+ * and applies updates via tracker update.
  *
  * Usage: const editIssue = useAtomSet(editIssueViaEditorAtom, { mode: "promise" })
  *        await editIssue(task)
@@ -271,7 +271,7 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
  *
  * Two-phase approach for reliability:
  * 1. Claude extracts structured data (title, type, priority) from natural language
- * 2. We call bd create directly via BeadsClient
+ * 2. We call tracker create directly via IssueTrackerClient
  *
  * This avoids the unreliability of Claude executing CLI commands and parsing free-form output.
  *
@@ -284,7 +284,7 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		const navigation = yield* NavigationService
 		const toast = yield* ToastService
 		const overlay = yield* OverlayService
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const projectService = yield* ProjectService
 		const appConfig = yield* AppConfig
 
@@ -367,7 +367,7 @@ Return ONLY the JSON object, no explanation or markdown.`
 				? parsed.priority
 				: 2
 
-		// Phase 2: Create the issue directly via BeadsClient
+		// Phase 2: Create the issue directly via IssueTrackerClient
 		const createdIssue = yield* issueTrackerClient.create({
 			title: parsed.title,
 			type: taskType,
@@ -405,7 +405,7 @@ Return ONLY the JSON object, no explanation or markdown.`
  */
 export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 	Effect.gen(function* () {
-		const client = yield* BeadsClient
+		const client = yield* IssueTrackerClient
 		yield* client.delete(issueId)
 	}).pipe(Effect.catchAll(Effect.logError)),
 )
@@ -426,7 +426,7 @@ export const deleteIssueAtom = appRuntime.fn((issueId: string) =>
 export const epicChildrenAtom = (epicId: string) =>
 	appRuntime.fn(() =>
 		Effect.gen(function* () {
-			const client = yield* BeadsClient
+			const client = yield* IssueTrackerClient
 			const result = yield* client.getEpicWithChildren(epicId)
 			return result.children
 		}).pipe(

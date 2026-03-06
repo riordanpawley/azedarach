@@ -6,7 +6,7 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect } from "effect"
-import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import {
 	computeDependencyPhases,
 	type PhaseComputationResult,
@@ -162,7 +162,7 @@ export const exitDrillDownAtom = appRuntime.fn(() =>
  */
 export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		return yield* issueTrackerClient.getEpicChildren(epicId)
 	}).pipe(Effect.catchAll((e) => Effect.logError(e).pipe(Effect.as([])))),
 )
@@ -174,7 +174,7 @@ export const getEpicChildrenAtom = appRuntime.fn((epicId: string) =>
  */
 export const getEpicInfoAtom = appRuntime.fn((epicId: string) =>
 	Effect.gen(function* () {
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		return yield* issueTrackerClient.show(epicId)
 	}).pipe(
 		Effect.catchAll((e) =>

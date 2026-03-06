@@ -28,7 +28,7 @@ export type {
  * - Current status (idle, generating, reviewing, etc.)
  * - Current plan being worked on
  * - Review pass progress
- * - Created beads
+ * - Created tracker
  *
  * Usage: const planningState = useAtomValue(planningStateAtom)
  */

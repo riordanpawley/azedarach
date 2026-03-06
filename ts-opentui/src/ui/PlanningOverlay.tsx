@@ -296,7 +296,7 @@ const CompletePhase = ({
 			</text>
 
 			<text fg={theme.text} marginTop={1}>
-				{`Created ${state.createdIssues.length} beads:`}
+				{`Created ${state.createdIssues.length} tracker:`}
 			</text>
 
 			{state.createdIssues.slice(0, 10).map((issue) => (

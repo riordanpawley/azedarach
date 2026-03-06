@@ -63,7 +63,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Epic workflows: child-board drill-down, progress header, and epic detail parity
 - Session workflows: start, start+work, yolo start, chat, attach, pause, resume, stop
 - Dev server workflows: toggle, view, restart, per-worktree ports
-- Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge bead into bead
+- Git workflows: update from configured base branch, bulk bring-up-to-date across issue sets, merge to base branch, abort merge, diff, merge issue branch into issue branch
 - Branch-origin workflows: runtime choice between base branch and eligible upstream source branch
 - PR workflows: create PR, open PR, PR status indicators
 - Multi-project workflows: project registry, auto-detection, project selector
