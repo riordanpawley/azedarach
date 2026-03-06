@@ -207,9 +207,9 @@ func defaultIssueStateMutatorFactory() issueStateMutateFunc {
 
 		switch operation {
 		case closeCommandName:
-			return deps.BeadsClient.Close(ctx, issueID, "")
+			return deps.IssueClient.Close(ctx, issueID, "")
 		case reopenCommandName:
-			return deps.BeadsClient.Update(ctx, issueID, domain.StatusOpen)
+			return deps.IssueClient.Update(ctx, issueID, domain.StatusOpen)
 		default:
 			return fmt.Errorf("unsupported issue state operation: %s", operation)
 		}

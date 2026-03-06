@@ -221,7 +221,7 @@ func validateLoadedConfig(cfg *config.Config) error {
 		return fmt.Errorf("session.timeoutMs must be > 0")
 	}
 	if cfg.Beads.SyncInterval <= 0 {
-		return fmt.Errorf("beads.syncInterval must be > 0")
+		return fmt.Errorf("issueTracker.syncInterval must be > 0")
 	}
 	if cfg.Network.CheckInterval <= 0 {
 		return fmt.Errorf("network.checkInterval must be > 0")

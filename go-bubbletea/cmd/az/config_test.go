@@ -228,6 +228,72 @@ func TestRunCLIConfigInvalidUsagePaths(t *testing.T) {
 	})
 }
 
+func TestValidateLoadedConfigSyncIntervalUsesTrackerNeutralMessage(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Beads.SyncInterval = 0
+
+	err := validateLoadedConfig(cfg)
+	if err == nil {
+		t.Fatalf("expected validation error for zero sync interval")
+	}
+
+	got := err.Error()
+	want := "issueTracker.syncInterval must be > 0"
+	if got != want {
+		t.Fatalf("expected error %q, got %q", want, got)
+	}
+	if strings.Contains(strings.ToLower(got), "beads") {
+		t.Fatalf("expected tracker-neutral error message, got %q", got)
+	}
+}
+
+func TestRunCLIConfigValidateJSONSyncIntervalFailureUsesTrackerNeutralMessage(t *testing.T) {
+	stubConfigLoaderForTest(t, func() (*config.Config, error) {
+		cfg := config.DefaultConfig()
+		cfg.Beads.SyncInterval = 0
+		return cfg, nil
+	})
+
+	exitCode, stdout, stderr := runCLIForTest([]string{"config", "validate", "--json"})
+	if exitCode == 0 {
+		t.Fatalf("expected non-zero exit code for invalid sync interval")
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr in JSON mode, got %q", stderr)
+	}
+
+	var envelope struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("expected valid JSON output, got parse error: %v\noutput:\n%s", err, stdout)
+	}
+
+	if envelope.OK {
+		t.Fatalf("expected ok=false for invalid sync interval")
+	}
+	if envelope.Error.Code != "invalid_config" && envelope.Error.Code != "config_validation_failed" {
+		t.Fatalf(
+			"expected error.code to be invalid_config or config_validation_failed, got %q",
+			envelope.Error.Code,
+		)
+	}
+	if strings.Contains(strings.ToLower(envelope.Error.Message), "beads") {
+		t.Fatalf("expected tracker-neutral error message, got %q", envelope.Error.Message)
+	}
+	if envelope.Error.Message != "issueTracker.syncInterval must be > 0" {
+		t.Fatalf(
+			"expected error.message=%q, got %q",
+			"issueTracker.syncInterval must be > 0",
+			envelope.Error.Message,
+		)
+	}
+}
+
 func stubConfigLoaderForTest(t *testing.T, loader func() (*config.Config, error)) {
 	t.Helper()
 

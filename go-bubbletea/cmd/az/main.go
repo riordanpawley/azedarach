@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/app"
@@ -18,6 +20,28 @@ func main() {
 }
 
 func runCLI(args []string, stdout, stderr io.Writer) int {
+	parsedArgs, projectDirOverride, parseErr := parseGlobalProjectDirArg(args)
+	if parseErr != nil {
+		fmt.Fprintf(stderr, "invalid --project-dir usage: %v\n", parseErr)
+		return 2
+	}
+	args = parsedArgs
+
+	if projectDirOverride != "" {
+		originalWD, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(stderr, "Error resolving current working directory: %v\n", err)
+			return 1
+		}
+		if err := os.Chdir(projectDirOverride); err != nil {
+			fmt.Fprintf(stderr, "Error binding --project-dir %q: %v\n", projectDirOverride, err)
+			return 2
+		}
+		defer func() {
+			_ = os.Chdir(originalWD)
+		}()
+	}
+
 	// Standalone prime command should not depend on runtime config.
 	if len(args) > 0 && args[0] == "prime" {
 		return handlePrimeCommand(args[1:], stdout, stderr)
@@ -98,7 +122,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	switch command {
 	case "start":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(stderr, "Usage: az start <bead-id>\n")
+			fmt.Fprintf(stderr, "Usage: az start <issue-id>\n")
 			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -110,7 +134,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 
 	case "attach":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(stderr, "Usage: az attach <bead-id>\n")
+			fmt.Fprintf(stderr, "Usage: az attach <issue-id>\n")
 			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -122,7 +146,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 
 	case "kill":
 		if len(commandArgs) != 1 {
-			fmt.Fprintf(stderr, "Usage: az kill <bead-id>\n")
+			fmt.Fprintf(stderr, "Usage: az kill <issue-id>\n")
 			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
@@ -133,15 +157,15 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		}
 
 	case "status":
-		beadID := ""
+		issueID := ""
 		if len(commandArgs) == 1 {
-			beadID = commandArgs[0]
+			issueID = commandArgs[0]
 		} else if len(commandArgs) > 1 {
-			fmt.Fprintf(stderr, "Usage: az status [bead-id]\n")
+			fmt.Fprintf(stderr, "Usage: az status [issue-id]\n")
 			return 1
 		}
 		if err := runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.StatusCommand(deps, beadID)
+			return cli.StatusCommand(deps, issueID)
 		}); err != nil {
 			fmt.Fprintf(stderr, "Error: %v\n", err)
 			return 1
@@ -157,6 +181,45 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	return 0
+}
+
+func parseGlobalProjectDirArg(args []string) ([]string, string, error) {
+	filteredArgs := make([]string, 0, len(args))
+	projectDirOverride := ""
+
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "--project-dir":
+			if projectDirOverride != "" {
+				return nil, "", fmt.Errorf("duplicate --project-dir flag")
+			}
+			if index+1 >= len(args) {
+				return nil, "", fmt.Errorf("missing value for --project-dir")
+			}
+			value := strings.TrimSpace(args[index+1])
+			if value == "" || strings.HasPrefix(value, "-") {
+				return nil, "", fmt.Errorf("missing value for --project-dir")
+			}
+			projectDirOverride = filepath.Clean(value)
+			index++
+
+		case strings.HasPrefix(arg, "--project-dir="):
+			if projectDirOverride != "" {
+				return nil, "", fmt.Errorf("duplicate --project-dir flag")
+			}
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--project-dir="))
+			if value == "" {
+				return nil, "", fmt.Errorf("missing value for --project-dir")
+			}
+			projectDirOverride = filepath.Clean(value)
+
+		default:
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+
+	return filteredArgs, projectDirOverride, nil
 }
 
 // runTUI starts the terminal user interface

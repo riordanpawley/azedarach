@@ -222,7 +222,7 @@ func defaultIssueUpdaterFactory() issueUpdateFunc {
 	return func(issueID string, status domain.Status) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return deps.BeadsClient.Update(ctx, issueID, status)
+		return deps.IssueClient.Update(ctx, issueID, status)
 	}
 }
 

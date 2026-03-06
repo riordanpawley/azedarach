@@ -254,7 +254,7 @@ func defaultIssueCreatorFactory() issueCreateFunc {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		return deps.BeadsClient.Create(ctx, beads.CreateTaskParams{
+		return deps.IssueClient.Create(ctx, beads.CreateTaskParams{
 			Title:    request.Title,
 			Type:     domain.TypeTask,
 			Priority: domain.P2,

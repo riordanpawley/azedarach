@@ -413,7 +413,7 @@ func defaultTaskQueryFactory() taskQueryFunc {
 	return func() ([]domain.Task, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return deps.BeadsClient.List(ctx)
+		return deps.IssueClient.List(ctx)
 	}
 }
 
@@ -435,7 +435,7 @@ func defaultSearchQueryFactory() searchQueryFunc {
 	return func(query string) ([]domain.Task, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return deps.BeadsClient.Search(ctx, query)
+		return deps.IssueClient.Search(ctx, query)
 	}
 }
 
