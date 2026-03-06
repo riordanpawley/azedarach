@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -219,10 +220,17 @@ func defaultIssueUpdaterFactory() issueUpdateFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func(issueID string, status domain.Status) error {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return deps.IssueClient.Update(ctx, issueID, status)
+		updateErr := deps.IssueClient.Update(ctx, issueID, status)
+		if updateErr == nil {
+			backupRunner.OnMutationSuccess()
+		}
+		return updateErr
 	}
 }
 

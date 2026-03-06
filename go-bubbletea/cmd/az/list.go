@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -157,7 +158,10 @@ func defaultListFetcherFactory() listFetchFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func() ([]domain.Task, error) {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return deps.IssueClient.List(ctx)

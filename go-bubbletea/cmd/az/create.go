@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -250,16 +251,23 @@ func defaultIssueCreatorFactory() issueCreateFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func(request issueCreateRequest) (string, error) {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		return deps.IssueClient.Create(ctx, linear.CreateTaskParams{
+		issueID, createErr := deps.IssueClient.Create(ctx, linear.CreateTaskParams{
 			Title:    request.Title,
 			Type:     domain.TypeTask,
 			Priority: domain.P2,
 			ParentID: request.ParentID,
 		})
+		if createErr == nil {
+			backupRunner.OnMutationSuccess()
+		}
+		return issueID, createErr
 	}
 }
 

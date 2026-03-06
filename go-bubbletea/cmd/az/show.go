@@ -408,7 +408,10 @@ func defaultShowSearcherFactory() showSearchFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func(issueID string) ([]domain.Task, error) {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return deps.IssueClient.Search(ctx, issueID)

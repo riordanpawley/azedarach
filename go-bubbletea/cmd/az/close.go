@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -201,18 +202,27 @@ func defaultIssueStateMutatorFactory() issueStateMutateFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func(operation, issueID string) error {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		var mutateErr error
 		switch operation {
 		case closeCommandName:
-			return deps.IssueClient.Close(ctx, issueID, "")
+			mutateErr = deps.IssueClient.Close(ctx, issueID, "")
 		case reopenCommandName:
-			return deps.IssueClient.Update(ctx, issueID, domain.StatusOpen)
+			mutateErr = deps.IssueClient.Update(ctx, issueID, domain.StatusOpen)
 		default:
 			return fmt.Errorf("unsupported issue state operation: %s", operation)
 		}
+
+		if mutateErr == nil {
+			backupRunner.OnMutationSuccess()
+		}
+		return mutateErr
 	}
 }
 

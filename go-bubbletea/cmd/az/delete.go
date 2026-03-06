@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -147,10 +148,17 @@ func defaultIssueDeleterFactory() issueDeleteFunc {
 		}
 	}
 
+	backupRunner := newIssueCommandBackupRunner(cfg, showProjectContext(), os.Stderr)
+
 	return func(issueID string) error {
+		backupRunner.OnOpen()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return deps.IssueClient.Delete(ctx, issueID)
+		deleteErr := deps.IssueClient.Delete(ctx, issueID)
+		if deleteErr == nil {
+			backupRunner.OnMutationSuccess()
+		}
+		return deleteErr
 	}
 }
 
