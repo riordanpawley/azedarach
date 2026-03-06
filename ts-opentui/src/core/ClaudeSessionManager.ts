@@ -82,6 +82,50 @@ const SessionStateSchema = Schema.Literal(
 	"crashed",
 )
 
+type TmuxAttentionStatus = "busy" | "waiting" | "idle"
+
+interface WaitingAttentionPlan {
+	readonly ringBell: boolean
+	readonly nextFlag: "0" | "1"
+}
+
+const AZ_STATUS_OPTION = "@az_status"
+const AZ_WAITING_ALERTED_OPTION = "@az_waiting_alerted"
+const BELL_CHAR = "\u0007"
+const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
+const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
+
+const deriveWaitingAttentionPlan = (
+	status: TmuxAttentionStatus,
+	currentFlagRaw: string | null,
+): WaitingAttentionPlan => {
+	const normalizedFlag = currentFlagRaw?.trim() === "1" ? "1" : "0"
+	if (status === "waiting") {
+		return {
+			ringBell: normalizedFlag !== "1",
+			nextFlag: "1",
+		}
+	}
+	return {
+		ringBell: false,
+		nextFlag: "0",
+	}
+}
+
+const mapSessionStateToTmuxAttentionStatus = (state: SessionState): TmuxAttentionStatus | null => {
+	switch (state) {
+		case "waiting":
+			return "waiting"
+		case "busy":
+		case "initializing":
+			return "busy"
+		case "idle":
+			return "idle"
+		default:
+			return null
+	}
+}
+
 /**
  * Schema for persisted session - matches Session interface
  * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
@@ -475,6 +519,90 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					Effect.asVoid,
 					Effect.orElseSucceed(() => undefined),
 				)
+
+			const setTmuxSessionOption = (sessionName: string, optionName: string, value: string) =>
+				Command.exitCode(
+					Command.make("tmux", "set-option", "-t", sessionName, optionName, value),
+				).pipe(
+					Effect.asVoid,
+					Effect.catchAll(() => Effect.void),
+				)
+
+			const getTmuxSessionOption = (sessionName: string, optionName: string) =>
+				Command.string(
+					Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName),
+				).pipe(
+					Effect.map((value) => value.trim()),
+					Effect.catchAll(() => Effect.succeed("")),
+				)
+
+			const ringSessionPaneBell = (sessionName: string) =>
+				Effect.gen(function* () {
+					const paneTty = yield* Command.string(
+						Command.make("tmux", "display-message", "-p", "-t", sessionName, "#{pane_tty}"),
+					).pipe(
+						Effect.map((value) => value.trim()),
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+					if (paneTty.length === 0) {
+						return false
+					}
+
+					const fs = yield* FileSystem.FileSystem
+					return yield* fs.writeFileString(paneTty, BELL_CHAR).pipe(
+						Effect.as(true),
+						Effect.catchAll(() => Effect.succeed(false)),
+					)
+				}).pipe(Effect.provide(fsLayer))
+
+			const applyTmuxAttentionStyles = (sessionName: string) =>
+				Effect.gen(function* () {
+					yield* setTmuxSessionOption(sessionName, "monitor-bell", "on")
+					yield* setTmuxSessionOption(
+						sessionName,
+						"window-status-bell-style",
+						WAITING_WINDOW_BELL_STYLE,
+					)
+					yield* setTmuxSessionOption(
+						sessionName,
+						"window-status-activity-style",
+						WAITING_WINDOW_ACTIVITY_STYLE,
+					)
+				})
+
+			const applyTmuxWaitingAttentionSignal = (sessionName: string, status: TmuxAttentionStatus) =>
+				Effect.gen(function* () {
+					yield* setTmuxSessionOption(sessionName, AZ_STATUS_OPTION, status)
+					yield* applyTmuxAttentionStyles(sessionName)
+
+					const currentFlag = yield* getTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION)
+					const plan = deriveWaitingAttentionPlan(
+						status,
+						currentFlag.length > 0 ? currentFlag : null,
+					)
+
+					let nextFlag: "0" | "1" = plan.nextFlag
+					if (plan.ringBell) {
+						const bellSent = yield* ringSessionPaneBell(sessionName)
+						if (!bellSent) {
+							nextFlag = "0"
+						}
+					}
+
+					yield* setTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION, nextFlag)
+				})
+
+			const syncTmuxAttentionForSessionState = (session: Session, newState: SessionState) =>
+				Effect.gen(function* () {
+					const status = mapSessionStateToTmuxAttentionStatus(newState)
+					if (status) {
+						yield* applyTmuxWaitingAttentionSignal(session.tmuxSessionName, status)
+						return
+					}
+
+					// Non-status terminal states (done/error/etc.) should not keep waiting debounce armed.
+					yield* setTmuxSessionOption(session.tmuxSessionName, AZ_WAITING_ALERTED_OPTION, "0")
+				})
 
 			return {
 				start: (options: StartSessionOptions) =>
@@ -1162,6 +1290,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Persist to disk
 						const allSessions = yield* Ref.get(sessionsRef)
 						yield* persistSessions(allSessions)
+
+						// Keep tmux-native waiting alerts in sync for PTY-driven tools (for example Codex).
+						yield* syncTmuxAttentionForSessionState(session, newState).pipe(
+							Effect.catchAll(() => Effect.void),
+						)
 
 						// Publish state change
 						yield* publishStateChange(issueId, oldState, newState)
