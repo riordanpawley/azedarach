@@ -484,6 +484,7 @@ User-visible logs SHOULD capture:
 1. detect required external tools and project validity
 2. if mandatory tooling missing, enter diagnostics-first board state with blocked actions
 3. load last known stable board snapshot if tracker refresh is temporarily unavailable
+4. start non-blocking startup jobs (for example refresh strategy/bootstrap monitors) as scoped background work so board interaction is not gated on full hydration
 
 ### Context Restore
 

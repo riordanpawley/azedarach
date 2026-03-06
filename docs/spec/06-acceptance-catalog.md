@@ -1036,6 +1036,13 @@ Canonical fixture profile names:
 - Expected: foreground interactions remain responsive; off-screen refresh proceeds opportunistically without mode or navigation stalls.
 - Links: AZ-FR-2309.
 
+### AZ-AT-2832 Non-blocking startup bootstrap
+
+- Preconditions: startup profile with slow tracker/webhook bootstrap path (for example delayed backend/listener initialization).
+- Steps: launch app and immediately perform navigation/mode/help interactions while initial hydration is still running.
+- Expected: board shell is interactable immediately; startup loading indicator remains visible until first hydration attempt settles; data converges without manual relaunch/refresh.
+- Links: AZ-FR-2709, AZ-FR-2710, AZ-FR-2711, AZ-FR-3908.
+
 ## 6.31 Minimum Release Gate
 
 A release candidate MUST pass:
@@ -1051,4 +1058,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2831
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2832
