@@ -6,8 +6,10 @@ import { useAtomValue } from "@effect-atom/atom-react"
 import type {
 	DiagnosticSeverity,
 	FiberStatus,
+	LinearWebhookStrategy,
 	IssueSyncLastStatus,
 } from "../services/DiagnosticsService.js"
+import type { LinearWebhookMode } from "../services/LinearWebhookService.js"
 import { diagnosticsAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
@@ -103,6 +105,36 @@ const issueSyncStatusColor = (status: IssueSyncLastStatus): string => {
 		case "skipped":
 			return theme.yellow
 		case "idle":
+		default:
+			return theme.subtext0
+	}
+}
+
+const linearWebhookModeColor = (mode: LinearWebhookMode): string => {
+	switch (mode) {
+		case "sdk":
+			return theme.green
+		case "cli":
+			return theme.blue
+		case "misconfigured":
+			return theme.yellow
+		case "failed":
+			return theme.red
+		case "disabled":
+		default:
+			return theme.subtext0
+	}
+}
+
+const linearWebhookStrategyColor = (strategy: LinearWebhookStrategy): string => {
+	switch (strategy) {
+		case "sdk-events":
+		case "cli-listener":
+			return theme.green
+		case "cli-fallback-listener":
+		case "polling-fallback":
+			return theme.yellow
+		case "disabled":
 		default:
 			return theme.subtext0
 	}
@@ -283,6 +315,9 @@ export const DiagnosticsOverlay = () => {
 	const issueSync = Result.isSuccess(diagnosticsResult)
 		? diagnosticsResult.value.issueSync
 		: undefined
+	const linearWebhook = Result.isSuccess(diagnosticsResult)
+		? diagnosticsResult.value.linearWebhook
+		: undefined
 	const sortedIssueDbPerf = [...issueDbPerf].sort((left, right) => right.p95Ms - left.p95Ms)
 
 	return (
@@ -353,6 +388,31 @@ export const DiagnosticsOverlay = () => {
 							error={fiber.error}
 						/>
 					))
+				)}
+				<text> </text>
+
+				{/* Issue database performance section */}
+				<SectionHeader title="Linear Webhooks:" />
+				{linearWebhook === undefined ? (
+					<text fg={theme.subtext0}>{"  No webhook diagnostics yet"}</text>
+				) : (
+					<box flexDirection="column">
+						<box flexDirection="row">
+							<text fg={linearWebhookModeColor(linearWebhook.mode)}>
+								{`mode=${linearWebhook.mode} `}
+							</text>
+							<text fg={linearWebhookStrategyColor(linearWebhook.strategy)}>
+								{`strategy=${linearWebhook.strategy}`}
+							</text>
+						</box>
+						<box flexDirection="row" paddingLeft={2}>
+							<text fg={linearWebhook.healthy ? theme.green : theme.red}>
+								{`healthy=${linearWebhook.healthy ? "yes" : "no"}`}
+							</text>
+							<text fg={theme.subtext1}>{` (${formatRelativeTime(linearWebhook.updatedAt)})`}</text>
+							<text fg={theme.subtext0}>{` ${linearWebhook.message}`}</text>
+						</box>
+					</box>
 				)}
 				<text> </text>
 

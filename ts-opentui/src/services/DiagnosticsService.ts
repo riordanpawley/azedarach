@@ -12,6 +12,7 @@
  */
 
 import { Effect, Fiber, FiberId, Ref, Scope, SubscriptionRef } from "effect"
+import type { LinearWebhookMode } from "./LinearWebhookService.js"
 
 // ============================================================================
 // Types
@@ -89,6 +90,21 @@ export interface IssueSyncHealth {
 	readonly lastFailure?: IssueSyncFailure
 }
 
+export type LinearWebhookStrategy =
+	| "disabled"
+	| "sdk-events"
+	| "cli-listener"
+	| "cli-fallback-listener"
+	| "polling-fallback"
+
+export interface LinearWebhookHealth {
+	readonly mode: LinearWebhookMode
+	readonly strategy: LinearWebhookStrategy
+	readonly healthy: boolean
+	readonly message: string
+	readonly updatedAt: Date
+}
+
 export interface IssueDbPerfStats {
 	readonly backend: IssueDbPerfBackend
 	readonly operation: string
@@ -163,6 +179,7 @@ export interface DiagnosticsState {
 	readonly events: readonly DiagnosticEvent[]
 	readonly issueDbPerf: readonly IssueDbPerfStats[]
 	readonly issueSync?: IssueSyncHealth
+	readonly linearWebhook?: LinearWebhookHealth
 	readonly lastUpdated: Date
 }
 
@@ -194,6 +211,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			events: [],
 			issueDbPerf: [],
 			issueSync: undefined,
+			linearWebhook: undefined,
 			lastUpdated: new Date(),
 		})
 		const issueDbPerfAccumulators = yield* Ref.make<Map<string, IssueDbPerfAccumulator>>(new Map())
@@ -475,6 +493,13 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 				lastUpdated: new Date(),
 			}))
 
+		const setLinearWebhookHealth = (health: LinearWebhookHealth) =>
+			SubscriptionRef.update(stateRef, (s) => ({
+				...s,
+				linearWebhook: health,
+				lastUpdated: new Date(),
+			}))
+
 		/**
 		 * Record a timing event when an operation is slow
 		 */
@@ -538,6 +563,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			clearEvents,
 			recordIssueDbTiming,
 			setIssueSyncHealth,
+			setLinearWebhookHealth,
 			logTiming,
 			measure,
 		}

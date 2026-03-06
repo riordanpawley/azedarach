@@ -144,3 +144,27 @@ describe("DiagnosticsService issue sync health", () => {
 		expect(health?.lastFailure?.issueId).toBe("AZE-42")
 	})
 })
+
+describe("DiagnosticsService linear webhook health", () => {
+	it("stores linear webhook health snapshots", async () => {
+		const health = await runWithDiagnostics(
+			Effect.gen(function* () {
+				const diagnostics = yield* DiagnosticsService
+				yield* diagnostics.setLinearWebhookHealth({
+					mode: "misconfigured",
+					strategy: "polling-fallback",
+					healthy: false,
+					message: "Webhook URL missing; using polling.",
+					updatedAt: new Date("2026-03-06T00:00:00.000Z"),
+				})
+				const snapshot = yield* diagnostics.getSnapshot()
+				return snapshot.linearWebhook
+			}),
+		)
+
+		expect(health?.mode).toBe("misconfigured")
+		expect(health?.strategy).toBe("polling-fallback")
+		expect(health?.healthy).toBe(false)
+		expect(health?.message).toContain("using polling")
+	})
+})
