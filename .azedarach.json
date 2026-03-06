@@ -6,7 +6,7 @@
       "syncEnabled": true,
       "team": "AZE",
       "webhooks": {
-        "enabled": false
+        "enabled": true
       }
     }
   },
