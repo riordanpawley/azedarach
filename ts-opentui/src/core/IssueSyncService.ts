@@ -39,6 +39,7 @@ const MAX_SYNC_BATCH = 500
 const MAX_SYNC_ATTEMPTS = 5
 const BASE_RETRY_SECONDS = 5
 const LINEAR_WORKFLOW_STATES_PAGE_SIZE = 250
+const LINEAR_LABELS_PAGE_SIZE = 250
 const API_KEY_CACHE_TTL_MS = 30_000
 const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
@@ -844,17 +845,42 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			})
 
 		const fetchLabelNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
-			linearSdk.issueLabels({ first: 500 }).pipe(
-				Effect.map(
-					(labels) => new Map(labels.nodes.map((label) => [label.id, label.name] as const)),
-				),
-				Effect.mapError(
-					(error) =>
-						new IssueSyncError({
-							message: error.message,
+			Effect.gen(function* () {
+				const fetchLabelsPage = (afterCursor: string | undefined) =>
+					linearSdk
+						.issueLabels({
+							first: LINEAR_LABELS_PAGE_SIZE,
+							after: afterCursor,
+						})
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: error.message,
+									}),
+							),
+						)
+
+				const collectPages = (
+					afterCursor: string | undefined,
+					accumulator: ReadonlyMap<string, string>,
+				): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+					fetchLabelsPage(afterCursor).pipe(
+						Effect.flatMap((page) => {
+							const nextAccumulator = new Map(accumulator)
+							for (const label of page.nodes) {
+								nextAccumulator.set(label.id, label.name)
+							}
+
+							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+								return Effect.succeed(nextAccumulator)
+							}
+							return collectPages(page.pageInfo.endCursor, nextAccumulator)
 						}),
-				),
-			)
+					)
+
+				return yield* collectPages(undefined, new Map())
+			})
 
 		const fetchWorkflowStates = (): Effect.Effect<
 			readonly LinearWorkflowState[],
