@@ -1,20 +1,21 @@
 /**
- * BeadsClient - Effect service for interacting with the bd CLI
+ * IssueTrackerClient - Effect service for interacting with the tracker CLI
  *
- * Wraps bd commands with Effect for type-safe, composable issue tracking operations.
- * All bd commands are executed with --json flag for structured output.
+ * Wraps tracker commands with Effect for type-safe, composable issue tracking operations.
+ * All tracker commands are executed with --json flag for structured output.
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import type { LinearClient, Issue as LinearSdkIssue } from "@linear/sdk"
-import { Data, Effect, SubscriptionRef } from "effect"
+import type { Issue as LinearSdkIssue } from "@linear/sdk"
+import { Data, Effect, Fiber, SubscriptionRef } from "effect"
 import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
 import type { IssueDbPerfOperationKind } from "../services/DiagnosticsService.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { ProjectService } from "../services/ProjectService.js"
-import { type IssueSyncError, IssueSyncService } from "./IssueSyncService.js"
+import { BackendSyncRouter } from "./BackendSyncRouter.js"
+import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import { LocalIssueStore, type LocalIssueStoreError, type SyncTarget } from "./LocalIssueStore.js"
 
@@ -29,8 +30,8 @@ export type DependencyType = "blocks" | "related" | "parent-child" | "discovered
 /**
  * Dependency reference schema for issue dependencies/dependents
  *
- * Intentionally permissive for br compatibility:
- * - br can emit extra dependency types
+ * Intentionally permissive for legacy compatibility:
+ * - legacy can emit extra dependency types
  * - show/list can use either compact refs or full dependency links
  */
 const DependencyRefSchema = Schema.Struct({
@@ -66,11 +67,11 @@ export interface DependencyRef {
 type DependencyLink = DependencyLinkRaw
 
 /**
- * Issue schema matching bd/br --json output
+ * Issue schema matching tracker/legacy --json output
  *
- * Intentionally permissive for br compatibility:
- * - br can emit additional status / issue_type variants
- * - br can emit `estimated_minutes` instead of `estimate`
+ * Intentionally permissive for legacy compatibility:
+ * - legacy can emit additional status / issue_type variants
+ * - legacy can emit `estimated_minutes` instead of `estimate`
  * - some fields can be null or omitted depending on command
  */
 const IssueSchema = Schema.Struct({
@@ -137,6 +138,10 @@ export interface IssueListOptions {
 	readonly sortDirection?: "asc" | "desc"
 }
 
+export interface IssueReadSyncOptions {
+	readonly maxSyncWaitMs?: number
+}
+
 const parseIssueStatus = (status: string | undefined): IssueStatus | undefined => {
 	switch (status) {
 		case "open":
@@ -145,7 +150,7 @@ const parseIssueStatus = (status: string | undefined): IssueStatus | undefined =
 		case "closed":
 		case "tombstone":
 			return status
-		// br-native states: map into existing board model
+		// legacy-native states: map into existing board model
 		case "deferred":
 			return "blocked"
 		case "draft":
@@ -167,7 +172,7 @@ const parseIssueType = (issueType: string | undefined): IssueType | undefined =>
 		case "epic":
 		case "chore":
 			return issueType
-		// br-specific types that do not exist in legacy UI model
+		// legacy-specific types that do not exist in legacy UI model
 		case "docs":
 		case "question":
 			return "task"
@@ -186,7 +191,7 @@ const parseDependencyType = (dependencyType: string | undefined): DependencyType
 		case "parent-child":
 		case "discovered-from":
 			return dependencyType
-		// br dependency variants mapped to existing relationship model
+		// legacy dependency variants mapped to existing relationship model
 		case "conditional-blocks":
 		case "waits-for":
 		case "caused-by":
@@ -265,10 +270,10 @@ const normalizeIssues = (issues: readonly IssueRaw[]): Issue[] =>
 /**
  * Sync result schema
  *
- * Legacy bd returns:
+ * Legacy tracker returns:
  *   { pushed: number, pulled: number }
  *
- * br returns import/export stats:
+ * legacy returns import/export stats:
  *   {
  *     created: number,
  *     updated: number,
@@ -303,7 +308,7 @@ export interface SyncResult {
 const normalizeLegacySyncResult = (result: LegacySyncResult): SyncResult => result
 
 const normalizeBrSyncResult = (result: BrSyncResult): SyncResult => ({
-	// br sync is local DB<->JSONL reconciliation; treat created+updated as "pulled"
+	// legacy sync is local DB<->JSONL reconciliation; treat created+updated as "pulled"
 	// for existing UI counters while keeping pushed at zero.
 	pushed: 0,
 	pulled: (result.created ?? 0) + (result.updated ?? 0),
@@ -604,9 +609,9 @@ const normalizeLinearIssue = (issue: LinearIssue): IssueRaw => {
 // ============================================================================
 
 /**
- * Generic bd command execution error
+ * Generic tracker command execution error
  */
-export class BeadsError extends Data.TaggedError("BeadsError")<{
+export class IssueTrackerError extends Data.TaggedError("IssueTrackerError")<{
 	readonly message: string
 	readonly command: string
 	readonly stderr?: string
@@ -620,7 +625,7 @@ export class NotFoundError extends Data.TaggedError("NotFoundError")<{
 }> {}
 
 /**
- * JSON parsing error from bd output
+ * JSON parsing error from tracker output
  */
 export class ParseError extends Data.TaggedError("ParseError")<{
 	readonly message: string
@@ -628,9 +633,9 @@ export class ParseError extends Data.TaggedError("ParseError")<{
 }> {}
 
 /**
- * Error when beads database is out of sync with JSONL file.
+ * Error when tracker database is out of sync with JSONL file.
  * This happens after git pull or when another worktree modifies issues.
- * Can be auto-recovered by running `bd sync --import-only`.
+ * Can be auto-recovered by running `tracker sync --import-only`.
  */
 export class SyncRequiredError extends Data.TaggedError("SyncRequiredError")<{
 	readonly message: string
@@ -641,19 +646,19 @@ export class SyncRequiredError extends Data.TaggedError("SyncRequiredError")<{
 // ============================================================================
 
 /**
- * BeadsClient service interface
+ * IssueTrackerClient service interface
  *
- * Provides typed access to bd CLI commands with Effect error handling.
+ * Provides typed access to tracker CLI commands with Effect error handling.
  * Note: All methods require CommandExecutor in their context.
  */
-export interface BeadsClientService {
+export interface IssueTrackerClientService {
 	/**
 	 * List issues with optional filters
 	 *
 	 * @example
 	 * ```ts
 	 * // Get all in-progress tasks
-	 * BeadsClient.list({ status: "in_progress", type: "task" })
+	 * IssueTrackerClient.list({ status: "in_progress", type: "task" })
 	 * ```
 	 */
 	readonly list: (
@@ -662,7 +667,7 @@ export interface BeadsClientService {
 		options?: IssueListOptions,
 	) => Effect.Effect<
 		Issue[],
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -671,15 +676,16 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.show("az-05y")
+	 * IssueTrackerClient.show("az-05y")
 	 * ```
 	 */
 	readonly show: (
 		id: string,
 		cwd?: string,
+		syncOptions?: IssueReadSyncOptions,
 	) => Effect.Effect<
 		Issue,
-		BeadsError | NotFoundError | ParseError | SyncRequiredError,
+		IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -691,7 +697,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.showMultiple(["az-05y", "az-06z", "az-07a"])
+	 * IssueTrackerClient.showMultiple(["az-05y", "az-06z", "az-07a"])
 	 * ```
 	 */
 	readonly showMultiple: (
@@ -699,7 +705,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		Issue[],
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -708,7 +714,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.update("az-05y", {
+	 * IssueTrackerClient.update("az-05y", {
 	 *   status: "in_progress",
 	 *   notes: "Started working on this",
 	 *   title: "Updated title"
@@ -732,28 +738,28 @@ export interface BeadsClientService {
 			parent?: string
 		},
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Close an issue with optional reason
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.close("az-05y", "Implementation complete")
+	 * IssueTrackerClient.close("az-05y", "Implementation complete")
 	 * ```
 	 */
 	readonly close: (
 		id: string,
 		reason?: string,
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
-	 * Sync beads database (push/pull)
+	 * Sync tracker database (push/pull)
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.sync().pipe(
+	 * IssueTrackerClient.sync().pipe(
 	 *   Effect.tap(result => Console.log(`Synced: ${result.pushed} pushed, ${result.pulled} pulled`))
 	 * )
 	 * ```
@@ -762,46 +768,46 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		SyncResult,
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
 	/**
-	 * Import-only sync - re-imports beads from JSONL into database without git operations.
-	 * Use after git merge to recover any beads incorrectly removed by the merge driver.
+	 * Import-only sync - re-imports tracker from JSONL into database without git operations.
+	 * Use after git merge to recover any tracker incorrectly removed by the merge driver.
 	 */
 	readonly syncImportOnly: (
 		cwd?: string,
 	) => Effect.Effect<
 		SyncResult,
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
 	/**
 	 * Recover tombstoned issues from JSONL.
-	 * Workaround for bd sync bug where issues get incorrectly tombstoned during merge.
+	 * Workaround for tracker sync bug where issues get incorrectly tombstoned during merge.
 	 * See issue az-zby for details.
 	 *
 	 * @returns Number of issues recovered
 	 */
 	readonly recoverTombstones: (
 		cwd?: string,
-	) => Effect.Effect<number, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<number, IssueTrackerError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get ready (unblocked) issues
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.ready()
+	 * IssueTrackerClient.ready()
 	 * ```
 	 */
 	readonly ready: (
 		cwd?: string,
 	) => Effect.Effect<
 		Issue[],
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -810,7 +816,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.search("beads client")
+	 * IssueTrackerClient.search("tracker client")
 	 * ```
 	 */
 	readonly search: (
@@ -818,7 +824,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		Issue[],
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -827,7 +833,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.create({
+	 * IssueTrackerClient.create({
 	 *   title: "Implement feature X",
 	 *   type: "task",
 	 *   priority: 2,
@@ -849,7 +855,7 @@ export interface BeadsClientService {
 		cwd?: string
 	}) => Effect.Effect<
 		Issue,
-		BeadsError | ParseError | SyncRequiredError,
+		IssueTrackerError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -858,20 +864,20 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.delete("az-05y")
+	 * IssueTrackerClient.delete("az-05y")
 	 * ```
 	 */
 	readonly delete: (
 		id: string,
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get children of an epic (issues with parent-child dependency)
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.getEpicChildren("az-gds")
+	 * IssueTrackerClient.getEpicChildren("az-gds")
 	 * // Returns array of child issue IDs
 	 * ```
 	 */
@@ -880,7 +886,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		DependencyRef[],
-		BeadsError | NotFoundError | ParseError | SyncRequiredError,
+		IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -891,7 +897,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * BeadsClient.getEpicWithChildren("az-05y")
+	 * IssueTrackerClient.getEpicWithChildren("az-05y")
 	 * ```
 	 */
 	readonly getEpicWithChildren: (
@@ -899,7 +905,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		{ epic: Issue; children: ReadonlyArray<DependencyRef> },
-		BeadsError | NotFoundError | ParseError | SyncRequiredError,
+		IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 
@@ -912,10 +918,10 @@ export interface BeadsClientService {
 	 * @example
 	 * ```ts
 	 * // Make task a child of an epic
-	 * BeadsClient.addDependency("az-task", "az-epic", "parent-child")
+	 * IssueTrackerClient.addDependency("az-task", "az-epic", "parent-child")
 	 *
 	 * // Default "blocks" dependency
-	 * BeadsClient.addDependency("az-blocked", "az-blocker")
+	 * IssueTrackerClient.addDependency("az-blocked", "az-blocker")
 	 * ```
 	 */
 	readonly addDependency: (
@@ -923,7 +929,7 @@ export interface BeadsClientService {
 		dependsOnId: string,
 		type?: "blocks" | "related" | "parent-child" | "discovered-from",
 		cwd?: string,
-	) => Effect.Effect<void, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<void, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Get the parent epic of an issue, if it has one
@@ -933,7 +939,7 @@ export interface BeadsClientService {
 	 *
 	 * @example
 	 * ```ts
-	 * const parentEpic = yield* BeadsClient.getParentEpic("az-task")
+	 * const parentEpic = yield* IssueTrackerClient.getParentEpic("az-task")
 	 * if (parentEpic) {
 	 *   console.log(`Task is child of epic: ${parentEpic.id}`)
 	 * }
@@ -944,7 +950,7 @@ export interface BeadsClientService {
 		cwd?: string,
 	) => Effect.Effect<
 		Issue | undefined,
-		BeadsError | NotFoundError | ParseError | SyncRequiredError,
+		IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
 		CommandExecutor.CommandExecutor
 	>
 }
@@ -958,17 +964,17 @@ export interface BeadsClientService {
  */
 const isSyncRequiredError = (message: string): boolean =>
 	message.includes("Database out of sync") ||
-	message.includes("Run 'bd sync --import-only'") ||
-	message.includes("bd sync --import-only")
+	message.includes("Run 'tracker sync --import-only'") ||
+	message.includes("tracker sync --import-only")
 
-type BeadsExecutable = "bd" | "br"
-type IssueDbFlavor = "bd" | "br" | "linear"
-type ConfiguredIssueBackend = "bd" | "br" | "local" | "linear"
+type LegacyIssueExecutable = "tracker" | "legacy"
+type IssueDbFlavor = "tracker" | "legacy" | "linear"
+type ConfiguredIssueBackend = "tracker" | "legacy" | "local" | "linear"
 type LocalFirstIssueBackend = "local" | "linear"
 
 export interface IssueTrackerBackendConfigShape {
-	readonly beads?: unknown
-	readonly beads_rust?: unknown
+	readonly tracker?: unknown
+	readonly legacy?: unknown
 	readonly linear?: unknown
 	readonly local?: unknown
 }
@@ -976,8 +982,8 @@ export interface IssueTrackerBackendConfigShape {
 export const resolveConfiguredIssueBackend = (
 	issueTracker: IssueTrackerBackendConfigShape,
 ): ConfiguredIssueBackend => {
-	if (issueTracker.beads !== undefined) return "bd"
-	if (issueTracker.beads_rust !== undefined) return "br"
+	if (issueTracker.tracker !== undefined) return "tracker"
+	if (issueTracker.legacy !== undefined) return "legacy"
 	if (issueTracker.linear !== undefined) return "linear"
 	return "local"
 }
@@ -995,11 +1001,11 @@ interface IssueDbClient {
 	readonly runJson: (
 		args: readonly string[],
 		cwd?: string,
-	) => Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<string, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor>
 	readonly runDirect: (
 		args: readonly string[],
 		cwd?: string,
-	) => Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor>
 	readonly parseSyncResult: (output: string) => Effect.Effect<SyncResult, ParseError>
 }
 
@@ -1082,6 +1088,7 @@ const hasNoDaemonFlag = (args: readonly string[]): boolean =>
 	args.some((arg) => arg === "--no-daemon")
 
 const DEFAULT_ISSUE_LIST_PAGE_SIZE = 200
+const DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS = 250
 
 const clampPositiveInt = (value: number, fallback: number): number => {
 	if (!Number.isFinite(value)) return fallback
@@ -1089,7 +1096,7 @@ const clampPositiveInt = (value: number, fallback: number): number => {
 	return rounded > 0 ? rounded : fallback
 }
 
-const isUnsupportedSortFlagError = (error: BeadsError): boolean => {
+const isUnsupportedSortFlagError = (error: IssueTrackerError): boolean => {
 	const message = `${error.message}\n${error.stderr ?? ""}`.toLowerCase()
 	const hasSortFlagReference = message.includes("--sort") || message.includes("--reverse")
 	const isFlagError =
@@ -1232,7 +1239,7 @@ const parseJson = <A, I, R>(
 // ============================================================================
 
 /**
- * BeadsClient service
+ * IssueTrackerClient service
  *
  * Creates a service implementation that captures CommandExecutor from the scope.
  * The Layer automatically provides BunContext for command execution.
@@ -1240,33 +1247,34 @@ const parseJson = <A, I, R>(
  * @example
  * ```ts
  * const program = Effect.gen(function* () {
- *   const client = yield* BeadsClient
+ *   const client = yield* IssueTrackerClient
  *   const issues = yield* client.ready()
  *   return issues
- * }).pipe(Effect.provide(BeadsClient.Default))
+ * }).pipe(Effect.provide(IssueTrackerClient.Default))
  * ```
  */
-export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
+export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("IssueTrackerClient", {
 	dependencies: [
 		ProjectService.Default,
 		OfflineService.Default,
 		AppConfig.Default,
 		DiagnosticsService.Default,
 		LocalIssueStore.Default,
-		IssueSyncService.Default,
+		BackendSyncRouter.Default,
 		LinearSdk.Default,
 	],
-	effect: Effect.gen(function* () {
+	scoped: Effect.gen(function* () {
 		const projectService = yield* ProjectService
 		const offlineService = yield* OfflineService
 		const appConfig = yield* AppConfig
 		const diagnostics = yield* DiagnosticsService
 		const localIssueStore = yield* LocalIssueStore
-		const issueSyncService = yield* IssueSyncService
+		const backendSyncRouter = yield* BackendSyncRouter
 		const linearSdk = yield* LinearSdk
+		const scope = yield* Effect.scope
 
 		/**
-		 * Get effective cwd for bd commands:
+		 * Get effective cwd for tracker commands:
 		 * - If explicit cwd provided, use it
 		 * - Otherwise, use current project path from ProjectService
 		 * - Falls back to undefined (process.cwd()) if no project selected
@@ -1274,12 +1282,12 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		const getEffectiveCwd = (explicitCwd?: string): Effect.Effect<string | undefined> =>
 			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
 
-		const executeBeadsJsonCommand = (
-			executable: BeadsExecutable,
+		const executeLegacyJsonCommand = (
+			executable: LegacyIssueExecutable,
 			args: readonly string[],
 			cwd?: string,
 			retryOnEmptyOutput = true,
-		): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<string, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				// Always add --json flag for structured output
 				const allArgs = [...args, "--json"]
@@ -1296,12 +1304,12 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						if (isSyncRequiredError(stderr)) {
 							return new SyncRequiredError({
 								message:
-									"Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+									"IssueTracker database out of sync with JSONL. Run 'tracker sync --import-only' to fix.",
 							})
 						}
 
-						return new BeadsError({
-							message: `beads command failed: ${stderr}`,
+						return new IssueTrackerError({
+							message: `tracker command failed: ${stderr}`,
 							command: `${executable} ${allArgs.join(" ")}`,
 							stderr,
 						})
@@ -1319,7 +1327,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						return yield* Effect.fail(
 							new SyncRequiredError({
 								message:
-									"Beads database out of sync with JSONL. Run 'bd sync --import-only' to fix.",
+									"IssueTracker database out of sync with JSONL. Run 'tracker sync --import-only' to fix.",
 							}),
 						)
 					}
@@ -1329,7 +1337,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							yield* Effect.logWarning(
 								`${executable} returned empty output, retrying with --no-daemon: ${executable} ${allArgs.join(" ")}`,
 							)
-							return yield* executeBeadsJsonCommand(
+							return yield* executeLegacyJsonCommand(
 								executable,
 								["--no-daemon", ...args],
 								cwd,
@@ -1341,8 +1349,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							`${executable} command returned empty output: ${executable} ${allArgs.join(" ")}`,
 						)
 						return yield* Effect.fail(
-							new BeadsError({
-								message: "beads command returned empty output",
+							new IssueTrackerError({
+								message: "tracker command returned empty output",
 								command: `${executable} ${allArgs.join(" ")}`,
 								stderr: "",
 							}),
@@ -1353,11 +1361,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				return result
 			})
 
-		const executeBeadsDirectCommand = (
-			executable: BeadsExecutable,
+		const executeLegacyDirectCommand = (
+			executable: LegacyIssueExecutable,
 			args: readonly string[],
 			cwd?: string,
-		): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				// Add --no-daemon to bypass daemon (daemon doesn't support all operations)
 				const allArgs = ["--no-daemon", ...args]
@@ -1369,8 +1377,8 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				return yield* Command.string(command).pipe(
 					Effect.mapError((error) => {
 						const stderr = "stderr" in error ? String(error.stderr) : String(error)
-						return new BeadsError({
-							message: `beads command failed: ${stderr}`,
+						return new IssueTrackerError({
+							message: `tracker command failed: ${stderr}`,
 							command: `${executable} ${allArgs.join(" ")}`,
 							stderr,
 						})
@@ -1378,36 +1386,33 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				)
 			})
 
-		const createBdIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
-			flavor: "bd",
+		const createBdIssueDbClient = (executable: LegacyIssueExecutable): IssueDbClient => ({
+			flavor: "tracker",
 			executable,
-			runJson: (args, runCwd) => executeBeadsJsonCommand(executable, args, runCwd),
-			runDirect: (args, runCwd) => executeBeadsDirectCommand(executable, args, runCwd),
+			runJson: (args, runCwd) => executeLegacyJsonCommand(executable, args, runCwd),
+			runDirect: (args, runCwd) => executeLegacyDirectCommand(executable, args, runCwd),
 			parseSyncResult: (output) =>
 				parseJson(LegacySyncResultSchema, output).pipe(Effect.map(normalizeLegacySyncResult)),
 		})
 
-		const createBrIssueDbClient = (executable: BeadsExecutable): IssueDbClient => ({
-			flavor: "br",
+		const createBrIssueDbClient = (executable: LegacyIssueExecutable): IssueDbClient => ({
+			flavor: "legacy",
 			executable,
-			runJson: (args, runCwd) => executeBeadsJsonCommand(executable, args, runCwd),
-			runDirect: (args, runCwd) => executeBeadsDirectCommand(executable, args, runCwd),
+			runJson: (args, runCwd) => executeLegacyJsonCommand(executable, args, runCwd),
+			runDirect: (args, runCwd) => executeLegacyDirectCommand(executable, args, runCwd),
 			parseSyncResult: (output) =>
 				parseJson(BrSyncResultSchema, output).pipe(Effect.map(normalizeBrSyncResult)),
 		})
 
 		interface LinearRuntimeConfig {
-			readonly linearClient: LinearClient
 			readonly defaultTeam?: string
 		}
 
 		const createLinearIssueDbClient = (config: LinearRuntimeConfig): IssueDbClient => {
-			const linearClient = config.linearClient
-
 			const withLinearSdkTiming = <A>(
 				linearArgs: readonly string[],
-				effect: Effect.Effect<A, BeadsError, CommandExecutor.CommandExecutor>,
-			): Effect.Effect<A, BeadsError, CommandExecutor.CommandExecutor> => {
+				effect: Effect.Effect<A, IssueTrackerError, CommandExecutor.CommandExecutor>,
+			): Effect.Effect<A, IssueTrackerError, CommandExecutor.CommandExecutor> => {
 				const perf = getLinearCommandPerfMetadata(linearArgs)
 				return withIssueDbTiming(
 					{
@@ -1442,7 +1447,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const fetchAllIssues = (): Effect.Effect<
 				readonly LinearSdkIssue[],
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
@@ -1456,31 +1461,30 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 								readonly endCursor?: string | null
 							}
 						},
-						BeadsError,
+						IssueTrackerError,
 						CommandExecutor.CommandExecutor
 					> =>
-						Effect.tryPromise({
-							try: () =>
-								linearClient.issues({
-									first: 250,
-									after: afterCursor,
-								}),
-							catch: (error) =>
-								new BeadsError({
-									message:
-										error instanceof Error
-											? error.message
-											: `Failed to fetch Linear issues: ${String(error)}`,
-									command: "linear-sdk issues",
-								}),
-						}).pipe(linearSdk.rateLimit)
+						linearSdk
+							.issues({
+								first: 250,
+								after: afterCursor,
+							})
+							.pipe(
+								Effect.mapError(
+									(error) =>
+										new IssueTrackerError({
+											message: error.message,
+											command: "linear-sdk issues",
+										}),
+								),
+							)
 
 					const collectPages = (
 						afterCursor: string | null | undefined,
 						accumulator: readonly LinearSdkIssue[],
 					): Effect.Effect<
 						readonly LinearSdkIssue[],
-						BeadsError,
+						IssueTrackerError,
 						CommandExecutor.CommandExecutor
 					> =>
 						fetchIssuesPage(afterCursor).pipe(
@@ -1498,23 +1502,21 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const fetchStateNameById = (): Effect.Effect<
 				ReadonlyMap<string, string>,
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				Effect.tryPromise({
-					try: async () => {
-						const states = await linearClient.workflowStates({ first: 500 })
-						return new Map(states.nodes.map((state) => [state.id, state.name] as const))
-					},
-					catch: (error) =>
-						new BeadsError({
-							message:
-								error instanceof Error
-									? error.message
-									: `Failed to fetch Linear workflow states: ${String(error)}`,
-							command: "linear-sdk workflowStates",
-						}),
-				}).pipe(linearSdk.rateLimit)
+				linearSdk.workflowStates({ first: 500 }).pipe(
+					Effect.map(
+						(states) => new Map(states.nodes.map((state) => [state.id, state.name] as const)),
+					),
+					Effect.mapError(
+						(error) =>
+							new IssueTrackerError({
+								message: error.message,
+								command: "linear-sdk workflowStates",
+							}),
+					),
+				)
 
 			const fetchWorkflowStates = (): Effect.Effect<
 				readonly {
@@ -1523,80 +1525,74 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					readonly name: string
 					readonly type: string
 				}[],
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				Effect.tryPromise({
-					try: async () => {
-						const states = await linearClient.workflowStates({ first: 500 })
-						return states.nodes.map((state) => ({
+				linearSdk.workflowStates({ first: 500 }).pipe(
+					Effect.map((states) =>
+						states.nodes.map((state) => ({
 							id: state.id,
 							teamId: state.teamId,
 							name: state.name,
 							type: state.type,
-						}))
-					},
-					catch: (error) =>
-						new BeadsError({
-							message:
-								error instanceof Error
-									? error.message
-									: `Failed to fetch Linear workflow states: ${String(error)}`,
-							command: "linear-sdk workflowStates",
-						}),
-				}).pipe(linearSdk.rateLimit)
+						})),
+					),
+					Effect.mapError(
+						(error) =>
+							new IssueTrackerError({
+								message: error.message,
+								command: "linear-sdk workflowStates",
+							}),
+					),
+				)
 
 			const fetchLabelNameById = (): Effect.Effect<
 				ReadonlyMap<string, string>,
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				Effect.tryPromise({
-					try: async () => {
-						const labels = await linearClient.issueLabels({ first: 500 })
-						return new Map(labels.nodes.map((label) => [label.id, label.name] as const))
-					},
-					catch: (error) =>
-						new BeadsError({
-							message:
-								error instanceof Error
-									? error.message
-									: `Failed to fetch Linear labels: ${String(error)}`,
-							command: "linear-sdk issueLabels",
-						}),
-				}).pipe(linearSdk.rateLimit)
+				linearSdk.issueLabels({ first: 500 }).pipe(
+					Effect.map(
+						(labels) => new Map(labels.nodes.map((label) => [label.id, label.name] as const)),
+					),
+					Effect.mapError(
+						(error) =>
+							new IssueTrackerError({
+								message: error.message,
+								command: "linear-sdk issueLabels",
+							}),
+					),
+				)
 
 			const fetchUsers = (): Effect.Effect<
 				readonly { readonly id: string; readonly name: string; readonly email: string }[],
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				Effect.tryPromise({
-					try: async () => {
-						const users = await linearClient.users({ first: 250 })
-						return users.nodes.map((user) => ({
+				linearSdk.users({ first: 250 }).pipe(
+					Effect.map((users) =>
+						users.nodes.map((user) => ({
 							id: user.id,
 							name: user.name ?? "",
 							email: user.email ?? "",
-						}))
-					},
-					catch: (error) =>
-						new BeadsError({
-							message:
-								error instanceof Error
-									? error.message
-									: `Failed to fetch Linear users: ${String(error)}`,
-							command: "linear-sdk users",
-						}),
-				}).pipe(linearSdk.rateLimit)
+						})),
+					),
+					Effect.mapError(
+						(error) =>
+							new IssueTrackerError({
+								message: error.message,
+								command: "linear-sdk users",
+							}),
+					),
+				)
 
 			const resolveTeamId = (
 				reference: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
-				linearSdk.resolveTeamId(linearClient, reference).pipe(
+			): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
+				linearSdk.resolveTeamId(reference).pipe(
 					Effect.mapError(
 						(error) =>
-							new BeadsError({
+							new IssueTrackerError({
 								message: error.message,
 								command: "linear-sdk team",
 							}),
@@ -1605,12 +1601,12 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const resolveAssigneeId = (
 				reference: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const trimmed = reference.trim()
 					if (trimmed.length === 0) {
 						return yield* Effect.fail(
-							new BeadsError({
+							new IssueTrackerError({
 								message: "Assignee reference cannot be empty",
 								command: "linear-sdk users",
 							}),
@@ -1632,7 +1628,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					})
 					if (!matched) {
 						return yield* Effect.fail(
-							new BeadsError({
+							new IssueTrackerError({
 								message: `Could not resolve Linear assignee '${reference}'`,
 								command: "linear-sdk users",
 							}),
@@ -1722,7 +1718,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const buildLinearIssueSnapshot = (): Effect.Effect<
 				LinearIssueSnapshot,
-				BeadsError,
+				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
 				Effect.gen(function* () {
@@ -1749,13 +1745,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const resolveLinearIssueId = (
 				identifier: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const snapshot = yield* buildLinearIssueSnapshot()
 					const linearId = snapshot.linearIdByIdentifier.get(identifier)
 					if (!linearId) {
 						return yield* Effect.fail(
-							new BeadsError({
+							new IssueTrackerError({
 								message: `Could not resolve Linear issue id: ${identifier}`,
 								command: "linear-sdk issue",
 							}),
@@ -1767,13 +1763,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			const findTeamStateIdForStatus = (
 				teamId: string,
 				targetStatus: IssueStatus,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const workflowStates = yield* fetchWorkflowStates()
 					const teamStates = workflowStates.filter((state) => state.teamId === teamId)
 					if (teamStates.length === 0) {
 						return yield* Effect.fail(
-							new BeadsError({
+							new IssueTrackerError({
 								message: `No workflow states available for team ${teamId}`,
 								command: "linear-sdk workflowStates",
 							}),
@@ -1805,7 +1801,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 			const resolveLabelIds = (
 				labelNames: readonly string[],
-			): Effect.Effect<readonly string[], BeadsError, CommandExecutor.CommandExecutor> =>
+			): Effect.Effect<readonly string[], IssueTrackerError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const labelMap = yield* fetchLabelNameById()
 					const ids: string[] = []
@@ -1831,7 +1827,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 			const runJson = (
 				args: readonly string[],
 				_runCwd?: string,
-			): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+			): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const [command, ...rest] = args
 					if (!command) {
@@ -1896,7 +1892,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const title = rest[0]
 							if (!title) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Create requires issue title",
 										command: "linear-sdk createIssue",
 									}),
@@ -1906,7 +1902,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const configuredTeam = config.defaultTeam?.trim()
 							if (!configuredTeam) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Linear create requires issueTracker.linear.team in config.",
 										command: "linear-sdk createIssue",
 									}),
@@ -1914,17 +1910,17 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							}
 							const teamId = yield* resolveTeamId(configuredTeam)
 
-						const description = parseArgumentValue(rest, "--description")
-						const design = parseArgumentValue(rest, "--design")
-						const acceptance = parseArgumentValue(rest, "--acceptance")
-						const type = parseArgumentValue(rest, "--type")
-						const assignee = parseArgumentValue(rest, "--assignee")
-						const estimate = parseArgumentValue(rest, "--estimate")
-						const parent = parseArgumentValue(rest, "--parent")
-						const priorityArg = parseArgumentValue(rest, "--priority")
-						const priority = toLinearPriorityValue(
-							priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
-						)
+							const description = parseArgumentValue(rest, "--description")
+							const design = parseArgumentValue(rest, "--design")
+							const acceptance = parseArgumentValue(rest, "--acceptance")
+							const type = parseArgumentValue(rest, "--type")
+							const assignee = parseArgumentValue(rest, "--assignee")
+							const estimate = parseArgumentValue(rest, "--estimate")
+							const parent = parseArgumentValue(rest, "--parent")
+							const priorityArg = parseArgumentValue(rest, "--priority")
+							const priority = toLinearPriorityValue(
+								priorityArg ? Number.parseInt(priorityArg, 10) : undefined,
+							)
 							const labelArgs = parseRepeatedArgumentValues(rest, "--labels")
 							const labels = labelArgs
 								.flatMap((value) => value.split(","))
@@ -1938,47 +1934,49 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 									: undefined
 							const parsedEstimate =
 								estimate !== undefined ? Number.parseInt(estimate, 10) : undefined
-						const estimateValue =
-							parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
-								? parsedEstimate
-								: undefined
-						const parentId =
-							parent !== undefined && parent.trim().length > 0
-								? yield* resolveLinearIssueId(parent)
-								: undefined
+							const estimateValue =
+								parsedEstimate !== undefined && !Number.isNaN(parsedEstimate)
+									? parsedEstimate
+									: undefined
+							const parentId =
+								parent !== undefined && parent.trim().length > 0
+									? yield* resolveLinearIssueId(parent)
+									: undefined
 
-						const extraSections: string[] = []
-						if (design) extraSections.push(`## Design\n${design}`)
-						if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
+							const extraSections: string[] = []
+							if (design) extraSections.push(`## Design\n${design}`)
+							if (acceptance) extraSections.push(`## Acceptance\n${acceptance}`)
 							const mergedDescription = [description, ...extraSections]
 								.filter((value): value is string => value !== undefined && value.length > 0)
 								.join("\n\n")
 
 							const createdPayload = yield* withLinearSdkTiming(
 								["i", "create"],
-								Effect.tryPromise({
-									try: () =>
-										linearClient.createIssue({
-											teamId,
-											title,
-											description: mergedDescription.length > 0 ? mergedDescription : undefined,
-											priority,
-											assigneeId,
-											estimate: estimateValue,
-											parentId,
-											labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
-										}),
-									catch: (error) =>
-										new BeadsError({
-											message: error instanceof Error ? error.message : String(error),
-											command: "linear-sdk createIssue",
-										}),
-								}).pipe(linearSdk.rateLimit),
+								linearSdk
+									.createIssue({
+										teamId,
+										title,
+										description: mergedDescription.length > 0 ? mergedDescription : undefined,
+										priority,
+										assigneeId,
+										estimate: estimateValue,
+										parentId,
+										labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+									})
+									.pipe(
+										Effect.mapError(
+											(error) =>
+												new IssueTrackerError({
+													message: error.message,
+													command: "linear-sdk createIssue",
+												}),
+										),
+									),
 							)
 							const createdIssueId = createdPayload.issueId
 							if (!createdIssueId) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Linear create returned no issue",
 										command: "linear-sdk createIssue",
 									}),
@@ -1986,14 +1984,15 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							}
 							const createdLinearIssue = yield* withLinearSdkTiming(
 								["i", "get", createdIssueId],
-								Effect.tryPromise({
-									try: () => linearClient.issue(createdIssueId),
-									catch: (error) =>
-										new BeadsError({
-											message: error instanceof Error ? error.message : String(error),
-											command: "linear-sdk issue",
-										}),
-								}).pipe(linearSdk.rateLimit),
+								linearSdk.issue(createdIssueId).pipe(
+									Effect.mapError(
+										(error) =>
+											new IssueTrackerError({
+												message: error.message,
+												command: "linear-sdk issue",
+											}),
+									),
+								),
 							)
 							const snapshot = yield* buildLinearIssueSnapshot()
 							const created = snapshot.issues.find(
@@ -2017,7 +2016,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const issueIdentifier = rest[0]
 							if (!issueIdentifier) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Update requires issue id",
 										command: "linear-sdk updateIssue",
 									}),
@@ -2028,7 +2027,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const linearId = snapshot.linearIdByIdentifier.get(issueIdentifier)
 							if (!linearId) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: `Issue not found: ${issueIdentifier}`,
 										command: "linear-sdk updateIssue",
 									}),
@@ -2088,24 +2087,26 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 							yield* withLinearSdkTiming(
 								["i", "update"],
-								Effect.tryPromise({
-									try: () =>
-										linearClient.updateIssue(linearId, {
-											title,
-											description: mergedDescription.length > 0 ? mergedDescription : undefined,
-											priority,
-											assigneeId,
-											estimate: estimateValue,
-											labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
-											parentId,
-											stateId,
-										}),
-									catch: (error) =>
-										new BeadsError({
-											message: error instanceof Error ? error.message : String(error),
-											command: "linear-sdk updateIssue",
-										}),
-								}).pipe(linearSdk.rateLimit),
+								linearSdk
+									.updateIssue(linearId, {
+										title,
+										description: mergedDescription.length > 0 ? mergedDescription : undefined,
+										priority,
+										assigneeId,
+										estimate: estimateValue,
+										labelIds: labelIds.length > 0 ? [...labelIds] : undefined,
+										parentId,
+										stateId,
+									})
+									.pipe(
+										Effect.mapError(
+											(error) =>
+												new IssueTrackerError({
+													message: error.message,
+													command: "linear-sdk updateIssue",
+												}),
+										),
+									),
 							)
 							return "{}"
 						}
@@ -2118,7 +2119,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const teamId = snapshot.teamIdByIdentifier.get(issueIdentifier)
 							if (!linearId || !teamId) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: `Issue not found: ${issueIdentifier}`,
 										command: "linear-sdk closeIssue",
 									}),
@@ -2127,14 +2128,15 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const closedStateId = yield* findTeamStateIdForStatus(teamId, "closed")
 							yield* withLinearSdkTiming(
 								["i", "close"],
-								Effect.tryPromise({
-									try: () => linearClient.updateIssue(linearId, { stateId: closedStateId }),
-									catch: (error) =>
-										new BeadsError({
-											message: error instanceof Error ? error.message : String(error),
-											command: "linear-sdk closeIssue",
-										}),
-								}).pipe(linearSdk.rateLimit),
+								linearSdk.updateIssue(linearId, { stateId: closedStateId }).pipe(
+									Effect.mapError(
+										(error) =>
+											new IssueTrackerError({
+												message: error.message,
+												command: "linear-sdk closeIssue",
+											}),
+									),
+								),
 							)
 							return "{}"
 						}
@@ -2145,7 +2147,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						case "dep": {
 							if (rest[0] !== "add") {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Only dependency add is supported",
 										command: "linear-sdk dep add",
 									}),
@@ -2156,7 +2158,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const depType = parseArgumentValue(rest, "--type")
 							if (!issueIdentifier || !dependsOnIdentifier) {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Dependency add requires child and parent ids",
 										command: "linear-sdk dep add",
 									}),
@@ -2164,7 +2166,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							}
 							if (depType !== undefined && depType !== "parent-child") {
 								return yield* Effect.fail(
-									new BeadsError({
+									new IssueTrackerError({
 										message: "Linear backend currently supports only parent-child dependencies",
 										command: "linear-sdk dep add",
 									}),
@@ -2174,21 +2176,22 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 							const parentId = yield* resolveLinearIssueId(dependsOnIdentifier)
 							yield* withLinearSdkTiming(
 								["i", "update"],
-								Effect.tryPromise({
-									try: () => linearClient.updateIssue(childId, { parentId }),
-									catch: (error) =>
-										new BeadsError({
-											message: error instanceof Error ? error.message : String(error),
-											command: "linear-sdk dep add",
-										}),
-								}).pipe(linearSdk.rateLimit),
+								linearSdk.updateIssue(childId, { parentId }).pipe(
+									Effect.mapError(
+										(error) =>
+											new IssueTrackerError({
+												message: error.message,
+												command: "linear-sdk dep add",
+											}),
+									),
+								),
 							)
 							return "{}"
 						}
 
 						default:
 							return yield* Effect.fail(
-								new BeadsError({
+								new IssueTrackerError({
 									message: `Linear backend does not support command: ${command}`,
 									command: `linear-sdk ${args.join(" ")}`,
 								}),
@@ -2210,21 +2213,21 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		const useLocalFirstPath = isLocalFirstIssueBackend(configuredBackend)
 		const mutationSyncTarget = getSyncTargetForBackend(configuredBackend)
 		const legacyIssueDbClient: IssueDbClient | undefined =
-			configuredBackend === "bd"
-				? createBdIssueDbClient("bd")
-				: configuredBackend === "br"
-					? createBrIssueDbClient("br")
+			configuredBackend === "tracker"
+				? createBdIssueDbClient("tracker")
+				: configuredBackend === "legacy"
+					? createBrIssueDbClient("legacy")
 					: undefined
 
-		const mapLocalIssueStoreError = (command: string, error: LocalIssueStoreError): BeadsError =>
-			new BeadsError({
+		const mapLocalIssueStoreError = (command: string, error: LocalIssueStoreError): IssueTrackerError =>
+			new IssueTrackerError({
 				message: error.message,
 				command,
 				stderr: error.cause === undefined ? undefined : String(error.cause),
 			})
 
-		const mapIssueSyncError = (command: string, error: IssueSyncError): BeadsError =>
-			new BeadsError({
+		const mapIssueSyncError = (command: string, error: IssueSyncError): IssueTrackerError =>
+			new IssueTrackerError({
 				message: error.message,
 				command,
 				stderr: error.cause === undefined ? undefined : String(error.cause),
@@ -2233,30 +2236,56 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		const fromLocalStore = <A>(
 			command: string,
 			effect: Effect.Effect<A, LocalIssueStoreError>,
-		): Effect.Effect<A, BeadsError> =>
+		): Effect.Effect<A, IssueTrackerError> =>
 			effect.pipe(Effect.mapError((error) => mapLocalIssueStoreError(command, error)))
 
 		const fromIssueSync = <A>(
 			command: string,
 			effect: Effect.Effect<A, IssueSyncError>,
-		): Effect.Effect<A, BeadsError> =>
+		): Effect.Effect<A, IssueTrackerError> =>
 			effect.pipe(Effect.mapError((error) => mapIssueSyncError(command, error)))
 
-		const ensureLinearBootstrapForRead = (cwd?: string): Effect.Effect<void, BeadsError> =>
+		const ensureLinearBootstrapForRead = (
+			cwd?: string,
+			maxSyncWaitMs = DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS,
+		): Effect.Effect<boolean, IssueTrackerError> =>
 			configuredBackend !== "linear"
-				? Effect.void
-				: fromIssueSync("issue-sync bootstrapLinear", issueSyncService.bootstrapLinear(cwd)).pipe(
-						Effect.asVoid,
-					)
+				? Effect.succeed(true)
+				: Effect.gen(function* () {
+						const backendSync = yield* backendSyncRouter.resolve()
+						if (backendSync === undefined) {
+							return true
+						}
+
+						const bootstrapEffect = fromIssueSync(
+							"issue-sync bootstrapLinear",
+							backendSync.bootstrap(cwd),
+						).pipe(
+							Effect.asVoid,
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Linear bootstrap failed: ${error.message}`),
+							),
+						)
+
+						const bootstrapFiber = yield* Effect.forkIn(bootstrapEffect, scope)
+						if (maxSyncWaitMs <= 0) {
+							return false
+						}
+
+						return yield* Effect.raceFirst(
+							Fiber.await(bootstrapFiber).pipe(Effect.as(true)),
+							Effect.sleep(`${maxSyncWaitMs} millis`).pipe(Effect.as(false)),
+						)
+					})
 
 		const runBd = (
 			args: readonly string[],
 			runCwd?: string,
-		): Effect.Effect<string, BeadsError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<string, IssueTrackerError | SyncRequiredError, CommandExecutor.CommandExecutor> =>
 			legacyIssueDbClient !== undefined
 				? legacyIssueDbClient.runJson(args, runCwd)
 				: Effect.fail(
-						new BeadsError({
+						new IssueTrackerError({
 							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
 							command: `legacy ${args.join(" ")}`,
 						}),
@@ -2265,11 +2294,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 		const runBdDirect = (
 			args: readonly string[],
 			runCwd?: string,
-		): Effect.Effect<string, BeadsError, CommandExecutor.CommandExecutor> =>
+		): Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor> =>
 			legacyIssueDbClient !== undefined
 				? legacyIssueDbClient.runDirect(args, runCwd)
 				: Effect.fail(
-						new BeadsError({
+						new IssueTrackerError({
 							message: `Legacy command path is unavailable for ${configuredBackend} backend`,
 							command: `legacy ${args.join(" ")}`,
 						}),
@@ -2313,7 +2342,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						const output = yield* runBd(args, effectiveCwd).pipe(
 							Effect.catchAll((error) => {
 								if (
-									error._tag === "BeadsError" &&
+									error._tag === "IssueTrackerError" &&
 									includeSortFlags &&
 									isUnsupportedSortFlagError(error)
 								) {
@@ -2356,9 +2385,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					}
 				}),
 
-			show: (id: string, cwd?: string) =>
+			show: (id: string, cwd?: string, syncOptions?: IssueReadSyncOptions) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
+					const maxSyncWaitMs = Math.max(
+						0,
+						Math.floor(syncOptions?.maxSyncWaitMs ?? DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS),
+					)
 					if (useLocalFirstPath) {
 						const localIssue = yield* fromLocalStore(
 							"local-store show",
@@ -2372,9 +2405,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						// before returning not found. If refresh fails, still surface not found rather than
 						// leaking backend sync failures for missing issues.
 						if (configuredBackend === "linear") {
-							yield* ensureLinearBootstrapForRead(effectiveCwd).pipe(
-								Effect.catchAll(() => Effect.void),
-							)
+							yield* ensureLinearBootstrapForRead(effectiveCwd, maxSyncWaitMs)
 						}
 
 						const refreshedIssue = yield* fromLocalStore(
@@ -2389,7 +2420,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(["show", id], effectiveCwd)
 
-					// bd returns an array with a single item for show command
+					// tracker returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 
@@ -2420,7 +2451,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						return [...issues]
 					}
 
-					// bd show accepts multiple IDs: bd show id1 id2 id3 --json
+					// tracker show accepts multiple IDs: tracker show id1 id2 id3 --json
 					const output = yield* runBd(["show", ...ids], effectiveCwd)
 
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
@@ -2456,7 +2487,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						)
 						if (!updated) {
 							return yield* Effect.fail(
-								new BeadsError({
+								new IssueTrackerError({
 									message: `Issue not found: ${id}`,
 									command: `local-store update ${id}`,
 								}),
@@ -2498,7 +2529,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--estimate", String(fields.estimate))
 					}
 					if (fields.labels && fields.labels.length > 0) {
-						// bd update uses --set-labels for each label
+						// tracker update uses --set-labels for each label
 						for (const label of fields.labels) {
 							args.push("--set-labels", label)
 						}
@@ -2520,7 +2551,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						)
 						if (!closed) {
 							return yield* Effect.fail(
-								new BeadsError({
+								new IssueTrackerError({
 									message: `Issue not found: ${id}`,
 									command: `local-store close ${id}`,
 								}),
@@ -2544,7 +2575,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						return ZERO_SYNC_RESULT
 					}
 
-					// Check if beads sync is enabled (config + network)
+					// Check if tracker sync is enabled (config + network)
 					const syncStatus = yield* offlineService.isIssueTrackerSyncEnabled()
 					if (!syncStatus.enabled) {
 						// Return empty result when offline - issues are tracked locally
@@ -2553,9 +2584,13 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (configuredBackend === "linear") {
+						const backendSync = yield* backendSyncRouter.resolve()
+						if (backendSync === undefined) {
+							return ZERO_SYNC_RESULT
+						}
 						return yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
-							issueSyncService.flushLinearQueue(effectiveCwd),
+							backendSync.flushQueue(effectiveCwd),
 						)
 					}
 
@@ -2564,9 +2599,9 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 				}),
 
 			/**
-			 * Import-only sync - re-imports beads from JSONL into database without git operations.
-			 * Use after git merge to recover any beads that might have been incorrectly
-			 * removed by the bd merge driver.
+			 * Import-only sync - re-imports tracker from JSONL into database without git operations.
+			 * Use after git merge to recover any tracker that might have been incorrectly
+			 * removed by the tracker merge driver.
 			 */
 			syncImportOnly: (cwd?: string) =>
 				Effect.gen(function* () {
@@ -2587,10 +2622,10 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					// Run recovery script that fixes tombstoned issues from JSONL
-					// This is a workaround for bd sync bug (see az-zby)
+					// This is a workaround for tracker sync bug (see az-zby)
 					const scriptPath = effectiveCwd
-						? `${effectiveCwd}/.beads/recover-tombstones.sh`
-						: ".beads/recover-tombstones.sh"
+						? `${effectiveCwd}/.azedarach/recover-tombstones.sh`
+						: ".azedarach/recover-tombstones.sh"
 
 					const command = Command.make("bash", scriptPath).pipe(
 						effectiveCwd ? Command.workingDirectory(effectiveCwd) : (x) => x,
@@ -2599,7 +2634,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 					const result = yield* Command.string(command).pipe(
 						Effect.mapError((error) => {
 							const stderr = "stderr" in error ? String(error.stderr) : String(error)
-							return new BeadsError({
+							return new IssueTrackerError({
 								message: `Tombstone recovery failed: ${stderr}`,
 								command: `bash ${scriptPath}`,
 								stderr,
@@ -2711,7 +2746,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						args.push("--estimate", String(params.estimate))
 					}
 					if (params.labels && params.labels.length > 0) {
-						// bd create uses --labels with comma-separated values
+						// tracker create uses --labels with comma-separated values
 						args.push("--labels", params.labels.join(","))
 					}
 					if (params.parent !== undefined) {
@@ -2720,7 +2755,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(args, effectiveCwd)
 
-					// bd create returns a single issue object (not an array)
+					// tracker create returns a single issue object (not an array)
 					const parsed = yield* parseJson(IssueSchema, output)
 					return normalizeIssue(parsed)
 				}),
@@ -2735,7 +2770,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 						)
 						if (!deleted) {
 							return yield* Effect.fail(
-								new BeadsError({
+								new IssueTrackerError({
 									message: `Issue not found: ${id}`,
 									command: `local-store delete ${id}`,
 								}),
@@ -2772,7 +2807,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(["show", epicId], effectiveCwd)
 
-					// bd show returns an array with a single item
+					// tracker show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 
@@ -2811,7 +2846,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(["show", epicId], effectiveCwd)
 
-					// bd returns an array with a single item for show command
+					// tracker returns an array with a single item for show command
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 
@@ -2884,7 +2919,7 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 
 					const output = yield* runBd(["show", issueId], effectiveCwd)
 
-					// bd show returns an array with a single item
+					// tracker show returns an array with a single item
 					const parsed = yield* parseJson(Schema.Array(IssueSchema), output)
 					const normalized = normalizeIssues(parsed)
 
@@ -2929,15 +2964,11 @@ export class BeadsClient extends Effect.Service<BeadsClient>()("BeadsClient", {
 }) {}
 
 /**
- * Complete BeadsClient layer with all platform dependencies (legacy alias)
+ * Complete IssueTrackerClient layer with all platform dependencies (legacy alias)
  *
- * @deprecated Use BeadsClient.Default instead
+ * @deprecated Use IssueTrackerClient.Default instead
  */
-export const BeadsClientLiveWithPlatform = BeadsClient.Default
-
-// ============================================================================
-// Convenience Functions
-// ============================================================================
+export const IssueTrackerClientLiveWithPlatform = IssueTrackerClient.Default
 
 /**
  * Get all issues matching filters
@@ -2948,9 +2979,9 @@ export const list = (
 	options?: IssueListOptions,
 ): Effect.Effect<
 	Issue[],
-	BeadsError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.list(filters, cwd, options))
+	IssueTrackerError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.list(filters, cwd, options))
 
 /**
  * Get a single issue by ID
@@ -2960,9 +2991,9 @@ export const show = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue,
-	BeadsError | NotFoundError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.show(id, cwd))
+	IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.show(id, cwd))
 
 /**
  * Update an issue
@@ -2984,9 +3015,9 @@ export const update = (
 	cwd?: string,
 ): Effect.Effect<
 	void,
-	BeadsError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.update(id, fields, cwd))
+	IssueTrackerError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.update(id, fields, cwd))
 
 /**
  * Close an issue
@@ -2997,20 +3028,20 @@ export const close = (
 	cwd?: string,
 ): Effect.Effect<
 	void,
-	BeadsError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.close(id, reason, cwd))
+	IssueTrackerError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.close(id, reason, cwd))
 
 /**
- * Sync beads database
+ * Sync tracker database
  */
 export const sync = (
 	cwd?: string,
 ): Effect.Effect<
 	SyncResult,
-	BeadsError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.sync(cwd))
+	IssueTrackerError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.sync(cwd))
 
 /**
  * Get ready issues
@@ -3019,9 +3050,9 @@ export const ready = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue[],
-	BeadsError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.ready(cwd))
+	IssueTrackerError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.ready(cwd))
 
 /**
  * Search issues
@@ -3031,9 +3062,9 @@ export const search = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue[],
-	BeadsError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.search(query, cwd))
+	IssueTrackerError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.search(query, cwd))
 
 /**
  * Create a new issue
@@ -3052,9 +3083,9 @@ export const create = (params: {
 	cwd?: string
 }): Effect.Effect<
 	Issue,
-	BeadsError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.create(params))
+	IssueTrackerError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.create(params))
 
 /**
  * Delete an issue
@@ -3064,9 +3095,9 @@ export const deleteIssue = (
 	cwd?: string,
 ): Effect.Effect<
 	void,
-	BeadsError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.delete(id, cwd))
+	IssueTrackerError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.delete(id, cwd))
 
 /**
  * Get an epic with its child tasks
@@ -3076,9 +3107,9 @@ export const getEpicWithChildren = (
 	cwd?: string,
 ): Effect.Effect<
 	{ epic: Issue; children: ReadonlyArray<DependencyRef> },
-	BeadsError | NotFoundError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.getEpicWithChildren(epicId, cwd))
+	IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.getEpicWithChildren(epicId, cwd))
 
 /**
  * Add a dependency between two issues
@@ -3090,9 +3121,9 @@ export const addDependency = (
 	cwd?: string,
 ): Effect.Effect<
 	void,
-	BeadsError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
+	IssueTrackerError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.addDependency(issueId, dependsOnId, type, cwd))
 
 /**
  * Get the parent epic of an issue, if it has one
@@ -3102,6 +3133,6 @@ export const getParentEpic = (
 	cwd?: string,
 ): Effect.Effect<
 	Issue | undefined,
-	BeadsError | NotFoundError | ParseError | SyncRequiredError,
-	BeadsClient | CommandExecutor.CommandExecutor
-> => Effect.flatMap(BeadsClient, (client) => client.getParentEpic(issueId, cwd))
+	IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
+	IssueTrackerClient | CommandExecutor.CommandExecutor
+> => Effect.flatMap(IssueTrackerClient, (client) => client.getParentEpic(issueId, cwd))

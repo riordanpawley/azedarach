@@ -7,7 +7,7 @@
  * - Progress bar showing completed/total children
  */
 
-import type { DependencyRef, Issue } from "../core/BeadsClient.js"
+import type { DependencyRef, Issue } from "../core/IssueTrackerClient.js"
 import { theme } from "./theme.js"
 
 interface EpicHeaderProps {

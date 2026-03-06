@@ -318,7 +318,7 @@ Canonical fixture profile names:
 - Expected: diff opens against merge-base with readable output.
 - Links: AZ-FR-1006.
 
-### AZ-AT-0906 Merge bead into bead
+### AZ-AT-0906 Merge issue into issue
 
 - Steps: source issue `Space b`, select target, confirm.
 - Expected: source changes merged to target branch, self-merge prevented.
@@ -855,6 +855,20 @@ Canonical fixture profile names:
 - Expected: phase-level cancelability metadata is present where implemented.
 - Links: AZ-FR-3909.
 
+### AZ-AT-2607 Bounded-wait read returns with stale hint under throttle
+
+- Preconditions: force backend refresh to remain queued beyond default read wait budget.
+- Steps: run read operation in default mode.
+- Expected: read returns quickly from local state and clearly indicates potential staleness.
+- Links: AZ-FR-3811, AZ-FR-3813.
+
+### AZ-AT-2608 Explicit wait mode extends read freshness budget
+
+- Preconditions: same throttled conditions as AZ-AT-2607.
+- Steps: run equivalent read operation with explicit wait mode.
+- Expected: operation uses higher wait budget and returns fresher data when sync completes within that budget.
+- Links: AZ-FR-3812, AZ-FR-3814.
+
 ## 6.29 Machine-Readable Probe and Harness Acceptance
 
 ### AZ-AT-2701 Probe is side-effect free
@@ -971,7 +985,7 @@ A release candidate MUST pass:
 - branch-origin and relationship-display scenarios AZ-AT-2301 through AZ-AT-2305
 - upstream follow-on scenarios AZ-AT-2401 through AZ-AT-2409
 - optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2505
-- background operation scenarios AZ-AT-2601 through AZ-AT-2606
+- background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
 - extended conformance scenarios AZ-AT-2812 through AZ-AT-2827

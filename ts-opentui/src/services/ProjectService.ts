@@ -24,7 +24,7 @@ import { Data, Effect, Schema, SubscriptionRef } from "effect"
 const ProjectSchema = Schema.Struct({
 	name: Schema.String,
 	path: Schema.String,
-	beadsPath: Schema.optional(Schema.String),
+	issueStorePath: Schema.optional(Schema.String),
 })
 
 export type Project = Schema.Schema.Type<typeof ProjectSchema>

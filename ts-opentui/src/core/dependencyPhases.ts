@@ -9,7 +9,7 @@
  * Phase N = tasks only blocked by Phase 1..N-1 tasks
  */
 
-import type { Issue } from "./BeadsClient.js"
+import type { Issue } from "./IssueTrackerClient.js"
 
 /**
  * Phase information for a single task

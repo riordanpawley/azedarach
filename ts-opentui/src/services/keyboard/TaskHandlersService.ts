@@ -12,7 +12,7 @@
 
 import { Effect } from "effect"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
-import { BeadsClient } from "../../core/BeadsClient.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import { COLUMNS } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
@@ -34,7 +34,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			NavigationService.Default,
 			EditorService.Default,
 			OverlayService.Default,
-			BeadsClient.Default,
+			IssueTrackerClient.Default,
 			IssueEditorService.Default,
 			PRWorkflow.Default,
 			MutationQueue.Default,
@@ -47,7 +47,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 			const nav = yield* NavigationService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-				const issueTrackerClient = yield* BeadsClient
+				const issueTrackerClient = yield* IssueTrackerClient
 				const issueEditor = yield* IssueEditorService
 			const prWorkflow = yield* PRWorkflow
 			const mutationQueue = yield* MutationQueue
@@ -106,7 +106,7 @@ export class TaskHandlersService extends Effect.Service<TaskHandlersService>()(
 					yield* board.removeTaskFromMutation(taskId)
 					yield* mutationQueue.add(deleteMutation)
 					yield* toast.show("success", `Deleted ${taskId}`)
-					// Await mutation processing - bd commands are fast (~50ms)
+					// Await mutation processing - tracker commands are fast (~50ms)
 					// MutationQueue handles rollback and error toasts on failure
 					yield* mutationQueue.process(taskId)
 					yield* nav.initialize()

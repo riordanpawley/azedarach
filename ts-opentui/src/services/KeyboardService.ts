@@ -10,7 +10,7 @@
  */
 
 import { Effect, Ref } from "effect"
-import { BeadsClient } from "../core/BeadsClient.js"
+import { IssueTrackerClient } from "../core/IssueTrackerClient.js"
 import { TmuxService } from "../core/TmuxService.js"
 import { BoardService } from "./BoardService.js"
 import { EditorService } from "./EditorService.js"
@@ -56,7 +56,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		EditorService.Default,
 		ViewService.Default,
 		TmuxService.Default,
-		BeadsClient.Default,
+		IssueTrackerClient.Default,
 		BoardService.Default,
 		GitSyncService.Default,
 	],
@@ -83,7 +83,7 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 		const editor = yield* EditorService
 		const viewService = yield* ViewService
 		const tmux = yield* TmuxService
-			const issueTrackerClient = yield* BeadsClient
+			const issueTrackerClient = yield* IssueTrackerClient
 		const board = yield* BoardService
 		const gitSync = yield* GitSyncService
 

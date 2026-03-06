@@ -150,32 +150,32 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		key: "issueSyncEnabled",
 		label: "Issue Sync",
 		getValue: (c) => {
-			if (c.issueTracker?.beads !== undefined) return c.issueTracker.beads.syncEnabled ?? true
-			if (c.issueTracker?.beads_rust !== undefined)
-				return c.issueTracker.beads_rust.syncEnabled ?? true
+			if (c.issueTracker?.tracker !== undefined) return c.issueTracker.tracker.syncEnabled ?? true
+			if (c.issueTracker?.legacy !== undefined)
+				return c.issueTracker.legacy.syncEnabled ?? true
 			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
 			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
 			return false
 		},
 		toggle: (c) => {
-			if (c.issueTracker?.beads !== undefined) {
+			if (c.issueTracker?.tracker !== undefined) {
 				return {
 					...c,
 					issueTracker: {
-						beads: {
-							...c.issueTracker.beads,
-							syncEnabled: !(c.issueTracker.beads.syncEnabled ?? true),
+						tracker: {
+							...c.issueTracker.tracker,
+							syncEnabled: !(c.issueTracker.tracker.syncEnabled ?? true),
 						},
 					},
 				}
 			}
-			if (c.issueTracker?.beads_rust !== undefined) {
+			if (c.issueTracker?.legacy !== undefined) {
 				return {
 					...c,
 					issueTracker: {
-						beads_rust: {
-							...c.issueTracker.beads_rust,
-							syncEnabled: !(c.issueTracker.beads_rust.syncEnabled ?? true),
+						legacy: {
+							...c.issueTracker.legacy,
+							syncEnabled: !(c.issueTracker.legacy.syncEnabled ?? true),
 						},
 					},
 				}

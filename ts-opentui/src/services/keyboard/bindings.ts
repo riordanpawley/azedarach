@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect"
-import type { BeadsClient, Issue } from "../../core/BeadsClient.js"
+import type { IssueTrackerClient, Issue } from "../../core/IssueTrackerClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
@@ -53,7 +53,7 @@ export interface BindingContext {
 	toast: ToastService
 	viewService: ViewService
 	tmux: TmuxService
-	issueTrackerClient: BeadsClient
+	issueTrackerClient: IssueTrackerClient
 	board: BoardService
 	gitSync: GitSyncService
 }

@@ -86,7 +86,7 @@ export const boardIsLoadingAtom = appRuntime.subscribable(
 )
 
 /**
- * Refresh board data from BeadsClient
+ * Refresh board data from IssueTrackerClient
  *
  * Must be called before navigation can work.
  *
@@ -115,7 +115,7 @@ export const isRefreshingGitStatsAtom = appRuntime.subscriptionRef(
 )
 
 /**
- * Refresh git stats for all beads with active sessions
+ * Refresh git stats for all tracker with active sessions
  *
  * This is a lightweight refresh that only updates git-related fields
  * (behind count, uncommitted changes, line additions/deletions),

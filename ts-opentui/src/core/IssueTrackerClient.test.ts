@@ -2,12 +2,12 @@ import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
 import {
 	extractJsonPayload,
-	getSyncTargetForBackend,
 	getLinearCommandPerfMetadata,
+	getSyncTargetForBackend,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
 	withIssueDbTiming,
-} from "./BeadsClient.js"
+} from "./IssueTrackerClient.js"
 
 interface RecordedTiming {
 	readonly backend: "linear"
@@ -143,10 +143,10 @@ describe("local-first backend selection", () => {
 
 	it("keeps legacy backends on non local-first path", () => {
 		const bdBackend = resolveConfiguredIssueBackend({
-			beads: { syncEnabled: true },
+			tracker: { syncEnabled: true },
 		})
 		const brBackend = resolveConfiguredIssueBackend({
-			beads_rust: { syncEnabled: true },
+			legacy: { syncEnabled: true },
 		})
 
 		expect(isLocalFirstIssueBackend(bdBackend)).toBe(false)

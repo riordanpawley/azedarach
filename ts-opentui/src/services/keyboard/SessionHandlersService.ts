@@ -120,7 +120,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 * If the task has an existing worktree (orphaned), includes additional
 			 * context about checking git status and continuing from previous work.
 			 *
-			 * This helps Claude understand that it should work on a specific beads issue.
+			 * This helps Claude understand that it should work on a specific tracker issue.
 			 * Queued to prevent race conditions with other operations on the same task.
 			 * Blocked if task already has an operation in progress.
 			 */

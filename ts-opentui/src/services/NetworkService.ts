@@ -7,7 +7,7 @@
  * When network is unavailable:
  * - Git push/fetch operations are silently skipped
  * - PR creation is disabled with a message
- * - Beads sync is skipped
+ * - IssueTracker sync is skipped
  *
  * Config options control behavior:
  * - network.autoDetect: Enable/disable automatic detection (default: true)

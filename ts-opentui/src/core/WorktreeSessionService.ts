@@ -79,7 +79,7 @@ export interface WorktreeSessionResult {
 /**
  * Options for building a tmux session from a bead ID
  *
- * This is the primary entry point for creating tmux sessions for beads.
+ * This is the primary entry point for creating tmux sessions for tracker.
  * Consolidates session name generation, worktree path computation, and
  * the common pattern of getOrCreateSession + ensureWindow.
  */
@@ -188,7 +188,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 				/**
 				 * Build a tmux session from a bead ID
 				 *
-				 * This is the primary entry point for creating tmux sessions for beads.
+				 * This is the primary entry point for creating tmux sessions for tracker.
 				 * It consolidates:
 				 * 1. Session name generation (uses getIssueSessionName)
 				 * 2. Worktree path computation (uses getWorktreePath)

@@ -469,7 +469,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				// Bulk cleanup - use bulkCleanup dialog with choice
 				const taskIds = tasksWithWorktrees.map((t) => t.id)
 
-				// Define worktree-only cleanup (keep beads open)
+				// Define worktree-only cleanup (keep tracker open)
 				const onWorktreeOnly = Effect.gen(function* () {
 					yield* toast.show("info", `Cleaning up ${taskIds.length} worktrees...`)
 
@@ -505,9 +505,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* toast.show("success", `Cleaned up ${taskIds.length} worktrees`)
 				}).pipe(Effect.catchAll(Effect.logError))
 
-				// Define full cleanup (close beads too)
+				// Define full cleanup (close tracker too)
 				const onFullCleanup = Effect.gen(function* () {
-					yield* toast.show("info", `Full cleanup of ${taskIds.length} beads...`)
+					yield* toast.show("info", `Full cleanup of ${taskIds.length} tracker...`)
 
 					yield* Effect.all(
 						tasksWithWorktrees.map((task) =>
@@ -540,7 +540,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							gitDeletions: undefined,
 						})
 					}
-					yield* toast.show("success", `Full cleanup of ${taskIds.length} beads completed`)
+					yield* toast.show("success", `Full cleanup of ${taskIds.length} tracker completed`)
 				}).pipe(Effect.catchAll(Effect.logError))
 
 				// Show bulk cleanup dialog

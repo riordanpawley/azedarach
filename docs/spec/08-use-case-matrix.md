@@ -591,7 +591,7 @@ The following condensed scenarios provide additional edge and scale coverage.
 - UC-EXT-032: merge to base branch canceled at confirmation prompt.
 - UC-EXT-033: merge to base branch conflicts then abort and retry.
 - UC-EXT-034: show diff for binary file changes with graceful fallback.
-- UC-EXT-035: merge-bead flow canceled before target selection.
+- UC-EXT-035: merge-issue flow canceled before target selection.
 
 ### PR and Network
 

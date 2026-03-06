@@ -9,7 +9,7 @@
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { ProjectService } from "../services/ProjectService.js"
-import { BeadsClient } from "./BeadsClient.js"
+import { IssueTrackerClient } from "./IssueTrackerClient.js"
 import { LocalIssueStore } from "./LocalIssueStore.js"
 
 // ============================================================================
@@ -65,7 +65,7 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 /**
  * ImageAttachmentService
  *
- * Manages image attachments for beads tasks. Since the beads CLI doesn't support
+ * Manages image attachments for tracker tasks. Since the tracker CLI doesn't support
  * file attachments, we store images in a local directory structure and track
  * metadata in a JSON index file.
  *
@@ -79,11 +79,11 @@ const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".sv
 export class ImageAttachmentService extends Effect.Service<ImageAttachmentService>()(
 	"ImageAttachmentService",
 	{
-		dependencies: [BeadsClient.Default, LocalIssueStore.Default, ProjectService.Default],
+		dependencies: [IssueTrackerClient.Default, LocalIssueStore.Default, ProjectService.Default],
 		effect: Effect.gen(function* () {
 			const fs = yield* FileSystem.FileSystem
 			const path = yield* Path.Path
-			const issueTrackerClient = yield* BeadsClient
+			const issueTrackerClient = yield* IssueTrackerClient
 			const localIssueStore = yield* LocalIssueStore
 			const projectService = yield* ProjectService
 

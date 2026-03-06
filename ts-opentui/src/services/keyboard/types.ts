@@ -8,7 +8,7 @@
 
 import type { CommandExecutor } from "@effect/platform"
 import type { Effect } from "effect"
-import type { BeadsError } from "../../core/BeadsClient.js"
+import type { IssueTrackerError } from "../../core/IssueTrackerClient.js"
 
 // ============================================================================
 // Mode Types
@@ -59,7 +59,7 @@ export type KeybindingDeps = CommandExecutor.CommandExecutor
 /**
  * Keybinding definition with mode-specific action
  *
- * Actions may have platform requirements (CommandExecutor, FileSystem, BeadsClient)
+ * Actions may have platform requirements (CommandExecutor, FileSystem, IssueTrackerClient)
  * which are satisfied by the runtime layer when KeyboardService is used.
  *
  * The `mode` field can be:
@@ -72,7 +72,7 @@ export type KeybindingDeps = CommandExecutor.CommandExecutor
  * Actions handle their own errors internally via toast notifications,
  * so this is effectively `unknown` at the boundary.
  */
-export type KeybindingError = BeadsError | unknown
+export type KeybindingError = IssueTrackerError | unknown
 
 export interface Keybinding {
 	readonly key: string

@@ -300,12 +300,12 @@ export interface ResolvedConfig {
 	}
 	issueTracker:
 		| {
-				beads: {
+				tracker: {
 					syncEnabled: boolean
 				}
 		  }
 		| {
-				beads_rust: {
+				legacy: {
 					syncEnabled: boolean
 				}
 		  }
@@ -322,6 +322,10 @@ export interface ResolvedConfig {
 						port: number
 						events: readonly string[]
 						secret: string | undefined
+					}
+					syncThrottle: {
+						maxPerMinute: number
+						burst: number
 					}
 				}
 		  }
@@ -372,7 +376,7 @@ export interface ResolvedConfig {
 	projects: ReadonlyArray<{
 		name: string
 		path: string
-		beadsPath?: string
+		issueStorePath?: string
 	}>
 	defaultProject: string | undefined
 }
@@ -407,26 +411,34 @@ const mergeIssueTrackerWithDefaults = (
 		events: ["Issue"],
 		secret: undefined,
 	}
+	const defaultLinearSyncThrottle: {
+		readonly maxPerMinute: number
+		readonly burst: number
+	} = {
+		maxPerMinute: 10,
+		burst: 10,
+	}
 
 	if (issueTracker !== undefined) {
-		if (issueTracker.beads !== undefined) {
+		if (issueTracker.tracker !== undefined) {
 			return {
-				beads: {
-					syncEnabled: issueTracker.beads.syncEnabled ?? true,
+				tracker: {
+					syncEnabled: issueTracker.tracker.syncEnabled ?? true,
 				},
 			}
 		}
 
-		if (issueTracker.beads_rust !== undefined) {
+		if (issueTracker.legacy !== undefined) {
 			return {
-				beads_rust: {
-					syncEnabled: issueTracker.beads_rust.syncEnabled ?? true,
+				legacy: {
+					syncEnabled: issueTracker.legacy.syncEnabled ?? true,
 				},
 			}
 		}
 
 		if (issueTracker.linear !== undefined) {
 			const configuredWebhooks = issueTracker.linear.webhooks
+			const configuredSyncThrottle = issueTracker.linear.syncThrottle
 			return {
 				linear: {
 					syncEnabled: issueTracker.linear.syncEnabled ?? true,
@@ -440,6 +452,11 @@ const mergeIssueTrackerWithDefaults = (
 						port: configuredWebhooks?.port ?? defaultLinearWebhooks.port,
 						events: configuredWebhooks?.events ?? defaultLinearWebhooks.events,
 						secret: configuredWebhooks?.secret ?? defaultLinearWebhooks.secret,
+					},
+					syncThrottle: {
+						maxPerMinute:
+							configuredSyncThrottle?.maxPerMinute ?? defaultLinearSyncThrottle.maxPerMinute,
+						burst: configuredSyncThrottle?.burst ?? defaultLinearSyncThrottle.burst,
 					},
 				},
 			}

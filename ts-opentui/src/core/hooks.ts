@@ -66,7 +66,7 @@ export const getAzNotifyPath = (): string => AZ_NOTIFY_PATH
  * Get the absolute path to the pre-compact hook script
  *
  * Returns the pre-computed path to bin/az-pre-compact.sh.
- * This script outputs a reminder for Claude to update beads
+ * This script outputs a reminder for Claude to update tracker
  * before context compaction.
  */
 export const getAzPreCompactPath = (): string => AZ_PRE_COMPACT_PATH
@@ -123,8 +123,8 @@ export const WORKTREE_PERMISSIONS = {
 		allow: [
 			// View materialized issue attachment images
 			"Read(//**/.azedarach/tmp/attachments/**)",
-			// Use beads CLI for issue management
-			"Bash(bd:*)",
+			// Use tracker CLI for issue management
+			"Bash(tracker:*)",
 			// Use az CLI for session control (dev server, notify, etc.)
 			"Bash(az:*)",
 		],
@@ -139,7 +139,7 @@ export const WORKTREE_PERMISSIONS = {
  *
  * Also injects essential permissions for:
  * - Viewing issue-attached images (.azedarach/tmp/attachments/**)
- * - Using the beads CLI (bd:*)
+ * - Using the tracker CLI (tracker:*)
  * - Using the az CLI (az:*)
  *
  * Hook events:
@@ -231,7 +231,7 @@ export const generateHookConfig = (issueId: string, options: HookConfigOptions =
 	if (preCompactEnabled) {
 		hooks.PreCompact = [
 			{
-				// Fires before context compaction - outputs reminder to update beads
+				// Fires before context compaction - outputs reminder to update tracker
 				// This ensures session progress is preserved before context is lost
 				hooks: [
 					{
@@ -405,7 +405,7 @@ The \`az dev\` commands sync state via tmux metadata.
 
 1. **You're here** - TUI spawned your session in this worktree
 2. **Do your work** - Use \`az dev\` for server control
-3. **Sync beads** - Run \`bd sync\` before finishing
+3. **Sync tracker** - Run \`tracker sync\` before finishing
 4. **Complete** - Clean exit triggers TUI completion workflow (PR creation)
 
 ## Quick Reference
@@ -416,6 +416,6 @@ The \`az dev\` commands sync state via tmux metadata.
 | \`az dev stop ${issueId}\` | Stop dev server |
 | \`az dev restart ${issueId}\` | Restart dev server |
 | \`az dev status ${issueId}\` | Check server status |
-| \`bd sync\` | Sync beads changes |
-| \`bd close ${issueId}\` | Mark bead complete |
+| \`tracker sync\` | Sync tracker changes |
+| \`tracker close ${issueId}\` | Mark bead complete |
 `

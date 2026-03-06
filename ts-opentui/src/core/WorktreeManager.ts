@@ -65,7 +65,7 @@ export interface CreateWorktreeOptions {
 	/**
 	 * Whether to enable the PreCompact hook for context preservation.
 	 *
-	 * When true (default), injects a hook that reminds Claude to update beads
+	 * When true (default), injects a hook that reminds Claude to update tracker
 	 * before context compaction. This ensures work-in-progress is preserved.
 	 *
 	 * @default true

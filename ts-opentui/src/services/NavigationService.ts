@@ -13,7 +13,7 @@
  */
 
 import { Effect, Stream, SubscriptionRef } from "effect"
-import { BeadsClient, type Issue } from "../core/BeadsClient.js"
+import { IssueTrackerClient, type Issue } from "../core/IssueTrackerClient.js"
 import { computeDependencyPhases } from "../core/dependencyPhases.js"
 import type { TaskWithSession } from "../ui/types.js"
 import { BoardService } from "./BoardService.js"
@@ -61,7 +61,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		BoardService.Default,
 		DiagnosticsService.Default,
 		EditorService.Default,
-		BeadsClient.Default,
+		IssueTrackerClient.Default,
 	],
 
 	scoped: Effect.gen(function* () {
@@ -69,7 +69,7 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 		const board = yield* BoardService
 		const diagnostics = yield* DiagnosticsService
 		const editor = yield* EditorService
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 
 		// Register with diagnostics - tracks service health
 		yield* diagnostics.trackService("NavigationService", "Cursor navigation and focus management")

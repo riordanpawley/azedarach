@@ -156,7 +156,9 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				} satisfies LinearWebhookServiceApi
 			}
 
-			const linearClientResult = yield* Effect.either(linearSdk.getClientFromEnv)
+			const linearClientResult = yield* Effect.either(
+				linearSdk.resolveTeamId(teamRef).pipe(Effect.as(teamRef)),
+			)
 			if (linearClientResult._tag === "Left") {
 				yield* SubscriptionRef.set(mode, "misconfigured")
 				yield* Effect.logWarning(
@@ -169,7 +171,6 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				} satisfies LinearWebhookServiceApi
 			}
 
-			const linearClient = linearClientResult.right
 			const webhookSecret =
 				configuredSecret && configuredSecret.length > 0
 					? configuredSecret
@@ -177,7 +178,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const webhookClient = new LinearWebhookClient(webhookSecret)
 
 			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
-				linearSdk.resolveTeamId(linearClient, reference).pipe(
+				linearSdk.resolveTeamId(reference).pipe(
 					Effect.mapError(
 						(error) =>
 							new LinearWebhookRuntimeError({
@@ -238,14 +239,13 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						})
 						const webhookId = webhookIdRef.id
 						if (!webhookId) return
-						yield* Effect.tryPromise({
-							try: () => linearClient.deleteWebhook(webhookId),
-							catch: () =>
-								new LinearWebhookRuntimeError({
-									message: "delete-webhook-failed",
-								}),
-						}).pipe(
-							linearSdk.rateLimit,
+						yield* linearSdk.deleteWebhook(webhookId).pipe(
+							Effect.mapError(
+								() =>
+									new LinearWebhookRuntimeError({
+										message: "delete-webhook-failed",
+									}),
+							),
 							Effect.catchAll(() =>
 								Effect.logWarning(`Linear webhook cleanup failed for webhook id ${webhookId}`),
 							),
@@ -253,20 +253,22 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					}),
 				)
 
-				const registrationPayload = yield* Effect.tryPromise({
-					try: () =>
-						linearClient.createWebhook({
-							teamId,
-							url: webhookUrl,
-							resourceTypes: [...eventTypes],
-							secret: webhookSecret,
-							enabled: true,
-						}),
-					catch: (error) =>
-						new LinearWebhookRuntimeError({
-							message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
-						}),
-				}).pipe(linearSdk.rateLimit)
+				const registrationPayload = yield* linearSdk
+					.createWebhook({
+						teamId,
+						url: webhookUrl,
+						resourceTypes: [...eventTypes],
+						secret: webhookSecret,
+						enabled: true,
+					})
+					.pipe(
+						Effect.mapError(
+							(error) =>
+								new LinearWebhookRuntimeError({
+									message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
+								}),
+						),
+					)
 
 				const registeredWebhookId = registrationPayload.webhookId
 				if (registeredWebhookId) {

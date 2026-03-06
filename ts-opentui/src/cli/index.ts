@@ -31,15 +31,16 @@ import {
 	Schema,
 	SubscriptionRef,
 } from "effect"
-import packageJson from "../../package.json"
+// biome-ignore lint/correctness/useImportExtensions: <stupid biome>
+import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { BeadsClient, type Issue as BeadsIssue } from "../core/BeadsClient.js"
 import { ClaudeSessionManager } from "../core/ClaudeSessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
+import { IssueTrackerClient, type Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -122,7 +123,7 @@ const fullCliLayer = Layer.mergeAll(
 	ToastService.Default,
 	NavigationService.Default,
 	ClaudeSessionManager.Default,
-	BeadsClient.Default,
+	IssueTrackerClient.Default,
 	AppConfig.Default,
 	VCService.Default,
 	ViewService.Default,
@@ -153,7 +154,7 @@ const fullCliLayer = Layer.mergeAll(
 const commandCliLayer = Layer.mergeAll(
 	AppConfig.Default,
 	ProjectService.Default,
-	BeadsClient.Default,
+	IssueTrackerClient.Default,
 	ClaudeSessionManager.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
@@ -204,7 +205,7 @@ const projectDirArg = Args.directory().pipe(
 // ============================================================================
 
 /**
- * Validate that the issue tracker store exists when backend requires .beads.
+ * Validate that the issue tracker store exists when backend requires .azedarach.
  */
 const validateIssueTrackerStore = (projectDir: string) =>
 	Effect.gen(function* () {
@@ -216,13 +217,13 @@ const validateIssueTrackerStore = (projectDir: string) =>
 
 		const fs = yield* FileSystem.FileSystem
 		const path = yield* Path.Path
-		const issueStoreDir = path.join(projectDir, ".beads")
+		const issueStoreDir = path.join(projectDir, ".azedarach")
 
 		const exists = yield* fs.exists(issueStoreDir)
 		if (!exists) {
 			return yield* Effect.fail(
 				new Error(
-					`No .beads directory found in ${projectDir}. Run 'bd init' to initialize issue tracking storage.`,
+					`No .azedarach directory found in ${projectDir}. Run 'tracker init' to initialize issue tracking storage.`,
 				),
 			)
 		}
@@ -294,7 +295,7 @@ const startHandler = (args: {
 		})
 
 		// Claim the issue with session assignee
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient
 			.update(
 				issueId,
@@ -529,7 +530,7 @@ const syncHandler = (args: {
 
 const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
 
-const formatIssueSummaryLine = (issue: BeadsIssue): string =>
+const formatIssueSummaryLine = (issue: TrackedIssue): string =>
 	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
 
 const normalizeIssueTextField = (value: string | undefined): string | undefined => {
@@ -621,7 +622,7 @@ const dependencyCountLabelFromDependent = (
 	}
 }
 
-const formatIssueDependencyTypeCountsSection = (issue: BeadsIssue): string | undefined => {
+const formatIssueDependencyTypeCountsSection = (issue: TrackedIssue): string | undefined => {
 	const counts = new Map<DependencyCountLabel, number>()
 	for (const dependency of issue.dependencies ?? []) {
 		const label = dependencyCountLabelFromDependency(dependency.dependency_type)
@@ -642,7 +643,7 @@ const formatIssueDependencyTypeCountsSection = (issue: BeadsIssue): string | und
 	return `Dependency Counts: ${parts.join(", ")}`
 }
 
-const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
+const formatIssueDetailSections = (issue: TrackedIssue): readonly string[] => {
 	const sections: string[] = []
 	const description = normalizeIssueTextField(issue.description)
 	const design = normalizeIssueTextField(issue.design)
@@ -685,6 +686,26 @@ const formatIssueDetailSections = (issue: BeadsIssue): readonly string[] => {
 	return sections
 }
 
+const DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS = 250
+const DEFAULT_ISSUE_GET_WAIT_FLAG_MAX_WAIT_MS = 60_000
+
+const resolveIssueGetSyncWaitMs = (args: {
+	readonly wait: boolean
+	readonly maxWaitMs: Option.Option<number>
+}): number => {
+	if (Option.isSome(args.maxWaitMs)) {
+		return Math.max(0, Math.floor(args.maxWaitMs.value))
+	}
+	if (args.wait) {
+		const fromEnv = Number.parseInt(process.env.AZEDARACH_ISSUE_GET_WAIT_MAX_MS ?? "", 10)
+		if (Number.isFinite(fromEnv) && fromEnv > 0) {
+			return Math.floor(fromEnv)
+		}
+		return DEFAULT_ISSUE_GET_WAIT_FLAG_MAX_WAIT_MS
+	}
+	return DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS
+}
+
 /**
  * Show issue details
  */
@@ -693,6 +714,8 @@ const issueGetHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
+	readonly wait: boolean
+	readonly maxWaitMs: Option.Option<number>
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
@@ -706,9 +729,13 @@ const issueGetHandler = (args: {
 
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
+		const maxSyncWaitMs = resolveIssueGetSyncWaitMs({
+			wait: args.wait,
+			maxWaitMs: args.maxWaitMs,
+		})
 		const issue = yield* issueTrackerClient
-			.show(issueId, explicitProjectDir)
+			.show(issueId, explicitProjectDir, { maxSyncWaitMs })
 			.pipe(
 				Effect.catchTag("NotFoundError", () =>
 					Effect.fail(new Error(`Issue not found internally nor externally: ${issueId}`)),
@@ -764,7 +791,7 @@ const issueCreateHandler = (args: {
 			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
 		})
 
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		const issue = yield* issueTrackerClient.create({
 			title: args.title,
 			type: Option.getOrUndefined(args.issueType),
@@ -864,7 +891,7 @@ const issueUpdateHandler = (args: {
 			)
 		}
 
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.update(issueId, fields, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, updated: true }, null, 2))
@@ -892,7 +919,7 @@ const issueCloseHandler = (args: {
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(
@@ -935,7 +962,7 @@ const issueDeleteHandler = (args: {
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueTrackerClient = yield* BeadsClient
+		const issueTrackerClient = yield* IssueTrackerClient
 		yield* issueTrackerClient.delete(issueId, explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(JSON.stringify({ id: issueId, deleted: true }, null, 2))
@@ -1366,7 +1393,7 @@ const projectAddHandler = (args: {
 			return yield* Effect.fail(new Error(`Path does not exist: ${absolutePath}`))
 		}
 
-		let tracker: "bd" | "br" | "linear" | "local" = "local"
+		let tracker: "tracker" | "legacy" | "linear" | "local" = "local"
 		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
 		const hasLocalConfig = yield* fs
 			.exists(localConfigPath)
@@ -1380,20 +1407,20 @@ const projectAddHandler = (args: {
 			).pipe(Effect.option)
 			if (Option.isSome(decodedConfig)) {
 				const issueTrackerConfig = decodedConfig.value.issueTracker
-				if (issueTrackerConfig?.beads !== undefined) tracker = "bd"
-				else if (issueTrackerConfig?.beads_rust !== undefined) tracker = "br"
+				if (issueTrackerConfig?.tracker !== undefined) tracker = "tracker"
+				else if (issueTrackerConfig?.legacy !== undefined) tracker = "legacy"
 				else if (issueTrackerConfig?.linear !== undefined) tracker = "linear"
 				else tracker = "local"
 			}
 		}
 
-		const beadsPath = pathService.join(absolutePath, ".beads")
-		if (tracker === "bd" || tracker === "br") {
-			const beadsExists = yield* fs.exists(beadsPath)
-			if (!beadsExists) {
+		const issueStorePath = pathService.join(absolutePath, ".azedarach")
+		if (tracker === "tracker" || tracker === "legacy") {
+			const issueStoreExists = yield* fs.exists(issueStorePath)
+			if (!issueStoreExists) {
 				return yield* Effect.fail(
 					new Error(
-						`No .beads directory found in ${absolutePath}. Run 'bd init' to initialize beads tracking.`,
+						`No .azedarach directory found in ${absolutePath}. Run 'tracker init' to initialize tracker tracking.`,
 					),
 				)
 			}
@@ -1406,8 +1433,8 @@ const projectAddHandler = (args: {
 			yield* Console.log(`Adding project: ${projectName}`)
 			yield* Console.log(`  Path: ${absolutePath}`)
 			yield* Console.log(`  Tracker: ${tracker}`)
-			if (tracker === "bd" || tracker === "br") {
-				yield* Console.log(`  Beads: ${beadsPath}`)
+			if (tracker === "tracker" || tracker === "legacy") {
+				yield* Console.log(`  IssueTracker: ${issueStorePath}`)
 			}
 		}
 
@@ -1423,7 +1450,7 @@ const projectAddHandler = (args: {
 		yield* projectService.addProject({
 			name: projectName,
 			path: absolutePath,
-			beadsPath: tracker === "bd" || tracker === "br" ? beadsPath : undefined,
+			issueStorePath: tracker === "tracker" || tracker === "legacy" ? issueStorePath : undefined,
 		})
 
 		yield* Console.log(`Project '${projectName}' added successfully.`)
@@ -1452,8 +1479,8 @@ const projectListHandler = (args: { readonly verbose: boolean }) =>
 			const marker = isCurrent ? "* " : "  "
 			yield* Console.log(`${marker}${project.name}`)
 			yield* Console.log(`    Path: ${project.path}`)
-			if (project.beadsPath && args.verbose) {
-				yield* Console.log(`    Beads: ${project.beadsPath}`)
+			if (project.issueStorePath && args.verbose) {
+				yield* Console.log(`    IssueTracker: ${project.issueStorePath}`)
 			}
 			if (isCurrent) {
 				yield* Console.log(`    (current)`)
@@ -1625,6 +1652,13 @@ const issueGetCommand = Command.make(
 		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+		wait: Options.boolean("wait").pipe(
+			Options.withDescription("Wait for external sync before returning"),
+		),
+		maxWaitMs: Options.integer("max-wait-ms").pipe(
+			Options.optional,
+			Options.withDescription("Maximum sync wait time in milliseconds"),
+		),
 	},
 	issueGetHandler,
 ).pipe(Command.withDescription("Show full issue details"))
@@ -1842,7 +1876,7 @@ const hooksCommand = Command.make("hooks", {}, () =>
 const DEFAULT_OPENCODE_CONFIG = {
 	$schema: "https://opencode.ai/config.json",
 	instructions: ["CLAUDE.md"],
-	plugins: ["opencode-beads", "opencode-skills"],
+	plugins: ["opencode-tracker", "opencode-skills"],
 	theme: "tokyonight",
 	permission: {
 		bash: {
@@ -1855,7 +1889,7 @@ const DEFAULT_OPENCODE_CONFIG = {
 			"git branch *": "allow",
 			"git add *": "allow",
 			"git commit *": "allow",
-			"bd *": "allow",
+			"tracker *": "allow",
 			"tmux *": "allow",
 		},
 	},
@@ -1889,7 +1923,9 @@ const opencodeInitHandler = (args: {
 		const claudeSkillsDir = pathService.join(cwd, ".claude", "skills")
 		const configHome =
 			process.env.XDG_CONFIG_HOME ??
-			(process.env.HOME ? pathService.join(process.env.HOME, ".config") : pathService.join(cwd, ".config"))
+			(process.env.HOME
+				? pathService.join(process.env.HOME, ".config")
+				: pathService.join(cwd, ".config"))
 		const globalPluginDir = pathService.join(configHome, "opencode", "plugins")
 		const globalPluginPath = pathService.join(globalPluginDir, OPENCODE_AZ_PLUGIN_FILENAME)
 
@@ -1910,7 +1946,7 @@ const opencodeInitHandler = (args: {
 			const existingPlugins = Array.isArray(existingConfig.plugins)
 				? (existingConfig.plugins as string[])
 				: []
-			const newPlugins = [...new Set([...existingPlugins, "opencode-beads", "opencode-skills"])]
+			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker", "opencode-skills"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }
 
 			yield* Console.log("✓ Updated existing opencode.json")
@@ -1980,7 +2016,7 @@ const opencodeInitHandler = (args: {
 		yield* Console.log("")
 		yield* Console.log("Next steps:")
 		yield* Console.log("  1. Install AZ plugin: az opencode plugin install")
-		yield* Console.log("  2. Install opencode-beads: npm install -g opencode-beads")
+		yield* Console.log("  2. Install opencode-tracker: npm install -g opencode-tracker")
 		yield* Console.log("  3. Install opencode-skills: npm install -g opencode-skills")
 		yield* Console.log("  4. Run: opencode")
 	})
@@ -2011,7 +2047,9 @@ const opencodePluginInstallHandler = (args: {
 		const cwd = process.cwd()
 		const defaultConfigHome =
 			process.env.XDG_CONFIG_HOME ??
-			(process.env.HOME ? pathService.join(process.env.HOME, ".config") : pathService.join(cwd, ".config"))
+			(process.env.HOME
+				? pathService.join(process.env.HOME, ".config")
+				: pathService.join(cwd, ".config"))
 		const defaultGlobalDir = pathService.join(defaultConfigHome, "opencode", "plugins")
 		const globalDir = Option.getOrElse(args.globalDir, () => defaultGlobalDir)
 		const globalPluginPath = pathService.join(globalDir, OPENCODE_AZ_PLUGIN_FILENAME)

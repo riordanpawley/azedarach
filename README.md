@@ -4,6 +4,8 @@
 
 Named after the [bead tree](https://en.wikipedia.org/wiki/Melia_azedarach) (Melia azedarach), whose seeds have been used for prayer beads for millennia.
 
+Early versions of Azedarach were backed by the Beads tracker ecosystem; this project keeps that inspiration and gives Beads explicit credit for shaping the core issue-orchestration model.
+
 ## Overview
 
 Azedarach is a terminal-based Kanban board that:

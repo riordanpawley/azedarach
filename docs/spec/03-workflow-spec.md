@@ -204,7 +204,7 @@ Each failure MUST return explicit remediation guidance.
 
 If no merge in progress, show no-op notification.
 
-## 3.11 Merge Bead Into Bead Workflow (`Space b`)
+## 3.11 Merge Issue Branch Into Issue Branch Workflow (`Space b`)
 
 ### Intent
 
@@ -712,8 +712,12 @@ Linear synchronization contract:
 
 - linear remains source of truth for persisted state
 - UI applies optimistic mutations immediately
-- periodic/manual hydration polls reconcile non-local external changes
+- read-time and periodic/manual hydration reconcile non-local external changes
 - hydration MUST NOT clobber locally pending optimistic updates
+- backend sync requests MUST flow through a bounded-rate queue with burst allowance
+- queued sync requests MUST be deduplicated by intent key so equivalent in-flight work is not duplicated
+- default read operations SHOULD use bounded wait and return local state if refresh wait budget is exceeded
+- explicit wait mode MAY request a larger wait budget when freshness is prioritized over latency
 
 ### Flow
 
@@ -727,6 +731,7 @@ Linear synchronization contract:
 
 - user never sees silent divergence between optimistic and persisted state
 - rollback is explicit and observable in UI/logs
+- throttled refresh timeouts are explicit so user can distinguish "fresh" vs "may be stale" reads
 
 ## 3.40 Background Operation Workflow
 

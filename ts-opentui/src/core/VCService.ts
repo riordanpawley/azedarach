@@ -11,7 +11,7 @@
  * Integration approach:
  * - Azedarach provides TUI Kanban visualization
  * - VC provides AI-supervised execution engine
- * - Both share the same Beads SQLite database
+ * - Both share the same IssueTracker SQLite database
  *
  * @see https://github.com/steveyegge/vc
  */

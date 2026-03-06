@@ -14,7 +14,7 @@ describe("session prompts", () => {
 		expect(prompt).toContain("work on issue az-f4625d")
 		expect(prompt).toContain("Run `az issue get az-f4625d`")
 		expect(prompt).toContain('`az issue update az-f4625d --design "..."`')
-		expect(prompt).not.toContain("bd show")
+		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
 	})
 
@@ -27,7 +27,7 @@ describe("session prompts", () => {
 
 		expect(prompt).toContain("Let's chat about issue az-f4625d")
 		expect(prompt).toContain("Run `az issue get az-f4625d`")
-		expect(prompt).not.toContain("bd show")
+		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
 	})
 })

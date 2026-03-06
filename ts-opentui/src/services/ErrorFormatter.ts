@@ -1,7 +1,7 @@
 /**
  * ErrorFormatter - Service for converting technical errors into user-friendly messages
  *
- * Takes tagged errors from various services (Git, Beads, Tmux, PR) and formats them
+ * Takes tagged errors from various services (Git, IssueTracker, Tmux, PR) and formats them
  * with actionable guidance. Preserves error context for debugging while showing
  * clear, helpful messages to users.
  *
@@ -32,7 +32,7 @@ export interface FormattedError {
 	readonly category: ErrorCategory
 }
 
-export type ErrorCategory = "git" | "beads" | "tmux" | "pr" | "session" | "system" | "unknown"
+export type ErrorCategory = "git" | "tracker" | "tmux" | "pr" | "session" | "system" | "unknown"
 
 // ============================================================================
 // Error Tag Registry
@@ -145,58 +145,58 @@ const ERROR_FORMATTERS: Record<
 	}),
 
 	// ─────────────────────────────────────────────────────────────────────────
-	// Beads Errors
+	// IssueTracker Errors
 	// ─────────────────────────────────────────────────────────────────────────
-	BeadsError: (error) => {
+	IssueTrackerError: (error) => {
 		const stderr = String(error.stderr || "")
-		const command = String(error.command || "bd")
+		const command = String(error.command || "tracker")
 
 		// Database locked
 		if (stderr.includes("database is locked") || stderr.includes("SQLITE_BUSY")) {
 			return {
-				message: "Beads database is locked",
-				suggestion: "Try: Another process may be using beads. Wait a moment and try again",
-				category: "beads",
+				message: "IssueTracker database is locked",
+				suggestion: "Try: Another process may be using tracker. Wait a moment and try again",
+				category: "tracker",
 			}
 		}
 
 		// Not initialized
-		if (stderr.includes("not initialized") || stderr.includes("No beads directory")) {
+		if (stderr.includes("not initialized") || stderr.includes("No tracker directory")) {
 			return {
-				message: "Beads not initialized in this project",
-				suggestion: "Try: Run 'bd init' to initialize beads tracking",
-				category: "beads",
+				message: "IssueTracker not initialized in this project",
+				suggestion: "Try: Run 'tracker init' to initialize tracker tracking",
+				category: "tracker",
 			}
 		}
 
 		// Sync conflicts
 		if (stderr.includes("sync") && stderr.includes("conflict")) {
 			return {
-				message: "Beads sync conflict detected",
-				suggestion: "Try: Run 'bd sync --from-main' to pull latest changes, then retry",
-				category: "beads",
+				message: "IssueTracker sync conflict detected",
+				suggestion: "Try: Run 'tracker sync --from-main' to pull latest changes, then retry",
+				category: "tracker",
 			}
 		}
 
 		return {
-			message: `Beads command failed: ${command}`,
+			message: `IssueTracker command failed: ${command}`,
 			suggestion: stderr
 				? `Error: ${stderr.slice(0, 100)}${stderr.length > 100 ? "..." : ""}`
 				: undefined,
-			category: "beads",
+			category: "tracker",
 		}
 	},
 
 	NotFoundError: (error) => ({
 		message: `Issue not found: ${error.issueId}`,
-		suggestion: "Try: Check the issue ID or run 'bd search' to find issues",
-		category: "beads",
+		suggestion: "Try: Check the issue ID or run 'tracker search' to find issues",
+		category: "tracker",
 	}),
 
 	ParseError: (_error) => ({
-		message: "Failed to parse beads output",
-		suggestion: "Try: This may be a beads version mismatch. Run 'bd doctor' to check",
-		category: "beads",
+		message: "Failed to parse tracker output",
+		suggestion: "Try: This may be a tracker version mismatch. Run 'tracker doctor' to check",
+		category: "tracker",
 	}),
 
 	// ─────────────────────────────────────────────────────────────────────────
