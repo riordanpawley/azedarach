@@ -53,6 +53,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Session state and issue state are related but distinct; both MUST be visible.
 - Destructive actions MUST require explicit confirmation or use safe defaults.
 - Recovery paths MUST exist for interrupted operations (merge conflicts, detached sessions, network failure).
+- External API-backed tracker reads MUST respect provider request limits and use cursor pagination when full datasets are required.
 
 ## Canonical Feature Inventory (High-Level)
 

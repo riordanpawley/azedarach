@@ -611,6 +611,12 @@ On failure, logs SHOULD capture:
   - coalesce/deduplicate equivalent in-flight work deterministically.
   - ensure at-least-once completion semantics for each unique intent key.
 
+### Case F-196: Provider rejects oversized metadata page request
+
+- Required behavior:
+  - avoid retry loops caused by invalid page-size values that exceed provider caps.
+  - continue with provider-compliant page size and cursor pagination until required metadata coverage is complete.
+
 ## 5.29 Probe and E2E Harness Edge Cases
 
 ### Case F-200: Probe returns inconsistent snapshot during rapid UI updates

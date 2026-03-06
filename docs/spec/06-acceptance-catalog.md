@@ -858,6 +858,13 @@ Canonical fixture profile names:
 - Expected: logs include flush start, per-item dispatch start, success path, and retry-or-terminal failure decision with project path, issue identity, operation type, and attempt context.
 - Links: AZ-FR-3811, AZ-FR-3815.
 
+### AZ-AT-2507 Linear metadata pagination respects provider page-size caps
+
+- Preconditions: linear backend fixture/stub exposes paginated workflow state data with provider max page size of 250.
+- Steps: trigger the workflow-state metadata fetch path used for status mapping.
+- Expected: requests use provider-compliant page size, follow cursors through all pages, and complete without argument-validation errors or missing required state mappings.
+- Links: AZ-FR-3816.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1026,7 +1033,7 @@ A release candidate MUST pass:
 - dependency graph scenarios AZ-AT-2201 through AZ-AT-2205
 - branch-origin and relationship-display scenarios AZ-AT-2301 through AZ-AT-2305
 - upstream follow-on scenarios AZ-AT-2401 through AZ-AT-2409
-- optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2505
+- optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2507
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
