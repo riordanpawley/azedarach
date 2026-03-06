@@ -498,3 +498,16 @@ This section is normative.
 - AZ-FR-4108: E2E suite MUST include performance assertions for representative critical flows.
 - AZ-FR-4109: E2E suite MUST include stress scenarios for scale datasets and rapid operation concurrency.
 - AZ-FR-4110: E2E release validation SHOULD combine probe assertions with visual assertions for high-risk workflows.
+
+## 4.45 Spec Tool Requirements
+
+- AZ-FR-4201: The system MUST provide az-native specification requirement records with stable IDs.
+- AZ-FR-4202: The system MUST support typed links between issues and specification requirements.
+- AZ-FR-4203: `az issue get` and `az spec req get` MUST expose linked specification relationships in both directions.
+- AZ-FR-4204: The system MUST provide one-way publish from az specification records to Linear project documents.
+- AZ-FR-4205: Publish workflows MUST support an auto-config option that enables unattended publish behavior.
+- AZ-FR-4206: Auto-config publish settings MUST be persisted per project and inspectable from CLI surfaces.
+- AZ-FR-4207: Publish operations MUST be idempotent and update managed document sections using stable spec identifiers.
+- AZ-FR-4208: Publish workflows MUST remain one-way for now and MUST NOT ingest edits from Linear project documents back into az spec storage.
+- AZ-FR-4209: Publish results MUST report per-document outcomes and requirement/link coverage counts.
+- AZ-FR-4210: Publish failures (network/auth/permission/target missing) MUST preserve local spec data and provide actionable remediation guidance.

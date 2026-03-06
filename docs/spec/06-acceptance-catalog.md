@@ -1079,4 +1079,47 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
+- spec tool scenarios AZ-AT-2901 through AZ-AT-2906
 - extended conformance scenarios AZ-AT-2812 through AZ-AT-2829 and AZ-AT-2831 through AZ-AT-2837
+
+## 6.32 Spec Tool Acceptance
+
+### AZ-AT-2901 Create/list/get az spec requirement records
+
+- Steps: create requirement records with explicit IDs, list requirements, and fetch one by ID.
+- Expected: records persist with stable IDs and are retrievable without ID mutation.
+- Links: AZ-FR-4201.
+
+### AZ-AT-2902 Link issue and requirement with typed relationship
+
+- Preconditions: existing issue and existing spec requirement.
+- Steps: add typed issue<->requirement link; inspect issue and requirement views.
+- Expected: both views expose the same typed relationship in opposite directions.
+- Links: AZ-FR-4202, AZ-FR-4203.
+
+### AZ-AT-2903 One-way publish to Linear project documents
+
+- Preconditions: spec requirements exist with linked issues.
+- Steps: run publish to a configured Linear project documents target.
+- Expected: managed documents update with stable requirement identifiers and link context.
+- Links: AZ-FR-4204, AZ-FR-4207.
+
+### AZ-AT-2904 Auto-config publish behavior and persistence
+
+- Steps: enable publish auto-config; trigger qualifying spec mutation; inspect stored config.
+- Expected: publish runs unattended per configured policy and configuration remains project-persistent/inspectable.
+- Links: AZ-FR-4205, AZ-FR-4206.
+
+### AZ-AT-2905 One-way contract under remote document edits
+
+- Preconditions: published Linear project document is manually edited remotely.
+- Steps: request local az spec refresh/read paths without explicit import.
+- Expected: local az spec records remain unchanged by remote document edits.
+- Links: AZ-FR-4208.
+
+### AZ-AT-2906 Publish outcome reporting and failure isolation
+
+- Preconditions: one publish target succeeds while another target is unauthorized or unavailable.
+- Steps: execute publish and inspect result reporting.
+- Expected: per-document outcome and requirement/link counts are reported; local spec data remains intact with actionable remediation guidance.
+- Links: AZ-FR-4209, AZ-FR-4210.
