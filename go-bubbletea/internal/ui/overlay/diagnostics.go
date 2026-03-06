@@ -83,6 +83,18 @@ func (d *DiagnosticsPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Manual refresh
 			return d, d.refreshCmd()
 
+		case "enter":
+			if d.activeSection == SectionOverview && d.currentDiagnostics != nil && len(d.currentDiagnostics.SessionMismatches) > 0 {
+				mismatch := d.currentDiagnostics.SessionMismatches[0]
+				return d, func() tea.Msg {
+					return OpenSessionReconciliationOverlayMsg{
+						Mismatch: mismatch,
+						Trigger:  "diagnostics_refresh",
+					}
+				}
+			}
+			return d, nil
+
 		case "j", "down":
 			if d.scrollY < d.maxScroll() {
 				d.scrollY++
@@ -311,6 +323,20 @@ func (d *DiagnosticsPanel) renderOverview(b *strings.Builder) {
 		b.WriteString("\n")
 		successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))
 		b.WriteString(successStyle.Render("  ✓ All systems operational"))
+		b.WriteString("\n")
+	}
+
+	if len(diag.SessionMismatches) > 0 {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render(fmt.Sprintf("SESSION RECONCILIATION (%d)", len(diag.SessionMismatches))))
+		b.WriteString("\n")
+		for _, mismatch := range diag.SessionMismatches {
+			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
+			b.WriteString(warnStyle.Render("  ⚠ " + mismatch.Warning()))
+			b.WriteString("\n")
+		}
+		hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6c7086"))
+		b.WriteString(hintStyle.Render("  Press Enter to reconcile the first mismatch"))
 		b.WriteString("\n")
 	}
 }
@@ -596,6 +622,7 @@ func (d *DiagnosticsPanel) renderFooter() string {
 		"[1-6] Jump to section",
 		"[j/k] Scroll",
 		"[r] Refresh",
+		"[Enter] Reconcile first mismatch",
 		"[q/Esc] Close",
 	}
 

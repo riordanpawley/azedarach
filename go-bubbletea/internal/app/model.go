@@ -353,6 +353,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleSelection(msg)
 
+	case overlay.OpenSessionReconciliationOverlayMsg:
+		return m, m.overlayStack.Push(overlay.NewSessionReconciliationOverlay(msg.Mismatch, msg.Trigger))
+
+	case overlay.SessionReconciliationActionMsg:
+		if !m.overlayStack.IsEmpty() {
+			if _, ok := m.overlayStack.Current().(*overlay.SessionReconciliationOverlay); ok {
+				m.overlayStack.Pop()
+			}
+		}
+		return m.applySessionReconciliation(msg)
+
 	case overlay.SearchMsg:
 		m.editor.SetSearchQuery(msg.Query)
 		return m, nil
@@ -709,6 +720,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Reload linear to reflect changes
 		return m, m.loadIssuesCmd()
+
+	case sessionAttachProbeMsg:
+		if msg.err != nil {
+			m.logger.Warn("failed to probe session/tmux mismatch", "issueID", msg.mismatch.IssueID, "error", msg.err)
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Failed to verify tmux session for %s; continuing with attach guidance", msg.mismatch.IssueID),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		if msg.mismatch.Kind != "" {
+			return m, m.overlayStack.Push(overlay.NewSessionReconciliationOverlay(msg.mismatch, msg.trigger))
+		}
+
+		if msg.mismatch.IndicatorPresent {
+			session := m.sessions[msg.mismatch.IssueID]
+			if session != nil && session.Worktree != "" {
+				return m, m.checkBranchBehindCmd(session.Worktree, msg.mismatch.IssueID)
+			}
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", msg.mismatch.IssueID),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastWarning,
+			Message: "No active session for this task",
+			Expires: time.Now().Add(3 * time.Second),
+		})
+		return m, nil
+
+	case sessionReconciliationResultMsg:
+		if msg.err != nil {
+			m.logger.Error("session reconciliation action failed",
+				"issueID", msg.mismatch.IssueID,
+				"action", msg.action,
+				"trigger", msg.trigger,
+				"error", msg.err,
+			)
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastError,
+				Message: fmt.Sprintf("Reconciliation failed (%s): %v", msg.action, msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+
+		m.logger.Info("session reconciliation action applied",
+			"issueID", msg.mismatch.IssueID,
+			"action", msg.action,
+			"trigger", msg.trigger,
+		)
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Reconciliation applied: %s for %s", reconciliationActionLabel(msg.action), msg.mismatch.IssueID),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
 
 	case branchBehindMsg:
 		if msg.err != nil {
@@ -1278,6 +1350,19 @@ type sessionErrorMsg struct {
 	err     error
 }
 
+type sessionAttachProbeMsg struct {
+	mismatch diagnostics.SessionMismatch
+	trigger  string
+	err      error
+}
+
+type sessionReconciliationResultMsg struct {
+	mismatch diagnostics.SessionMismatch
+	action   overlay.ReconciliationAction
+	trigger  string
+	err      error
+}
+
 // Commands
 
 // loadIssuesCmd returns a command that fetches linear from the CLI
@@ -1570,17 +1655,9 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 	case "a":
-		// Attach to session
-		if session != nil {
-			// Check if branch is behind main
-			return m, m.checkBranchBehindCmd(session.Worktree, task.ID)
-		} else {
-			m.toasts = append(m.toasts, Toast{
-				Level:   ToastWarning,
-				Message: "No active session for this task",
-				Expires: time.Now().Add(3 * time.Second),
-			})
-		}
+		// Attach to session after probing indicator/tmux consistency.
+		_ = session
+		return m, m.probeSessionMismatchCmd(task.ID, "attach")
 	case "p":
 		// TODO: Pause session
 		m.toasts = append(m.toasts, Toast{
@@ -2123,19 +2200,19 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-				// Update via linear client
-				err := m.issueClient.Update(ctx, taskID, newStatus)
-				if err != nil {
-					failed++
-					continue
-				}
-
-				m.runBackupOnMutationSuccess()
-				updated++
+			// Update via linear client
+			err := m.issueClient.Update(ctx, taskID, newStatus)
+			if err != nil {
+				failed++
+				continue
 			}
 
-			return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+			m.runBackupOnMutationSuccess()
+			updated++
 		}
+
+		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
+	}
 }
 
 func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
@@ -2390,6 +2467,138 @@ type branchBehindMsg struct {
 	worktree      string
 	commitsBehind int
 	err           error
+}
+
+func (m Model) probeSessionMismatchCmd(issueID, trigger string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		indicatorPresent := m.sessions[issueID] != nil
+		tmuxPresent, err := m.tmuxClient.HasSession(ctx, issueID)
+		if err != nil {
+			return sessionAttachProbeMsg{
+				mismatch: diagnostics.SessionMismatch{
+					IssueID:          issueID,
+					IndicatorPresent: indicatorPresent,
+					TmuxPresent:      tmuxPresent,
+				},
+				trigger: trigger,
+				err:     err,
+			}
+		}
+
+		kind := diagnostics.SessionMismatchKind("")
+		switch {
+		case indicatorPresent && !tmuxPresent:
+			kind = diagnostics.SessionMismatchKindStaleIndicator
+		case !indicatorPresent && tmuxPresent:
+			kind = diagnostics.SessionMismatchKindOrphanTmux
+		}
+
+		return sessionAttachProbeMsg{
+			mismatch: diagnostics.SessionMismatch{
+				IssueID:          issueID,
+				TmuxSession:      issueID,
+				Kind:             kind,
+				IndicatorPresent: indicatorPresent,
+				TmuxPresent:      tmuxPresent,
+			},
+			trigger: trigger,
+		}
+	}
+}
+
+func (m Model) applySessionReconciliation(msg overlay.SessionReconciliationActionMsg) (tea.Model, tea.Cmd) {
+	issueID := msg.Mismatch.IssueID
+	if issueID == "" {
+		return m, nil
+	}
+
+	switch msg.Action {
+	case overlay.ReconciliationActionAdoptIndicator:
+		if m.sessions[issueID] == nil {
+			now := time.Now()
+			m.sessions[issueID] = &domain.Session{
+				IssueID:   issueID,
+				State:     domain.SessionIdle,
+				StartedAt: &now,
+			}
+		}
+		m.logger.Info("session reconciliation action applied",
+			"issueID", issueID,
+			"action", msg.Action,
+			"trigger", msg.Trigger,
+		)
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Reconciliation applied: %s for %s", reconciliationActionLabel(msg.Action), issueID),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		if strings.EqualFold(msg.Trigger, "attach") {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastInfo,
+				Message: fmt.Sprintf("Run: tmux attach-session -t %s", issueID),
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		return m, nil
+
+	case overlay.ReconciliationActionClearIndicator:
+		if m.sessionMonitor != nil {
+			m.sessionMonitor.Stop(issueID)
+		}
+		delete(m.sessions, issueID)
+		m.portAllocator.Release(issueID)
+		m.logger.Info("session reconciliation action applied",
+			"issueID", issueID,
+			"action", msg.Action,
+			"trigger", msg.Trigger,
+		)
+		m.toasts = append(m.toasts, Toast{
+			Level:   ToastSuccess,
+			Message: fmt.Sprintf("Reconciliation applied: %s for %s", reconciliationActionLabel(msg.Action), issueID),
+			Expires: time.Now().Add(5 * time.Second),
+		})
+		return m, nil
+
+	case overlay.ReconciliationActionTerminateOrphanTmux:
+		return m, m.terminateOrphanTmuxCmd(msg.Mismatch, msg.Action, msg.Trigger)
+
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) terminateOrphanTmuxCmd(
+	mismatch diagnostics.SessionMismatch,
+	action overlay.ReconciliationAction,
+	trigger string,
+) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := m.tmuxClient.KillSession(ctx, mismatch.IssueID)
+		return sessionReconciliationResultMsg{
+			mismatch: mismatch,
+			action:   action,
+			trigger:  trigger,
+			err:      err,
+		}
+	}
+}
+
+func reconciliationActionLabel(action overlay.ReconciliationAction) string {
+	switch action {
+	case overlay.ReconciliationActionAdoptIndicator:
+		return "adopted indicator"
+	case overlay.ReconciliationActionClearIndicator:
+		return "cleared indicator"
+	case overlay.ReconciliationActionTerminateOrphanTmux:
+		return "terminated orphan tmux session"
+	default:
+		return string(action)
+	}
 }
 
 func (m Model) checkBranchBehindCmd(worktree, issueID string) tea.Cmd {

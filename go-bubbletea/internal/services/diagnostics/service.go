@@ -42,6 +42,35 @@ type SessionInfo struct {
 	Uptime    time.Duration
 }
 
+// SessionMismatchKind identifies a divergence between board session indicators and tmux discovery.
+type SessionMismatchKind string
+
+const (
+	SessionMismatchKindOrphanTmux     SessionMismatchKind = "orphan_tmux"
+	SessionMismatchKindStaleIndicator SessionMismatchKind = "stale_indicator"
+)
+
+// SessionMismatch captures one session/tmux divergence requiring reconciliation.
+type SessionMismatch struct {
+	IssueID          string
+	TmuxSession      string
+	Kind             SessionMismatchKind
+	IndicatorPresent bool
+	TmuxPresent      bool
+}
+
+// Warning returns a user-facing warning string for the mismatch.
+func (m SessionMismatch) Warning() string {
+	switch m.Kind {
+	case SessionMismatchKindOrphanTmux:
+		return fmt.Sprintf("Session/tmux mismatch: orphan tmux session without indicator: %s", m.IssueID)
+	case SessionMismatchKindStaleIndicator:
+		return fmt.Sprintf("Session/tmux mismatch: indicator without tmux session: %s", m.IssueID)
+	default:
+		return fmt.Sprintf("Session/tmux mismatch detected: %s", m.IssueID)
+	}
+}
+
 // WorktreeInfo represents information about a git worktree
 type WorktreeInfo struct {
 	Path      string
@@ -71,16 +100,17 @@ type SystemInfo struct {
 
 // SystemDiagnostics contains all diagnostic information
 type SystemDiagnostics struct {
-	Timestamp    time.Time
-	OverallState HealthStatus
-	Startup      StartupGate
-	Ports        []PortInfo
-	Sessions     []SessionInfo
-	Worktrees    []WorktreeInfo
-	Network      NetworkInfo
-	System       SystemInfo
-	Warnings     []string
-	Errors       []string
+	Timestamp         time.Time
+	OverallState      HealthStatus
+	Startup           StartupGate
+	Ports             []PortInfo
+	Sessions          []SessionInfo
+	SessionMismatches []SessionMismatch
+	Worktrees         []WorktreeInfo
+	Network           NetworkInfo
+	System            SystemInfo
+	Warnings          []string
+	Errors            []string
 }
 
 // TmuxClient interface for tmux operations
@@ -425,16 +455,9 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 		warnings = append(warnings, fmt.Sprintf("Failed to list tmux sessions: %v", err))
 	}
 
-	// Check for orphaned tmux sessions (sessions without linear)
-	issueIDs := make(map[string]bool)
-	for issueID := range sessions {
-		issueIDs[issueID] = true
-	}
-
-	for _, tmuxName := range tmuxSessions {
-		if !issueIDs[tmuxName] && !strings.HasPrefix(tmuxName, "devserver-") {
-			warnings = append(warnings, fmt.Sprintf("Orphaned tmux session: %s", tmuxName))
-		}
+	sessionMismatches := DetectSessionMismatches(sessions, tmuxSessions)
+	for _, mismatch := range sessionMismatches {
+		warnings = append(warnings, mismatch.Warning())
 	}
 
 	// Collect worktree information
@@ -474,22 +497,79 @@ func (s *Service) CollectDiagnostics(ctx context.Context, sessions map[string]*d
 	}
 
 	diag := &SystemDiagnostics{
-		Timestamp:    now,
-		OverallState: overallState,
-		Startup:      startupGate,
-		Ports:        ports,
-		Sessions:     sessionInfos,
-		Worktrees:    worktreeInfos,
-		Network:      network,
-		System:       system,
-		Warnings:     warnings,
-		Errors:       errors,
+		Timestamp:         now,
+		OverallState:      overallState,
+		Startup:           startupGate,
+		Ports:             ports,
+		Sessions:          sessionInfos,
+		SessionMismatches: sessionMismatches,
+		Worktrees:         worktreeInfos,
+		Network:           network,
+		System:            system,
+		Warnings:          warnings,
+		Errors:            errors,
 	}
 
 	s.lastDiagnostics = diag
 	s.lastUpdate = now
 
 	return diag
+}
+
+// DetectSessionMismatches computes deterministic session/tmux mismatch records.
+func DetectSessionMismatches(sessions map[string]*domain.Session, tmuxSessions []string) []SessionMismatch {
+	indicatorIDs := make(map[string]bool, len(sessions))
+	for issueID, session := range sessions {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" || session == nil {
+			continue
+		}
+		indicatorIDs[issueID] = true
+	}
+
+	tmuxIDs := make(map[string]bool, len(tmuxSessions))
+	for _, tmuxSession := range tmuxSessions {
+		tmuxSession = strings.TrimSpace(tmuxSession)
+		if tmuxSession == "" || strings.HasPrefix(tmuxSession, "devserver-") {
+			continue
+		}
+		tmuxIDs[tmuxSession] = true
+	}
+
+	mismatches := make([]SessionMismatch, 0, len(indicatorIDs)+len(tmuxIDs))
+	for issueID := range indicatorIDs {
+		if tmuxIDs[issueID] {
+			continue
+		}
+		mismatches = append(mismatches, SessionMismatch{
+			IssueID:          issueID,
+			Kind:             SessionMismatchKindStaleIndicator,
+			IndicatorPresent: true,
+			TmuxPresent:      false,
+		})
+	}
+
+	for issueID := range tmuxIDs {
+		if indicatorIDs[issueID] {
+			continue
+		}
+		mismatches = append(mismatches, SessionMismatch{
+			IssueID:          issueID,
+			TmuxSession:      issueID,
+			Kind:             SessionMismatchKindOrphanTmux,
+			IndicatorPresent: false,
+			TmuxPresent:      true,
+		})
+	}
+
+	sort.Slice(mismatches, func(i, j int) bool {
+		if mismatches[i].IssueID == mismatches[j].IssueID {
+			return mismatches[i].Kind < mismatches[j].Kind
+		}
+		return mismatches[i].IssueID < mismatches[j].IssueID
+	})
+
+	return mismatches
 }
 
 // FormatDiagnostics returns a human-readable diagnostics report

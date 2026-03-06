@@ -465,6 +465,44 @@ func TestDiagnosticsPanel_RefreshMessage(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsPanel_EnterOnMismatchEmitsOpenReconciliationOverlayMsg(t *testing.T) {
+	now := time.Now()
+	mockService := &mockDiagnosticsService{
+		diagnostics: &diagnostics.SystemDiagnostics{
+			Timestamp:    now,
+			OverallState: diagnostics.HealthDegraded,
+			SessionMismatches: []diagnostics.SessionMismatch{
+				{
+					IssueID:          "az-44",
+					Kind:             diagnostics.SessionMismatchKindOrphanTmux,
+					IndicatorPresent: false,
+					TmuxPresent:      true,
+				},
+			},
+		},
+	}
+	panel := NewDiagnosticsPanel(mockService, map[string]*domain.Session{})
+	panel.currentDiagnostics = mockService.diagnostics
+
+	nextModel, cmd := panel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = nextModel.(*DiagnosticsPanel)
+	if cmd == nil {
+		t.Fatal("expected command when pressing enter with mismatches present")
+	}
+
+	msg := cmd()
+	openMsg, ok := msg.(OpenSessionReconciliationOverlayMsg)
+	if !ok {
+		t.Fatalf("expected OpenSessionReconciliationOverlayMsg, got %T", msg)
+	}
+	if openMsg.Trigger != "diagnostics_refresh" {
+		t.Fatalf("trigger = %q, want diagnostics_refresh", openMsg.Trigger)
+	}
+	if openMsg.Mismatch.IssueID != "az-44" {
+		t.Fatalf("issue id = %q, want az-44", openMsg.Mismatch.IssueID)
+	}
+}
+
 func TestFormatBytes_Overlay(t *testing.T) {
 	tests := []struct {
 		bytes uint64

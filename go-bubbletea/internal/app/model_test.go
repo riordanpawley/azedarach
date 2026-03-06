@@ -11,8 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/diagnostics"
 	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/services/monitor"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -627,6 +629,150 @@ func TestActionMenuSpaceThenCtrlRRestartsDevServer(t *testing.T) {
 	}
 }
 
+func TestActionMenuAttachWithIndicatorTmuxMismatchOpensReconciliationOverlay(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+	m.tmuxClient = tmux.NewClient(&tmuxScriptRunner{
+		hasSessions: map[string]bool{
+			"az-1": false,
+		},
+	}, slog.Default())
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected session mismatch probe command")
+	}
+
+	probeMsg := cmd()
+	result, _ = m.Update(probeMsg)
+	m = result.(Model)
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected reconciliation overlay to be opened")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.SessionReconciliationOverlay); !ok {
+		t.Fatalf("expected SessionReconciliationOverlay, got %T", m.overlayStack.Current())
+	}
+}
+
+func TestSessionReconciliationActionAdoptCreatesIndicatorAndEvidenceToast(t *testing.T) {
+	m := newTestModel()
+	delete(m.sessions, "az-1")
+
+	result, cmd := m.Update(overlay.SessionReconciliationActionMsg{
+		Mismatch: diagnostics.SessionMismatch{
+			IssueID:          "az-1",
+			Kind:             diagnostics.SessionMismatchKindOrphanTmux,
+			IndicatorPresent: false,
+			TmuxPresent:      true,
+		},
+		Action:  overlay.ReconciliationActionAdoptIndicator,
+		Trigger: "attach",
+	})
+	if cmd != nil {
+		t.Fatal("expected adopt to run synchronously with no command")
+	}
+	m = result.(Model)
+
+	session := m.sessions["az-1"]
+	if session == nil {
+		t.Fatal("expected adopted session indicator for az-1")
+	}
+	if session.State != domain.SessionIdle {
+		t.Fatalf("expected adopted session state idle, got %v", session.State)
+	}
+
+	if len(m.toasts) == 0 {
+		t.Fatal("expected reconciliation toast evidence")
+	}
+	found := false
+	for _, entry := range m.toasts {
+		if containsAll(entry.Message, []string{"reconciliation", "adopt", "az-1"}) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected auditable adopt toast, got %+v", m.toasts)
+	}
+}
+
+func TestSessionReconciliationActionClearRemovesIndicatorAndEvidenceToast(t *testing.T) {
+	m := newTestModel()
+	m.sessions["az-1"] = &domain.Session{
+		IssueID: "az-1",
+		State:   domain.SessionPaused,
+	}
+
+	result, cmd := m.Update(overlay.SessionReconciliationActionMsg{
+		Mismatch: diagnostics.SessionMismatch{
+			IssueID:          "az-1",
+			Kind:             diagnostics.SessionMismatchKindStaleIndicator,
+			IndicatorPresent: true,
+			TmuxPresent:      false,
+		},
+		Action:  overlay.ReconciliationActionClearIndicator,
+		Trigger: "attach",
+	})
+	if cmd != nil {
+		t.Fatal("expected clear to run synchronously with no command")
+	}
+	m = result.(Model)
+
+	if _, ok := m.sessions["az-1"]; ok {
+		t.Fatal("expected stale session indicator to be cleared")
+	}
+	if len(m.toasts) == 0 {
+		t.Fatal("expected reconciliation toast evidence")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if !containsAll(last.Message, []string{"reconciliation", "clear", "az-1"}) {
+		t.Fatalf("expected auditable clear toast, got %q", last.Message)
+	}
+}
+
+func TestSessionReconciliationActionTerminateOrphanTmuxSession(t *testing.T) {
+	runner := &tmuxScriptRunner{}
+	m := newTestModel()
+	m.tmuxClient = tmux.NewClient(runner, slog.Default())
+
+	result, cmd := m.Update(overlay.SessionReconciliationActionMsg{
+		Mismatch: diagnostics.SessionMismatch{
+			IssueID:          "az-1",
+			Kind:             diagnostics.SessionMismatchKindOrphanTmux,
+			IndicatorPresent: false,
+			TmuxPresent:      true,
+		},
+		Action:  overlay.ReconciliationActionTerminateOrphanTmux,
+		Trigger: "attach",
+	})
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected terminate action command")
+	}
+
+	msg := cmd()
+	result, _ = m.Update(msg)
+	m = result.(Model)
+
+	if len(runner.killedSessions) != 1 || runner.killedSessions[0] != "az-1" {
+		t.Fatalf("expected tmux kill-session for az-1, got %v", runner.killedSessions)
+	}
+	if len(m.toasts) == 0 {
+		t.Fatal("expected reconciliation toast evidence")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if !containsAll(last.Message, []string{"reconciliation", "terminate", "az-1"}) {
+		t.Fatalf("expected auditable terminate toast, got %q", last.Message)
+	}
+}
+
 func openActionAndSelect(t *testing.T, m Model, key tea.KeyMsg) (Model, overlay.SelectionMsg) {
 	t.Helper()
 
@@ -854,6 +1000,43 @@ func TestTickMsgSyncsSessionStatesFromMonitor(t *testing.T) {
 				t.Fatalf("expected session state %v, got %v", tt.expected, session.State)
 			}
 		})
+	}
+}
+
+type tmuxScriptRunner struct {
+	hasSessions    map[string]bool
+	killErr        error
+	killedSessions []string
+}
+
+func (r *tmuxScriptRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	switch args[0] {
+	case "has-session":
+		if len(args) < 3 {
+			return "", errors.New("missing target")
+		}
+		target := args[2]
+		if r.hasSessions != nil && r.hasSessions[target] {
+			return "", nil
+		}
+		return "", errors.New("session not found")
+	case "kill-session":
+		if len(args) < 3 {
+			return "", errors.New("missing target")
+		}
+		target := args[2]
+		r.killedSessions = append(r.killedSessions, target)
+		if r.killErr != nil {
+			return "", r.killErr
+		}
+		return "", nil
+	case "list-sessions":
+		return "", nil
+	default:
+		return "", nil
 	}
 }
 

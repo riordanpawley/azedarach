@@ -619,6 +619,44 @@ func TestCollectDiagnostics_IncludesStartupGateErrors(t *testing.T) {
 	}
 }
 
+func TestCollectDiagnostics_ReportsSessionMismatches(t *testing.T) {
+	tmux := &mockTmuxClient{
+		sessions: []string{"az-1", "az-3", "devserver-az-2"},
+	}
+	ports := &mockPortAllocator{}
+	network := &mockNetworkChecker{
+		online:    true,
+		lastCheck: time.Now(),
+	}
+
+	service := NewService(tmux, ports, network)
+	diag := service.CollectDiagnostics(context.Background(), map[string]*domain.Session{
+		"az-1": {IssueID: "az-1", State: domain.SessionBusy},
+		"az-2": {IssueID: "az-2", State: domain.SessionIdle},
+	}, nil)
+
+	if len(diag.SessionMismatches) != 2 {
+		t.Fatalf("CollectDiagnostics() mismatches = %d, want 2", len(diag.SessionMismatches))
+	}
+
+	first := diag.SessionMismatches[0]
+	second := diag.SessionMismatches[1]
+
+	if first.IssueID != "az-2" || first.Kind != SessionMismatchKindStaleIndicator {
+		t.Fatalf("first mismatch = %+v, want stale indicator for az-2", first)
+	}
+	if second.IssueID != "az-3" || second.Kind != SessionMismatchKindOrphanTmux {
+		t.Fatalf("second mismatch = %+v, want orphan tmux for az-3", second)
+	}
+
+	if len(diag.Warnings) < 2 {
+		t.Fatalf("CollectDiagnostics() warnings = %v, expected mismatch warnings", diag.Warnings)
+	}
+	if !contains(diag.Warnings[0], "Session/tmux mismatch") {
+		t.Fatalf("expected mismatch warning text, got %q", diag.Warnings[0])
+	}
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && stringContains(s, substr)
