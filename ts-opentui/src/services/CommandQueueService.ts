@@ -16,6 +16,7 @@ import type { CommandExecutor } from "@effect/platform"
 import {
 	Cause,
 	Data,
+	DateTime,
 	Deferred,
 	Duration,
 	Effect,
@@ -36,7 +37,7 @@ export interface QueuedCommand {
 	readonly id: string
 	readonly taskId: string
 	readonly label: string // e.g. "merge", "cleanup" for display
-	readonly queuedAt: Date
+	readonly queuedAt: DateTime.Utc
 }
 
 /**
@@ -90,7 +91,7 @@ interface InternalQueuedCommand extends QueuedCommand {
 	readonly effect: Effect.Effect<void, unknown, CommandExecutor.CommandExecutor>
 	readonly deferred: Deferred.Deferred<void, CommandTimeoutError | CommandCancelledError>
 	readonly timeout: Duration.Duration
-	readonly startedAt: Date | null
+	readonly startedAt: DateTime.Utc | null
 }
 
 interface InternalTaskQueueState {
@@ -167,9 +168,10 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					const [next, ...rest] = queue
 					if (!next) return
 
+					const startedAt = yield* DateTime.now
 					const runningCommand: InternalQueuedCommand = {
 						...next,
-						startedAt: new Date(),
+						startedAt,
 					}
 
 					// Mark as running
@@ -279,6 +281,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					Effect.gen(function* () {
 						const { taskId, label, effect, timeout = DEFAULT_TIMEOUT } = options
 						const id = yield* generateCommandId
+						const queuedAt = yield* DateTime.now
 						const deferred = yield* Deferred.make<
 							void,
 							CommandTimeoutError | CommandCancelledError
@@ -288,7 +291,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							id,
 							taskId,
 							label,
-							queuedAt: new Date(),
+							queuedAt,
 							effect,
 							deferred,
 							timeout,
@@ -379,8 +382,9 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 						const running = taskState.value.running
 						if (running === null) return false
 
+						const now = yield* DateTime.now
 						const startedAt = running.startedAt ?? running.queuedAt
-						const elapsedMs = Date.now() - startedAt.getTime()
+						const elapsedMs = DateTime.distance(startedAt, now)
 						const timeoutMs = Duration.toMillis(running.timeout)
 						const staleGrace = options?.grace ?? STALE_COMMAND_GRACE
 						const staleThresholdMs = timeoutMs + Duration.toMillis(staleGrace)
