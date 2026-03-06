@@ -12,6 +12,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
+import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
@@ -27,7 +28,7 @@ import {
 } from "../../core/paths.js"
 import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
-import { WorktreeManager } from "../../core/WorktreeManager.js"
+import { type WorktreeNameClashError, WorktreeManager } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
 import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
@@ -69,8 +70,115 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
-			const boardService = yield* BoardService
-			const gitConfig = yield* appConfig.getGitConfig()
+				const boardService = yield* BoardService
+				const gitConfig = yield* appConfig.getGitConfig()
+
+				const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
+					const aheadRisk =
+						error.commitsAheadOfBase === undefined
+							? `Could not determine whether the duplicate worktree has commits not in ${error.baseBranch}.`
+							: error.commitsAheadOfBase > 0
+								? `${error.commitsAheadOfBase} commit(s) in the duplicate worktree are not in ${error.baseBranch}.`
+								: `No extra commits detected in the duplicate worktree versus ${error.baseBranch}.`
+					const dirtyRisk =
+						error.uncommittedFileCount > 0
+							? `${error.uncommittedFileCount} uncommitted file(s) detected in the duplicate worktree.`
+							: "No uncommitted changes detected in the duplicate worktree."
+					const requestedBranchLine = error.requestedBranch
+						? `Requested branch: ${error.requestedBranch}\n`
+						: ""
+					const conflictReason =
+						error.conflictKind === "branch"
+							? "Derived branch name collision detected."
+							: "Derived worktree path collision detected."
+
+					return `Worktree name clash for ${error.issueId}.
+
+${conflictReason}
+Conflicting issue: ${error.conflictingIssueId}
+Conflicting worktree: ${error.conflictingWorktreePath}
+Conflicting branch: ${error.conflictingBranch || "(unknown)"}
+Requested worktree: ${error.requestedWorktreePath}
+${requestedBranchLine}
+Before deleting the duplicate worktree:
+- ${aheadRisk}
+- ${dirtyRisk}
+
+Delete the duplicate worktree and retry?`
+				}
+
+				const promptWorktreeClashResolution = (options: {
+					error: WorktreeNameClashError
+					projectPath: string
+					retry: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
+				}) =>
+					Effect.gen(function* () {
+						const { error, projectPath, retry } = options
+
+						yield* overlay.push({
+							_tag: "confirm",
+							message: buildWorktreeClashMessage(error),
+							onConfirm: Effect.gen(function* () {
+								yield* toast.show(
+									"info",
+									`Removing duplicate worktree for ${error.conflictingIssueId}...`,
+								)
+
+								const removed = yield* worktreeManager
+									.remove({
+										issueId: error.conflictingIssueId,
+										projectPath,
+									})
+									.pipe(
+										Effect.map(() => true),
+										Effect.catchAll((removeError) =>
+											helpers.showErrorToast("Failed to remove duplicate worktree")(removeError).pipe(
+												Effect.as(false),
+											),
+										),
+									)
+
+								if (!removed) {
+									return
+								}
+
+								yield* boardService.refresh().pipe(Effect.catchAll(() => Effect.void))
+								yield* retry
+							}),
+						})
+					})
+
+				const isWorktreeNameClashError = (
+					error: unknown,
+				): error is WorktreeNameClashError =>
+					typeof error === "object" &&
+					error !== null &&
+					"_tag" in error &&
+					error._tag === "WorktreeNameClashError"
+
+				const runStartWithClashRecovery = <A, E>(options: {
+					issueId: string
+					projectPath: string
+					successMessage: string
+					startEffect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>
+				}) => {
+					const attemptStart = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+						options.startEffect.pipe(
+							Effect.tap(() => toast.show("success", options.successMessage)),
+							Effect.asVoid,
+							Effect.catchAll((error) =>
+								isWorktreeNameClashError(error)
+									? promptWorktreeClashResolution({
+											error,
+											projectPath: options.projectPath,
+											retry: helpers.withQueue(options.issueId, "start", attemptStart()),
+										})
+									: helpers.showErrorToast("Failed to start")(error),
+							),
+						)
+
+					return helpers.withQueue(options.issueId, "start", attemptStart())
+				}
 
 			// ================================================================
 			// Session Handler Methods
@@ -97,18 +205,16 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						return
 					}
 
-					// Get current project path (from ProjectService or cwd fallback)
-					const projectPath = yield* helpers.getProjectPath()
+						// Get current project path (from ProjectService or cwd fallback)
+						const projectPath = yield* helpers.getProjectPath()
 
-					yield* helpers.withQueue(
-						task.id,
-						"start",
-						sessionManager.start({ issueId: task.id, projectPath }).pipe(
-							Effect.tap(() => toast.show("success", `Started session for ${task.id}`)),
-							Effect.catchAll(helpers.showErrorToast("Failed to start")),
-						),
-					)
-				})
+						yield* runStartWithClashRecovery({
+							issueId: task.id,
+							projectPath,
+							successMessage: `Started session for ${task.id}`,
+							startEffect: sessionManager.start({ issueId: task.id, projectPath }),
+						})
+					})
 
 			/**
 			 * Start session with initial prompt (Space+S)
@@ -161,28 +267,19 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						attachmentPaths: imagePaths,
 					})
 
-					yield* helpers.withQueue(
-						task.id,
-						"start",
-						sessionManager
-							.start({
+						yield* runStartWithClashRecovery({
+							issueId: task.id,
+							projectPath,
+							successMessage: task.hasWorktree
+								? `Resumed session for ${task.id} on existing worktree`
+								: `Started session for ${task.id} with prompt`,
+							startEffect: sessionManager.start({
 								issueId: task.id,
 								projectPath,
 								initialPrompt,
-							})
-							.pipe(
-								Effect.tap(() =>
-									toast.show(
-										"success",
-										task.hasWorktree
-											? `Resumed session for ${task.id} on existing worktree`
-											: `Started session for ${task.id} with prompt`,
-									),
-								),
-								Effect.catchAll(helpers.showErrorToast("Failed to start")),
-							),
-					)
-				})
+							}),
+						})
+					})
 
 			/**
 			 * Start session with prompt and --dangerously-skip-permissions (Space+!)
@@ -233,29 +330,20 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						attachmentPaths: imagePaths,
 					})
 
-					yield* helpers.withQueue(
-						task.id,
-						"start",
-						sessionManager
-							.start({
+						yield* runStartWithClashRecovery({
+							issueId: task.id,
+							projectPath,
+							successMessage: task.hasWorktree
+								? `Resumed session for ${task.id} (skip-permissions)`
+								: `Started session for ${task.id} (skip-permissions)`,
+							startEffect: sessionManager.start({
 								issueId: task.id,
 								projectPath,
 								initialPrompt,
 								dangerouslySkipPermissions: true,
-							})
-							.pipe(
-								Effect.tap(() =>
-									toast.show(
-										"success",
-										task.hasWorktree
-											? `Resumed session for ${task.id} (skip-permissions)`
-											: `Started session for ${task.id} (skip-permissions)`,
-									),
-								),
-								Effect.catchAll(helpers.showErrorToast("Failed to start")),
-							),
-					)
-				})
+							}),
+						})
+					})
 
 			/**
 			 * Chat about task (Space+c)
@@ -574,8 +662,12 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			 * and running tasks. For idle tasks, creates the worktree/session without
 			 * starting Claude.
 			 */
-			const startHelixSession = () =>
-				Effect.gen(function* () {
+				const startHelixSession: () => Effect.Effect<
+					void,
+					never,
+					CommandExecutor.CommandExecutor
+				> = () =>
+					Effect.gen(function* () {
 					const task = yield* helpers.getActionTargetTask()
 					if (!task) return
 
@@ -595,16 +687,28 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 						yield* toast.show("info", `Creating worktree for ${task.id}...`)
 
 						// Create worktree (idempotent - returns existing if present)
-						const worktree = yield* worktreeManager
-							.create({
-								issueId: task.id,
-								issueTitle: task.title,
-								branchSlugMaxLength: gitConfig.branchSlugMaxLength,
-								projectPath,
-							})
-							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create worktree")))
+							const worktree = yield* worktreeManager
+								.create({
+									issueId: task.id,
+									issueTitle: task.title,
+									branchSlugMaxLength: gitConfig.branchSlugMaxLength,
+									projectPath,
+								})
+								.pipe(
+									Effect.catchAll((error) =>
+										isWorktreeNameClashError(error)
+											? promptWorktreeClashResolution({
+													error,
+													projectPath,
+													retry: helpers.withQueue(task.id, "start", startHelixSession()),
+												}).pipe(Effect.as(null))
+											: helpers
+													.showErrorToast("Failed to create worktree")(error)
+													.pipe(Effect.as(null)),
+									),
+								)
 
-						if (!worktree) return
+							if (!worktree) return
 
 						// Create tmux session with init commands (same as ClaudeSessionManager)
 						yield* worktreeSession

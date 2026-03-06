@@ -118,11 +118,36 @@ export class WorktreeExistsError extends Data.TaggedError("WorktreeExistsError")
 }> {}
 
 /**
+ * Error when issue-derived worktree or branch names collide with another worktree
+ */
+export class WorktreeNameClashError extends Data.TaggedError("WorktreeNameClashError")<{
+	readonly issueId: string
+	readonly conflictKind: "path" | "branch"
+	readonly requestedWorktreePath: string
+	readonly requestedBranch?: string
+	readonly conflictingIssueId: string
+	readonly conflictingWorktreePath: string
+	readonly conflictingBranch: string
+	readonly baseBranch: string
+	readonly commitsAheadOfBase?: number
+	readonly uncommittedFileCount: number
+}> {}
+
+class WorktreeCacheMissAfterCreateError extends Data.TaggedError(
+	"WorktreeCacheMissAfterCreateError",
+)<{
+	readonly foundIssueIds: readonly string[]
+	readonly cacheSize: number
+}> {}
+
+/**
  * Error when project is not a git repository
  */
 export class NotAGitRepoError extends Data.TaggedError("NotAGitRepoError")<{
 	readonly path: string
 }> {}
+
+export type WorktreeCreateError = GitError | NotAGitRepoError | WorktreeNameClashError
 
 // ============================================================================
 // Service Definition
@@ -153,7 +178,7 @@ export interface WorktreeManagerService {
 	 */
 	readonly create: (
 		options: CreateWorktreeOptions,
-	) => Effect.Effect<Worktree, GitError | NotAGitRepoError, CommandExecutor.CommandExecutor>
+	) => Effect.Effect<Worktree, WorktreeCreateError, CommandExecutor.CommandExecutor>
 
 	/**
 	 * Remove a worktree by bead ID
@@ -786,12 +811,81 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			return worktrees
 		}
 
-		// Pure helper to get worktree path (uses captured pathService)
-		const getWorktreePath = (projectPath: string, issueId: string): string => {
-			const projectName = pathService.basename(projectPath)
-			const parentDir = pathService.dirname(projectPath)
-			return pathService.join(parentDir, `${projectName}-${issueId}`)
-		}
+			// Pure helper to get worktree path (uses captured pathService)
+			const getWorktreePath = (projectPath: string, issueId: string): string => {
+				const projectName = pathService.basename(projectPath)
+				const parentDir = pathService.dirname(projectPath)
+				return pathService.join(parentDir, `${projectName}-${issueId}`)
+			}
+
+			const caseInsensitivePathLookup = process.platform === "darwin" || process.platform === "win32"
+
+			const normalizePathForLookup = (rawPath: string): string => {
+				const normalized = pathService.normalize(pathService.resolve(rawPath))
+				return caseInsensitivePathLookup ? normalized.toLowerCase() : normalized
+			}
+
+			const pathsEqualForLookup = (leftPath: string, rightPath: string): boolean =>
+				normalizePathForLookup(leftPath) === normalizePathForLookup(rightPath)
+
+			const countUncommittedFiles = (
+				worktreePath: string,
+			): Effect.Effect<number, never, CommandExecutor.CommandExecutor> =>
+				runGit(["status", "--porcelain"], worktreePath).pipe(
+					Effect.map((output) =>
+						output
+							.split("\n")
+							.map((line) => line.trim())
+							.filter((line) => line.length > 0).length,
+					),
+					Effect.catchAll(() => Effect.succeed(0)),
+				)
+
+			const countCommitsAheadOfBase = (
+				worktreePath: string,
+				baseBranch: string,
+			): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
+				runGit(["rev-list", "--count", `${baseBranch}..HEAD`], worktreePath).pipe(
+					Effect.map((output) => {
+						const parsed = Number.parseInt(output.trim(), 10)
+						return Number.isFinite(parsed) ? parsed : undefined
+					}),
+					Effect.catchAll(() => Effect.succeed(undefined)),
+				)
+
+			const buildWorktreeNameClashError = (options: {
+				issueId: string
+				conflictKind: "path" | "branch"
+				requestedWorktreePath: string
+				requestedBranch?: string
+				conflictingWorktree: Worktree
+				baseBranch: string
+			}): Effect.Effect<WorktreeNameClashError, never, CommandExecutor.CommandExecutor> =>
+				Effect.gen(function* () {
+					const {
+						issueId,
+						conflictKind,
+						requestedWorktreePath,
+						requestedBranch,
+						conflictingWorktree,
+						baseBranch,
+					} = options
+					const commitsAheadOfBase = yield* countCommitsAheadOfBase(conflictingWorktree.path, baseBranch)
+					const uncommittedFileCount = yield* countUncommittedFiles(conflictingWorktree.path)
+
+					return new WorktreeNameClashError({
+						issueId,
+						conflictKind,
+						requestedWorktreePath,
+						requestedBranch,
+						conflictingIssueId: conflictingWorktree.issueId,
+						conflictingWorktreePath: conflictingWorktree.path,
+						conflictingBranch: conflictingWorktree.branch,
+						baseBranch,
+						commitsAheadOfBase,
+						uncommittedFileCount,
+					})
+				})
 
 		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
 		// Now supports multiple projects - each project has its own cache entry
@@ -903,12 +997,65 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							return existingWorktree
 						}
 
+						const resolveComparisonBaseBranch = (() => {
+							let cachedBaseBranch: string | undefined
+							return (): Effect.Effect<
+								string,
+								GitError,
+								CommandExecutor.CommandExecutor
+							> =>
+								Effect.gen(function* () {
+									if (cachedBaseBranch) {
+										return cachedBaseBranch
+									}
+
+									const resolvedBaseBranch = baseBranch || (yield* getCurrentBranch(projectPath))
+									cachedBaseBranch = resolvedBaseBranch
+									return resolvedBaseBranch
+								})
+						})()
+
+							const conflictingByPath = Array.from(projectWorktrees.values()).find(
+								(worktree) =>
+									pathsEqualForLookup(worktree.path, worktreePath) &&
+									worktree.issueId !== issueId,
+							)
+
+						if (conflictingByPath) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: conflictingByPath,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
 						const branchName = yield* getOrCreateBranchName({
 							issueId,
 							issueTitle,
 							branchSlugMaxLength,
 							projectPath,
 						})
+
+						const conflictingByBranch = Array.from(projectWorktrees.values()).find(
+							(worktree) => worktree.branch === branchName && worktree.issueId !== issueId,
+						)
+
+						if (conflictingByBranch) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "branch",
+								requestedWorktreePath: worktreePath,
+								requestedBranch: branchName,
+								conflictingWorktree: conflictingByBranch,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
 
 						// Check if branch already exists (e.g., from a previously deleted worktree)
 						const hasBranch = yield* branchExists(branchName, projectPath)
@@ -942,52 +1089,88 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Git worktree list can sometimes miss newly created worktrees due to
 						// filesystem sync timing issues, especially on macOS APFS. We retry
 						// a few times with short delays to handle this race condition.
-						const findNewWorktree = Effect.gen(function* () {
-							yield* forceRefreshWorktrees(projectPath)
-							const allUpdated = yield* Ref.get(worktreesRef)
-							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-							const newWorktree = projectUpdated.get(issueId)
+							const findNewWorktree = Effect.gen(function* () {
+								yield* forceRefreshWorktrees(projectPath)
+								const allUpdated = yield* Ref.get(worktreesRef)
+								const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+								const newWorktree = projectUpdated.get(issueId)
 
-							if (!newWorktree) {
-								const foundIssueIds = Array.from(projectUpdated.keys())
-								return yield* Effect.fail({
-									_tag: "NotFound" as const,
-									foundIssueIds,
-									cacheSize: projectUpdated.size,
-								})
-							}
-							return newWorktree
-						})
+								if (!newWorktree) {
+									const foundIssueIds = Array.from(projectUpdated.keys())
+									return yield* Effect.fail(new WorktreeCacheMissAfterCreateError({
+										foundIssueIds,
+										cacheSize: projectUpdated.size,
+									}))
+								}
+								return newWorktree
+							})
 
 						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
 						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
 
-						const result = yield* findNewWorktree.pipe(
-							Effect.retry({
-								schedule: retrySchedule,
-								while: (e) => e._tag === "NotFound",
-							}),
-							Effect.catchIf(
-								(e): e is { _tag: "NotFound"; foundIssueIds: string[]; cacheSize: number } =>
-									"_tag" in e && e._tag === "NotFound",
-								(e) => {
-									// All retries exhausted, log and fail with descriptive error
-									Effect.logError("Worktree created but not found in cache after retries", {
-										issueId,
-										worktreePath,
-										projectPath,
-										foundIssueIds: e.foundIssueIds,
-										cacheSize: e.cacheSize,
-									})
-									return Effect.fail(
-										new GitError({
-											message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
-											command: `git worktree add ${worktreePath}`,
+							const result = yield* findNewWorktree.pipe(
+								Effect.retry({
+									schedule: retrySchedule,
+									while: (e) => e._tag === "WorktreeCacheMissAfterCreateError",
+								}),
+								Effect.catchTag(
+									"WorktreeCacheMissAfterCreateError",
+									(e) =>
+										Effect.gen(function* () {
+											yield* Effect.logError("Worktree created but not found in cache after retries", {
+												issueId,
+												worktreePath,
+												projectPath,
+												foundIssueIds: e.foundIssueIds,
+												cacheSize: e.cacheSize,
+											})
+
+											const allAfterRetries = yield* Ref.get(worktreesRef)
+											const projectAfterRetries =
+												allAfterRetries.get(projectPath) ?? new Map<string, Worktree>()
+											const worktreesAfterRetries = Array.from(projectAfterRetries.values())
+
+											const conflictByPath = worktreesAfterRetries.find(
+												(worktree) =>
+													worktree.issueId !== issueId &&
+													pathsEqualForLookup(worktree.path, worktreePath),
+											)
+
+											const conflictByCaseVariantIssueId =
+												conflictByPath ||
+												!caseInsensitivePathLookup
+													? undefined
+													: worktreesAfterRetries.find(
+															(worktree) =>
+																worktree.issueId !== issueId &&
+																worktree.issueId.toLowerCase() === issueId.toLowerCase(),
+														)
+
+											const conflictingWorktree = conflictByPath ?? conflictByCaseVariantIssueId
+											if (conflictingWorktree) {
+												const comparisonBaseBranch = yield* resolveComparisonBaseBranch().pipe(
+													Effect.catchAll(() => Effect.succeed(baseBranch ?? "main")),
+												)
+												const clashError = yield* buildWorktreeNameClashError({
+													issueId,
+													conflictKind: "path",
+													requestedWorktreePath: worktreePath,
+													requestedBranch: branchName,
+													conflictingWorktree,
+													baseBranch: comparisonBaseBranch,
+												})
+												return yield* Effect.fail(clashError)
+											}
+
+											return yield* Effect.fail(
+												new GitError({
+													message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
+													command: `git worktree add ${worktreePath}`,
+												}),
+											)
 										}),
-									)
-								},
-							),
-						)
+								),
+							)
 
 						return result
 					}).pipe(Effect.withSpan("worktree.create")),
@@ -1064,7 +1247,7 @@ export const create = (
 	options: CreateWorktreeOptions,
 ): Effect.Effect<
 	Worktree,
-	GitError | NotAGitRepoError,
+	WorktreeCreateError,
 	WorktreeManager | CommandExecutor.CommandExecutor
 > => Effect.flatMap(WorktreeManager, (manager) => manager.create(options))
 
@@ -1138,7 +1321,7 @@ export const acquireWorktree = (
 	options: CreateWorktreeOptions,
 ): Effect.Effect<
 	Worktree,
-	GitError | NotAGitRepoError,
+	WorktreeCreateError,
 	Scope.Scope | WorktreeManager | CommandExecutor.CommandExecutor
 > =>
 	Effect.acquireRelease(create(options), (worktree) =>
