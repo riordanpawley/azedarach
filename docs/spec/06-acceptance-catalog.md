@@ -1079,7 +1079,7 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- spec tool scenarios AZ-AT-2901 through AZ-AT-2906
+- spec tool scenarios AZ-AT-2901 through AZ-AT-2912
 - extended conformance scenarios AZ-AT-2812 through AZ-AT-2829 and AZ-AT-2831 through AZ-AT-2837
 
 ## 6.32 Spec Tool Acceptance
@@ -1123,3 +1123,44 @@ A release candidate MUST pass:
 - Steps: execute publish and inspect result reporting.
 - Expected: per-document outcome and requirement/link counts are reported; local spec data remains intact with actionable remediation guidance.
 - Links: AZ-FR-4209, AZ-FR-4210.
+
+## 6.33 TUI Spec Workspace Acceptance
+
+### AZ-AT-2907 Enter and exit Spec workspace from board context
+
+- Steps: open Spec workspace from board via keyboard path, then exit back to board.
+- Expected: entry succeeds from board workflow and exit restores prior board context with deterministic focus.
+- Links: AZ-FR-4301, AZ-FR-4302.
+
+### AZ-AT-2908 Board `Tab` behavior remains board-scoped
+
+- Steps: use `Tab` in board before and after visiting Spec workspace.
+- Expected: board `Tab` continues to toggle board views only and is not globally overridden by Spec workspace behavior.
+- Links: AZ-FR-4303.
+
+### AZ-AT-2909 Spec subview switching and context hints
+
+- Steps: in Spec workspace, cycle subviews via keyboard and inspect status/key-hint surfaces.
+- Expected: subview switching is deterministic; Requirements, Coverage, and Publish are available; status/key hints reflect active workspace/subview.
+- Links: AZ-FR-4304, AZ-FR-4305, AZ-FR-4309.
+
+### AZ-AT-2910 Requirements subview identity and link counts
+
+- Preconditions: requirements exist with mixed linked-issue counts.
+- Steps: open Requirements subview and inspect listed entries.
+- Expected: each entry shows requirement identity and linked-issue count.
+- Links: AZ-FR-4306.
+
+### AZ-AT-2911 Coverage subview gap visibility
+
+- Preconditions: at least one requirement is unlinked and at least one integrity gap exists.
+- Steps: open Coverage subview and inspect reported coverage state.
+- Expected: unlinked requirements and link integrity gaps are surfaced explicitly.
+- Links: AZ-FR-4307.
+
+### AZ-AT-2912 Publish subview auto-config and outcome summary
+
+- Preconditions: publish target is configured and at least one publish run has completed.
+- Steps: open Publish subview and inspect publish metadata.
+- Expected: target state, auto-config status, and most recent outcome summary are visible.
+- Links: AZ-FR-4308.

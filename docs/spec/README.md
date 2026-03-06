@@ -70,7 +70,7 @@ It is implementation-agnostic and intended to be sufficient for any conforming i
 - Multi-project workflows: project registry, auto-detection, project selector
 - Attachment workflows: add, remove, preview, open external
 - Planning workflows: natural-language planning to epic+tasks+deps
-- Spec workflows: az-native requirement records, issue-linked traceability, and one-way publish to Linear project documents with optional auto-config
+- Spec workflows: az-native requirement records, issue-linked traceability, dedicated TUI Spec workspace (Requirements/Coverage/Publish), and one-way publish to Linear project documents with optional auto-config
 - Settings workflows: full UI-driven configuration persisted to JSON config with schema-backed editor support
 - Observability workflows: logs viewer, connection status, toast notifications
 - Startup/re-entry workflows: dependency health checks, non-blocking startup bootstrap, loading-state convergence, and context restore

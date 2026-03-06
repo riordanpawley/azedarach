@@ -511,3 +511,15 @@ This section is normative.
 - AZ-FR-4208: Publish workflows MUST remain one-way for now and MUST NOT ingest edits from Linear project documents back into az spec storage.
 - AZ-FR-4209: Publish results MUST report per-document outcomes and requirement/link coverage counts.
 - AZ-FR-4210: Publish failures (network/auth/permission/target missing) MUST preserve local spec data and provide actionable remediation guidance.
+
+## 4.46 TUI Spec Workspace Requirements
+
+- AZ-FR-4301: The UI MUST provide a keyboard-accessible entry path from board workflows into a dedicated Spec workspace.
+- AZ-FR-4302: Exiting the Spec workspace MUST return users to prior board context with deterministic focus restoration.
+- AZ-FR-4303: Board `Tab` behavior MUST remain scoped to board view toggling and MUST NOT be repurposed globally by Spec workspace features.
+- AZ-FR-4304: The Spec workspace MUST provide at least Requirements, Coverage, and Publish subviews.
+- AZ-FR-4305: Spec subview switching MUST be keyboard-first and deterministic.
+- AZ-FR-4306: Requirements subview MUST expose requirement identity and linked-issue counts.
+- AZ-FR-4307: Coverage subview MUST expose unlinked requirements and link integrity gaps.
+- AZ-FR-4308: Publish subview MUST expose publish target state, auto-config status, and most recent outcome summary.
+- AZ-FR-4309: Status bar and key-hint surfaces MUST reflect active workspace/subview context.
