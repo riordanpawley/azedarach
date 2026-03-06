@@ -1015,11 +1015,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								})
 						})()
 
-							const conflictingByPath = Array.from(projectWorktrees.values()).find(
-								(worktree) =>
-									pathsEqualForLookup(worktree.path, worktreePath) &&
-									worktree.issueId !== issueId,
-							)
+						const worktreesBeforeCreate = Array.from(projectWorktrees.values())
+
+						const conflictingByPath = worktreesBeforeCreate.find(
+							(worktree) =>
+								pathsEqualForLookup(worktree.path, worktreePath) &&
+								worktree.issueId !== issueId,
+						)
 
 						if (conflictingByPath) {
 							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
@@ -1028,6 +1030,48 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								conflictKind: "path",
 								requestedWorktreePath: worktreePath,
 								conflictingWorktree: conflictingByPath,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
+						const conflictingByCaseVariantIssueId =
+							!caseInsensitivePathLookup
+								? undefined
+								: worktreesBeforeCreate.find(
+										(worktree) =>
+											worktree.issueId !== issueId &&
+											worktree.issueId.toLowerCase() === issueId.toLowerCase(),
+									)
+
+						if (conflictingByCaseVariantIssueId) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: conflictingByCaseVariantIssueId,
+								baseBranch: comparisonBaseBranch,
+							})
+							return yield* Effect.fail(clashError)
+						}
+
+						const stalePathExists = yield* fs
+							.exists(worktreePath)
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						if (stalePathExists) {
+							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
+							const clashError = yield* buildWorktreeNameClashError({
+								issueId,
+								conflictKind: "path",
+								requestedWorktreePath: worktreePath,
+								conflictingWorktree: {
+									path: worktreePath,
+									issueId,
+									branch: "",
+									isLocked: false,
+									head: "",
+								},
 								baseBranch: comparisonBaseBranch,
 							})
 							return yield* Effect.fail(clashError)
@@ -1162,6 +1206,30 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 												return yield* Effect.fail(clashError)
 											}
 
+											const stalePathExists = yield* fs
+												.exists(worktreePath)
+												.pipe(Effect.catchAll(() => Effect.succeed(false)))
+											if (stalePathExists) {
+												const comparisonBaseBranch = yield* resolveComparisonBaseBranch().pipe(
+													Effect.catchAll(() => Effect.succeed(baseBranch ?? "main")),
+												)
+												const clashError = yield* buildWorktreeNameClashError({
+													issueId,
+													conflictKind: "path",
+													requestedWorktreePath: worktreePath,
+													requestedBranch: branchName,
+													conflictingWorktree: {
+														path: worktreePath,
+														issueId,
+														branch: branchName,
+														isLocked: false,
+														head: "",
+													},
+													baseBranch: comparisonBaseBranch,
+												})
+												return yield* Effect.fail(clashError)
+											}
+
 											return yield* Effect.fail(
 												new GitError({
 													message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
@@ -1186,10 +1254,35 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
 					const worktree = projectWorktrees.get(issueId)
 
-					if (!worktree) {
-						// Safe no-op if doesn't exist
-						return
-					}
+						if (!worktree) {
+							const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+							const stalePathExists = yield* fs
+								.exists(expectedWorktreePath)
+								.pipe(Effect.catchAll(() => Effect.succeed(false)))
+							if (!stalePathExists) {
+								// Safe no-op if doesn't exist
+								return
+							}
+
+							yield* Effect.logWarning("Removing stale derived worktree directory", {
+								issueId,
+								projectPath,
+								worktreePath: expectedWorktreePath,
+							})
+
+							yield* fs.remove(expectedWorktreePath, { recursive: true }).pipe(
+								Effect.mapError(
+									(error) =>
+										new GitError({
+											message: `Failed to remove stale worktree path: ${String(error)}`,
+											command: `rm -rf ${expectedWorktreePath}`,
+										}),
+								),
+							)
+
+							yield* forceRefreshWorktrees(projectPath)
+							return
+						}
 
 					// Remove worktree
 					yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)

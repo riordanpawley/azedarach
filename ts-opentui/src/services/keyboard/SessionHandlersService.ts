@@ -13,7 +13,7 @@
  */
 
 import type { CommandExecutor } from "@effect/platform"
-import { Effect } from "effect"
+import { Data, Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
 import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
@@ -35,6 +35,20 @@ import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
 import { buildChatPrompt, buildStartWorkPrompt } from "./SessionPrompt.js"
+
+type WorktreeNameClashLike = {
+	readonly _tag: "WorktreeNameClashError"
+	readonly issueId: string
+	readonly conflictKind: "path" | "branch"
+	readonly requestedWorktreePath: string
+	readonly requestedBranch?: string
+	readonly conflictingIssueId: string
+	readonly conflictingWorktreePath: string
+	readonly conflictingBranch: string
+	readonly baseBranch: string
+	readonly commitsAheadOfBase?: number
+	readonly uncommittedFileCount: number
+}
 
 // ============================================================================
 // Service Definition
@@ -70,31 +84,35 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
-				const boardService = yield* BoardService
-				const gitConfig = yield* appConfig.getGitConfig()
-				const localModePromptGuardrails =
-					gitConfig.workflowMode === "local" || !gitConfig.pushEnabled || !gitConfig.fetchEnabled
+			const boardService = yield* BoardService
+			const gitConfig = yield* appConfig.getGitConfig()
+			const localModePromptGuardrails =
+				gitConfig.workflowMode === "local" || !gitConfig.pushEnabled || !gitConfig.fetchEnabled
+			type SessionStartCause = Effect.Effect.Error<ReturnType<typeof sessionManager.start>>
+			class SessionStartError extends Data.TaggedError("SessionStartError")<{
+				readonly cause: SessionStartCause
+			}> {}
 
-				const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
-					const aheadRisk =
-						error.commitsAheadOfBase === undefined
-							? `Could not determine whether the duplicate worktree has commits not in ${error.baseBranch}.`
-							: error.commitsAheadOfBase > 0
-								? `${error.commitsAheadOfBase} commit(s) in the duplicate worktree are not in ${error.baseBranch}.`
-								: `No extra commits detected in the duplicate worktree versus ${error.baseBranch}.`
-					const dirtyRisk =
-						error.uncommittedFileCount > 0
-							? `${error.uncommittedFileCount} uncommitted file(s) detected in the duplicate worktree.`
-							: "No uncommitted changes detected in the duplicate worktree."
-					const requestedBranchLine = error.requestedBranch
-						? `Requested branch: ${error.requestedBranch}\n`
-						: ""
-					const conflictReason =
-						error.conflictKind === "branch"
-							? "Derived branch name collision detected."
-							: "Derived worktree path collision detected."
+			const buildWorktreeClashMessage = (error: WorktreeNameClashLike): string => {
+				const aheadRisk =
+					error.commitsAheadOfBase === undefined
+						? `Could not determine whether the duplicate worktree has commits not in ${error.baseBranch}.`
+						: error.commitsAheadOfBase > 0
+							? `${error.commitsAheadOfBase} commit(s) in the duplicate worktree are not in ${error.baseBranch}.`
+							: `No extra commits detected in the duplicate worktree versus ${error.baseBranch}.`
+				const dirtyRisk =
+					error.uncommittedFileCount > 0
+						? `${error.uncommittedFileCount} uncommitted file(s) detected in the duplicate worktree.`
+						: "No uncommitted changes detected in the duplicate worktree."
+				const requestedBranchLine = error.requestedBranch
+					? `Requested branch: ${error.requestedBranch}\n`
+					: ""
+				const conflictReason =
+					error.conflictKind === "branch"
+						? "Derived branch name collision detected."
+						: "Derived worktree path collision detected."
 
-					return `Worktree name clash for ${error.issueId}.
+				return `Worktree name clash for ${error.issueId}.
 
 ${conflictReason}
 Conflicting issue: ${error.conflictingIssueId}
@@ -107,10 +125,10 @@ Before deleting the duplicate worktree:
 - ${dirtyRisk}
 
 Delete the duplicate worktree and retry?`
-				}
+			}
 
 				const promptWorktreeClashResolution = (options: {
-					error: WorktreeNameClashError
+					error: WorktreeNameClashLike
 					projectPath: string
 					retry: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 				}) =>
@@ -150,33 +168,38 @@ Delete the duplicate worktree and retry?`
 						})
 					})
 
-				const isWorktreeNameClashError = (
-					error: unknown,
-				): error is WorktreeNameClashError =>
-					typeof error === "object" &&
-					error !== null &&
-					"_tag" in error &&
-					error._tag === "WorktreeNameClashError"
+				const wrapSessionStartError = <A>(
+					effect: Effect.Effect<A, SessionStartError["cause"], CommandExecutor.CommandExecutor>,
+				): Effect.Effect<A, SessionStartError, CommandExecutor.CommandExecutor> =>
+					effect.pipe(
+						Effect.mapError((cause) => new SessionStartError({ cause })),
+					)
 
-				const runStartWithClashRecovery = <A, E>(options: {
+				const runStartWithClashRecovery = <A>(options: {
 					issueId: string
 					projectPath: string
 					successMessage: string
-					startEffect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>
+					startEffect: Effect.Effect<
+						A,
+						SessionStartError | WorktreeNameClashError,
+						CommandExecutor.CommandExecutor
+					>
 				}) => {
 					const attemptStart = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
 						options.startEffect.pipe(
 							Effect.tap(() => toast.show("success", options.successMessage)),
 							Effect.asVoid,
-							Effect.catchAll((error) =>
-								isWorktreeNameClashError(error)
-									? promptWorktreeClashResolution({
-											error,
-											projectPath: options.projectPath,
-											retry: helpers.withQueue(options.issueId, "start", attemptStart()),
-										})
-									: helpers.showErrorToast("Failed to start")(error),
+							Effect.catchTag("WorktreeNameClashError", (error) =>
+								promptWorktreeClashResolution({
+									error,
+									projectPath: options.projectPath,
+									retry: helpers.withQueue(options.issueId, "start", attemptStart()),
+								}),
 							),
+							Effect.catchTag("SessionStartError", (error) =>
+								helpers.showErrorToast("Failed to start")(error.cause),
+							),
+							Effect.catchAll(helpers.showErrorToast("Failed to start")),
 						)
 
 					return helpers.withQueue(options.issueId, "start", attemptStart())
@@ -214,7 +237,9 @@ Delete the duplicate worktree and retry?`
 							issueId: task.id,
 							projectPath,
 							successMessage: `Started session for ${task.id}`,
-							startEffect: sessionManager.start({ issueId: task.id, projectPath }),
+							startEffect: wrapSessionStartError(
+								sessionManager.start({ issueId: task.id, projectPath }),
+							),
 						})
 					})
 
@@ -276,11 +301,13 @@ Delete the duplicate worktree and retry?`
 							successMessage: task.hasWorktree
 								? `Resumed session for ${task.id} on existing worktree`
 								: `Started session for ${task.id} with prompt`,
-							startEffect: sessionManager.start({
-								issueId: task.id,
-								projectPath,
-								initialPrompt,
-							}),
+							startEffect: wrapSessionStartError(
+								sessionManager.start({
+									issueId: task.id,
+									projectPath,
+									initialPrompt,
+								}),
+							),
 						})
 					})
 
@@ -340,12 +367,14 @@ Delete the duplicate worktree and retry?`
 							successMessage: task.hasWorktree
 								? `Resumed session for ${task.id} (skip-permissions)`
 								: `Started session for ${task.id} (skip-permissions)`,
-							startEffect: sessionManager.start({
-								issueId: task.id,
-								projectPath,
-								initialPrompt,
-								dangerouslySkipPermissions: true,
-							}),
+							startEffect: wrapSessionStartError(
+								sessionManager.start({
+									issueId: task.id,
+									projectPath,
+									initialPrompt,
+									dangerouslySkipPermissions: true,
+								}),
+							),
 						})
 					})
 
@@ -699,16 +728,15 @@ Delete the duplicate worktree and retry?`
 									projectPath,
 								})
 								.pipe(
+									Effect.catchTag("WorktreeNameClashError", (error) =>
+										promptWorktreeClashResolution({
+											error,
+											projectPath,
+											retry: helpers.withQueue(task.id, "start", startHelixSession()),
+										}).pipe(Effect.as(null)),
+									),
 									Effect.catchAll((error) =>
-										isWorktreeNameClashError(error)
-											? promptWorktreeClashResolution({
-													error,
-													projectPath,
-													retry: helpers.withQueue(task.id, "start", startHelixSession()),
-												}).pipe(Effect.as(null))
-											: helpers
-													.showErrorToast("Failed to create worktree")(error)
-													.pipe(Effect.as(null)),
+										helpers.showErrorToast("Failed to create worktree")(error).pipe(Effect.as(null)),
 									),
 								)
 
