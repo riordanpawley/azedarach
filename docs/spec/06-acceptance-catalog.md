@@ -494,7 +494,7 @@ Canonical fixture profile names:
 - Expected: PTY monitor does not update session state/metrics from those patterns; only native tmux/hook status updates affect session state.
 - Links: AZ-FR-0815a, AZ-FR-2005.
 
-### AZ-AT-2829 PTY recency-first detection avoids stale error pinning
+### AZ-AT-2832 PTY recency-first detection avoids stale error pinning
 
 - Preconditions: issue session is running with `stateDetection.patternMatching=true`.
 - Steps: emit an error-looking line, then continue with clear active-work output (spinner/tool activity) without stopping the session.
@@ -562,6 +562,13 @@ Canonical fixture profile names:
 - Expected: app exits cleanly; session remains running; terminal state restored.
 - Links: AZ-FR-2707, AZ-FR-2708.
 
+### AZ-AT-1604 Non-blocking startup bootstrap and hydration convergence
+
+- Preconditions: startup profile with slow tracker/webhook/bootstrap path (for example delayed backend/listener initialization).
+- Steps: launch app and immediately perform navigation/mode/help interactions while initial hydration is still running.
+- Expected: board shell is interactable immediately; startup loading indicator remains visible until first hydration attempt settles; data converges without manual relaunch/refresh.
+- Links: AZ-FR-2709, AZ-FR-2710, AZ-FR-2711, AZ-FR-3908, section 05 F-104.
+
 ## 6.19 Concurrency and Mutation Acceptance
 
 ### AZ-AT-1701 Stale edit conflict handling
@@ -583,7 +590,7 @@ Canonical fixture profile names:
 - Expected: explicit lock feedback; no duplicate write; retry path available.
 - Links: AZ-FR-2806..AZ-FR-2808.
 
-### AZ-AT-2830 Refresh selection reconciliation and optimistic dependency/fork rollback
+### AZ-AT-2833 Refresh selection reconciliation and optimistic dependency/fork rollback
 
 - Preconditions: selected set includes items affected by refresh removal; dependency/fork mutation failures can be injected.
 - Steps: trigger refresh during active selections; run optimistic dependency and fork metadata mutations with forced failures.
@@ -1036,13 +1043,6 @@ Canonical fixture profile names:
 - Expected: foreground interactions remain responsive; off-screen refresh proceeds opportunistically without mode or navigation stalls.
 - Links: AZ-FR-2309.
 
-### AZ-AT-2832 Non-blocking startup bootstrap
-
-- Preconditions: startup profile with slow tracker/webhook bootstrap path (for example delayed backend/listener initialization).
-- Steps: launch app and immediately perform navigation/mode/help interactions while initial hydration is still running.
-- Expected: board shell is interactable immediately; startup loading indicator remains visible until first hydration attempt settles; data converges without manual relaunch/refresh.
-- Links: AZ-FR-2709, AZ-FR-2710, AZ-FR-2711, AZ-FR-3908.
-
 ## 6.31 Minimum Release Gate
 
 A release candidate MUST pass:
@@ -1058,4 +1058,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2832
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2833
