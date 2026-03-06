@@ -26,6 +26,7 @@ This directory implements an **auto-activating skills system** that combines:
 ├── skill-rules.json             # Activation rules and configuration
 │
 ├── effect/                      # Effect/TypeScript skills
+│   ├── effect-atom-interactions.skill.md
 │   ├── effect-concurrency.skill.md
 │   ├── effect-errors.skill.md
 │   ├── effect-resources.skill.md
@@ -75,6 +76,7 @@ Development workflow and process patterns:
 
 ### Effect Skills (ts-opentui only)
 Effect framework and TypeScript patterns:
+- **effect-atom-interactions** - Move UI interaction orchestration from React into atom actions
 - **effect-concurrency** - Fibers, forking, scheduling
 - **effect-errors** - Error handling patterns
 - **effect-resources** - Resource management

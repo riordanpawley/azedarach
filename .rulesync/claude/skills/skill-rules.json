@@ -129,6 +129,46 @@
 			}
 		},
 		{
+			"id": "effect-atom-interactions",
+			"name": "Effect Atom Interactions",
+			"path": ".claude/skills/effect/effect-atom-interactions.skill.md",
+			"type": "effect",
+			"priority": "high",
+			"confidence": {
+				"required": 0.65,
+				"suggested": 0.5
+			},
+			"triggers": {
+				"filePatterns": ["ts-opentui/src/ui/App.tsx", "ts-opentui/src/ui/atoms/**/*.ts"],
+				"contentPatterns": [
+					"useAtomSet(",
+					"appRuntime.fn(",
+					"KeyboardService",
+					"NavigationService",
+					"OverlayService"
+				],
+				"keywords": [
+					"move this into atom",
+					"effect/atom land",
+					"react handler orchestration",
+					"mouse interaction flow",
+					"thin react handler",
+					"avoid async in react",
+					"appRuntime.fn action"
+				]
+			},
+			"affinities": [],
+			"affinity_threshold": 0.5,
+			"validation": {
+				"enforces": [
+					"Keep React handlers as event normalization + single atom dispatch",
+					"Put interaction sequencing in appRuntime.fn actions",
+					"Use Effect services (Navigation/Editor/Overlay/Keyboard) in atom actions",
+					"Preserve keyboard semantics when refactoring interaction paths"
+				]
+			}
+		},
+		{
 			"id": "go-testing",
 			"name": "Go Testing (Bubbletea)",
 			"path": ".claude/skills/go/go-testing.skill.md",
