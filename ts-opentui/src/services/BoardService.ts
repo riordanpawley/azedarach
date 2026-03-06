@@ -792,44 +792,50 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* Effect.log(
 					`loadTasks: resolved projectPath=${projectPath ?? "null"} preferredProjectPath=${preferredProjectPath ?? "null"} boardCurrentProjectPath=${boardProjectPath ?? "null"} projectServiceCurrentPath=${serviceProjectPath ?? "null"}`,
 				)
-				const gitConfig = yield* appConfig.getGitConfig()
-				const { baseBranch, showLineChanges } = gitConfig
-				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
-				const isLinearBackend = "linear" in startupConfig.issueTracker
-				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
-
-				const issues = yield* diagnostics.measure(
+				const startupBatch = yield* Effect.all(
 					{
-						source: "BoardService",
-						name: "tracker.list",
-						thresholdMs: 200,
-						details: projectPath ?? "default",
+						gitConfig: appConfig.getGitConfig(),
+						startupConfig: SubscriptionRef.get(appConfig.config),
+						currentVisibleTaskIds: SubscriptionRef.get(visibleTaskIds),
+						issues: diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "tracker.list",
+								thresholdMs: 200,
+								details: projectPath ?? "default",
+							},
+							withSqliteLockRetry(
+								"tracker.list",
+								issueTrackerClient
+									.list(undefined, projectPath ?? undefined, {
+										pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
+										sortBy: "updated_at",
+										sortDirection: "desc",
+										includeClosed: true,
+									})
+									.pipe(Effect.withSpan("tracker.list")),
+							),
+						),
+						activeSessions: diagnostics.measure(
+							{
+								source: "BoardService",
+								name: "sessions.listActive",
+								thresholdMs: 150,
+								details: projectPath ?? "default",
+							},
+							sessionManager
+								.listActive(projectPath ?? undefined)
+								.pipe(Effect.withSpan("sessions.listActive")),
+						),
 					},
-					withSqliteLockRetry(
-						"tracker.list",
-						issueTrackerClient
-							.list(undefined, projectPath ?? undefined, {
-								pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
-								sortBy: "updated_at",
-								sortDirection: "desc",
-								includeClosed: true,
-							})
-							.pipe(Effect.withSpan("tracker.list")),
-					),
+					{ concurrency: "unbounded" },
 				)
+				const { gitConfig, startupConfig, currentVisibleTaskIds, issues, activeSessions } =
+					startupBatch
+				const { baseBranch, showLineChanges } = gitConfig
+				const isLinearBackend = "linear" in startupConfig.issueTracker
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
-				)
-				const activeSessions = yield* diagnostics.measure(
-					{
-						source: "BoardService",
-						name: "sessions.listActive",
-						thresholdMs: 150,
-						details: projectPath ?? "default",
-					},
-					sessionManager
-						.listActive(projectPath ?? undefined)
-						.pipe(Effect.withSpan("sessions.listActive")),
 				)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const ptySessionTargets = activeSessions
@@ -838,7 +844,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						issueId: session.issueId,
 						tmuxSessionName: session.tmuxSessionName,
 					}))
-				yield* ptyMonitor.syncSessions(ptySessionTargets)
+				yield* ptyMonitor.syncSessions(ptySessionTargets).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Failed to sync PTY sessions during board load: ${String(error)}`,
+						).pipe(Effect.asVoid),
+					),
+					Effect.forkIn(serviceScope),
+				)
 
 				// Auto-recovery of crashed sessions (if enabled)
 				const crashedSessions = Array.from(
@@ -2094,15 +2107,31 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		yield* refreshWithPolicy({ reason: "initial-load", forceRemote: true }).pipe(
-			Effect.catchAllCause((cause) =>
-				Effect.logWarning(`Recovering after caught error: ${String(cause)}`).pipe(
-					Effect.zipRight(logAndToastRefreshFailure("initial", cause)),
-				),
-			),
-		)
+		const startupBootstrapFiber = yield* Effect.forkScoped(
+			Effect.gen(function* () {
+				yield* refreshWithPolicy({ reason: "initial-load", forceRemote: true }).pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(`Recovering after caught error: ${String(cause)}`).pipe(
+							Effect.zipRight(logAndToastRefreshFailure("initial", cause)),
+						),
+					),
+				)
 
-		yield* applyLinearRefreshStrategy()
+				yield* applyLinearRefreshStrategy().pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(
+							`Failed to initialize linear refresh strategy: ${formatRefreshFailureMessage(cause)}`,
+						).pipe(Effect.asVoid),
+					),
+				)
+			}),
+		)
+		yield* diagnostics.registerFiber({
+			id: "board-startup-bootstrap",
+			name: "Board Startup Bootstrap",
+			description: "Performs initial board refresh and webhook strategy bootstrap asynchronously",
+			fiber: startupBootstrapFiber,
+		})
 
 		const webhookConfigChangesFiber = yield* Effect.forkScoped(
 			appConfig.config.changes.pipe(
