@@ -231,6 +231,19 @@ pnpm type-check
 # Expected: No errors
 ```
 
+## Effect Schedule Testing (TestClock)
+
+Auto-recovery retry schedules are validated with non-live Effect tests using `@effect/vitest` and `TestClock`.
+
+```bash
+# Run Effect Vitest schedule tests
+bunx vitest run
+```
+
+Coverage includes:
+- Exponential + jitter retry progression under virtual time
+- Max retry-wait cap behavior (`retryMaxDelayMs`)
+
 ## Common Issues
 
 ### "Cannot find module" errors
