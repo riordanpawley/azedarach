@@ -342,6 +342,12 @@ export const DiagnosticsOverlay = () => {
 	const diagnosticsResult = useAtomValue(diagnosticsAtom)
 	const scrollCommandResult = useAtomValue(diagnosticsScrollAtom)
 	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
+	const terminalRows = process.stdout.rows || 24
+	const terminalColumns = process.stdout.columns || 80
+	const panelWidth = Math.max(1, terminalColumns - 2)
+	const panelHeight = Math.max(1, terminalRows - 2)
+	const dividerLength = Math.max(1, panelWidth - 4)
+	const dividerLine = "━".repeat(dividerLength)
 
 	// Handle loading/error states - extract fibers, services, and events with defaults
 	const fibers = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.fibers : []
@@ -361,10 +367,10 @@ export const DiagnosticsOverlay = () => {
 		}
 		return null
 	}, [scrollCommandResult])
-	const maxScrollHeight = useMemo(() => {
-		const terminalRows = process.stdout.rows || 24
-		return Math.max(10, terminalRows - PANEL_CHROME_HEIGHT)
-	}, [])
+	const maxScrollHeight = useMemo(
+		() => Math.max(1, panelHeight - PANEL_CHROME_HEIGHT),
+		[panelHeight],
+	)
 
 	useEffect(() => {
 		if (!scrollboxRef.current || !scrollCommand || scrollCommand.target !== "diagnostics") return
@@ -407,18 +413,19 @@ export const DiagnosticsOverlay = () => {
 				paddingRight={2}
 				paddingTop={1}
 				paddingBottom={1}
-				minWidth={70}
+				width={panelWidth}
+				height={panelHeight}
 				flexDirection="column"
 			>
 				{/* Header */}
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
-					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
+					{dividerLine}
 				</text>
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
 					{"  SYSTEM DIAGNOSTICS"}
 				</text>
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
-					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
+					{dividerLine}
 				</text>
 				<scrollbox
 					ref={scrollboxRef}
