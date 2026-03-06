@@ -18,8 +18,7 @@ linear-cli i start <issue-id>
 linear-cli i update <issue-id> --output json --compact ...
 
 # 4) Land branch updates
-git pull --rebase
-git push
+# Keep sync local by default; only run remote sync if explicitly requested.
 
 # 5) Close issue when complete
 linear-cli i close <issue-id>
@@ -38,4 +37,4 @@ No local issue-db sync workflow is needed.
 
 - `linear-cli` auth expired: re-authenticate and retry.
 - Wrong issue ID: run `linear-cli i list --output json --compact --all` and re-check.
-- Git push rejected: `git pull --rebase`, resolve, push again.
+- Remote sync rejected: resolve locally and retry remote sync only if explicitly requested.

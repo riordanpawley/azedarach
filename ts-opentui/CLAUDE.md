@@ -19,7 +19,7 @@ Purpose: Claude Code entry point for Azedarach development
 
 3. **Issue Tracking**: ALWAYS start with `az prime`, then use `az issue` for issue operations.
 
-4. **Branch Workflow**: Respect repo mode. In `git.workflowMode: "local"` (or when remote git is disabled), avoid remote sync/cleanup flows (`git pull --rebase`, `git push`) unless explicitly requested. In `git.workflowMode: "origin"`, use normal pull/push synchronization. When already in the target worktree, use plain `git` commands; use `git -C <path>` only when intentionally targeting a different path.
+4. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested. When already in the target worktree, use plain `git` commands; use `git -C <path>` only when intentionally targeting a different path.
 
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
@@ -208,7 +208,7 @@ Run `az prime` first in each session, then use `az issue` as the single tracking
 - `az issue update <issue-id> --notes "progress update"`
 - `az issue close <issue-id>`
 
-**Worktree sync:** In local mode, keep sync local (no pull/push unless explicitly requested). In origin mode, use normal git workflow (`git pull --rebase`, `git push`) per worktree.
+**Worktree sync:** Keep sync local by default; only run remote git sync commands when explicitly requested.
 
 ## State Management Architecture
 
