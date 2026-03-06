@@ -12,6 +12,7 @@ type LinearIssueResult = Awaited<ReturnType<LinearClient["issue"]>>
 type LinearWorkflowStatesResult = Awaited<ReturnType<LinearClient["workflowStates"]>>
 type LinearIssueLabelsResult = Awaited<ReturnType<LinearClient["issueLabels"]>>
 type LinearUsersResult = Awaited<ReturnType<LinearClient["users"]>>
+type LinearTeamsArgs = Parameters<LinearClient["teams"]>[0]
 type LinearCreateIssueInput = Parameters<LinearClient["createIssue"]>[0]
 type LinearCreateIssueResult = Awaited<ReturnType<LinearClient["createIssue"]>>
 type LinearUpdateIssueInput = Parameters<LinearClient["updateIssue"]>[1]
@@ -45,6 +46,10 @@ export interface LinearSdkApi {
 		args: Parameters<LinearClient["users"]>[0],
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<LinearUsersResult, LinearSdkError>
+	readonly teams: (
+		args: LinearTeamsArgs,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<LinearTeamsResult, LinearSdkError>
 	readonly createIssue: (
 		input: LinearCreateIssueInput,
 		options?: { readonly maxWaitMs?: number },
@@ -182,6 +187,14 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: "Failed to fetch users from Linear",
 			})
 
+		const teams: LinearSdkApi["teams"] = (args, options) =>
+			runWithClient({
+				operation: "teams",
+				maxWaitMs: options?.maxWaitMs,
+				request: (client) => client.teams(args),
+				fallbackError: "Failed to fetch teams from Linear",
+			})
+
 		const createIssue: LinearSdkApi["createIssue"] = (input, options) =>
 			runWithClient({
 				operation: "createIssue",
@@ -316,6 +329,7 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 			workflowStates,
 			issueLabels,
 			users,
+			teams,
 			createIssue,
 			updateIssue,
 				createWebhook,
