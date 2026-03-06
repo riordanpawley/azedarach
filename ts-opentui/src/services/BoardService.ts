@@ -59,6 +59,66 @@ const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
 const LINEAR_WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
 const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
+const SQLITE_LOCK_RETRY_ATTEMPTS = 3
+const SQLITE_LOCK_RETRY_DELAY = "120 millis"
+
+const isSqliteLockMessage = (value: string): boolean => {
+	const normalized = value.toLowerCase()
+	return (
+		normalized.includes("database is locked") ||
+		normalized.includes("sqlite_busy") ||
+		normalized.includes("sqlite busy")
+	)
+}
+
+const isSqliteLockError = (error: unknown): boolean => {
+	if (typeof error === "string") {
+		return isSqliteLockMessage(error)
+	}
+
+	if (error instanceof Error) {
+		return isSqliteLockMessage(error.message)
+	}
+
+	if (typeof error === "object" && error !== null) {
+		if (
+			"message" in error &&
+			typeof error.message === "string" &&
+			isSqliteLockMessage(error.message)
+		) {
+			return true
+		}
+		if (
+			"stderr" in error &&
+			typeof error.stderr === "string" &&
+			isSqliteLockMessage(error.stderr)
+		) {
+			return true
+		}
+	}
+
+	return isSqliteLockMessage(String(error))
+}
+
+const withSqliteLockRetry = <A, E, R>(
+	context: string,
+	effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+	effect.pipe(
+		Effect.tapError((error) =>
+			isSqliteLockError(error)
+				? Effect.logWarning(
+						`SQLite lock detected during ${context}; retrying (max ${SQLITE_LOCK_RETRY_ATTEMPTS} attempts)`,
+					)
+				: Effect.void,
+		),
+		Effect.retry({
+			schedule: Schedule.recurs(SQLITE_LOCK_RETRY_ATTEMPTS - 1).pipe(
+				Schedule.addDelay(() => SQLITE_LOCK_RETRY_DELAY),
+			),
+			while: (error) => isSqliteLockError(error),
+		}),
+	)
 
 const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
 	if (!stateName) return "open"
@@ -396,15 +456,16 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
 		const linearRefreshStrategyRef = yield* Ref.make<ActiveLinearRefreshStrategy | null>(null)
-			const refreshFailureToastRef = yield* Ref.make<{
-				readonly message: string
-				readonly timestamp: number
-			} | null>(null)
-			const webhookFallbackToastRef = yield* Ref.make<{
-				readonly message: string
-				readonly timestamp: number
-			} | null>(null)
-			const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
+		const refreshSemaphore = yield* Effect.makeSemaphore(1)
+		const refreshFailureToastRef = yield* Ref.make<{
+			readonly message: string
+			readonly timestamp: number
+		} | null>(null)
+		const webhookFallbackToastRef = yield* Ref.make<{
+			readonly message: string
+			readonly timestamp: number
+		} | null>(null)
+		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
 
 		// ====================================================================
 		// Per-Project State Management
@@ -744,14 +805,17 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						thresholdMs: 200,
 						details: projectPath ?? "default",
 					},
-					issueTrackerClient
-						.list(undefined, projectPath ?? undefined, {
-							pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
-							sortBy: "updated_at",
-							sortDirection: "desc",
-							includeClosed: true,
-						})
-						.pipe(Effect.withSpan("tracker.list")),
+					withSqliteLockRetry(
+						"tracker.list",
+						issueTrackerClient
+							.list(undefined, projectPath ?? undefined, {
+								pageSize: BOARD_ISSUE_LIST_PAGE_SIZE,
+								sortBy: "updated_at",
+								sortDirection: "desc",
+								includeClosed: true,
+							})
+							.pipe(Effect.withSpan("tracker.list")),
+					),
 				)
 				yield* Effect.log(
 					`loadTasks: ${issues.length} issues fetched in ${Date.now() - loadStartTime}ms`,
@@ -1256,9 +1320,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			return base.length > 180 ? `${base.slice(0, 177)}...` : base
 		}
 
-			const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
-				Effect.gen(function* () {
-					yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
+		const logAndToastRefreshFailure = (context: string, cause: Cause.Cause<unknown>) =>
+			Effect.gen(function* () {
+				yield* Effect.logError(`BoardService ${context} failed`, Cause.pretty(cause))
 				const message = `Board refresh (${context}) failed: ${formatRefreshFailureMessage(cause)}`
 				const now = Date.now()
 				const previousToast = yield* Ref.get(refreshFailureToastRef)
@@ -1271,22 +1335,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* toast.show("error", message)
 					yield* Ref.set(refreshFailureToastRef, { message, timestamp: now })
 				}
-				}).pipe(Effect.asVoid)
+			}).pipe(Effect.asVoid)
 
-			const toastWebhookFallback = (message: string) =>
-				Effect.gen(function* () {
-					const now = Date.now()
-					const previousToast = yield* Ref.get(webhookFallbackToastRef)
-					const shouldToast =
-						previousToast === null ||
-						previousToast.message !== message ||
-						now - previousToast.timestamp >= WEBHOOK_FALLBACK_TOAST_DEBOUNCE_MS
+		const toastWebhookFallback = (message: string) =>
+			Effect.gen(function* () {
+				const now = Date.now()
+				const previousToast = yield* Ref.get(webhookFallbackToastRef)
+				const shouldToast =
+					previousToast === null ||
+					previousToast.message !== message ||
+					now - previousToast.timestamp >= WEBHOOK_FALLBACK_TOAST_DEBOUNCE_MS
 
-					if (shouldToast) {
-						yield* toast.show("warning", message)
-						yield* Ref.set(webhookFallbackToastRef, { message, timestamp: now })
-					}
-				}).pipe(Effect.asVoid)
+				if (shouldToast) {
+					yield* toast.show("warning", message)
+					yield* Ref.set(webhookFallbackToastRef, { message, timestamp: now })
+				}
+			}).pipe(Effect.asVoid)
 
 		/**
 		 * Refresh with auto-recovery for database sync errors.
@@ -1421,7 +1485,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const refreshEffect = useLocalRefresh
 					? refreshLocalSessionAndGitState(preferredProjectPath)
 					: refreshWithRecovery(preferredProjectPath)
-				yield* refreshEffect
+				yield* refreshSemaphore.withPermits(1)(refreshEffect)
 			})
 
 		const requestRefresh = (options?: BoardRefreshOptions) =>
@@ -1435,10 +1499,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
 				const fiber = yield* Effect.gen(function* () {
 					yield* Effect.sleep("500 millis")
-					const refreshEffect = useLocalRefresh
-						? refreshLocalSessionAndGitState()
-						: refreshWithRecovery()
-					yield* refreshEffect.pipe(
+					yield* refreshWithPolicy(options).pipe(
 						Effect.catchAllCause((cause) =>
 							Effect.logWarning(cause).pipe(
 								Effect.zipRight(
@@ -1562,9 +1623,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* saveCurrentToMap()
 			})
 
-		const getLinearWebhookListenerConfig = (options?: {
-			readonly requireCliTransport?: boolean
-		}) =>
+		const getLinearWebhookListenerConfig = (options?: { readonly requireCliTransport?: boolean }) =>
 			Effect.gen(function* () {
 				const config = yield* SubscriptionRef.get(appConfig.config)
 				if (!("linear" in config.issueTracker)) {
@@ -1714,7 +1773,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				const backgroundPollingFiber = yield* Effect.forkScoped(
 					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
-						refreshWithRecovery().pipe(
+						refreshWithPolicy({ forceRemote: true }).pipe(
 							Effect.catchAllCause((cause) =>
 								Effect.logWarning(cause).pipe(
 									Effect.zipRight(logAndToastRefreshFailure("background", cause)),
@@ -1839,7 +1898,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						key: "linear:disabled",
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
-							yield* Effect.log("Linear webhooks disabled in config, using background polling fallback")
+							yield* Effect.log(
+								"Linear webhooks disabled in config, using background polling fallback",
+							)
 							yield* reportLinearWebhookHealth({
 								mode: "disabled",
 								strategy: "disabled",
@@ -1880,7 +1941,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								mode: "cli",
 								strategy: "polling-fallback",
 								healthy: false,
-								message: "CLI webhook listener configuration unavailable; using background polling.",
+								message:
+									"CLI webhook listener configuration unavailable; using background polling.",
 							})
 							yield* toastWebhookFallback(
 								"Linear webhook listener configuration unavailable. Falling back to background polling.",
@@ -2032,7 +2094,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* updateFilteredTasks()
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
-		yield* refreshWithRecovery().pipe(
+		yield* refreshWithPolicy({ reason: "initial-load", forceRemote: true }).pipe(
 			Effect.catchAllCause((cause) =>
 				Effect.logWarning(`Recovering after caught error: ${String(cause)}`).pipe(
 					Effect.zipRight(logAndToastRefreshFailure("initial", cause)),
