@@ -28,6 +28,7 @@ const (
 	depCyclesUsage = "Usage: az dep cycles [--json]"
 
 	depInvalidArgumentCode = "invalid_argument"
+	depCycleRejectedCode   = "cycle_rejected"
 	depBackendErrorCode    = "backend_error"
 	depInternalErrorCode   = "internal_error"
 
@@ -39,7 +40,9 @@ const (
 	depCyclesInvalidArgRemediation = "Run az dep cycles [--json]"
 
 	depBackendRemediation  = "Retry the command and inspect backend stderr diagnostics"
+	depCycleRemediation    = "Run az dep cycles --json and choose a non-cyclic relation target"
 	depInternalRemediation = "Retry the command and inspect stderr diagnostics"
+	depCycleMessage        = "Dependency edge would introduce disallowed cycle"
 
 	depExitCodeInvalidUsage   = 2
 	depExitCodeBackendFailure = 3
@@ -592,11 +595,23 @@ func handleDepBackendError(
 		}
 	}
 
+	errorCode := depBackendErrorCode
+	remediation := depBackendRemediation
+	if depErrorIndicatesCycle(commandErr, backendErr) && depBackendTargetsAdd(backendArgs) {
+		errorCode = depCycleRejectedCode
+		errorMessage = depCycleMessage
+		remediation = depCycleRemediation
+		if sourceIssueID, targetIssueID, ok := depAddIssueIDs(backendArgs); ok {
+			errorDetails["sourceIssueId"] = sourceIssueID
+			errorDetails["targetIssueId"] = targetIssueID
+		}
+	}
+
 	if jsonMode {
 		errorPayload := NewH1Error(
-			depBackendErrorCode,
+			errorCode,
 			errorMessage,
-			depBackendRemediation,
+			remediation,
 			errorDetails,
 		)
 		envelope := NewH2FailureEnvelope(spec.Name, spec.Path, project, meta, errorPayload)
@@ -609,6 +624,36 @@ func handleDepBackendError(
 
 	fmt.Fprintf(stderr, "Error: %s\n", errorMessage)
 	return depExitCodeBackendFailure
+}
+
+func depErrorIndicatesCycle(commandErr error, backendErr depBackendCommandError) bool {
+	candidates := []string{
+		commandErr.Error(),
+		backendErr.Message,
+		backendErr.Stderr,
+	}
+	for _, candidate := range candidates {
+		if strings.Contains(strings.ToLower(candidate), "cycle") {
+			return true
+		}
+	}
+	return false
+}
+
+func depBackendTargetsAdd(backendArgs []string) bool {
+	return len(backendArgs) > 0 && backendArgs[0] == depSubcommandAdd
+}
+
+func depAddIssueIDs(backendArgs []string) (string, string, bool) {
+	if len(backendArgs) < 3 {
+		return "", "", false
+	}
+	sourceIssueID := strings.TrimSpace(backendArgs[1])
+	targetIssueID := strings.TrimSpace(backendArgs[2])
+	if sourceIssueID == "" || targetIssueID == "" {
+		return "", "", false
+	}
+	return sourceIssueID, targetIssueID, true
 }
 
 func handleDepInternalError(

@@ -10,7 +10,10 @@ type depJSONEnvelope struct {
 	Command string `json:"command"`
 	OK      bool   `json:"ok"`
 	Error   struct {
-		Code string `json:"code"`
+		Code        string         `json:"code"`
+		Message     string         `json:"message"`
+		Remediation string         `json:"remediation"`
+		Details     map[string]any `json:"details"`
 	} `json:"error"`
 }
 
@@ -172,6 +175,48 @@ func TestRunCLIDepRunnerFailureJSONReturnsDeterministicErrorCode(t *testing.T) {
 			envelope1.Error.Code,
 			envelope2.Error.Code,
 		)
+	}
+}
+
+func TestRunCLIDepAddCycleRejectedJSONReturnsDeterministicErrorCode(t *testing.T) {
+	stubDepDependencies(t, func(_ []string) ([]byte, error) {
+		return nil, depBackendCommandError{
+			ExitCode: 1,
+			Stderr:   "dependency cycle detected while adding edge",
+		}
+	})
+
+	args := []string{"dep", "add", "AZE-101", "AZE-102", "--type", "blocking", "--json"}
+	exitCode, stdout, stderr := runCLIForTest(args)
+
+	if exitCode != depExitCodeBackendFailure {
+		t.Fatalf("expected deterministic cycle rejection exit code %d, got %d", depExitCodeBackendFailure, exitCode)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr in JSON mode, got %q", stderr)
+	}
+
+	envelope := decodeDepJSONEnvelope(t, stdout)
+	if envelope.Command != "dep.add" {
+		t.Fatalf("expected command=dep.add, got %q", envelope.Command)
+	}
+	if envelope.OK {
+		t.Fatalf("expected ok=false for cycle rejection path")
+	}
+	if envelope.Error.Code != "cycle_rejected" {
+		t.Fatalf("expected error.code=cycle_rejected, got %q", envelope.Error.Code)
+	}
+	if envelope.Error.Message != "Dependency edge would introduce disallowed cycle" {
+		t.Fatalf("unexpected message: %q", envelope.Error.Message)
+	}
+	if envelope.Error.Remediation != "Run az dep cycles --json and choose a non-cyclic relation target" {
+		t.Fatalf("unexpected remediation: %q", envelope.Error.Remediation)
+	}
+	if got := envelope.Error.Details["sourceIssueId"]; got != "AZE-101" {
+		t.Fatalf("expected details.sourceIssueId=AZE-101, got %#v", got)
+	}
+	if got := envelope.Error.Details["targetIssueId"]; got != "AZE-102" {
+		t.Fatalf("expected details.targetIssueId=AZE-102, got %#v", got)
 	}
 }
 

@@ -16,17 +16,20 @@ const (
 	createCommandName       = "create"
 	quickCaptureCommandName = "q"
 
-	createUsage       = "Usage: az create <title> [--json]"
-	quickCaptureUsage = "Usage: az q <text> [--json]"
+	createUsage       = "Usage: az create <title> [--parent <issue-id>] [--json]"
+	quickCaptureUsage = "Usage: az q <text> [--parent <issue-id>] [--json]"
 
 	createInvalidArgumentCode = "invalid_argument"
+	createCycleRejectedCode   = "cycle_rejected"
 	createInternalErrorCode   = "internal_error"
 
-	createInvalidArgRemediation       = "Run az create <title> [--json]"
-	quickCaptureInvalidArgRemediation = "Run az q <text> [--json]"
+	createInvalidArgRemediation       = "Run az create <title> [--parent <issue-id>] [--json]"
+	quickCaptureInvalidArgRemediation = "Run az q <text> [--parent <issue-id>] [--json]"
+	createCycleRemediation            = "Run az dep cycles --json and choose a non-cyclic parent issue"
 	createInternalRemediation         = "Retry the command and inspect stderr diagnostics"
 
 	createExitCodeInvalidUsage = 2
+	createExitCodeCycleReject  = 3
 )
 
 var (
@@ -34,19 +37,26 @@ var (
 	quickCaptureCommandPath = []string{"az", "q"}
 )
 
-type issueCreateFunc func(title string) (string, error)
+type issueCreateRequest struct {
+	Title    string
+	ParentID *string
+}
+
+type issueCreateFunc func(request issueCreateRequest) (string, error)
 type issueCreatorFactory func() issueCreateFunc
 
 var newIssueCreator issueCreatorFactory = defaultIssueCreatorFactory
 
 type createParsedArgs struct {
 	Title    string
+	ParentID *string
 	JSONMode bool
 }
 
 type createResult struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	ParentID *string `json:"parentId,omitempty"`
 }
 
 type createCommandSpec struct {
@@ -121,8 +131,23 @@ func handleIssueCreationCommand(
 		)
 	}
 
-	issueID, err := creator(parsedArgs.Title)
+	issueID, err := creator(issueCreateRequest{
+		Title:    parsedArgs.Title,
+		ParentID: parsedArgs.ParentID,
+	})
 	if err != nil {
+		if parsedArgs.ParentID != nil && isCreateCycleError(err) {
+			return handleCreateCycleRejected(
+				spec,
+				err,
+				parsedArgs.ParentID,
+				parsedArgs.JSONMode,
+				stdout,
+				stderr,
+				showExecutionMeta(startedAt),
+				showProjectContext(),
+			)
+		}
 		return handleCreateInternalError(
 			spec,
 			err,
@@ -146,8 +171,9 @@ func handleIssueCreationCommand(
 	}
 
 	result := createResult{
-		ID:    issueID,
-		Title: parsedArgs.Title,
+		ID:       issueID,
+		Title:    parsedArgs.Title,
+		ParentID: parsedArgs.ParentID,
 	}
 
 	if parsedArgs.JSONMode {
@@ -174,10 +200,21 @@ func parseCreateArgs(args []string, requiredArgumentName string) (createParsedAr
 	positionals := make([]string, 0)
 	unknownFlags := make([]string, 0)
 
-	for _, arg := range args {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
 		switch {
 		case arg == "--json":
 			parsed.JSONMode = true
+		case arg == "--parent":
+			if index+1 >= len(args) {
+				return parsed, fmt.Errorf("missing value for --parent")
+			}
+			parentID := strings.TrimSpace(args[index+1])
+			if parentID == "" || strings.HasPrefix(parentID, "-") {
+				return parsed, fmt.Errorf("missing value for --parent")
+			}
+			parsed.ParentID = &parentID
+			index++
 		case strings.HasPrefix(arg, "-"):
 			unknownFlags = append(unknownFlags, arg)
 		default:
@@ -201,28 +238,34 @@ func parseCreateArgs(args []string, requiredArgumentName string) (createParsedAr
 func defaultIssueCreatorFactory() issueCreateFunc {
 	cfg, err := loadConfig()
 	if err != nil {
-		return func(_ string) (string, error) {
+		return func(_ issueCreateRequest) (string, error) {
 			return "", fmt.Errorf("failed to load config: %w", err)
 		}
 	}
 
 	deps, err := cli.NewDependencies(cfg)
 	if err != nil {
-		return func(_ string) (string, error) {
+		return func(_ issueCreateRequest) (string, error) {
 			return "", fmt.Errorf("failed to initialize dependencies: %w", err)
 		}
 	}
 
-	return func(title string) (string, error) {
+	return func(request issueCreateRequest) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		return deps.BeadsClient.Create(ctx, beads.CreateTaskParams{
-			Title:    title,
+			Title:    request.Title,
 			Type:     domain.TypeTask,
 			Priority: domain.P2,
+			ParentID: request.ParentID,
 		})
 	}
+}
+
+func isCreateCycleError(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cycle")
 }
 
 func handleCreateInvalidUsage(
@@ -279,4 +322,38 @@ func handleCreateInternalError(
 
 	fmt.Fprintf(stderr, "Error: %v\n", commandErr)
 	return 1
+}
+
+func handleCreateCycleRejected(
+	spec createCommandSpec,
+	commandErr error,
+	parentID *string,
+	jsonMode bool,
+	stdout io.Writer,
+	stderr io.Writer,
+	meta H2Meta,
+	project H2ProjectContext,
+) int {
+	if jsonMode {
+		details := map[string]any{}
+		if parentID != nil {
+			details["parentId"] = *parentID
+		}
+
+		errorPayload := NewH1Error(
+			createCycleRejectedCode,
+			commandErr.Error(),
+			createCycleRemediation,
+			details,
+		)
+		envelope := NewH2FailureEnvelope(spec.Name, spec.Path, project, meta, errorPayload)
+		if err := writeJSON(stdout, envelope); err != nil {
+			fmt.Fprintf(stderr, "Error: %v\n", err)
+			return 1
+		}
+		return createExitCodeCycleReject
+	}
+
+	fmt.Fprintf(stderr, "Error: %v\n", commandErr)
+	return createExitCodeCycleReject
 }
