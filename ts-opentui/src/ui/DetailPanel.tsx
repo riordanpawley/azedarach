@@ -96,7 +96,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 	// Execute scroll commands when they change
 	useEffect(() => {
-		if (scrollboxRef.current && scrollCommand) {
+		if (scrollboxRef.current && scrollCommand && scrollCommand.target === "detail") {
 			if (scrollCommand.type === "line") {
 				// Scroll by lines (1 line = ~1 row)
 				scrollboxRef.current.scrollBy(scrollCommand.amount, "step")

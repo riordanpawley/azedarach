@@ -142,6 +142,7 @@ export {
 	closeSettingsAtom,
 	currentOverlayAtom,
 	detailScrollAtom,
+	diagnosticsScrollAtom,
 	dismissToastAtom,
 	moveDownSettingsAtom,
 	moveUpSettingsAtom,

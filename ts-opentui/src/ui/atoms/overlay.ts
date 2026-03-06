@@ -183,6 +183,18 @@ export const detailScrollAtom = appRuntime.subscriptionRef(
 	}),
 )
 
+/**
+ * Diagnostics scroll command atom - subscribes to scroll commands for diagnostics overlay
+ *
+ * Uses the same command stream as detail scrolling; consumers filter by `target`.
+ */
+export const diagnosticsScrollAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return overlay.scrollCommand
+	}),
+)
+
 // ============================================================================
 // Settings Overlay Atoms
 // ============================================================================
