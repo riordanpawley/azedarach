@@ -212,8 +212,12 @@ Settings are stored in `.azedarach.json` in your project root:
     "autoDetect": true
   },
   "issueTracker": {
-    "beads_rust": {
-      "syncEnabled": true
+    "linear": {
+      "syncEnabled": true,
+      "team": "AZE",
+      "webhooks": {
+        "enabled": true
+      }
     }
   },
   "stateDetection": {
