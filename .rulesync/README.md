@@ -4,7 +4,11 @@ This repository treats `.rulesync/` as the canonical source for selected Claude-
 
 ## Managed Mappings
 
-Mappings are declared in `.rulesync/mappings.tsv` and synced to runtime locations by the `rulesync` CLI.
+`rulesync` generates RuleSync-native features from `rulesync.jsonc`:
+- `.rulesync/subagents/` -> `.claude/agents/`
+- `.rulesync/skills/` -> `.claude/skills/`
+
+Additional passthrough mappings are declared in `.rulesync/mappings.tsv` and synced by `scripts/rulesync-sync.sh`.
 
 Current managed targets:
 - `.claude/agents/`
@@ -17,6 +21,15 @@ Current managed targets:
 - `ts-opentui/AGENTS.md`
 - `ts-opentui/CLAUDE.md`
 - `go-bubbletea/CLAUDE.md`
+
+## Unified Root Context Source
+
+Root entrypoint files are now unified to a single canonical source:
+
+- Source: `.rulesync/docs/CONTEXT.md`
+- Targets: `AGENTS.md` and `CLAUDE.md`
+
+`mappings.tsv` fans out this one source to both runtime entrypoint filenames.
 
 ## Commands
 

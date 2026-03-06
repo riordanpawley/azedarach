@@ -6,4 +6,5 @@ if [ "${RULESYNC_SKIP:-0}" = "1" ]; then
   exit 0
 fi
 
-rulesync generate --silent
+repo_root="$(git rev-parse --show-toplevel)"
+"$repo_root/scripts/rulesync-sync.sh" sync >/dev/null

@@ -59,6 +59,32 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		const argv = ["bun", "az", "issue", "list", "--limit", "5", "--status", "open"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
 	})
+
+	it("moves issue dep add options ahead of positional ids when ids are first", () => {
+		const argv = [
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"add",
+			"AZE-200",
+			"AZE-123",
+			"--type",
+			"discovered-from",
+		]
+
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"add",
+			"--type",
+			"discovered-from",
+			"AZE-200",
+			"AZE-123",
+		])
+	})
 })
 
 describe("resolveCliExecutionMode", () => {

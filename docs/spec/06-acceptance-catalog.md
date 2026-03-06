@@ -583,6 +583,13 @@ Canonical fixture profile names:
 - Expected: app exits cleanly; session remains running; terminal state restored.
 - Links: AZ-FR-2707, AZ-FR-2708.
 
+### AZ-AT-1604 Non-blocking startup bootstrap and hydration convergence
+
+- Preconditions: startup profile with slow tracker/webhook/bootstrap path (for example delayed backend/listener initialization).
+- Steps: launch app and immediately perform navigation/mode/help interactions while initial hydration is still running.
+- Expected: board shell is interactable immediately; startup loading indicator remains visible until first hydration attempt settles; data converges without manual relaunch/refresh.
+- Links: AZ-FR-2709, AZ-FR-2710, AZ-FR-2711, AZ-FR-3908, section 05 F-104.
+
 ## 6.19 Concurrency and Mutation Acceptance
 
 ### AZ-AT-1701 Stale edit conflict handling

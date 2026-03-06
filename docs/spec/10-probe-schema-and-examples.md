@@ -135,4 +135,5 @@ The probe contract is behavioral and transport-agnostic.
 
 - Assert both state and ordering: compare `snapshot.revision` and `capturedAt`.
 - For responsiveness checks, assert viewport IDs update before off-screen hydration completes.
+- For startup checks, assert board interaction fields (mode/focus/overlays) remain operable while `board.loading` indicates hydration is still in progress.
 - For high-risk flows, pair probe assertions with visual snapshots from Section 06.

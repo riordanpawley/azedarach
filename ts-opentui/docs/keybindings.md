@@ -14,12 +14,12 @@ Azedarach uses **Helix-style modal keybindings** inspired by the Helix editor. T
          │   ┌────────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
          │   │ GOTO (GTO) │ │ SELECT   │ │ ACTION   │ │ SEARCH   │ │ SORT     │
          │   │ gg/ge/gl   │ │ (SEL)    │ │ (ACT)    │ │ (SRC)    │ │ (SRT)    │
-         │   │ gw: labels │ │ Space:   │ │ h/l:move │ │ filter   │ │ s/p/u:   │
+         │   │ gw: labels │ │ a/5:     │ │ h/l:move │ │ filter   │ │ s/p/u:   │
          │   └────────────┘ │ toggle   │ │ a:attach │ │ by title │ │ sort by  │
          │         │        └──────────┘ └──────────┘ └──────────┘ └──────────┘
          │         │             │           │             │            │
          └─────────┴─────────────┴───────────┴─────────────┴────────────┘
-                                    Esc: return to Normal
+                                    Esc (or q in non-text close contexts): back/close
 ```
 
 ## Normal Mode
@@ -38,8 +38,8 @@ The default mode for navigation and basic actions.
 | `↓` | Same as `j` | Arrow key alternative |
 | `↑` | Same as `k` | Arrow key alternative |
 | `→` | Same as `l` | Arrow key alternative |
-| `Ctrl-Shift-d` | Half-page down | Fast scrolling |
-| `Ctrl-Shift-u` | Half-page up | Fast scrolling |
+| `Ctrl-d` | Half-page down | Fast scrolling |
+| `Ctrl-u` | Half-page up | Fast scrolling |
 
 ### Actions
 
@@ -58,11 +58,11 @@ The default mode for navigation and basic actions.
 | `c` | Create bead (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `s` | Show settings | Opens interactive settings overlay |
-| `?` | Show help | Press any key to dismiss |
+| `?` | Show help | Dismiss with `Esc` or `q` |
 | `L` | View logs | Opens az.log menu (v=view, e=edit, q=quit) |
 | `Ctrl-l` | Redraw screen | Force full screen refresh |
-| `q` | Quit/Back | Exits drill-down; otherwise quits app |
-| `Esc` | Dismiss overlay | Or return from sub-mode |
+| `q` | Quit/Back | Exits drill-down; otherwise quits app; also closes non-text overlays |
+| `Esc` | Back/close | Primary back key for modal contexts |
 
 ## Epic Drill-Down
 
@@ -124,7 +124,7 @@ Press `s` to open the interactive settings overlay. This allows you to view and 
 | `k` | Move up | Select previous setting |
 | `Space` or `Enter` | Toggle value | Changes boolean settings; cycles enum values |
 | `e` | Edit in editor | Opens .azedarach.json in $EDITOR for advanced changes |
-| `Esc` | Close overlay | Returns to normal mode |
+| `Esc` / `q` | Close overlay | Returns to normal mode |
 
 ### Available Settings
 
@@ -254,7 +254,6 @@ Press `p` to open the AI-powered planning overlay. This lets you describe a feat
 |-----|--------|-------|
 | `Enter` | Close | Return to normal mode |
 | `Esc` | Close | Return to normal mode |
-| `q` | Close | Return to normal mode |
 
 ### How Planning Works
 
@@ -482,17 +481,17 @@ Labels use these home row keys: `a s d f g h j k l ;`
 
 ## Select Mode
 
-Press `v` to enter select mode for multi-task operations. You can also press `%` from normal mode to immediately select all tasks.
+Press `v` to enter select mode for multi-task operations.
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `a` | Toggle selection | Add/remove current task from selection |
-| `A` | Select all in column | Add all tasks in current column to selection |
-| `%` | Select all | Select all tasks except tombstoned |
+| `a` / `5` | Toggle selection | Add/remove current task from selection |
+| `A` | Select all in column | Add all visible non-tombstoned tasks in current column |
+| `%` (`Shift+5`) | Select all | Select all non-tombstoned tasks |
 | `Space` | Enter action mode | Apply actions to all selected tasks |
 | `h/j/k/l` | Navigate | Selections persist while navigating |
-| `v` | Exit select mode | Clears selections and returns to normal mode |
-| `Esc` | Exit + clear | Same as `v` |
+| `v` | Exit select mode | Return to normal mode |
+| `Esc` / `q` | Exit + clear | Return to normal mode |
 
 ### Visual Feedback
 
@@ -503,7 +502,7 @@ Selected tasks are highlighted with a different background color. The status bar
 When you have multiple tasks selected, action mode commands apply to all selected tasks:
 
 1. Press `v` to enter select mode
-2. Navigate with `h/j/k/l` and press `a` to toggle individual tasks
+2. Navigate with `h/j/k/l` and press `a` (or `5`) to toggle individual tasks
    - Or press `A` to select all in current column
    - Or press `%` to select all tasks
 3. Press `Space` to enter action mode
@@ -520,7 +519,7 @@ When cleaning up multiple worktrees (`Space` `d` with selections), a choice dial
 |-----|--------|-------------|
 | `w` | Worktrees only | Delete worktrees but keep linear open |
 | `f` | Full cleanup | Delete worktrees AND close linear |
-| `Esc` | Cancel | Return without cleanup |
+| `Esc` / `q` | Cancel | Return without cleanup |
 
 ## Search Mode
 
@@ -528,8 +527,8 @@ Press `/` to enter search mode for filtering tasks.
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Enter` | Confirm search | Keep filter active, return to Normal |
-| `Esc` | Clear search | Remove filter, return to Normal |
+| `Enter` | Confirm | Return to Normal mode |
+| `Esc` | Cancel/clear | Return to Normal mode |
 | `Backspace` | Delete character | Remove last character from query |
 | Any char | Add to query | Case-insensitive search |
 
@@ -538,16 +537,14 @@ Press `/` to enter search mode for filtering tasks.
 - **Live filtering**: Tasks are filtered as you type
 - **Matches**: Title and task ID are searched
 - **Case-insensitive**: "Fix" matches "fix", "FIX", etc.
-- **Persistent filter**: After pressing Enter, the filter stays active until you press `/` then `Esc` to clear it
-- **Visual indicator**: Status bar shows "filter: <query>" when a filter is active
+- **Transient query**: Search text is active while in Search mode and clears when you return to Normal
+- **Visual indicator**: Status bar shows search input while search mode is active
 
 ### Example
 
 1. Press `/` to enter search mode
 2. Type `auth` to filter tasks containing "auth"
-3. Press `Enter` to confirm and return to normal mode
-4. Navigate filtered results with hjkl
-5. Press `/` then `Esc` to clear the filter
+3. Press `Enter` to return to normal mode
 
 ## Sort Mode
 
@@ -558,7 +555,7 @@ Press `,` to enter sort mode for changing how tasks are ordered within each colu
 | `s` | Sort by Session | Active sessions first (busy, waiting, paused, then idle) |
 | `p` | Sort by Priority | Higher priority tasks first (P1 > P2 > P3 > P4) |
 | `u` | Sort by Updated | Most recently updated tasks first |
-| `Esc` | Cancel | Exit sort mode without changing |
+| `Esc` / `q` | Cancel | Exit sort mode without changing |
 
 ### How Sort Works
 
@@ -598,9 +595,8 @@ Press `f` to enter filter mode for filtering tasks by various attributes. Unlike
 | `p` | Priority sub-menu | Toggle filtering by priority (P0-P4) |
 | `t` | Type sub-menu | Toggle filtering by issue type |
 | `S` | Session sub-menu | Toggle filtering by session state |
-| `e` | Toggle epic children | Hide/show tasks that are children of epics |
 | `c` | Clear all filters | Remove all filters and return to normal mode |
-| `Esc` | Cancel | Exit filter mode without changes |
+| `Esc` / `q` | Exit filter mode | Keep current filters and return to normal mode |
 
 ### Status Sub-Menu
 
@@ -687,7 +683,7 @@ Filter tasks by how recently they were updated. Useful for finding stale tasks f
 2. Press `S` to open session sub-menu
 3. Press `U` for busy sessions
 4. Press `W` for waiting sessions
-5. Press `Esc` to apply
+5. Press `Esc` to exit filter mode
 6. Only tasks with busy or waiting sessions are visible
 ```
 
@@ -704,7 +700,7 @@ Filter tasks by how recently they were updated. Useful for finding stale tasks f
 2. Press `7` to filter to tasks not updated in 7+ days
 3. Press `Esc` to exit filter mode
 4. Press `%` to select all tasks (includes closed, excludes tombstoned)
-5. Navigate and deselect any you want to keep (Space toggles)
+5. Navigate and deselect any you want to keep (`a` or `5` toggles)
 6. Press `Space` `d` to initiate cleanup
 7. Press `w` for worktrees only, or `f` for full cleanup
 8. All selected worktrees are cleaned up in parallel
@@ -740,7 +736,6 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | `Space` `a` | Attach to session | Session exists (offers to merge main if behind) |
 | `Space` `p` | Pause session | Session is busy (Ctrl-C + WIP commit) |
 | `Space` `r` | Toggle dev server | Worktree exists (start/stop dev server) |
-| `Space` `v` | View dev server | Dev server is running (attach to tmux session) |
 | `Space` `Ctrl+r` | Restart dev server | Dev server is running (stop + start) |
 | `Space` `R` | Resume session | Session is paused |
 | `Space` `x` | Stop session | Session exists (kills tmux) |
@@ -789,25 +784,6 @@ Toggle a dev server for the selected task's worktree. Each worktree can have its
 **Requirements:**
 - A worktree must exist for the bead (start a session first with `Space+s`)
 - The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
-
-#### View Dev Server (Space+v)
-
-Attach to the dev server's tmux session to view its output. This is useful for:
-- Monitoring server logs and errors
-- Checking startup messages
-- Debugging connection issues
-
-**How it works:**
-1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
-2. You can see all server output in real-time
-3. Return to Azedarach with `Ctrl-a g` (default return-to-board bind)
-
-**Requirements:**
-- A dev server must be running for the bead (start with `Space+r` first)
-
-**TaskCard indicator:**
-- Tasks with running dev servers show 🖥️ in their header line
-- This helps identify which tasks have active dev servers at a glance
 
 ### Git/PR Actions
 
@@ -930,7 +906,7 @@ Merges one bead's work into another bead's branch without going through main or 
 3. The source bead is highlighted with a distinct border (flamingo color)
 4. Navigate to the target bead using `h/j/k/l`
 5. Press `Space` or `Enter` to confirm the merge
-6. Press `Esc` to cancel
+6. Press `Esc` or `q` to cancel
 
 **Merge behavior:**
 
@@ -968,6 +944,19 @@ Merges one bead's work into another bead's branch without going through main or 
 - Source bead must have a worktree (has commits to merge)
 - Target bead must exist in the tracker (worktree is created if needed)
 - Cannot merge a bead into itself
+
+### Orchestrate Mode (Epic Child Spawning)
+
+When orchestrating an epic's child tasks, use the following keys:
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `j` / `k` / `↓` / `↑` | Move focus | Navigate child task list |
+| `Space` | Toggle task | Select/deselect focused child task |
+| `a` | Select all | Select all spawnable tasks |
+| `n` | Select none | Clear all selected tasks |
+| `Enter` | Spawn selected | Start sessions for selected child tasks |
+| `Esc` / `q` | Exit | Close orchestrate mode without spawning |
 
 #### Show Diff (Space+f)
 
@@ -1010,7 +999,7 @@ After starting Helix, use `Space` `a` to attach to the tmux session.
 | Sequence | Action | Description |
 |----------|--------|-------------|
 | `Space` `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
-| `Space` `E` | Edit bead (Claude) | AI-assisted editing |
+| `Space` `E` | Edit bead (Claude) | Placeholder (currently shows "not implemented" toast) |
 
 ### Fork Actions
 
@@ -1028,15 +1017,15 @@ After starting Helix, use `Space` `a` to attach to the tmux session.
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `Esc` | Cancel | Exit action mode |
+| `Esc` / `q` | Cancel | Exit action mode |
 
 ### Batch Operations
 
 If you have tasks selected (from Select mode), Action mode commands apply to all selected tasks:
 
 1. Press `v` to enter Select mode
-2. Navigate and press `Space` to select multiple tasks
-3. Press `Esc` to return to Normal (selections persist)
+2. Navigate and press `a` (or `5`) to select multiple tasks
+3. Press `Esc` to return to Normal mode
 4. Press `Space` `l` to move all selected tasks right
 
 ## Image Attachments
@@ -1064,7 +1053,7 @@ When viewing a task's details (`Enter`), you can scroll and manage attachments:
 | `o` | Open | Open selected attachment in system image viewer |
 | `x` | Remove | Delete selected attachment |
 | `i` | Add | Open image attachment overlay to add more |
-| `Enter` / `Esc` | Close | Close detail panel |
+| `Enter` / `Esc` / `q` | Close | Close detail panel |
 
 **Visual Feedback:**
 - Selected attachment is highlighted with `▶` prefix and mauve color
@@ -1079,7 +1068,7 @@ Press `Space` `i` to open the image attachment overlay for the selected task.
 |-----|--------|-------------|
 | `p` or `v` | Paste from clipboard | Attach image from system clipboard (macOS/Linux) |
 | `f` | Enter file path mode | Type a file path to attach |
-| `Esc` | Close/back | Close overlay or exit path input mode |
+| `Esc` (or `q` in menu mode) | Close/back | Close overlay or exit path input mode |
 
 ### Path Input Mode
 
@@ -1091,6 +1080,7 @@ When in path input mode (after pressing `f`):
 | `Backspace` | Delete last character |
 | `Enter` | Attach file at path |
 | `Esc` | Return to menu mode |
+| `q` | Type `q` | Printable input in path mode (not a close shortcut) |
 
 ### Image Preview Overlay
 
@@ -1139,7 +1129,7 @@ Images are scaled to fit the terminal window while preserving aspect ratio.
 3. Press j to select first attachment
 4. Press v to preview (renders in terminal)
 5. Press j/k to navigate through attachments
-6. Press Esc to close preview
+6. Press Esc or q to close preview
 ```
 
 **Opening an attached image externally:**
@@ -1238,7 +1228,7 @@ Press `g` `p` to open the project selector overlay:
 | Key | Action |
 |-----|--------|
 | `1`-`9` | Select project by number |
-| `Esc` | Cancel and close |
+| `Esc` / `q` | Cancel and close |
 
 The current project is highlighted with "(current)". When you switch projects:
 1. The board refreshes to show tasks from the new project
@@ -1276,4 +1266,4 @@ Projects are stored globally in `~/.config/azedarach/projects.json`:
 
 4. **Quick column jumps**: `gh` and `gl` jump between first and last columns; `gg` and `ge` jump to top/bottom of current column.
 
-5. **Half-page scrolling**: `Ctrl-Shift-d` and `Ctrl-Shift-u` are great for tall columns.
+5. **Half-page scrolling**: `Ctrl-d` and `Ctrl-u` are great for tall columns.

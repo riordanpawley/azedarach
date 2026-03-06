@@ -89,8 +89,9 @@ export const HelpOverlay = () => {
 
 				{/* Select mode section */}
 				<SectionHeader title="Select Mode:" />
-				<KeyLine keys="Space" description="Toggle selection of current task" />
-				<KeyLine keys="v" description="Exit select mode" />
+				<KeyLine keys="a / 5" description="Toggle selection of current task" />
+				<KeyLine keys="Space" description="Enter action mode for selection" />
+				<KeyLine keys="v / q / Esc" description="Exit select mode" />
 				<text> </text>
 
 				{/* Action mode section */}
@@ -124,6 +125,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="s" description="Sort by session status" />
 				<KeyLine keys="p" description="Sort by priority" />
 				<KeyLine keys="u" description="Sort by updated at" />
+				<KeyLine keys="Esc / q" description="Exit sort mode" />
 				<text> </text>
 
 				{/* Filter mode section */}
@@ -131,8 +133,8 @@ export const HelpOverlay = () => {
 				<KeyLine keys="s/p/t/S" description="Status / Priority / Type / Session" />
 				<KeyLine keys="0-4" description="Toggle P0-P4 priority" />
 				<KeyLine keys="o/i/b/d" description="Open / In progress / Blocked / Closed" />
-				<KeyLine keys="e" description="Toggle hide epic children" />
 				<KeyLine keys="c" description="Clear all filters" />
+				<KeyLine keys="Esc / q" description="Exit filter mode" />
 				<text> </text>
 
 				{/* General section */}
@@ -149,7 +151,7 @@ export const HelpOverlay = () => {
 				<text> </text>
 
 				{/* Footer */}
-				<text fg={theme.subtext0}>{"Press any key to dismiss..."}</text>
+				<text fg={theme.subtext0}>{"Press Esc or q to dismiss..."}</text>
 			</box>
 		</box>
 	)

@@ -166,7 +166,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * @returns true if the key was handled.
 			 *
 			 * y/Enter → execute onConfirm effect, pop overlay
-			 * n/Escape → just pop overlay
+			 * n/Escape/q → just pop overlay
 			 */
 			const handleConfirmInput = (key: string) =>
 				Effect.gen(function* () {
@@ -191,8 +191,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
-					// n or Escape to cancel
-					if (key === "n" || key === "escape") {
+					// n, q, or Escape to cancel
+					if (key === "n" || key === "q" || key === "escape") {
 						yield* overlay.pop()
 						return true
 					}
@@ -209,7 +209,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 *
 			 * m → execute onMerge effect (merge main into branch, then attach), pop overlay
 			 * s → execute onSkip effect (attach without merging), pop overlay
-			 * Escape → just pop overlay (cancel)
+			 * Escape/q → just pop overlay (cancel)
 			 */
 			const handleMergeChoiceInput = (key: string) =>
 				Effect.gen(function* () {
@@ -233,8 +233,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
-					// Escape to cancel
-					if (key === "escape") {
+					// Escape or q to cancel
+					if (key === "escape" || key === "q") {
 						yield* overlay.pop()
 						return true
 					}
@@ -252,7 +252,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * 1 → fork from current (convert to epic + create child)
 			 * 2 → create new parent epic then child
 			 * 3 → create sibling under existing parent epic
-			 * Escape → cancel
+			 * Escape/q → cancel
 			 */
 			const handleForkInput = (key: string) =>
 				Effect.gen(function* () {
@@ -263,7 +263,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					const blockedReason = currentOverlay.blockedReason
 
-					if (key === "escape") {
+					if (key === "escape" || key === "q") {
 						yield* overlay.pop()
 						return true
 					}
@@ -305,7 +305,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 *
 			 * w → execute onWorktreeOnly effect (cleanup worktrees, keep tracker open)
 			 * f → execute onFullCleanup effect (cleanup worktrees AND close tracker)
-			 * Escape → just pop overlay (cancel)
+			 * Escape/q → just pop overlay (cancel)
 			 */
 			const handleBulkCleanupInput = (key: string) =>
 				Effect.gen(function* () {
@@ -328,8 +328,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
-					// Escape to cancel
-					if (key === "escape") {
+					// Escape or q to cancel
+					if (key === "escape" || key === "q") {
 						yield* overlay.pop()
 						return true
 					}
@@ -356,7 +356,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * - i: Add new attachment (opens imageAttach overlay)
 			 *
 			 * General:
-			 * - escape: Close detail overlay
+			 * - escape/q: Close detail overlay
 			 */
 			const handleDetailOverlayInput = (key: string) =>
 				Effect.gen(function* () {
@@ -367,8 +367,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					const taskId = currentOverlay.taskId
 
-					// Escape closes the overlay
-					if (key === "escape" || key === "return") {
+					// Escape, q, or Enter closes the overlay
+					if (key === "escape" || key === "q" || key === "return") {
 						yield* overlay.pop()
 						return true
 					}
@@ -501,6 +501,11 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
+					if (key === "q") {
+						yield* overlay.pop()
+						return true
+					}
+
 					return false
 				})
 
@@ -530,8 +535,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						state = yield* SubscriptionRef.get(imageAttachment.overlayState)
 					}
 
-					// Escape handling
-					if (key === "escape") {
+					// Escape handling (q acts as close in menu mode only)
+					if (key === "escape" || (key === "q" && state.mode !== "path")) {
 						if (state.mode === "path") {
 							yield* imageAttachment.exitPathMode()
 						} else {
@@ -714,6 +719,11 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return true
 					}
 
+					if (key === "q") {
+						yield* overlay.pop()
+						return true
+					}
+
 					// Escape is handled elsewhere
 					if (key === "escape") {
 						return false
@@ -830,11 +840,11 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * - k/up: Move focus up
 			 * - space/return: Toggle setting
 			 * - e: Edit in external editor
-			 * - escape: Close settings
+			 * - escape/q: Close settings
 			 */
 			const handleSettingsInput = (key: string) =>
 				Effect.gen(function* () {
-					if (key === "escape") {
+					if (key === "escape" || key === "q") {
 						yield* settings.close()
 						yield* overlay.pop()
 						return true

@@ -501,6 +501,11 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: app relaunch after issue was removed/closed externally
 - Expected: focus falls back to nearest valid item with non-blocking notice
 
+### UC-BOOT-004 Interact before startup hydration completes
+
+- Trigger: app launch while initial refresh/bootstrap path is slow
+- Expected: board shell remains interactable; loading state converges when first hydration attempt settles
+
 ## 8.18 Concurrency and Mutation Use Cases
 
 ### UC-CONC-001 Save edit after external update
@@ -567,7 +572,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Authoring/planning -> AZ-FR-1301..1506
 - Attachments/settings/projects -> AZ-FR-1601..1805
 - Recovery/ops -> AZ-FR-2101..2207 and Section 05 failure cases
-- Startup/re-entry -> AZ-FR-2701..2708
+- Startup/re-entry -> AZ-FR-2701..2711
 - Concurrency/mutation -> AZ-FR-2801..2808
 - Terminal/idempotence -> AZ-FR-2901..3004
 - Guardrails/reconciliation/determinism -> AZ-FR-3101..3304

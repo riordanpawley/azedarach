@@ -20,6 +20,13 @@ Before starting implementation:
 
 Goal: Make this issue self-sufficient so any future session could pick it up without extra context.`
 
+	prompt += `
+
+Issue nesting rule:
+- If additional work must be completed before closing \`${params.taskId}\`, create it as a child of \`${params.taskId}\` (for example, \`az issue update <new-id> --parent ${params.taskId}\`).
+- If additional work is intentionally deferred to a later session (not required to close \`${params.taskId}\`), do NOT make it a child; link it with a discovered-from edge instead (for example, \`az issue dep add --type discovered-from <new-id> ${params.taskId}\`).
+- Close \`${params.taskId}\` only after its child issues are completed.`
+
 	if (params.localMode) {
 		prompt += `
 

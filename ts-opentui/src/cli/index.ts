@@ -223,7 +223,7 @@ const validateIssueTrackerStore = (projectDir: string) =>
 		if (!exists) {
 			return yield* Effect.fail(
 				new Error(
-					`No .azedarach directory found in ${projectDir}. Run 'tracker init' to initialize issue tracking storage.`,
+					`No .azedarach directory found in ${projectDir}. Initialize issue tracking for this project, then retry your \`az issue\` command.`,
 				),
 			)
 		}
@@ -559,6 +559,25 @@ type DependencyCountLabel =
 	| "discoveredFrom"
 	| "discoveredBy"
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
+
+const parseRelationshipDependencyType = (
+	value: string | undefined,
+): RelationshipDependencyType | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "blocks":
+		case "related":
+		case "parent-child":
+		case "discovered-from":
+			return normalized
+		default:
+			return undefined
+	}
+}
 
 const DEPENDENCY_COUNT_LABEL_ORDER: readonly DependencyCountLabel[] = [
 	"blocking",
@@ -969,6 +988,69 @@ const issueUpdateHandler = (args: {
 		yield* Console.log(`Updated issue ${issueId}`)
 		if (args.verbose) {
 			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
+		}
+	})
+
+/**
+ * Add an issue dependency edge
+ */
+const issueDepAddHandler = (args: {
+	readonly issueId: string
+	readonly dependsOnId: string
+	readonly dependencyType: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const dependsOnId = yield* resolveCliIssueId(args.dependsOnId, resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const dependencyType = yield* Option.match(args.dependencyType, {
+			onNone: () => Effect.succeed<RelationshipDependencyType>("blocks"),
+			onSome: (value) => {
+				const parsed = parseRelationshipDependencyType(value)
+				if (parsed === undefined) {
+					return Effect.fail(
+						new Error(
+							`Invalid dependency type '${value}'. Expected one of: blocks, related, parent-child, discovered-from.`,
+						),
+					)
+				}
+				return Effect.succeed(parsed)
+			},
+		})
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		yield* issueTrackerClient.addDependency(
+			issueId,
+			dependsOnId,
+			dependencyType,
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						issueId,
+						dependsOnId,
+						type: dependencyType,
+						updated: true,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(`Added ${dependencyType} dependency: ${issueId} -> ${dependsOnId}`)
+		if (args.verbose) {
+			yield* Console.error("Use `az issue get <issue-id>` to inspect dependencies.")
 		}
 	})
 
@@ -1658,7 +1740,7 @@ const projectAddHandler = (args: {
 			if (!issueStoreExists) {
 				return yield* Effect.fail(
 					new Error(
-						`No .azedarach directory found in ${absolutePath}. Run 'tracker init' to initialize tracker tracking.`,
+						`No .azedarach directory found in ${absolutePath}. Initialize issue tracking for this project, then retry with \`az issue\`.`,
 					),
 				)
 			}
@@ -1771,6 +1853,10 @@ const projectSwitchHandler = (args: { readonly name: string; readonly verbose: b
  */
 const issueIdArg = Args.text({ name: "issue-id" }).pipe(
 	Args.withDescription("Issue ID (e.g., a, ab, 12, AZE-123, or shorthand suffix 123)"),
+)
+
+const dependsOnIssueIdArg = Args.text({ name: "depends-on-id" }).pipe(
+	Args.withDescription("Issue ID this issue depends on (e.g., AZE-123 or shorthand suffix 123)"),
 )
 
 /**
@@ -2031,6 +2117,37 @@ const issueUpdateCommand = Command.make(
 ).pipe(Command.withDescription("Update issue fields"))
 
 /**
+ * az issue dep add <issue-id> <depends-on-id> - Add dependency edge
+ */
+const issueDepAddCommand = Command.make(
+	"add",
+	{
+		issueId: issueIdArg,
+		dependsOnId: dependsOnIssueIdArg,
+		dependencyType: Options.text("type").pipe(
+			Options.optional,
+			Options.withDescription(
+				"Dependency type (blocks, related, parent-child, discovered-from). Default: blocks",
+			),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
+	},
+	issueDepAddHandler,
+).pipe(Command.withDescription("Add a dependency edge between issues"))
+
+/**
+ * az issue dep - Parent command for dependency edge operations
+ */
+const issueDepCommand = Command.make("dep", {}, () =>
+	Console.log("Usage: az issue dep add [--type <type>] <issue-id> <depends-on-id>"),
+).pipe(
+	Command.withDescription("Manage issue dependency edges"),
+	Command.withSubcommands([issueDepAddCommand]),
+)
+
+/**
  * az issue close <issue-id> - Close issue
  */
 const issueCloseCommand = Command.make(
@@ -2073,6 +2190,7 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueGetCommand,
 		issueCreateCommand,
 		issueUpdateCommand,
+		issueDepCommand,
 		issueCloseCommand,
 		issueDeleteCommand,
 	]),
@@ -2144,7 +2262,7 @@ const hooksCommand = Command.make("hooks", {}, () =>
 const DEFAULT_OPENCODE_CONFIG = {
 	$schema: "https://opencode.ai/config.json",
 	instructions: ["CLAUDE.md"],
-	plugins: ["opencode-tracker", "opencode-skills"],
+	plugins: ["opencode-tracker"],
 	theme: "tokyonight",
 	permission: {
 		bash: {
@@ -2174,13 +2292,11 @@ const DEFAULT_OPENCODE_CONFIG = {
  * Initialize OpenCode support in a project
  *
  * - Creates/updates opencode.json with recommended plugins
- * - Generates SKILL.md wrappers from .claude/skills if present
  * - Checks for globally installed opencode-az plugin
  */
 const opencodeInitHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
-	readonly skipSkills: boolean
 }) =>
 	Effect.gen(function* () {
 		const fs = yield* FileSystem.FileSystem
@@ -2188,7 +2304,6 @@ const opencodeInitHandler = (args: {
 
 		const cwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		const opencodeJsonPath = pathService.join(cwd, "opencode.json")
-		const claudeSkillsDir = pathService.join(cwd, ".claude", "skills")
 		const configHome =
 			process.env.XDG_CONFIG_HOME ??
 			(process.env.HOME
@@ -2214,7 +2329,7 @@ const opencodeInitHandler = (args: {
 			const existingPlugins = Array.isArray(existingConfig.plugins)
 				? (existingConfig.plugins as string[])
 				: []
-			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker", "opencode-skills"])]
+			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }
 
 			yield* Console.log("✓ Updated existing opencode.json")
@@ -2238,50 +2353,6 @@ const opencodeInitHandler = (args: {
 			yield* Console.log("✓ Global opencode-az plugin found")
 		}
 
-		// Step 3: Generate skill wrappers if .claude/skills exists
-		if (!args.skipSkills) {
-			const claudeSkillsExist = yield* fs.exists(claudeSkillsDir)
-			if (claudeSkillsExist) {
-				yield* Console.log("")
-				yield* Console.log("📚 Generating skill wrappers...")
-
-				// Find the generator script
-				const scriptPath = pathService.join(
-					pathService.dirname(pathService.dirname(import.meta.dirname ?? "")),
-					"scripts",
-					"generate-opencode-skills.sh",
-				)
-
-				const scriptExists = yield* fs.exists(scriptPath)
-				if (scriptExists) {
-					// Run the generator script
-					const command = PlatformCommand.make("bash", scriptPath, cwd)
-					const output = yield* PlatformCommand.string(command).pipe(
-						Effect.catchAll((e) =>
-							Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
-								Effect.zipRight(Effect.succeed(`Error: ${e}`)),
-							),
-						),
-					)
-
-					// Count generated skills
-					const generatedCount = (output.match(/Generated:/g) ?? []).length
-					yield* Console.log(`✓ Generated ${generatedCount} skill wrappers`)
-
-					if (args.verbose) {
-						yield* Console.log(output)
-					}
-				} else {
-					yield* Console.log("! Skill generator script not found")
-					yield* Console.log(`  Expected at: ${scriptPath}`)
-					yield* Console.log("  Run manually: generate-opencode-skills.sh <project-dir>")
-				}
-			} else if (args.verbose) {
-				yield* Console.log("")
-				yield* Console.log("i No .claude/skills directory found, skipping skill generation")
-			}
-		}
-
 		// Summary
 		yield* Console.log("")
 		yield* Console.log("✅ OpenCode setup complete!")
@@ -2289,8 +2360,7 @@ const opencodeInitHandler = (args: {
 		yield* Console.log("Next steps:")
 		yield* Console.log("  1. Install AZ plugin: az opencode plugin install")
 		yield* Console.log("  2. Install opencode-tracker: npm install -g opencode-tracker")
-		yield* Console.log("  3. Install opencode-skills: npm install -g opencode-skills")
-		yield* Console.log("  4. Run: opencode")
+		yield* Console.log("  3. Run: opencode")
 	})
 
 /**
@@ -2301,9 +2371,6 @@ const opencodeInitCommand = Command.make(
 	{
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		skipSkills: Options.boolean("skip-skills").pipe(
-			Options.withDescription("Skip generating skill wrappers"),
-		),
 	},
 	opencodeInitHandler,
 ).pipe(Command.withDescription("Initialize OpenCode support in a project"))
@@ -2637,6 +2704,38 @@ const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<s
 	if (issueCommandIndex === -1) return argv
 
 	const subcommand = argv[issueCommandIndex + 1]
+	if (subcommand === "dep") {
+		const depSubcommand = argv[issueCommandIndex + 2]
+		if (depSubcommand !== "add") {
+			return argv
+		}
+
+		const issueIdIndex = issueCommandIndex + 3
+		const dependsOnIdIndex = issueCommandIndex + 4
+		if (dependsOnIdIndex >= argv.length) return argv
+
+		const issueId = argv[issueIdIndex]
+		const dependsOnId = argv[dependsOnIdIndex]
+		if (
+			issueId === undefined ||
+			dependsOnId === undefined ||
+			issueId.startsWith("-") ||
+			dependsOnId.startsWith("-")
+		) {
+			return argv
+		}
+
+		const hasOptionAfterPositionalIds = argv
+			.slice(dependsOnIdIndex + 1)
+			.some((token) => token.startsWith("-"))
+		if (!hasOptionAfterPositionalIds) return argv
+
+		const reordered = [...argv]
+		reordered.splice(issueIdIndex, 2)
+		reordered.push(issueId, dependsOnId)
+		return reordered
+	}
+
 	if (
 		subcommand !== "get" &&
 		subcommand !== "create" &&

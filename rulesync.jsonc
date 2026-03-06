@@ -1,0 +1,7 @@
+{
+  "targets": ["claudecode"],
+  "features": ["subagents", "skills"],
+  "baseDirs": ["."],
+  "delete": true,
+  "silent": true
+}
