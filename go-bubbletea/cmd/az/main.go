@@ -22,6 +22,10 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "prime" {
 		return handlePrimeCommand(args[1:], stdout, stderr)
 	}
+	// Standalone init command should not depend on runtime config.
+	if len(args) > 0 && args[0] == "init" {
+		return handleInitCommand(args[1:], stdout, stderr)
+	}
 	// Show command owns its own argument parsing and search dependency setup.
 	if len(args) > 0 && args[0] == "show" {
 		return handleShowCommand(args[1:], stdout, stderr)
