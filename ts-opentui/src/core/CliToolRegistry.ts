@@ -36,6 +36,8 @@ export type HookStrategy = "hooks+pty" | "events" | "pty"
 export interface BuildCommandOptions {
 	/** Initial prompt to send (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
+	/** Image paths to attach to the initial prompt when the tool supports native image input */
+	readonly imagePaths?: readonly string[]
 	/** Active issue ID for issue-scoped sessions */
 	readonly issueId?: string
 	/** Model to use (tool-specific format) */
@@ -191,6 +193,7 @@ const openCodeToolDefinition: CliToolDefinition = {
  *
  * Codex uses:
  * - Positional argument for initial prompt
+ * - --image for native image attachments
  * - --model for model selection
  * - resume --last to continue the most recent conversation
  * - --dangerously-bypass-approvals-and-sandbox for fully automatic execution
@@ -207,6 +210,13 @@ const codexToolDefinition: CliToolDefinition = {
 
 		if (options.model) {
 			parts.push(`--model ${options.model}`)
+		}
+
+		if (options.imagePaths && options.imagePaths.length > 0) {
+			for (const imagePath of options.imagePaths) {
+				if (imagePath.trim().length === 0) continue
+				parts.push(`--image "${escapeForShellDoubleQuotes(imagePath)}"`)
+			}
 		}
 
 		if (options.dangerouslySkipPermissions) {
