@@ -59,6 +59,7 @@ import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
+import { isSmallScreen } from "./responsive.js"
 import { TASK_CARD_HEIGHT } from "./TaskCard.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
@@ -263,11 +264,13 @@ export const App = () => {
 	// Recalculate max visible tasks from live terminal dimensions.
 	const CHROME_HEIGHT = 6
 	const terminalRows = process.stdout.rows || 24
+	const terminalColumns = process.stdout.columns || 80
 	const baseMaxVisibleTasks = Math.max(
 		1,
 		Math.floor((terminalRows - CHROME_HEIGHT) / TASK_CARD_HEIGHT),
 	)
 	const maxVisibleTasks = drillDownEpicId ? baseMaxVisibleTasks - 1 : baseMaxVisibleTasks
+	const useSingleKanbanColumn = viewMode === "kanban" && isSmallScreen(terminalColumns)
 
 	const visibleTaskIds = useMemo(() => {
 		if (viewMode === "compact") {
@@ -473,6 +476,7 @@ export const App = () => {
 					// terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
 					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
+					singleColumnMode={useSingleKanbanColumn}
 					isActionMode={isAction}
 					mergeSelectSourceId={mergeSelectSourceId}
 					phases={phases}
@@ -554,7 +558,9 @@ export const App = () => {
 			{isSearch && <SearchInput query={searchQuery} />}
 
 			{/* Detail panel */}
-			{showingDetail && selectedTask && <DetailPanel task={selectedTask} />}
+			{showingDetail && selectedTask && (
+				<DetailPanel task={selectedTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
+			)}
 
 			{/* Create task prompt */}
 			{showingCreate && (
