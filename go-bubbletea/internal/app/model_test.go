@@ -645,6 +645,69 @@ func TestActionMenuSpaceThenChatVariantIncludesChatBootstrapGuidance(t *testing.
 	}
 }
 
+func TestActionMenuSpaceThenSReusesExistingWorktreeAndTmuxSession(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	issueRunner := &scriptedLinearRunner{listPayload: []byte(`[]`)}
+	m.issueClient = linear.NewClient(issueRunner, slog.Default())
+
+	gitRunner := &gitScriptRunner{
+		worktreeListOutput: `worktree /tmp/azedarach
+HEAD abc123
+branch refs/heads/main
+
+worktree /tmp/azedarach-az-1
+HEAD def456
+branch refs/heads/az/az-1
+`,
+	}
+	m.worktreeManager = git.NewWorktreeManager(gitRunner, "/tmp/azedarach", slog.Default())
+
+	tmuxRunner := &tmuxScriptRunner{
+		hasSessions: map[string]bool{
+			"az-1": true,
+		},
+	}
+	m.tmuxClient = tmux.NewClient(tmuxRunner, slog.Default())
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	result, cmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if cmd == nil {
+		t.Fatal("expected start session command")
+	}
+
+	msg := cmd()
+	started, ok := msg.(sessionStartedMsg)
+	if !ok {
+		t.Fatalf("expected sessionStartedMsg, got %T", msg)
+	}
+	if started.variant != sessionStartVariantStandard {
+		t.Fatalf("expected standard start variant, got %q", started.variant)
+	}
+
+	if len(gitRunner.addCalls) != 0 {
+		t.Fatalf("expected no new worktree add when existing worktree is present, got %v", gitRunner.addCalls)
+	}
+	if len(tmuxRunner.sentKeys["az-1"]) != 0 {
+		t.Fatalf("expected no duplicate bootstrap commands when tmux session already exists, got %v", tmuxRunner.sentKeys["az-1"])
+	}
+
+	result, _ = m.Update(started)
+	m = result.(Model)
+	if !issueRunner.hasStatusUpdate("az-1", domain.StatusInProgress) {
+		t.Fatal("expected issue status update call to in_progress on idempotent start")
+	}
+	session := m.sessions["az-1"]
+	if session == nil {
+		t.Fatal("expected session indicator after idempotent start")
+	}
+	if session.Worktree != "/tmp/azedarach-az-1" {
+		t.Fatalf("expected recovered existing worktree path, got %q", session.Worktree)
+	}
+}
+
 func TestActionMenuSpaceThenPTransitionsBusySessionToPaused(t *testing.T) {
 	m := newTestModel()
 	m.nav.SelectTask("az-1", 0)

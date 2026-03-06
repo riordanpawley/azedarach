@@ -1511,36 +1511,55 @@ func (m Model) startSessionCmd(issueID string, variant sessionStartVariant) tea.
 		baseBranch := "main" // TODO: Make configurable
 		worktree, err := m.worktreeManager.Create(ctx, issueID, baseBranch)
 		if err != nil {
-			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create worktree: %w", err)}
+			// Idempotence: recover an already-existing worktree path so interrupted starts can resume.
+			if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+				worktree, err = m.worktreeManager.Get(ctx, issueID)
+				if err != nil {
+					return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to recover existing worktree: %w", err)}
+				}
+			} else {
+				return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create worktree: %w", err)}
+			}
 		}
 
-		// Create tmux session
-		err = m.tmuxClient.NewSession(ctx, issueID, worktree.Path)
+		// Idempotence: reuse existing tmux sessions when present.
+		tmuxExists, err := m.tmuxClient.HasSession(ctx, issueID)
 		if err != nil {
-			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to verify tmux session: %w", err)}
+		}
+		if !tmuxExists {
+			err = m.tmuxClient.NewSession(ctx, issueID, worktree.Path)
+			if err != nil {
+				return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to create tmux session: %w", err)}
+			}
+
+			// Launch AI CLI command for selected variant.
+			launchCmd := m.buildSessionLaunchCommand(variant)
+			err = m.tmuxClient.SendKeys(ctx, issueID, launchCmd)
+			if err != nil {
+				return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send keys: %w", err)}
+			}
+			// Inject backend-agnostic bootstrap guidance.
+			bootstrapPrompt := m.buildSessionBootstrapPrompt(issueID, variant)
+			err = m.tmuxClient.SendKeys(ctx, issueID, bootstrapPrompt)
+			if err != nil {
+				return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send bootstrap prompt: %w", err)}
+			}
 		}
 
-		// Launch AI CLI command for selected variant.
-		launchCmd := m.buildSessionLaunchCommand(variant)
-		err = m.tmuxClient.SendKeys(ctx, issueID, launchCmd)
-		if err != nil {
-			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send keys: %w", err)}
-		}
-		// Inject backend-agnostic bootstrap guidance.
-		bootstrapPrompt := m.buildSessionBootstrapPrompt(issueID, variant)
-		err = m.tmuxClient.SendKeys(ctx, issueID, bootstrapPrompt)
-		if err != nil {
-			return sessionErrorMsg{issueID: issueID, err: fmt.Errorf("failed to send bootstrap prompt: %w", err)}
-		}
-
-		// Create session record
+		// Ensure session record exists and is transitioned to busy.
 		now := time.Now()
-		session := &domain.Session{
-			IssueID:   issueID,
-			State:     domain.SessionBusy,
-			StartedAt: &now,
-			Worktree:  worktree.Path,
+		session := m.sessions[issueID]
+		if session == nil {
+			session = &domain.Session{
+				IssueID:   issueID,
+				StartedAt: &now,
+			}
+		} else if session.StartedAt == nil {
+			session.StartedAt = &now
 		}
+		session.State = domain.SessionBusy
+		session.Worktree = worktree.Path
 		m.sessions[issueID] = session
 
 		// Start session state monitoring (nil program sender; model polls monitor state on tick).
