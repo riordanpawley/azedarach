@@ -230,8 +230,8 @@ Canonical fixture profile names:
 ### AZ-AT-0702 Start with work prompt
 
 - Steps: `Space S`.
-- Expected: session starts with default work instruction.
-- Links: AZ-FR-0802.
+- Expected: session starts with default work instruction and injected context includes `az prime` plus `az issue get <issue-id>` output for the focused issue.
+- Links: AZ-FR-0802, AZ-FR-0802a.
 
 ### AZ-AT-0703 Yolo start variant
 

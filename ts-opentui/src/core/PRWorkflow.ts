@@ -1203,6 +1203,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							const command = toolDef.buildCommand({
 								initialPrompt: resolvePrompt,
+								issueId,
 								model: effectiveModel,
 								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 							})
@@ -1775,6 +1776,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							const command = toolDef.buildCommand({
 								initialPrompt: resolvePrompt,
+								issueId,
 								model: effectiveModel,
 								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 							})
@@ -2052,6 +2054,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						const command = toolDef.buildCommand({
 							initialPrompt: resolvePrompt,
+							issueId,
 							model: effectiveModel,
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})
@@ -2279,6 +2282,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							const command = toolDef.buildCommand({
 								initialPrompt: resolvePrompt,
+								issueId: targetIssueId,
 								model: effectiveModel,
 								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 							})

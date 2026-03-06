@@ -186,7 +186,7 @@ Action mode is a palette of context-sensitive operations.
 | Sequence | Behavior |
 |---|---|
 | `Space s` | start session |
-| `Space S` | start session with default "work on {id}" prompt |
+| `Space S` | start session with default work prompt and injected az issue context |
 | `Space !` | start session with skip-permission behavior |
 | `Space c` | start chat session (short-context model profile) |
 | `Space a` | attach to existing session |

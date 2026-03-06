@@ -610,6 +610,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Build command using the CLI tool registry
 						const commandWithOptions = toolDef.buildCommand({
 							initialPrompt,
+							issueId,
 							model: effectiveModel,
 							dangerouslySkipPermissions,
 							sessionSettings,
@@ -964,6 +965,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Build command with -c flag to continue conversation
 						const commandWithOptions = toolDef.buildCommand({
 							continueConversation: true, // Key difference from start() - continue where we left off
+							issueId,
 							model: effectiveModel,
 							dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
 						})

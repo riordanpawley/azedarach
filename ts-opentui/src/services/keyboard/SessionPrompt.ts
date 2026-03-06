@@ -10,7 +10,8 @@ export const buildStartWorkPrompt = (params: {
 
 	let prompt = `work on issue ${params.taskId} (${params.issueType}): ${params.title}
 
-Run \`${showCommand}\` to see full description and context.
+Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
+Only rerun \`${showCommand}\` if details are stale or missing.
 
 Before starting implementation:
 1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
@@ -43,7 +44,8 @@ export const buildChatPrompt = (params: {
 
 	return `Let's chat about issue ${params.taskId}: ${params.title}
 
-Run \`${showCommand}\` to see full description and context.
+Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
+Only rerun \`${showCommand}\` if details are stale or missing.
 
 Help me with one of:
 - Clarifying requirements or scope
