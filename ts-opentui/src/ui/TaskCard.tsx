@@ -7,6 +7,7 @@ import type { MouseEvent } from "@opentui/core"
 import type { DevServerView } from "./atoms.js"
 import { issueDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
+import { isSmallScreen } from "./responsive.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import {
@@ -45,6 +46,11 @@ export const TASK_CARD_HEIGHT = 6
  */
 const getTitleMaxWidth = (): number => {
 	const terminalWidth = process.stdout.columns || 80
+	if (isSmallScreen(terminalWidth)) {
+		const borderAndPadding = 4 // border(2) + padding(2)
+		return Math.max(20, terminalWidth - borderAndPadding - 6)
+	}
+
 	const columnWidth = Math.floor(terminalWidth * 0.25) - 1 // 25% minus marginRight
 	const borderAndPadding = 4 // border(2) + padding(2)
 	return Math.max(10, columnWidth - borderAndPadding)

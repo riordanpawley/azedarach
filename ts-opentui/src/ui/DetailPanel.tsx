@@ -7,7 +7,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import type { ScrollBoxRenderable } from "@opentui/core"
+import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { DependencyRef } from "../core/IssueTrackerClient.js"
 import { formatElapsedMs } from "../services/ClockService.js"
@@ -18,6 +18,7 @@ import {
 	epicChildrenAtom,
 	taskPhaseInfoAtom,
 } from "./atoms.js"
+import { isSmallScreen } from "./responsive.js"
 import { getPriorityColor, theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { PHASE_INDICATORS, PHASE_LABELS, SESSION_INDICATORS, WORKTREE_INDICATOR } from "./types.js"
@@ -27,6 +28,8 @@ const PANEL_CHROME_HEIGHT = 8 // borders (2) + padding (2) + header (3) + footer
 
 export interface DetailPanelProps {
 	task: TaskWithSession
+	/** Force small-screen layout from parent when already computed there. */
+	forceSmallScreenLayout?: boolean
 }
 
 const ATTR_BOLD = 1
@@ -84,6 +87,19 @@ const getChildStatusColor = (status?: DependencyStatus): string => {
 export const DetailPanel = (props: DetailPanelProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
 	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
+	const terminalRows = process.stdout.rows || 24
+	const terminalColumns = process.stdout.columns || 80
+	const isSmallScreenLayout =
+		props.forceSmallScreenLayout !== undefined
+			? props.forceSmallScreenLayout
+			: isSmallScreen(terminalColumns)
+	const panelWidth = isSmallScreenLayout ? Math.max(40, terminalColumns - 4) : undefined
+	const panelHorizontalPadding = isSmallScreenLayout ? 1 : 2
+	const metadataDirection = isSmallScreenLayout ? "column" : "row"
+	const dividerLength = isSmallScreenLayout
+		? Math.max(20, (panelWidth ?? terminalColumns) - 4)
+		: 89
+	const dividerLine = "━".repeat(dividerLength)
 
 	// Subscribe to scroll commands from Effect layer
 	const scrollCommandResult = useAtomValue(detailScrollAtom)
@@ -107,12 +123,21 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		}
 	}, [scrollCommand])
 
-	// Calculate max height for scrollbox based on terminal size
-	const maxScrollHeight = useMemo(() => {
-		const terminalRows = process.stdout.rows || 24
-		// Reserve space for panel chrome and some margin
-		return Math.max(10, terminalRows - PANEL_CHROME_HEIGHT - 4)
-	}, [])
+	const handleScrollboxMouseScroll = (event: MouseEvent) => {
+		const scroll = event.scroll
+		if (!scroll || !scrollboxRef.current) return
+		if (scroll.direction !== "up" && scroll.direction !== "down") return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
+		const amount = scroll.direction === "down" ? delta : -delta
+		scrollboxRef.current.scrollBy(amount, "step")
+	}
+
+	// Reserve space for panel chrome and some margin
+	const maxScrollHeight = Math.max(10, terminalRows - PANEL_CHROME_HEIGHT - 4)
 
 	// Subscribe to current attachments from Effect layer
 	const attachmentsResult = useAtomValue(currentAttachmentsAtom)
@@ -293,27 +318,24 @@ export const DetailPanel = (props: DetailPanelProps) => {
 				border={true}
 				borderColor={theme.mauve}
 				backgroundColor={theme.base}
-				paddingLeft={2}
-				paddingRight={2}
+				paddingLeft={panelHorizontalPadding}
+				paddingRight={panelHorizontalPadding}
 				paddingTop={1}
 				paddingBottom={1}
-				minWidth={80}
-				maxWidth={110}
+				width={panelWidth}
+				minWidth={isSmallScreenLayout ? undefined : 80}
+				maxWidth={isSmallScreenLayout ? panelWidth : 110}
 				flexDirection="column"
 			>
 				{/* Header with task ID and type - stays fixed */}
 				<text fg={theme.mauve} attributes={ATTR_BOLD}>
-					{
-						"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-					}
+					{dividerLine}
 				</text>
 				<text fg={theme.mauve} attributes={ATTR_BOLD}>
 					{headerLine}
 				</text>
 				<text fg={theme.mauve} attributes={ATTR_BOLD}>
-					{
-						"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-					}
+					{dividerLine}
 				</text>
 
 				{/* Scrollable content area */}
@@ -323,6 +345,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 					maxHeight={maxScrollHeight}
 					flexDirection="column"
 					flexGrow={1}
+					onMouseScroll={handleScrollboxMouseScroll}
 				>
 					<text> </text>
 
@@ -333,7 +356,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 					<text> </text>
 
 					{/* Metadata row */}
-					<box flexDirection="row" gap={2}>
+					<box flexDirection={metadataDirection} gap={2}>
 						<text fg={getPriorityColor(props.task.priority)}>{`Priority: ${priorityLabel}`}</text>
 						<text fg={getStatusColor()}>{`Status: ${props.task.status}`}</text>
 						<text fg={theme.subtext0}>{`Session: ${props.task.sessionState}`}</text>
@@ -440,7 +463,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 							<text fg={theme.blue} attributes={ATTR_BOLD}>
 								{"Worktree:"}
 							</text>
-							<box flexDirection="row" gap={2}>
+							<box flexDirection={metadataDirection} gap={2}>
 								<text fg={theme.text}>{"📁 Exists"}</text>
 								{props.task.hasUncommittedChanges && (
 									<text fg={theme.red}>{"● Uncommitted changes"}</text>
@@ -485,7 +508,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 									{`Phase: ${PHASE_INDICATORS[props.task.agentPhase]} ${PHASE_LABELS[props.task.agentPhase]}`}
 								</text>
 							)}
-							<box flexDirection="row" gap={2}>
+							<box flexDirection={metadataDirection} gap={2}>
 								{props.task.contextPercent !== undefined && (
 									<text fg={getContextColor(props.task.contextPercent)}>
 										{"Context: " +
@@ -522,7 +545,12 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 				{/* Footer instructions - stays fixed */}
 				<text> </text>
-				<text fg={theme.subtext0}>{"Ctrl+u/d:scroll  Enter/Esc:close"}</text>
+				<text fg={theme.subtext0}>
+					{isSmallScreenLayout
+						? "Ctrl+u/d:scroll"
+						: "Ctrl+u/d:scroll  Enter/Esc:close"}
+				</text>
+				{isSmallScreenLayout && <text fg={theme.subtext0}>{"Enter/Esc:close"}</text>}
 			</box>
 		</box>
 	)

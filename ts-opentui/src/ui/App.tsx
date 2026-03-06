@@ -8,7 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
@@ -24,11 +24,12 @@ import {
 	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
 	forkCreateEpicAtom,
+	handleColumnPagerMouseInteractionAtom,
 	handleKeyAtom,
+	handleTaskMouseInteractionAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
 	jumpToAtom,
-	jumpToTaskAtom,
 	sessionMonitorStarterAtom,
 	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
@@ -59,6 +60,7 @@ import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { StatusBar } from "./StatusBar.js"
+import { isSmallScreen } from "./responsive.js"
 import { TASK_CARD_HEIGHT } from "./TaskCard.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
@@ -202,7 +204,10 @@ export const App = () => {
 	)?.name
 
 	const handleKey = useAtomSet(handleKeyAtom, { mode: "promise" })
-	const jumpToTask = useAtomSet(jumpToTaskAtom, { mode: "promise" })
+	const handleTaskMouseInteraction = useAtomSet(handleTaskMouseInteractionAtom, { mode: "promise" })
+	const handleColumnPagerMouseInteraction = useAtomSet(handleColumnPagerMouseInteractionAtom, {
+		mode: "promise",
+	})
 	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
@@ -263,11 +268,13 @@ export const App = () => {
 	// Recalculate max visible tasks from live terminal dimensions.
 	const CHROME_HEIGHT = 6
 	const terminalRows = process.stdout.rows || 24
+	const terminalColumns = process.stdout.columns || 80
 	const baseMaxVisibleTasks = Math.max(
 		1,
 		Math.floor((terminalRows - CHROME_HEIGHT) / TASK_CARD_HEIGHT),
 	)
 	const maxVisibleTasks = drillDownEpicId ? baseMaxVisibleTasks - 1 : baseMaxVisibleTasks
+	const useSingleKanbanColumn = viewMode === "kanban" && isSmallScreen(terminalColumns)
 
 	const visibleTaskIds = useMemo(() => {
 		if (viewMode === "compact") {
@@ -363,39 +370,18 @@ export const App = () => {
 	// Mouse Handlers - First-pass task focus/open + wheel scroll
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const DOUBLE_CLICK_WINDOW_MS = 300
-	const lastClickRef = useRef<{ taskId: string; at: number } | null>(null)
-
 	const handleTaskMouseDown = (taskId: string, event: MouseEvent) => {
-		// Keep mouse interactions scoped to the main board surface
-		if (currentOverlay) return
-
 		// Left click = focus, right click = focus + open action menu
 		if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
-		const button = event.button
 
 		event.preventDefault()
 		event.stopPropagation()
 
-		const now = Date.now()
-		const previous = lastClickRef.current
-		const isDoubleClick =
-			event.button === MouseButton.LEFT &&
-			previous?.taskId === taskId &&
-			now - previous.at <= DOUBLE_CLICK_WINDOW_MS
-
-		lastClickRef.current = { taskId, at: now }
-
-		void jumpToTask(taskId).then(() => {
-			if (button === MouseButton.RIGHT) {
-				if (mode._tag !== "normal" && mode._tag !== "select") return
-				void handleKey("space")
-				return
-			}
-
-			if (!isDoubleClick) return
-			if (mode._tag !== "normal") return
-			void handleKey("return")
+		const button = event.button === MouseButton.RIGHT ? "right" : "left"
+		void handleTaskMouseInteraction({
+			taskId,
+			button,
+			selectedTaskId: selectedTask?.id,
 		})
 	}
 
@@ -417,6 +403,20 @@ export const App = () => {
 		const nextIndex = Math.max(0, Math.min(columnTasks.length - 1, baseIndex + delta * direction))
 
 		void jumpTo({ column: columnIdx, task: nextIndex })
+	}
+
+	const handleColumnPagerMouseDown = (delta: -1 | 1, event: MouseEvent) => {
+		if (event.button !== MouseButton.LEFT) return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		void handleColumnPagerMouseInteraction({
+			delta,
+			columnIndex,
+			taskIndex,
+			tasksByColumn,
+		})
 	}
 
 	const totalTasks = useAtomValue(totalTasksCountAtom)
@@ -456,11 +456,36 @@ export const App = () => {
 	const renderContent = () => {
 		// The derived atom returns an empty array if sources are loading/failed
 		// This is handled gracefully - the board just shows empty columns
+		const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
+		const canPageLeft = columnIndex > 0
+		const canPageRight = columnIndex < COLUMNS.length - 1
 
 		return (
 			<box flexGrow={1} flexDirection="column">
 				{/* Epic header when in drill-down mode */}
 				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
+
+				{useSingleKanbanColumn && activeColumn && (
+					<box
+						flexDirection="row"
+						justifyContent="space-between"
+						paddingLeft={1}
+						paddingRight={1}
+						paddingBottom={1}
+					>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(-1, event)}>
+							<text fg={canPageLeft ? theme.lavender : theme.overlay0}>{"← Prev"}</text>
+						</box>
+						<text fg={theme.text} attributes={ATTR_BOLD}>
+							{`${activeColumn.title} (${columnIndex + 1}/${COLUMNS.length})`}
+						</text>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(1, event)}>
+							<text fg={canPageRight ? theme.lavender : theme.overlay0}>{"Next →"}</text>
+						</box>
+					</box>
+				)}
 
 				<Board
 					tasks={tasksByColumn.flat()}
@@ -473,6 +498,7 @@ export const App = () => {
 					// terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
 					terminalHeight={maxVisibleTasks}
 					viewMode={viewMode}
+					singleColumnMode={useSingleKanbanColumn}
 					isActionMode={isAction}
 					mergeSelectSourceId={mergeSelectSourceId}
 					phases={phases}
@@ -538,6 +564,7 @@ export const App = () => {
 					devServerPort={displayDevServer.port}
 					workflowMode={workflowMode}
 					drillDownEpicId={drillDownEpicId}
+					compact={isSmallScreen(terminalColumns)}
 					onActionSelect={(keySeq) => {
 						void handleKey(keySeq)
 					}}
@@ -554,7 +581,9 @@ export const App = () => {
 			{isSearch && <SearchInput query={searchQuery} />}
 
 			{/* Detail panel */}
-			{showingDetail && selectedTask && <DetailPanel task={selectedTask} />}
+			{showingDetail && selectedTask && (
+				<DetailPanel task={selectedTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
+			)}
 
 			{/* Create task prompt */}
 			{showingCreate && (
@@ -644,3 +673,5 @@ export const App = () => {
 		</box>
 	)
 }
+
+const ATTR_BOLD = 1

@@ -27,6 +27,10 @@ export interface ColumnProps {
 	mergeSelectSourceId?: string
 	/** Phase computation result for dependency visualization (drill-down mode only) */
 	phases?: PhaseComputationResult
+	/** Column width (default: 25%). */
+	width?: number | "auto" | `${number}%`
+	/** Right margin (default: 1). */
+	marginRight?: number
 	/** Mouse task selection/open handler */
 	onTaskMouseDown?: (taskId: string, event: MouseEvent) => void
 	/** Mouse wheel handler for column scrolling */
@@ -188,8 +192,8 @@ export const Column = (props: ColumnProps) => {
 	return (
 		<box
 			flexDirection="column"
-			width="25%"
-			marginRight={1}
+			width={props.width ?? "25%"}
+			marginRight={props.marginRight ?? 1}
 			onMouseScroll={(event) => props.onColumnMouseScroll?.(props.columnIndex, event)}
 		>
 			{/* Column header */}

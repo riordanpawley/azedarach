@@ -18,6 +18,7 @@ Skills are plain markdown guidance files grouped by domain. They are loaded when
 .claude/skills/
 ├── README.md                    # This file
 ├── effect/                      # Effect/TypeScript skills
+│   ├── effect-atom-interactions.skill.md
 │   ├── effect-concurrency.skill.md
 │   ├── effect-errors.skill.md
 │   ├── effect-resources.skill.md
@@ -48,6 +49,7 @@ Skills are plain markdown guidance files grouped by domain. They are loaded when
 - `workflow/spec-maintenance.skill.md`: keep `docs/spec/` aligned with behavior changes
 
 ### Effect Skills (ts-opentui)
+- **effect-atom-interactions** - Move UI interaction orchestration from React into atom actions
 - `effect/effect-services.skill.md`
 - `effect/effect-errors.skill.md`
 - `effect/effect-concurrency.skill.md`
