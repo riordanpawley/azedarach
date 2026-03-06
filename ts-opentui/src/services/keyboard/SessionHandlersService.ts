@@ -72,6 +72,8 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const overlay = yield* OverlayService
 				const boardService = yield* BoardService
 				const gitConfig = yield* appConfig.getGitConfig()
+				const localModePromptGuardrails =
+					gitConfig.workflowMode === "local" || !gitConfig.pushEnabled || !gitConfig.fetchEnabled
 
 				const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
 					const aheadRisk =
@@ -265,6 +267,7 @@ Delete the duplicate worktree and retry?`
 						title: task.title,
 						hasWorktree: task.hasWorktree ?? false,
 						attachmentPaths: imagePaths,
+						localMode: localModePromptGuardrails,
 					})
 
 						yield* runStartWithClashRecovery({
@@ -328,6 +331,7 @@ Delete the duplicate worktree and retry?`
 						title: task.title,
 						hasWorktree: task.hasWorktree ?? false,
 						attachmentPaths: imagePaths,
+						localMode: localModePromptGuardrails,
 					})
 
 						yield* runStartWithClashRecovery({
