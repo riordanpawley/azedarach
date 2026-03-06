@@ -595,6 +595,55 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 				}
 			}
 
+			const normalizeProjectPathForComparison = (
+				projectPath: string | null | undefined,
+			): string | null => {
+				const trimmed = projectPath?.trim()
+				if (!trimmed) {
+					return null
+				}
+				return trimmed.replace(/\/+$/, "")
+			}
+
+			const projectPathsEqual = (
+				left: string | null | undefined,
+				right: string | null | undefined,
+			): boolean => {
+				const normalizedLeft = normalizeProjectPathForComparison(left)
+				const normalizedRight = normalizeProjectPathForComparison(right)
+				if (normalizedLeft === null || normalizedRight === null) {
+					return false
+				}
+				return normalizedLeft === normalizedRight
+			}
+
+			const isSessionInProjectScope = (session: Session, projectPath: string): boolean => {
+				const sessionProjectPath = normalizeProjectPathForComparison(session.projectPath)
+				if (
+					sessionProjectPath !== null &&
+					!projectPathsEqual(sessionProjectPath, projectPath)
+				) {
+					return false
+				}
+
+				const parsed = parseIssueSessionName(session.tmuxSessionName, projectPath)
+				return parsed?.type === "issue"
+			}
+
+			const filterSessionsByProjectScope = (
+				sessions: HashMap.HashMap<string, Session>,
+				projectPath: string,
+			): HashMap.HashMap<string, Session> => {
+				let scopedSessions = HashMap.empty<string, Session>()
+				for (const [issueId, session] of HashMap.entries(sessions)) {
+					if (!isSessionInProjectScope(session, projectPath)) {
+						continue
+					}
+					scopedSessions = HashMap.set(scopedSessions, issueId, session)
+				}
+				return scopedSessions
+			}
+
 			const setTmuxSessionOption = (sessionName: string, optionName: string, value: string) =>
 				Command.exitCode(
 					Command.make("tmux", "set-option", "-t", sessionName, optionName, value),
@@ -1294,6 +1343,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							sessionsChanged = true
 							yield* Ref.set(sessionsRef, inMemorySessions)
 						}
+						const scopedInMemorySessions = filterSessionsByProjectScope(
+							inMemorySessions,
+							effectiveProjectPath,
+						)
 
 						// Query tmux for actual running sessions
 						const tmuxSessions = yield* tmuxService.listSessions().pipe(
@@ -1311,6 +1364,10 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							effectiveProjectPath,
 						)
 						const persistedSessions = canonicalPersistedResult.sessions
+						const scopedPersistedSessions = filterSessionsByProjectScope(
+							persistedSessions,
+							effectiveProjectPath,
+						)
 
 						// Query worktrees to get accurate paths
 						const worktrees = yield* worktreeManager
@@ -1326,13 +1383,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							worktrees.map((wt) => [normalizeIssueIdForLookup(wt.issueId), wt] as const),
 						)
 						const persistedByIssueLookup = new Map(
-							Array.from(HashMap.entries(persistedSessions), ([storedIssueId, persisted]) => [
+							Array.from(HashMap.entries(scopedPersistedSessions), ([storedIssueId, persisted]) => [
 								normalizeIssueIdForLookup(storedIssueId),
 								persisted,
 							]),
 						)
 						const inMemoryIssueLookup = new Set(
-							Array.from(HashMap.keys(inMemorySessions), normalizeIssueIdForLookup),
+							Array.from(HashMap.keys(scopedInMemorySessions), normalizeIssueIdForLookup),
 						)
 
 						// Build set of running tmux session names for crash detection
@@ -1380,7 +1437,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							"warning",
 						])
 
-						for (const [issueId, persisted] of HashMap.entries(persistedSessions)) {
+						for (const [issueId, persisted] of HashMap.entries(scopedPersistedSessions)) {
 							const issueLookupKey = normalizeIssueIdForLookup(issueId)
 							// Skip if already recovered from tmux (handled above)
 							if (inMemoryIssueLookup.has(issueLookupKey)) continue
@@ -1423,7 +1480,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							yield* persistSessions(mergedSessions)
 						}
 
-						return Array.from(HashMap.values(updatedSessions))
+						const scopedUpdatedSessions = filterSessionsByProjectScope(
+							updatedSessions,
+							effectiveProjectPath,
+						)
+						return Array.from(HashMap.values(scopedUpdatedSessions))
 					}),
 
 				updateState: (issueId: string, newState: SessionState) =>
@@ -1475,6 +1536,17 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					},
 				) =>
 					Effect.gen(function* () {
+						const effectiveProjectPath = yield* getEffectiveProjectPath()
+						if (
+							sessionMeta?.projectPath &&
+							!projectPathsEqual(sessionMeta.projectPath, effectiveProjectPath)
+						) {
+							yield* Effect.logDebug(
+								`Ignoring tmux state update for ${issueId}: project mismatch (${sessionMeta.projectPath} != ${effectiveProjectPath})`,
+							)
+							return
+						}
+
 						const resolvedIssueId = sessionMeta
 							? resolveCanonicalIssueIdFromSession(
 									issueId,
@@ -1545,6 +1617,15 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						}
 
 						const session = sessionOpt.value
+						if (
+							sessionMeta &&
+							status === "idle" &&
+							session.tmuxSessionName !== sessionMeta.sessionName
+						) {
+							// Ignore stale "session ended" signals from an out-of-date alias when
+							// the tracked session for this issue uses a different tmux session name.
+							return
+						}
 						const oldState = session.state
 
 						// Map TmuxStatus to SessionState

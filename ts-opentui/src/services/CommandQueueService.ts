@@ -40,6 +40,14 @@ export interface QueuedCommand {
 	readonly queuedAt: DateTime.Utc
 }
 
+export const buildTaskQueueKey = (taskId: string, projectPath?: string): string => {
+	const normalizedProjectPath = projectPath?.trim()
+	if (!normalizedProjectPath) {
+		return taskId
+	}
+	return `${normalizedProjectPath}::${taskId}`
+}
+
 /**
  * State for a single task's command queue
  */
@@ -151,11 +159,11 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 			 * CommandExecutor propagates from the queued effects
 			 */
 			const processNext = (
-				taskId: string,
+				queueKey: string,
 			): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
 				Effect.gen(function* () {
 					const state = yield* SubscriptionRef.get(stateRef)
-					const taskState = HashMap.get(state, taskId)
+					const taskState = HashMap.get(state, queueKey)
 
 					if (taskState._tag === "None") return
 
@@ -176,7 +184,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 					// Mark as running
 					yield* SubscriptionRef.update(stateRef, (s) =>
-						HashMap.set(s, taskId, {
+						HashMap.set(s, queueKey, {
 							running: runningCommand,
 							queue: rest,
 						}),
@@ -197,7 +205,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 										duration: runningCommand.timeout,
 										onTimeout: () =>
 											new CommandTimeoutError({
-												taskId,
+												taskId: next.taskId,
 												label: runningCommand.label,
 												timeout: runningCommand.timeout,
 											}),
@@ -211,7 +219,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 							if (Option.isSome(timeoutError)) {
 								yield* Effect.logWarning("Command timed out", {
-									taskId,
+									taskId: next.taskId,
 									label: runningCommand.label,
 									timeout: runningCommand.timeout,
 								})
@@ -220,7 +228,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// Log defects for debugging - these would otherwise silently crash the fiber
 							if (Exit.isFailure(result) && Cause.isDie(result.cause)) {
 								yield* Effect.logError("Command failed with defect (unexpected error)", {
-									taskId,
+									taskId: next.taskId,
 									label: runningCommand.label,
 									cause: Cause.pretty(result.cause),
 								})
@@ -237,17 +245,17 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 							// Clear running and process next
 							yield* SubscriptionRef.update(stateRef, (s) => {
-								const current = HashMap.get(s, taskId)
+								const current = HashMap.get(s, queueKey)
 								if (current._tag === "None") return s
 
-								return HashMap.set(s, taskId, {
+								return HashMap.set(s, queueKey, {
 									...current.value,
 									running: null,
 								})
 							})
 
 							// Recursively process next
-							yield* processNext(taskId)
+							yield* processNext(queueKey)
 						}),
 						serviceScope,
 					)
@@ -273,6 +281,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 					label: string
 					effect: Effect.Effect<void, unknown, CommandExecutor.CommandExecutor>
 					timeout?: Duration.Duration
+					queueKey?: string
 				}): Effect.Effect<
 					void,
 					CommandTimeoutError | CommandCancelledError,
@@ -280,6 +289,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				> =>
 					Effect.gen(function* () {
 						const { taskId, label, effect, timeout = DEFAULT_TIMEOUT } = options
+						const queueKey = options.queueKey ?? taskId
 						const id = yield* generateCommandId
 						const queuedAt = yield* DateTime.now
 						const deferred = yield* Deferred.make<
@@ -300,17 +310,17 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 						// Add to queue
 						yield* SubscriptionRef.update(stateRef, (state) => {
-							const existing = HashMap.get(state, taskId)
+							const existing = HashMap.get(state, queueKey)
 							const taskState = existing._tag === "Some" ? existing.value : createEmptyState()
 
-							return HashMap.set(state, taskId, {
+							return HashMap.set(state, queueKey, {
 								...taskState,
 								queue: [...taskState.queue, command],
 							})
 						})
 
 						// Trigger processing (will start immediately if nothing running)
-						yield* processNext(taskId)
+						yield* processNext(queueKey)
 
 						// Wait for completion with timeout
 						yield* Deferred.await(deferred).pipe(
@@ -326,10 +336,10 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 							// On timeout, remove from queue
 							Effect.onError(() =>
 								SubscriptionRef.update(stateRef, (state) => {
-									const existing = HashMap.get(state, taskId)
+									const existing = HashMap.get(state, queueKey)
 									if (existing._tag === "None") return state
 
-									return HashMap.set(state, taskId, {
+									return HashMap.set(state, queueKey, {
 										...existing.value,
 										queue: existing.value.queue.filter((c) => c.id !== id),
 									})
@@ -341,10 +351,14 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				/**
 				 * Get queue info for a specific task
 				 */
-				getQueueInfo: (taskId: string): Effect.Effect<TaskQueueInfo, never, never> =>
+				getQueueInfo: (
+					taskId: string,
+					queueKey?: string,
+				): Effect.Effect<TaskQueueInfo, never, never> =>
 					Effect.gen(function* () {
+						const effectiveQueueKey = queueKey ?? taskId
 						const state = yield* SubscriptionRef.get(stateRef)
-						const taskState = HashMap.get(state, taskId)
+						const taskState = HashMap.get(state, effectiveQueueKey)
 
 						if (taskState._tag === "None") {
 							return {
@@ -421,10 +435,15 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				 * Cancel all queued commands for a task
 				 * (e.g., when task is deleted)
 				 */
-				cancelAll: (taskId: string, reason: string): Effect.Effect<void, never, never> =>
+				cancelAll: (
+					taskId: string,
+					reason: string,
+					queueKey?: string,
+				): Effect.Effect<void, never, never> =>
 					Effect.gen(function* () {
+						const effectiveQueueKey = queueKey ?? taskId
 						const state = yield* SubscriptionRef.get(stateRef)
-						const taskState = HashMap.get(state, taskId)
+						const taskState = HashMap.get(state, effectiveQueueKey)
 
 						if (taskState._tag === "None") return
 
@@ -442,7 +461,7 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 
 						// Clear the queue (running command will complete naturally)
 						yield* SubscriptionRef.update(stateRef, (s) =>
-							HashMap.set(s, taskId, {
+							HashMap.set(s, effectiveQueueKey, {
 								running: taskState.value.running,
 								queue: [],
 							}),
@@ -452,10 +471,11 @@ export class CommandQueueService extends Effect.Service<CommandQueueService>()(
 				/**
 				 * Check if a task has any commands running or queued
 				 */
-				isBusy: (taskId: string): Effect.Effect<boolean, never, never> =>
+				isBusy: (taskId: string, queueKey?: string): Effect.Effect<boolean, never, never> =>
 					Effect.gen(function* () {
+						const effectiveQueueKey = queueKey ?? taskId
 						const state = yield* SubscriptionRef.get(stateRef)
-						const taskState = HashMap.get(state, taskId)
+						const taskState = HashMap.get(state, effectiveQueueKey)
 
 						if (taskState._tag === "None") return false
 
@@ -505,6 +525,7 @@ export const enqueueCommand = (options: {
 	label: string
 	effect: Effect.Effect<void, unknown, CommandExecutor.CommandExecutor>
 	timeout?: Duration.Duration
+	queueKey?: string
 }): Effect.Effect<
 	void,
 	CommandTimeoutError | CommandCancelledError,
@@ -516,5 +537,6 @@ export const enqueueCommand = (options: {
  */
 export const getQueueInfo = (
 	taskId: string,
+	queueKey?: string,
 ): Effect.Effect<TaskQueueInfo, never, CommandQueueService> =>
-	Effect.flatMap(CommandQueueService, (queue) => queue.getQueueInfo(taskId))
+	Effect.flatMap(CommandQueueService, (queue) => queue.getQueueInfo(taskId, queueKey))

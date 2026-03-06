@@ -6,8 +6,10 @@
 
 import { Atom, Result } from "@effect-atom/atom"
 import { Effect, HashMap } from "effect"
-import { CommandQueueService } from "../../services/CommandQueueService.js"
+import { buildTaskQueueKey, CommandQueueService } from "../../services/CommandQueueService.js"
+import { ProjectService } from "../../services/ProjectService.js"
 import { focusedTaskIdAtom } from "./navigation.js"
+import { currentProjectAtom } from "./project.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
@@ -44,12 +46,18 @@ export const focusedTaskRunningOperationAtom = Atom.readable((get) => {
 	const taskId = focusedIdResult.value
 	if (!taskId) return null
 
+	const currentProjectResult = get(currentProjectAtom)
+	const projectPath = Result.isSuccess(currentProjectResult)
+		? (currentProjectResult.value?.path ?? undefined)
+		: undefined
+	const queueKey = buildTaskQueueKey(taskId, projectPath)
+
 	// Get the queue state
 	const stateResult = get(commandQueueStateAtom)
 	if (!Result.isSuccess(stateResult)) return null
 
 	// Look up the running operation for this task
-	const taskState = HashMap.get(stateResult.value, taskId)
+	const taskState = HashMap.get(stateResult.value, queueKey)
 	if (taskState._tag === "None") return null
 
 	return taskState.value.running?.label ?? null
@@ -67,12 +75,18 @@ export const focusedTaskRunningOperationAtom = Atom.readable((get) => {
  */
 export const taskRunningOperationAtom = (taskId: string) =>
 	Atom.readable((get) => {
+		const currentProjectResult = get(currentProjectAtom)
+		const projectPath = Result.isSuccess(currentProjectResult)
+			? (currentProjectResult.value?.path ?? undefined)
+			: undefined
+		const queueKey = buildTaskQueueKey(taskId, projectPath)
+
 		// Get the queue state
 		const stateResult = get(commandQueueStateAtom)
 		if (!Result.isSuccess(stateResult)) return null
 
 		// Look up the running operation for this task
-		const taskState = HashMap.get(stateResult.value, taskId)
+		const taskState = HashMap.get(stateResult.value, queueKey)
 		if (taskState._tag === "None") return null
 
 		return taskState.value.running?.label ?? null
@@ -89,7 +103,10 @@ export const taskRunningOperationAtom = (taskId: string) =>
 export const getQueueInfoAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
 		const queue = yield* CommandQueueService
-		return yield* queue.getQueueInfo(taskId)
+		const projectService = yield* ProjectService
+		const projectPath = yield* projectService.getCurrentPath()
+		const queueKey = buildTaskQueueKey(taskId, projectPath)
+		return yield* queue.getQueueInfo(taskId, queueKey)
 	}),
 )
 
@@ -101,6 +118,9 @@ export const getQueueInfoAtom = appRuntime.fn((taskId: string) =>
 export const checkTaskBusyAtom = appRuntime.fn((taskId: string) =>
 	Effect.gen(function* () {
 		const queue = yield* CommandQueueService
-		return yield* queue.isBusy(taskId)
+		const projectService = yield* ProjectService
+		const projectPath = yield* projectService.getCurrentPath()
+		const queueKey = buildTaskQueueKey(taskId, projectPath)
+		return yield* queue.isBusy(taskId, queueKey)
 	}),
 )

@@ -12,7 +12,7 @@ import type { CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
 import type { TaskWithSession } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
-import { CommandQueueService } from "../CommandQueueService.js"
+import { buildTaskQueueKey, CommandQueueService } from "../CommandQueueService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
 import { NavigationService } from "../NavigationService.js"
@@ -184,26 +184,30 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 				taskId: string,
 				label: string,
 				operation: Effect.Effect<A, E, CommandExecutor.CommandExecutor>,
+				projectPathOverride?: string,
 			) =>
-				commandQueue
-					.enqueue({
+				Effect.gen(function* () {
+					const projectPath = projectPathOverride ?? (yield* getProjectPath())
+					const queueKey = buildTaskQueueKey(taskId, projectPath)
+					return yield* commandQueue.enqueue({
 						taskId,
+						queueKey,
 						label,
 						// CommandExecutor propagates to runtime - no provide needed
 						effect: Effect.asVoid(operation),
 					})
-					.pipe(
-						// Queue errors (timeout, cancelled) are handled separately
-						Effect.catchAll((error) =>
-							Effect.logWarning(error).pipe(
-								Effect.zipRight(
-									toast
-										.show("error", `${label} timed out or was cancelled: ${error._tag}`)
-										.pipe(Effect.asVoid),
-								),
+				}).pipe(
+					// Queue errors (timeout, cancelled) are handled separately
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								toast
+									.show("error", `${label} timed out or was cancelled: ${error._tag}`)
+									.pipe(Effect.asVoid),
 							),
 						),
-					)
+					),
+				)
 
 			/**
 			 * Check if a task has an operation in progress and show a toast if so.
@@ -214,9 +218,11 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 			 * @param taskId - The task to check
 			 * @returns Effect that resolves to true if busy, false if idle
 			 */
-			const checkBusy = (taskId: string): Effect.Effect<boolean> =>
+			const checkBusy = (taskId: string, projectPathOverride?: string): Effect.Effect<boolean> =>
 				Effect.gen(function* () {
-					const queueInfo = yield* commandQueue.getQueueInfo(taskId)
+					const projectPath = projectPathOverride ?? (yield* getProjectPath())
+					const queueKey = buildTaskQueueKey(taskId, projectPath)
+					const queueInfo = yield* commandQueue.getQueueInfo(taskId, queueKey)
 
 					if (queueInfo.runningLabel !== null) {
 						const recovered = yield* commandQueue.recoverStaleRunning(taskId)
