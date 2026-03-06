@@ -1264,7 +1264,7 @@ Canonical fixture profile names:
 
 - Steps: perform automated FR->AT mapping check for MUST requirements.
 - Expected: each MUST FR maps to at least one acceptance scenario.
-- Links: AZ-FR-4106.
+- Links: AZ-FR-4101, AZ-FR-4106.
 
 ### AZ-AT-2802 Canonical fixture profiles exist and are reusable
 

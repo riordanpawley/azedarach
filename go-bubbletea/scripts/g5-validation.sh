@@ -103,7 +103,7 @@ validate_traceability() {
   [[ -f "$at_file" ]] || fail "acceptance catalog file not found: $at_file"
 
   local required_fr_ids
-  required_fr_ids="AZ-FR-4104 AZ-FR-4105 AZ-FR-4106 AZ-FR-4108"
+  required_fr_ids="AZ-FR-4101 AZ-FR-4104 AZ-FR-4105 AZ-FR-4106 AZ-FR-4108"
 
   local fr_id
   for fr_id in $required_fr_ids; do
@@ -126,7 +126,7 @@ validate_traceability() {
     return 1
   }
 
-  assert_acceptance_links "$at_file" "AZ-AT-2801" "AZ-FR-4106"
+  assert_acceptance_links "$at_file" "AZ-AT-2801" "AZ-FR-4101" "AZ-FR-4106"
   assert_acceptance_links "$at_file" "AZ-AT-2803" "AZ-FR-4104" "AZ-FR-4105"
   assert_acceptance_links "$at_file" "AZ-AT-2805" "AZ-FR-4108"
 
@@ -206,7 +206,7 @@ main() {
   require_command rg
   require_command go
 
-  log "== G5 traceability gate (AZ-AT-2801 / AZ-FR-4106) =="
+  log "== G5 traceability gate (AZ-AT-2801 / AZ-FR-4101, AZ-FR-4106) =="
   validate_traceability "$FR_SPEC_FILE" "$AT_SPEC_FILE"
 
   log "== G5 profile variance gate (AZ-AT-2803 / AZ-FR-4104, AZ-FR-4105) =="
