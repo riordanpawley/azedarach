@@ -222,6 +222,20 @@ Effect.runPromise(program.pipe(
 "
 ```
 
+### Linear Backend Sync (Rare Integration)
+
+This test performs real Linear API operations (create + close via sync queue), so run it rarely.
+
+```bash
+# Opt-in only: skips by default unless flag is set to 1
+AZEDARACH_RUN_LINEAR_SYNC_BACKEND_INTEGRATION=1 \
+LINEAR_API_KEY=lin_api_xxx \
+bun test src/core/BackendSyncLinear.integration.test.ts
+
+# Optional: override the Linear team key used by the integration config
+AZEDARACH_LINEAR_TEST_TEAM=AZE
+```
+
 ## Type Checking
 
 ```bash
