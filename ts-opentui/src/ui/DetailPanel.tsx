@@ -7,7 +7,7 @@
 
 import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
-import type { ScrollBoxRenderable } from "@opentui/core"
+import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { DependencyRef } from "../core/IssueTrackerClient.js"
 import { formatElapsedMs } from "../services/ClockService.js"
@@ -122,6 +122,19 @@ export const DetailPanel = (props: DetailPanelProps) => {
 			}
 		}
 	}, [scrollCommand])
+
+	const handleScrollboxMouseScroll = (event: MouseEvent) => {
+		const scroll = event.scroll
+		if (!scroll || !scrollboxRef.current) return
+		if (scroll.direction !== "up" && scroll.direction !== "down") return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
+		const amount = scroll.direction === "down" ? delta : -delta
+		scrollboxRef.current.scrollBy(amount, "step")
+	}
 
 	// Reserve space for panel chrome and some margin
 	const maxScrollHeight = Math.max(10, terminalRows - PANEL_CHROME_HEIGHT - 4)
@@ -332,6 +345,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 					maxHeight={maxScrollHeight}
 					flexDirection="column"
 					flexGrow={1}
+					onMouseScroll={handleScrollboxMouseScroll}
 				>
 					<text> </text>
 

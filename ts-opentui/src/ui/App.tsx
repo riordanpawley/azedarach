@@ -8,7 +8,7 @@ import { Result } from "@effect-atom/atom"
 import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { ActionPalette } from "./ActionPalette.js"
 import {
@@ -366,8 +366,20 @@ export const App = () => {
 	// Mouse Handlers - First-pass task focus/open + wheel scroll
 	// ═══════════════════════════════════════════════════════════════════════════
 
-	const DOUBLE_CLICK_WINDOW_MS = 300
-	const lastClickRef = useRef<{ taskId: string; at: number } | null>(null)
+	const openActionPaletteForCurrentTask = async () => {
+		// In most modes, escape returns to normal and allows entering action mode.
+		if (mode._tag !== "normal" && mode._tag !== "select") {
+			await handleKey("escape")
+		}
+		await handleKey("space")
+	}
+
+	const openDetailForCurrentTask = async () => {
+		if (mode._tag !== "normal") {
+			await handleKey("escape")
+		}
+		await handleKey("return")
+	}
 
 	const handleTaskMouseDown = (taskId: string, event: MouseEvent) => {
 		// Keep mouse interactions scoped to the main board surface
@@ -376,30 +388,29 @@ export const App = () => {
 		// Left click = focus, right click = focus + open action menu
 		if (event.button !== MouseButton.LEFT && event.button !== MouseButton.RIGHT) return
 		const button = event.button
+		const isAlreadySelected = selectedTask?.id === taskId
 
 		event.preventDefault()
 		event.stopPropagation()
 
-		const now = Date.now()
-		const previous = lastClickRef.current
-		const isDoubleClick =
-			event.button === MouseButton.LEFT &&
-			previous?.taskId === taskId &&
-			now - previous.at <= DOUBLE_CLICK_WINDOW_MS
+		void jumpToTask(taskId)
+			.then(async () => {
+				if (button === MouseButton.RIGHT) {
+					await openActionPaletteForCurrentTask()
+					return
+				}
 
-		lastClickRef.current = { taskId, at: now }
+				// Mobile-friendly flow:
+				// - tap unselected task -> focus + open action menu
+				// - tap selected task -> open details
+				if (isAlreadySelected) {
+					await openDetailForCurrentTask()
+					return
+				}
 
-		void jumpToTask(taskId).then(() => {
-			if (button === MouseButton.RIGHT) {
-				if (mode._tag !== "normal" && mode._tag !== "select") return
-				void handleKey("space")
-				return
-			}
-
-			if (!isDoubleClick) return
-			if (mode._tag !== "normal") return
-			void handleKey("return")
-		})
+				await openActionPaletteForCurrentTask()
+			})
+			.catch(() => undefined)
 	}
 
 	const handleColumnMouseScroll = (columnIdx: number, event: MouseEvent) => {
@@ -420,6 +431,21 @@ export const App = () => {
 		const nextIndex = Math.max(0, Math.min(columnTasks.length - 1, baseIndex + delta * direction))
 
 		void jumpTo({ column: columnIdx, task: nextIndex })
+	}
+
+	const handleColumnPagerMouseDown = (delta: -1 | 1, event: MouseEvent) => {
+		if (currentOverlay) return
+		if (event.button !== MouseButton.LEFT) return
+
+		event.preventDefault()
+		event.stopPropagation()
+
+		const nextColumn = Math.max(0, Math.min(COLUMNS.length - 1, columnIndex + delta))
+		if (nextColumn === columnIndex) return
+
+		const nextColumnTasks = tasksByColumn[nextColumn] ?? []
+		const nextTask = Math.min(taskIndex, Math.max(0, nextColumnTasks.length - 1))
+		void jumpTo({ column: nextColumn, task: nextTask })
 	}
 
 	const totalTasks = useAtomValue(totalTasksCountAtom)
@@ -459,11 +485,36 @@ export const App = () => {
 	const renderContent = () => {
 		// The derived atom returns an empty array if sources are loading/failed
 		// This is handled gracefully - the board just shows empty columns
+		const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
+		const canPageLeft = columnIndex > 0
+		const canPageRight = columnIndex < COLUMNS.length - 1
 
 		return (
 			<box flexGrow={1} flexDirection="column">
 				{/* Epic header when in drill-down mode */}
 				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
+
+				{useSingleKanbanColumn && activeColumn && (
+					<box
+						flexDirection="row"
+						justifyContent="space-between"
+						paddingLeft={1}
+						paddingRight={1}
+						paddingBottom={1}
+					>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(-1, event)}>
+							<text fg={canPageLeft ? theme.lavender : theme.overlay0}>{"← Prev"}</text>
+						</box>
+						<text fg={theme.text} attributes={ATTR_BOLD}>
+							{`${activeColumn.title} (${columnIndex + 1}/${COLUMNS.length})`}
+						</text>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(1, event)}>
+							<text fg={canPageRight ? theme.lavender : theme.overlay0}>{"Next →"}</text>
+						</box>
+					</box>
+				)}
 
 				<Board
 					tasks={tasksByColumn.flat()}
@@ -542,6 +593,7 @@ export const App = () => {
 					devServerPort={displayDevServer.port}
 					workflowMode={workflowMode}
 					drillDownEpicId={drillDownEpicId}
+					compact={isSmallScreen(terminalColumns)}
 					onActionSelect={(keySeq) => {
 						void handleKey(keySeq)
 					}}
@@ -650,3 +702,5 @@ export const App = () => {
 		</box>
 	)
 }
+
+const ATTR_BOLD = 1

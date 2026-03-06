@@ -2,6 +2,7 @@
  * ActionPalette component - non-intrusive action menu (bottom-right, like Helix)
  */
 import { MouseButton, type MouseEvent } from "@opentui/core"
+import { useMemo, useState } from "react"
 import type { WorkflowMode } from "../config/schema.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
@@ -21,6 +22,8 @@ export interface ActionPaletteProps {
 	workflowMode?: WorkflowMode
 	/** Current drilldown epic ID (when viewing inside an epic) */
 	drillDownEpicId?: string
+	/** Compact palette variant for small terminals. */
+	compact?: boolean
 	/** Execute an action key sequence (same path as keyboard handler) */
 	onActionSelect?: (keySeq: string) => void
 }
@@ -71,6 +74,11 @@ const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	D: "S-d",
 }
 
+interface ActionLineSpec {
+	keyName: string
+	description: string
+}
+
 export const ActionPalette = (props: ActionPaletteProps) => {
 	const sessionState = props.task?.sessionState ?? "idle"
 	const hasWorktree = props.task?.hasWorktree ?? false
@@ -80,9 +88,11 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 	const devServerPort = props.devServerPort
 	const workflowMode = props.workflowMode ?? "origin"
 	const drillDownEpicId = props.drillDownEpicId
+	const compact = props.compact ?? false
 	const parentEpicId = props.task?.parentEpicId
 	const issueType = props.task?.issue_type
 	const isEpic = issueType === "epic"
+	const [showAllCompactActions, setShowAllCompactActions] = useState(false)
 
 	// Check if this is an orphaned worktree (worktree exists but no session)
 	const isOrphanedWorktree = hasWorktree && sessionState === "idle"
@@ -174,6 +184,32 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		return !isOnline && NETWORK_ACTIONS.has(action)
 	}
 
+	const compactActions = useMemo<ReadonlyArray<ActionLineSpec>>(() => {
+		const actions: ActionLineSpec[] = [
+			{ keyName: "h", description: "← move" },
+			{ keyName: "l", description: "→ move" },
+		]
+
+		if (sessionState === "idle") {
+			actions.push({ keyName: "s", description: "start" })
+			actions.push({ keyName: "S", description: "start+work" })
+		} else {
+			actions.push({ keyName: "a", description: "attach" })
+			if (sessionState === "busy") {
+				actions.push({ keyName: "p", description: "pause" })
+			}
+			if (sessionState === "paused") {
+				actions.push({ keyName: "R", description: "resume" })
+			}
+			actions.push({ keyName: "x", description: "stop" })
+		}
+
+		actions.push({ keyName: "i", description: "image" })
+		actions.push({ keyName: "f", description: "diff" })
+		actions.push({ keyName: "d", description: "cleanup" })
+		return actions
+	}, [sessionState])
+
 	// Action line component
 	const ActionLine = ({ keyName, description }: { keyName: string; description: string }) => {
 		const available = isAvailable(keyName)
@@ -208,6 +244,72 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 		)
 	}
 
+	const handleToggleCompactActions = (event: MouseEvent) => {
+		if (event.button !== MouseButton.LEFT) return
+		event.preventDefault()
+		event.stopPropagation()
+		setShowAllCompactActions((current) => !current)
+	}
+
+	const CompactToggleLine = () => (
+		// biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target.
+		<box flexDirection="row" onMouseDown={handleToggleCompactActions}>
+			<text fg={theme.lavender}>{showAllCompactActions ? "less actions" : "more actions"}</text>
+		</box>
+	)
+
+	const renderFullPalette = () => (
+		<>
+			{/* Move actions - most common, at top */}
+			<ActionLine keyName="h" description="← move" />
+			<ActionLine keyName="l" description="→ move" />
+			<text fg={theme.surface1}>{"─────────"}</text>
+
+			{/* Session actions */}
+			<ActionLine keyName="s" description="start" />
+			<ActionLine keyName="S" description="start+work" />
+			<ActionLine keyName="!" description="start (yolo)" />
+			<ActionLine keyName="c" description="chat" />
+			<ActionLine keyName="a" description="attach" />
+			<ActionLine keyName="p" description="pause" />
+			<ActionLine keyName="R" description="resume" />
+			<ActionLine keyName="x" description="stop" />
+			<text fg={theme.surface1}>{"─────────"}</text>
+
+			{/* Dev server */}
+			<ActionLine keyName="r" description={getDevServerLabel()} />
+			<ActionLine keyName="v" description="view server" />
+			<text fg={theme.surface1}>{"─────────"}</text>
+
+			{/* Task actions */}
+			<ActionLine keyName="H" description="helix" />
+			<ActionLine keyName="i" description="image" />
+			<ActionLine keyName="F" description="fork" />
+			<text fg={theme.surface1}>{"─────────"}</text>
+
+			{/* Git/PR */}
+			<ActionLine keyName="u" description="update" />
+			<ActionLine keyName="f" description="diff" />
+			<ActionLine keyName="P" description="PR" />
+			<ActionLine keyName="O" description="open PR" />
+			<ActionLine keyName="m" description="merge" />
+			<ActionLine keyName="d" description="cleanup" />
+			<ActionLine keyName="D" description="delete" />
+		</>
+	)
+
+	const renderCompactPalette = () => (
+		<>
+			{compactActions.map((action) => (
+				<ActionLine
+					key={`compact:${action.keyName}:${action.description}`}
+					keyName={action.keyName}
+					description={action.description}
+				/>
+			))}
+		</>
+	)
+
 	return (
 		<box position="absolute" right={1} bottom={4}>
 			<box
@@ -219,41 +321,15 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				paddingRight={1}
 				flexDirection="column"
 			>
-				{/* Move actions - most common, at top */}
-				<ActionLine keyName="h" description="← move" />
-				<ActionLine keyName="l" description="→ move" />
-				<text fg={theme.surface1}>{"─────────"}</text>
-
-				{/* Session actions */}
-				<ActionLine keyName="s" description="start" />
-				<ActionLine keyName="S" description="start+work" />
-				<ActionLine keyName="!" description="start (yolo)" />
-				<ActionLine keyName="c" description="chat" />
-				<ActionLine keyName="a" description="attach" />
-				<ActionLine keyName="p" description="pause" />
-				<ActionLine keyName="R" description="resume" />
-				<ActionLine keyName="x" description="stop" />
-				<text fg={theme.surface1}>{"─────────"}</text>
-
-				{/* Dev server */}
-				<ActionLine keyName="r" description={getDevServerLabel()} />
-				<ActionLine keyName="v" description="view server" />
-				<text fg={theme.surface1}>{"─────────"}</text>
-
-				{/* Task actions */}
-				<ActionLine keyName="H" description="helix" />
-				<ActionLine keyName="i" description="image" />
-				<ActionLine keyName="F" description="fork" />
-				<text fg={theme.surface1}>{"─────────"}</text>
-
-				{/* Git/PR */}
-				<ActionLine keyName="u" description="update" />
-				<ActionLine keyName="f" description="diff" />
-				<ActionLine keyName="P" description="PR" />
-				<ActionLine keyName="O" description="open PR" />
-				<ActionLine keyName="m" description="merge" />
-				<ActionLine keyName="d" description="cleanup" />
-				<ActionLine keyName="D" description="delete" />
+				{compact ? (
+					<>
+						<CompactToggleLine />
+						<text fg={theme.surface1}>{"─────────"}</text>
+						{showAllCompactActions ? renderFullPalette() : renderCompactPalette()}
+					</>
+				) : (
+					renderFullPalette()
+				)}
 
 				{/* Busy indicator */}
 				{runningOperation && (
