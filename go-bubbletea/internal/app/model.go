@@ -332,6 +332,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayStack.Pop()
 			issueID := msg.Value.(string)
 			session := m.sessions[issueID]
+			if session == nil || strings.TrimSpace(session.Worktree) == "" {
+				m.toasts = append(m.toasts, Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("No active session for %s. Start with Space s before attaching.", issueID),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
 			return m, tea.Batch(
 				m.fetchAndMergeCmd(session.Worktree, m.config.Git.BaseBranch),
 				func() tea.Msg {
@@ -782,7 +790,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.toasts = append(m.toasts, Toast{
 			Level:   ToastWarning,
-			Message: "No active session for this task",
+			Message: fmt.Sprintf("No active session for %s. Start with Space s before attaching.", msg.mismatch.IssueID),
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		return m, nil

@@ -856,6 +856,69 @@ func TestActionMenuAttachWithIndicatorTmuxMismatchOpensReconciliationOverlay(t *
 	}
 }
 
+func TestActionMenuAttachWithoutSessionShowsIssueSpecificNextStep(t *testing.T) {
+	m := newTestModel()
+
+	result, _ := m.Update(sessionAttachProbeMsg{
+		mismatch: diagnostics.SessionMismatch{
+			IssueID:          "az-1",
+			IndicatorPresent: false,
+			TmuxPresent:      false,
+		},
+		trigger: "attach",
+	})
+	m = result.(Model)
+
+	if len(m.toasts) == 0 {
+		t.Fatal("expected warning toast when no active session exists")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if last.Level != ToastWarning {
+		t.Fatalf("expected warning toast level, got %v", last.Level)
+	}
+	if !containsAll(last.Message, []string{"az-1", "Space s"}) {
+		t.Fatalf("expected issue-specific next-step guidance, got %q", last.Message)
+	}
+}
+
+func TestBranchBehindMsgWithCommitsBehindOpensMergeChoiceOverlay(t *testing.T) {
+	m := newTestModel()
+
+	result, _ := m.Update(branchBehindMsg{
+		issueID:       "az-1",
+		worktree:      "/tmp/az-1",
+		commitsBehind: 2,
+	})
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected merge choice overlay for stale branch attach flow")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.MergeChoiceOverlay); !ok {
+		t.Fatalf("expected MergeChoiceOverlay, got %T", m.overlayStack.Current())
+	}
+}
+
+func TestMergeAttachSelectionWithoutSessionShowsActionableWarning(t *testing.T) {
+	m := newTestModel()
+	result, _ := m.Update(overlay.SelectionMsg{
+		Key:   "merge_attach",
+		Value: "az-1",
+	})
+	m = result.(Model)
+
+	if len(m.toasts) == 0 {
+		t.Fatal("expected warning toast when merge attach selected without active session")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if last.Level != ToastWarning {
+		t.Fatalf("expected warning toast level, got %v", last.Level)
+	}
+	if !containsAll(last.Message, []string{"az-1", "Space s"}) {
+		t.Fatalf("expected actionable warning with issue id and next step, got %q", last.Message)
+	}
+}
+
 func TestSessionReconciliationActionAdoptCreatesIndicatorAndEvidenceToast(t *testing.T) {
 	m := newTestModel()
 	delete(m.sessions, "az-1")
