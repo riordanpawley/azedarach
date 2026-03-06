@@ -227,6 +227,16 @@ const STATE_PATTERNS: readonly StatePattern[] = [
 	// "idle" is the default/initial state with no output
 ]
 
+const getPatternsForState = (state: SessionState): readonly RegExp[] => {
+	const match = STATE_PATTERNS.find((entry) => entry.state === state)
+	return match ? match.patterns : []
+}
+
+const WAITING_PATTERNS = getPatternsForState("waiting")
+const ERROR_PATTERNS = getPatternsForState("error")
+const BUSY_PATTERNS = getPatternsForState("busy")
+const DONE_PATTERNS = getPatternsForState("done")
+
 /**
  * Phase detection patterns ordered by priority (highest to lowest)
  *
@@ -455,6 +465,19 @@ const matchesPattern = (chunk: string, patterns: readonly RegExp[]): boolean => 
 	return patterns.some((pattern) => pattern.test(chunk))
 }
 
+const getRecentNonEmptyChunk = (chunk: string, maxLines: number): string => {
+	const lines = chunk
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.filter((line) => line.trim().length > 0)
+
+	if (lines.length === 0) {
+		return ""
+	}
+
+	return lines.slice(-maxLines).join("\n")
+}
+
 /**
  * Detect state from a chunk by checking all patterns in priority order
  *
@@ -471,12 +494,38 @@ const detectState = (chunk: string): SessionState | null => {
 
 	// Strip ANSI codes before pattern matching (Grove-inspired: clean output first)
 	const clean = stripAnsi(chunk)
+	const recentChunk = getRecentNonEmptyChunk(clean, 12)
 
-	// Check patterns in priority order
-	for (const { state, patterns } of STATE_PATTERNS) {
-		if (matchesPattern(clean, patterns)) {
-			return state
-		}
+	if (recentChunk.length === 0) {
+		return null
+	}
+
+	const recentLines = recentChunk.split("\n")
+	const lastLine = recentLines[recentLines.length - 1] ?? ""
+
+	// Waiting prompts should always win.
+	if (matchesPattern(recentChunk, WAITING_PATTERNS)) {
+		return "waiting"
+	}
+
+	// If the latest line is an explicit error, surface it immediately.
+	if (matchesPattern(lastLine, ERROR_PATTERNS)) {
+		return "error"
+	}
+
+	// Active work indicators are preferred over historical errors in scrollback.
+	if (matchesPattern(recentChunk, BUSY_PATTERNS)) {
+		return "busy"
+	}
+
+	// If recent output still looks like an error and no busy signal is present, mark error.
+	if (matchesPattern(recentChunk, ERROR_PATTERNS)) {
+		return "error"
+	}
+
+	// Done is lower priority than active processing and explicit errors.
+	if (matchesPattern(recentChunk, DONE_PATTERNS)) {
+		return "done"
 	}
 
 	// If we have non-empty output that doesn't match any pattern, it's "busy"
@@ -535,12 +584,6 @@ const createStatefulDetector = (): ((chunk: string) => SessionState | null) => {
 		const now = Date.now()
 		const timeSinceLastDetection = now - lastDetectionTime
 
-		// If we're in a terminal state ("done" or "error"), stay there
-		// until explicitly reset (detector recreation)
-		if (lastState === "done" || lastState === "error") {
-			return lastState
-		}
-
 		// High-priority states ("waiting", "error", "done") are reported immediately
 		if (detectedState === "waiting" || detectedState === "error" || detectedState === "done") {
 			lastState = detectedState
@@ -590,16 +633,8 @@ const createCombinedStatefulDetector = (): ((chunk: string) => DetectionResult) 
 		// State detection logic (same as createStatefulDetector)
 		let newState: SessionState | null = null
 		if (detectedState !== null) {
-			// Terminal states are sticky
-			if (lastState === "done" || lastState === "error") {
-				newState = lastState
-			}
 			// High-priority states report immediately
-			else if (
-				detectedState === "waiting" ||
-				detectedState === "error" ||
-				detectedState === "done"
-			) {
+			if (detectedState === "waiting" || detectedState === "error" || detectedState === "done") {
 				lastState = detectedState
 				lastStateTime = now
 				newState = detectedState

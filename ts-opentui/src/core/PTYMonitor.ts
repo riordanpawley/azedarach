@@ -604,11 +604,16 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 						const isHighPriority = detectedState === "waiting" || detectedState === "error"
 
 						if (isHighPriority) {
-							const shouldUpdate =
-								(currentState === "initializing" || currentState === "busy") &&
-								(detectedState === "error" || detectedState === "waiting")
+							// Guard high-priority transitions so stale scrollback does not force
+							// idle/done sessions into error or waiting.
+							const canTransition =
+								detectedState === "waiting"
+									? currentState === "initializing" || currentState === "busy"
+									: currentState === "initializing" ||
+										currentState === "busy" ||
+										currentState === "waiting"
 
-							if (shouldUpdate || currentState !== detectedState) {
+							if (canTransition && currentState !== detectedState) {
 								yield* sessionManager.updateState(issueId, detectedState)
 								yield* Effect.log(
 									`PTYMonitor: ${issueId} state ${currentState} → ${detectedState} (PTY high-priority)`,
