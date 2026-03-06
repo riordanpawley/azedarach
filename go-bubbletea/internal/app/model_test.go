@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -441,54 +443,173 @@ func TestActionMenuSpaceThenIOpensImageAttachOverlay(t *testing.T) {
 	}
 }
 
-func TestActionMenuSpaceThenROpensDevServerOverlay(t *testing.T) {
+func TestActionMenuSpaceThenRTogglesDevServerForCurrentIssue(t *testing.T) {
 	m := newTestModel()
 	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
 
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	result, runCmd := m.Update(selectionMsg)
 	m = result.(Model)
-
-	if m.overlayStack.IsEmpty() {
-		t.Fatal("expected action menu overlay after pressing space")
+	if runCmd == nil {
+		t.Fatal("expected toggle dev server command")
 	}
-	if _, ok := m.overlayStack.Current().(*overlay.ActionMenu); !ok {
-		t.Fatalf("expected ActionMenu overlay, got %T", m.overlayStack.Current())
-	}
-
-	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-	m = result.(Model)
-
-	if cmd == nil {
-		t.Fatal("expected selection command from action menu for key 'r'")
+	if msg := runCmd(); msg != nil {
+		if _, isErr := msg.(sessionErrorMsg); isErr {
+			t.Fatalf("expected toggle command success, got error msg: %#v", msg)
+		}
 	}
 
-	msg := cmd()
-	selectionMsg, ok := msg.(overlay.SelectionMsg)
+	srv, ok := m.devServerManager.Get("az-1")
 	if !ok {
-		t.Fatalf("expected SelectionMsg from action menu, got %T", msg)
+		t.Fatal("expected running dev server for issue az-1")
 	}
-	if selectionMsg.Key != "r" {
-		t.Fatalf("expected selection key 'r', got %q", selectionMsg.Key)
+	if srv.Status != "running" {
+		t.Fatalf("expected running dev server status, got %q", srv.Status)
 	}
 
-	result, _ = m.Update(selectionMsg)
-	m = result.(Model)
-
-	if m.overlayStack.IsEmpty() {
-		t.Fatal("expected dev server overlay to be open")
-	}
-	if _, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
-		t.Fatalf("expected DevServerOverlay, got %T", m.overlayStack.Current())
+	session := m.sessions["az-1"]
+	if session == nil || session.DevServer == nil || !session.DevServer.Running {
+		t.Fatal("expected session dev server indicator to be populated and running")
 	}
 }
 
-func TestActionMenuSpaceThenVOpensDevServerOverlay(t *testing.T) {
+func TestActionMenuSpaceThenRWithoutSessionShowsActionableError(t *testing.T) {
 	m := newTestModel()
 	m.nav.SelectTask("az-1", 0)
 
-	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	result, runCmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if runCmd == nil {
+		t.Fatal("expected toggle dev server command")
+	}
+
+	msg := runCmd()
+	errMsg, ok := msg.(sessionErrorMsg)
+	if !ok {
+		t.Fatalf("expected sessionErrorMsg from toggle, got %T", msg)
+	}
+
+	result, _ = m.Update(errMsg)
+	m = result.(Model)
+	if len(m.toasts) == 0 {
+		t.Fatal("expected toast error for missing worktree context")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if last.Level != ToastError {
+		t.Fatalf("expected error toast, got %v", last.Level)
+	}
+	if !containsAll(last.Message, []string{"dev server", "start", "session"}) {
+		t.Fatalf("expected actionable guidance in toast, got %q", last.Message)
+	}
+}
+
+func TestActionMenuSpaceThenVShowsAttachCommandToastWhenRunning(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+
+	if _, err := m.devServerManager.Start(
+		context.Background(),
+		"az-1",
+		"az-1",
+		"npm run dev",
+		"/tmp/az-1",
+	); err != nil {
+		t.Fatalf("failed to seed running dev server: %v", err)
+	}
+	srv, ok := m.devServerManager.Get("az-1")
+	if !ok {
+		t.Fatal("expected seeded server")
+	}
+	m.sessions["az-1"].DevServer = &domain.DevServer{Port: srv.Port, Command: srv.Command, Running: true}
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	result, runCmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if runCmd == nil {
+		t.Fatal("expected view dev server command")
+	}
+	viewMsg := runCmd()
+	toast, ok := viewMsg.(Toast)
+	if !ok {
+		t.Fatalf("expected Toast from view command, got %T", viewMsg)
+	}
+	result, _ = m.Update(toast)
 	m = result.(Model)
 
+	if len(m.toasts) == 0 {
+		t.Fatal("expected toast from view command")
+	}
+	last := m.toasts[len(m.toasts)-1]
+	if !containsAll(last.Message, []string{"tmux attach-session", "devserver-az-1"}) {
+		t.Fatalf("expected attach instructions toast, got %q", last.Message)
+	}
+}
+
+func TestActionMenuSpaceThenCtrlRRestartsDevServer(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+	m.sessions["az-1"] = &domain.Session{
+		IssueID:  "az-1",
+		State:    domain.SessionBusy,
+		Worktree: "/tmp/az-1",
+	}
+
+	if _, err := m.devServerManager.Start(
+		context.Background(),
+		"az-1",
+		"az-1",
+		"npm run dev",
+		"/tmp/az-1",
+	); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	before, _ := m.devServerManager.Get("az-1")
+	beforeStartedAt := before.StartedAt
+
+	m, selectionMsg := openActionAndSelect(t, m, tea.KeyMsg{Type: tea.KeyCtrlR})
+	if selectionMsg.Key != "ctrl+r" {
+		t.Fatalf("expected selection key ctrl+r, got %q", selectionMsg.Key)
+	}
+	result, runCmd := m.Update(selectionMsg)
+	m = result.(Model)
+	if runCmd == nil {
+		t.Fatal("expected restart command from ctrl+r selection")
+	}
+	restartMsg := runCmd()
+	if restartMsg != nil {
+		if _, isErr := restartMsg.(sessionErrorMsg); isErr {
+			t.Fatalf("expected restart success, got error msg: %#v", restartMsg)
+		}
+	}
+
+	after, ok := m.devServerManager.Get("az-1")
+	if !ok {
+		t.Fatal("expected dev server entry after restart")
+	}
+	if after.Status != "running" {
+		t.Fatalf("expected running status after restart, got %q", after.Status)
+	}
+	if !after.StartedAt.After(beforeStartedAt) {
+		t.Fatalf("expected restart to refresh startedAt; before=%v after=%v", beforeStartedAt, after.StartedAt)
+	}
+}
+
+func openActionAndSelect(t *testing.T, m Model, key tea.KeyMsg) (Model, overlay.SelectionMsg) {
+	t.Helper()
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = result.(Model)
 	if m.overlayStack.IsEmpty() {
 		t.Fatal("expected action menu overlay after pressing space")
 	}
@@ -496,31 +617,26 @@ func TestActionMenuSpaceThenVOpensDevServerOverlay(t *testing.T) {
 		t.Fatalf("expected ActionMenu overlay, got %T", m.overlayStack.Current())
 	}
 
-	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	result, cmd := m.Update(key)
 	m = result.(Model)
-
 	if cmd == nil {
-		t.Fatal("expected selection command from action menu for key 'v'")
+		t.Fatalf("expected selection command for key %q", key.String())
 	}
-
 	msg := cmd()
 	selectionMsg, ok := msg.(overlay.SelectionMsg)
 	if !ok {
 		t.Fatalf("expected SelectionMsg from action menu, got %T", msg)
 	}
-	if selectionMsg.Key != "v" {
-		t.Fatalf("expected selection key 'v', got %q", selectionMsg.Key)
-	}
+	return m, selectionMsg
+}
 
-	result, _ = m.Update(selectionMsg)
-	m = result.(Model)
-
-	if m.overlayStack.IsEmpty() {
-		t.Fatal("expected dev server overlay to be open")
+func containsAll(message string, fragments []string) bool {
+	for _, fragment := range fragments {
+		if !strings.Contains(strings.ToLower(message), strings.ToLower(fragment)) {
+			return false
+		}
 	}
-	if _, ok := m.overlayStack.Current().(*overlay.DevServerOverlay); !ok {
-		t.Fatalf("expected DevServerOverlay, got %T", m.overlayStack.Current())
-	}
+	return true
 }
 
 func TestModeStrings(t *testing.T) {

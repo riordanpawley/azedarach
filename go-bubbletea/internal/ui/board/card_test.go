@@ -120,6 +120,37 @@ func TestRenderCard_WithSession(t *testing.T) {
 	}
 }
 
+func TestRenderCard_WithRunningDevServerIndicator(t *testing.T) {
+	s := styles.New()
+	startedAt := time.Now().Add(-30 * time.Minute)
+
+	task := domain.Task{
+		ID:       "az-dev-1",
+		Title:    "Task with dev server",
+		Status:   domain.StatusInProgress,
+		Priority: domain.P1,
+		Type:     domain.TypeTask,
+		Session: &domain.Session{
+			IssueID:   "az-dev-1",
+			State:     domain.SessionBusy,
+			StartedAt: &startedAt,
+			Worktree:  "/tmp/az-dev-1",
+			DevServer: &domain.DevServer{
+				Port:    3001,
+				Command: "npm run dev",
+				Running: true,
+			},
+		},
+	}
+
+	result := RenderCard(task, false, false, 40, s)
+	stripped := stripANSI(result)
+
+	if !strings.Contains(stripped, "DEV:3001") {
+		t.Errorf("card should contain dev server indicator DEV:3001, got: %s", stripped)
+	}
+}
+
 func TestRenderCard_WithSessionNoElapsed(t *testing.T) {
 	s := styles.New()
 
@@ -389,6 +420,24 @@ func TestRenderSessionStatus(t *testing.T) {
 
 		if !strings.Contains(stripped, "✗") {
 			t.Errorf("Error session should contain error icon, got: %s", stripped)
+		}
+	})
+
+	t.Run("running dev server indicator", func(t *testing.T) {
+		session := &domain.Session{
+			IssueID: "test",
+			State:   domain.SessionBusy,
+			DevServer: &domain.DevServer{
+				Port:    3001,
+				Command: "npm run dev",
+				Running: true,
+			},
+		}
+
+		result := renderSessionStatus(session, s)
+		stripped := stripANSI(result)
+		if !strings.Contains(stripped, "DEV:3001") {
+			t.Errorf("running dev server should render DEV indicator, got: %s", stripped)
 		}
 	})
 }

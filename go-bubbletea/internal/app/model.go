@@ -407,6 +407,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 
+	case Toast:
+		m.toasts = append(m.toasts, msg)
+		return m, nil
+
 	case network.StatusMsg:
 		// Update online status
 		m.isOnline = msg.Online
@@ -895,8 +899,8 @@ func (m Model) buildColumns() []board.Column {
 		return board.CreatePlaceholderData()
 	}
 
-	// Apply filter to tasks
-	filteredTasks := m.editor.ApplyFilter(m.tasks)
+	// Apply filter to tasks and project runtime session/dev-server state.
+	filteredTasks := m.attachSessionState(m.editor.ApplyFilter(m.tasks))
 
 	// Build columns from filtered tasks
 	return []board.Column{
@@ -1624,18 +1628,14 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		attachOverlay := overlay.NewImageAttachOverlay(task.ID, m.attachmentService)
 		return m, tea.Batch(m.overlayStack.Push(attachOverlay), attachOverlay.Init())
 
-	case "r", "v":
-		// Dev server menu
-		servers := m.getDevServerInfo()
-		devOverlay := overlay.NewDevServerOverlay(
-			servers,
-			task.ID,
-			func(serverID string) tea.Cmd { return m.toggleDevServer(serverID) },
-			func(serverID string) tea.Cmd { return m.viewDevServer(serverID) },
-			func(serverID string) tea.Cmd { return m.restartDevServer(serverID) },
-			func() tea.Cmd { return func() tea.Msg { return overlay.CloseOverlayMsg{} } },
-		)
-		return m, m.overlayStack.Push(devOverlay)
+	case "r":
+		return m, m.toggleDevServer(task.ID)
+
+	case "v":
+		return m, m.viewDevServer(task.ID)
+
+	case "ctrl+r":
+		return m, m.restartDevServer(task.ID)
 
 	case "b":
 		// Merge issue into... (merge select mode)
@@ -2382,8 +2382,25 @@ func (m Model) getDevServerInfo() []overlay.DevServerInfo {
 func (m Model) toggleDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		if err := m.devServerManager.Toggle(ctx, serverID); err != nil {
+		worktree, err := m.resolveDevServerWorktree(serverID)
+		if err != nil {
 			return sessionErrorMsg{issueID: serverID, err: err}
+		}
+
+		if err := m.devServerManager.Toggle(ctx, serverID, worktree, "npm run dev"); err != nil {
+			return sessionErrorMsg{issueID: serverID, err: err}
+		}
+
+		server, ok := m.devServerManager.Get(serverID)
+		if ok {
+			if session, exists := m.sessions[serverID]; exists && session != nil {
+				if session.DevServer == nil {
+					session.DevServer = &domain.DevServer{}
+				}
+				session.DevServer.Port = server.Port
+				session.DevServer.Command = server.Command
+				session.DevServer.Running = server.Status == "running"
+			}
 		}
 		return nil
 	}
@@ -2391,7 +2408,14 @@ func (m Model) toggleDevServer(serverID string) tea.Cmd {
 
 func (m Model) viewDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
-		// For now, show a toast with instructions
+		server, ok := m.devServerManager.Get(serverID)
+		if !ok || server.Status != "running" {
+			return sessionErrorMsg{
+				issueID: serverID,
+				err:     fmt.Errorf("no running dev server for %s; start one with Space r", serverID),
+			}
+		}
+
 		return Toast{
 			Level:   ToastInfo,
 			Message: fmt.Sprintf("Run: tmux attach-session -t devserver-%s", serverID),
@@ -2403,11 +2427,56 @@ func (m Model) viewDevServer(serverID string) tea.Cmd {
 func (m Model) restartDevServer(serverID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		if err := m.devServerManager.Restart(ctx, serverID); err != nil {
+		worktree, err := m.resolveDevServerWorktree(serverID)
+		if err != nil {
 			return sessionErrorMsg{issueID: serverID, err: err}
+		}
+
+		if err := m.devServerManager.Restart(ctx, serverID, worktree, "npm run dev"); err != nil {
+			return sessionErrorMsg{issueID: serverID, err: err}
+		}
+
+		server, ok := m.devServerManager.Get(serverID)
+		if ok {
+			if session, exists := m.sessions[serverID]; exists && session != nil {
+				if session.DevServer == nil {
+					session.DevServer = &domain.DevServer{}
+				}
+				session.DevServer.Port = server.Port
+				session.DevServer.Command = server.Command
+				session.DevServer.Running = server.Status == "running"
+			}
 		}
 		return nil
 	}
+}
+
+func (m Model) resolveDevServerWorktree(issueID string) (string, error) {
+	session, exists := m.sessions[issueID]
+	if !exists || session == nil || strings.TrimSpace(session.Worktree) == "" {
+		return "", fmt.Errorf("dev server requires active session context; start session first with Space s")
+	}
+
+	return session.Worktree, nil
+}
+
+func (m Model) attachSessionState(tasks []domain.Task) []domain.Task {
+	if len(tasks) == 0 {
+		return tasks
+	}
+
+	enriched := make([]domain.Task, len(tasks))
+	copy(enriched, tasks)
+	for index := range enriched {
+		session, exists := m.sessions[enriched[index].ID]
+		if !exists {
+			enriched[index].Session = nil
+			continue
+		}
+		enriched[index].Session = session
+	}
+
+	return enriched
 }
 
 // Merge helpers

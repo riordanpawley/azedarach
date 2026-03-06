@@ -115,6 +115,7 @@ func TestActionMenu_BuildActions_IncludesDevServerActions(t *testing.T) {
 
 	hasToggleDevServer := false
 	hasViewDevServer := false
+	hasRestartDevServer := false
 	for _, action := range menu.actions {
 		if action.Key == "r" {
 			hasToggleDevServer = true
@@ -128,6 +129,12 @@ func TestActionMenu_BuildActions_IncludesDevServerActions(t *testing.T) {
 				t.Error("expected dev server view action to be enabled")
 			}
 		}
+		if action.Key == "ctrl+r" {
+			hasRestartDevServer = true
+			if !action.Enabled {
+				t.Error("expected dev server restart action to be enabled")
+			}
+		}
 	}
 
 	if !hasToggleDevServer {
@@ -135,6 +142,9 @@ func TestActionMenu_BuildActions_IncludesDevServerActions(t *testing.T) {
 	}
 	if !hasViewDevServer {
 		t.Fatal("expected dev server view action with key 'v'")
+	}
+	if !hasRestartDevServer {
+		t.Fatal("expected dev server restart action with key 'ctrl+r'")
 	}
 }
 
@@ -411,6 +421,28 @@ func TestActionMenu_Update_DirectSelection_DevServerActions(t *testing.T) {
 				t.Errorf("expected key %q, got %q", string(tt.key), selectionMsg.Key)
 			}
 		})
+	}
+}
+
+func TestActionMenu_Update_DirectSelection_DevServerRestartAction(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
+	menu := NewActionMenu(task, nil)
+
+	msg := tea.KeyMsg{Type: tea.KeyCtrlR}
+	_, cmd := menu.Update(msg)
+
+	if cmd == nil {
+		t.Fatal("expected command from ctrl+r direct key selection")
+	}
+
+	result := cmd()
+	selectionMsg, ok := result.(SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg, got %T", result)
+	}
+
+	if selectionMsg.Key != "ctrl+r" {
+		t.Errorf("expected key %q, got %q", "ctrl+r", selectionMsg.Key)
 	}
 }
 

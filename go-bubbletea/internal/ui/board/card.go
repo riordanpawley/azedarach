@@ -108,9 +108,17 @@ func renderSessionStatus(session *domain.Session, s *styles.Styles) string {
 
 	stateStyle := s.SessionState(session.State)
 	if elapsed != "" {
-		return stateStyle.Render(fmt.Sprintf("%s %s", icon, elapsed))
+		row := fmt.Sprintf("%s %s", icon, elapsed)
+		if session.DevServer != nil && session.DevServer.Running {
+			row = fmt.Sprintf("%s DEV:%d", row, session.DevServer.Port)
+		}
+		return stateStyle.Render(row)
 	}
-	return stateStyle.Render(icon)
+	row := icon
+	if session.DevServer != nil && session.DevServer.Running {
+		row = fmt.Sprintf("%s DEV:%d", row, session.DevServer.Port)
+	}
+	return stateStyle.Render(row)
 }
 
 // formatDuration formats a duration as "2h 34m" or "45m"

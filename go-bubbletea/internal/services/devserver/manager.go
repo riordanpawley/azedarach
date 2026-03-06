@@ -16,6 +16,7 @@ type Server struct {
 	Status    string // "running", "stopped", "error"
 	IssueID   string
 	Command   string
+	Worktree  string
 	Uptime    time.Duration
 	StartedAt time.Time
 }
@@ -37,10 +38,14 @@ func NewManager(allocator *PortAllocator, logger *slog.Logger) *Manager {
 	}
 }
 
-// Start starts a dev server for a issue
-func (m *Manager) Start(ctx context.Context, issueID, name, command string) (*Server, error) {
+// Start starts a dev server for an issue.
+func (m *Manager) Start(ctx context.Context, issueID, name, command, worktree string) (*Server, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if worktree == "" {
+		return nil, fmt.Errorf("dev server requires issue-scoped worktree context for %s", issueID)
+	}
 
 	// Check if already running
 	if srv, exists := m.servers[issueID]; exists && srv.Status == "running" {
@@ -60,11 +65,12 @@ func (m *Manager) Start(ctx context.Context, issueID, name, command string) (*Se
 		Status:    "running",
 		IssueID:   issueID,
 		Command:   command,
+		Worktree:  worktree,
 		StartedAt: time.Now(),
 	}
 
 	m.servers[issueID] = server
-	m.logger.Info("dev server started", "issue_id", issueID, "port", port)
+	m.logger.Info("dev server started", "issue_id", issueID, "port", port, "worktree", worktree)
 
 	return server, nil
 }
@@ -87,8 +93,8 @@ func (m *Manager) Stop(ctx context.Context, issueID string) error {
 	return nil
 }
 
-// Toggle starts or stops a dev server
-func (m *Manager) Toggle(ctx context.Context, issueID string) error {
+// Toggle starts or stops a dev server.
+func (m *Manager) Toggle(ctx context.Context, issueID, worktree, command string) error {
 	m.mu.RLock()
 	srv, exists := m.servers[issueID]
 	m.mu.RUnlock()
@@ -97,18 +103,18 @@ func (m *Manager) Toggle(ctx context.Context, issueID string) error {
 		return m.Stop(ctx, issueID)
 	}
 
-	_, err := m.Start(ctx, issueID, issueID, "")
+	_, err := m.Start(ctx, issueID, issueID, command, worktree)
 	return err
 }
 
-// Restart restarts a dev server
-func (m *Manager) Restart(ctx context.Context, issueID string) error {
+// Restart restarts a dev server.
+func (m *Manager) Restart(ctx context.Context, issueID, worktree, command string) error {
 	if err := m.Stop(ctx, issueID); err != nil {
 		// Ignore "not found" errors for restart
 		m.logger.Debug("server not running, starting fresh", "issue_id", issueID)
 	}
 
-	_, err := m.Start(ctx, issueID, issueID, "")
+	_, err := m.Start(ctx, issueID, issueID, command, worktree)
 	return err
 }
 

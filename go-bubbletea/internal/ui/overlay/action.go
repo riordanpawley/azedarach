@@ -86,6 +86,7 @@ func (m *ActionMenu) buildActions() []Action {
 		Action{Key: "i", Label: "Image attachments", Enabled: true},
 		Action{Key: "r", Label: "Toggle dev server", Enabled: true},
 		Action{Key: "v", Label: "View dev server", Enabled: true},
+		Action{Key: "ctrl+r", Label: "Restart dev server", Enabled: true},
 		Action{Key: "e", Label: "Edit task", Enabled: true},
 		Action{Key: "d", Label: "Delete task", Enabled: true},
 	)
