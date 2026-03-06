@@ -263,7 +263,7 @@ Minimum external capabilities required:
 - project registry CLI commands available for multi-project management (`az project add/list/remove/switch`)
 - AI CLI available and authenticated
 - optional gh for PR workflows
-- optional linear-cli and/or Beads adapter tooling when sync targets are enabled
+- optional external-tracker adapter tooling when sync targets are enabled (for example linear-cli for Linear projects)
 
 ## 1.16 Product-Level Constraints
 
@@ -298,7 +298,7 @@ mindmap
       Local SQLite
       Sync Adapters
         Linear
-        Beads
+        External Adapter
       Projects
       Attachments
     Governance

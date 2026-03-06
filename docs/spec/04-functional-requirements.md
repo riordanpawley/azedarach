@@ -21,7 +21,7 @@ This section is normative.
 - AZ-FR-0010: Loading states MUST be visible when data is unavailable.
 - AZ-FR-0011: The canonical persisted issue store MUST be local SQLite managed by Azedarach.
 - AZ-FR-0012: Local-only mode (no sync targets configured) MUST preserve full board and mutation workflows.
-- AZ-FR-0013: Sync targets (for example Linear or Beads adapter) MUST remain optional and non-blocking for local operation.
+- AZ-FR-0013: Sync targets (for example Linear or other external adapters) MUST remain optional and non-blocking for local operation.
 - AZ-FR-0014: Canonical SQLite for the active project MUST be stored at `<project-root>/.azedarach/azedarach.db`.
 - AZ-FR-0015: If `<project-root>/.azedarach/azedarach.db` does not exist, the app MUST initialize it before first board hydration for that project.
 - AZ-FR-0016: Each project MUST use an isolated canonical SQLite store; issue data MUST NOT be mixed across project boundaries.

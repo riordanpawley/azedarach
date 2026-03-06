@@ -13,7 +13,7 @@
 - Write-cooldown backup trigger: post-mutation backup gate that allows backup attempts only when configured cooldown has elapsed since last successful backup.
 - Rolling backup retention: policy that retains only newest N backup files and prunes older snapshots after successful backup creation.
 - Sync target: optional external system mirrored from local canonical issue state.
-- Beads adapter: optional issue<->Beads sync interface layer.
+- External tracker adapter: optional issue-sync interface layer for non-Linear providers.
 - Linear adapter: optional issue<->Linear sync interface layer.
 - Burst window: short-term allowance for sync requests above sustained throughput before throttling/deferred execution begins.
 - Az CLI Suite: canonical top-level `az` issue command suite (`init/prime/create/q/show/update/close/reopen/delete/list/ready/blocked/search/stale/count`) plus dependency/config/stats commands (`az dep ...`, `az config ...`, `az stats`) and project-management commands (`az project add/list/remove/switch`) used by agent workflows.

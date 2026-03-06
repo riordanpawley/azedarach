@@ -45,7 +45,7 @@ Workflows are written as behavior contracts, not implementation details.
 - When prompt guidance asks the agent to update issue metadata, it MUST reference `az update <issue-id> ...`.
 - When prompt guidance asks the agent to complete/remove issues, it MUST reference `az close <issue-id> ...` and/or `az delete <issue-id> ...`.
 - Prompt guidance MAY reference `az list` for cross-issue discovery in the active project context.
-- Session bootstrap prompts MUST NOT require backend-specific issue CLIs (for example `bd`, `linear-cli`) for canonical issue read/write flows.
+- Session bootstrap prompts MUST NOT require backend-specific issue CLIs (for example `linear-cli` or provider-specific tracker CLIs) for canonical issue read/write flows.
 
 ### Postconditions
 
