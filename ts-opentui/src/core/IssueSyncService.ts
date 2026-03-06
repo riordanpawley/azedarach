@@ -34,6 +34,7 @@ const LINEAR_SYNC_TARGET: "linear" = "linear"
 const MAX_SYNC_BATCH = 500
 const MAX_SYNC_ATTEMPTS = 5
 const BASE_RETRY_SECONDS = 5
+const LINEAR_WORKFLOW_STATES_PAGE_SIZE = 250
 const API_KEY_CACHE_TTL_MS = 30_000
 const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
@@ -257,6 +258,13 @@ const normalizeScopeValue = (value: string | undefined): string | undefined => {
 interface LinearIssueScope {
 	readonly team: string | undefined
 	readonly project: string | undefined
+}
+
+interface LinearWorkflowState {
+	readonly id: string
+	readonly name: string
+	readonly teamId: string | undefined
+	readonly type: string
 }
 
 const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | undefined => {
@@ -728,16 +736,55 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				),
 			)
 
-		const fetchStateNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
-			linearSdk.workflowStates({ first: 500 }).pipe(
-				Effect.map(
-					(states) => new Map(states.nodes.map((state) => [state.id, state.name] as const)),
-				),
-				Effect.mapError(
-					(error) =>
-						new IssueSyncError({
-							message: error.message,
+		const fetchWorkflowStates = (): Effect.Effect<
+			readonly LinearWorkflowState[],
+			IssueSyncError
+		> =>
+			Effect.gen(function* () {
+				const fetchWorkflowStatesPage = (afterCursor: string | undefined) =>
+					linearSdk
+						.workflowStates({
+							first: LINEAR_WORKFLOW_STATES_PAGE_SIZE,
+							after: afterCursor,
+						})
+						.pipe(
+							Effect.mapError(
+								(error) =>
+									new IssueSyncError({
+										message: error.message,
+									}),
+							),
+						)
+
+				const collectPages = (
+					afterCursor: string | undefined,
+					accumulator: readonly LinearWorkflowState[],
+				): Effect.Effect<readonly LinearWorkflowState[], IssueSyncError> =>
+					fetchWorkflowStatesPage(afterCursor).pipe(
+						Effect.flatMap((page) => {
+							const nextAccumulator: readonly LinearWorkflowState[] = [
+								...accumulator,
+								...page.nodes.map((state) => ({
+									id: state.id,
+									name: state.name,
+									teamId: state.teamId,
+									type: state.type,
+								})),
+							]
+							if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
+								return Effect.succeed(nextAccumulator)
+							}
+							return collectPages(page.pageInfo.endCursor, nextAccumulator)
 						}),
+					)
+
+				return yield* collectPages(undefined, [])
+			})
+
+		const fetchStateNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
+			fetchWorkflowStates().pipe(
+				Effect.map((workflowStates) =>
+					new Map(workflowStates.map((state) => [state.id, state.name] as const)),
 				),
 			)
 
@@ -772,22 +819,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return cached
 				}
 
-				const workflowStates = yield* linearSdk.workflowStates({ first: 500 }).pipe(
-					Effect.map((states) =>
-						states.nodes.map((state) => ({
-							id: state.id,
-							teamId: state.teamId,
-							type: state.type,
-							name: state.name,
-						})),
-					),
-					Effect.mapError(
-						(error) =>
-							new IssueSyncError({
-								message: error.message,
-							}),
-					),
-				)
+				const workflowStates = yield* fetchWorkflowStates()
 
 				const teamStates = workflowStates.filter((state) => state.teamId === teamId)
 				if (teamStates.length === 0) {
