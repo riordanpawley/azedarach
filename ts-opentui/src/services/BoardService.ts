@@ -308,6 +308,16 @@ interface LinearWebhookListenerConfig {
 	readonly secret: string | undefined
 }
 
+interface ActiveLinearRefreshStrategy {
+	readonly key: string
+	readonly fiber: Fiber.RuntimeFiber<unknown, never>
+}
+
+interface LinearRefreshStrategyPlan {
+	readonly key: string
+	readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
+}
+
 type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch"
 
 interface BoardRefreshOptions {
@@ -385,6 +395,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const boardCache = yield* Ref.make<Map<string, ReadonlyArray<TaskWithSession>>>(new Map())
 		const debounceFiberRef = yield* Ref.make<Fiber.Fiber<void, never> | null>(null)
 		const localRefreshOnlyRef = yield* Ref.make(false)
+		const linearRefreshStrategyRef = yield* Ref.make<ActiveLinearRefreshStrategy | null>(null)
 			const refreshFailureToastRef = yield* Ref.make<{
 				readonly message: string
 				readonly timestamp: number
@@ -1699,7 +1710,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					Effect.orElseSucceed(() => void 0),
 				)
 
-		const startBackgroundPolling = () =>
+		const startBackgroundPollingFiber = () =>
 			Effect.gen(function* () {
 				const backgroundPollingFiber = yield* Effect.forkScoped(
 					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
@@ -1717,6 +1728,255 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					name: "Board Background Polling",
 					description: "Refreshes board every 5 seconds to keep git stats fresh",
 					fiber: backgroundPollingFiber,
+				})
+				return backgroundPollingFiber
+			})
+
+		const startLinearCliListenerFiber = (listenerConfig: LinearWebhookListenerConfig) =>
+			Effect.gen(function* () {
+				const linearWebhookFiber = yield* Effect.forkScoped(
+					Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
+						runLinearWebhookListener(listenerConfig).pipe(
+							Effect.catchAllCause((cause) =>
+								Cause.isInterruptedOnly(cause)
+									? Effect.void
+									: Effect.logWarning(
+											`Linear CLI webhook listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
+										).pipe(Effect.asVoid),
+							),
+						),
+					),
+				)
+				yield* diagnostics.registerFiber({
+					id: "board-linear-webhook-cli-listener",
+					name: "Board Linear CLI Webhook Listener",
+					description: "Refreshes board from linear-cli webhook events",
+					fiber: linearWebhookFiber,
+				})
+				return linearWebhookFiber
+			})
+
+		const startLinearSdkCliFallbackListenerFiber = (listenerConfig: LinearWebhookListenerConfig) =>
+			Effect.gen(function* () {
+				const linearWebhookFallbackFiber = yield* Effect.forkScoped(
+					Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
+						runLinearWebhookListener(listenerConfig).pipe(
+							Effect.catchAllCause((cause) =>
+								Cause.isInterruptedOnly(cause)
+									? Effect.void
+									: Effect.logWarning(
+											`Linear SDK->CLI webhook fallback listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
+										).pipe(Effect.asVoid),
+							),
+						),
+					),
+				)
+				yield* diagnostics.registerFiber({
+					id: "board-linear-webhook-sdk-cli-fallback-listener",
+					name: "Board Linear SDK CLI Fallback Listener",
+					description: "Refreshes board from CLI webhook events when SDK mode is unhealthy",
+					fiber: linearWebhookFallbackFiber,
+				})
+				return linearWebhookFallbackFiber
+			})
+
+		const startLinearSdkEventsFiber = () =>
+			Effect.gen(function* () {
+				const linearWebhookFiber = yield* Effect.forkScoped(
+					Stream.runForEach(linearWebhookService.issueEvents, (event) =>
+						applyLinearWebhookIssueEvent(event).pipe(
+							Effect.catchAllCause((cause) =>
+								Effect.logWarning(cause).pipe(
+									Effect.zipRight(logAndToastRefreshFailure("linear-webhook-sdk", cause)),
+								),
+							),
+						),
+					),
+				)
+				yield* diagnostics.registerFiber({
+					id: "board-linear-webhook-sdk-events",
+					name: "Board Linear SDK Webhook Events",
+					description: "Applies Linear SDK webhook issue events to board state",
+					fiber: linearWebhookFiber,
+				})
+				return linearWebhookFiber
+			})
+
+		const linearWebhookListenerConfigKey = (listenerConfig: LinearWebhookListenerConfig): string =>
+			[
+				listenerConfig.command,
+				listenerConfig.team,
+				listenerConfig.url,
+				String(listenerConfig.port),
+				listenerConfig.events.join(","),
+				listenerConfig.secret ?? "",
+			].join("|")
+
+		const buildLinearRefreshStrategyPlan = () =>
+			Effect.gen(function* () {
+				const startupConfig = yield* SubscriptionRef.get(appConfig.config)
+				if (!("linear" in startupConfig.issueTracker)) {
+					return {
+						key: "non-linear:background-polling",
+						start: Effect.gen(function* () {
+							yield* Ref.set(localRefreshOnlyRef, false)
+							yield* reportLinearWebhookHealth({
+								mode: "disabled",
+								strategy: "disabled",
+								healthy: false,
+								message: "Linear backend not active; using background polling.",
+							})
+							return yield* startBackgroundPollingFiber()
+						}),
+					} satisfies LinearRefreshStrategyPlan
+				}
+
+				const webhookConfig = startupConfig.issueTracker.linear.webhooks
+				const transport = webhookConfig.transport
+
+				if (webhookConfig.enabled === false) {
+					return {
+						key: "linear:disabled",
+						start: Effect.gen(function* () {
+							yield* Ref.set(localRefreshOnlyRef, false)
+							yield* Effect.log("Linear webhooks disabled in config, using background polling fallback")
+							yield* reportLinearWebhookHealth({
+								mode: "disabled",
+								strategy: "disabled",
+								healthy: false,
+								message: "Webhooks disabled in config; using background polling.",
+							})
+							return yield* startBackgroundPollingFiber()
+						}),
+					} satisfies LinearRefreshStrategyPlan
+				}
+
+				if (transport === "cli") {
+					const linearWebhookListenerConfig = yield* getLinearWebhookListenerConfig()
+					if (linearWebhookListenerConfig !== undefined) {
+						return {
+							key: `linear:cli-listener:${linearWebhookListenerConfigKey(linearWebhookListenerConfig)}`,
+							start: Effect.gen(function* () {
+								yield* Ref.set(localRefreshOnlyRef, false)
+								yield* reportLinearWebhookHealth({
+									mode: "cli",
+									strategy: "cli-listener",
+									healthy: true,
+									message: `Using linear-cli webhook listener (team=${linearWebhookListenerConfig.team}, url=${linearWebhookListenerConfig.url}).`,
+								})
+								return yield* startLinearCliListenerFiber(linearWebhookListenerConfig)
+							}),
+						} satisfies LinearRefreshStrategyPlan
+					}
+
+					return {
+						key: "linear:cli-polling-fallback",
+						start: Effect.gen(function* () {
+							yield* Ref.set(localRefreshOnlyRef, false)
+							yield* Effect.logWarning(
+								"Linear CLI webhook listener configuration unavailable, using background polling fallback",
+							)
+							yield* reportLinearWebhookHealth({
+								mode: "cli",
+								strategy: "polling-fallback",
+								healthy: false,
+								message: "CLI webhook listener configuration unavailable; using background polling.",
+							})
+							yield* toastWebhookFallback(
+								"Linear webhook listener configuration unavailable. Falling back to background polling.",
+							)
+							return yield* startBackgroundPollingFiber()
+						}),
+					} satisfies LinearRefreshStrategyPlan
+				}
+
+				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
+				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
+				if (sdkMode === "sdk" && sdkHealthy) {
+					return {
+						key: "linear:sdk-events",
+						start: Effect.gen(function* () {
+							yield* Ref.set(localRefreshOnlyRef, true)
+							yield* reportLinearWebhookHealth({
+								mode: sdkMode,
+								strategy: "sdk-events",
+								healthy: true,
+								message: "Using SDK webhook events with local refresh-only updates.",
+							})
+							return yield* startLinearSdkEventsFiber()
+						}),
+					} satisfies LinearRefreshStrategyPlan
+				}
+
+				const listenerConfig = yield* getLinearWebhookListenerConfig({
+					requireCliTransport: false,
+				})
+				if (listenerConfig !== undefined) {
+					return {
+						key: `linear:sdk-cli-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookListenerConfigKey(listenerConfig)}`,
+						start: Effect.gen(function* () {
+							yield* Ref.set(localRefreshOnlyRef, false)
+							yield* Effect.logWarning(
+								`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}); attempting CLI webhook listener fallback`,
+							)
+							yield* reportLinearWebhookHealth({
+								mode: sdkMode,
+								strategy: "cli-fallback-listener",
+								healthy: true,
+								message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`,
+							})
+							return yield* startLinearSdkCliFallbackListenerFiber(listenerConfig)
+						}),
+					} satisfies LinearRefreshStrategyPlan
+				}
+
+				return {
+					key: `linear:sdk-polling-fallback:${sdkMode}:${String(sdkHealthy)}`,
+					start: Effect.gen(function* () {
+						yield* Ref.set(localRefreshOnlyRef, false)
+						yield* Effect.logWarning(
+							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
+						)
+						yield* reportLinearWebhookHealth({
+							mode: sdkMode,
+							strategy: "polling-fallback",
+							healthy: false,
+							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
+						})
+						yield* toastWebhookFallback(
+							sdkMode === "misconfigured"
+								? "Linear webhooks unavailable: missing public webhook URL. Falling back to background polling."
+								: `Linear webhooks unavailable (mode=${sdkMode}). Falling back to background polling.`,
+						)
+						return yield* startBackgroundPollingFiber()
+					}),
+				} satisfies LinearRefreshStrategyPlan
+			})
+
+		const applyLinearRefreshStrategy = () =>
+			Effect.gen(function* () {
+				const nextPlan = yield* buildLinearRefreshStrategyPlan()
+				const activeStrategy = yield* Ref.get(linearRefreshStrategyRef)
+				if (activeStrategy?.key === nextPlan.key) {
+					return
+				}
+
+				if (activeStrategy !== null) {
+					yield* Fiber.interrupt(activeStrategy.fiber).pipe(
+						Effect.catchAllCause((cause) =>
+							Cause.isInterruptedOnly(cause)
+								? Effect.void
+								: Effect.logWarning(
+										`Failed to stop previous linear refresh strategy: ${formatRefreshFailureMessage(cause)}`,
+									).pipe(Effect.asVoid),
+						),
+					)
+				}
+
+				const nextFiber = yield* nextPlan.start
+				yield* Ref.set(linearRefreshStrategyRef, {
+					key: nextPlan.key,
+					fiber: nextFiber,
 				})
 			})
 
@@ -1780,151 +2040,28 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			),
 		)
 
-		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
-		if ("linear" in startupConfig.issueTracker) {
-			const webhookConfig = startupConfig.issueTracker.linear.webhooks
-			const transport = webhookConfig.transport
+		yield* applyLinearRefreshStrategy()
 
-			if (webhookConfig.enabled === false) {
-				yield* Ref.set(localRefreshOnlyRef, false)
-				yield* Effect.log("Linear webhooks disabled in config, using background polling fallback")
-				yield* reportLinearWebhookHealth({
-					mode: "disabled",
-					strategy: "disabled",
-					healthy: false,
-					message: "Webhooks disabled in config; using background polling.",
-				})
-				yield* startBackgroundPolling()
-			} else if (transport === "cli") {
-				yield* Ref.set(localRefreshOnlyRef, false)
-				const linearWebhookListenerConfig = yield* getLinearWebhookListenerConfig()
-				if (linearWebhookListenerConfig !== undefined) {
-					const linearWebhookFiber = yield* Effect.forkScoped(
-						Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
-							runLinearWebhookListener(linearWebhookListenerConfig).pipe(
-								Effect.catchAllCause((cause) =>
-									Cause.isInterruptedOnly(cause)
-										? Effect.void
-										: Effect.logWarning(
-												`Linear CLI webhook listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
-											).pipe(Effect.asVoid),
-								),
-							),
+		const webhookConfigChangesFiber = yield* Effect.forkScoped(
+			appConfig.config.changes.pipe(
+				Stream.drop(1),
+				Stream.runForEach(() =>
+					applyLinearRefreshStrategy().pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`Failed to reconfigure webhook strategy: ${formatRefreshFailureMessage(cause)}`,
+							).pipe(Effect.asVoid),
 						),
-					)
-					yield* diagnostics.registerFiber({
-						id: "board-linear-webhook-cli-listener",
-						name: "Board Linear CLI Webhook Listener",
-						description: "Refreshes board from linear-cli webhook events",
-						fiber: linearWebhookFiber,
-					})
-					yield* reportLinearWebhookHealth({
-						mode: "cli",
-						strategy: "cli-listener",
-						healthy: true,
-						message: `Using linear-cli webhook listener (team=${linearWebhookListenerConfig.team}, url=${linearWebhookListenerConfig.url}).`,
-					})
-					} else {
-						yield* Effect.logWarning(
-							"Linear CLI webhook listener configuration unavailable, using background polling fallback",
-						)
-						yield* reportLinearWebhookHealth({
-							mode: "cli",
-							strategy: "polling-fallback",
-							healthy: false,
-							message: "CLI webhook listener configuration unavailable; using background polling.",
-						})
-						yield* toastWebhookFallback(
-							"Linear webhook listener configuration unavailable. Falling back to background polling.",
-						)
-						yield* startBackgroundPolling()
-					}
-				} else {
-				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
-				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
-				if (sdkMode === "sdk" && sdkHealthy) {
-					const linearWebhookFiber = yield* Effect.forkScoped(
-						Stream.runForEach(linearWebhookService.issueEvents, (event) =>
-							applyLinearWebhookIssueEvent(event).pipe(
-								Effect.catchAllCause((cause) =>
-									Effect.logWarning(cause).pipe(
-										Effect.zipRight(logAndToastRefreshFailure("linear-webhook-sdk", cause)),
-									),
-								),
-							),
-						),
-					)
-					yield* diagnostics.registerFiber({
-						id: "board-linear-webhook-sdk-events",
-						name: "Board Linear SDK Webhook Events",
-						description: "Applies Linear SDK webhook issue events to board state",
-						fiber: linearWebhookFiber,
-					})
-					yield* Ref.set(localRefreshOnlyRef, true)
-					yield* reportLinearWebhookHealth({
-						mode: sdkMode,
-						strategy: "sdk-events",
-						healthy: true,
-						message: "Using SDK webhook events with local refresh-only updates.",
-					})
-				} else {
-					yield* Ref.set(localRefreshOnlyRef, false)
-					const listenerConfig = yield* getLinearWebhookListenerConfig({
-						requireCliTransport: false,
-					})
-					if (listenerConfig !== undefined) {
-						yield* Effect.logWarning(
-							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}); attempting CLI webhook listener fallback`,
-						)
-						const linearWebhookFallbackFiber = yield* Effect.forkScoped(
-							Effect.repeat(Schedule.spaced(LINEAR_WEBHOOK_RESTART_DELAY))(
-								runLinearWebhookListener(listenerConfig).pipe(
-									Effect.catchAllCause((cause) =>
-										Cause.isInterruptedOnly(cause)
-											? Effect.void
-											: Effect.logWarning(
-													`Linear SDK->CLI webhook fallback listener exited: ${formatRefreshFailureMessage(cause)}. Restarting in ${LINEAR_WEBHOOK_RESTART_DELAY}.`,
-												).pipe(Effect.asVoid),
-									),
-								),
-							),
-						)
-						yield* diagnostics.registerFiber({
-							id: "board-linear-webhook-sdk-cli-fallback-listener",
-							name: "Board Linear SDK CLI Fallback Listener",
-							description: "Refreshes board from CLI webhook events when SDK mode is unhealthy",
-							fiber: linearWebhookFallbackFiber,
-						})
-						yield* reportLinearWebhookHealth({
-							mode: sdkMode,
-							strategy: "cli-fallback-listener",
-							healthy: true,
-							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`,
-						})
-						} else {
-							yield* Effect.logWarning(
-								`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
-							)
-							yield* reportLinearWebhookHealth({
-								mode: sdkMode,
-								strategy: "polling-fallback",
-								healthy: false,
-								message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
-							})
-							yield* toastWebhookFallback(
-								sdkMode === "misconfigured"
-									? "Linear webhooks unavailable: missing public webhook URL. Falling back to background polling."
-									: `Linear webhooks unavailable (mode=${sdkMode}). Falling back to background polling.`,
-							)
-							yield* startBackgroundPolling()
-						}
-					}
-				}
-		} else {
-			yield* Ref.set(localRefreshOnlyRef, false)
-			// Background polling for non-linear backends
-			yield* startBackgroundPolling()
-		}
+					),
+				),
+			),
+		)
+		yield* diagnostics.registerFiber({
+			id: "board-webhook-strategy-config-changes",
+			name: "Board Webhook Strategy Config Changes",
+			description: "Reconciles webhook/polling strategy when app config changes",
+			fiber: webhookConfigChangesFiber,
+		})
 
 		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
