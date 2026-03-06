@@ -79,6 +79,32 @@ func TestActionMenu_BuildActions_NoSession(t *testing.T) {
 	}
 }
 
+func TestActionMenu_BuildActions_IncludesImageAttachments(t *testing.T) {
+	task := domain.Task{
+		ID:     "az-123",
+		Status: domain.StatusOpen,
+	}
+
+	menu := NewActionMenu(task, nil)
+
+	hasImageAttachments := false
+	for _, action := range menu.actions {
+		if action.Key == "i" {
+			hasImageAttachments = true
+			if action.Label != "Image attachments" {
+				t.Errorf("expected image attachment label, got %q", action.Label)
+			}
+			if !action.Enabled {
+				t.Error("expected image attachments action to be enabled")
+			}
+		}
+	}
+
+	if !hasImageAttachments {
+		t.Fatal("expected image attachments action with key 'i'")
+	}
+}
+
 func TestActionMenu_BuildActions_ActiveSession(t *testing.T) {
 	task := domain.Task{
 		ID:     "az-123",
@@ -296,6 +322,28 @@ func TestActionMenu_Update_DirectSelection(t *testing.T) {
 
 	if selectionMsg.Key != "s" {
 		t.Errorf("expected key 's', got %s", selectionMsg.Key)
+	}
+}
+
+func TestActionMenu_Update_DirectSelection_ImageAttachments(t *testing.T) {
+	task := domain.Task{ID: "az-123", Status: domain.StatusOpen}
+	menu := NewActionMenu(task, nil)
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}}
+	_, cmd := menu.Update(msg)
+
+	if cmd == nil {
+		t.Fatal("expected command from direct key selection for image attachments")
+	}
+
+	result := cmd()
+	selectionMsg, ok := result.(SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg, got %T", result)
+	}
+
+	if selectionMsg.Key != "i" {
+		t.Errorf("expected key 'i', got %s", selectionMsg.Key)
 	}
 }
 

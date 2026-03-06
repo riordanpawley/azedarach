@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
 // Helper to create a test model with tasks
@@ -397,6 +398,47 @@ func TestModeTransitions(t *testing.T) {
 			t.Error("Expected clear screen command, got nil")
 		}
 	})
+}
+
+func TestActionMenuSpaceThenIOpensImageAttachOverlay(t *testing.T) {
+	m := newTestModel()
+	m.nav.SelectTask("az-1", 0)
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected action menu overlay after pressing space")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ActionMenu); !ok {
+		t.Fatalf("expected ActionMenu overlay, got %T", m.overlayStack.Current())
+	}
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	m = result.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected selection command from action menu for key 'i'")
+	}
+
+	msg := cmd()
+	selectionMsg, ok := msg.(overlay.SelectionMsg)
+	if !ok {
+		t.Fatalf("expected SelectionMsg from action menu, got %T", msg)
+	}
+	if selectionMsg.Key != "i" {
+		t.Fatalf("expected selection key 'i', got %q", selectionMsg.Key)
+	}
+
+	result, _ = m.Update(selectionMsg)
+	m = result.(Model)
+
+	if m.overlayStack.IsEmpty() {
+		t.Fatal("expected image attachment overlay to be open")
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ImageAttachOverlay); !ok {
+		t.Fatalf("expected ImageAttachOverlay, got %T", m.overlayStack.Current())
+	}
 }
 
 func TestModeStrings(t *testing.T) {
