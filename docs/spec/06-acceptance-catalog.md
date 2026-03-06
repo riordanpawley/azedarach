@@ -1079,4 +1079,4 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2837
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2829 and AZ-AT-2831 through AZ-AT-2837
