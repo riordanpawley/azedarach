@@ -29,7 +29,7 @@ Workflows are written as behavior contracts, not implementation details.
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session using deterministic project-prefixed session naming
 7. launch selected AI CLI command
-8. reflect session state as busy/idle/waiting as telemetry arrives
+8. reflect session lifecycle state (`initializing`/`busy`/`waiting`/`done`/`error`/`paused`/`idle`) as telemetry arrives
 
 ### Variants
 
@@ -405,6 +405,8 @@ Rules:
 ### Mapping
 
 - detected states update card indicators and optional notifications
+- PTY-based detection SHOULD weight the most recent non-empty output window more heavily than older scrollback
+- stale error-like text in scrollback MUST NOT override concurrent active-work signals
 
 ### Typical Triggers
 

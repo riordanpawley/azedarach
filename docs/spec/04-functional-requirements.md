@@ -133,6 +133,9 @@ This section is normative.
 - AZ-FR-0814: Stop MUST not implicitly delete worktree.
 - AZ-FR-0815: Session state detector MUST map busy/waiting/done/error/paused.
 - AZ-FR-0815a: `stateDetection.patternMatching=false` MUST disable PTY pattern-based state detection and PTY metrics updates.
+- AZ-FR-0815b: When PTY pattern matching is enabled, session-state detection MUST prioritize recent output over stale scrollback so historical error markers do not pin an actively working session in `error`.
+- AZ-FR-0815c: PTY state detection MUST allow recovery from transient `error`/`done` matches; terminal states MUST NOT remain sticky solely due to prior PTY matches.
+- AZ-FR-0815d: PTY high-priority transitions into `waiting`/`error` MUST be gated by active-session context (`initializing`/`busy`/`waiting`) and MUST NOT force `idle`/`done` sessions into those states from stale output alone.
 
 ## 4.11 Dev Server Requirements
 
