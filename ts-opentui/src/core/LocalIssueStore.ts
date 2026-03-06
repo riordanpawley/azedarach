@@ -723,7 +723,13 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					const backupPath = pathService.join(backupDir, `issues-${token}.db`)
 					const exists = yield* fs
 						.exists(backupPath)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 					if (!exists) {
 						return {
 							backupDir,
@@ -746,11 +752,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			Effect.gen(function* () {
 				const entries = yield* fs.readDirectory(backupDir).pipe(
 					Effect.catchAll((cause) =>
-						Effect.fail(
-							new LocalIssueStoreError({
-								message: `Failed to read backup directory: ${String(cause)}`,
-								cause,
-							}),
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								Effect.fail(
+									new LocalIssueStoreError({
+										message: `Failed to read backup directory: ${String(cause)}`,
+										cause,
+									}),
+								),
+							),
 						),
 					),
 				)
@@ -759,11 +769,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					const targetPath = pathService.join(backupDir, filename)
 					yield* fs.remove(targetPath, { force: true }).pipe(
 						Effect.catchAll((cause) =>
-							Effect.fail(
-								new LocalIssueStoreError({
-									message: `Failed to prune backup '${filename}': ${String(cause)}`,
-									cause,
-								}),
+							Effect.logWarning(cause).pipe(
+								Effect.zipRight(
+									Effect.fail(
+										new LocalIssueStoreError({
+											message: `Failed to prune backup '${filename}': ${String(cause)}`,
+											cause,
+										}),
+									),
+								),
 							),
 						),
 					)
@@ -814,18 +828,26 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				const cleanupTemp = fs.remove(paths.tempPath, { force: true }).pipe(Effect.ignore)
 
 				yield* sql`VACUUM INTO ${paths.tempPath}`.pipe(
-					Effect.catchAll((cause) => cleanupTemp.pipe(Effect.zipRight(Effect.fail(cause)))),
+					Effect.catchAll((cause) =>
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(cleanupTemp.pipe(Effect.zipRight(Effect.fail(cause)))),
+						),
+					),
 				)
 
 				yield* fs.rename(paths.tempPath, paths.backupPath).pipe(
 					Effect.catchAll((cause) =>
-						cleanupTemp.pipe(
+						Effect.logWarning(cause).pipe(
 							Effect.zipRight(
-								Effect.fail(
-									new LocalIssueStoreError({
-										message: `Failed to finalize sqlite backup: ${String(cause)}`,
-										cause,
-									}),
+								cleanupTemp.pipe(
+									Effect.zipRight(
+										Effect.fail(
+											new LocalIssueStoreError({
+												message: `Failed to finalize sqlite backup: ${String(cause)}`,
+												cause,
+											}),
+										),
+									),
 								),
 							),
 						),
@@ -848,12 +870,16 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
 					Effect.catchAll((cause) => {
-						return reportBackupFailure(
-							dbPath,
-							backupConfig,
-							"Failed to read sqlite backup metadata",
-							cause,
-						).pipe(Effect.as(undefined))
+						return Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								reportBackupFailure(
+									dbPath,
+									backupConfig,
+									"Failed to read sqlite backup metadata",
+									cause,
+								).pipe(Effect.as(undefined)),
+							),
+						)
 					}),
 				)
 				const staleIntervalMs = backupConfig.intervalMinutes * 60 * 1000
@@ -864,7 +890,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 				yield* runBackup(sql, storageRoot, backupConfig).pipe(
 					Effect.catchAll((cause) =>
-						reportBackupFailure(dbPath, backupConfig, "Automatic sqlite backup failed", cause),
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								reportBackupFailure(dbPath, backupConfig, "Automatic sqlite backup failed", cause),
+							),
+						),
 					),
 				)
 			})
@@ -881,12 +911,16 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 				const lastBackupAtMs = yield* getLastBackupTimestampMs(sql).pipe(
 					Effect.catchAll((cause) => {
-						return reportBackupFailure(
-							dbPath,
-							backupConfig,
-							"Failed to read sqlite backup metadata",
-							cause,
-						).pipe(Effect.as(undefined))
+						return Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								reportBackupFailure(
+									dbPath,
+									backupConfig,
+									"Failed to read sqlite backup metadata",
+									cause,
+								).pipe(Effect.as(undefined)),
+							),
+						)
 					}),
 				)
 				const cooldownMs = backupConfig.writeCooldownSeconds * 1000
@@ -897,11 +931,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				}
 				yield* runBackup(sql, storageRoot, backupConfig).pipe(
 					Effect.catchAll((cause) =>
-						reportBackupFailure(
-							dbPath,
-							backupConfig,
-							"Write-triggered sqlite backup failed",
-							cause,
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								reportBackupFailure(
+									dbPath,
+									backupConfig,
+									"Write-triggered sqlite backup failed",
+									cause,
+								),
+							),
 						),
 					),
 				)
@@ -926,11 +964,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 
 				yield* fs.makeDirectory(dbDir, { recursive: true }).pipe(
 					Effect.catchAll((cause) =>
-						Effect.fail(
-							new LocalIssueStoreError({
-								message: `Failed to create sqlite directory: ${String(cause)}`,
-								cause,
-							}),
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								Effect.fail(
+									new LocalIssueStoreError({
+										message: `Failed to create sqlite directory: ${String(cause)}`,
+										cause,
+									}),
+								),
+							),
 						),
 					),
 				)
@@ -955,11 +997,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					}),
 				).pipe(
 					Effect.catchAll((cause) =>
-						Effect.fail(
-							new LocalIssueStoreError({
-								message: `SQLite operation failed: ${String(cause)}`,
-								cause,
-							}),
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(
+								Effect.fail(
+									new LocalIssueStoreError({
+										message: `SQLite operation failed: ${String(cause)}`,
+										cause,
+									}),
+								),
+							),
 						),
 					),
 				)
@@ -1668,11 +1714,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-				clearIssueAttachments: (
-					issueId: string,
-					cwd?: string,
-				): Effect.Effect<number, LocalIssueStoreError> =>
-					withSql(cwd, (sql) =>
+			clearIssueAttachments: (
+				issueId: string,
+				cwd?: string,
+			): Effect.Effect<number, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
 					sql.withTransaction(
 						Effect.gen(function* () {
 							const existing = yield* sql<{ readonly count: number }>`
@@ -1689,24 +1735,24 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 							return count
 						}),
-						),
 					),
+				),
 
-				getSyncQueueSummary: (
-					target: SyncTarget,
-					cwd?: string,
-				): Effect.Effect<SyncQueueSummary, LocalIssueStoreError> =>
-					withSql(cwd, (sql) =>
-						Effect.gen(function* () {
-							const now = nowIso()
-							const rows = yield* sql<{
-								readonly total: number
-								readonly pending_ready: number | null
-								readonly pending_delayed: number | null
-								readonly processing_active: number | null
-								readonly processing_stale: number | null
-								readonly failed: number | null
-							}>`
+			getSyncQueueSummary: (
+				target: SyncTarget,
+				cwd?: string,
+			): Effect.Effect<SyncQueueSummary, LocalIssueStoreError> =>
+				withSql(cwd, (sql) =>
+					Effect.gen(function* () {
+						const now = nowIso()
+						const rows = yield* sql<{
+							readonly total: number
+							readonly pending_ready: number | null
+							readonly pending_delayed: number | null
+							readonly processing_active: number | null
+							readonly processing_stale: number | null
+							readonly failed: number | null
+						}>`
 								SELECT
 									COUNT(*) as total,
 									SUM(
@@ -1757,33 +1803,33 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								FROM sync_queue
 								WHERE target = ${target}
 							`
-							const row = rows[0]
-							if (row === undefined) {
-								return {
-									total: 0,
-									pendingReady: 0,
-									pendingDelayed: 0,
-									processingActive: 0,
-									processingStale: 0,
-									failed: 0,
-								} satisfies SyncQueueSummary
-							}
-
+						const row = rows[0]
+						if (row === undefined) {
 							return {
-								total: row.total,
-								pendingReady: row.pending_ready ?? 0,
-								pendingDelayed: row.pending_delayed ?? 0,
-								processingActive: row.processing_active ?? 0,
-								processingStale: row.processing_stale ?? 0,
-								failed: row.failed ?? 0,
+								total: 0,
+								pendingReady: 0,
+								pendingDelayed: 0,
+								processingActive: 0,
+								processingStale: 0,
+								failed: 0,
 							} satisfies SyncQueueSummary
-						}),
-					),
+						}
 
-				listPendingSync: (
-					target: SyncTarget,
-					limit: number,
-					cwd?: string,
+						return {
+							total: row.total,
+							pendingReady: row.pending_ready ?? 0,
+							pendingDelayed: row.pending_delayed ?? 0,
+							processingActive: row.processing_active ?? 0,
+							processingStale: row.processing_stale ?? 0,
+							failed: row.failed ?? 0,
+						} satisfies SyncQueueSummary
+					}),
+				),
+
+			listPendingSync: (
+				target: SyncTarget,
+				limit: number,
+				cwd?: string,
 			): Effect.Effect<readonly PendingSyncItem[], LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(

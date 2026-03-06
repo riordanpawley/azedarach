@@ -151,8 +151,7 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		label: "Issue Sync",
 		getValue: (c) => {
 			if (c.issueTracker?.tracker !== undefined) return c.issueTracker.tracker.syncEnabled ?? true
-			if (c.issueTracker?.legacy !== undefined)
-				return c.issueTracker.legacy.syncEnabled ?? true
+			if (c.issueTracker?.legacy !== undefined) return c.issueTracker.legacy.syncEnabled ?? true
 			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.syncEnabled ?? true
 			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
 			return false
@@ -254,15 +253,35 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 		const loadRawConfig = () =>
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
-				const exists = yield* fs.exists(configPath).pipe(Effect.orElseSucceed(() => false))
+				const exists = yield* fs.exists(configPath).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => false),
+				)
 				if (!exists) return yield* Schema.decodeUnknown(AzedarachConfigSchema)({})
 
-				const content = yield* fs.readFileString(configPath).pipe(Effect.orElseSucceed(() => "{}"))
+				const content = yield* fs.readFileString(configPath).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => "{}"),
+				)
 				const parsed = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
-					Effect.catchAll(() => Schema.decodeUnknown(AzedarachConfigSchema)({})),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Schema.decodeUnknown(AzedarachConfigSchema)({})),
+						),
+					),
 				)
 				return parsed
-			}).pipe(Effect.catchAll(() => Schema.decodeUnknown(AzedarachConfigSchema)({})))
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(error).pipe(
+						Effect.zipRight(Schema.decodeUnknown(AzedarachConfigSchema)({})),
+					),
+				),
+			)
 
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
@@ -323,23 +342,34 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 				Effect.gen(function* () {
 					const configPath = yield* getConfigPath()
 
-					const exists = yield* fs.exists(configPath).pipe(Effect.orElseSucceed(() => false))
+					const exists = yield* fs.exists(configPath).pipe(
+						Effect.tapError((error) =>
+							Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+						),
+						Effect.orElseSucceed(() => false),
+					)
 					if (!exists) {
 						yield* fs.writeFileString(configPath, "{}\n").pipe(Effect.orDie)
 					}
 
-					const backupContent = yield* fs
-						.readFileString(configPath)
-						.pipe(Effect.orElseSucceed(() => "{}"))
+					const backupContent = yield* fs.readFileString(configPath).pipe(
+						Effect.tapError((error) =>
+							Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+						),
+						Effect.orElseSucceed(() => "{}"),
+					)
 
 					return { configPath, backupContent }
 				}),
 
 			validateAfterEdit: (configPath: string, backupContent: string) =>
 				Effect.gen(function* () {
-					const newContent = yield* fs
-						.readFileString(configPath)
-						.pipe(Effect.orElseSucceed(() => "{}"))
+					const newContent = yield* fs.readFileString(configPath).pipe(
+						Effect.tapError((error) =>
+							Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+						),
+						Effect.orElseSucceed(() => "{}"),
+					)
 
 					const parseResult = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
 						newContent,

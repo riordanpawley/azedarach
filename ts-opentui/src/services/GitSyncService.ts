@@ -133,7 +133,11 @@ export class GitSyncService extends Effect.Service<GitSyncService>()("GitSyncSer
 						projectPath,
 					).pipe(
 						Effect.map((output) => Number.parseInt(output.trim(), 10)),
-						Effect.catchAll(() => Effect.succeed(0)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(0)),
+							),
+						),
 					)
 
 					yield* SubscriptionRef.set(commitsBehind, behindCount)
@@ -211,7 +215,13 @@ export class GitSyncService extends Effect.Service<GitSyncService>()("GitSyncSer
 					Effect.gen(function* () {
 						yield* pull()
 						yield* toast.show("success", `Pulled ${count} commits from ${remote}/${baseBranch}`)
-					}).pipe(Effect.catchAll((e) => toast.show("error", `Pull failed: ${e}`)))
+					}).pipe(
+						Effect.catchAll((e) =>
+							Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+								Effect.zipRight(toast.show("error", `Pull failed: ${e}`)),
+							),
+						),
+					)
 
 				// Check current overlay state
 				const currentOverlay = yield* overlay.current()

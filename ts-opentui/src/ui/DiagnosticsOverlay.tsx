@@ -104,7 +104,6 @@ const issueSyncStatusColor = (status: IssueSyncLastStatus): string => {
 			return theme.red
 		case "skipped":
 			return theme.yellow
-		case "idle":
 		default:
 			return theme.subtext0
 	}
@@ -120,7 +119,6 @@ const linearWebhookModeColor = (mode: LinearWebhookMode): string => {
 			return theme.yellow
 		case "failed":
 			return theme.red
-		case "disabled":
 		default:
 			return theme.subtext0
 	}
@@ -134,7 +132,6 @@ const linearWebhookStrategyColor = (strategy: LinearWebhookStrategy): string => 
 		case "cli-fallback-listener":
 		case "polling-fallback":
 			return theme.yellow
-		case "disabled":
 		default:
 			return theme.subtext0
 	}

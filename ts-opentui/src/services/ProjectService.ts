@@ -133,7 +133,13 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 			Effect.gen(function* () {
 				const exists = yield* fs
 					.exists(projectsFile)
-					.pipe(Effect.catchAll(() => Effect.succeed(false)))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
 
 				if (!exists) {
 					return emptyProjectsConfig
@@ -174,7 +180,13 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 				// Ensure config directory exists
 				yield* fs
 					.makeDirectory(configDir, { recursive: true })
-					.pipe(Effect.catchAll(() => Effect.void))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.void),
+							),
+						),
+					)
 
 				const content = JSON.stringify(config, null, 2)
 				yield* fs.writeFileString(projectsFile, content).pipe(
@@ -193,7 +205,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 
 		// Load initial config
 		const initialConfig = yield* loadProjectsConfig().pipe(
-			Effect.catchAll(() => Effect.succeed(emptyProjectsConfig)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(emptyProjectsConfig)),
+				),
+			),
 		)
 
 		// Create reactive state refs

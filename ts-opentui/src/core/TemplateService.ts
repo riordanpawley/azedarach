@@ -148,7 +148,11 @@ export class TemplateService extends Effect.Service<TemplateService>()("Template
 		const tryRenderWorkerTemplate = (variables: WorkerTemplateVariables, projectPath: string) =>
 			renderWorkerTemplate(variables, projectPath).pipe(
 				Effect.map(Option.some),
-				Effect.catchAll(() => Effect.succeed(Option.none())),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(Option.none())),
+					),
+				),
 			)
 
 		return {

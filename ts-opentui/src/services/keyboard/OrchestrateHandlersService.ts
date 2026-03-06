@@ -42,7 +42,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const toast = yield* ToastService
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
-				const issueTrackerClient = yield* IssueTrackerClient
+			const issueTrackerClient = yield* IssueTrackerClient
 			const sessionManager = yield* ClaudeSessionManager
 			const templateService = yield* TemplateService
 
@@ -67,7 +67,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					// Get the task details
-						const task = yield* issueTrackerClient.show(current.taskId).pipe(
+					const task = yield* issueTrackerClient.show(current.taskId).pipe(
 						Effect.catchAll((error) => {
 							const msg =
 								error && typeof error === "object" && "_tag" in error
@@ -90,7 +90,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					}
 
 					// Fetch the epic with its children
-						const epicWithChildren = yield* issueTrackerClient.getEpicWithChildren(task.id).pipe(
+					const epicWithChildren = yield* issueTrackerClient.getEpicWithChildren(task.id).pipe(
 						Effect.catchAll((error) =>
 							Effect.gen(function* () {
 								const msg =
@@ -107,7 +107,13 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					// Get all active sessions to determine hasSession state
 					const activeSessions = yield* sessionManager
 						.listActive()
-						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([] as const)),
+								),
+							),
+						)
 					const activeSessionIds = new Set(activeSessions.map((s) => s.issueId))
 
 					// Map children to OrchestrationTask format (filter out tombstones)
@@ -154,9 +160,15 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 					const projectPath = yield* helpers.getProjectPath()
 
 					// Load epic details for context injection
-						const epic = yield* issueTrackerClient
-							.show(mode.epicId)
-						.pipe(Effect.catchAll(() => Effect.succeed(null)))
+					const epic = yield* issueTrackerClient
+						.show(mode.epicId)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(null)),
+								),
+							),
+						)
 
 					// Exit orchestrate mode first (so UI updates)
 					yield* editor.exitOrchestrate()
@@ -167,9 +179,15 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 						mode.selectedIds.map((taskId) =>
 							Effect.gen(function* () {
 								// Load task details for template
-									const task = yield* issueTrackerClient
-										.show(taskId)
-									.pipe(Effect.catchAll(() => Effect.succeed(null)))
+								const task = yield* issueTrackerClient
+									.show(taskId)
+									.pipe(
+										Effect.catchAll((error) =>
+											Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+												Effect.zipRight(Effect.succeed(null)),
+											),
+										),
+									)
 
 								// Try to render worker template with context
 								const initialPrompt = yield* templateService

@@ -43,7 +43,11 @@ export const getLoginShell = (): Effect.Effect<string, never, CommandExecutor.Co
 				"UserShell",
 			).pipe(
 				Command.string,
-				Effect.catchAll(() => Effect.succeed("")),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed("")),
+					),
+				),
 			)
 			const shell = result.split(":")[1]?.trim()
 			if (shell) return shell
@@ -51,7 +55,11 @@ export const getLoginShell = (): Effect.Effect<string, never, CommandExecutor.Co
 			// Linux/Unix: Use passwd database via getent
 			const result = yield* Command.make("sh", "-c", "getent passwd $(whoami) | cut -d: -f7").pipe(
 				Command.string,
-				Effect.catchAll(() => Effect.succeed("")),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed("")),
+					),
+				),
 			)
 			const shell = result.trim()
 			if (shell) return shell

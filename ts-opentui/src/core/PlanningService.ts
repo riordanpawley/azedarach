@@ -610,14 +610,18 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 				return yield* createIssuesFromPlan(plan)
 			}).pipe(
 				Effect.catchAll((error) =>
-					Effect.gen(function* () {
-						yield* SubscriptionRef.update(state, (s) => ({
-							...s,
-							status: "error" as const,
-							error: String(error),
-						}))
-						return yield* Effect.fail(error)
-					}),
+					Effect.logWarning(error).pipe(
+						Effect.zipRight(
+							Effect.gen(function* () {
+								yield* SubscriptionRef.update(state, (s) => ({
+									...s,
+									status: "error" as const,
+									error: String(error),
+								}))
+								return yield* Effect.fail(error)
+							}),
+						),
+					),
 				),
 			)
 

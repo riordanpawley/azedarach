@@ -56,17 +56,25 @@ const checkPortOpenOnHost = (port: number, host: string): Effect.Effect<boolean>
 				},
 			},
 		})
+		const logSocketError = (error: unknown): void => {
+			void Effect.runFork(Effect.logWarning(error))
+		}
 
 		// Timeout handling
 		const timeout = setTimeout(() => {
-			socket.then((s) => s.end()).catch(() => {})
+			socket
+				.then((s) => s.end())
+				.catch((error) => {
+					logSocketError(error)
+				})
 			resume(Effect.succeed(false))
 		}, PORT_CHECK_TIMEOUT_MS)
 
 		// Cleanup timeout on success/error
 		socket
 			.then(() => clearTimeout(timeout))
-			.catch(() => {
+			.catch((error) => {
+				logSocketError(error)
 				clearTimeout(timeout)
 				resume(Effect.succeed(false))
 			})
@@ -171,7 +179,11 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
 			Effect.gen(function* () {
 				const json = yield* Schema.encode(Schema.parseJson(DevServerMetadata))(metadata).pipe(
-					Effect.catchAll(() => Effect.succeed("{}")),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("{}")),
+						),
+					),
 				)
 				yield* tmux.setUserOption(sessionName, TMUX_OPT_METADATA, json).pipe(Effect.ignore)
 			})
@@ -378,7 +390,13 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 						if (!Number.isNaN(port)) return Option.some(port)
 					}
 					return Option.none<number>()
-				}).pipe(Effect.catchAll(() => Effect.succeed(Option.none<number>())))
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(Option.none<number>())),
+						),
+					),
+				)
 
 				const result = yield* tryDetect.pipe(
 					Effect.repeat(
@@ -448,7 +466,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 		const _detectCommand = (worktreePath: string) =>
 			Effect.gen(function* () {
 				const pkgPath = pathService.join(worktreePath, "package.json")
-				if (!(yield* fs.exists(pkgPath).pipe(Effect.catchAll(() => Effect.succeed(false))))) {
+				if (
+					!(yield* fs
+						.exists(pkgPath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						))
+				) {
 					return "npm run dev"
 				}
 				const content = yield* fs.readFileString(pkgPath)
@@ -456,7 +484,13 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 				const scripts = pkg.scripts ?? {}
 				const pm = (yield* fs
 					.exists(pathService.join(worktreePath, "bun.lockb"))
-					.pipe(Effect.catchAll(() => Effect.succeed(false))))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					))
 					? "bun"
 					: "npm"
 				return scripts.dev ? `${pm} run dev` : scripts.start ? `${pm} run start` : `${pm} run dev`
@@ -551,7 +585,17 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 
 				// Use canonical path computation instead of inline
 				const worktreePath = getWorktreePath(projectPath, issueId)
-				if (!(yield* fs.exists(worktreePath).pipe(Effect.catchAll(() => Effect.succeed(false))))) {
+				if (
+					!(yield* fs
+						.exists(worktreePath)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						))
+				) {
 					return yield* Effect.fail(new NoWorktreeError({ issueId, message: "No worktree found" }))
 				}
 

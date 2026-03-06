@@ -19,7 +19,7 @@
 
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
+import { Data, DateTime, Effect, Exit, HashMap, PubSub, Ref, Schema } from "effect"
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -487,7 +487,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 				return yield* decodeSessions(content)
 			}).pipe(
 				Effect.provide(fsLayer),
-				Effect.catchAll(() => Effect.succeed(HashMap.empty<string, Session>())),
+				Effect.catchAll((error) =>
+					Effect.logWarning(error).pipe(
+						Effect.zipRight(Effect.succeed(HashMap.empty<string, Session>())),
+					),
+				),
 			)
 
 			// Helper: Save sessions to disk
@@ -517,6 +521,9 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					timestamp: new Date(),
 				}).pipe(
 					Effect.asVoid,
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
 					Effect.orElseSucceed(() => undefined),
 				)
 
@@ -525,7 +532,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					Command.make("tmux", "set-option", "-t", sessionName, optionName, value),
 				).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.void),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.void),
+						),
+					),
 				)
 
 			const getTmuxSessionOption = (sessionName: string, optionName: string) =>
@@ -533,7 +544,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					Command.make("tmux", "show-option", "-t", sessionName, "-v", optionName),
 				).pipe(
 					Effect.map((value) => value.trim()),
-					Effect.catchAll(() => Effect.succeed("")),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
 				)
 
 			const ringSessionPaneBell = (sessionName: string) =>
@@ -542,7 +557,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						Command.make("tmux", "display-message", "-p", "-t", sessionName, "#{pane_tty}"),
 					).pipe(
 						Effect.map((value) => value.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 					if (paneTty.length === 0) {
 						return false
@@ -551,7 +570,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 					const fs = yield* FileSystem.FileSystem
 					return yield* fs.writeFileString(paneTty, BELL_CHAR).pipe(
 						Effect.as(true),
-						Effect.catchAll(() => Effect.succeed(false)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
 					)
 				}).pipe(Effect.provide(fsLayer))
 
@@ -629,9 +652,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Check session limit
 						const configForLimit = yield* appConfig.getSessionConfig()
-						// Cast to any to access the new field since TS might not pick up the schema change immediately in this context
-						// In a real build, the schema change should propagate types correctly
-						const maxSessions = (configForLimit as any).maxSessions ?? 10
+						const maxSessions =
+							(configForLimit as { readonly maxSessions?: number }).maxSessions ?? 10
 						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
 							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
 						)
@@ -835,7 +857,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 													Effect.tap(() =>
 														Effect.logWarning(`Rolled back tmux session ${tmuxSessionName}`),
 													),
-													Effect.catchAll(() => Effect.void),
+													Effect.catchAll((error) =>
+														Effect.logWarning(
+															`Recovering after caught error: ${String(error)}`,
+														).pipe(Effect.zipRight(Effect.void)),
+													),
 												)
 											}
 
@@ -845,7 +871,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 													Effect.tap(() =>
 														Effect.logWarning(`Rolled back bead ${issueId} status to open`),
 													),
-													Effect.catchAll(() => Effect.void),
+													Effect.catchAll((error) =>
+														Effect.logWarning(
+															`Recovering after caught error: ${String(error)}`,
+														).pipe(Effect.zipRight(Effect.void)),
+													),
 												)
 											}
 										})
@@ -885,7 +915,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Kill tmux session (ignore error if already dead)
 						yield* tmuxService
 							.killSession(session.tmuxSessionName)
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 
 						// Get old state for event
 						const oldState = session.state
@@ -928,7 +964,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Sync tracker changes from worktree before creating WIP commit
 						// This ensures any tracker update/close commands are synced before we pause
 						yield* issueTrackerClient.sync(session.worktreePath).pipe(
-							Effect.catchAll(() => Effect.void), // Ignore sync errors (non-critical)
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							), // Ignore sync errors (non-critical)
 						)
 
 						// Create WIP commit in worktree
@@ -959,7 +999,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 									}),
 							),
 							// Ignore error if nothing to commit
-							Effect.catchAll(() => Effect.succeed(0)),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(0)),
+								),
+							),
 						)
 
 						// Update session state to paused
@@ -1055,7 +1099,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Verify worktree still exists
 						const worktreeExists = yield* worktreeManager
 							.exists({ issueId: issueId, projectPath: session.projectPath })
-							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(false)),
+									),
+								),
+							)
 
 						if (!worktreeExists) {
 							return yield* Effect.fail(
@@ -1073,7 +1123,8 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const modelConfig = yield* appConfig.getModelConfig()
 
 						// Check session limit
-						const maxSessions = (sessionConfig as any).maxSessions ?? 10
+						const maxSessions =
+							(sessionConfig as { readonly maxSessions?: number }).maxSessions ?? 10
 						const activeSessions = HashMap.reduce(sessions, 0, (count, session) =>
 							session.state !== "idle" && session.state !== "crashed" ? count + 1 : count,
 						)
@@ -1165,7 +1216,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Query tmux for actual running sessions
 						const tmuxSessions = yield* tmuxService.listSessions().pipe(
-							Effect.catchAll(() => Effect.succeed([])), // If tmux fails, just use in-memory
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([])),
+								),
+							), // If tmux fails, just use in-memory
 						)
 
 						// Load persisted sessions for state recovery
@@ -1176,7 +1231,13 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						const effectiveProjectPath = projectPath ?? process.cwd()
 						const worktrees = yield* worktreeManager
 							.list(effectiveProjectPath)
-							.pipe(Effect.catchAll(() => Effect.succeed([])))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed([])),
+									),
+								),
+							)
 						const worktreeByIssueLookup = new Map(
 							worktrees.map((wt) => [normalizeIssueIdForLookup(wt.issueId), wt] as const),
 						)
@@ -1293,7 +1354,11 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 
 						// Keep tmux-native waiting alerts in sync for PTY-driven tools (for example Codex).
 						yield* syncTmuxAttentionForSessionState(session, newState).pipe(
-							Effect.catchAll(() => Effect.void),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
 						)
 
 						// Publish state change

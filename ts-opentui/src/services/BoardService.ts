@@ -552,7 +552,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const command = Command.make("git", "-C", worktreePath, "rev-parse", "MERGE_HEAD").pipe(
 					Command.exitCode,
 				)
-				const exitCode = yield* command.pipe(Effect.catchAll(() => Effect.succeed(128)))
+				const exitCode = yield* command.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(128)),
+						),
+					),
+				)
 				return exitCode === 0
 			})
 
@@ -579,7 +585,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const count = Number.parseInt(output.trim(), 10)
 							return Number.isNaN(count) ? 0 : count
 						}),
-						Effect.catchAll(() => Effect.succeed(0)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(0)),
+							),
+						),
 					)
 
 					const dirtyCommand = Command.make(
@@ -592,7 +602,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 					const hasUncommittedChanges = yield* dirtyCommand.pipe(
 						Effect.map((output) => output.trim().length > 0),
-						Effect.catchAll(() => Effect.succeed(false)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
 					)
 
 					let gitAdditions: number | undefined
@@ -611,7 +625,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 						const mergeBase = yield* mergeBaseCommand.pipe(
 							Effect.map((output) => output.trim()),
-							Effect.catchAll(() => Effect.succeed(baseBranch)), // Fallback to branch name
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(baseBranch)),
+								),
+							), // Fallback to branch name
 						)
 
 						// Use merge-base for accurate diff stats (matches DiffService.getChangedFiles)
@@ -642,7 +660,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								}
 								return { additions, deletions }
 							}),
-							Effect.catchAll(() => Effect.succeed({ additions: 0, deletions: 0 })),
+							Effect.catchAll((error) =>
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(Effect.succeed({ additions: 0, deletions: 0 })),
+								),
+							),
 						)
 
 						gitAdditions = diffStats.additions
@@ -811,7 +833,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 										)
 										.pipe(
 											Effect.withSpan("tracker.showMultiple"),
-											Effect.catchAll(() => Effect.succeed([])),
+											Effect.catchAll((error) =>
+												Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+													Effect.zipRight(Effect.succeed([])),
+												),
+											),
 										),
 								)
 
@@ -858,7 +884,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							},
 							worktreeManager.list(projectPath).pipe(
 								Effect.withSpan("worktrees.list"),
-								Effect.catchAll(() => Effect.succeed([])),
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed([])),
+									),
+								),
 							),
 						)
 					: []
@@ -959,7 +989,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						},
 						prStateService.getPRStates(prInfos, projectPath).pipe(
 							Effect.withSpan("prStates.get"),
-							Effect.catchAll(() => Effect.succeed(new Map<string, PRState>())),
+							Effect.catchAll((error) =>
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(Effect.succeed(new Map<string, PRState>())),
+								),
+							),
 						),
 					)
 					yield* Effect.log(
@@ -1243,7 +1277,13 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
 				const activeSessions = yield* sessionManager
 					.listActive(projectPath ?? undefined)
-					.pipe(Effect.catchAll(() => Effect.succeed([])))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
 				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 				const gitConfig = yield* appConfig.getGitConfig()
@@ -1351,7 +1391,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						: refreshWithRecovery()
 					yield* refreshEffect.pipe(
 						Effect.catchAllCause((cause) =>
-							logAndToastRefreshFailure(useLocalRefresh ? "debounced-local" : "debounced", cause),
+							Effect.logWarning(cause).pipe(
+								Effect.zipRight(
+									logAndToastRefreshFailure(
+										useLocalRefresh ? "debounced-local" : "debounced",
+										cause,
+									),
+								),
+							),
 						),
 					)
 				}).pipe(Effect.forkIn(serviceScope))
@@ -1553,7 +1600,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						return Effect.logDebug(`Linear webhook listener: ${trimmed}`).pipe(Effect.asVoid)
 					}
 					return requestRefresh().pipe(
-						Effect.catchAllCause((cause) => logAndToastRefreshFailure("linear-webhook", cause)),
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(cause).pipe(
+								Effect.zipRight(logAndToastRefreshFailure("linear-webhook", cause)),
+							),
+						),
 					)
 				})
 			})
@@ -1566,14 +1617,23 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					...health,
 					updatedAt: new Date(),
 				})
-				.pipe(Effect.orElseSucceed(() => void 0))
+				.pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => void 0),
+				)
 
 		const startBackgroundPolling = () =>
 			Effect.gen(function* () {
 				const backgroundPollingFiber = yield* Effect.forkScoped(
 					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
 						refreshWithRecovery().pipe(
-							Effect.catchAllCause((cause) => logAndToastRefreshFailure("background", cause)),
+							Effect.catchAllCause((cause) =>
+								Effect.logWarning(cause).pipe(
+									Effect.zipRight(logAndToastRefreshFailure("background", cause)),
+								),
+							),
 						),
 					),
 				)
@@ -1638,7 +1698,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
 
 		yield* refreshWithRecovery().pipe(
-			Effect.catchAllCause((cause) => logAndToastRefreshFailure("initial", cause)),
+			Effect.catchAllCause((cause) =>
+				Effect.logWarning(`Recovering after caught error: ${String(cause)}`).pipe(
+					Effect.zipRight(logAndToastRefreshFailure("initial", cause)),
+				),
+			),
 		)
 
 		const startupConfig = yield* SubscriptionRef.get(appConfig.config)
@@ -1713,7 +1777,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						Stream.runForEach(linearWebhookService.issueEvents, (event) =>
 							applyLinearWebhookIssueEvent(event).pipe(
 								Effect.catchAllCause((cause) =>
-									logAndToastRefreshFailure("linear-webhook-sdk", cause),
+									Effect.logWarning(cause).pipe(
+										Effect.zipRight(logAndToastRefreshFailure("linear-webhook-sdk", cause)),
+									),
 								),
 							),
 						),
@@ -1788,7 +1854,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
 				requestRefresh().pipe(
-					Effect.catchAllCause((cause) => logAndToastRefreshFailure("pty-triggered", cause)),
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(logAndToastRefreshFailure("pty-triggered", cause)),
+						),
+					),
 				),
 			),
 		)
@@ -1934,7 +2004,11 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					yield* refreshWithPolicy({ reason: "project-switch", forceRemote: true }, newProjectPath)
 					yield* onRefreshComplete
 				}).pipe(
-					Effect.catchAllCause((cause) => logAndToastRefreshFailure("project-switch", cause)),
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(cause).pipe(
+							Effect.zipRight(logAndToastRefreshFailure("project-switch", cause)),
+						),
+					),
 					Effect.forkIn(serviceScope),
 				)
 

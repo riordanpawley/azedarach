@@ -263,7 +263,11 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 				const cmd = Command.make("which", "vc")
 				const result = yield* Command.exitCode(cmd).pipe(
 					Effect.map((code) => code === 0),
-					Effect.catchAll(() => Effect.succeed(false)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(false)),
+						),
+					),
 				)
 				return result
 			})
@@ -376,7 +380,15 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 					}
 
 					// Send exit command gracefully first
-					yield* tmux.sendKeys(VC_SESSION_NAME, "/exit").pipe(Effect.catchAll(() => Effect.void))
+					yield* tmux
+						.sendKeys(VC_SESSION_NAME, "/exit")
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
+						)
 
 					// Wait a moment for graceful shutdown
 					yield* Effect.sleep("500 millis")
@@ -384,7 +396,15 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 					// Force kill if still running
 					const stillRunning = yield* tmux.hasSession(VC_SESSION_NAME)
 					if (stillRunning) {
-						yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
+						yield* tmux
+							.killSession(VC_SESSION_NAME)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 					}
 
 					yield* updateState({
@@ -398,7 +418,13 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 				Effect.gen(function* () {
 					const hasSession = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					// Sync our state with reality
 					if (hasSession) {
@@ -418,7 +444,13 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 					// Check actual tmux session state
 					const hasSession = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					// Check if VC is installed
 					const installed = yield* checkVCInstalled()
@@ -444,7 +476,13 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 				Effect.gen(function* () {
 					const hasSession = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					if (!hasSession) {
 						return yield* Effect.fail(
@@ -478,7 +516,13 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 				Effect.gen(function* () {
 					const hasSession = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					if (!hasSession) {
 						return yield* Effect.fail(
@@ -495,11 +539,25 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 				Effect.gen(function* () {
 					const hasSession = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					if (hasSession) {
 						// Stop it
-						yield* tmux.killSession(VC_SESSION_NAME).pipe(Effect.catchAll(() => Effect.void))
+						yield* tmux
+							.killSession(VC_SESSION_NAME)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 						return yield* updateState({ status: "stopped" })
 					}
 
@@ -525,7 +583,13 @@ export class VCService extends Effect.Service<VCService>()("VCService", {
 
 					const running = yield* tmux
 						.hasSession(VC_SESSION_NAME)
-						.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(false)),
+								),
+							),
+						)
 
 					if (running) {
 						return yield* updateState({

@@ -41,15 +41,7 @@ describe("normalizeIssueJsonFlagOrder", () => {
 	})
 
 	it("moves issue create options ahead of title when title is first", () => {
-		const argv = [
-			"bun",
-			"az",
-			"issue",
-			"create",
-			"Child task",
-			"--parent",
-			"AZE-134",
-		]
+		const argv = ["bun", "az", "issue", "create", "Child task", "--parent", "AZE-134"]
 		const normalized = normalizeIssueJsonFlagOrder(argv)
 
 		expect(normalized).toEqual([
@@ -71,7 +63,9 @@ describe("resolveCliExecutionMode", () => {
 
 	it("uses command mode for non-dev subcommands", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
-		expect(resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"])).toBe("command")
+		expect(
+			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
+		).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
 	})
