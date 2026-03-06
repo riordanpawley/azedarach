@@ -114,6 +114,10 @@ type Model struct {
 	// Configuration
 	config *config.Config
 
+	// Local backup runtime policy
+	backupRunner   backupRunner
+	backupWarnings *backupWarningCollector
+
 	// Loading state
 	loading        bool
 	spinner        spinner.Model
@@ -230,6 +234,8 @@ func New(cfg *config.Config) Model {
 		cliTool = strings.TrimSpace(cfg.CLITool)
 	}
 	startupGate := diagService.RunStartupGate(diagnostics.DefaultStartupGateConfig(cliTool))
+	backupWarnings := newBackupWarningCollector()
+	appBackupRunner := newAppBackupRunner(cfg, repoDir, logger, backupWarnings)
 
 	model := Model{
 		tasks:              []domain.Task{},
@@ -241,6 +247,8 @@ func New(cfg *config.Config) Model {
 		toasts:             []Toast{},
 		styles:             styles.New(),
 		config:             cfg,
+		backupRunner:       appBackupRunner,
+		backupWarnings:     backupWarnings,
 		loading:            true, // Start with loading state
 		spinner:            s,
 		issueClient:        issueClient,
@@ -287,6 +295,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
+
+	case backupWrappedMsg:
+		for _, warning := range msg.warnings {
+			m.toasts = append(m.toasts, Toast{
+				Level:   ToastWarning,
+				Message: warning,
+				Expires: time.Now().Add(5 * time.Second),
+			})
+		}
+		if msg.inner == nil {
+			return m, nil
+		}
+		return m.Update(msg.inner)
 
 	case tea.KeyMsg:
 		// If overlay is open, route to overlay stack
@@ -1264,11 +1285,12 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		m.runBackupOnOpen()
 		tasks, err := m.issueClient.List(ctx)
 		if err != nil {
-			return issuesErrorMsg{err: err}
+			return m.wrapBackupWarnings(issuesErrorMsg{err: err})
 		}
-		return issuesLoadedMsg{tasks: tasks}
+		return m.wrapBackupWarnings(issuesLoadedMsg{tasks: tasks})
 	}
 }
 
@@ -1746,8 +1768,12 @@ func (m Model) deleteTaskCmd(taskID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		m.runBackupOnOpen()
 		err := m.issueClient.Delete(ctx, taskID)
-		return taskDeletedResultMsg{taskID: taskID, err: err}
+		if err == nil {
+			m.runBackupOnMutationSuccess()
+		}
+		return m.wrapBackupWarnings(taskDeletedResultMsg{taskID: taskID, err: err})
 	}
 }
 
@@ -2036,6 +2062,7 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
@@ -2085,24 +2112,26 @@ func (m Model) bulkMoveStatusCmd(taskIDs []string, delta int) tea.Cmd {
 
 			newStatus := statusOrder[newIdx]
 
-			// Update via linear client
-			err := m.issueClient.Update(ctx, taskID, newStatus)
-			if err != nil {
-				failed++
-				continue
+				// Update via linear client
+				err := m.issueClient.Update(ctx, taskID, newStatus)
+				if err != nil {
+					failed++
+					continue
+				}
+
+				m.runBackupOnMutationSuccess()
+				updated++
 			}
 
-			updated++
+			return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
 		}
-
-		return bulkStatusResultMsg{updated: updated, failed: failed}
-	}
 }
 
 func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		updated := 0
 		failed := 0
@@ -2113,10 +2142,11 @@ func (m Model) bulkDeleteCmd(taskIDs []string) tea.Cmd {
 				failed++
 				continue
 			}
+			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
 	}
 }
 
@@ -2124,6 +2154,7 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		updated := 0
 		failed := 0
@@ -2134,10 +2165,11 @@ func (m Model) bulkArchiveCmd(taskIDs []string) tea.Cmd {
 				failed++
 				continue
 			}
+			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
 	}
 }
 
@@ -2146,6 +2178,7 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		updated := 0
 		failed := 0
@@ -2156,10 +2189,11 @@ func (m Model) bulkSetStatusCmd(taskIDs []string, status domain.Status) tea.Cmd 
 				failed++
 				continue
 			}
+			m.runBackupOnMutationSuccess()
 			updated++
 		}
 
-		return bulkStatusResultMsg{updated: updated, failed: failed}
+		return m.wrapBackupWarnings(bulkStatusResultMsg{updated: updated, failed: failed})
 	}
 }
 
@@ -2167,6 +2201,7 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		if msg.ID != "" {
 			err := m.issueClient.UpdateDetails(ctx, msg.ID, linear.UpdateTaskParams{
@@ -2175,7 +2210,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 				Type:        msg.Type,
 				Priority:    msg.Priority,
 			})
-			return taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true}
+			if err == nil {
+				m.runBackupOnMutationSuccess()
+			}
+			return m.wrapBackupWarnings(taskCreatedResultMsg{taskID: msg.ID, err: err, isUpdate: true})
 		}
 
 		taskID, err := m.issueClient.Create(ctx, linear.CreateTaskParams{
@@ -2185,7 +2223,10 @@ func (m Model) saveTaskCmd(msg overlay.TaskCreatedMsg) tea.Cmd {
 			Priority:    msg.Priority,
 			ParentID:    msg.ParentID,
 		})
-		return taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false}
+		if err == nil {
+			m.runBackupOnMutationSuccess()
+		}
+		return m.wrapBackupWarnings(taskCreatedResultMsg{taskID: taskID, err: err, isUpdate: false})
 	}
 }
 
@@ -2201,6 +2242,7 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		m.runBackupOnOpen()
 
 		statusOrder := []domain.Status{
 			domain.StatusOpen,
@@ -2219,7 +2261,7 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 		}
 
 		if currentTask == nil {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("task not found")}
+			return m.wrapBackupWarnings(taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("task not found")})
 		}
 
 		// Find current status index
@@ -2232,13 +2274,13 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 		}
 
 		if currentIdx == -1 {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("invalid status")}
+			return m.wrapBackupWarnings(taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("invalid status")})
 		}
 
 		// Calculate new status
 		newIdx := currentIdx + delta
 		if newIdx < 0 || newIdx >= len(statusOrder) {
-			return taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("cannot move beyond status bounds")}
+			return m.wrapBackupWarnings(taskStatusResultMsg{taskID: taskID, err: fmt.Errorf("cannot move beyond status bounds")})
 		}
 
 		newStatus := statusOrder[newIdx]
@@ -2246,10 +2288,11 @@ func (m Model) moveTaskStatusCmd(taskID string, delta int) tea.Cmd {
 		// Update via linear client
 		err := m.issueClient.Update(ctx, taskID, newStatus)
 		if err != nil {
-			return taskStatusResultMsg{taskID: taskID, err: err}
+			return m.wrapBackupWarnings(taskStatusResultMsg{taskID: taskID, err: err})
 		}
 
-		return taskStatusResultMsg{taskID: taskID, newStatus: newStatus}
+		m.runBackupOnMutationSuccess()
+		return m.wrapBackupWarnings(taskStatusResultMsg{taskID: taskID, newStatus: newStatus})
 	}
 }
 

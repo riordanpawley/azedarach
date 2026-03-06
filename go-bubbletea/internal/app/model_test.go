@@ -2,12 +2,15 @@ package app
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/linear"
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
@@ -654,6 +657,150 @@ func containsAll(message string, fragments []string) bool {
 		}
 	}
 	return true
+}
+
+func TestLoadIssuesCmdInvokesBackupOpenAndShowsWarningsNonBlocking(t *testing.T) {
+	m := newTestModel()
+	collector := newBackupWarningCollector()
+	backupRunner := &recordingBackupRunner{
+		onOpenHook: func() {
+			collector.Add("Local backup attempt failed (non-blocking): simulated open warning")
+		},
+	}
+	m.backupRunner = backupRunner
+	m.backupWarnings = collector
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{
+		listPayload: []byte(`[]`),
+	}, slog.Default())
+
+	cmd := m.loadIssuesCmd()
+	msg := cmd()
+
+	result, _ := m.Update(msg)
+	m = result.(Model)
+
+	if backupRunner.openCalls != 1 {
+		t.Fatalf("expected OnOpen to run once, got %d", backupRunner.openCalls)
+	}
+	if m.loading {
+		t.Fatal("expected load issues flow to remain non-blocking and clear loading state")
+	}
+	if len(m.toasts) == 0 {
+		t.Fatal("expected warning toast from backup warning collector")
+	}
+	found := false
+	for _, toast := range m.toasts {
+		if toast.Level != ToastWarning {
+			continue
+		}
+		if strings.Contains(strings.ToLower(toast.Message), "local backup attempt failed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected actionable backup warning toast, got %+v", m.toasts)
+	}
+}
+
+func TestMoveTaskStatusCmdInvokesBackupOpenAndMutationSuccess(t *testing.T) {
+	m := newTestModel()
+	backupRunner := &recordingBackupRunner{}
+	m.backupRunner = backupRunner
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{
+		listPayload: []byte(`[]`),
+	}, slog.Default())
+
+	cmd := m.moveTaskStatusCmd("az-1", 1)
+	msg := cmd()
+
+	statusMsg, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("expected taskStatusResultMsg, got %T", msg)
+	}
+	if statusMsg.err != nil {
+		t.Fatalf("expected successful status move, got err=%v", statusMsg.err)
+	}
+	if backupRunner.openCalls != 1 {
+		t.Fatalf("expected OnOpen to run once, got %d", backupRunner.openCalls)
+	}
+	if backupRunner.mutationCalls != 1 {
+		t.Fatalf("expected OnMutationSuccess to run once, got %d", backupRunner.mutationCalls)
+	}
+}
+
+func TestMoveTaskStatusCmdSkipsMutationBackupWhenIssueUpdateFails(t *testing.T) {
+	m := newTestModel()
+	backupRunner := &recordingBackupRunner{}
+	m.backupRunner = backupRunner
+	m.issueClient = linear.NewClient(&scriptedLinearRunner{
+		listPayload: []byte(`[]`),
+		updateErr:   errors.New("update failed"),
+	}, slog.Default())
+
+	cmd := m.moveTaskStatusCmd("az-1", 1)
+	msg := cmd()
+
+	statusMsg, ok := msg.(taskStatusResultMsg)
+	if !ok {
+		t.Fatalf("expected taskStatusResultMsg, got %T", msg)
+	}
+	if statusMsg.err == nil {
+		t.Fatal("expected status update error")
+	}
+	if backupRunner.openCalls != 1 {
+		t.Fatalf("expected OnOpen to run once, got %d", backupRunner.openCalls)
+	}
+	if backupRunner.mutationCalls != 0 {
+		t.Fatalf("expected OnMutationSuccess not to run on failed update, got %d", backupRunner.mutationCalls)
+	}
+}
+
+type recordingBackupRunner struct {
+	openCalls     int
+	mutationCalls int
+	onOpenHook    func()
+}
+
+func (r *recordingBackupRunner) OnOpen() {
+	r.openCalls++
+	if r.onOpenHook != nil {
+		r.onOpenHook()
+	}
+}
+
+func (r *recordingBackupRunner) OnMutationSuccess() {
+	r.mutationCalls++
+}
+
+type scriptedLinearRunner struct {
+	listPayload []byte
+	updateErr   error
+}
+
+func (r *scriptedLinearRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	if len(args) < 2 || args[0] != "issue" {
+		return []byte(`{}`), nil
+	}
+
+	switch args[1] {
+	case "list":
+		if len(r.listPayload) == 0 {
+			return []byte(`[]`), nil
+		}
+		return r.listPayload, nil
+	case "update":
+		if r.updateErr != nil {
+			return nil, r.updateErr
+		}
+		return []byte(`{}`), nil
+	case "create":
+		return []byte(`{"id":"az-created"}`), nil
+	case "delete", "archive", "close":
+		return []byte(`{}`), nil
+	default:
+		return []byte(`{}`), nil
+	}
 }
 
 func TestModeStrings(t *testing.T) {
