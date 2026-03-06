@@ -14,6 +14,11 @@ import {
 	Schedule,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
+import {
+	DiagnosticsService,
+	type IssueSyncFailure,
+	type IssueSyncHealth,
+} from "../services/DiagnosticsService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
 	type ExternalIssueSnapshot,
@@ -302,16 +307,25 @@ const formatApiKeyFingerprint = (apiKey: string | undefined): string => {
 }
 
 export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueSyncService", {
-	dependencies: [AppConfig.Default, LocalIssueStore.Default, LinearSdk.Default],
+	dependencies: [
+		AppConfig.Default,
+		LocalIssueStore.Default,
+		LinearSdk.Default,
+		DiagnosticsService.Default,
+	],
 	effect: Effect.gen(function* () {
 		const appConfig = yield* AppConfig
 		const localStore = yield* LocalIssueStore
 		const linearSdk = yield* LinearSdk
+		const diagnostics = yield* DiagnosticsService
 		const fs = yield* FileSystem.FileSystem
 		const pathService = yield* Path.Path
 		const workflowStateCacheRef = yield* Ref.make<Map<string, string>>(new Map())
 		const warnedMissingApiKeyRef = yield* Ref.make(false)
 		const apiKeyCacheRef = yield* Ref.make<Map<string, ApiKeyCacheEntry>>(new Map())
+		const syncFailureCountRef = yield* Ref.make(0)
+		const lastSyncedAtRef = yield* Ref.make<Date | undefined>(undefined)
+		const lastFailureRef = yield* Ref.make<IssueSyncFailure | undefined>(undefined)
 		const bootstrapInFlightRef = yield* Ref.make<
 			Map<string, Deferred.Deferred<number, IssueSyncError>>
 		>(new Map())
@@ -331,6 +345,49 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const fromStore = <A>(
 			effect: Effect.Effect<A, LocalIssueStoreError>,
 		): Effect.Effect<A, IssueSyncError> => effect.pipe(Effect.mapError(mapLocalStoreError))
+
+		const reportSyncHealth = (params: {
+			readonly status: IssueSyncHealth["lastStatus"]
+			readonly message: string
+			readonly queueDepth: number
+			readonly failure?: IssueSyncFailure
+		}): Effect.Effect<void, never> =>
+			Effect.gen(function* () {
+				const config = yield* appConfig
+					.getIssueTrackerSyncConfig()
+					.pipe(Effect.orElseSucceed(() => undefined))
+				const backend = config !== undefined && "linear" in config.issueTracker ? "linear" : "none"
+				const syncEnabled =
+					config !== undefined && "linear" in config.issueTracker
+						? config.issueTracker.linear.syncEnabled
+						: false
+
+				if (params.status === "success") {
+					yield* Ref.set(lastSyncedAtRef, new Date())
+					yield* Ref.set(lastFailureRef, undefined)
+				}
+				if (params.failure !== undefined) {
+					yield* Ref.update(syncFailureCountRef, (count) => count + 1)
+					yield* Ref.set(lastFailureRef, params.failure)
+				}
+
+				const failedCount = yield* Ref.get(syncFailureCountRef)
+				const lastSyncedAt = yield* Ref.get(lastSyncedAtRef)
+				const lastFailure = yield* Ref.get(lastFailureRef)
+
+				yield* diagnostics
+					.setIssueSyncHealth({
+						backend,
+						syncEnabled,
+						queueDepth: params.queueDepth,
+						failedCount,
+						lastSyncedAt,
+						lastStatus: params.status,
+						lastMessage: params.message,
+						lastFailure,
+					})
+					.pipe(Effect.orElseSucceed(() => void 0))
+			})
 
 		const resolveDotEnvProvider = (
 			path: string,
@@ -899,6 +956,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			cwd: string | undefined,
 		): Effect.Effect<void, IssueSyncError> => {
 			const nextAttempts = item.attempts + 1
+			const failure: IssueSyncFailure = {
+				issueId: item.issueId,
+				operation: item.operation,
+				error: error.message,
+				attempts: nextAttempts,
+				occurredAt: new Date(),
+			}
 			const shouldTerminal = nextAttempts >= MAX_SYNC_ATTEMPTS
 			if (shouldTerminal) {
 				return fromStore(
@@ -909,6 +973,15 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							nextAttempts,
 						},
 						cwd,
+					),
+				).pipe(
+					Effect.tap(() =>
+						reportSyncHealth({
+							status: "failure",
+							message: `sync failed for ${item.issueId}`,
+							queueDepth: item.claims.length,
+							failure,
+						}),
 					),
 				)
 			}
@@ -923,6 +996,15 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						nextAttempts,
 					},
 					cwd,
+				),
+			).pipe(
+				Effect.tap(() =>
+					reportSyncHealth({
+						status: "failure",
+						message: `sync retry scheduled for ${item.issueId}`,
+						queueDepth: item.claims.length,
+						failure,
+					}),
 				),
 			)
 		}
@@ -1077,6 +1159,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					const runBootstrap: Effect.Effect<number, IssueSyncError> = Effect.gen(function* () {
 						const runtimeOption = yield* getLinearRuntime(cwd)
 						if (Option.isNone(runtimeOption)) {
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: "bootstrap skipped (linear sync unavailable)",
+								queueDepth: 0,
+							})
 							return 0
 						}
 
@@ -1084,12 +1171,22 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
 						)
 						if (bootstrapComplete) {
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: "bootstrap skipped (already complete)",
+								queueDepth: 0,
+							})
 							return 0
 						}
 
 						const existingCount = yield* fromStore(localStore.countIssues(cwd))
 						if (existingCount > 0) {
 							yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: "bootstrap skipped (local issues already present)",
+								queueDepth: 0,
+							})
 							return 0
 						}
 
@@ -1108,11 +1205,30 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						yield* Effect.log(
 							`Linear bootstrap complete: projectPath=${projectPath} imported=${imported} totalIssues=${totalIssues}`,
 						)
+						yield* reportSyncHealth({
+							status: "success",
+							message: `bootstrap imported ${imported} issues`,
+							queueDepth: 0,
+						})
 						return imported
 					})
 
 					return yield* runBootstrap.pipe(
 						Effect.tap((result) => Deferred.succeed(completion, result)),
+						Effect.tapError((error) =>
+							reportSyncHealth({
+								status: "failure",
+								message: `bootstrap failed: ${error.message}`,
+								queueDepth: 0,
+								failure: {
+									issueId: "bootstrap",
+									operation: "bootstrap",
+									error: error.message,
+									attempts: 1,
+									occurredAt: new Date(),
+								},
+							}),
+						),
 						Effect.tapError((error) => Deferred.fail(completion, error)),
 						Effect.ensuring(
 							Ref.update(bootstrapInFlightRef, (pending) => {
@@ -1170,6 +1286,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					> = Effect.gen(function* () {
 						const runtimeOption = yield* getLinearRuntime(cwd)
 						if (Option.isNone(runtimeOption)) {
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: "flush skipped (linear sync unavailable)",
+								queueDepth: 0,
+							})
 							return { pushed: 0, pulled: 0 }
 						}
 
@@ -1177,6 +1298,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
 						)
 						if (pendingItems.length === 0) {
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: "flush skipped (no pending sync items)",
+								queueDepth: 0,
+							})
 							return { pushed: 0, pulled: 0 }
 						}
 
@@ -1217,11 +1343,30 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						)
 
 						const pushed = yield* Ref.get(pushedRef)
+						yield* reportSyncHealth({
+							status: "success",
+							message: `flush processed ${collapsed.length} item(s), pushed ${pushed} claim(s)`,
+							queueDepth: Math.max(0, pendingItems.length - collapsed.length),
+						})
 						return { pushed, pulled: 0 }
 					})
 
 					return yield* runFlush.pipe(
 						Effect.tap((result) => Deferred.succeed(completion, result)),
+						Effect.tapError((error) =>
+							reportSyncHealth({
+								status: "failure",
+								message: `flush failed: ${error.message}`,
+								queueDepth: 0,
+								failure: {
+									issueId: "flush",
+									operation: "flush",
+									error: error.message,
+									attempts: 1,
+									occurredAt: new Date(),
+								},
+							}),
+						),
 						Effect.tapError((error) => Deferred.fail(completion, error)),
 						Effect.ensuring(
 							Ref.update(flushInFlightRef, (pending) => {
