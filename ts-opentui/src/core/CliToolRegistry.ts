@@ -26,8 +26,9 @@ export type CliToolName = "claude" | "opencode" | "codex"
  *
  * - "hooks+pty": Claude Code style - uses hooks with PTY pattern matching fallback
  * - "events": OpenCode style - rich plugin events for authoritative status
+ * - "pty": PTY-only detection for tools without hooks/events (for example Codex)
  */
-export type HookStrategy = "hooks+pty" | "events"
+export type HookStrategy = "hooks+pty" | "events" | "pty"
 
 /**
  * Options for building a CLI command
@@ -199,7 +200,7 @@ const codexToolDefinition: CliToolDefinition = {
 	executable: "codex",
 	hookConfigDir: ".codex",
 	sessionNamePrefix: "codex",
-	hookStrategy: "hooks+pty",
+	hookStrategy: "pty",
 
 	buildCommand: (options) => {
 		const parts: string[] = ["codex"]

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	normalizeIssueJsonFlagOrder,
@@ -82,6 +83,34 @@ describe("resolveCliExecutionMode", () => {
 	it("uses command mode for top-level help/version", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "--help"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "--version"])).toBe("command")
+	})
+})
+
+describe("deriveWaitingAttentionPlan", () => {
+	it("rings bell once when entering waiting", () => {
+		expect(deriveWaitingAttentionPlan("waiting", null)).toEqual({
+			ringBell: true,
+			nextFlag: "1",
+		})
+		expect(deriveWaitingAttentionPlan("waiting", "0")).toEqual({
+			ringBell: true,
+			nextFlag: "1",
+		})
+		expect(deriveWaitingAttentionPlan("waiting", "1")).toEqual({
+			ringBell: false,
+			nextFlag: "1",
+		})
+	})
+
+	it("resets waiting flag when leaving waiting", () => {
+		expect(deriveWaitingAttentionPlan("busy", "1")).toEqual({
+			ringBell: false,
+			nextFlag: "0",
+		})
+		expect(deriveWaitingAttentionPlan("idle", "1")).toEqual({
+			ringBell: false,
+			nextFlag: "0",
+		})
 	})
 })
 

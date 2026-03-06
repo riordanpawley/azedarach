@@ -141,9 +141,9 @@ export const DEFAULT_CONFIG = {
 	},
 	stateDetection: {
 		/**
-		 * Pattern matching is disabled by default.
-		 * Hooks (via TmuxSessionMonitor) are the authoritative source of session state.
-		 * Only enable pattern matching if hooks aren't working or for debugging.
+		 * PTY pattern matching is disabled by default.
+		 * When disabled, PTY-driven detection and metrics are inert.
+		 * Native tool signals (hooks/events via TmuxSessionMonitor) remain authoritative.
 		 */
 		patternMatching: false,
 	},
