@@ -21,6 +21,8 @@ type LinearCreateWebhookResult = Awaited<ReturnType<LinearClient["createWebhook"
 type LinearDeleteWebhookResult = Awaited<ReturnType<LinearClient["deleteWebhook"]>>
 type LinearTeamResult = Awaited<ReturnType<LinearClient["team"]>>
 type LinearTeamsResult = Awaited<ReturnType<LinearClient["teams"]>>
+type LinearProjectResult = Awaited<ReturnType<LinearClient["project"]>>
+type LinearProjectsResult = Awaited<ReturnType<LinearClient["projects"]>>
 
 export interface LinearSdkApi {
 	readonly issues: (
@@ -61,6 +63,10 @@ export interface LinearSdkApi {
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<LinearDeleteWebhookResult, LinearSdkError>
 	readonly resolveTeamId: (
+		reference: string,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<string, LinearSdkError>
+	readonly resolveProjectId: (
 		reference: string,
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<string, LinearSdkError>
@@ -208,8 +214,8 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: `Failed to delete webhook ${id} in Linear`,
 			})
 
-		const resolveTeamId: LinearSdkApi["resolveTeamId"] = (reference, options) =>
-			Effect.gen(function* () {
+			const resolveTeamId: LinearSdkApi["resolveTeamId"] = (reference, options) =>
+				Effect.gen(function* () {
 				const directTeamIdOption = yield* runWithClient<LinearTeamResult>({
 					operation: "team",
 					maxWaitMs: options?.maxWaitMs,
@@ -249,20 +255,73 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					)
 				}
 
-				return matched.id
-			})
+					return matched.id
+				})
 
-		return {
-			issues,
-			issue,
+			const resolveProjectId: LinearSdkApi["resolveProjectId"] = (reference, options) =>
+				Effect.gen(function* () {
+					const normalizedReference = reference.trim().toLowerCase()
+					if (normalizedReference.length === 0) {
+						return yield* Effect.fail(
+							new LinearSdkError({
+								message: "Unable to resolve Linear project: reference is empty",
+							}),
+						)
+					}
+
+					const directProjectIdOption = yield* runWithClient<LinearProjectResult>({
+						operation: "project",
+						maxWaitMs: options?.maxWaitMs,
+						request: (client) => client.project(reference),
+						fallbackError: `Unable to resolve Linear project '${reference}'`,
+					}).pipe(
+						Effect.map((project) => (project?.id ? Option.some(project.id) : Option.none<string>())),
+						Effect.catchAll(() => Effect.succeed(Option.none<string>())),
+					)
+
+					if (Option.isSome(directProjectIdOption)) {
+						return directProjectIdOption.value
+					}
+
+					const projects = yield* runWithClient<LinearProjectsResult>({
+						operation: "projects",
+						maxWaitMs: options?.maxWaitMs,
+						request: (client) => client.projects({ first: 250 }),
+						fallbackError: `Unable to resolve Linear project '${reference}'`,
+					})
+
+					const matched = projects.nodes.find((project) => {
+						const byId = project.id === reference
+						const bySlugId = project.slugId.trim().toLowerCase() === normalizedReference
+						const byName =
+							typeof project.name === "string" &&
+							project.name.trim().toLowerCase() === normalizedReference
+						return byId || bySlugId || byName
+					})
+
+					if (matched === undefined) {
+						return yield* Effect.fail(
+							new LinearSdkError({
+								message: `Unable to resolve Linear project '${reference}'`,
+							}),
+						)
+					}
+
+					return matched.id
+				})
+
+			return {
+				issues,
+				issue,
 			workflowStates,
 			issueLabels,
 			users,
 			createIssue,
 			updateIssue,
-			createWebhook,
-			deleteWebhook,
-			resolveTeamId,
-		} satisfies LinearSdkApi
-	}),
-}) {}
+				createWebhook,
+				deleteWebhook,
+				resolveTeamId,
+				resolveProjectId,
+			} satisfies LinearSdkApi
+		}),
+	}) {}

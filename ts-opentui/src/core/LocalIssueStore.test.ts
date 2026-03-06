@@ -165,3 +165,62 @@ describe("importExternalSnapshot", () => {
 		}
 	})
 })
+
+describe("getSyncQueueSummary", () => {
+	it("reports delayed and failed queue states for diagnostics", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-sync-summary-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const summary = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					const first = yield* store.create({ title: "First sync item" }, "linear", projectPath)
+					const firstClaims = yield* store.listPendingSync("linear", 10, projectPath)
+					yield* store.markSyncRetriable(
+						{
+							claims: firstClaims.map((item) => ({
+								id: item.id,
+								attemptToken: item.attemptToken,
+							})),
+							errorMessage: "retry later",
+							delaySeconds: 60,
+							nextAttempts: 1,
+						},
+						projectPath,
+					)
+
+					yield* store.create({ title: "Second sync item" }, "linear", projectPath)
+					const secondClaims = yield* store.listPendingSync("linear", 10, projectPath)
+					yield* store.markSyncTerminalFailure(
+						{
+							claims: secondClaims.map((item) => ({
+								id: item.id,
+								attemptToken: item.attemptToken,
+							})),
+							errorMessage: "terminal failure",
+							nextAttempts: 5,
+						},
+						projectPath,
+					)
+
+					const queueSummary = yield* store.getSyncQueueSummary("linear", projectPath)
+					const firstIssueClaims = yield* store.listPendingSync("linear", 10, projectPath)
+					expect(firstIssueClaims).toHaveLength(0)
+					expect(first.id.length).toBeGreaterThan(0)
+					return queueSummary
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(summary.total).toBe(2)
+			expect(summary.pendingReady).toBe(0)
+			expect(summary.pendingDelayed).toBe(1)
+			expect(summary.processingActive).toBe(0)
+			expect(summary.processingStale).toBe(0)
+			expect(summary.failed).toBe(1)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})

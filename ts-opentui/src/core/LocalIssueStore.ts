@@ -122,6 +122,15 @@ export interface MarkSyncTerminalFailureParams {
 	readonly nextAttempts: number
 }
 
+export interface SyncQueueSummary {
+	readonly total: number
+	readonly pendingReady: number
+	readonly pendingDelayed: number
+	readonly processingActive: number
+	readonly processingStale: number
+	readonly failed: number
+}
+
 export interface ExternalIssueSnapshot {
 	readonly localId: string
 	readonly externalId: string
@@ -1659,11 +1668,11 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-			clearIssueAttachments: (
-				issueId: string,
-				cwd?: string,
-			): Effect.Effect<number, LocalIssueStoreError> =>
-				withSql(cwd, (sql) =>
+				clearIssueAttachments: (
+					issueId: string,
+					cwd?: string,
+				): Effect.Effect<number, LocalIssueStoreError> =>
+					withSql(cwd, (sql) =>
 					sql.withTransaction(
 						Effect.gen(function* () {
 							const existing = yield* sql<{ readonly count: number }>`
@@ -1680,13 +1689,101 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							}
 							return count
 						}),
+						),
 					),
-				),
 
-			listPendingSync: (
-				target: SyncTarget,
-				limit: number,
-				cwd?: string,
+				getSyncQueueSummary: (
+					target: SyncTarget,
+					cwd?: string,
+				): Effect.Effect<SyncQueueSummary, LocalIssueStoreError> =>
+					withSql(cwd, (sql) =>
+						Effect.gen(function* () {
+							const now = nowIso()
+							const rows = yield* sql<{
+								readonly total: number
+								readonly pending_ready: number | null
+								readonly pending_delayed: number | null
+								readonly processing_active: number | null
+								readonly processing_stale: number | null
+								readonly failed: number | null
+							}>`
+								SELECT
+									COUNT(*) as total,
+									SUM(
+										CASE
+											WHEN status = ${"pending"} AND (next_attempt_at IS NULL OR next_attempt_at <= ${now})
+												THEN 1
+											ELSE 0
+										END
+									) as pending_ready,
+									SUM(
+										CASE
+											WHEN status = ${"pending"} AND next_attempt_at > ${now}
+												THEN 1
+											ELSE 0
+										END
+									) as pending_delayed,
+									SUM(
+										CASE
+											WHEN
+												status = ${"processing"}
+												AND attempt_token IS NOT NULL
+												AND lease_expires_at IS NOT NULL
+												AND lease_expires_at > ${now}
+													THEN 1
+											ELSE 0
+										END
+									) as processing_active,
+									SUM(
+										CASE
+											WHEN
+												status = ${"processing"}
+												AND (
+													attempt_token IS NULL
+													OR lease_expires_at IS NULL
+													OR lease_expires_at <= ${now}
+												)
+													THEN 1
+											ELSE 0
+										END
+									) as processing_stale,
+									SUM(
+										CASE
+											WHEN status = ${"failed"}
+												THEN 1
+											ELSE 0
+										END
+									) as failed
+								FROM sync_queue
+								WHERE target = ${target}
+							`
+							const row = rows[0]
+							if (row === undefined) {
+								return {
+									total: 0,
+									pendingReady: 0,
+									pendingDelayed: 0,
+									processingActive: 0,
+									processingStale: 0,
+									failed: 0,
+								} satisfies SyncQueueSummary
+							}
+
+							return {
+								total: row.total,
+								pendingReady: row.pending_ready ?? 0,
+								pendingDelayed: row.pending_delayed ?? 0,
+								processingActive: row.processing_active ?? 0,
+								processingStale: row.processing_stale ?? 0,
+								failed: row.failed ?? 0,
+							} satisfies SyncQueueSummary
+						}),
+					),
+
+				listPendingSync: (
+					target: SyncTarget,
+					limit: number,
+					cwd?: string,
 			): Effect.Effect<readonly PendingSyncItem[], LocalIssueStoreError> =>
 				withSqlMutation(cwd, (sql) =>
 					sql.withTransaction(
