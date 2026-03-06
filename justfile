@@ -39,3 +39,6 @@ install-sfe-ts: build-sfe-ts link-sfe-ts
 ts-build-link-run: build-sfe-ts link-sfe-ts
     @echo "Running az"
     az
+
+release-ts-opentui bump='patch' *args:
+    ./ts-opentui/scripts/release.sh {{ bump }} {{ args }}

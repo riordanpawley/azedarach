@@ -7,9 +7,11 @@ usage() {
 Cut an Azedarach ts-opentui release with version/tag sync.
 
 Usage:
-  release.sh <version> [--dry-run] [--skip-checks] [--skip-pull] [--remote <name>] [--branch <name>]
+  release.sh <version|major|minor|patch> [--dry-run] [--skip-checks] [--skip-pull] [--remote <name>] [--branch <name>]
 
 Examples:
+  ./ts-opentui/scripts/release.sh patch
+  ./ts-opentui/scripts/release.sh minor
   ./ts-opentui/scripts/release.sh 0.3.2
   ./ts-opentui/scripts/release.sh v0.3.2 --dry-run
 
@@ -46,7 +48,7 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
 	exit 0
 fi
 
-VERSION_INPUT="$1"
+RELEASE_TARGET="$1"
 shift
 
 DRY_RUN=0
@@ -87,14 +89,6 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-VERSION="${VERSION_INPUT#v}"
-SEMVER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-if [[ ! "$VERSION" =~ $SEMVER_REGEX ]]; then
-	fail "Version must be semver (for example 0.3.2 or 0.3.2-rc.1). Received: $VERSION_INPUT"
-fi
-
-TAG="v${VERSION}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PACKAGE_JSON_PATH="$REPO_ROOT/ts-opentui/package.json"
@@ -118,12 +112,8 @@ if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
 	fail "Remote '$REMOTE' does not exist."
 fi
 
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-	fail "Tag '$TAG' already exists locally."
-fi
-
-if git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
-	fail "Tag '$TAG' already exists on remote '$REMOTE'."
+if [[ "$RUN_PULL" -eq 1 ]]; then
+	run git pull --rebase "$REMOTE" "$BRANCH"
 fi
 
 CURRENT_VERSION="$(
@@ -134,13 +124,52 @@ CURRENT_VERSION="$(
 	' "$PACKAGE_JSON_PATH"
 )"
 
+SEMVER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+PLAIN_SEMVER_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+case "$RELEASE_TARGET" in
+major | minor | patch)
+	if [[ ! "$CURRENT_VERSION" =~ $PLAIN_SEMVER_REGEX ]]; then
+		fail "Cannot apply '$RELEASE_TARGET' bump to non-standard current version '$CURRENT_VERSION'. Use explicit semver version instead."
+	fi
+	IFS='.' read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH <<<"$CURRENT_VERSION"
+	case "$RELEASE_TARGET" in
+	major)
+		VERSION="$((CURRENT_MAJOR + 1)).0.0"
+		;;
+	minor)
+		VERSION="${CURRENT_MAJOR}.$((CURRENT_MINOR + 1)).0"
+		;;
+	patch)
+		VERSION="${CURRENT_MAJOR}.${CURRENT_MINOR}.$((CURRENT_PATCH + 1))"
+		;;
+	esac
+	;;
+*)
+	VERSION="${RELEASE_TARGET#v}"
+	if [[ ! "$VERSION" =~ $SEMVER_REGEX ]]; then
+		fail "Release target must be major|minor|patch or a semver version (for example 0.3.2 or 0.3.2-rc.1). Received: $RELEASE_TARGET"
+	fi
+	;;
+esac
+
 if [[ "$CURRENT_VERSION" == "$VERSION" ]]; then
 	fail "ts-opentui/package.json is already $VERSION. Choose a new version."
 fi
 
-if [[ "$RUN_PULL" -eq 1 ]]; then
-	run git pull --rebase "$REMOTE" "$BRANCH"
+TAG="v${VERSION}"
+
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+	fail "Tag '$TAG' already exists locally."
 fi
+
+if git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
+	fail "Tag '$TAG' already exists on remote '$REMOTE'."
+fi
+
+echo "Current version: $CURRENT_VERSION"
+echo "Next version:    $VERSION"
+echo "Release tag:     $TAG"
 
 if [[ "$RUN_CHECKS" -eq 1 ]]; then
 	echo "+ (cd ts-opentui && bun run type-check)"

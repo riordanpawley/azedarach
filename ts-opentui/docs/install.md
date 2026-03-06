@@ -118,7 +118,7 @@ Example release cut:
 ```bash
 git checkout main
 git pull --rebase
-./ts-opentui/scripts/release.sh 0.3.1
+just release-ts-opentui patch
 ```
 
 Release script behavior:
@@ -128,6 +128,11 @@ Release script behavior:
 - commits `release: vX.Y.Z`
 - creates annotated tag `vX.Y.Z`
 - pushes both `main` and the tag
+
+Accepted bump targets:
+- `patch`
+- `minor`
+- `major`
 
 ## Homebrew Tap Setup (Maintainers)
 
