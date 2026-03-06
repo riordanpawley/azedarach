@@ -187,6 +187,12 @@ Settings are stored in `.azedarach.json` in your project root:
   "session": {
     "dangerouslySkipPermissions": false
   },
+  "sessionRecovery": {
+    "mode": "auto",
+    "autoRecoveryDelayMs": 2000,
+    "retryBaseDelayMs": 1000,
+    "retryMaxDelayMs": 60000
+  },
   "git": {
     "pushBranchOnCreate": true,
     "pushEnabled": true,
@@ -206,8 +212,12 @@ Settings are stored in `.azedarach.json` in your project root:
     "autoDetect": true
   },
   "issueTracker": {
-    "beads_rust": {
-      "syncEnabled": true
+    "linear": {
+      "syncEnabled": true,
+      "team": "AZE",
+      "webhooks": {
+        "enabled": true
+      }
     }
   },
   "stateDetection": {
@@ -215,6 +225,8 @@ Settings are stored in `.azedarach.json` in your project root:
   }
 }
 ```
+
+`sessionRecovery.retryBaseDelayMs` and `sessionRecovery.retryMaxDelayMs` are advanced controls for auto-recovery retry timing in raw JSON. Azedarach retries transient recovery failures indefinitely, while capping each wait duration at `retryMaxDelayMs`.
 
 ## Planning Overlay
 

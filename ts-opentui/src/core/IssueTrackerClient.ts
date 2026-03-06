@@ -318,6 +318,7 @@ const ZERO_SYNC_RESULT: SyncResult = {
 const LINEAR_STATUS_CLOSED = "closed"
 const LINEAR_STATUS_IN_PROGRESS = "in_progress"
 const LINEAR_STATUS_BLOCKED = "blocked"
+const LINEAR_METADATA_PAGE_SIZE = 250
 const _LINEAR_DETAIL_CACHE_TTL_MS = 5 * 60 * 1000
 const _LINEAR_DETAIL_FETCH_LIMIT_PER_LIST = 80
 const _LINEAR_DETAIL_FETCH_CHUNK_SIZE = 20
@@ -1500,21 +1501,80 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					return yield* collectPages(undefined, [])
 				})
 
+			const fetchAllWorkflowStates = (): Effect.Effect<
+				readonly {
+					readonly id: string
+					readonly teamId?: string
+					readonly name: string
+					readonly type: string
+				}[],
+				IssueTrackerError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					const fetchWorkflowStatesPage = (afterCursor: string | null | undefined) =>
+						linearSdk
+							.workflowStates({
+								first: LINEAR_METADATA_PAGE_SIZE,
+								after: afterCursor ?? undefined,
+							})
+							.pipe(
+								Effect.mapError(
+									(error) =>
+										new IssueTrackerError({
+											message: error.message,
+											command: "linear-sdk workflowStates",
+										}),
+								),
+							)
+
+					const collectPages = (
+						afterCursor: string | null | undefined,
+						accumulator: readonly {
+							readonly id: string
+							readonly teamId?: string
+							readonly name: string
+							readonly type: string
+						}[],
+					): Effect.Effect<
+						readonly {
+							readonly id: string
+							readonly teamId?: string
+							readonly name: string
+							readonly type: string
+						}[],
+						IssueTrackerError,
+						CommandExecutor.CommandExecutor
+					> =>
+						fetchWorkflowStatesPage(afterCursor).pipe(
+							Effect.flatMap((states) => {
+								const nextAccumulator = [
+									...accumulator,
+									...states.nodes.map((state) => ({
+										id: state.id,
+										teamId: state.teamId,
+										name: state.name,
+										type: state.type,
+									})),
+								]
+								if (!states.pageInfo.hasNextPage || !states.pageInfo.endCursor) {
+									return Effect.succeed(nextAccumulator)
+								}
+								return collectPages(states.pageInfo.endCursor, nextAccumulator)
+							}),
+						)
+
+					return yield* collectPages(undefined, [])
+				})
+
 			const fetchStateNameById = (): Effect.Effect<
 				ReadonlyMap<string, string>,
 				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				linearSdk.workflowStates({ first: 500 }).pipe(
+				fetchAllWorkflowStates().pipe(
 					Effect.map(
-						(states) => new Map(states.nodes.map((state) => [state.id, state.name] as const)),
-					),
-					Effect.mapError(
-						(error) =>
-							new IssueTrackerError({
-								message: error.message,
-								command: "linear-sdk workflowStates",
-							}),
+						(states) => new Map(states.map((state) => [state.id, state.name] as const)),
 					),
 				)
 
@@ -1527,40 +1587,65 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				}[],
 				IssueTrackerError,
 				CommandExecutor.CommandExecutor
+			> => fetchAllWorkflowStates()
+
+			const fetchAllIssueLabels = (): Effect.Effect<
+				readonly { readonly id: string; readonly name: string }[],
+				IssueTrackerError,
+				CommandExecutor.CommandExecutor
 			> =>
-				linearSdk.workflowStates({ first: 500 }).pipe(
-					Effect.map((states) =>
-						states.nodes.map((state) => ({
-							id: state.id,
-							teamId: state.teamId,
-							name: state.name,
-							type: state.type,
-						})),
-					),
-					Effect.mapError(
-						(error) =>
-							new IssueTrackerError({
-								message: error.message,
-								command: "linear-sdk workflowStates",
+				Effect.gen(function* () {
+					const fetchIssueLabelsPage = (afterCursor: string | null | undefined) =>
+						linearSdk
+							.issueLabels({
+								first: LINEAR_METADATA_PAGE_SIZE,
+								after: afterCursor ?? undefined,
+							})
+							.pipe(
+								Effect.mapError(
+									(error) =>
+										new IssueTrackerError({
+											message: error.message,
+											command: "linear-sdk issueLabels",
+										}),
+								),
+							)
+
+					const collectPages = (
+						afterCursor: string | null | undefined,
+						accumulator: readonly { readonly id: string; readonly name: string }[],
+					): Effect.Effect<
+						readonly { readonly id: string; readonly name: string }[],
+						IssueTrackerError,
+						CommandExecutor.CommandExecutor
+					> =>
+						fetchIssueLabelsPage(afterCursor).pipe(
+							Effect.flatMap((labels) => {
+								const nextAccumulator = [
+									...accumulator,
+									...labels.nodes.map((label) => ({
+										id: label.id,
+										name: label.name,
+									})),
+								]
+								if (!labels.pageInfo.hasNextPage || !labels.pageInfo.endCursor) {
+									return Effect.succeed(nextAccumulator)
+								}
+								return collectPages(labels.pageInfo.endCursor, nextAccumulator)
 							}),
-					),
-				)
+						)
+
+					return yield* collectPages(undefined, [])
+				})
 
 			const fetchLabelNameById = (): Effect.Effect<
 				ReadonlyMap<string, string>,
 				IssueTrackerError,
 				CommandExecutor.CommandExecutor
 			> =>
-				linearSdk.issueLabels({ first: 500 }).pipe(
+				fetchAllIssueLabels().pipe(
 					Effect.map(
-						(labels) => new Map(labels.nodes.map((label) => [label.id, label.name] as const)),
-					),
-					Effect.mapError(
-						(error) =>
-							new IssueTrackerError({
-								message: error.message,
-								command: "linear-sdk issueLabels",
-							}),
+						(labels) => new Map(labels.map((label) => [label.id, label.name] as const)),
 					),
 				)
 

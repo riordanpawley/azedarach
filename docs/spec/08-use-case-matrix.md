@@ -172,6 +172,16 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: `Space x`
 - Expected: session ends; card remains for future restarts
 
+### UC-SESS-009 Auto-recover crashed session without duplicate recovery storms
+
+- Trigger: crashed session is detected repeatedly across refresh cycles
+- Expected: recovery runs through a single deduplicated worker path; no parallel duplicate recoveries for same issue
+
+### UC-SESS-010 Keep retrying transient crash recovery with capped waits
+
+- Trigger: auto-recovery encounters transient recover-session failures
+- Expected: retries continue with exponential+jitter delays capped by configured maximum; terminal failures stop with explicit guidance
+
 ## 8.6 Dev Server Use Cases
 
 ### UC-DEV-001 Start per-task dev server
@@ -220,6 +230,11 @@ This section expands product behavior into concrete user-centered use cases.
 
 - Trigger: source `Space b`, choose target
 - Expected: source changes merged into target branch
+
+### UC-GIT-006 Preserve divergence indicator when behind-count parse fails
+
+- Trigger: origin-sync behind-count command returns non-numeric output
+- Expected: parse failure is logged; previous behind indicator is retained; state never becomes `NaN`
 
 ## 8.8 PR Use Cases
 
@@ -459,6 +474,16 @@ This section expands product behavior into concrete user-centered use cases.
 - Trigger: issue removed during refresh
 - Expected: nearest valid focus chosen without panic
 
+### UC-OPS-006 Handle terminal auto-recovery failure with manual path preserved
+
+- Trigger: crashed-session recovery returns terminal failure (for example invalid state/worktree missing)
+- Expected: retry loop stops for that issue, terminal reason is shown, and manual recovery path remains available
+
+### UC-OPS-007 Observe transient auto-recovery attempt logs during outage
+
+- Trigger: transient recovery failures persist for several attempts
+- Expected: per-attempt logs include issue context and attempt progression while board remains responsive
+
 ## 8.17 Startup and Re-entry Use Cases
 
 ### UC-BOOT-001 Launch with missing required dependency
@@ -546,7 +571,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Git/PR use cases -> AZ-FR-1001..1108
 - Authoring/planning -> AZ-FR-1301..1506
 - Attachments/settings/projects -> AZ-FR-1601..1805
-- Recovery/ops -> AZ-FR-2101..2205 and Section 05 failure cases
+- Recovery/ops -> AZ-FR-2101..2207 and Section 05 failure cases
 - Startup/re-entry -> AZ-FR-2701..2711
 - Concurrency/mutation -> AZ-FR-2801..2808
 - Terminal/idempotence -> AZ-FR-2901..3004

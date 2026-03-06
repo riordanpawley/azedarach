@@ -81,6 +81,36 @@ Workflows are written as behavior contracts, not implementation details.
 - terminate session process
 - keep worktree unless user performs cleanup
 
+## 3.4a Crashed Session Auto-Recovery Workflow
+
+### Trigger
+
+- refresh/session-reconciliation detects persisted session in `crashed` state
+- recovery mode is configured as auto
+
+### Main Path
+
+1. enqueue crashed issue ID into a deduplicated recovery queue
+2. a single scoped recovery worker consumes queued issue IDs
+3. wait configured `sessionRecovery.autoRecoveryDelayMs` before first attempt
+4. run recover-session operation for issue
+5. if success, mark session as recovered and clear queued/in-flight marker
+
+### Transient Failure Path
+
+1. classify error as transient
+2. log failure with attempt metadata and issue context
+3. retry using exponential backoff + jitter
+4. cap per-attempt wait at `sessionRecovery.retryMaxDelayMs`
+5. continue until success or error classification changes to terminal
+
+### Terminal Failure Path
+
+1. classify error as terminal
+2. log terminal stop reason with issue context
+3. stop retries for that issue
+4. leave issue recoverable through explicit manual recovery actions
+
 ## 3.5 Dev Server Workflow
 
 ### Toggle (`Space r`)
@@ -148,6 +178,25 @@ For each queued issue item, source branch resolves as:
 2. if assistant resolves conflict, continue queue processing
 3. if assistant fails or allowed attempts are exhausted, keep item recoverable and emit manual-resolution guidance
 4. queue continues with remaining items regardless of individual failure
+
+## 3.6b Origin Sync Behind-Count Parsing Workflow
+
+### Trigger
+
+- background git sync checks branch divergence in origin workflow mode
+
+### Main Path
+
+1. run behind-count command for configured base branch
+2. parse count as integer
+3. update behind-count state and any dependent notifications
+
+### Parse Failure Path
+
+1. treat non-integer output as tagged parse failure
+2. log parse failure with command/output context
+3. retain previous behind-count state
+4. continue polling loop without propagating `NaN` to UI logic
 
 ## 3.7 Create PR Workflow (`Space P`)
 
@@ -725,7 +774,7 @@ Linear synchronization contract:
 - hydration MUST NOT clobber locally pending optimistic updates
 - backend sync requests MUST flow through a bounded-rate queue with burst allowance
 - queued sync requests MUST be deduplicated by intent key so equivalent in-flight work is not duplicated
-- metadata/list reads that require full dataset coverage MUST honor provider page-size caps and traverse cursor pagination until complete
+- metadata/list reads that require full dataset coverage (including workflow states and issue labels) MUST honor provider page-size caps, MUST NOT send over-cap page sizes, and MUST traverse cursor pagination until complete
 - linear sync lifecycle MUST emit logs for dispatch start, skip decisions, success, retry scheduling, and terminal failure
 - linear sync logs MUST include project path, operation kind, attempt context, and issue identity (`issueId` or bootstrap/flush scope), plus external linear issue ID when known
 - default read operations SHOULD use bounded wait and return local state if refresh wait budget is exceeded

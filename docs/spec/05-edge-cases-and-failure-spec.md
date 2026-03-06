@@ -58,6 +58,27 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - transition to error state.
   - provide setup command hint.
 
+### Case F-014: Repeated refresh cycles re-detect same crashed session
+
+- Required behavior:
+  - deduplicate recovery targets by issue ID.
+  - prevent concurrent duplicate recovery attempts for the same issue.
+  - keep normal board refresh responsive while recovery runs in background scope.
+
+### Case F-015: Auto-recovery hits long transient failure streak
+
+- Required behavior:
+  - continue retries for transient failures.
+  - use exponential+jitter retry delays capped by configured max delay.
+  - log each failed attempt with attempt count and issue context.
+
+### Case F-016: Auto-recovery encounters terminal failure
+
+- Required behavior:
+  - stop retry loop for that issue immediately.
+  - preserve recoverable crashed/manual-recovery path.
+  - provide clear terminal reason guidance.
+
 ## 5.5 Worktree and Git Failures
 
 ### Case F-020: Worktree path already exists but is invalid
@@ -101,6 +122,13 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
 - Required behavior:
   - fallback to plain git diff view.
   - notify user of reduced output mode.
+
+### Case F-026: Git behind-count command returns non-numeric output
+
+- Required behavior:
+  - treat parse as explicit failure and log command/output context.
+  - preserve previously known behind-count value.
+  - avoid propagating `NaN` into indicators/notifications.
 
 ## 5.6 PR and Network Failures
 
@@ -331,6 +359,7 @@ On failure, logs SHOULD capture:
 - exit code/stdout/stderr snippets (sanitized)
 - timestamp
 - for linear sync queue failures, attempt counter, retry delay vs terminal failure decision, and known external Linear issue ID
+- for linear metadata fetch failures, endpoint name, requested page size, and provider validation error details (for example over-cap page size rejections)
 
 ## 5.19 Startup and Shutdown Edge Cases
 

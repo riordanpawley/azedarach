@@ -11,11 +11,13 @@ import {
 	Cause,
 	Config,
 	DateTime,
+	Duration,
 	Effect,
 	Fiber,
 	HashMap,
 	Option,
 	Order,
+	Queue,
 	Record,
 	Ref,
 	Schedule,
@@ -29,8 +31,19 @@ import {
 	type Issue,
 	type SyncRequiredError,
 } from "../core/IssueTrackerClient.js"
-import { SessionManager } from "../core/SessionManager.js"
+import {
+	SessionManager,
+	type InvalidStateError,
+	type SessionError,
+	type SessionLimitError,
+	type SessionNotFoundError,
+} from "../core/SessionManager.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
+import type { ShellNotReadyError } from "../core/WorktreeSessionService.js"
+import type {
+	SessionNotFoundError as TmuxSessionNotFoundError,
+	TmuxError,
+} from "../core/TmuxService.js"
 import { getWorktreePath } from "../core/paths.js"
 import { WorktreeManager } from "../core/WorktreeManager.js"
 import { emptyRecord } from "../lib/empty.js"
@@ -48,6 +61,7 @@ import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
+import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
@@ -61,6 +75,8 @@ const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 const SQLITE_LOCK_RETRY_ATTEMPTS = 3
 const SQLITE_LOCK_RETRY_DELAY = "120 millis"
+const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
+const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
 
 const isSqliteLockMessage = (value: string): boolean => {
 	const normalized = value.toLowerCase()
@@ -119,6 +135,80 @@ const withSqliteLockRetry = <A, E, R>(
 			while: (error) => isSqliteLockError(error),
 		}),
 	)
+
+type SessionRecoveryError =
+	| SessionNotFoundError
+	| TmuxSessionNotFoundError
+	| InvalidStateError
+	| TmuxError
+	| ShellNotReadyError
+	| SessionError
+	| SessionLimitError
+
+export type SessionRecoveryRetryability = "transient" | "terminal"
+
+const isTransientSessionErrorMessage = (message: string): boolean => {
+	const normalized = message.toLowerCase()
+	return (
+		normalized.includes("temporarily unavailable") ||
+		normalized.includes("timed out") ||
+		normalized.includes("timeout") ||
+		normalized.includes("resource busy") ||
+		normalized.includes("connection reset") ||
+		normalized.includes("broken pipe")
+	)
+}
+
+const normalizeRecoveryRetryBaseDelayMs = (value: number): number =>
+	Number.isFinite(value)
+		? Math.max(Math.trunc(value), SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN)
+		: 1000
+
+const normalizeRecoveryRetryMaxDelayMs = (value: number, baseDelayMs: number): number =>
+	Number.isFinite(value)
+		? Math.max(Math.trunc(value), Math.max(baseDelayMs, SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN))
+		: 60000
+
+export const classifySessionRecoveryError = (
+	error: SessionRecoveryError,
+): SessionRecoveryRetryability => {
+	switch (error._tag) {
+		case "TmuxError":
+			return "transient"
+		case "ShellNotReadyError":
+			return "transient"
+		case "SessionNotFoundError":
+			return "session" in error ? "transient" : "terminal"
+		case "SessionLimitError":
+			return "transient"
+		case "SessionError":
+			return isTransientSessionErrorMessage(error.message) ? "transient" : "terminal"
+		case "InvalidStateError":
+			return "terminal"
+	}
+}
+
+const isTransientSessionRecoveryError = (error: SessionRecoveryError): boolean =>
+	classifySessionRecoveryError(error) === "transient"
+
+const formatSessionRecoveryError = (error: SessionRecoveryError): string => {
+	switch (error._tag) {
+		case "SessionNotFoundError":
+			return "session" in error
+				? `tmux session ${error.session} not found`
+				: `session ${error.issueId} not found`
+		case "InvalidStateError":
+			return `state=${error.currentState} expected=${error.expectedState ?? "unknown"}`
+		case "TmuxError":
+			return error.message
+		case "ShellNotReadyError":
+			return `${error.message} target=${error.target}`
+		case "SessionError":
+			return error.message
+		case "SessionLimitError":
+			return `${error.message} current=${error.current} limit=${error.limit}`
+	}
+}
 
 const normalizeLinearWebhookStatus = (stateName: string | undefined): ColumnStatus => {
 	if (!stateName) return "open"
@@ -466,6 +556,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			readonly timestamp: number
 		} | null>(null)
 		const linearIdentifierByEntityIdRef = yield* Ref.make<Map<string, string>>(new Map())
+		const autoRecoveryQueue = yield* Queue.unbounded<string>()
+		const autoRecoveryTrackedIssueIdsRef = yield* Ref.make<ReadonlySet<string>>(new Set())
 
 		// ====================================================================
 		// Per-Project State Management
@@ -776,6 +868,142 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			)
 
+		const markAutoRecoveryTracked = (issueId: string): Effect.Effect<boolean> =>
+			Ref.modify(autoRecoveryTrackedIssueIdsRef, (current): [boolean, ReadonlySet<string>] => {
+				if (current.has(issueId)) {
+					return [false, current]
+				}
+				const next = new Set(current)
+				next.add(issueId)
+				return [true, next]
+			})
+
+		const unmarkAutoRecoveryTracked = (issueId: string): Effect.Effect<void> =>
+			Ref.update(autoRecoveryTrackedIssueIdsRef, (current) => {
+				if (!current.has(issueId)) {
+					return current
+				}
+				const next = new Set(current)
+				next.delete(issueId)
+				return next
+			})
+
+		const enqueueAutoRecovery = (issueId: string): Effect.Effect<boolean> =>
+			Effect.gen(function* () {
+				const shouldEnqueue = yield* markAutoRecoveryTracked(issueId)
+				if (!shouldEnqueue) {
+					return false
+				}
+				const offered = yield* Queue.offer(autoRecoveryQueue, issueId)
+				if (!offered) {
+					yield* unmarkAutoRecoveryTracked(issueId)
+					yield* Effect.logWarning(`Auto-recovery queue is unavailable for ${issueId}`)
+					return false
+				}
+				return true
+			})
+
+		const runAutoRecoveryForIssue = (issueId: string) =>
+			Effect.gen(function* () {
+				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
+				const initialDelayMs = Math.max(0, Math.trunc(recoveryConfig.autoRecoveryDelayMs))
+				const retryBaseDelayMs = normalizeRecoveryRetryBaseDelayMs(recoveryConfig.retryBaseDelayMs)
+				const retryMaxDelayMs = normalizeRecoveryRetryMaxDelayMs(
+					recoveryConfig.retryMaxDelayMs,
+					retryBaseDelayMs,
+				)
+				let attempt = 0
+
+				if (initialDelayMs > 0) {
+					yield* Effect.sleep(Duration.millis(initialDelayMs))
+				}
+
+				yield* sessionManager.recoverSession(issueId).pipe(
+					Effect.tap(() => Effect.log(`Auto-recovered session for ${issueId}`)),
+					Effect.tapError((error) => {
+						attempt += 1
+						const retryability = classifySessionRecoveryError(error)
+						return Effect.logError(
+							`Auto-recovery attempt ${attempt} failed for ${issueId} [${error._tag}, ${retryability}] ${formatSessionRecoveryError(error)}`,
+						)
+					}),
+					Effect.retry({
+						schedule: makeSessionRecoveryRetrySchedule(retryBaseDelayMs, retryMaxDelayMs),
+						while: isTransientSessionRecoveryError,
+					}),
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Stopped auto-recovery for ${issueId} [${error._tag}] ${formatSessionRecoveryError(error)}`,
+						),
+					),
+					Effect.ensuring(unmarkAutoRecoveryTracked(issueId)),
+				)
+			})
+
+		const queueAutoRecoveryForCrashedSessions = (
+			activeSessions: ReadonlyArray<{ readonly issueId: string; readonly state: string }>,
+		): Effect.Effect<void> =>
+			Effect.gen(function* () {
+				const crashedIssueIds = Array.from(
+					new Set(
+						activeSessions
+							.filter((session) => session.state === "crashed")
+							.map((session) => session.issueId),
+					),
+				)
+				if (crashedIssueIds.length === 0) {
+					return
+				}
+
+				const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
+				if (recoveryConfig.mode !== "auto") {
+					yield* Effect.log(
+						`${crashedIssueIds.length} crashed session(s) detected. Manual recovery mode - use R to recover.`,
+					)
+					return
+				}
+
+				let enqueuedCount = 0
+				for (const issueId of crashedIssueIds) {
+					const wasEnqueued = yield* enqueueAutoRecovery(issueId)
+					if (wasEnqueued) {
+						enqueuedCount += 1
+					}
+				}
+
+				if (enqueuedCount > 0) {
+					yield* Effect.log(
+						`Queued ${enqueuedCount}/${crashedIssueIds.length} crashed session(s) for auto-recovery`,
+					)
+				}
+			})
+
+		const startAutoRecoveryWorkerFiber = () =>
+			Effect.gen(function* () {
+				const autoRecoveryFiber = yield* Effect.forever(
+					Queue.take(autoRecoveryQueue).pipe(
+						Effect.flatMap((issueId) => runAutoRecoveryForIssue(issueId)),
+						Effect.catchAllCause((cause) =>
+							Cause.isInterruptedOnly(cause)
+								? Effect.void
+								: Effect.logError(
+										`Auto-recovery worker iteration failed: ${Cause.pretty(cause)}`,
+									).pipe(Effect.asVoid),
+						),
+					),
+				).pipe(Effect.forkIn(serviceScope))
+
+				yield* diagnostics.registerFiber({
+					id: "board-auto-recovery-worker",
+					name: "Board Auto Recovery Worker",
+					description:
+						"Recovers crashed sessions from a deduplicated queue with transient-error retries",
+					fiber: autoRecoveryFiber,
+				})
+
+				return autoRecoveryFiber
+			})
+
 		const resolveProjectPath = (
 			preferredProjectPath?: string | null,
 		): Effect.Effect<string | null> =>
@@ -852,51 +1080,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					),
 					Effect.forkIn(serviceScope),
 				)
-
-				// Auto-recovery of crashed sessions (if enabled)
-				const crashedSessions = Array.from(
-					activeSessions
-						.filter((session) => session.state === "crashed")
-						.reduce(
-							(map, session) => map.set(session.tmuxSessionName, session),
-							new Map<string, (typeof activeSessions)[number]>(),
-						)
-						.values(),
-				)
-				if (crashedSessions.length > 0) {
-					const recoveryConfig = yield* appConfig.getSessionRecoveryConfig()
-
-					if (recoveryConfig.mode === "auto") {
-						yield* Effect.log(
-							`Auto-recovering ${crashedSessions.length} crashed session(s) in ${recoveryConfig.autoRecoveryDelayMs}ms...`,
-						)
-
-						// Fork recovery to run in background after delay
-						// This lets the UI render immediately while recovery happens
-						yield* Effect.fork(
-							Effect.gen(function* () {
-								yield* Effect.sleep(recoveryConfig.autoRecoveryDelayMs)
-
-								for (const session of crashedSessions) {
-									yield* sessionManager.recoverSession(session.issueId).pipe(
-										Effect.tap(() => Effect.log(`Auto-recovered session for ${session.issueId}`)),
-										Effect.catchAll((error) =>
-											Effect.log(`Failed to auto-recover ${session.issueId}: ${error._tag}`),
-										),
-									)
-								}
-
-								yield* Effect.log(
-									`Auto-recovery complete: ${crashedSessions.length} session(s) processed`,
-								)
-							}),
-						)
-					} else {
-						yield* Effect.log(
-							`${crashedSessions.length} crashed session(s) detected. Manual recovery mode - use R to recover.`,
-						)
-					}
-				}
+				yield* queueAutoRecoveryForCrashedSessions(activeSessions)
 
 				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
 
@@ -2106,6 +2290,8 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(updatedTasks))
 				yield* updateFilteredTasks()
 			}).pipe(Effect.ensuring(SubscriptionRef.set(isRefreshingGitStats, false)))
+
+		yield* startAutoRecoveryWorkerFiber()
 
 		const startupBootstrapFiber = yield* Effect.forkScoped(
 			Effect.gen(function* () {
