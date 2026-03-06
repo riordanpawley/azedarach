@@ -6,11 +6,12 @@ import { useAtomValue } from "@effect-atom/atom-react"
 import type {
 	DiagnosticSeverity,
 	FiberStatus,
-	LinearWebhookStrategy,
 	IssueSyncLastStatus,
+	LinearWebhookStrategy,
 } from "../services/DiagnosticsService.js"
 import type { LinearWebhookMode } from "../services/LinearWebhookService.js"
 import { diagnosticsAtom } from "./atoms.js"
+import { sanitizeDiagnosticInlineText, sanitizeDiagnosticTextLines } from "./diagnosticsText.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -159,14 +160,19 @@ const ServiceRow = ({
 	status: "healthy" | "degraded" | "unhealthy"
 	details?: string
 	lastActivity?: Date
-}) => (
-	<box flexDirection="row">
-		<text fg={healthColor(status)}>{status === "healthy" ? "●" : "○"}</text>
-		<text fg={theme.text}>{` ${name.padEnd(16)}`}</text>
-		<text fg={theme.subtext0}>{details ? ` ${details}` : ""}</text>
-		{lastActivity && <text fg={theme.subtext1}>{` (${formatRelativeTime(lastActivity)})`}</text>}
-	</box>
-)
+}) => {
+	const safeName = sanitizeDiagnosticInlineText(name)
+	const safeDetails = details === undefined ? "" : sanitizeDiagnosticInlineText(details)
+
+	return (
+		<box flexDirection="row">
+			<text fg={healthColor(status)}>{status === "healthy" ? "●" : "○"}</text>
+			<text fg={theme.text}>{` ${safeName.padEnd(16)}`}</text>
+			<text fg={theme.subtext0}>{safeDetails.length > 0 ? ` ${safeDetails}` : ""}</text>
+			{lastActivity && <text fg={theme.subtext1}>{` (${formatRelativeTime(lastActivity)})`}</text>}
+		</box>
+	)
+}
 
 /**
  * Fiber status row
@@ -185,31 +191,37 @@ const FiberRow = ({
 	startedAt: Date
 	endedAt?: Date
 	error?: string
-}) => (
-	<box flexDirection="column">
-		<box flexDirection="row">
-			<text fg={statusColor(status)}>
-				{status === "running" ? "▶" : status === "failed" ? "✗" : "■"}
-			</text>
-			<text fg={theme.text}>{` ${name.padEnd(24)}`}</text>
-			<text fg={statusColor(status)}>{`[${status}]`}</text>
-		</box>
-		<box flexDirection="row" paddingLeft={2}>
-			<text fg={theme.subtext0}>{description}</text>
-		</box>
-		<box flexDirection="row" paddingLeft={2}>
-			<text fg={theme.subtext1}>
-				{`Started: ${formatRelativeTime(startedAt)}`}
-				{endedAt ? ` | Ended: ${formatRelativeTime(endedAt)}` : ""}
-			</text>
-		</box>
-		{error && (
-			<box flexDirection="row" paddingLeft={2}>
-				<text fg={theme.red}>{`Error: ${error.slice(0, 60)}...`}</text>
+}) => {
+	const safeName = sanitizeDiagnosticInlineText(name)
+	const safeDescription = sanitizeDiagnosticInlineText(description)
+	const safeError = error === undefined ? undefined : sanitizeDiagnosticInlineText(error)
+
+	return (
+		<box flexDirection="column">
+			<box flexDirection="row">
+				<text fg={statusColor(status)}>
+					{status === "running" ? "▶" : status === "failed" ? "✗" : "■"}
+				</text>
+				<text fg={theme.text}>{` ${safeName.padEnd(24)}`}</text>
+				<text fg={statusColor(status)}>{`[${status}]`}</text>
 			</box>
-		)}
-	</box>
-)
+			<box flexDirection="row" paddingLeft={2}>
+				<text fg={theme.subtext0}>{safeDescription}</text>
+			</box>
+			<box flexDirection="row" paddingLeft={2}>
+				<text fg={theme.subtext1}>
+					{`Started: ${formatRelativeTime(startedAt)}`}
+					{endedAt ? ` | Ended: ${formatRelativeTime(endedAt)}` : ""}
+				</text>
+			</box>
+			{safeError && (
+				<box flexDirection="row" paddingLeft={2}>
+					<text fg={theme.red}>{`Error: ${safeError.slice(0, 60)}...`}</text>
+				</box>
+			)}
+		</box>
+	)
+}
 
 /**
  * Diagnostic event row
@@ -226,25 +238,31 @@ const EventRow = ({
 	message: string
 	details?: string
 	timestamp: Date
-}) => (
-	<box flexDirection="column">
-		<box flexDirection="row">
-			<text fg={severityColor(severity)}>{severityIcon(severity)}</text>
-			<text fg={theme.text}>{` [${source}] `}</text>
-			<text fg={severityColor(severity)}>{message}</text>
-			<text fg={theme.subtext1}>{` (${formatRelativeTime(timestamp)})`}</text>
-		</box>
-		{details && (
-			<box flexDirection="column" paddingLeft={2}>
-				{details.split("\n").map((line) => (
-					<text key={line} fg={theme.subtext0}>
-						{line}
-					</text>
-				))}
+}) => {
+	const safeSource = sanitizeDiagnosticInlineText(source)
+	const safeMessage = sanitizeDiagnosticInlineText(message)
+	const safeDetailsLines = details === undefined ? [] : sanitizeDiagnosticTextLines(details)
+
+	return (
+		<box flexDirection="column">
+			<box flexDirection="row">
+				<text fg={severityColor(severity)}>{severityIcon(severity)}</text>
+				<text fg={theme.text}>{` [${safeSource}] `}</text>
+				<text fg={severityColor(severity)}>{safeMessage}</text>
+				<text fg={theme.subtext1}>{` (${formatRelativeTime(timestamp)})`}</text>
 			</box>
-		)}
-	</box>
-)
+			{safeDetailsLines.length > 0 && (
+				<box flexDirection="column" paddingLeft={2}>
+					{safeDetailsLines.map((line) => (
+						<text key={line} fg={theme.subtext0}>
+							{line}
+						</text>
+					))}
+				</box>
+			)}
+		</box>
+	)
+}
 
 const IssueDbPerfRow = ({
 	backend,
@@ -402,15 +420,17 @@ export const DiagnosticsOverlay = () => {
 								{`strategy=${linearWebhook.strategy}`}
 							</text>
 						</box>
-						<box flexDirection="row" paddingLeft={2}>
-							<text fg={linearWebhook.healthy ? theme.green : theme.red}>
-								{`healthy=${linearWebhook.healthy ? "yes" : "no"}`}
-							</text>
-							<text fg={theme.subtext1}>{` (${formatRelativeTime(linearWebhook.updatedAt)})`}</text>
-							<text fg={theme.subtext0}>{` ${linearWebhook.message}`}</text>
+							<box flexDirection="row" paddingLeft={2}>
+								<text fg={linearWebhook.healthy ? theme.green : theme.red}>
+									{`healthy=${linearWebhook.healthy ? "yes" : "no"}`}
+								</text>
+								<text fg={theme.subtext1}>{` (${formatRelativeTime(linearWebhook.updatedAt)})`}</text>
+								<text fg={theme.subtext0}>
+									{` ${sanitizeDiagnosticInlineText(linearWebhook.message)}`}
+								</text>
+							</box>
 						</box>
-					</box>
-				)}
+					)}
 				<text> </text>
 
 				{/* Issue database performance section */}
@@ -433,20 +453,24 @@ export const DiagnosticsOverlay = () => {
 							<text
 								fg={issueSyncStatusColor(issueSync.lastStatus)}
 							>{`last=${issueSync.lastStatus}`}</text>
-							{issueSync.lastSyncedAt && (
-								<text
-									fg={theme.subtext1}
-								>{` (${formatRelativeTime(issueSync.lastSyncedAt)})`}</text>
-							)}
-							<text fg={theme.subtext0}>{` ${issueSync.lastMessage}`}</text>
-						</box>
-						{issueSync.lastFailure && (
-							<box flexDirection="row" paddingLeft={2}>
-								<text fg={theme.red}>
-									{`failure ${issueSync.lastFailure.issueId} ${issueSync.lastFailure.operation}: ${issueSync.lastFailure.error}`}
+								{issueSync.lastSyncedAt && (
+									<text
+										fg={theme.subtext1}
+									>{` (${formatRelativeTime(issueSync.lastSyncedAt)})`}</text>
+								)}
+								<text fg={theme.subtext0}>
+									{` ${sanitizeDiagnosticInlineText(issueSync.lastMessage)}`}
 								</text>
 							</box>
-						)}
+							{issueSync.lastFailure && (
+								<box flexDirection="row" paddingLeft={2}>
+									<text fg={theme.red}>
+										{sanitizeDiagnosticInlineText(
+											`failure ${issueSync.lastFailure.issueId} ${issueSync.lastFailure.operation}: ${issueSync.lastFailure.error}`,
+										)}
+									</text>
+								</box>
+							)}
 					</box>
 				)}
 				<text> </text>
