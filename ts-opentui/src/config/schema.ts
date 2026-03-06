@@ -471,7 +471,10 @@ const LinearWebhookConfigSchema = Schema.Struct({
 	transport: Schema.optional(Schema.Literal("sdk", "cli")),
 
 	/**
-	 * Public HTTPS URL used when registering the temporary webhook listener
+	 * Optional public HTTPS base URL used when registering the webhook listener.
+	 *
+	 * When omitted, runtime attempts automatic URL resolution
+	 * (env `LINEAR_WEBHOOK_PUBLIC_URL`, then local tunnel integration).
 	 *
 	 * Example: https://my-tunnel.ngrok.io
 	 */

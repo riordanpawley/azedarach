@@ -10,13 +10,15 @@ import {
 	LINEAR_WEBHOOK_TS_HEADER,
 	LinearWebhookClient,
 } from "@linear/sdk/webhooks"
-import { Data, Effect, Option, Queue, Schema, Stream, SubscriptionRef } from "effect"
+import { Command } from "@effect/platform"
+import { Config, Data, Effect, Option, Queue, Schema, Stream, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { LinearSdk } from "../core/LinearSdk.js"
 
 const WEBHOOK_PATH = "/linear/webhook"
 const DEFAULT_WEBHOOK_PORT = 9000
 const DEFAULT_WEBHOOK_EVENTS: readonly string[] = ["Issue"]
+const WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
 
 export type LinearWebhookMode = "disabled" | "cli" | "misconfigured" | "sdk" | "failed"
 
@@ -90,11 +92,102 @@ const parseWebhookUrl = (publicBaseUrl: string): string => {
 	return `${trimmed}${WEBHOOK_PATH}`
 }
 
+const normalizeNonEmpty = (value: string | undefined | null): string | undefined => {
+	if (value === undefined || value === null) return undefined
+	const trimmed = value.trim()
+	return trimmed.length > 0 ? trimmed : undefined
+}
+
+export const normalizePublicBaseUrl = (value: string | undefined | null): string | undefined =>
+	normalizeNonEmpty(value)?.replace(/\/+$/, "")
+
 const normalizeWebhookEvents = (events: readonly string[] | undefined): readonly string[] => {
 	const configured = events
 		?.map((eventType) => eventType.trim())
 		.filter((eventType) => eventType.length > 0)
 	return configured !== undefined && configured.length > 0 ? configured : DEFAULT_WEBHOOK_EVENTS
+}
+
+const TailscaleStatusSchema = Schema.Struct({
+	Self: Schema.optional(
+		Schema.Struct({
+			DNSName: Schema.optional(Schema.NullOr(Schema.String)),
+		}),
+	),
+})
+
+export const parseTailscaleDnsName = (statusJson: string): Option.Option<string> => {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(statusJson)
+	} catch {
+		return Option.none()
+	}
+
+	const decodedStatus = Schema.decodeUnknownEither(TailscaleStatusSchema)(parsed)
+	if (decodedStatus._tag === "Left") {
+		return Option.none()
+	}
+
+	const dnsName = normalizeNonEmpty(decodedStatus.right.Self?.DNSName)
+	if (dnsName === undefined) {
+		return Option.none()
+	}
+
+	const normalizedDnsName = dnsName.replace(/\.$/, "")
+	return normalizedDnsName.length > 0 ? Option.some(normalizedDnsName) : Option.none()
+}
+
+const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
+	Effect.gen(function* () {
+		const tailscaleStatus = yield* Command.string(
+			Command.make("tailscale", "status", "--json"),
+		).pipe(
+			Effect.map((output) => output.trim()),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
+		if (tailscaleStatus === undefined) {
+			return undefined
+		}
+
+		const dnsNameOption = parseTailscaleDnsName(tailscaleStatus)
+		if (Option.isNone(dnsNameOption)) {
+			return undefined
+		}
+
+		const funnelExitCode = yield* Command.exitCode(
+			Command.make("tailscale", "funnel", "--bg", "--yes", String(port)),
+		).pipe(Effect.catchAll(() => Effect.succeed(1)))
+		if (funnelExitCode !== 0) {
+			return undefined
+		}
+
+		return `https://${dnsNameOption.value}`
+	})
+
+type ResolvedWebhookTeamSource = "config" | "auto-single-team"
+
+interface ResolvedWebhookTeamRef {
+	readonly teamRef: string
+	readonly source: ResolvedWebhookTeamSource
+}
+
+type ResolvedWebhookPublicUrlSource = "config" | "env" | "tailscale-funnel"
+
+interface ResolvedWebhookPublicUrl {
+	readonly publicBaseUrl: string
+	readonly source: ResolvedWebhookPublicUrlSource
+}
+
+interface ResolvedSdkWebhookRuntimeConfig {
+	readonly teamRef: string
+	readonly teamSource: ResolvedWebhookTeamSource
+	readonly publicBaseUrl: string
+	readonly publicUrlSource: ResolvedWebhookPublicUrlSource
+	readonly port: number
+	readonly eventTypes: readonly string[]
+	readonly webhookSecret: string
+	readonly webhookSecretSource: "config" | "generated"
 }
 
 export class LinearWebhookService extends Effect.Service<LinearWebhookService>()(
@@ -118,7 +211,8 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				} satisfies LinearWebhookServiceApi
 			}
 
-			const webhookConfig = config.issueTracker.linear.webhooks
+			const linearConfig = config.issueTracker.linear
+			const webhookConfig = linearConfig.webhooks
 			const transport = webhookConfig.transport
 			if (webhookConfig.enabled === false) {
 				yield* SubscriptionRef.set(mode, "disabled")
@@ -138,32 +232,127 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				} satisfies LinearWebhookServiceApi
 			}
 
-			const teamRef = config.issueTracker.linear.team?.trim()
-			const publicUrl = webhookConfig.url?.trim()
-			const configuredSecret = webhookConfig.secret?.trim()
-			if (!teamRef || !publicUrl) {
-				yield* SubscriptionRef.set(mode, "misconfigured")
-				const missing: string[] = []
-				if (!teamRef) missing.push("issueTracker.linear.team")
-				if (!publicUrl) missing.push("issueTracker.linear.webhooks.url")
-				yield* Effect.logWarning(
-					`Linear webhook SDK mode requires ${missing.join(", ")}; falling back to polling`,
-				)
-				return {
-					issueEvents: Stream.fromQueue(issueEventsQueue),
-					healthy,
-					mode,
-				} satisfies LinearWebhookServiceApi
-			}
+			const resolveWebhookTeamRef = (): Effect.Effect<
+				ResolvedWebhookTeamRef,
+				LinearWebhookRuntimeError
+			> =>
+				Effect.gen(function* () {
+					const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
+					if (configuredTeamRef !== undefined) {
+						return {
+							teamRef: configuredTeamRef,
+							source: "config",
+						} satisfies ResolvedWebhookTeamRef
+					}
 
-			const linearClientResult = yield* Effect.either(
-				linearSdk.resolveTeamId(teamRef).pipe(Effect.as(teamRef)),
+					const teams = yield* linearSdk.teams({ first: 50 }).pipe(
+						Effect.mapError(
+							(error) =>
+								new LinearWebhookRuntimeError({
+									message: `${error.message}; set issueTracker.linear.team explicitly`,
+								}),
+						),
+					)
+
+					const discoveredTeamRefs = teams.nodes
+						.map((team) => normalizeNonEmpty(team.key) ?? normalizeNonEmpty(team.id))
+						.filter((teamRef): teamRef is string => teamRef !== undefined)
+
+					if (discoveredTeamRefs.length === 1) {
+						return {
+							teamRef: discoveredTeamRefs[0],
+							source: "auto-single-team",
+						} satisfies ResolvedWebhookTeamRef
+					}
+
+					if (discoveredTeamRefs.length === 0) {
+						return yield* Effect.fail(
+							new LinearWebhookRuntimeError({
+								message: "Linear webhook SDK mode could not discover a default team; set issueTracker.linear.team",
+							}),
+						)
+					}
+
+					return yield* Effect.fail(
+						new LinearWebhookRuntimeError({
+							message: `Linear webhook SDK mode found multiple teams (${discoveredTeamRefs.join(", ")}); set issueTracker.linear.team`,
+						}),
+					)
+				})
+
+			const resolveWebhookPublicUrl = (port: number) =>
+				Effect.gen(function* () {
+					const configuredPublicBaseUrl = normalizePublicBaseUrl(webhookConfig.url)
+					if (configuredPublicBaseUrl !== undefined) {
+						return {
+							publicBaseUrl: configuredPublicBaseUrl,
+							source: "config",
+						} satisfies ResolvedWebhookPublicUrl
+					}
+
+					const envPublicBaseUrl = yield* Config.option(Config.string(WEBHOOK_PUBLIC_URL_ENV)).pipe(
+						Effect.map((option) =>
+							Option.isSome(option) ? normalizePublicBaseUrl(option.value) : undefined,
+						),
+						Effect.mapError(
+							() =>
+								new LinearWebhookRuntimeError({
+									message: `Failed to read ${WEBHOOK_PUBLIC_URL_ENV}`,
+								}),
+						),
+					)
+					if (envPublicBaseUrl !== undefined) {
+						return {
+							publicBaseUrl: envPublicBaseUrl,
+							source: "env",
+						} satisfies ResolvedWebhookPublicUrl
+					}
+
+					const tailscalePublicBaseUrl = yield* tryResolveTailscaleFunnelPublicUrl(port)
+					if (tailscalePublicBaseUrl !== undefined) {
+						return {
+							publicBaseUrl: tailscalePublicBaseUrl,
+							source: "tailscale-funnel",
+						} satisfies ResolvedWebhookPublicUrl
+					}
+
+					return yield* Effect.fail(
+						new LinearWebhookRuntimeError({
+							message: `Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export ${WEBHOOK_PUBLIC_URL_ENV}, or run "tailscale funnel --bg --yes ${port}"`,
+						}),
+					)
+				})
+
+			const runtimeConfigResult = yield* Effect.either(
+				Effect.gen(function* () {
+					const port =
+						Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
+							? webhookConfig.port
+							: DEFAULT_WEBHOOK_PORT
+					const eventTypes = normalizeWebhookEvents(webhookConfig.events)
+					const team = yield* resolveWebhookTeamRef()
+					const webhookPublicUrl = yield* resolveWebhookPublicUrl(port)
+					const configuredSecret = normalizeNonEmpty(webhookConfig.secret)
+					const webhookSecretSource: "config" | "generated" =
+						configuredSecret !== undefined ? "config" : "generated"
+					const webhookSecret =
+						configuredSecret ?? `azw_${crypto.randomUUID().replaceAll("-", "")}`
+
+					return {
+						teamRef: team.teamRef,
+						teamSource: team.source,
+						publicBaseUrl: webhookPublicUrl.publicBaseUrl,
+						publicUrlSource: webhookPublicUrl.source,
+						port,
+						eventTypes,
+						webhookSecret,
+						webhookSecretSource,
+					} satisfies ResolvedSdkWebhookRuntimeConfig
+				}),
 			)
-			if (linearClientResult._tag === "Left") {
+			if (runtimeConfigResult._tag === "Left") {
 				yield* SubscriptionRef.set(mode, "misconfigured")
-				yield* Effect.logWarning(
-					`${linearClientResult.left.message} for Linear SDK webhook registration; falling back to polling`,
-				)
+				yield* Effect.logWarning(`${runtimeConfigResult.left.message}; falling back to polling`)
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
@@ -171,11 +360,8 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				} satisfies LinearWebhookServiceApi
 			}
 
-			const webhookSecret =
-				configuredSecret && configuredSecret.length > 0
-					? configuredSecret
-					: `azw_${crypto.randomUUID().replaceAll("-", "")}`
-			const webhookClient = new LinearWebhookClient(webhookSecret)
+			const runtimeConfig = runtimeConfigResult.right
+			const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
 
 			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
 				linearSdk.resolveTeamId(reference).pipe(
@@ -188,13 +374,10 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				)
 
 			const startSdkWebhookRuntime = Effect.gen(function* () {
-				const teamId = yield* resolveTeamId(teamRef)
-				const webhookUrl = parseWebhookUrl(publicUrl)
-				const eventTypes = normalizeWebhookEvents(webhookConfig.events)
-				const port =
-					Number.isInteger(webhookConfig.port) && webhookConfig.port > 0
-						? webhookConfig.port
-						: DEFAULT_WEBHOOK_PORT
+				const teamId = yield* resolveTeamId(runtimeConfig.teamRef)
+				const webhookUrl = parseWebhookUrl(runtimeConfig.publicBaseUrl)
+				const eventTypes = runtimeConfig.eventTypes
+				const port = runtimeConfig.port
 
 				const webhookIdRef = yield* Effect.sync((): { id: string | undefined } => ({
 					id: undefined,
@@ -258,7 +441,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						teamId,
 						url: webhookUrl,
 						resourceTypes: [...eventTypes],
-						secret: webhookSecret,
+						secret: runtimeConfig.webhookSecret,
 						enabled: true,
 					})
 					.pipe(
@@ -278,7 +461,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				yield* SubscriptionRef.set(mode, "sdk")
 				yield* SubscriptionRef.set(healthy, true)
 				yield* Effect.log(
-					`Linear SDK webhook runtime started on :${port} (team=${teamRef}, url=${webhookUrl}, secret=${configuredSecret ? "configured" : "generated"})`,
+					`Linear SDK webhook runtime started on :${port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource})`,
 				)
 			})
 

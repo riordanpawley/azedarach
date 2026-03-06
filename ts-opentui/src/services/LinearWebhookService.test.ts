@@ -2,7 +2,11 @@ import { LinearWebhookClient } from "@linear/sdk/webhooks"
 import { describe, expect, it } from "bun:test"
 import * as crypto from "node:crypto"
 import { Option } from "effect"
-import { decodeLinearIssueWebhookEvent } from "./LinearWebhookService.js"
+import {
+	decodeLinearIssueWebhookEvent,
+	normalizePublicBaseUrl,
+	parseTailscaleDnsName,
+} from "./LinearWebhookService.js"
 
 const issueWebhookPayload = {
 	type: "Issue",
@@ -93,5 +97,40 @@ describe("Linear webhook signature verification", () => {
 		expect(() => webhookClient.parseData(rawBody, "deadbeef", timestamp)).toThrow(
 			"Invalid webhook signature",
 		)
+	})
+})
+
+describe("Linear webhook URL resolution helpers", () => {
+	it("normalizes configured public base URLs", () => {
+		expect(normalizePublicBaseUrl("  https://demo.ngrok.app/// ")).toBe("https://demo.ngrok.app")
+		expect(normalizePublicBaseUrl("   ")).toBeUndefined()
+		expect(normalizePublicBaseUrl(undefined)).toBeUndefined()
+	})
+
+	it("parses tailscale dns names from status output", () => {
+		const parsed = parseTailscaleDnsName(
+			JSON.stringify({
+				Self: {
+					DNSName: "my-host.example.ts.net.",
+				},
+			}),
+		)
+		expect(Option.isSome(parsed)).toBe(true)
+		if (Option.isSome(parsed)) {
+			expect(parsed.value).toBe("my-host.example.ts.net")
+		}
+	})
+
+	it("returns none for malformed tailscale status output", () => {
+		expect(Option.isNone(parseTailscaleDnsName("{"))).toBe(true)
+		expect(
+			Option.isNone(
+				parseTailscaleDnsName(
+					JSON.stringify({
+						Self: {},
+					}),
+				),
+			),
+		).toBe(true)
 	})
 })
