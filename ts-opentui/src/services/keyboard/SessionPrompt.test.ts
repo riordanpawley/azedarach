@@ -21,6 +21,11 @@ describe("session prompts", () => {
 		expect(prompt).toContain("Issue nesting rule:")
 		expect(prompt).toContain("children of `az-f4625d`")
 		expect(prompt).toContain("`az issue update <new-id> --parent az-f4625d`")
+		expect(prompt).toContain("All child issues should be completed before completing `az-f4625d`")
+		expect(prompt).toContain("do NOT make it a child issue")
+		expect(prompt).toContain(
+			"`az issue dep add --type discovered-from <new-id> az-f4625d`",
+		)
 		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
 	})

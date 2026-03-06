@@ -25,6 +25,10 @@ Goal: Make this issue self-sufficient so any future session could pick it up wit
 Issue nesting rule:
 - If you or any subagents create additional issues, always set them as children of \`${params.taskId}\` (for example, \`az issue update <new-id> --parent ${params.taskId}\`).`
 
+	prompt += `
+- All child issues should be completed before completing \`${params.taskId}\`.
+- If follow-up work should be deferred to another session, do NOT make it a child issue; instead link it with a discovered-from edge (for example, \`az issue dep add --type discovered-from <new-id> ${params.taskId}\`).`
+
 	if (params.localMode) {
 		prompt += `
 
