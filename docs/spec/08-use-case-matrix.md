@@ -550,7 +550,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Runtime branch origin -> AZ-FR-3501..3506
 - Upstream follow-on merge -> AZ-FR-3601..3611
 - Relationship representation -> AZ-FR-3701..3705
-- Optimistic mutation -> AZ-FR-3801..3810
+- Optimistic mutation -> AZ-FR-3801..3816
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4008, AZ-FR-4101..4110
 

@@ -375,11 +375,11 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					// Scroll commands - always work, even with attachments
 					if (key === "C-u") {
-						yield* overlay.scroll("halfPage", -1) // up
+						yield* overlay.scroll("halfPage", -1, "detail") // up
 						return true
 					}
 					if (key === "C-d") {
-						yield* overlay.scroll("halfPage", 1) // down
+						yield* overlay.scroll("halfPage", 1, "detail") // down
 						return true
 					}
 
@@ -459,6 +459,48 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}
 
 					// Don't consume other keys - let them fall through (e.g., for Space menu)
+					return false
+				})
+
+			/**
+			 * Handle diagnostics overlay keyboard input for scrolling.
+			 *
+			 * @param key - The key that was pressed
+			 * @returns true if the key was handled
+			 *
+			 * Scroll keys:
+			 * - j/down: Scroll down one line
+			 * - k/up: Scroll up one line
+			 * - C-u: Scroll up half page
+			 * - C-d: Scroll down half page
+			 */
+			const handleDiagnosticsOverlayInput = (key: string) =>
+				Effect.gen(function* () {
+					const currentOverlay = yield* overlay.current()
+					if (currentOverlay?._tag !== "diagnostics") {
+						return false
+					}
+
+					if (key === "j" || key === "down") {
+						yield* overlay.scroll("line", 1, "diagnostics")
+						return true
+					}
+
+					if (key === "k" || key === "up") {
+						yield* overlay.scroll("line", -1, "diagnostics")
+						return true
+					}
+
+					if (key === "C-u") {
+						yield* overlay.scroll("halfPage", -1, "diagnostics")
+						return true
+					}
+
+					if (key === "C-d") {
+						yield* overlay.scroll("halfPage", 1, "diagnostics")
+						return true
+					}
+
 					return false
 				})
 
@@ -974,6 +1016,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleForkInput,
 				handleBulkCleanupInput,
 				handleDetailOverlayInput,
+				handleDiagnosticsOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,
 				handleImagePreviewInput,

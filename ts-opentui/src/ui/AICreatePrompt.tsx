@@ -1,8 +1,8 @@
 /**
- * ClaudeCreatePrompt - Modal prompt for creating tasks via Claude
+ * AICreatePrompt - Modal prompt for creating tasks via AI CLI
  *
- * Allows users to describe a task in natural language. Claude CLI runs
- * in non-interactive mode to create the bead, then exits.
+ * Allows users to describe a task in natural language. The configured AI CLI
+ * runs in non-interactive mode to create the bead, then exits.
  */
 
 import { useAtomValue } from "@effect-atom/atom-react"
@@ -12,7 +12,7 @@ import { appConfigAtom } from "./atoms/index.js"
 import { usePaste } from "./hooks/usePaste.js"
 import { theme } from "./theme.js"
 
-export interface ClaudeCreatePromptProps {
+export interface AICreatePromptProps {
 	onSubmit: (description: string) => void
 	onCancel: () => void
 }
@@ -20,13 +20,13 @@ export interface ClaudeCreatePromptProps {
 const ATTR_BOLD = 1
 
 /**
- * ClaudeCreatePrompt component
+ * AICreatePrompt component
  *
  * Simple modal for entering a natural language task description.
- * Claude will interpret this and create the appropriate bead.
+ * The configured AI tool interprets this and creates the appropriate bead.
  * Enter to submit, Esc to cancel.
  */
-export const ClaudeCreatePrompt = (props: ClaudeCreatePromptProps) => {
+export const AICreatePrompt = (props: AICreatePromptProps) => {
 	const [description, setDescription] = useState("")
 	const appConfigResult = useAtomValue(appConfigAtom)
 

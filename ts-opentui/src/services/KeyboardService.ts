@@ -189,6 +189,10 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 					const handledAsDetail = yield* inputHandlers.handleDetailOverlayInput(key)
 					if (handledAsDetail) return
 
+					// Check for diagnostics overlay (handles scrolling keys)
+					const handledAsDiagnostics = yield* inputHandlers.handleDiagnosticsOverlayInput(key)
+					if (handledAsDiagnostics) return
+
 					// Check for projectSelector overlay (handles number key selection)
 					const currentOverlay = yield* overlay.current()
 					if (currentOverlay?._tag === "projectSelector") {

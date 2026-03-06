@@ -9,10 +9,11 @@ import { emptyArray } from "../lib/empty.js"
 type AnyEffect = Effect.Effect<void, never, CommandExecutor.CommandExecutor>
 
 /**
- * Scroll command for detail panel scrolling.
+ * Scroll command for overlay panel scrolling.
  * Each emission triggers a scroll action.
  */
 export interface ScrollCommand {
+	readonly target: "detail" | "diagnostics"
 	readonly type: "line" | "halfPage"
 	readonly amount: number // positive = down, negative = up
 	readonly timestamp: number // unique per command
@@ -38,7 +39,7 @@ export type Overlay =
 				  }
 				| { readonly _tag: "forkEpic"; readonly sourceTaskId: string }
 	  }
-	| { readonly _tag: "claudeCreate" }
+	| { readonly _tag: "aiCreate" }
 	| { readonly _tag: "settings" }
 	| { readonly _tag: "imageAttach"; readonly taskId: string }
 	| { readonly _tag: "imagePreview"; readonly taskId: string }
@@ -96,10 +97,15 @@ export class OverlayService extends Effect.Service<OverlayService>()("OverlaySer
 			scrollCommand,
 
 			/**
-			 * Emit a scroll command for the detail panel
+			 * Emit a scroll command for a scrollable overlay panel.
 			 */
-			scroll: (type: "line" | "halfPage", amount: number) =>
+			scroll: (
+				type: "line" | "halfPage",
+				amount: number,
+				target: "detail" | "diagnostics" = "detail",
+			) =>
 				SubscriptionRef.set(scrollCommand, {
+					target,
 					type,
 					amount,
 					timestamp: Date.now(),

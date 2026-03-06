@@ -133,6 +133,9 @@ This section is normative.
 - AZ-FR-0814: Stop MUST not implicitly delete worktree.
 - AZ-FR-0815: Session state detector MUST map busy/waiting/done/error/paused.
 - AZ-FR-0815a: `stateDetection.patternMatching=false` MUST disable PTY pattern-based state detection and PTY metrics updates.
+- AZ-FR-0815b: When PTY pattern matching is enabled, session-state detection MUST prioritize recent output over stale scrollback so historical error markers do not pin an actively working session in `error`.
+- AZ-FR-0815c: PTY state detection MUST allow recovery from transient `error`/`done` matches; terminal states MUST NOT remain sticky solely due to prior PTY matches.
+- AZ-FR-0815d: PTY high-priority transitions into `waiting`/`error` MUST be gated by active-session context (`initializing`/`busy`/`waiting`) and MUST NOT force `idle`/`done` sessions into those states from stale output alone.
 
 ## 4.11 Dev Server Requirements
 
@@ -435,6 +438,7 @@ This section is normative.
 - AZ-FR-3813: Read operations SHOULD support bounded wait budgets and MUST return a clear stale/freshness hint when timeout occurs before sync completion.
 - AZ-FR-3814: Explicit wait mode for reads MUST allow a higher wait budget than default non-blocking read mode.
 - AZ-FR-3815: Linear sync queue processing MUST emit lifecycle logs for start/skip/success/retry/terminal-failure with project path, operation, attempt count, issue identity, and known external Linear issue ID.
+- AZ-FR-3816: Linear metadata/list reads (including workflow states) MUST honor provider page-size caps and MUST traverse cursor pagination until complete when full dataset coverage is required.
 
 ## 4.42 Background Operation Requirements
 

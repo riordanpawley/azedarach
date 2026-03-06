@@ -9,6 +9,7 @@
  * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
  * - Version 3: Adds top-level issueTracker selector + backend-specific config blocks
  * - Version 4: Nests backend config under top-level issueTracker object
+ * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
  *
  * ## Adding New Versions
  * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
@@ -26,7 +27,7 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 4
+export const CURRENT_CONFIG_VERSION = 5
 
 // ============================================================================
 // CLI Tool Configuration
@@ -321,10 +322,10 @@ const MergeConfigSchema = Schema.Struct({
 	maxFixAttempts: Schema.optional(Schema.Number),
 
 	/**
-	 * Start a Claude session to fix issues if auto-fix fails
+	 * Start an AI session to fix issues if auto-fix fails
 	 * Default: true
 	 */
-	startClaudeOnFailure: Schema.optional(Schema.Boolean),
+	startAiSessionOnFailure: Schema.optional(Schema.Boolean),
 })
 
 const DevServerConfigSchema = Schema.Struct({
@@ -371,6 +372,20 @@ const LegacyPRConfigSchema = Schema.Struct({
 	autoMerge: Schema.optional(Schema.Boolean),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
+})
+
+/**
+ * Legacy merge config schema (v4 and earlier)
+ *
+ * v5 renamed `startClaudeOnFailure` → `startAiSessionOnFailure`.
+ */
+const LegacyMergeConfigSchema = Schema.Struct({
+	validateCommands: Schema.optional(Schema.Array(Schema.String)),
+	fixCommand: Schema.optional(Schema.String),
+	maxFixAttempts: Schema.optional(Schema.Number),
+	startAiSessionOnFailure: Schema.optional(Schema.Boolean),
+	/** @deprecated Renamed to startAiSessionOnFailure in v5 */
+	startClaudeOnFailure: Schema.optional(Schema.Boolean),
 })
 
 /**
@@ -1013,6 +1028,29 @@ const migrations: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		toVersion: 5,
+		description: "Rename merge.startClaudeOnFailure → merge.startAiSessionOnFailure",
+		migrate: (config) => {
+			const merge = config.merge
+			const migratedMerge =
+				merge === undefined
+					? undefined
+					: {
+							validateCommands: merge.validateCommands,
+							fixCommand: merge.fixCommand,
+							maxFixAttempts: merge.maxFixAttempts,
+							startAiSessionOnFailure:
+								merge.startAiSessionOnFailure ?? merge.startClaudeOnFailure,
+						}
+
+			return {
+				...config,
+				$schema: 5,
+				merge: migratedMerge,
+			}
+		},
+	},
 	// ────────────────────────────────────────────────────────────────────────
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
@@ -1075,7 +1113,15 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					autoMerge: current.pr.autoMerge,
 				}
 			: undefined,
-		merge: current.merge,
+		merge: current.merge
+			? {
+					validateCommands: current.merge.validateCommands,
+					fixCommand: current.merge.fixCommand,
+					maxFixAttempts: current.merge.maxFixAttempts,
+					startAiSessionOnFailure:
+						current.merge.startAiSessionOnFailure ?? current.merge.startClaudeOnFailure,
+				}
+			: undefined,
 		devServer: current.devServer,
 		notifications: current.notifications,
 		network: current.network,
@@ -1127,7 +1173,7 @@ const RawConfigSchema = Schema.Struct({
 	stateDetection: Schema.optional(StateDetectionConfigSchema),
 	/** May contain legacy baseBranch field */
 	pr: Schema.optional(LegacyPRConfigSchema),
-	merge: Schema.optional(MergeConfigSchema),
+	merge: Schema.optional(LegacyMergeConfigSchema),
 	devServer: Schema.optional(DevServerConfigSchema),
 	notifications: Schema.optional(NotificationsConfigSchema),
 

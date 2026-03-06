@@ -148,7 +148,7 @@ When user requests work, use this matrix to decide which implementation to work 
 
 This repository has shared skills in `.claude/skills/` that apply to all implementations:
 
-- **Workflow Skills** (`workflow/`): TDD patterns, retrospectives
+- **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
 - **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
 - **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
 

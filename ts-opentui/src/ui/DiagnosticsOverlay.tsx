@@ -3,18 +3,22 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
+import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
+import { useEffect, useMemo, useRef } from "react"
 import type {
 	DiagnosticSeverity,
 	FiberStatus,
 	IssueSyncLastStatus,
+	IssueSyncRuntimeReason,
 	LinearWebhookStrategy,
 } from "../services/DiagnosticsService.js"
 import type { LinearWebhookMode } from "../services/LinearWebhookService.js"
-import { diagnosticsAtom } from "./atoms.js"
+import { diagnosticsAtom, diagnosticsScrollAtom } from "./atoms.js"
 import { sanitizeDiagnosticInlineText, sanitizeDiagnosticTextLines } from "./diagnosticsText.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
+const PANEL_CHROME_HEIGHT = 10
 
 /**
  * Format a date as relative time (e.g., "2s ago", "5m ago")
@@ -105,6 +109,21 @@ const issueSyncStatusColor = (status: IssueSyncLastStatus): string => {
 			return theme.red
 		case "skipped":
 			return theme.yellow
+		default:
+			return theme.subtext0
+	}
+}
+
+const issueSyncRuntimeReasonColor = (reason: IssueSyncRuntimeReason): string => {
+	switch (reason) {
+		case "ready":
+			return theme.green
+		case "missing_api_key":
+		case "sync_disabled":
+			return theme.yellow
+		case "backend_not_linear":
+		case "config_error":
+			return theme.red
 		default:
 			return theme.subtext0
 	}
@@ -321,6 +340,8 @@ const IssueDbPerfRow = ({
  */
 export const DiagnosticsOverlay = () => {
 	const diagnosticsResult = useAtomValue(diagnosticsAtom)
+	const scrollCommandResult = useAtomValue(diagnosticsScrollAtom)
+	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
 
 	// Handle loading/error states - extract fibers, services, and events with defaults
 	const fibers = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.fibers : []
@@ -334,6 +355,36 @@ export const DiagnosticsOverlay = () => {
 		? diagnosticsResult.value.linearWebhook
 		: undefined
 	const sortedIssueDbPerf = [...issueDbPerf].sort((left, right) => right.p95Ms - left.p95Ms)
+	const scrollCommand = useMemo(() => {
+		if (Result.isSuccess(scrollCommandResult)) {
+			return scrollCommandResult.value
+		}
+		return null
+	}, [scrollCommandResult])
+	const maxScrollHeight = useMemo(() => {
+		const terminalRows = process.stdout.rows || 24
+		return Math.max(10, terminalRows - PANEL_CHROME_HEIGHT)
+	}, [])
+
+	useEffect(() => {
+		if (!scrollboxRef.current || !scrollCommand || scrollCommand.target !== "diagnostics") return
+		if (scrollCommand.type === "line") {
+			scrollboxRef.current.scrollBy(scrollCommand.amount, "step")
+			return
+		}
+		scrollboxRef.current.scrollBy(scrollCommand.amount * 0.5, "viewport")
+	}, [scrollCommand])
+
+	const handleMouseScroll = (event: MouseEvent) => {
+		const scroll = event.scroll
+		if (!scrollboxRef.current || !scroll) return
+		if (scroll.direction !== "up" && scroll.direction !== "down") return
+		event.preventDefault()
+		event.stopPropagation()
+		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
+		const amount = scroll.direction === "down" ? delta : -delta
+		scrollboxRef.current.scrollBy(amount, "step")
+	}
 
 	return (
 		<box
@@ -345,6 +396,7 @@ export const DiagnosticsOverlay = () => {
 			alignItems="center"
 			justifyContent="center"
 			backgroundColor={`${theme.crust}CC`}
+			onMouseScroll={handleMouseScroll}
 		>
 			<box
 				borderStyle="rounded"
@@ -368,91 +420,101 @@ export const DiagnosticsOverlay = () => {
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
 					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
 				</text>
-				<text> </text>
+				<scrollbox
+					ref={scrollboxRef}
+					scrollY={true}
+					maxHeight={maxScrollHeight}
+					flexDirection="column"
+					flexGrow={1}
+					onMouseScroll={handleMouseScroll}
+				>
+					<text> </text>
 
-				{/* Services section */}
-				<SectionHeader title="Services:" />
-				{services.length === 0 ? (
-					<text fg={theme.subtext0}>{"  No services registered"}</text>
-				) : (
-					services.map((svc) => (
-						<ServiceRow
-							key={svc.name}
-							name={svc.name}
-							status={svc.status}
-							details={svc.details}
-							lastActivity={svc.lastActivity}
-						/>
-					))
-				)}
-				<text> </text>
+					{/* Services section */}
+					<SectionHeader title="Services:" />
+					{services.length === 0 ? (
+						<text fg={theme.subtext0}>{"  No services registered"}</text>
+					) : (
+						services.map((svc) => (
+							<ServiceRow
+								key={svc.name}
+								name={svc.name}
+								status={svc.status}
+								details={svc.details}
+								lastActivity={svc.lastActivity}
+							/>
+						))
+					)}
+					<text> </text>
 
-				{/* Fibers section */}
-				<SectionHeader title="Long-Running Fibers:" />
-				{fibers.length === 0 ? (
-					<text fg={theme.subtext0}>{"  No fibers registered"}</text>
-				) : (
-					fibers.map((fiber) => (
-						<FiberRow
-							key={fiber.id}
-							name={fiber.name}
-							status={fiber.status}
-							description={fiber.description}
-							startedAt={fiber.startedAt}
-							endedAt={fiber.endedAt}
-							error={fiber.error}
-						/>
-					))
-				)}
-				<text> </text>
+					{/* Fibers section */}
+					<SectionHeader title="Long-Running Fibers:" />
+					{fibers.length === 0 ? (
+						<text fg={theme.subtext0}>{"  No fibers registered"}</text>
+					) : (
+						fibers.map((fiber) => (
+							<FiberRow
+								key={fiber.id}
+								name={fiber.name}
+								status={fiber.status}
+								description={fiber.description}
+								startedAt={fiber.startedAt}
+								endedAt={fiber.endedAt}
+								error={fiber.error}
+							/>
+						))
+					)}
+					<text> </text>
 
-				{/* Issue database performance section */}
-				<SectionHeader title="Linear Webhooks:" />
-				{linearWebhook === undefined ? (
-					<text fg={theme.subtext0}>{"  No webhook diagnostics yet"}</text>
-				) : (
-					<box flexDirection="column">
-						<box flexDirection="row">
-							<text fg={linearWebhookModeColor(linearWebhook.mode)}>
-								{`mode=${linearWebhook.mode} `}
-							</text>
-							<text fg={linearWebhookStrategyColor(linearWebhook.strategy)}>
-								{`strategy=${linearWebhook.strategy}`}
-							</text>
-						</box>
+					{/* Issue database performance section */}
+					<SectionHeader title="Linear Webhooks:" />
+					{linearWebhook === undefined ? (
+						<text fg={theme.subtext0}>{"  No webhook diagnostics yet"}</text>
+					) : (
+						<box flexDirection="column">
+							<box flexDirection="row">
+								<text fg={linearWebhookModeColor(linearWebhook.mode)}>
+									{`mode=${linearWebhook.mode} `}
+								</text>
+								<text fg={linearWebhookStrategyColor(linearWebhook.strategy)}>
+									{`strategy=${linearWebhook.strategy}`}
+								</text>
+							</box>
 							<box flexDirection="row" paddingLeft={2}>
 								<text fg={linearWebhook.healthy ? theme.green : theme.red}>
 									{`healthy=${linearWebhook.healthy ? "yes" : "no"}`}
 								</text>
-								<text fg={theme.subtext1}>{` (${formatRelativeTime(linearWebhook.updatedAt)})`}</text>
+								<text
+									fg={theme.subtext1}
+								>{` (${formatRelativeTime(linearWebhook.updatedAt)})`}</text>
 								<text fg={theme.subtext0}>
 									{` ${sanitizeDiagnosticInlineText(linearWebhook.message)}`}
 								</text>
 							</box>
 						</box>
 					)}
-				<text> </text>
+					<text> </text>
 
-				{/* Issue database performance section */}
-				<SectionHeader title="Issue Sync:" />
-				{issueSync === undefined ? (
-					<text fg={theme.subtext0}>{"  No sync diagnostics yet"}</text>
-				) : (
-					<box flexDirection="column">
-						<box flexDirection="row">
-							<text fg={theme.text}>{`backend=${issueSync.backend.padEnd(6)} `}</text>
-							<text fg={issueSync.syncEnabled ? theme.green : theme.yellow}>
-								{`enabled=${issueSync.syncEnabled ? "yes" : "no"} `}
-							</text>
-							<text fg={theme.subtext1}>{`queue=${issueSync.queueDepth} `}</text>
-							<text fg={issueSync.failedCount > 0 ? theme.red : theme.subtext1}>
-								{`failed=${issueSync.failedCount}`}
-							</text>
-						</box>
-						<box flexDirection="row" paddingLeft={2}>
-							<text
-								fg={issueSyncStatusColor(issueSync.lastStatus)}
-							>{`last=${issueSync.lastStatus}`}</text>
+					{/* Issue database performance section */}
+					<SectionHeader title="Issue Sync:" />
+					{issueSync === undefined ? (
+						<text fg={theme.subtext0}>{"  No sync diagnostics yet"}</text>
+					) : (
+						<box flexDirection="column">
+							<box flexDirection="row">
+								<text fg={theme.text}>{`backend=${issueSync.backend.padEnd(6)} `}</text>
+								<text fg={issueSync.syncEnabled ? theme.green : theme.yellow}>
+									{`enabled=${issueSync.syncEnabled ? "yes" : "no"} `}
+								</text>
+								<text fg={theme.subtext1}>{`queue=${issueSync.queueDepth} `}</text>
+								<text fg={issueSync.failedCount > 0 ? theme.red : theme.subtext1}>
+									{`failed=${issueSync.failedCount}`}
+								</text>
+							</box>
+							<box flexDirection="row" paddingLeft={2}>
+								<text
+									fg={issueSyncStatusColor(issueSync.lastStatus)}
+								>{`last=${issueSync.lastStatus}`}</text>
 								{issueSync.lastSyncedAt && (
 									<text
 										fg={theme.subtext1}
@@ -462,6 +524,62 @@ export const DiagnosticsOverlay = () => {
 									{` ${sanitizeDiagnosticInlineText(issueSync.lastMessage)}`}
 								</text>
 							</box>
+							{issueSync.runtime && (
+								<box flexDirection="column">
+									<box flexDirection="row" paddingLeft={2}>
+										<text
+											fg={issueSync.runtime.status === "ready" ? theme.green : theme.yellow}
+										>{`runtime=${issueSync.runtime.status} `}</text>
+										<text fg={issueSyncRuntimeReasonColor(issueSync.runtime.reason)}>
+											{`reason=${issueSync.runtime.reason}`}
+										</text>
+										<text fg={theme.subtext1}>
+											{` (${formatRelativeTime(issueSync.runtime.updatedAt)})`}
+										</text>
+									</box>
+									<box flexDirection="row" paddingLeft={4}>
+										<text fg={theme.subtext0}>
+											{sanitizeDiagnosticInlineText(
+												`path=${issueSync.runtime.projectPath} team=${issueSync.runtime.configuredTeam ?? "<none>"} project=${issueSync.runtime.configuredProject ?? "<none>"} apiKey=${issueSync.runtime.apiKeySource}`,
+											)}
+										</text>
+									</box>
+								</box>
+							)}
+							{issueSync.queue && (
+								<box flexDirection="column">
+									<box flexDirection="row" paddingLeft={2}>
+										<text fg={theme.subtext1}>
+											{`queue total=${issueSync.queue.total} ready=${issueSync.queue.pendingReady} delayed=${issueSync.queue.pendingDelayed} active=${issueSync.queue.processingActive} stale=${issueSync.queue.processingStale} failed=${issueSync.queue.failed}`}
+										</text>
+										<text fg={theme.subtext1}>
+											{` (${formatRelativeTime(issueSync.queue.updatedAt)})`}
+										</text>
+									</box>
+								</box>
+							)}
+							{issueSync.lastRun && (
+								<box flexDirection="column">
+									<box flexDirection="row" paddingLeft={2}>
+										<text fg={theme.subtext1}>
+											{`run=${issueSync.lastRun.runId} op=${issueSync.lastRun.operation} `}
+										</text>
+										<text fg={issueSyncStatusColor(issueSync.lastRun.status)}>
+											{`status=${issueSync.lastRun.status}`}
+										</text>
+										<text fg={theme.subtext1}>
+											{` (${formatRelativeTime(issueSync.lastRun.finishedAt)})`}
+										</text>
+									</box>
+									<box flexDirection="row" paddingLeft={4}>
+										<text fg={theme.subtext0}>
+											{sanitizeDiagnosticInlineText(
+												`pushed=${issueSync.lastRun.pushed} pulled=${issueSync.lastRun.pulled} ${issueSync.lastRun.message}`,
+											)}
+										</text>
+									</box>
+								</box>
+							)}
 							{issueSync.lastFailure && (
 								<box flexDirection="row" paddingLeft={2}>
 									<text fg={theme.red}>
@@ -471,57 +589,60 @@ export const DiagnosticsOverlay = () => {
 									</text>
 								</box>
 							)}
-					</box>
-				)}
-				<text> </text>
+						</box>
+					)}
+					<text> </text>
 
-				{/* Issue database performance section */}
-				<SectionHeader title="Issue DB Perf:" />
-				{sortedIssueDbPerf.length === 0 ? (
-					<text fg={theme.subtext0}>{"  No issue db metrics yet"}</text>
-				) : (
-					sortedIssueDbPerf.map((perf) => (
-						<IssueDbPerfRow
-							key={`${perf.backend}:${perf.operation}`}
-							backend={perf.backend}
-							operation={perf.operation}
-							kind={perf.kind}
-							count={perf.count}
-							failureCount={perf.failureCount}
-							avgMs={perf.avgMs}
-							p95Ms={perf.p95Ms}
-							maxMs={perf.maxMs}
-							lastMs={perf.lastMs}
-							lastStatus={perf.lastStatus}
-							lastAt={perf.lastAt}
-						/>
-					))
-				)}
-				<text> </text>
-
-				{/* Events section - show warnings/errors from system */}
-				<SectionHeader title="Recent Events:" />
-				{events.length === 0 ? (
-					<text fg={theme.subtext0}>{"  No events"}</text>
-				) : (
-					events
-						.slice(-10) // Show last 10 events
-						.reverse() // Most recent first
-						.map((event) => (
-							<EventRow
-								key={event.id}
-								severity={event.severity}
-								source={event.source}
-								message={event.message}
-								details={event.details}
-								timestamp={event.timestamp}
+					{/* Issue database performance section */}
+					<SectionHeader title="Issue DB Perf:" />
+					{sortedIssueDbPerf.length === 0 ? (
+						<text fg={theme.subtext0}>{"  No issue db metrics yet"}</text>
+					) : (
+						sortedIssueDbPerf.map((perf) => (
+							<IssueDbPerfRow
+								key={`${perf.backend}:${perf.operation}`}
+								backend={perf.backend}
+								operation={perf.operation}
+								kind={perf.kind}
+								count={perf.count}
+								failureCount={perf.failureCount}
+								avgMs={perf.avgMs}
+								p95Ms={perf.p95Ms}
+								maxMs={perf.maxMs}
+								lastMs={perf.lastMs}
+								lastStatus={perf.lastStatus}
+								lastAt={perf.lastAt}
 							/>
 						))
-				)}
-				<text> </text>
+					)}
+					<text> </text>
+
+					{/* Events section - show warnings/errors from system */}
+					<SectionHeader title="Recent Events:" />
+					{events.length === 0 ? (
+						<text fg={theme.subtext0}>{"  No events"}</text>
+					) : (
+						events
+							.slice(-10) // Show last 10 events
+							.reverse() // Most recent first
+							.map((event) => (
+								<EventRow
+									key={event.id}
+									severity={event.severity}
+									source={event.source}
+									message={event.message}
+									details={event.details}
+									timestamp={event.timestamp}
+								/>
+							))
+					)}
+					<text> </text>
+				</scrollbox>
 
 				{/* Footer */}
-				<text fg={theme.subtext0}>{"Press Esc to dismiss..."}</text>
+				<text fg={theme.subtext0}>
+					{"j/k or ↑/↓:scroll  Ctrl+u/d:half page  mouse wheel:scroll  Esc:dismiss"}
+				</text>
 			</box>
 		</box>
 	)

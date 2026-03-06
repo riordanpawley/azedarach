@@ -29,7 +29,7 @@ Workflows are written as behavior contracts, not implementation details.
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session using deterministic project-prefixed session naming
 7. launch selected AI CLI command
-8. reflect session state as busy/idle/waiting as telemetry arrives
+8. reflect session lifecycle state (`initializing`/`busy`/`waiting`/`done`/`error`/`paused`/`idle`) as telemetry arrives
 
 ### Variants
 
@@ -405,6 +405,8 @@ Rules:
 ### Mapping
 
 - detected states update card indicators and optional notifications
+- PTY-based detection SHOULD weight the most recent non-empty output window more heavily than older scrollback
+- stale error-like text in scrollback MUST NOT override concurrent active-work signals
 
 ### Typical Triggers
 
@@ -721,6 +723,7 @@ Linear synchronization contract:
 - hydration MUST NOT clobber locally pending optimistic updates
 - backend sync requests MUST flow through a bounded-rate queue with burst allowance
 - queued sync requests MUST be deduplicated by intent key so equivalent in-flight work is not duplicated
+- metadata/list reads that require full dataset coverage MUST honor provider page-size caps and traverse cursor pagination until complete
 - linear sync lifecycle MUST emit logs for dispatch start, skip decisions, success, retry scheduling, and terminal failure
 - linear sync logs MUST include project path, operation kind, attempt context, and issue identity (`issueId` or bootstrap/flush scope), plus external linear issue ID when known
 - default read operations SHOULD use bounded wait and return local state if refresh wait budget is exceeded

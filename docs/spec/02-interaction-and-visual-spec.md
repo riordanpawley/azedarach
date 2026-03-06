@@ -399,6 +399,7 @@ Suggested icon mapping:
 - done: check
 - error: cross
 - paused: pause glyph
+- session icon state SHOULD track recent telemetry and recover from transient error states when newer activity indicates resumed execution
 
 ## 2.18 Relationship Surfaces
 

@@ -165,7 +165,7 @@ export const DEFAULT_CONFIG = {
 		validateCommands: [] satisfies string[],
 		fixCommand: "",
 		maxFixAttempts: 2,
-		startClaudeOnFailure: true,
+		startAiSessionOnFailure: true,
 	},
 	notifications: {
 		bell: true,
@@ -302,7 +302,7 @@ export interface ResolvedConfig {
 		validateCommands: readonly string[]
 		fixCommand: string
 		maxFixAttempts: number
-		startClaudeOnFailure: boolean
+		startAiSessionOnFailure: boolean
 	}
 	notifications: {
 		bell: boolean
@@ -566,8 +566,8 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,
 			fixCommand: config.merge?.fixCommand ?? DEFAULT_CONFIG.merge.fixCommand,
 			maxFixAttempts: config.merge?.maxFixAttempts ?? DEFAULT_CONFIG.merge.maxFixAttempts,
-			startClaudeOnFailure:
-				config.merge?.startClaudeOnFailure ?? DEFAULT_CONFIG.merge.startClaudeOnFailure,
+			startAiSessionOnFailure:
+				config.merge?.startAiSessionOnFailure ?? DEFAULT_CONFIG.merge.startAiSessionOnFailure,
 		},
 		notifications: {
 			bell: config.notifications?.bell ?? DEFAULT_CONFIG.notifications.bell,

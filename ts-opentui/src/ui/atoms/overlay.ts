@@ -117,7 +117,7 @@ export const pushOverlayAtom = appRuntime.fn(
 						  }
 						| { readonly _tag: "forkEpic"; readonly sourceTaskId: string }
 			  }
-			| { readonly _tag: "claudeCreate" }
+			| { readonly _tag: "aiCreate" }
 			| { readonly _tag: "settings" }
 			| { readonly _tag: "imageAttach"; readonly taskId: string }
 			| { readonly _tag: "imagePreview"; readonly taskId: string }
@@ -177,6 +177,18 @@ export const popOverlayAtom = appRuntime.fn(() =>
  * Usage: const scrollCommand = useAtomValue(detailScrollAtom)
  */
 export const detailScrollAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const overlay = yield* OverlayService
+		return overlay.scrollCommand
+	}),
+)
+
+/**
+ * Diagnostics scroll command atom - subscribes to scroll commands for diagnostics overlay
+ *
+ * Uses the same command stream as detail scrolling; consumers filter by `target`.
+ */
+export const diagnosticsScrollAtom = appRuntime.subscriptionRef(
 	Effect.gen(function* () {
 		const overlay = yield* OverlayService
 		return overlay.scrollCommand

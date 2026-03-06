@@ -19,21 +19,21 @@ import type { TaskWithSession } from "../types.js"
 import { appRuntime } from "./runtime.js"
 
 // ============================================================================
-// Schema for Claude response parsing
+// Schema for AI response parsing
 // ============================================================================
 
-const ClaudeTaskResponseSchema = Schema.Struct({
+const AITaskResponseSchema = Schema.Struct({
 	title: Schema.String,
 	type: Schema.optional(Schema.String),
 	priority: Schema.optional(Schema.Number),
 	description: Schema.optional(Schema.String),
 })
 
-type ClaudeTaskResponse = Schema.Schema.Type<typeof ClaudeTaskResponseSchema>
+type AITaskResponse = Schema.Schema.Type<typeof AITaskResponseSchema>
 
-const decodeClaudeResponse = Schema.decodeUnknown(ClaudeTaskResponseSchema)
+const decodeAIResponse = Schema.decodeUnknown(AITaskResponseSchema)
 
-class ClaudeTaskCreateError extends Data.TaggedError("ClaudeTaskCreateError")<{
+class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
 }> {}
 
@@ -267,18 +267,18 @@ export const createIssueViaEditorAtom = appRuntime.fn(() =>
 )
 
 /**
- * Create an issue from natural language using Claude CLI
+ * Create an issue from natural language using the configured AI CLI
  *
  * Two-phase approach for reliability:
- * 1. Claude extracts structured data (title, type, priority) from natural language
+ * 1. AI tool extracts structured data (title, type, priority) from natural language
  * 2. We call tracker create directly via IssueTrackerClient
  *
- * This avoids the unreliability of Claude executing CLI commands and parsing free-form output.
+ * This avoids the unreliability of AI tools executing CLI commands and parsing free-form output.
  *
- * Usage: const claudeCreate = useAtom(claudeCreateSessionAtom, { mode: "promise" })
- *        const issueId = await claudeCreate("Add dark mode toggle to settings")
+ * Usage: const aiCreate = useAtom(aiCreateTaskAtom, { mode: "promise" })
+ *        const issueId = await aiCreate("Add dark mode toggle to settings")
  */
-export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
+export const aiCreateTaskAtom = appRuntime.fn((description: string) =>
 	Effect.gen(function* () {
 		const board = yield* BoardService
 		const navigation = yield* NavigationService
@@ -296,7 +296,7 @@ export const claudeCreateSessionAtom = appRuntime.fn((description: string) =>
 		// Get current project path (or cwd if no project selected)
 		const projectPath = (yield* projectService.getCurrentPath()) ?? process.cwd()
 
-		// Phase 1: Ask Claude to extract structured task data
+		// Phase 1: Ask the configured AI tool to extract structured task data
 		// Using JSON output format for deterministic parsing
 		const prompt = `Extract task information from this description and return ONLY a JSON object.
 
@@ -325,14 +325,14 @@ Return ONLY the JSON object, no explanation or markdown.`
 
 		const args = ["-p", prompt, "--model", chatModel, "--output-format", "text"]
 
-		const claudeCmd = Command.make(cliTool, ...args).pipe(Command.workingDirectory(projectPath))
+		const aiCmd = Command.make(cliTool, ...args).pipe(Command.workingDirectory(projectPath))
 
-		const rawOutput = yield* Command.string(claudeCmd).pipe(
+		const rawOutput = yield* Command.string(aiCmd).pipe(
 			Effect.timeout("15 seconds"),
-			Effect.mapError((e) => new ClaudeTaskCreateError({ message: `Claude CLI failed: ${e}` })),
+			Effect.mapError((e) => new AITaskCreateError({ message: `AI CLI failed: ${e}` })),
 		)
 
-		// Parse the JSON output from Claude
+		// Parse the JSON output from the AI CLI
 		// Handle potential markdown code blocks or extra whitespace
 		const cleanOutput = rawOutput
 			.trim()
@@ -344,17 +344,17 @@ Return ONLY the JSON object, no explanation or markdown.`
 		const jsonParsed = yield* Effect.try({
 			try: () => JSON.parse(cleanOutput),
 			catch: (e) =>
-				new ClaudeTaskCreateError({
-					message: `Failed to parse Claude output: ${e}\nRaw output: ${rawOutput}`,
+				new AITaskCreateError({
+					message: `Failed to parse AI output: ${e}\nRaw output: ${rawOutput}`,
 				}),
 		})
 
 		// Validate with Schema
-		const parsed: ClaudeTaskResponse = yield* decodeClaudeResponse(jsonParsed).pipe(
+		const parsed: AITaskResponse = yield* decodeAIResponse(jsonParsed).pipe(
 			Effect.mapError(
 				(e) =>
-					new ClaudeTaskCreateError({
-						message: `Claude returned invalid data: ${e}\nRaw output: ${rawOutput}`,
+					new AITaskCreateError({
+						message: `AI output did not match schema: ${e}\nRaw output: ${rawOutput}`,
 					}),
 			),
 		)

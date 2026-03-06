@@ -17,7 +17,7 @@
  * - atoms/overlay.ts    - Overlay stack and toast notifications
  * - atoms/pr.ts         - PR creation and merge operations
  * - atoms/project.ts    - Project selection and management
- * - atoms/session.ts    - Claude session lifecycle
+ * - atoms/session.ts    - AI session lifecycle
  * - atoms/task.ts       - Task CRUD operations
  * - atoms/vc.ts         - VC auto-pilot status and control
  */

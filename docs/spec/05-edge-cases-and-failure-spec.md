@@ -458,6 +458,18 @@ On failure, logs SHOULD capture:
   - when board/project context is explicit, ignore project-prefixed tmux sessions from other projects.
   - do not mark a local issue active based on foreign-prefixed session names (for example `ch-f` must not activate `f` in Azedarach context).
 
+### Case F-144: Historical error text remains in scrollback while session is actively working
+
+- Required behavior:
+  - prioritize recent active-work signals over older scrollback error markers.
+  - do not pin session indicator to `error` unless recent output still supports an active error condition.
+
+### Case F-145: Transient error followed by resumed execution
+
+- Required behavior:
+  - allow session state to recover from `error` back to `busy`/`waiting` when subsequent telemetry indicates resumed execution.
+  - avoid terminal-state stickiness caused only by prior PTY pattern matches.
+
 ## 5.24 Ordering and Time Anomaly Edge Cases
 
 ### Case F-150: Missing updated timestamp on subset of issues
@@ -610,6 +622,12 @@ On failure, logs SHOULD capture:
 - Required behavior:
   - coalesce/deduplicate equivalent in-flight work deterministically.
   - ensure at-least-once completion semantics for each unique intent key.
+
+### Case F-196: Provider rejects oversized metadata page request
+
+- Required behavior:
+  - avoid retry loops caused by invalid page-size values that exceed provider caps.
+  - continue with provider-compliant page size and cursor pagination until required metadata coverage is complete.
 
 ## 5.29 Probe and E2E Harness Edge Cases
 

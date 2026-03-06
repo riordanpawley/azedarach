@@ -319,8 +319,8 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 	{
 		key: "S-c",
 		mode: "normal",
-		description: "Create bead via Claude",
-		action: bc.overlay.push({ _tag: "claudeCreate" }),
+		description: "Create bead via AI",
+		action: bc.overlay.push({ _tag: "aiCreate" }),
 	},
 	{
 		key: "tab",
@@ -439,7 +439,7 @@ done
 	{
 		key: "S-s",
 		mode: "action",
-		description: "Start+work (prompt Claude)",
+		description: "Start+work (prompt AI)",
 		action: Effect.suspend(() =>
 			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.startSessionWithPrompt())),
 		),
@@ -543,14 +543,12 @@ done
 	{
 		key: "S-e",
 		mode: "action",
-		description: "Edit bead (Claude)",
+		description: "Edit bead (AI)",
 		action: Effect.suspend(() =>
 			bc.editor
 				.exitToNormal()
 				.pipe(
-					Effect.tap(() =>
-						bc.toast.show("error", "Claude edit not yet implemented - use 'e' for $EDITOR"),
-					),
+					Effect.tap(() => bc.toast.show("error", "AI edit not yet implemented - use 'e' for $EDITOR")),
 				),
 		),
 	},

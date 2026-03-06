@@ -7,7 +7,7 @@
  * 3. package.json under "azedarach" key
  * 4. Defaults
  *
- * Follows the service patterns established in IssueTrackerClient.ts and ClaudeSessionManager.ts.
+ * Follows the service patterns established in IssueTrackerClient.ts and SessionManager.ts.
  */
 
 import { FileSystem, Path } from "@effect/platform"

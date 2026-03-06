@@ -256,7 +256,7 @@ Canonical fixture profile names:
 - Preconditions: issue branch missing for one run; mixed tmux session states present for another run.
 - Steps: start session and inspect card indicators.
 - Expected: session start ensures issue branch context exists; detector maps and displays busy/waiting/done/error/paused accurately.
-- Links: AZ-FR-0806, AZ-FR-0815.
+- Links: AZ-FR-0806, AZ-FR-0815, AZ-FR-0815b, AZ-FR-0815c, AZ-FR-0815d.
 
 ## 6.10 Dev Server Acceptance
 
@@ -487,12 +487,26 @@ Canonical fixture profile names:
 - Expected: first `waiting` transition emits tmux-native bell/alert highlighting for the session window (`prefix+s` attention signal); repeated `waiting` without an intervening non-waiting state does not re-emit; returning to `busy` resets debounce so the next `waiting` alerts again.
 - Links: AZ-FR-0815, AZ-FR-2005.
 
-### AZ-AT-2828 PTY pattern-matching toggle off behavior
+### AZ-AT-2829 PTY pattern-matching toggle off behavior
 
 - Preconditions: issue session is running in tmux; config sets `stateDetection.patternMatching=false`.
 - Steps: create output that would normally match PTY waiting/busy/done patterns.
 - Expected: PTY monitor does not update session state/metrics from those patterns; only native tmux/hook status updates affect session state.
 - Links: AZ-FR-0815a, AZ-FR-2005.
+
+### AZ-AT-2829 PTY recency-first detection avoids stale error pinning
+
+- Preconditions: issue session is running with `stateDetection.patternMatching=true`.
+- Steps: emit an error-looking line, then continue with clear active-work output (spinner/tool activity) without stopping the session.
+- Expected: session state returns/remains `busy` (or `waiting` when prompted) instead of staying pinned to `error` from stale scrollback.
+- Links: AZ-FR-0815b, section 05 F-144.
+
+### AZ-AT-2830 PTY transient error recovery
+
+- Preconditions: issue session is running with `stateDetection.patternMatching=true`.
+- Steps: drive output through `busy -> error-like transient output -> resumed busy/waiting output`.
+- Expected: session state can transition out of `error` back to active states when newer telemetry indicates recovery.
+- Links: AZ-FR-0815c, AZ-FR-0815d, section 05 F-145.
 
 ## 6.17 Failure Acceptance
 
@@ -569,7 +583,7 @@ Canonical fixture profile names:
 - Expected: explicit lock feedback; no duplicate write; retry path available.
 - Links: AZ-FR-2806..AZ-FR-2808.
 
-### AZ-AT-2827 Refresh selection reconciliation and optimistic dependency/fork rollback
+### AZ-AT-2830 Refresh selection reconciliation and optimistic dependency/fork rollback
 
 - Preconditions: selected set includes items affected by refresh removal; dependency/fork mutation failures can be injected.
 - Steps: trigger refresh during active selections; run optimistic dependency and fork metadata mutations with forced failures.
@@ -596,7 +610,7 @@ Canonical fixture profile names:
 - Expected: critical states understandable via textual cues.
 - Links: AZ-FR-2905.
 
-### AZ-AT-2826 Security/privacy redaction and ASCII-key operability
+### AZ-AT-2831 Security/privacy redaction and ASCII-key operability
 
 - Preconditions: operations produce logs/toasts and issue has attachments.
 - Steps: execute sensitive operations, inspect outputs, and run primary workflows with ASCII keybindings only.
@@ -858,6 +872,13 @@ Canonical fixture profile names:
 - Expected: logs include flush start, per-item dispatch start, success path, and retry-or-terminal failure decision with project path, issue identity, operation type, and attempt context.
 - Links: AZ-FR-3811, AZ-FR-3815.
 
+### AZ-AT-2507 Linear metadata pagination respects provider page-size caps
+
+- Preconditions: linear backend fixture/stub exposes paginated workflow state data with provider max page size of 250.
+- Steps: trigger the workflow-state metadata fetch path used for status mapping.
+- Expected: requests use provider-compliant page size, follow cursors through all pages, and complete without argument-validation errors or missing required state mappings.
+- Links: AZ-FR-3816.
+
 ## 6.28 Background Operation Acceptance
 
 ### AZ-AT-2601 Long-running actions register operation IDs
@@ -1026,8 +1047,8 @@ A release candidate MUST pass:
 - dependency graph scenarios AZ-AT-2201 through AZ-AT-2205
 - branch-origin and relationship-display scenarios AZ-AT-2301 through AZ-AT-2305
 - upstream follow-on scenarios AZ-AT-2401 through AZ-AT-2409
-- optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2505
+- optimistic mutation scenarios AZ-AT-2501 through AZ-AT-2507
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- extended conformance scenarios AZ-AT-2812 through AZ-AT-2827
+- extended conformance scenarios AZ-AT-2812 through AZ-AT-2831

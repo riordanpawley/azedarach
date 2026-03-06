@@ -11,7 +11,7 @@
 
 import { Effect, Option } from "effect"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
-import { ClaudeSessionManager } from "../../core/ClaudeSessionManager.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { TemplateService } from "../../core/TemplateService.js"
 import type { OrchestrationTask } from "../EditorService.js"
 import { EditorService } from "../EditorService.js"
@@ -32,7 +32,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			EditorService.Default,
 			OverlayService.Default,
 			IssueTrackerClient.Default,
-			ClaudeSessionManager.Default,
+			SessionManager.Default,
 			TemplateService.Default,
 		],
 
@@ -43,7 +43,7 @@ export class OrchestrateHandlersService extends Effect.Service<OrchestrateHandle
 			const editor = yield* EditorService
 			const overlay = yield* OverlayService
 			const issueTrackerClient = yield* IssueTrackerClient
-			const sessionManager = yield* ClaudeSessionManager
+			const sessionManager = yield* SessionManager
 			const templateService = yield* TemplateService
 
 			// ================================================================

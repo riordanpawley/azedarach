@@ -125,6 +125,40 @@ describe("AzedarachConfigSchema", () => {
 		})
 	})
 
+	describe("v4 → v5 migration: merge.startClaudeOnFailure rename", () => {
+		it("migrates merge.startClaudeOnFailure to merge.startAiSessionOnFailure", () => {
+			const result = decodeConfig({
+				$schema: 4,
+				merge: {
+					validateCommands: ["bun run type-check"],
+					startClaudeOnFailure: false,
+				},
+			})
+
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.merge?.startAiSessionOnFailure).toBe(false)
+
+			const encoded = Schema.encodeSync(AzedarachConfigSchema)(result)
+			const encodedMerge = encoded.merge
+			expect(encodedMerge?.startAiSessionOnFailure).toBe(false)
+			if (encodedMerge !== undefined) {
+				expect("startClaudeOnFailure" in encodedMerge).toBe(false)
+			}
+		})
+
+		it("prefers merge.startAiSessionOnFailure when both keys are present", () => {
+			const result = decodeConfig({
+				$schema: 4,
+				merge: {
+					startClaudeOnFailure: false,
+					startAiSessionOnFailure: true,
+				},
+			})
+
+			expect(result.merge?.startAiSessionOnFailure).toBe(true)
+		})
+	})
+
 	describe("v4 issueTracker shape", () => {
 		it("accepts nested tracker config", () => {
 			const result = decodeConfig({
