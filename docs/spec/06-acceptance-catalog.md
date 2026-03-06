@@ -418,6 +418,13 @@ Canonical fixture profile names:
 - Expected: attachment selection navigation updates deterministically.
 - Links: AZ-FR-1605.
 
+### AZ-AT-2828 Attachment prompt paths are worktree-local
+
+- Preconditions: issue has one or more image attachments and no existing session.
+- Steps: trigger `Space S` (and optionally `Space !`) and inspect the generated startup prompt content sent to the AI CLI.
+- Expected: attachment paths point to `<issue-worktree>/.azedarach/tmp/attachments/...`; flow does not rely on sibling/global project attachment directories.
+- Links: AZ-FR-1610.
+
 ## 6.16 Settings and Projects Acceptance
 
 ### AZ-AT-1401 Edit settings and persist

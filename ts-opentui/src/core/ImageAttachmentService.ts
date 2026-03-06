@@ -96,12 +96,22 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					return projectPath ?? process.cwd()
 				})
 
-			const getTmpBaseDir = () =>
-				Effect.map(getProjectPath(), (projectPath) => path.join(projectPath, ATTACHMENTS_TMP_DIR))
-			const getTmpIssueDir = (issueId: string) =>
-				Effect.map(getTmpBaseDir(), (baseDir) => path.join(baseDir, issueId))
-			const getTmpAttachmentDir = (issueId: string, attachmentId: string) =>
-				Effect.map(getTmpIssueDir(issueId), (issueDir) => path.join(issueDir, attachmentId))
+			const getTmpBaseDir = (projectRootPath?: string) =>
+				projectRootPath
+					? Effect.succeed(path.join(projectRootPath, ATTACHMENTS_TMP_DIR))
+					: Effect.map(getProjectPath(), (projectPath) =>
+							path.join(projectPath, ATTACHMENTS_TMP_DIR),
+						)
+			const getTmpIssueDir = (issueId: string, projectRootPath?: string) =>
+				Effect.map(getTmpBaseDir(projectRootPath), (baseDir) => path.join(baseDir, issueId))
+			const getTmpAttachmentDir = (
+				issueId: string,
+				attachmentId: string,
+				projectRootPath?: string,
+			) =>
+				Effect.map(getTmpIssueDir(issueId, projectRootPath), (issueDir) =>
+					path.join(issueDir, attachmentId),
+				)
 
 			const getClipboardTmpDir = () =>
 				Effect.map(getProjectPath(), (projectPath) => path.join(projectPath, CLIPBOARD_TMP_DIR))
@@ -113,7 +123,11 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 					yield* fs.remove(issueTmpDir).pipe(Effect.ignore)
 				})
 
-			const materializeAttachment = (issueId: string, attachment: ImageAttachment) =>
+			const materializeAttachment = (
+				issueId: string,
+				attachment: ImageAttachment,
+				projectRootPath?: string,
+			) =>
 				Effect.gen(function* () {
 					const record = yield* localIssueStore.getIssueAttachment(issueId, attachment.id)
 					if (!record) {
@@ -124,7 +138,7 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						)
 					}
 
-					const attachmentDir = yield* getTmpAttachmentDir(issueId, attachment.id)
+					const attachmentDir = yield* getTmpAttachmentDir(issueId, attachment.id, projectRootPath)
 					yield* fs.makeDirectory(attachmentDir, { recursive: true }).pipe(Effect.ignore)
 					const filePath = path.join(attachmentDir, attachment.filename)
 					yield* fs.writeFile(filePath, record.content)
@@ -776,6 +790,28 @@ export class ImageAttachmentService extends Effect.Service<ImageAttachmentServic
 						}
 
 						return yield* materializeAttachment(issueId, attachment)
+					}),
+
+				/**
+				 * Get full path to an attachment file materialized under a specific project root.
+				 *
+				 * Used when starting a session in a worktree so attachment paths resolve inside
+				 * that worktree instead of a sibling/parent project.
+				 */
+				getPathForProjectRoot: (issueId: string, attachmentId: string, projectRootPath: string) =>
+					Effect.gen(function* () {
+						const issueAttachments = yield* localIssueStore.listIssueAttachments(issueId)
+						const attachment = issueAttachments.find((a) => a.id === attachmentId)
+
+						if (!attachment) {
+							return yield* Effect.fail(
+								new ImageAttachmentError({
+									message: `Attachment not found: ${attachmentId}`,
+								}),
+							)
+						}
+
+						return yield* materializeAttachment(issueId, attachment, projectRootPath)
 					}),
 
 				/**
