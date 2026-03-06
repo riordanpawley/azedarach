@@ -67,6 +67,28 @@ export type IssueDbPerfBackend = "linear"
 export type IssueDbPerfOperationKind = "read" | "write"
 export type IssueDbPerfLastStatus = "success" | "failure"
 
+export type IssueSyncBackend = "linear" | "none"
+export type IssueSyncLastStatus = "idle" | "success" | "failure" | "skipped"
+
+export interface IssueSyncFailure {
+	readonly issueId: string
+	readonly operation: "bootstrap" | "flush" | "upsert" | "close" | "delete"
+	readonly error: string
+	readonly attempts: number
+	readonly occurredAt: Date
+}
+
+export interface IssueSyncHealth {
+	readonly backend: IssueSyncBackend
+	readonly syncEnabled: boolean
+	readonly queueDepth: number
+	readonly failedCount: number
+	readonly lastSyncedAt?: Date
+	readonly lastStatus: IssueSyncLastStatus
+	readonly lastMessage: string
+	readonly lastFailure?: IssueSyncFailure
+}
+
 export interface IssueDbPerfStats {
 	readonly backend: IssueDbPerfBackend
 	readonly operation: string
@@ -140,6 +162,7 @@ export interface DiagnosticsState {
 	readonly services: readonly ServiceHealth[]
 	readonly events: readonly DiagnosticEvent[]
 	readonly issueDbPerf: readonly IssueDbPerfStats[]
+	readonly issueSync?: IssueSyncHealth
 	readonly lastUpdated: Date
 }
 
@@ -170,11 +193,10 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			services: [],
 			events: [],
 			issueDbPerf: [],
+			issueSync: undefined,
 			lastUpdated: new Date(),
 		})
-		const issueDbPerfAccumulators = yield* Ref.make<Map<string, IssueDbPerfAccumulator>>(
-			new Map(),
-		)
+		const issueDbPerfAccumulators = yield* Ref.make<Map<string, IssueDbPerfAccumulator>>(new Map())
 
 		/**
 		 * Register a fiber for monitoring
@@ -446,6 +468,13 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 				}
 			})
 
+		const setIssueSyncHealth = (health: IssueSyncHealth) =>
+			SubscriptionRef.update(stateRef, (s) => ({
+				...s,
+				issueSync: health,
+				lastUpdated: new Date(),
+			}))
+
 		/**
 		 * Record a timing event when an operation is slow
 		 */
@@ -508,6 +537,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 			logEvent,
 			clearEvents,
 			recordIssueDbTiming,
+			setIssueSyncHealth,
 			logTiming,
 			measure,
 		}

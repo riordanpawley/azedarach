@@ -3,7 +3,11 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import type { DiagnosticSeverity, FiberStatus } from "../services/DiagnosticsService.js"
+import type {
+	DiagnosticSeverity,
+	FiberStatus,
+	IssueSyncLastStatus,
+} from "../services/DiagnosticsService.js"
 import { diagnosticsAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
@@ -87,6 +91,20 @@ const severityIcon = (severity: DiagnosticSeverity): string => {
 			return "✗"
 		default:
 			return "•"
+	}
+}
+
+const issueSyncStatusColor = (status: IssueSyncLastStatus): string => {
+	switch (status) {
+		case "success":
+			return theme.green
+		case "failure":
+			return theme.red
+		case "skipped":
+			return theme.yellow
+		case "idle":
+		default:
+			return theme.subtext0
 	}
 }
 
@@ -234,8 +252,12 @@ const IssueDbPerfRow = ({
 			<text fg={theme.subtext1}>{`n=${String(count).padStart(4)} `}</text>
 			<text fg={failureRate > 0 ? theme.yellow : theme.subtext1}>{`fail=${failureRate}% `}</text>
 			<text fg={theme.subtext1}>{`avg=${String(avgMs).padStart(4)}ms `}</text>
-			<text fg={p95Ms >= 300 ? theme.yellow : theme.subtext1}>{`p95=${String(p95Ms).padStart(4)}ms `}</text>
-			<text fg={maxMs >= 500 ? theme.red : theme.subtext1}>{`max=${String(maxMs).padStart(4)}ms `}</text>
+			<text
+				fg={p95Ms >= 300 ? theme.yellow : theme.subtext1}
+			>{`p95=${String(p95Ms).padStart(4)}ms `}</text>
+			<text
+				fg={maxMs >= 500 ? theme.red : theme.subtext1}
+			>{`max=${String(maxMs).padStart(4)}ms `}</text>
 			<text fg={statusColorValue}>{`last=${lastMs}ms`}</text>
 			<text fg={theme.subtext1}>{` (${formatRelativeTime(lastAt)})`}</text>
 		</box>
@@ -258,6 +280,9 @@ export const DiagnosticsOverlay = () => {
 	const services = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.services : []
 	const events = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.events : []
 	const issueDbPerf = Result.isSuccess(diagnosticsResult) ? diagnosticsResult.value.issueDbPerf : []
+	const issueSync = Result.isSuccess(diagnosticsResult)
+		? diagnosticsResult.value.issueSync
+		: undefined
 	const sortedIssueDbPerf = [...issueDbPerf].sort((left, right) => right.p95Ms - left.p95Ms)
 
 	return (
@@ -328,6 +353,44 @@ export const DiagnosticsOverlay = () => {
 							error={fiber.error}
 						/>
 					))
+				)}
+				<text> </text>
+
+				{/* Issue database performance section */}
+				<SectionHeader title="Issue Sync:" />
+				{issueSync === undefined ? (
+					<text fg={theme.subtext0}>{"  No sync diagnostics yet"}</text>
+				) : (
+					<box flexDirection="column">
+						<box flexDirection="row">
+							<text fg={theme.text}>{`backend=${issueSync.backend.padEnd(6)} `}</text>
+							<text fg={issueSync.syncEnabled ? theme.green : theme.yellow}>
+								{`enabled=${issueSync.syncEnabled ? "yes" : "no"} `}
+							</text>
+							<text fg={theme.subtext1}>{`queue=${issueSync.queueDepth} `}</text>
+							<text fg={issueSync.failedCount > 0 ? theme.red : theme.subtext1}>
+								{`failed=${issueSync.failedCount}`}
+							</text>
+						</box>
+						<box flexDirection="row" paddingLeft={2}>
+							<text
+								fg={issueSyncStatusColor(issueSync.lastStatus)}
+							>{`last=${issueSync.lastStatus}`}</text>
+							{issueSync.lastSyncedAt && (
+								<text
+									fg={theme.subtext1}
+								>{` (${formatRelativeTime(issueSync.lastSyncedAt)})`}</text>
+							)}
+							<text fg={theme.subtext0}>{` ${issueSync.lastMessage}`}</text>
+						</box>
+						{issueSync.lastFailure && (
+							<box flexDirection="row" paddingLeft={2}>
+								<text fg={theme.red}>
+									{`failure ${issueSync.lastFailure.issueId} ${issueSync.lastFailure.operation}: ${issueSync.lastFailure.error}`}
+								</text>
+							</box>
+						)}
+					</box>
 				)}
 				<text> </text>
 
