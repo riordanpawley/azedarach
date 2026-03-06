@@ -25,6 +25,8 @@ describe("AzedarachConfigSchema", () => {
 			expect("local" in resolved.issueTracker && resolved.issueTracker.local.backups.enabled).toBe(
 				true,
 			)
+			expect(resolved.sessionRecovery.retryBaseDelayMs).toBe(1000)
+			expect(resolved.sessionRecovery.retryMaxDelayMs).toBe(60000)
 		})
 
 		it("sets $schema to current for v1 config (legacy)", () => {
@@ -38,6 +40,25 @@ describe("AzedarachConfigSchema", () => {
 			})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(result.session?.command).toBe("claude")
+		})
+	})
+
+	describe("session recovery config", () => {
+		it("accepts retry delay overrides", () => {
+			const result = decodeConfig({
+				sessionRecovery: {
+					mode: "auto",
+					autoRecoveryDelayMs: 500,
+					retryBaseDelayMs: 1500,
+					retryMaxDelayMs: 45000,
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.sessionRecovery.mode).toBe("auto")
+			expect(resolved.sessionRecovery.autoRecoveryDelayMs).toBe(500)
+			expect(resolved.sessionRecovery.retryBaseDelayMs).toBe(1500)
+			expect(resolved.sessionRecovery.retryMaxDelayMs).toBe(45000)
 		})
 	})
 

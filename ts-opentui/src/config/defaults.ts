@@ -210,6 +210,10 @@ export const DEFAULT_CONFIG = {
 		mode: "auto" as SessionRecoveryMode,
 		/** Delay before auto-recovery starts (ms) - gives UI time to render */
 		autoRecoveryDelayMs: 2000,
+		/** Retry backoff base delay (ms) for transient auto-recovery failures */
+		retryBaseDelayMs: 1000,
+		/** Maximum retry wait (ms) for transient auto-recovery failures */
+		retryMaxDelayMs: 60000,
 	},
 	hooks: {
 		preCompact: {
@@ -377,6 +381,8 @@ export interface ResolvedConfig {
 	sessionRecovery: {
 		mode: SessionRecoveryMode
 		autoRecoveryDelayMs: number
+		retryBaseDelayMs: number
+		retryMaxDelayMs: number
 	}
 	hooks: {
 		preCompact: {
@@ -594,6 +600,10 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			autoRecoveryDelayMs:
 				config.sessionRecovery?.autoRecoveryDelayMs ??
 				DEFAULT_CONFIG.sessionRecovery.autoRecoveryDelayMs,
+			retryBaseDelayMs:
+				config.sessionRecovery?.retryBaseDelayMs ?? DEFAULT_CONFIG.sessionRecovery.retryBaseDelayMs,
+			retryMaxDelayMs:
+				config.sessionRecovery?.retryMaxDelayMs ?? DEFAULT_CONFIG.sessionRecovery.retryMaxDelayMs,
 		},
 		hooks: {
 			preCompact: {

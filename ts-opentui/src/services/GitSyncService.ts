@@ -34,6 +34,31 @@ export class GitSyncError extends Data.TaggedError("GitSyncError")<{
 	readonly command?: string
 }> {}
 
+export class GitBehindCountParseError extends Data.TaggedError("GitBehindCountParseError")<{
+	readonly message: string
+	readonly command: string
+	readonly output: string
+}> {}
+
+export const parseGitBehindCount = (
+	output: string,
+	command: string,
+): Effect.Effect<number, GitBehindCountParseError> =>
+	Effect.gen(function* () {
+		const trimmed = output.trim()
+		const parsed = Number.parseInt(trimmed, 10)
+		if (Number.isNaN(parsed)) {
+			return yield* Effect.fail(
+				new GitBehindCountParseError({
+					message: `Expected integer output from '${command}', got '${trimmed || "<empty>"}'`,
+					command,
+					output,
+				}),
+			)
+		}
+		return parsed
+	})
+
 // ============================================================================
 // Helper: Run git command
 // ============================================================================
@@ -128,15 +153,22 @@ export class GitSyncService extends Effect.Service<GitSyncService>()("GitSyncSer
 
 					// Step 2: Check how many commits behind
 					// Compare local baseBranch to remote-tracking branch (origin/baseBranch)
+					const previousBehindCount = yield* SubscriptionRef.get(commitsBehind)
+					const behindCommand = `git rev-list --count ${baseBranch}..${remote}/${baseBranch}`
 					const behindCount = yield* runGit(
 						["rev-list", "--count", `${baseBranch}..${remote}/${baseBranch}`],
 						projectPath,
 					).pipe(
-						Effect.map((output) => Number.parseInt(output.trim(), 10)),
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(0)),
+						Effect.flatMap((output) => parseGitBehindCount(output, behindCommand)),
+						Effect.tapError((error) =>
+							Effect.logError(
+								`Git behind-count check failed [${error._tag}]: ${String(error.message ?? error)}`,
 							),
+						),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Using previous behind count (${previousBehindCount}) after failure: ${String(error)}`,
+							).pipe(Effect.zipRight(Effect.succeed(previousBehindCount))),
 						),
 					)
 

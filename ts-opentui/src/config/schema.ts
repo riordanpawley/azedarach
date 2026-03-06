@@ -704,6 +704,21 @@ const SessionRecoveryConfigSchema = Schema.Struct({
 	 * Only applies when mode is "auto".
 	 */
 	autoRecoveryDelayMs: Schema.optional(Schema.Number),
+
+	/**
+	 * Base retry delay in milliseconds for transient auto-recovery failures (default: 1000)
+	 *
+	 * Retries use exponential backoff with jitter.
+	 */
+	retryBaseDelayMs: Schema.optional(Schema.Number),
+
+	/**
+	 * Maximum retry wait in milliseconds for transient auto-recovery failures (default: 60000)
+	 *
+	 * Auto-recovery keeps retrying transient failures indefinitely, but each wait
+	 * duration is capped at this maximum.
+	 */
+	retryMaxDelayMs: Schema.optional(Schema.Number),
 })
 
 /**
@@ -1040,8 +1055,7 @@ const migrations: readonly Migration[] = [
 							validateCommands: merge.validateCommands,
 							fixCommand: merge.fixCommand,
 							maxFixAttempts: merge.maxFixAttempts,
-							startAiSessionOnFailure:
-								merge.startAiSessionOnFailure ?? merge.startClaudeOnFailure,
+							startAiSessionOnFailure: merge.startAiSessionOnFailure ?? merge.startClaudeOnFailure,
 						}
 
 			return {
