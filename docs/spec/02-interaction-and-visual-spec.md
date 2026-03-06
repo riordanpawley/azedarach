@@ -435,6 +435,7 @@ When integrated with tmux navigation conventions:
 
 - `Ctrl-a Ctrl-a` returns to board session
 - `Ctrl-a Tab` toggles between AI session and related dev-server session
+- hook-driven `waiting` state SHOULD surface tmux-native attention highlighting (bell/alert style) so `prefix+s` can reveal sessions awaiting user input
 
 If unavailable, product SHOULD degrade gracefully and provide guidance.
 

@@ -480,6 +480,13 @@ Canonical fixture profile names:
 - Expected: only sessions matching the active project prefix (or valid legacy unprefixed sessions) influence active-session state; foreign prefixed sessions are ignored.
 - Links: AZ-FR-2001a, AZ-FR-2002, AZ-FR-2002a, section 05 F-143.
 
+### AZ-AT-2827 Waiting-state tmux attention signaling
+
+- Preconditions: issue session is running in tmux with hook notifications enabled.
+- Steps: drive hook notifications through `busy -> waiting -> waiting (repeat) -> busy -> waiting`.
+- Expected: first `waiting` transition emits tmux-native bell/alert highlighting for the session window (`prefix+s` attention signal); repeated `waiting` without an intervening non-waiting state does not re-emit; returning to `busy` resets debounce so the next `waiting` alerts again.
+- Links: AZ-FR-0815, AZ-FR-2005.
+
 ## 6.17 Failure Acceptance
 
 ### AZ-AT-1501 No session attach failure clarity

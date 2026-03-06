@@ -1163,6 +1163,15 @@ const VALID_HOOK_EVENTS = [
 ] as const
 type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 
+const AZ_STATUS_OPTION = "@az_status"
+const AZ_WAITING_ALERTED_OPTION = "@az_waiting_alerted"
+const BELL_CHAR = "\u0007"
+
+interface WaitingAttentionPlan {
+	readonly ringBell: boolean
+	readonly nextFlag: "0" | "1"
+}
+
 /**
  * Type guard to check if a string is a valid hook event
  */
@@ -1190,6 +1199,85 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 			return "idle"
 	}
 }
+
+const deriveWaitingAttentionPlan = (
+	status: TmuxStatus,
+	currentFlagRaw: string | null,
+): WaitingAttentionPlan => {
+	const normalizedFlag = currentFlagRaw?.trim() === "1" ? "1" : "0"
+	if (status === "waiting") {
+		return {
+			ringBell: normalizedFlag !== "1",
+			nextFlag: "1",
+		}
+	}
+	return {
+		ringBell: false,
+		nextFlag: "0",
+	}
+}
+
+const setTmuxSessionOption = (
+	sessionName: string,
+	optionName: string,
+	value: string,
+	verbose: boolean,
+) =>
+	PlatformCommand.exitCode(
+		PlatformCommand.make("tmux", "set-option", "-t", sessionName, optionName, value),
+	).pipe(
+		Effect.catchAll((error) =>
+			verbose
+				? Console.log(`Could not set tmux option ${optionName}: ${error}`).pipe(Effect.as(1))
+				: Effect.succeed(1),
+		),
+	)
+
+const getTmuxSessionOption = (sessionName: string, optionName: string) =>
+	PlatformCommand.string(
+		PlatformCommand.make("tmux", "show-option", "-t", sessionName, "-v", optionName),
+	).pipe(
+		Effect.map((value) => value.trim()),
+		Effect.catchAll(() => Effect.succeed("")),
+	)
+
+const ringSessionPaneBell = (sessionName: string) =>
+	Effect.gen(function* () {
+		const paneTty = yield* PlatformCommand.string(
+			PlatformCommand.make("tmux", "display-message", "-p", "-t", sessionName, "#{pane_tty}"),
+		).pipe(
+			Effect.map((value) => value.trim()),
+			Effect.catchAll(() => Effect.succeed("")),
+		)
+		if (paneTty.length === 0) {
+			return false
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		return yield* fs.writeFileString(paneTty, BELL_CHAR).pipe(
+			Effect.as(true),
+			Effect.catchAll(() => Effect.succeed(false)),
+		)
+	})
+
+const applyTmuxWaitingAttentionSignal = (sessionName: string, status: TmuxStatus, verbose: boolean) =>
+	Effect.gen(function* () {
+		const currentFlag = yield* getTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION)
+		const plan = deriveWaitingAttentionPlan(status, currentFlag.length > 0 ? currentFlag : null)
+
+		let nextFlag: "0" | "1" = plan.nextFlag
+		if (plan.ringBell) {
+			const bellSent = yield* ringSessionPaneBell(sessionName)
+			if (!bellSent) {
+				nextFlag = "0"
+				if (verbose) {
+					yield* Console.log(`Could not ring tmux bell for session ${sessionName}`)
+				}
+			}
+		}
+
+		yield* setTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION, nextFlag, verbose)
+	})
 
 const listTmuxSessionNames = Effect.gen(function* () {
 	const listCommand = PlatformCommand.make("tmux", "list-sessions", "-F", "#{session_name}")
@@ -1284,23 +1372,8 @@ const notifyHandler = (args: {
 
 		// Update tmux session option for the Claude session
 		// The TUI can poll this with: tmux show-option -t <session> -v @az_status
-		const tmuxCommand = PlatformCommand.make(
-			"tmux",
-			"set-option",
-			"-t",
-			sessionName,
-			"@az_status",
-			status,
-		)
-
-		yield* PlatformCommand.exitCode(tmuxCommand).pipe(
-			Effect.catchAll((error) =>
-				// Session may not exist (e.g., during startup) - log but don't fail
-				args.verbose
-					? Console.log(`Could not set tmux status: ${error}`).pipe(Effect.as(1))
-					: Effect.succeed(1),
-			),
-		)
+		yield* setTmuxSessionOption(sessionName, AZ_STATUS_OPTION, status, args.verbose)
+		yield* applyTmuxWaitingAttentionSignal(sessionName, status, args.verbose)
 
 		if (args.verbose) {
 			yield* Console.log(`Set @az_status=${status} on session ${sessionName}`)
@@ -2520,6 +2593,7 @@ export { cliLayer, commandCliLayer }
  */
 export {
 	cliRunner,
+	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
 	normalizeIssueOptionOrder,

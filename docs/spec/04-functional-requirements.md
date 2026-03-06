@@ -263,6 +263,7 @@ This section is normative.
 - AZ-FR-2002a: When project context is known, tmux session discovery MUST ignore project-prefixed sessions belonging to other projects (for example ignore `ch-f` while scoped to Azedarach).
 - AZ-FR-2003: App SHOULD support return-to-board tmux key convention.
 - AZ-FR-2004: App SHOULD support AI<->dev-server toggle tmux key convention.
+- AZ-FR-2005: When hook-driven session status enters `waiting`, the system MUST emit a tmux bell attention signal for that session window and SHOULD avoid repeated bell spam until status leaves `waiting` (busy/idle resets the debounce flag).
 
 ## 4.23 Command Execution and Safety Requirements
 
