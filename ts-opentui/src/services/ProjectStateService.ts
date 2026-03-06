@@ -216,11 +216,21 @@ export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 						// Ensure .azedarach directory exists
 						yield* fs
 							.makeDirectory(stateDir, { recursive: true })
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 
 						// Encode to JSON string using Schema (handles Set -> Array conversion)
 						const jsonString = yield* Schema.encode(ProjectUIStateJsonSchema)(state).pipe(
-							Effect.catchAll(() => Effect.succeed("")),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed("")),
+								),
+							),
 						)
 
 						if (!jsonString) {
@@ -230,7 +240,13 @@ export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 						// Write to file
 						yield* fs
 							.writeFileString(stateFile, jsonString)
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 					}).pipe(
 						Effect.catchAll((error) =>
 							Effect.logDebug("ProjectStateService: Failed to save state", { error, projectPath }),
@@ -249,7 +265,13 @@ export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 						// Check if file exists
 						const exists = yield* fs
 							.exists(stateFile)
-							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(false)),
+									),
+								),
+							)
 
 						if (!exists) {
 							return createDefaultUIState()
@@ -258,7 +280,13 @@ export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 						// Read file content
 						const content = yield* fs
 							.readFileString(stateFile)
-							.pipe(Effect.catchAll(() => Effect.succeed("")))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed("")),
+									),
+								),
+							)
 
 						if (!content) {
 							return createDefaultUIState()
@@ -266,7 +294,11 @@ export class ProjectStateService extends Effect.Service<ProjectStateService>()(
 
 						// Decode from JSON string using Schema (handles Array -> Set conversion)
 						const decoded = yield* Schema.decode(ProjectUIStateJsonSchema)(content).pipe(
-							Effect.catchAll(() => Effect.succeed(null)),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(null)),
+								),
+							),
 						)
 
 						if (!decoded) {

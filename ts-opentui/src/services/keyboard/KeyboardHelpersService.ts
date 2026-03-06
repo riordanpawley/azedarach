@@ -195,9 +195,13 @@ export class KeyboardHelpersService extends Effect.Service<KeyboardHelpersServic
 					.pipe(
 						// Queue errors (timeout, cancelled) are handled separately
 						Effect.catchAll((error) =>
-							toast
-								.show("error", `${label} timed out or was cancelled: ${error._tag}`)
-								.pipe(Effect.asVoid),
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(
+									toast
+										.show("error", `${label} timed out or was cancelled: ${error._tag}`)
+										.pipe(Effect.asVoid),
+								),
+							),
 						),
 					)
 

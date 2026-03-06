@@ -315,7 +315,13 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 				// Fetch current epic children
 				const children = yield* issueTrackerClient
 					.getEpicChildren(epicId)
-					.pipe(Effect.catchAll(() => Effect.succeed([])))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed([])),
+							),
+						),
+					)
 
 				const newChildIds = new Set(children.map((c: { id: string }) => c.id))
 
@@ -343,7 +349,13 @@ export class NavigationService extends Effect.Service<NavigationService>()("Navi
 						issueTrackerClient
 							.show(child.id)
 							.pipe(Effect.map((issue) => [child.id, issue] as const))
-							.pipe(Effect.catchAll(() => Effect.succeed(null))),
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(null)),
+									),
+								),
+							),
 					),
 					{ concurrency: "unbounded" },
 				)

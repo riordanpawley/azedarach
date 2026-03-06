@@ -56,9 +56,10 @@ const checkConnectivity = (host: string): Effect.Effect<boolean> =>
 				// The server responded, so we're online
 				return { online: true }
 			}),
-			Effect.catchAll(
-				(error): Effect.Effect<ConnectivityResult> =>
-					Effect.succeed({ online: false, error: String(error) }),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed({ online: false, error: String(error) })),
+				),
 			),
 		)
 
@@ -79,9 +80,10 @@ const checkConnectivity = (host: string): Effect.Effect<boolean> =>
 				// Any response means we're online
 				return { online: true }
 			}),
-			Effect.catchAll(
-				(error): Effect.Effect<ConnectivityResult> =>
-					Effect.succeed({ online: false, error: String(error) }),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed({ online: false, error: String(error) })),
+				),
 			),
 		)
 

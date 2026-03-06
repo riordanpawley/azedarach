@@ -57,7 +57,11 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 
 				const command = Command.make("gh", "auth", "status")
 				const exitCode = yield* Command.exitCode(command).pipe(
-					Effect.catchAll(() => Effect.succeed(1)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(1)),
+						),
+					),
 				)
 				const available = exitCode === 0
 				yield* Ref.set(ghAvailable, available)
@@ -117,7 +121,11 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 								return "open"
 						}
 					}),
-					Effect.catchAll(() => Effect.succeed(undefined as PRState | undefined)),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.succeed(undefined as PRState | undefined)),
+						),
+					),
 				)
 
 				// Update cache if we got a result

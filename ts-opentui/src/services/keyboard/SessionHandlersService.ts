@@ -70,29 +70,29 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const appConfig = yield* AppConfig
 			const prWorkflow = yield* PRWorkflow
 			const overlay = yield* OverlayService
-				const boardService = yield* BoardService
-				const gitConfig = yield* appConfig.getGitConfig()
+			const boardService = yield* BoardService
+			const gitConfig = yield* appConfig.getGitConfig()
 
-				const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
-					const aheadRisk =
-						error.commitsAheadOfBase === undefined
-							? `Could not determine whether the duplicate worktree has commits not in ${error.baseBranch}.`
-							: error.commitsAheadOfBase > 0
-								? `${error.commitsAheadOfBase} commit(s) in the duplicate worktree are not in ${error.baseBranch}.`
-								: `No extra commits detected in the duplicate worktree versus ${error.baseBranch}.`
-					const dirtyRisk =
-						error.uncommittedFileCount > 0
-							? `${error.uncommittedFileCount} uncommitted file(s) detected in the duplicate worktree.`
-							: "No uncommitted changes detected in the duplicate worktree."
-					const requestedBranchLine = error.requestedBranch
-						? `Requested branch: ${error.requestedBranch}\n`
-						: ""
-					const conflictReason =
-						error.conflictKind === "branch"
-							? "Derived branch name collision detected."
-							: "Derived worktree path collision detected."
+			const buildWorktreeClashMessage = (error: WorktreeNameClashError): string => {
+				const aheadRisk =
+					error.commitsAheadOfBase === undefined
+						? `Could not determine whether the duplicate worktree has commits not in ${error.baseBranch}.`
+						: error.commitsAheadOfBase > 0
+							? `${error.commitsAheadOfBase} commit(s) in the duplicate worktree are not in ${error.baseBranch}.`
+							: `No extra commits detected in the duplicate worktree versus ${error.baseBranch}.`
+				const dirtyRisk =
+					error.uncommittedFileCount > 0
+						? `${error.uncommittedFileCount} uncommitted file(s) detected in the duplicate worktree.`
+						: "No uncommitted changes detected in the duplicate worktree."
+				const requestedBranchLine = error.requestedBranch
+					? `Requested branch: ${error.requestedBranch}\n`
+					: ""
+				const conflictReason =
+					error.conflictKind === "branch"
+						? "Derived branch name collision detected."
+						: "Derived worktree path collision detected."
 
-					return `Worktree name clash for ${error.issueId}.
+				return `Worktree name clash for ${error.issueId}.
 
 ${conflictReason}
 Conflicting issue: ${error.conflictingIssueId}
@@ -105,80 +105,94 @@ Before deleting the duplicate worktree:
 - ${dirtyRisk}
 
 Delete the duplicate worktree and retry?`
-				}
+			}
 
-				const promptWorktreeClashResolution = (options: {
-					error: WorktreeNameClashError
-					projectPath: string
-					retry: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
-				}) =>
-					Effect.gen(function* () {
-						const { error, projectPath, retry } = options
+			const promptWorktreeClashResolution = (options: {
+				error: WorktreeNameClashError
+				projectPath: string
+				retry: Effect.Effect<void, never, CommandExecutor.CommandExecutor>
+			}) =>
+				Effect.gen(function* () {
+					const { error, projectPath, retry } = options
 
-						yield* overlay.push({
-							_tag: "confirm",
-							message: buildWorktreeClashMessage(error),
-							onConfirm: Effect.gen(function* () {
-								yield* toast.show(
-									"info",
-									`Removing duplicate worktree for ${error.conflictingIssueId}...`,
-								)
+					yield* overlay.push({
+						_tag: "confirm",
+						message: buildWorktreeClashMessage(error),
+						onConfirm: Effect.gen(function* () {
+							yield* toast.show(
+								"info",
+								`Removing duplicate worktree for ${error.conflictingIssueId}...`,
+							)
 
-								const removed = yield* worktreeManager
-									.remove({
-										issueId: error.conflictingIssueId,
-										projectPath,
-									})
-									.pipe(
-										Effect.map(() => true),
-										Effect.catchAll((removeError) =>
-											helpers.showErrorToast("Failed to remove duplicate worktree")(removeError).pipe(
-												Effect.as(false),
+							const removed = yield* worktreeManager
+								.remove({
+									issueId: error.conflictingIssueId,
+									projectPath,
+								})
+								.pipe(
+									Effect.map(() => true),
+									Effect.catchAll((removeError) =>
+										Effect.logWarning(removeError).pipe(
+											Effect.zipRight(
+												helpers
+													.showErrorToast("Failed to remove duplicate worktree")(removeError)
+													.pipe(Effect.as(false)),
 											),
 										),
-									)
+									),
+								)
 
-								if (!removed) {
-									return
-								}
+							if (!removed) {
+								return
+							}
 
-								yield* boardService.refresh().pipe(Effect.catchAll(() => Effect.void))
-								yield* retry
-							}),
-						})
+							yield* boardService
+								.refresh()
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
+							yield* retry
+						}),
 					})
+				})
 
-				const isWorktreeNameClashError = (
-					error: unknown,
-				): error is WorktreeNameClashError =>
-					typeof error === "object" &&
-					error !== null &&
-					"_tag" in error &&
-					error._tag === "WorktreeNameClashError"
+			const isWorktreeNameClashError = (error: unknown): error is WorktreeNameClashError =>
+				typeof error === "object" &&
+				error !== null &&
+				"_tag" in error &&
+				error._tag === "WorktreeNameClashError"
 
-				const runStartWithClashRecovery = <A, E>(options: {
-					issueId: string
-					projectPath: string
-					successMessage: string
-					startEffect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>
-				}) => {
-					const attemptStart = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
-						options.startEffect.pipe(
-							Effect.tap(() => toast.show("success", options.successMessage)),
-							Effect.asVoid,
-							Effect.catchAll((error) =>
-								isWorktreeNameClashError(error)
-									? promptWorktreeClashResolution({
-											error,
-											projectPath: options.projectPath,
-											retry: helpers.withQueue(options.issueId, "start", attemptStart()),
-										})
-									: helpers.showErrorToast("Failed to start")(error),
+			const runStartWithClashRecovery = <A, E>(options: {
+				issueId: string
+				projectPath: string
+				successMessage: string
+				startEffect: Effect.Effect<A, E, CommandExecutor.CommandExecutor>
+			}) => {
+				const attemptStart = (): Effect.Effect<void, never, CommandExecutor.CommandExecutor> =>
+					options.startEffect.pipe(
+						Effect.tap(() => toast.show("success", options.successMessage)),
+						Effect.asVoid,
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(
+									isWorktreeNameClashError(error)
+										? promptWorktreeClashResolution({
+												error,
+												projectPath: options.projectPath,
+												retry: helpers.withQueue(options.issueId, "start", attemptStart()),
+											})
+										: helpers.showErrorToast("Failed to start")(error),
+								),
 							),
-						)
+						),
+					)
 
-					return helpers.withQueue(options.issueId, "start", attemptStart())
-				}
+				return helpers.withQueue(options.issueId, "start", attemptStart())
+			}
 
 			// ================================================================
 			// Session Handler Methods
@@ -205,16 +219,16 @@ Delete the duplicate worktree and retry?`
 						return
 					}
 
-						// Get current project path (from ProjectService or cwd fallback)
-						const projectPath = yield* helpers.getProjectPath()
+					// Get current project path (from ProjectService or cwd fallback)
+					const projectPath = yield* helpers.getProjectPath()
 
-						yield* runStartWithClashRecovery({
-							issueId: task.id,
-							projectPath,
-							successMessage: `Started session for ${task.id}`,
-							startEffect: sessionManager.start({ issueId: task.id, projectPath }),
-						})
+					yield* runStartWithClashRecovery({
+						issueId: task.id,
+						projectPath,
+						successMessage: `Started session for ${task.id}`,
+						startEffect: sessionManager.start({ issueId: task.id, projectPath }),
 					})
+				})
 
 			/**
 			 * Start session with initial prompt (Space+S)
@@ -252,11 +266,20 @@ Delete the duplicate worktree and retry?`
 					const worktreePath = getWorktreePath(projectPath, task.id)
 					const attachments = yield* imageAttachment
 						.list(task.id)
-						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([] as const)),
+								),
+							),
+						)
 					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment
-							.getPathForProjectRoot(task.id, attachment.id, worktreePath)
-							.pipe(Effect.orElseSucceed(() => "")),
+						imageAttachment.getPathForProjectRoot(task.id, attachment.id, worktreePath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						),
 					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({
@@ -267,19 +290,19 @@ Delete the duplicate worktree and retry?`
 						attachmentPaths: imagePaths,
 					})
 
-						yield* runStartWithClashRecovery({
+					yield* runStartWithClashRecovery({
+						issueId: task.id,
+						projectPath,
+						successMessage: task.hasWorktree
+							? `Resumed session for ${task.id} on existing worktree`
+							: `Started session for ${task.id} with prompt`,
+						startEffect: sessionManager.start({
 							issueId: task.id,
 							projectPath,
-							successMessage: task.hasWorktree
-								? `Resumed session for ${task.id} on existing worktree`
-								: `Started session for ${task.id} with prompt`,
-							startEffect: sessionManager.start({
-								issueId: task.id,
-								projectPath,
-								initialPrompt,
-							}),
-						})
+							initialPrompt,
+						}),
 					})
+				})
 
 			/**
 			 * Start session with prompt and --dangerously-skip-permissions (Space+!)
@@ -315,11 +338,20 @@ Delete the duplicate worktree and retry?`
 					// Check for attached images and include their paths
 					const attachments = yield* imageAttachment
 						.list(task.id)
-						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([] as const)),
+								),
+							),
+						)
 					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment
-							.getPathForProjectRoot(task.id, attachment.id, worktreePath)
-							.pipe(Effect.orElseSucceed(() => "")),
+						imageAttachment.getPathForProjectRoot(task.id, attachment.id, worktreePath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						),
 					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({
@@ -330,20 +362,20 @@ Delete the duplicate worktree and retry?`
 						attachmentPaths: imagePaths,
 					})
 
-						yield* runStartWithClashRecovery({
+					yield* runStartWithClashRecovery({
+						issueId: task.id,
+						projectPath,
+						successMessage: task.hasWorktree
+							? `Resumed session for ${task.id} (skip-permissions)`
+							: `Started session for ${task.id} (skip-permissions)`,
+						startEffect: sessionManager.start({
 							issueId: task.id,
 							projectPath,
-							successMessage: task.hasWorktree
-								? `Resumed session for ${task.id} (skip-permissions)`
-								: `Started session for ${task.id} (skip-permissions)`,
-							startEffect: sessionManager.start({
-								issueId: task.id,
-								projectPath,
-								initialPrompt,
-								dangerouslySkipPermissions: true,
-							}),
-						})
+							initialPrompt,
+							dangerouslySkipPermissions: true,
+						}),
 					})
+				})
 
 			/**
 			 * Chat about task (Space+c)
@@ -383,7 +415,13 @@ Delete the duplicate worktree and retry?`
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 					const projectPath = yield* helpers
 						.getProjectPath()
-						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(undefined)),
+								),
+							),
+						)
 
 					const sessionName = yield* findAiSession(task.id, projectPath)
 
@@ -431,7 +469,13 @@ Delete the duplicate worktree and retry?`
 				Effect.gen(function* () {
 					const projectPath = yield* helpers
 						.getProjectPath()
-						.pipe(Effect.catchAll(() => Effect.succeed(undefined)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(undefined)),
+								),
+							),
+						)
 					const sessionName = yield* findAiSession(issueId, projectPath)
 					if (!sessionName) {
 						yield* toast.show("error", `No session for ${issueId} - press Space+s to start`)
@@ -479,12 +523,16 @@ Delete the duplicate worktree and retry?`
 					const branchStatus = yield* prWorkflow
 						.checkBranchBehindBase({ issueId: task.id, projectPath })
 						.pipe(
-							Effect.catchAll(() =>
-								Effect.succeed({
-									behind: 0,
-									ahead: 0,
-									baseBranch: task.parentEpicId ?? gitConfig.baseBranch,
-								}),
+							Effect.catchAll((error) =>
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.succeed({
+											behind: 0,
+											ahead: 0,
+											baseBranch: task.parentEpicId ?? gitConfig.baseBranch,
+										}),
+									),
+								),
 							),
 						)
 
@@ -662,31 +710,28 @@ Delete the duplicate worktree and retry?`
 			 * and running tasks. For idle tasks, creates the worktree/session without
 			 * starting Claude.
 			 */
-				const startHelixSession: () => Effect.Effect<
-					void,
-					never,
-					CommandExecutor.CommandExecutor
-				> = () =>
+			const startHelixSession: () => Effect.Effect<void, never, CommandExecutor.CommandExecutor> =
+				() =>
 					Effect.gen(function* () {
-					const task = yield* helpers.getActionTargetTask()
-					if (!task) return
+						const task = yield* helpers.getActionTargetTask()
+						if (!task) return
 
-					const projectPath = yield* helpers.getProjectPath()
-					const sessionConfig = yield* appConfig.getSessionConfig()
-					const worktreeConfig = yield* appConfig.getWorktreeConfig()
-					const gitConfig = yield* appConfig.getGitConfig()
-					const shell = sessionConfig.shell
-					const existingSessionName = yield* findAiSession(task.id, projectPath)
-					const sessionName = existingSessionName ?? getIssueSessionName(task.id, projectPath)
+						const projectPath = yield* helpers.getProjectPath()
+						const sessionConfig = yield* appConfig.getSessionConfig()
+						const worktreeConfig = yield* appConfig.getWorktreeConfig()
+						const gitConfig = yield* appConfig.getGitConfig()
+						const shell = sessionConfig.shell
+						const existingSessionName = yield* findAiSession(task.id, projectPath)
+						const sessionName = existingSessionName ?? getIssueSessionName(task.id, projectPath)
 
-					// Check if session already exists
-					const hasSession = yield* tmux.hasSession(sessionName)
+						// Check if session already exists
+						const hasSession = yield* tmux.hasSession(sessionName)
 
-					if (!hasSession) {
-						// No session - create worktree and session first
-						yield* toast.show("info", `Creating worktree for ${task.id}...`)
+						if (!hasSession) {
+							// No session - create worktree and session first
+							yield* toast.show("info", `Creating worktree for ${task.id}...`)
 
-						// Create worktree (idempotent - returns existing if present)
+							// Create worktree (idempotent - returns existing if present)
 							const worktree = yield* worktreeManager
 								.create({
 									issueId: task.id,
@@ -696,50 +741,54 @@ Delete the duplicate worktree and retry?`
 								})
 								.pipe(
 									Effect.catchAll((error) =>
-										isWorktreeNameClashError(error)
-											? promptWorktreeClashResolution({
-													error,
-													projectPath,
-													retry: helpers.withQueue(task.id, "start", startHelixSession()),
-												}).pipe(Effect.as(null))
-											: helpers
-													.showErrorToast("Failed to create worktree")(error)
-													.pipe(Effect.as(null)),
+										Effect.logWarning(error).pipe(
+											Effect.zipRight(
+												isWorktreeNameClashError(error)
+													? promptWorktreeClashResolution({
+															error,
+															projectPath,
+															retry: helpers.withQueue(task.id, "start", startHelixSession()),
+														}).pipe(Effect.as(null))
+													: helpers
+															.showErrorToast("Failed to create worktree")(error)
+															.pipe(Effect.as(null)),
+											),
+										),
 									),
 								)
 
 							if (!worktree) return
 
-						// Create tmux session with init commands (same as ClaudeSessionManager)
+							// Create tmux session with init commands (same as ClaudeSessionManager)
+							yield* worktreeSession
+								.getOrCreateSession(task.id, {
+									worktreePath: worktree.path,
+									projectPath,
+									initCommands: worktreeConfig.initCommands,
+									tmuxPrefix: sessionConfig.tmuxPrefix,
+								})
+								.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create session")))
+						}
+
+						// Get worktree path for the helix command
+						const worktreePath = getWorktreePath(projectPath, task.id)
+
+						// Create or switch to the "hx" window with Helix running
+						// Uses interactive shell wrapper so direnv loads and Helix has proper env
+						const helixCommand = `${shell} -i -c 'hx .; exec ${shell}'`
+
 						yield* worktreeSession
-							.getOrCreateSession(task.id, {
-								worktreePath: worktree.path,
-								projectPath,
-								initCommands: worktreeConfig.initCommands,
-								tmuxPrefix: sessionConfig.tmuxPrefix,
+							.ensureWindow(sessionName, WINDOW_NAMES.HX, {
+								command: helixCommand,
+								cwd: worktreePath,
 							})
-							.pipe(Effect.catchAll(helpers.showErrorToast("Failed to create session")))
-					}
-
-					// Get worktree path for the helix command
-					const worktreePath = getWorktreePath(projectPath, task.id)
-
-					// Create or switch to the "hx" window with Helix running
-					// Uses interactive shell wrapper so direnv loads and Helix has proper env
-					const helixCommand = `${shell} -i -c 'hx .; exec ${shell}'`
-
-					yield* worktreeSession
-						.ensureWindow(sessionName, WINDOW_NAMES.HX, {
-							command: helixCommand,
-							cwd: worktreePath,
-						})
-						.pipe(
-							Effect.tap(() =>
-								toast.show("success", `Helix ready for ${task.id} - press Space+a to attach`),
-							),
-							Effect.catchAll(helpers.showErrorToast("Failed to open Helix")),
-						)
-				})
+							.pipe(
+								Effect.tap(() =>
+									toast.show("success", `Helix ready for ${task.id} - press Space+a to attach`),
+								),
+								Effect.catchAll(helpers.showErrorToast("Failed to open Helix")),
+							)
+					})
 
 			/**
 			 * Recover crashed session (r in normal mode)

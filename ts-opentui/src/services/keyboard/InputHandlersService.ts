@@ -403,7 +403,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									error && typeof error === "object" && "message" in error
 										? String(error.message)
 										: String(error)
-								return toast.show("error", msg)
+								return Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(toast.show("error", msg)),
+								)
 							}),
 						)
 						return true
@@ -418,7 +420,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									error && typeof error === "object" && "message" in error
 										? String(error.message)
 										: String(error)
-								return toast.show("error", msg)
+								return Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(toast.show("error", msg)),
+								)
 							}),
 						)
 						return true
@@ -443,7 +447,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 										error && typeof error === "object" && "message" in error
 											? String(error.message)
 											: String(error)
-									return toast.show("error", `Preview: ${msg}`)
+									return Effect.logWarning(error).pipe(
+										Effect.zipRight(toast.show("error", `Preview: ${msg}`)),
+									)
 								}),
 							)
 						} else {
@@ -510,6 +516,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 												? String(error.message)
 												: String(error)
 										return Effect.gen(function* () {
+											yield* Effect.logWarning(error)
 											yield* toast.show("error", `Failed to attach: ${msg}`)
 											yield* imageAttachment.setAttaching(false)
 										})
@@ -554,6 +561,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 												? String(error.message)
 												: String(error)
 										return Effect.gen(function* () {
+											yield* Effect.logWarning(error)
 											yield* toast.show("error", `Clipboard: ${msg}`)
 											yield* imageAttachment.setAttaching(false)
 										})
@@ -672,14 +680,18 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					return true // Consume other keys in overlay
 				}).pipe(
 					Effect.catchAll((error) =>
-						Effect.gen(function* () {
-							const msg =
-								error && typeof error === "object" && "message" in error
-									? String(error.message)
-									: String(error)
-							yield* toast.show("error", `Project switch failed: ${msg}`)
-							return true
-						}),
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.gen(function* () {
+									const msg =
+										error && typeof error === "object" && "message" in error
+											? String(error.message)
+											: String(error)
+									yield* toast.show("error", `Project switch failed: ${msg}`)
+									return true
+								}),
+							),
+						),
 					),
 				)
 
@@ -719,7 +731,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									error && typeof error === "object" && "message" in error
 										? String(error.message)
 										: String(error)
-								return toast.show("error", `Preview: ${msg}`)
+								return Effect.logWarning(error).pipe(
+									Effect.zipRight(toast.show("error", `Preview: ${msg}`)),
+								)
 							}),
 						)
 						return true
@@ -735,7 +749,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									error && typeof error === "object" && "message" in error
 										? String(error.message)
 										: String(error)
-								return toast.show("error", `Preview: ${msg}`)
+								return Effect.logWarning(error).pipe(
+									Effect.zipRight(toast.show("error", `Preview: ${msg}`)),
+								)
 							}),
 						)
 						return true
@@ -750,7 +766,9 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 									error && typeof error === "object" && "message" in error
 										? String(error.message)
 										: String(error)
-								return toast.show("error", msg)
+								return Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(toast.show("error", msg)),
+								)
 							}),
 						)
 						return true

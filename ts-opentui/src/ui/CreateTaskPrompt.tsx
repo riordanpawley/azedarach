@@ -31,12 +31,19 @@ const isPriority = (value: number) => PRIORITIES.some((priority) => priority ===
  * Uses tab/shift-tab to cycle through fields, Enter to submit, Esc to cancel.
  */
 export const CreateTaskPrompt = (props: CreateTaskPromptProps) => {
-	const initialTypeIndex = props.initialType && isTaskType(props.initialType)
-		? Math.max(0, TASK_TYPES.findIndex((type) => type === props.initialType))
-		: 0
+	const initialTypeIndex =
+		props.initialType && isTaskType(props.initialType)
+			? Math.max(
+					0,
+					TASK_TYPES.findIndex((type) => type === props.initialType),
+				)
+			: 0
 	const initialPriorityIndex =
 		props.initialPriority !== undefined && isPriority(props.initialPriority)
-			? Math.max(0, PRIORITIES.findIndex((priority) => priority === props.initialPriority))
+			? Math.max(
+					0,
+					PRIORITIES.findIndex((priority) => priority === props.initialPriority),
+				)
 			: 1
 
 	const [title, setTitle] = useState(props.initialTitle ?? "")

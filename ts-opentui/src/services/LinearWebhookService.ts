@@ -144,7 +144,11 @@ const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 			Command.make("tailscale", "status", "--json"),
 		).pipe(
 			Effect.map((output) => output.trim()),
-			Effect.catchAll(() => Effect.succeed(undefined)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(undefined)),
+				),
+			),
 		)
 		if (tailscaleStatus === undefined) {
 			return undefined
@@ -157,7 +161,13 @@ const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 
 		const funnelExitCode = yield* Command.exitCode(
 			Command.make("tailscale", "funnel", "--bg", "--yes", String(port)),
-		).pipe(Effect.catchAll(() => Effect.succeed(1)))
+		).pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(1)),
+				),
+			),
+		)
 		if (funnelExitCode !== 0) {
 			return undefined
 		}
@@ -268,7 +278,8 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					if (discoveredTeamRefs.length === 0) {
 						return yield* Effect.fail(
 							new LinearWebhookRuntimeError({
-								message: "Linear webhook SDK mode could not discover a default team; set issueTracker.linear.team",
+								message:
+									"Linear webhook SDK mode could not discover a default team; set issueTracker.linear.team",
 							}),
 						)
 					}
@@ -335,8 +346,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					const configuredSecret = normalizeNonEmpty(webhookConfig.secret)
 					const webhookSecretSource: "config" | "generated" =
 						configuredSecret !== undefined ? "config" : "generated"
-					const webhookSecret =
-						configuredSecret ?? `azw_${crypto.randomUUID().replaceAll("-", "")}`
+					const webhookSecret = configuredSecret ?? `azw_${crypto.randomUUID().replaceAll("-", "")}`
 
 					return {
 						teamRef: team.teamRef,
@@ -429,8 +439,12 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 										message: "delete-webhook-failed",
 									}),
 							),
-							Effect.catchAll(() =>
-								Effect.logWarning(`Linear webhook cleanup failed for webhook id ${webhookId}`),
+							Effect.catchAll((error) =>
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(
+										Effect.logWarning(`Linear webhook cleanup failed for webhook id ${webhookId}`),
+									),
+								),
 							),
 						)
 					}),

@@ -2359,10 +2359,14 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								) {
 									includeSortFlags = false
 									const fallbackArgs = buildListCommandArgs(currentLimit, filters, options, false)
-									return runBd(fallbackArgs, effectiveCwd)
+									return Effect.logWarning(error).pipe(
+										Effect.zipRight(runBd(fallbackArgs, effectiveCwd)),
+									)
 								}
 
-								return Effect.fail(error)
+								return Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.fail(error)),
+								)
 							}),
 						)
 						const parsed = yield* parseJson(Schema.Array(IssueSchema), output)

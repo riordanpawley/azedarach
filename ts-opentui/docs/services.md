@@ -335,6 +335,14 @@ yield* someEffect.pipe(
 )
 ```
 
+### Recovery Logging Policy
+
+When an effect recovers from an error (`catch*`, `orElseSucceed`, fallback branches), log the error before returning fallback values.
+
+- Use Effect logging APIs (`Effect.logError`, `Effect.logWarning`, `Effect.logDebug`, etc.).
+- Recovery warnings should explicitly state that recovery is happening, not just print the raw error.
+- Keep existing fallback behavior unchanged; add observability only.
+
 ## Testing Services
 
 Each service has a `*Test` layer for mocking:

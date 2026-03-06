@@ -557,7 +557,13 @@ export class PTYMonitor extends Effect.Service<PTYMonitor>()("PTYMonitor", {
 					// Get current state from ClaudeSessionManager
 					const currentState = yield* sessionManager
 						.getState(issueId)
-						.pipe(Effect.catchAll(() => Effect.succeed("idle" as SessionState)))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(error).pipe(
+									Effect.zipRight(Effect.succeed("idle" as SessionState)),
+								),
+							),
+						)
 
 					// Foreground process ground-truth (Grove-inspired):
 					// If the pane now has a shell as the foreground process and the session

@@ -300,7 +300,11 @@ const isGitRepo = (
 
 		return yield* Command.exitCode(command).pipe(
 			Effect.map((code) => code === 0),
-			Effect.catchAll(() => Effect.succeed(false)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(false)),
+				),
+			),
 		)
 	})
 
@@ -329,7 +333,11 @@ const branchExists = (
 
 		return yield* Command.exitCode(command).pipe(
 			Effect.map((code) => code === 0),
-			Effect.catchAll(() => Effect.succeed(false)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(false)),
+				),
+			),
 		)
 	})
 
@@ -355,7 +363,11 @@ const branchExistsAnywhere = (
 
 		return yield* Command.exitCode(command).pipe(
 			Effect.map((code) => code === 0),
-			Effect.catchAll(() => Effect.succeed(false)),
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(false)),
+				),
+			),
 		)
 	})
 
@@ -408,9 +420,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			}
 
 			const normalized = Math.floor(value)
-			return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH
-				? normalized
-				: DEFAULT_BRANCH_SLUG_MAX_LENGTH
+			return normalized >= MIN_BRANCH_SLUG_MAX_LENGTH ? normalized : DEFAULT_BRANCH_SLUG_MAX_LENGTH
 		}
 
 		const slugifyIssueTitle = (title: string, maxLength: number): string => {
@@ -438,7 +448,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			Effect.gen(function* () {
 				const configuredName = yield* runGit(["config", "user.name"], projectPath).pipe(
 					Effect.map((value) => value.trim()),
-					Effect.catchAll(() => Effect.succeed("")),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
 				)
 				const configuredAuthor = sanitizeBranchAuthor(configuredName)
 				if (configuredAuthor.length > 0) {
@@ -468,7 +482,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 				const raw = yield* fs
 					.readFileString(mapPath)
-					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("{}")),
+							),
+						),
+					)
 				const parsed = yield* Effect.try({
 					try: () => JSON.parse(raw) as unknown,
 					catch: () => ({}),
@@ -487,7 +507,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				}
 
 				return map
-			}).pipe(Effect.catchAll(() => Effect.succeed({})))
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed({})),
+					),
+				),
+			)
 
 		const writeBranchNameMap = (
 			projectPath: string,
@@ -499,7 +525,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				yield* fs.makeDirectory(mapDir, { recursive: true }).pipe(Effect.ignore)
 				yield* fs
 					.writeFileString(mapPath, JSON.stringify(map, null, "\t"))
-					.pipe(Effect.catchAll(() => Effect.void))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.void),
+							),
+						),
+					)
 			})
 
 		const getOrCreateBranchName = (options: {
@@ -650,11 +682,23 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				if (sourceExists) {
 					const content = yield* fs
 						.readFileString(sourceSettings)
-						.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed("{}")),
+								),
+							),
+						)
 					existingSettings = yield* Effect.try({
 						try: () => JSON.parse(content) as Record<string, unknown>,
 						catch: () => ({}) as Record<string, unknown>,
-					}).pipe(Effect.catchAll(() => Effect.succeed({} as Record<string, unknown>)))
+					}).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(Effect.succeed({} as Record<string, unknown>)),
+							),
+						),
+					)
 				}
 
 				// Generate hook configuration for this bead
@@ -713,11 +757,21 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 				const worktreeContent = yield* fs
 					.readFileString(worktreeSettings)
-					.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("{}")),
+							),
+						),
+					)
 
 				// Parse with Schema - fallback to empty object on failure
 				const worktreeData = yield* decodeSettings(worktreeContent).pipe(
-					Effect.catchAll(() => Effect.succeed({})),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed({})),
+						),
+					),
 				)
 
 				// Extract only permission-related settings (exclude hooks)
@@ -736,10 +790,20 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 				if (mainExists) {
 					const mainContent = yield* fs
 						.readFileString(mainSettings)
-						.pipe(Effect.catchAll(() => Effect.succeed("{}")))
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed("{}")),
+								),
+							),
+						)
 
 					mainData = yield* decodeSettings(mainContent).pipe(
-						Effect.catchAll(() => Effect.succeed({})),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed({})),
+							),
+						),
 					)
 				}
 
@@ -811,81 +875,93 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 			return worktrees
 		}
 
-			// Pure helper to get worktree path (uses captured pathService)
-			const getWorktreePath = (projectPath: string, issueId: string): string => {
-				const projectName = pathService.basename(projectPath)
-				const parentDir = pathService.dirname(projectPath)
-				return pathService.join(parentDir, `${projectName}-${issueId}`)
-			}
+		// Pure helper to get worktree path (uses captured pathService)
+		const getWorktreePath = (projectPath: string, issueId: string): string => {
+			const projectName = pathService.basename(projectPath)
+			const parentDir = pathService.dirname(projectPath)
+			return pathService.join(parentDir, `${projectName}-${issueId}`)
+		}
 
-			const caseInsensitivePathLookup = process.platform === "darwin" || process.platform === "win32"
+		const caseInsensitivePathLookup = process.platform === "darwin" || process.platform === "win32"
 
-			const normalizePathForLookup = (rawPath: string): string => {
-				const normalized = pathService.normalize(pathService.resolve(rawPath))
-				return caseInsensitivePathLookup ? normalized.toLowerCase() : normalized
-			}
+		const normalizePathForLookup = (rawPath: string): string => {
+			const normalized = pathService.normalize(pathService.resolve(rawPath))
+			return caseInsensitivePathLookup ? normalized.toLowerCase() : normalized
+		}
 
-			const pathsEqualForLookup = (leftPath: string, rightPath: string): boolean =>
-				normalizePathForLookup(leftPath) === normalizePathForLookup(rightPath)
+		const pathsEqualForLookup = (leftPath: string, rightPath: string): boolean =>
+			normalizePathForLookup(leftPath) === normalizePathForLookup(rightPath)
 
-			const countUncommittedFiles = (
-				worktreePath: string,
-			): Effect.Effect<number, never, CommandExecutor.CommandExecutor> =>
-				runGit(["status", "--porcelain"], worktreePath).pipe(
-					Effect.map((output) =>
+		const countUncommittedFiles = (
+			worktreePath: string,
+		): Effect.Effect<number, never, CommandExecutor.CommandExecutor> =>
+			runGit(["status", "--porcelain"], worktreePath).pipe(
+				Effect.map(
+					(output) =>
 						output
 							.split("\n")
 							.map((line) => line.trim())
 							.filter((line) => line.length > 0).length,
+				),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(0)),
 					),
-					Effect.catchAll(() => Effect.succeed(0)),
+				),
+			)
+
+		const countCommitsAheadOfBase = (
+			worktreePath: string,
+			baseBranch: string,
+		): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
+			runGit(["rev-list", "--count", `${baseBranch}..HEAD`], worktreePath).pipe(
+				Effect.map((output) => {
+					const parsed = Number.parseInt(output.trim(), 10)
+					return Number.isFinite(parsed) ? parsed : undefined
+				}),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(undefined)),
+					),
+				),
+			)
+
+		const buildWorktreeNameClashError = (options: {
+			issueId: string
+			conflictKind: "path" | "branch"
+			requestedWorktreePath: string
+			requestedBranch?: string
+			conflictingWorktree: Worktree
+			baseBranch: string
+		}): Effect.Effect<WorktreeNameClashError, never, CommandExecutor.CommandExecutor> =>
+			Effect.gen(function* () {
+				const {
+					issueId,
+					conflictKind,
+					requestedWorktreePath,
+					requestedBranch,
+					conflictingWorktree,
+					baseBranch,
+				} = options
+				const commitsAheadOfBase = yield* countCommitsAheadOfBase(
+					conflictingWorktree.path,
+					baseBranch,
 				)
+				const uncommittedFileCount = yield* countUncommittedFiles(conflictingWorktree.path)
 
-			const countCommitsAheadOfBase = (
-				worktreePath: string,
-				baseBranch: string,
-			): Effect.Effect<number | undefined, never, CommandExecutor.CommandExecutor> =>
-				runGit(["rev-list", "--count", `${baseBranch}..HEAD`], worktreePath).pipe(
-					Effect.map((output) => {
-						const parsed = Number.parseInt(output.trim(), 10)
-						return Number.isFinite(parsed) ? parsed : undefined
-					}),
-					Effect.catchAll(() => Effect.succeed(undefined)),
-				)
-
-			const buildWorktreeNameClashError = (options: {
-				issueId: string
-				conflictKind: "path" | "branch"
-				requestedWorktreePath: string
-				requestedBranch?: string
-				conflictingWorktree: Worktree
-				baseBranch: string
-			}): Effect.Effect<WorktreeNameClashError, never, CommandExecutor.CommandExecutor> =>
-				Effect.gen(function* () {
-					const {
-						issueId,
-						conflictKind,
-						requestedWorktreePath,
-						requestedBranch,
-						conflictingWorktree,
-						baseBranch,
-					} = options
-					const commitsAheadOfBase = yield* countCommitsAheadOfBase(conflictingWorktree.path, baseBranch)
-					const uncommittedFileCount = yield* countUncommittedFiles(conflictingWorktree.path)
-
-					return new WorktreeNameClashError({
-						issueId,
-						conflictKind,
-						requestedWorktreePath,
-						requestedBranch,
-						conflictingIssueId: conflictingWorktree.issueId,
-						conflictingWorktreePath: conflictingWorktree.path,
-						conflictingBranch: conflictingWorktree.branch,
-						baseBranch,
-						commitsAheadOfBase,
-						uncommittedFileCount,
-					})
+				return new WorktreeNameClashError({
+					issueId,
+					conflictKind,
+					requestedWorktreePath,
+					requestedBranch,
+					conflictingIssueId: conflictingWorktree.issueId,
+					conflictingWorktreePath: conflictingWorktree.path,
+					conflictingBranch: conflictingWorktree.branch,
+					baseBranch,
+					commitsAheadOfBase,
+					uncommittedFileCount,
 				})
+			})
 
 		// Helper to refresh worktrees cache (with TTL to avoid repeated git calls)
 		// Now supports multiple projects - each project has its own cache entry
@@ -999,11 +1075,7 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 
 						const resolveComparisonBaseBranch = (() => {
 							let cachedBaseBranch: string | undefined
-							return (): Effect.Effect<
-								string,
-								GitError,
-								CommandExecutor.CommandExecutor
-							> =>
+							return (): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
 								Effect.gen(function* () {
 									if (cachedBaseBranch) {
 										return cachedBaseBranch
@@ -1015,11 +1087,10 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								})
 						})()
 
-							const conflictingByPath = Array.from(projectWorktrees.values()).find(
-								(worktree) =>
-									pathsEqualForLookup(worktree.path, worktreePath) &&
-									worktree.issueId !== issueId,
-							)
+						const conflictingByPath = Array.from(projectWorktrees.values()).find(
+							(worktree) =>
+								pathsEqualForLookup(worktree.path, worktreePath) && worktree.issueId !== issueId,
+						)
 
 						if (conflictingByPath) {
 							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
@@ -1089,88 +1160,91 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Git worktree list can sometimes miss newly created worktrees due to
 						// filesystem sync timing issues, especially on macOS APFS. We retry
 						// a few times with short delays to handle this race condition.
-							const findNewWorktree = Effect.gen(function* () {
-								yield* forceRefreshWorktrees(projectPath)
-								const allUpdated = yield* Ref.get(worktreesRef)
-								const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-								const newWorktree = projectUpdated.get(issueId)
+						const findNewWorktree = Effect.gen(function* () {
+							yield* forceRefreshWorktrees(projectPath)
+							const allUpdated = yield* Ref.get(worktreesRef)
+							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+							const newWorktree = projectUpdated.get(issueId)
 
-								if (!newWorktree) {
-									const foundIssueIds = Array.from(projectUpdated.keys())
-									return yield* Effect.fail(new WorktreeCacheMissAfterCreateError({
+							if (!newWorktree) {
+								const foundIssueIds = Array.from(projectUpdated.keys())
+								return yield* Effect.fail(
+									new WorktreeCacheMissAfterCreateError({
 										foundIssueIds,
 										cacheSize: projectUpdated.size,
-									}))
-								}
-								return newWorktree
-							})
+									}),
+								)
+							}
+							return newWorktree
+						})
 
 						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
 						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
 
-							const result = yield* findNewWorktree.pipe(
-								Effect.retry({
-									schedule: retrySchedule,
-									while: (e) => e._tag === "WorktreeCacheMissAfterCreateError",
-								}),
-								Effect.catchTag(
-									"WorktreeCacheMissAfterCreateError",
-									(e) =>
-										Effect.gen(function* () {
-											yield* Effect.logError("Worktree created but not found in cache after retries", {
-												issueId,
-												worktreePath,
-												projectPath,
-												foundIssueIds: e.foundIssueIds,
-												cacheSize: e.cacheSize,
-											})
+						const result = yield* findNewWorktree.pipe(
+							Effect.retry({
+								schedule: retrySchedule,
+								while: (e) => e._tag === "WorktreeCacheMissAfterCreateError",
+							}),
+							Effect.catchTag("WorktreeCacheMissAfterCreateError", (e) =>
+								Effect.gen(function* () {
+									yield* Effect.logError("Worktree created but not found in cache after retries", {
+										issueId,
+										worktreePath,
+										projectPath,
+										foundIssueIds: e.foundIssueIds,
+										cacheSize: e.cacheSize,
+									})
 
-											const allAfterRetries = yield* Ref.get(worktreesRef)
-											const projectAfterRetries =
-												allAfterRetries.get(projectPath) ?? new Map<string, Worktree>()
-											const worktreesAfterRetries = Array.from(projectAfterRetries.values())
+									const allAfterRetries = yield* Ref.get(worktreesRef)
+									const projectAfterRetries =
+										allAfterRetries.get(projectPath) ?? new Map<string, Worktree>()
+									const worktreesAfterRetries = Array.from(projectAfterRetries.values())
 
-											const conflictByPath = worktreesAfterRetries.find(
-												(worktree) =>
-													worktree.issueId !== issueId &&
-													pathsEqualForLookup(worktree.path, worktreePath),
-											)
+									const conflictByPath = worktreesAfterRetries.find(
+										(worktree) =>
+											worktree.issueId !== issueId &&
+											pathsEqualForLookup(worktree.path, worktreePath),
+									)
 
-											const conflictByCaseVariantIssueId =
-												conflictByPath ||
-												!caseInsensitivePathLookup
-													? undefined
-													: worktreesAfterRetries.find(
-															(worktree) =>
-																worktree.issueId !== issueId &&
-																worktree.issueId.toLowerCase() === issueId.toLowerCase(),
-														)
-
-											const conflictingWorktree = conflictByPath ?? conflictByCaseVariantIssueId
-											if (conflictingWorktree) {
-												const comparisonBaseBranch = yield* resolveComparisonBaseBranch().pipe(
-													Effect.catchAll(() => Effect.succeed(baseBranch ?? "main")),
+									const conflictByCaseVariantIssueId =
+										conflictByPath || !caseInsensitivePathLookup
+											? undefined
+											: worktreesAfterRetries.find(
+													(worktree) =>
+														worktree.issueId !== issueId &&
+														worktree.issueId.toLowerCase() === issueId.toLowerCase(),
 												)
-												const clashError = yield* buildWorktreeNameClashError({
-													issueId,
-													conflictKind: "path",
-													requestedWorktreePath: worktreePath,
-													requestedBranch: branchName,
-													conflictingWorktree,
-													baseBranch: comparisonBaseBranch,
-												})
-												return yield* Effect.fail(clashError)
-											}
 
-											return yield* Effect.fail(
-												new GitError({
-													message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
-													command: `git worktree add ${worktreePath}`,
-												}),
-											)
+									const conflictingWorktree = conflictByPath ?? conflictByCaseVariantIssueId
+									if (conflictingWorktree) {
+										const comparisonBaseBranch = yield* resolveComparisonBaseBranch().pipe(
+											Effect.catchAll((error) =>
+												Effect.logWarning(error).pipe(
+													Effect.zipRight(Effect.succeed(baseBranch ?? "main")),
+												),
+											),
+										)
+										const clashError = yield* buildWorktreeNameClashError({
+											issueId,
+											conflictKind: "path",
+											requestedWorktreePath: worktreePath,
+											requestedBranch: branchName,
+											conflictingWorktree,
+											baseBranch: comparisonBaseBranch,
+										})
+										return yield* Effect.fail(clashError)
+									}
+
+									return yield* Effect.fail(
+										new GitError({
+											message: `Worktree created but not found in list after retries. Looking for: ${issueId}, found: [${e.foundIssueIds.join(", ")}]`,
+											command: `git worktree add ${worktreePath}`,
 										}),
-								),
-							)
+									)
+								}),
+							),
+						)
 
 						return result
 					}).pipe(Effect.withSpan("worktree.create")),
@@ -1326,6 +1400,9 @@ export const acquireWorktree = (
 > =>
 	Effect.acquireRelease(create(options), (worktree) =>
 		remove({ issueId: worktree.issueId, projectPath: options.projectPath }).pipe(
+			Effect.tapError((error) =>
+				Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+			),
 			Effect.orElseSucceed(() => undefined),
 		),
 	)

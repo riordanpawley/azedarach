@@ -248,7 +248,11 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					fallbackError: `Unable to resolve Linear team '${reference}'`,
 				}).pipe(
 					Effect.map((team) => (team?.id ? Option.some(team.id) : Option.none<string>())),
-					Effect.catchAll(() => Effect.succeed(Option.none<string>())),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(Option.none<string>())),
+						),
+					),
 				)
 
 				if (Option.isSome(directTeamIdOption)) {
@@ -301,7 +305,11 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 					fallbackError: `Unable to resolve Linear project '${reference}'`,
 				}).pipe(
 					Effect.map((project) => (project?.id ? Option.some(project.id) : Option.none<string>())),
-					Effect.catchAll(() => Effect.succeed(Option.none<string>())),
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(Option.none<string>())),
+						),
+					),
 				)
 
 				if (Option.isSome(directProjectIdOption)) {

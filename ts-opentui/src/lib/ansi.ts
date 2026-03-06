@@ -12,8 +12,7 @@
  * - Charset designators: ESC ( ) followed by A, B, 0, 1, 2
  * - Shift-in / Shift-out control characters
  */
-export const ANSI_ESCAPE_RE =
-	/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x0f|\x0e/g
+export const ANSI_ESCAPE_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x0f|\x0e/g
 
 /**
  * Strip ANSI/VT100 escape codes from terminal output.

@@ -621,8 +621,20 @@ const runShellCommand = (
 
 		const command = Command.make(program, ...args).pipe(Command.workingDirectory(cwd))
 		const result = yield* Effect.all({
-			exitCode: Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1))),
-			output: Command.string(command).pipe(Effect.catchAll((e) => Effect.succeed(String(e)))),
+			exitCode: Command.exitCode(command).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(1)),
+					),
+				),
+			),
+			output: Command.string(command).pipe(
+				Effect.catchAll((e) =>
+					Effect.logWarning(`Recovering after caught error: ${String(e)}`).pipe(
+						Effect.zipRight(Effect.succeed(String(e))),
+					),
+				),
+			),
 		})
 		return {
 			success: result.exitCode === 0,
@@ -650,8 +662,8 @@ const runGit = (
 					stderr,
 				})
 			}),
-			)
-		})
+		)
+	})
 
 /**
  * Check whether a git repository has an in-progress merge.
@@ -665,7 +677,13 @@ const hasMergeInProgress = (
 		const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
 			Command.workingDirectory(cwd),
 		)
-		const exitCode = yield* Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1)))
+		const exitCode = yield* Command.exitCode(command).pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed(1)),
+				),
+			),
+		)
 		return exitCode === 0
 	})
 
@@ -830,7 +848,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		): Effect.Effect<string, never, CommandExecutor.CommandExecutor> =>
 			worktreeManager.get({ issueId, projectPath }).pipe(
 				Effect.map((worktree) => worktree?.branch || issueId),
-				Effect.catchAll(() => Effect.succeed(issueId)),
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(issueId)),
+					),
+				),
 			)
 
 		/**
@@ -935,16 +957,36 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Sync tracker changes (with lock to prevent races)
 						yield* withSyncLock(
-							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+							issueTrackerClient
+								.sync(worktree.path)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								),
 						)
 
 						// Stage and commit any changes
-						yield* runGit(["add", "-A"], worktree.path).pipe(Effect.catchAll(() => Effect.void))
+						yield* runGit(["add", "-A"], worktree.path).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
+						)
 
 						yield* runGit(
 							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
 							worktree.path,
-						).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
+						).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
+						) // Ignore if nothing to commit
 
 						// Push branch to origin
 						yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
@@ -980,7 +1022,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							.update(issueId, {
 								notes: `PR: ${prUrl}`,
 							})
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 
 						return {
 							number: prNumber,
@@ -1006,7 +1054,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						projectPath,
 					).pipe(
 						Effect.map((output) => Option.some(parsePRJson(output))),
-						Effect.catchAll(() => Effect.succeed(Option.none<PR>())),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(Option.none<PR>())),
+							),
+						),
 					)
 
 					return result
@@ -1026,9 +1078,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// 1. Stop any running session (ignore errors)
 						// First try ClaudeSessionManager.stop (handles tracker sync from worktree)
-						yield* sessionManager.stop(issueId).pipe(Effect.catchAll(() => Effect.void))
+						yield* sessionManager
+							.stop(issueId)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 						// Also directly kill tmux session in case it wasn't tracked in memory
-						yield* tmuxService.killSession(issueId).pipe(Effect.catchAll(() => Effect.void))
+						yield* tmuxService
+							.killSession(issueId)
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 
 						// 2. Delete worktree
 						yield* worktreeManager.remove({ issueId: issueId, projectPath })
@@ -1038,7 +1106,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const pushStatus = yield* offlineService.isGitPushEnabled()
 							if (pushStatus.enabled) {
 								yield* runGit(["push", "origin", "--delete", issueBranch], projectPath).pipe(
-									Effect.catchAll(() => Effect.void), // Ignore if already deleted
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									), // Ignore if already deleted
 								)
 							}
 							// Silently skip if offline - remote branch can be cleaned up later
@@ -1046,25 +1118,49 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// 4. Delete local branch
 						yield* runGit(["branch", "-D", issueBranch], projectPath).pipe(
-							Effect.catchAll(() => Effect.void), // Ignore if already deleted
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							), // Ignore if already deleted
 						)
 
 						// 5. Close bead issue (optional) and sync to persist the change
 						if (closeIssue) {
 							yield* issueTrackerClient
 								.update(issueId, { status: "closed" })
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
 
 							// Clean up images for the closed issue (temporary debugging images)
 							// This prevents unbounded growth of local attachment storage
 							yield* imageAttachmentService
 								.cleanupImagesForIssue(issueId)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
 
 							// Sync the closed status to JSONL and commit it
 							// This fixes az-o5m9: merged tasks being left in in_progress status
 							yield* withSyncLock(
-								issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+								issueTrackerClient
+									.sync(projectPath)
+									.pipe(
+										Effect.catchAll((error) =>
+											Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+												Effect.zipRight(Effect.void),
+											),
+										),
+									),
 							)
 						}
 					}).pipe(Effect.withSpan("pr.cleanup")),
@@ -1074,7 +1170,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 				Effect.gen(function* () {
 					const command = Command.make("gh", "auth", "status")
 					const exitCode = yield* Command.exitCode(command).pipe(
-						Effect.catchAll(() => Effect.succeed(1)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(1)),
+							),
+						),
 					)
 					return exitCode === 0
 				}),
@@ -1109,11 +1209,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// because git won't let us checkout a branch that's in use by another worktree.
 						// If epic has no worktree, create one first.
 						let mergeDir = projectPath
-							if (parentEpic) {
-								let epicWorktree = yield* worktreeManager.get({
-									issueId: parentEpic.id,
-									projectPath,
-								})
+						if (parentEpic) {
+							let epicWorktree = yield* worktreeManager.get({
+								issueId: parentEpic.id,
+								projectPath,
+							})
 							if (!epicWorktree) {
 								yield* Effect.log(`Creating worktree for epic ${parentEpic.id} to receive merge`)
 								epicWorktree = yield* worktreeManager.create({
@@ -1124,20 +1224,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								})
 							}
 							mergeDir = epicWorktree.path
-								yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
-							}
+							yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
+						}
 
-							// Fail fast if the merge target repository is already mid-merge.
-							// Continuing would produce opaque git errors and non-deterministic outcomes.
-							yield* ensureNoMergeInProgress({
-								cwd: mergeDir,
-								issueId,
-								baseBranch,
-								contextLabel: parentEpic ? `epic ${parentEpic.id} worktree` : "project base branch",
-							})
+						// Fail fast if the merge target repository is already mid-merge.
+						// Continuing would produce opaque git errors and non-deterministic outcomes.
+						yield* ensureNoMergeInProgress({
+							cwd: mergeDir,
+							issueId,
+							baseBranch,
+							contextLabel: parentEpic ? `epic ${parentEpic.id} worktree` : "project base branch",
+						})
 
-							// Get issue info for merge commit message
-							const issue = yield* issueTrackerClient.show(issueId)
+						// Get issue info for merge commit message
+						const issue = yield* issueTrackerClient.show(issueId)
 
 						// Get worktree info
 						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
@@ -1172,7 +1272,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
 							worktree.path,
 						).pipe(
-							Effect.catchAll(() => Effect.void), // Ignore if nothing to commit
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							), // Ignore if nothing to commit
 						)
 
 						// 3. Check for non-tracker conflicts using merge-tree (safe, in-memory)
@@ -1237,7 +1341,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							yield* runGit(
 								["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueBranch}`],
 								worktree.path,
-							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, that's expected
+							).pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							) // Will fail with conflicts, that's expected
 
 							const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
@@ -1390,12 +1500,22 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 											// Commit the fixes
 											yield* runGit(["add", "-A"], mergeDir).pipe(
-												Effect.catchAll(() => Effect.void),
+												Effect.catchAll((error) =>
+													Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+														Effect.zipRight(Effect.void),
+													),
+												),
 											)
 											yield* runGit(
 												["commit", "-m", `fix: auto-fix after merging ${issueId}`],
 												mergeDir,
-											).pipe(Effect.catchAll(() => Effect.void))
+											).pipe(
+												Effect.catchAll((error) =>
+													Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+														Effect.zipRight(Effect.void),
+													),
+												),
+											)
 
 											return
 										}
@@ -1406,11 +1526,23 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								yield* Effect.log("Validation still failing after auto-fix attempts")
 
 								// Commit any partial fixes
-								yield* runGit(["add", "-A"], mergeDir).pipe(Effect.catchAll(() => Effect.void))
+								yield* runGit(["add", "-A"], mergeDir).pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
 								yield* runGit(
 									["commit", "-m", `wip: partial fix after merging ${issueId}`],
 									mergeDir,
-								).pipe(Effect.catchAll(() => Effect.void))
+								).pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
 
 								// Start Claude session if configured
 								if (startClaudeOnFailure) {
@@ -1455,7 +1587,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 							// 10. Delete local branch
 							yield* runGit(["branch", "-d", issueBranch], projectPath).pipe(
-								Effect.catchAll(() => Effect.void),
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
 							)
 						}
 
@@ -1472,14 +1608,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							// Clean up images for the closed bead (temporary debugging images)
 							yield* imageAttachmentService
 								.cleanupImagesForIssue(issueId)
-								.pipe(Effect.catchAll(() => Effect.void))
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								)
 
 							// If this is an epic being merged to main (not to another epic branch),
 							// also close all its child tasks
 							if (issue.issue_type === "epic" && !parentEpic) {
 								const children = yield* issueTrackerClient
 									.getEpicChildren(issueId)
-									.pipe(Effect.catchAll(() => Effect.succeed([])))
+									.pipe(
+										Effect.catchAll((error) =>
+											Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+												Effect.zipRight(Effect.succeed([])),
+											),
+										),
+									)
 
 								for (const child of children) {
 									if (child.status !== "closed") {
@@ -1494,7 +1642,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 										// Clean up images for each closed child
 										yield* imageAttachmentService
 											.cleanupImagesForIssue(child.id)
-											.pipe(Effect.catchAll(() => Effect.void))
+											.pipe(
+												Effect.catchAll((error) =>
+													Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+														Effect.zipRight(Effect.void),
+													),
+												),
+											)
 									}
 								}
 
@@ -1532,26 +1686,26 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}).pipe(Effect.withSpan("pr.mergeToMain")),
 				),
 
-				checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
-					Effect.gen(function* () {
-						const { issueId, projectPath } = options
-						const { baseBranch: effectiveBaseBranch } = yield* getIssueBaseBranch(
-							issueId,
-							projectPath,
-						)
-						const issueBranch = yield* getIssueBranchName(issueId, projectPath)
+			checkMergeConflicts: (options: { issueId: string; projectPath: string }) =>
+				Effect.gen(function* () {
+					const { issueId, projectPath } = options
+					const { baseBranch: effectiveBaseBranch } = yield* getIssueBaseBranch(
+						issueId,
+						projectPath,
+					)
+					const issueBranch = yield* getIssueBranchName(issueId, projectPath)
 
-						// Fail fast if repository is already in merge state.
-						// Conflict probing is not reliable while merge is unresolved.
-						yield* ensureNoMergeInProgress({
-							cwd: projectPath,
-							issueId,
-							baseBranch: effectiveBaseBranch,
-							contextLabel: "project base branch",
-						})
+					// Fail fast if repository is already in merge state.
+					// Conflict probing is not reliable while merge is unresolved.
+					yield* ensureNoMergeInProgress({
+						cwd: projectPath,
+						issueId,
+						baseBranch: effectiveBaseBranch,
+						contextLabel: "project base branch",
+					})
 
-						// Use git merge-tree to perform an actual 3-way merge in memory
-						// This detects real line-level conflicts, not just file overlap
+					// Use git merge-tree to perform an actual 3-way merge in memory
+					// This detects real line-level conflicts, not just file overlap
 					// Exit code 0 = clean merge, 1 = conflicts, other = error
 					const mergeTreeCommand = Command.make(
 						"git",
@@ -1562,7 +1716,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					).pipe(Command.workingDirectory(projectPath))
 
 					const exitCode = yield* Command.exitCode(mergeTreeCommand).pipe(
-						Effect.catchAll(() => Effect.succeed(2)), // Treat errors as unknown
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(2)),
+							),
+						), // Treat errors as unknown
 					)
 
 					// Exit code 1 means conflicts detected
@@ -1583,7 +1741,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								issueBranch,
 							],
 							projectPath,
-						).pipe(Effect.catchAll(() => Effect.succeed("")))
+						).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed("")),
+								),
+							),
+						)
 
 						// Parse output - conflicting files appear after the tree hash line
 						const lines = output.trim().split("\n")
@@ -1597,7 +1761,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						projectPath,
 					).pipe(
 						Effect.map((output) => output.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 
 					let branchChangedFiles = 0
@@ -1615,7 +1783,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 										.split("\n")
 										.filter((f) => f.length > 0).length,
 							),
-							Effect.catchAll(() => Effect.succeed(0)),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(0)),
+								),
+							),
 						)
 						branchChangedFiles = branchOutput
 
@@ -1630,7 +1802,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 										.split("\n")
 										.filter((f) => f.length > 0).length,
 							),
-							Effect.catchAll(() => Effect.succeed(0)),
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed(0)),
+								),
+							),
 						)
 						baseChangedFiles = baseOutput
 					}
@@ -1690,7 +1866,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					// This is faster than git status and easier to parse
 					// Format: XY filename (where X=index status, Y=worktree status)
 					const output = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 
 					// Parse output - each non-empty line is a changed file
@@ -1819,7 +1999,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							yield* runGit(
 								["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueBranch}`],
 								worktree.path,
-							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+							).pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							) // Will fail with conflicts, expected
 
 							const resolvePrompt = `There are merge conflicts with ${baseBranch} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution. After resolving, the branch will be up to date with ${baseBranch}.`
 
@@ -1873,7 +2059,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// Sync tracker after merge to pick up any bead changes from main
 						yield* withSyncLock(
-							issueTrackerClient.sync(worktree.path).pipe(Effect.catchAll(() => Effect.void)),
+							issueTrackerClient
+								.sync(worktree.path)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								),
 						)
 					}).pipe(Effect.withSpan("pr.updateFromBase")),
 				),
@@ -1889,7 +2083,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						projectPath,
 					).pipe(
 						Effect.map(() => true),
-						Effect.catchAll(() => Effect.succeed(false)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
 					)
 
 					if (!prExists) {
@@ -1900,17 +2098,33 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const commentsJson = yield* runGH(
 						["pr", "view", issueBranch, "--json", "comments,reviews"],
 						projectPath,
-					).pipe(Effect.catchAll(() => Effect.succeed("{}")))
+					).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("{}")),
+							),
+						),
+					)
 
 					// Parse JSON using Effect.try
 					const parsed = yield* Effect.try({
 						try: () => JSON.parse(commentsJson) as unknown,
 						catch: () => new PRError({ message: "Failed to parse PR comments JSON" }),
-					}).pipe(Effect.catchAll(() => Effect.succeed({} as unknown)))
+					}).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed({} as unknown)),
+							),
+						),
+					)
 
 					// Decode using Schema
 					const data = yield* Schema.decodeUnknown(GHPRCommentsResponseSchema)(parsed).pipe(
-						Effect.catchAll(() => Effect.succeed({ comments: [], reviews: [] })),
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(Effect.succeed({ comments: [], reviews: [] })),
+							),
+						),
 					)
 
 					const comments: PRComment[] = []
@@ -1967,7 +2181,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						worktree.path,
 					).pipe(
 						Effect.map((output) => Number.parseInt(output.trim(), 10)),
-						Effect.catchAll(() => Effect.succeed(0)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(0)),
+							),
+						),
 					)
 
 					// Count commits branch is ahead of base branch
@@ -1977,7 +2195,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						worktree.path,
 					).pipe(
 						Effect.map((output) => Number.parseInt(output.trim(), 10)),
-						Effect.catchAll(() => Effect.succeed(0)),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(0)),
+							),
+						),
 					)
 
 					return { behind: behindOutput, ahead: aheadOutput, baseBranch }
@@ -2023,7 +2245,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 
 					const statusOutput = yield* runGit(["status", "--porcelain"], worktree.path).pipe(
-						Effect.catchAll(() => Effect.succeed("")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed("")),
+							),
+						),
 					)
 					const hasUncommitted = statusOutput.trim().length > 0
 					let stashed = false
@@ -2096,7 +2322,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							["merge", baseBranch, "-m", `Merge ${baseBranch} into ${issueId}`],
 							worktree.path,
 						).pipe(
-							Effect.catchAll(() => Effect.void), // Will fail with conflicts, that's expected
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							), // Will fail with conflicts, that's expected
 						)
 
 						const resolvePrompt = `There are merge conflicts in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
@@ -2237,7 +2467,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						yield* runGit(
 							["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
 							sourceWorktree.path,
-						).pipe(Effect.catchAll(() => Effect.void)) // Ignore if nothing to commit
+						).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.void),
+								),
+							),
+						) // Ignore if nothing to commit
 
 						// Ensure target has a worktree (create if needed)
 						let targetWorktree = yield* worktreeManager.get({
@@ -2326,7 +2562,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							yield* runGit(
 								["merge", sourceBranch, "-m", `Merge ${sourceIssueId} into ${targetIssueId}`],
 								targetWorktree.path,
-							).pipe(Effect.catchAll(() => Effect.void)) // Will fail with conflicts, expected
+							).pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							) // Will fail with conflicts, expected
 
 							const resolvePrompt = `There are merge conflicts when merging ${sourceIssueId} into ${targetIssueId} in: ${fileList}. Please resolve these conflicts, then stage and commit the resolution.`
 
@@ -2418,11 +2660,25 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						// Clean up images for the closed source bead
 						yield* imageAttachmentService
 							.cleanupImagesForIssue(sourceIssueId)
-							.pipe(Effect.catchAll(() => Effect.void))
+							.pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.void),
+									),
+								),
+							)
 
 						// Sync the closed status
 						yield* withSyncLock(
-							issueTrackerClient.sync(projectPath).pipe(Effect.catchAll(() => Effect.void)),
+							issueTrackerClient
+								.sync(projectPath)
+								.pipe(
+									Effect.catchAll((error) =>
+										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+											Effect.zipRight(Effect.void),
+										),
+									),
+								),
 						)
 
 						yield* Effect.log(

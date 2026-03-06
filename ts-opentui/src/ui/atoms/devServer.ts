@@ -165,13 +165,18 @@ export const attachDevServerAtom = appRuntime.fn((args: { issueId: string; serve
 		// Attach to the tmux session
 		yield* tmux.switchClient(serverState.tmuxSession).pipe(
 			Effect.catchAll((err) => {
+				const logError = Effect.logWarning(err)
 				if (err._tag === "SessionNotFoundError") {
-					return toast.show("error", `Session not found: ${err.session}`)
+					return logError.pipe(
+						Effect.zipRight(toast.show("error", `Session not found: ${err.session}`)),
+					)
 				}
 				if (err._tag === "TmuxError") {
-					return toast.show("error", `tmux error: ${err.message}`)
+					return logError.pipe(Effect.zipRight(toast.show("error", `tmux error: ${err.message}`)))
 				}
-				return toast.show("error", "Failed to attach to dev server session")
+				return logError.pipe(
+					Effect.zipRight(toast.show("error", "Failed to attach to dev server session")),
+				)
 			}),
 		)
 	}),

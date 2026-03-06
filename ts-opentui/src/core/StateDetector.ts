@@ -94,8 +94,7 @@ const BRAILLE_SPINNERS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏◐◓◑◒⣾⣽⣻⢿
  *
  * Sources: Claude Code source, empirical observation, Grove's WORKING_INDICATORS pattern.
  */
-const WORKING_INDICATOR_DINGBATS =
-	"✢✣✤✥✦✧✨✩✪✫✬✭✮✯✰✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❄❅❆❇❈❉❊❋✡✥★☆"
+const WORKING_INDICATOR_DINGBATS = "✢✣✤✥✦✧✨✩✪✫✬✭✮✯✰✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❄❅❆❇❈❉❊❋✡✥★☆"
 
 /**
  * Regex that matches braille spinner characters in output.
@@ -108,10 +107,7 @@ const SPINNER_RE = new RegExp(`[${BRAILLE_SPINNERS}]`, "u")
  * Pattern: dingbat + optional whitespace + verb-ing word + ellipsis characters
  * e.g. "✻ Sketching…", "✶ Thinking...", "❃ Analyzing…"
  */
-const WORKING_INDICATOR_RE = new RegExp(
-	`[${WORKING_INDICATOR_DINGBATS}]\\s*\\w+ing[.…]+`,
-	"u",
-)
+const WORKING_INDICATOR_RE = new RegExp(`[${WORKING_INDICATOR_DINGBATS}]\\s*\\w+ing[.…]+`, "u")
 
 /**
  * Pattern definitions ordered by priority (highest to lowest)

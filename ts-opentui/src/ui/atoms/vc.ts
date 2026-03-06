@@ -48,7 +48,11 @@ export const vcStatusPollerAtom = appRuntime.atom(
 			yield* Effect.scheduleForked(Schedule.spaced("5 seconds"))(
 				vc.getStatus().pipe(
 					Effect.flatMap((status) => SubscriptionRef.set(ref, status)),
-					Effect.catchAll(() => Effect.void), // Don't crash on transient errors
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.void),
+						),
+					), // Don't crash on transient errors
 				),
 			)
 		}),

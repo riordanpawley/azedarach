@@ -99,10 +99,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by cleanup.
 		 */
-			const doCleanup = (issueId: string, projectPath: string) =>
-				helpers.withQueue(
-					issueId,
-					"cleanup",
+		const doCleanup = (issueId: string, projectPath: string) =>
+			helpers.withQueue(
+				issueId,
+				"cleanup",
 				Effect.gen(function* () {
 					// DIAGNOSTIC: Log the bead ID when cleanup actually executes (az-f3iw)
 					yield* Effect.log(`[cleanup:execute] Running cleanup for issueId=${issueId}`)
@@ -112,24 +112,30 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						Effect.tap(() => toast.show("success", `Cleaned up ${issueId}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
-					}),
+				}),
+			)
+
+		/**
+		 * Check whether repository has an active merge (MERGE_HEAD present).
+		 */
+		const hasMergeInProgress = (cwd: string) =>
+			Effect.gen(function* () {
+				const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
+					Command.workingDirectory(cwd),
 				)
+				const exitCode = yield* Command.exitCode(command).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(1)),
+						),
+					),
+				)
+				return exitCode === 0
+			})
 
-			/**
-			 * Check whether repository has an active merge (MERGE_HEAD present).
-			 */
-			const hasMergeInProgress = (cwd: string) =>
-				Effect.gen(function* () {
-					const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
-						Command.workingDirectory(cwd),
-					)
-					const exitCode = yield* Command.exitCode(command).pipe(Effect.catchAll(() => Effect.succeed(1)))
-					return exitCode === 0
-				})
-
-			// ================================================================
-			// PR Handler Methods
-			// ================================================================
+		// ================================================================
+		// PR Handler Methods
+		// ================================================================
 
 		/**
 		 * Update from base action (Space+u)
@@ -325,24 +331,30 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-					// Get current project path (from ProjectService or cwd fallback)
-					const projectPath = yield* helpers.getProjectPath()
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
 
-					// Fail fast if the base-branch repository is already in merge state.
-					// We do not auto-abort; user must explicitly resolve or abort first.
-					const baseMergeInProgress = yield* hasMergeInProgress(projectPath)
-					if (baseMergeInProgress) {
-						yield* toast.show(
-							"error",
-							`Cannot merge: project base branch is already mid-merge.\nResolve and commit it, or run 'git -C ${projectPath} merge --abort', then retry Space+m.`,
-						)
-						return
-					}
+				// Fail fast if the base-branch repository is already in merge state.
+				// We do not auto-abort; user must explicitly resolve or abort first.
+				const baseMergeInProgress = yield* hasMergeInProgress(projectPath)
+				if (baseMergeInProgress) {
+					yield* toast.show(
+						"error",
+						`Cannot merge: project base branch is already mid-merge.\nResolve and commit it, or run 'git -C ${projectPath} merge --abort', then retry Space+m.`,
+					)
+					return
+				}
 
-					// Get target branch (epic branch for children, main otherwise)
-					const { targetBranch } = yield* prWorkflow
-						.getTargetBranch(task.id, projectPath)
-					.pipe(Effect.catchAll(() => Effect.succeed({ targetBranch: "main", isEpicChild: false })))
+				// Get target branch (epic branch for children, main otherwise)
+				const { targetBranch } = yield* prWorkflow
+					.getTargetBranch(task.id, projectPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(Effect.succeed({ targetBranch: "main", isEpicChild: false })),
+							),
+						),
+					)
 
 				// Check for uncommitted changes in worktree BEFORE merge
 				// With merge.autostash=true, uncommitted changes get stashed before merge
@@ -356,10 +368,14 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					.pipe(
 						Effect.map((result) => ({ _tag: "success" as const, result })),
 						Effect.catchAll((error) =>
-							Effect.succeed({
-								_tag: "error" as const,
-								message: formatForToast(error),
-							}),
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(
+									Effect.succeed({
+										_tag: "error" as const,
+										message: formatForToast(error),
+									}),
+								),
+							),
 						),
 					)
 
@@ -396,10 +412,14 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					.pipe(
 						Effect.map((check) => ({ _tag: "success" as const, check })),
 						Effect.catchAll((error) =>
-							Effect.succeed({
-								_tag: "error" as const,
-								message: formatForToast(error),
-							}),
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(
+									Effect.succeed({
+										_tag: "error" as const,
+										message: formatForToast(error),
+									}),
+								),
+							),
 						),
 					)
 
@@ -619,7 +639,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							Effect.tap(() => toast.show("success", `Merge aborted for ${task.id}`)),
 							Effect.catchAll((error: unknown) => {
 								const formatted = formatForToast(error)
-								return toast.show("error", `Abort failed: ${formatted}`)
+								return Effect.logWarning(error).pipe(
+									Effect.zipRight(toast.show("error", `Abort failed: ${formatted}`)),
+								)
 							}),
 						)
 					}),
@@ -654,11 +676,14 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						projectPath,
 					})
 					.pipe(
-						Effect.catchAll(() =>
-							// Fallback to global base branch on error
-							appConfig
-								.getEffectiveBaseBranch()
-								.pipe(Effect.map((baseBranch) => ({ baseBranch, parentEpic: undefined }))),
+						Effect.catchAll((error) =>
+							Effect.logWarning(error).pipe(
+								Effect.zipRight(
+									appConfig
+										.getEffectiveBaseBranch()
+										.pipe(Effect.map((baseBranch) => ({ baseBranch, parentEpic: undefined }))),
+								),
+							),
 						),
 					)
 
@@ -750,7 +775,9 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						),
 						Effect.catchAll((error) => {
 							const formatted = formatForToast(error)
-							return toast.show("error", `Merge failed: ${formatted}`)
+							return Effect.logWarning(error).pipe(
+								Effect.zipRight(toast.show("error", `Merge failed: ${formatted}`)),
+							)
 						}),
 					)
 			})

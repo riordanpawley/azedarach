@@ -29,13 +29,26 @@ export class LinearSyncThrottle extends Effect.Service<LinearSyncThrottle>()("Li
 			"linear" in syncConfig.issueTracker ? syncConfig.issueTracker.linear : undefined
 		const overrideMaxPerMinute = yield* Config.option(
 			Config.integer("AZEDARACH_LINEAR_SYNC_MAX_PER_MINUTE"),
-		).pipe(Effect.orElseSucceed(() => Option.none<number>()))
+		).pipe(
+			Effect.tapError((error) =>
+				Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+			),
+			Effect.orElseSucceed(() => Option.none<number>()),
+		)
 		const overrideBurst = yield* Config.option(Config.integer("AZEDARACH_LINEAR_SYNC_BURST")).pipe(
+			Effect.tapError((error) =>
+				Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+			),
 			Effect.orElseSucceed(() => Option.none<number>()),
 		)
 		const overrideWindowMs = yield* Config.option(
 			Config.integer("AZEDARACH_LINEAR_SYNC_WINDOW_MS"),
-		).pipe(Effect.orElseSucceed(() => Option.none<number>()))
+		).pipe(
+			Effect.tapError((error) =>
+				Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+			),
+			Effect.orElseSucceed(() => Option.none<number>()),
+		)
 		const maxPerMinute = Math.max(
 			1,
 			Math.floor(
@@ -80,7 +93,11 @@ export class LinearSyncThrottle extends Effect.Service<LinearSyncThrottle>()("Li
 				const task: ThrottleTask = {
 					execute: params.effect.pipe(
 						Effect.flatMap((value) => Deferred.succeed(deferred, value)),
-						Effect.catchAllCause((cause) => Deferred.failCause(deferred, cause)),
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(`Recovering after caught error: ${String(cause)}`).pipe(
+								Effect.zipRight(Deferred.failCause(deferred, cause)),
+							),
+						),
 						Effect.asVoid,
 					),
 				}

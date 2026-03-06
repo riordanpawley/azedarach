@@ -78,7 +78,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			killSession: (name: string) =>
 				runTmux(["kill-session", "-t", name]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: name }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session: name }))),
+						),
+					),
 				),
 
 			listSessions: () =>
@@ -102,7 +106,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 							}
 						})
 				}).pipe(
-					Effect.catchAll(() => Effect.succeed([])), // No sessions = empty list
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					), // No sessions = empty list
 				),
 
 			hasSession: (name: string) =>
@@ -112,13 +120,21 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					const sessions = output.trim().split("\n").filter(Boolean)
 					return sessions.includes(name)
 				}).pipe(
-					Effect.catchAll(() => Effect.succeed(false)), // No sessions = doesn't exist
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(false)),
+						),
+					), // No sessions = doesn't exist
 				),
 
 			sendKeys: (session: string, keys: string) =>
 				runTmux(["send-keys", "-t", session, keys, "Enter"]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session }))),
+						),
+					),
 				),
 
 			attachCommand: (session: string) => `tmux attach-session -t ${session}`,
@@ -126,7 +142,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			switchClient: (session: string) =>
 				runTmux(["switch-client", "-t", session]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session }))),
+						),
+					),
 				),
 
 			/**
@@ -193,22 +213,34 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			renameSession: (oldName: string, newName: string) =>
 				runTmux(["rename-session", "-t", oldName, newName]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: oldName }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session: oldName }))),
+						),
+					),
 				),
 
 			renameWindow: (session: string, oldName: string, newName: string) =>
 				runTmux(["rename-window", "-t", `${session}:${oldName}`, newName]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() =>
-						Effect.fail(new SessionNotFoundError({ session: `${session}:${oldName}` })),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.fail(new SessionNotFoundError({ session: `${session}:${oldName}` })),
+							),
+						),
 					),
 				),
 
 			linkWindow: (source: string, target: string) =>
 				runTmux(["link-window", "-s", source, "-t", target]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() =>
-						Effect.fail(new TmuxError({ message: `Failed to link ${source} to ${target}` })),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.fail(new TmuxError({ message: `Failed to link ${source} to ${target}` })),
+							),
+						),
 					),
 				),
 
@@ -216,19 +248,35 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 				Effect.gen(function* () {
 					const output = yield* runTmux(["list-windows", "-t", session, "-F", "#{window_name}"])
 					return output.trim().split("\n").filter(Boolean)
-				}).pipe(Effect.catchAll(() => Effect.succeed([]))),
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				),
 
 			hasWindow: (session: string, windowName: string) =>
 				Effect.gen(function* () {
 					const windows = yield* runTmux(["list-windows", "-t", session, "-F", "#{window_name}"])
 					return windows.split("\n").filter(Boolean).includes(windowName)
-				}).pipe(Effect.catchAll(() => Effect.succeed(false))),
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(false)),
+						),
+					),
+				),
 
 			selectWindow: (session: string, windowName: string) =>
 				runTmux(["select-window", "-t", `${session}:${windowName}`]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() =>
-						Effect.fail(new SessionNotFoundError({ session: `${session}:${windowName}` })),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.fail(new SessionNotFoundError({ session: `${session}:${windowName}` })),
+							),
+						),
 					),
 				),
 
@@ -266,7 +314,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			killPane: (target: string) =>
 				runTmux(["kill-pane", "-t", target]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session: target }))),
+						),
+					),
 				),
 
 			/**
@@ -277,7 +329,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			killWindow: (target: string) =>
 				runTmux(["kill-window", "-t", target]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session: target }))),
+						),
+					),
 				),
 
 			/**
@@ -303,7 +359,13 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 							const [id, index] = line.split(":")
 							return { id, index: parseInt(index, 10) }
 						})
-				}).pipe(Effect.catchAll(() => Effect.succeed([]))),
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed([])),
+						),
+					),
+				),
 
 			capturePane: (session: string, lines?: number) =>
 				Effect.gen(function* () {
@@ -319,7 +381,13 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 						args.push("-S", String(-Math.abs(lines)))
 					}
 					return yield* runTmux(args)
-				}).pipe(Effect.catchAll(() => Effect.succeed(""))),
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed("")),
+						),
+					),
+				),
 
 			/**
 			 * Get the foreground process running in the session's active pane
@@ -344,7 +412,13 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					])
 					const cmd = output.trim()
 					return cmd.length > 0 ? cmd : null
-				}).pipe(Effect.catchAll(() => Effect.succeed(null as string | null))),
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(null as string | null)),
+						),
+					),
+				),
 
 			/**
 			 * Interrupt the current process and restart with a new command
@@ -366,7 +440,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					yield* runTmux(["send-keys", "-t", session, command, "Enter"])
 				}).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session }))),
+						),
+					),
 				),
 
 			/**
@@ -379,7 +457,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			setWindowOption: (target: string, key: string, value: string) =>
 				runTmux(["set-window-option", "-t", target, key, value]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session: target }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session: target }))),
+						),
+					),
 				),
 
 			/**
@@ -395,7 +477,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 			setUserOption: (session: string, key: string, value: string) =>
 				runTmux(["set-option", "-t", session, key, value]).pipe(
 					Effect.asVoid,
-					Effect.catchAll(() => Effect.fail(new SessionNotFoundError({ session }))),
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session }))),
+						),
+					),
 				),
 
 			/**
@@ -414,7 +500,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					const value = output.trim()
 					return value.length > 0 ? Option.some(value) : Option.none()
 				}).pipe(
-					Effect.catchAll(() => Effect.succeed(Option.none())), // Return None on error
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(Option.none())),
+						),
+					), // Return None on error
 				),
 		}
 	}),
