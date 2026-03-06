@@ -418,6 +418,13 @@ Canonical fixture profile names:
 - Expected: attachment selection navigation updates deterministically.
 - Links: AZ-FR-1605.
 
+### AZ-AT-2828 Attachment prompt paths are worktree-local
+
+- Preconditions: issue has one or more image attachments and no existing session.
+- Steps: trigger `Space S` (and optionally `Space !`) and inspect the generated startup prompt content sent to the AI CLI.
+- Expected: attachment paths point to `<issue-worktree>/.azedarach/tmp/attachments/...`; flow does not rely on sibling/global project attachment directories.
+- Links: AZ-FR-1610.
+
 ## 6.16 Settings and Projects Acceptance
 
 ### AZ-AT-1401 Edit settings and persist
@@ -456,8 +463,15 @@ Canonical fixture profile names:
 ### AZ-AT-2824 Status/help/log and tmux discovery contract
 
 - Steps: open board, invoke help and logs overlays, run tmux discovery against known sessions.
-- Expected: status bar shows current mode, help/log overlays are accessible and dismissible, and tmux session naming/discovery contract resolves known sessions including project-prefixed names.
-- Links: AZ-FR-1902, AZ-FR-1905, AZ-FR-1906, AZ-FR-2001, AZ-FR-2002.
+- Expected: status bar shows current mode, help/log overlays are accessible and dismissible, and tmux session naming/discovery contract resolves known sessions including project-prefixed names while excluding mismatched project-prefixed sessions from other projects.
+- Links: AZ-FR-1902, AZ-FR-1905, AZ-FR-1906, AZ-FR-2001, AZ-FR-2002, AZ-FR-2002a.
+
+### AZ-AT-2826 Cross-project session prefix isolation
+
+- Preconditions: at least two projects have active tmux sessions with overlapping short IDs (for example `ch-f` exists while viewing Azedarach project with issue `f`).
+- Steps: load board for one project and run session discovery/refresh.
+- Expected: only sessions matching the active project prefix (or valid legacy unprefixed sessions) influence active-session state; foreign prefixed sessions are ignored.
+- Links: AZ-FR-2001a, AZ-FR-2002, AZ-FR-2002a, section 05 F-143.
 
 ## 6.17 Failure Acceptance
 

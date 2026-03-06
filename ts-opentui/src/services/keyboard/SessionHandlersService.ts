@@ -143,11 +143,14 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 					// Check for attached images and include their paths
 					// This allows Claude to use the Read tool to view them
+					const worktreePath = getWorktreePath(projectPath, task.id)
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
 					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment.getPath(task.id, attachment.id).pipe(Effect.orElseSucceed(() => "")),
+						imageAttachment
+							.getPathForProjectRoot(task.id, attachment.id, worktreePath)
+							.pipe(Effect.orElseSucceed(() => "")),
 					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({
@@ -210,13 +213,16 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
+					const worktreePath = getWorktreePath(projectPath, task.id)
 
 					// Check for attached images and include their paths
 					const attachments = yield* imageAttachment
 						.list(task.id)
 						.pipe(Effect.catchAll(() => Effect.succeed([] as const)))
 					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment.getPath(task.id, attachment.id).pipe(Effect.orElseSucceed(() => "")),
+						imageAttachment
+							.getPathForProjectRoot(task.id, attachment.id, worktreePath)
+							.pipe(Effect.orElseSucceed(() => "")),
 					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
 
 					const initialPrompt = buildStartWorkPrompt({

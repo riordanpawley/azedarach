@@ -68,6 +68,11 @@ describe("paths session naming", () => {
 		})
 	})
 
+	it("rejects project-prefixed names from other projects when project path is explicit", () => {
+		expect(parseIssueSessionName("ch-f", "/Users/user/prog/azedarach")).toBeUndefined()
+		expect(parseIssueSessionName("ch-AZE-123", "/Users/user/prog/azedarach")).toBeUndefined()
+	})
+
 	it("parses legacy underscore-normalized session names", () => {
 		expect(parseIssueSessionName("az_foo")).toEqual({
 			type: "issue",
@@ -105,6 +110,17 @@ describe("paths session naming", () => {
 		expect(parseIssueSessionName("codex-123")).toEqual({
 			type: "issue",
 			issueId: "123",
+		})
+	})
+
+	it("still parses unprefixed legacy IDs when project path is explicit", () => {
+		expect(parseIssueSessionName("AZE-123", "/Users/user/prog/azedarach")).toEqual({
+			type: "issue",
+			issueId: "AZE-123",
+		})
+		expect(parseIssueSessionName("az_x2e_foo", "/Users/user/prog/azedarach")).toEqual({
+			type: "issue",
+			issueId: "az.foo",
 		})
 	})
 
