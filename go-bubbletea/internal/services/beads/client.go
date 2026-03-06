@@ -28,12 +28,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 
 	out, err := c.runner.Run(ctx, "bd", "list", "--json")
 	if err != nil {
-		return nil, &domain.BeadsError{Op: "list", Err: err}
+		return nil, &domain.IssueTrackerError{Op: "list", Err: err}
 	}
 
 	var tasks []domain.Task
 	if err := json.Unmarshal(out, &tasks); err != nil {
-		return nil, &domain.BeadsError{Op: "list", Message: "failed to parse JSON", Err: err}
+		return nil, &domain.IssueTrackerError{Op: "list", Message: "failed to parse JSON", Err: err}
 	}
 
 	c.logger.Debug("fetched beads", "count", len(tasks))
@@ -46,12 +46,12 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.Task, error
 
 	out, err := c.runner.Run(ctx, "bd", "search", query, "--json")
 	if err != nil {
-		return nil, &domain.BeadsError{Op: "search", Message: query, Err: err}
+		return nil, &domain.IssueTrackerError{Op: "search", Message: query, Err: err}
 	}
 
 	var tasks []domain.Task
 	if err := json.Unmarshal(out, &tasks); err != nil {
-		return nil, &domain.BeadsError{Op: "search", Message: "failed to parse JSON", Err: err}
+		return nil, &domain.IssueTrackerError{Op: "search", Message: "failed to parse JSON", Err: err}
 	}
 
 	c.logger.Debug("found beads", "count", len(tasks))
@@ -64,12 +64,12 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 
 	out, err := c.runner.Run(ctx, "bd", "ready", "--json")
 	if err != nil {
-		return nil, &domain.BeadsError{Op: "ready", Err: err}
+		return nil, &domain.IssueTrackerError{Op: "ready", Err: err}
 	}
 
 	var tasks []domain.Task
 	if err := json.Unmarshal(out, &tasks); err != nil {
-		return nil, &domain.BeadsError{Op: "ready", Message: "failed to parse JSON", Err: err}
+		return nil, &domain.IssueTrackerError{Op: "ready", Message: "failed to parse JSON", Err: err}
 	}
 
 	c.logger.Debug("found ready beads", "count", len(tasks))
@@ -82,7 +82,7 @@ func (c *Client) Update(ctx context.Context, id string, status domain.Status) er
 
 	_, err := c.runner.Run(ctx, "bd", "update", id, "--status="+string(status))
 	if err != nil {
-		return &domain.BeadsError{Op: "update", BeadID: id, Err: err}
+		return &domain.IssueTrackerError{Op: "update", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("bead updated", "id", id)
@@ -112,7 +112,7 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 
 	out, err := c.runner.Run(ctx, "bd", args...)
 	if err != nil {
-		return "", &domain.BeadsError{Op: "create", Message: params.Title, Err: err}
+		return "", &domain.IssueTrackerError{Op: "create", Message: params.Title, Err: err}
 	}
 
 	// Response from bd create --json is the created task
@@ -126,7 +126,7 @@ func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, e
 		if err2 := json.Unmarshal(out, &idResult); err2 == nil && idResult.ID != "" {
 			return idResult.ID, nil
 		}
-		return "", &domain.BeadsError{Op: "create", Message: "failed to parse JSON", Err: err}
+		return "", &domain.IssueTrackerError{Op: "create", Message: "failed to parse JSON", Err: err}
 	}
 
 	c.logger.Debug("bead created", "id", task.ID)
@@ -144,7 +144,7 @@ func (c *Client) Close(ctx context.Context, id string, reason string) error {
 
 	_, err := c.runner.Run(ctx, "bd", args...)
 	if err != nil {
-		return &domain.BeadsError{Op: "close", BeadID: id, Err: err}
+		return &domain.IssueTrackerError{Op: "close", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("bead closed", "id", id)
@@ -156,7 +156,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 
 	_, err := c.runner.Run(ctx, "bd", "delete", id)
 	if err != nil {
-		return &domain.BeadsError{Op: "delete", BeadID: id, Err: err}
+		return &domain.IssueTrackerError{Op: "delete", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("bead deleted", "id", id)
@@ -169,7 +169,7 @@ func (c *Client) Archive(ctx context.Context, id string) error {
 
 	_, err := c.runner.Run(ctx, "bd", "archive", id)
 	if err != nil {
-		return &domain.BeadsError{Op: "archive", BeadID: id, Err: err}
+		return &domain.IssueTrackerError{Op: "archive", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("bead archived", "id", id)
@@ -196,7 +196,7 @@ func (c *Client) UpdateDetails(ctx context.Context, id string, params UpdateTask
 
 	_, err := c.runner.Run(ctx, "bd", args...)
 	if err != nil {
-		return &domain.BeadsError{Op: "update-details", BeadID: id, Err: err}
+		return &domain.IssueTrackerError{Op: "update-details", IssueID: id, Err: err}
 	}
 
 	c.logger.Debug("bead details updated", "id", id)

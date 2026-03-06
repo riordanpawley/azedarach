@@ -66,9 +66,9 @@ func TestClient_List(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
-				var beadsErr *domain.BeadsError
-				assert.ErrorAs(t, err, &beadsErr)
-				assert.Equal(t, "list", beadsErr.Op)
+				var trackerErr *domain.IssueTrackerError
+				assert.ErrorAs(t, err, &trackerErr)
+				assert.Equal(t, "list", trackerErr.Op)
 				return
 			}
 
@@ -127,9 +127,9 @@ func TestClient_Search(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
-				var beadsErr *domain.BeadsError
-				assert.ErrorAs(t, err, &beadsErr)
-				assert.Equal(t, "search", beadsErr.Op)
+				var trackerErr *domain.IssueTrackerError
+				assert.ErrorAs(t, err, &trackerErr)
+				assert.Equal(t, "search", trackerErr.Op)
 				return
 			}
 
@@ -183,9 +183,9 @@ func TestClient_Ready(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
-				var beadsErr *domain.BeadsError
-				assert.ErrorAs(t, err, &beadsErr)
-				assert.Equal(t, "ready", beadsErr.Op)
+				var trackerErr *domain.IssueTrackerError
+				assert.ErrorAs(t, err, &trackerErr)
+				assert.Equal(t, "ready", trackerErr.Op)
 				return
 			}
 
@@ -226,10 +226,10 @@ func TestClient_Update(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
-				var beadsErr *domain.BeadsError
-				assert.ErrorAs(t, err, &beadsErr)
-				assert.Equal(t, "update", beadsErr.Op)
-				assert.Equal(t, tt.id, beadsErr.BeadID)
+				var trackerErr *domain.IssueTrackerError
+				assert.ErrorAs(t, err, &trackerErr)
+				assert.Equal(t, "update", trackerErr.Op)
+				assert.Equal(t, tt.id, trackerErr.IssueID)
 				return
 			}
 
@@ -273,10 +273,10 @@ func TestClient_Close(t *testing.T) {
 
 			if tt.wantErr {
 				require.Error(t, err)
-				var beadsErr *domain.BeadsError
-				assert.ErrorAs(t, err, &beadsErr)
-				assert.Equal(t, "close", beadsErr.Op)
-				assert.Equal(t, tt.id, beadsErr.BeadID)
+				var trackerErr *domain.IssueTrackerError
+				assert.ErrorAs(t, err, &trackerErr)
+				assert.Equal(t, "close", trackerErr.Op)
+				assert.Equal(t, tt.id, trackerErr.IssueID)
 				return
 			}
 
@@ -356,10 +356,10 @@ func TestClient_ErrorWrapping(t *testing.T) {
 		_, err := client.List(context.Background())
 		require.Error(t, err)
 
-		var beadsErr *domain.BeadsError
-		require.ErrorAs(t, err, &beadsErr)
-		assert.Equal(t, "list", beadsErr.Op)
-		assert.Contains(t, err.Error(), "beads list")
+		var trackerErr *domain.IssueTrackerError
+		require.ErrorAs(t, err, &trackerErr)
+		assert.Equal(t, "list", trackerErr.Op)
+		assert.Contains(t, err.Error(), "issue tracker list")
 	})
 
 	t.Run("update error contains bead id", func(t *testing.T) {
@@ -369,10 +369,10 @@ func TestClient_ErrorWrapping(t *testing.T) {
 		err := client.Update(context.Background(), "az-123", domain.StatusDone)
 		require.Error(t, err)
 
-		var beadsErr *domain.BeadsError
-		require.ErrorAs(t, err, &beadsErr)
-		assert.Equal(t, "update", beadsErr.Op)
-		assert.Equal(t, "az-123", beadsErr.BeadID)
+		var trackerErr *domain.IssueTrackerError
+		require.ErrorAs(t, err, &trackerErr)
+		assert.Equal(t, "update", trackerErr.Op)
+		assert.Equal(t, "az-123", trackerErr.IssueID)
 		assert.Contains(t, err.Error(), "az-123")
 	})
 }

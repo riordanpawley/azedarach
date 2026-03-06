@@ -13,28 +13,28 @@ var (
 	ErrUserCanceled = errors.New("user canceled")
 )
 
-// BeadsError represents an error from the beads CLI
-type BeadsError struct {
+// IssueTrackerError represents an error from the issue tracker adapter
+type IssueTrackerError struct {
 	Op      string // Operation: "list", "create", "update", etc.
-	BeadID  string // Optional: specific bead ID
+	IssueID string // Optional: specific issue ID
 	Message string // Human-readable context
 	Err     error  // Underlying error
 }
 
-func (e *BeadsError) Error() string {
-	if e.BeadID != "" {
-		return fmt.Sprintf("beads %s [%s]: %s", e.Op, e.BeadID, e.Message)
+func (e *IssueTrackerError) Error() string {
+	if e.IssueID != "" {
+		return fmt.Sprintf("issue tracker %s [%s]: %s", e.Op, e.IssueID, e.Message)
 	}
 	if e.Message != "" {
-		return fmt.Sprintf("beads %s: %s", e.Op, e.Message)
+		return fmt.Sprintf("issue tracker %s: %s", e.Op, e.Message)
 	}
 	if e.Err != nil {
-		return fmt.Sprintf("beads %s: %v", e.Op, e.Err)
+		return fmt.Sprintf("issue tracker %s: %v", e.Op, e.Err)
 	}
-	return fmt.Sprintf("beads %s failed", e.Op)
+	return fmt.Sprintf("issue tracker %s failed", e.Op)
 }
 
-func (e *BeadsError) Unwrap() error {
+func (e *IssueTrackerError) Unwrap() error {
 	return e.Err
 }
 
