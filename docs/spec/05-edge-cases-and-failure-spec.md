@@ -323,6 +323,7 @@ On failure, logs SHOULD capture:
 - invoked command (sanitized)
 - exit code/stdout/stderr snippets (sanitized)
 - timestamp
+- for linear sync queue failures, attempt counter, retry delay vs terminal failure decision, and known external Linear issue ID
 
 ## 5.19 Startup and Shutdown Edge Cases
 
