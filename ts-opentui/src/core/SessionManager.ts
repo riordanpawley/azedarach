@@ -158,6 +158,8 @@ export interface StartSessionOptions {
 	readonly baseBranch?: string
 	/** Optional initial prompt to send on startup (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
+	/** Optional image paths to attach to the initial prompt (tool-dependent support). */
+	readonly imagePaths?: readonly string[]
 	/** Optional model to use. Uses configured tool default if not specified. */
 	readonly model?: SessionModel
 	/** Run tool with --dangerously-skip-permissions (if supported) (default: false) */
@@ -727,6 +729,7 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 							projectPath,
 							baseBranch: explicitBaseBranch,
 							initialPrompt,
+							imagePaths,
 							model,
 							dangerouslySkipPermissions,
 							autoCompact,
@@ -855,6 +858,7 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 						// Build command using the CLI tool registry
 						const commandWithOptions = toolDef.buildCommand({
 							initialPrompt,
+							imagePaths,
 							issueId,
 							model: effectiveModel,
 							dangerouslySkipPermissions,

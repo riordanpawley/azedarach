@@ -262,9 +262,11 @@ Delete the duplicate worktree and retry?`
 
 					// Get current project path (from ProjectService or cwd fallback)
 					const projectPath = yield* helpers.getProjectPath()
+					const cliTool = yield* appConfig.getCliTool()
 
 					// Check for attached images and include their paths
-					// This allows Claude to use the Read tool to view them
+					// Non-Codex tools consume these via prompt text + Read tool.
+					// Codex receives them as native --image inputs (see sessionManager.start below).
 					const worktreePath = getWorktreePath(projectPath, task.id)
 					const attachments = yield* imageAttachment
 						.list(task.id)
@@ -289,7 +291,7 @@ Delete the duplicate worktree and retry?`
 						issueType: task.issue_type,
 						title: task.title,
 						hasWorktree: task.hasWorktree ?? false,
-						attachmentPaths: imagePaths,
+						attachmentPaths: cliTool === "codex" ? [] : imagePaths,
 						localMode: localModePromptGuardrails,
 					})
 
@@ -303,6 +305,7 @@ Delete the duplicate worktree and retry?`
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
+							imagePaths: cliTool === "codex" ? imagePaths : undefined,
 						}),
 					})
 				})
@@ -336,6 +339,7 @@ Delete the duplicate worktree and retry?`
 
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
+					const cliTool = yield* appConfig.getCliTool()
 					const worktreePath = getWorktreePath(projectPath, task.id)
 
 					// Check for attached images and include their paths
@@ -362,7 +366,7 @@ Delete the duplicate worktree and retry?`
 						issueType: task.issue_type,
 						title: task.title,
 						hasWorktree: task.hasWorktree ?? false,
-						attachmentPaths: imagePaths,
+						attachmentPaths: cliTool === "codex" ? [] : imagePaths,
 						localMode: localModePromptGuardrails,
 					})
 
@@ -376,6 +380,7 @@ Delete the duplicate worktree and retry?`
 							issueId: task.id,
 							projectPath,
 							initialPrompt,
+							imagePaths: cliTool === "codex" ? imagePaths : undefined,
 							dangerouslySkipPermissions: true,
 						}),
 					})
