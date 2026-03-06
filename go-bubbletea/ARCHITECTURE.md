@@ -37,7 +37,7 @@
 │           │                    │                    │                        │
 │           ▼                    ▼                    ▼                        │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │  Beads Client   │  │  Tmux Client    │  │   Git Client    │              │
+│  │ Issue Tracker   │  │  Tmux Client    │  │   Git Client    │              │
 │  │                 │  │                 │  │                 │              │
 │  │ • ListAll()     │  │ • NewSession()  │  │ • CreateWorktree│              │
 │  │ • Create()      │  │ • Attach()      │  │ • MergeMain()   │              │
@@ -52,8 +52,8 @@
 │                           External Systems                                   │
 │                                                                              │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐ │
-│  │   tmux    │  │    git    │  │  bd CLI   │  │  gh CLI   │  │  claude   │ │
-│  │           │  │           │  │  (beads)  │  │ (GitHub)  │  │           │ │
+│  │   tmux    │  │    git    │  │   az CLI  │  │  gh CLI   │  │  claude   │ │
+│  │           │  │           │  │ (tracker) │  │ (GitHub)  │  │           │ │
 │  └───────────┘  └───────────┘  └───────────┘  └───────────┘  └───────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -113,7 +113,7 @@ func (m *SessionMonitor) Start(program *tea.Program) {
                     m.lastState = state
                     // Send message back to TEA loop
                     program.Send(sessionStateMsg{
-                        beadID: m.beadID,
+                        issueID: m.issueID,
                         state:  state,
                     })
                 }
@@ -331,17 +331,17 @@ func LoadConfig(path string) (*Config, error) {
 
 ```go
 // Use typed errors for specific handling
-type BeadsError struct {
+type IssueTrackerError struct {
     Op  string // "list", "create", "update", etc.
     Err error
 }
 
-func (e BeadsError) Error() string {
-    return fmt.Sprintf("beads %s: %v", e.Op, e.Err)
+func (e IssueTrackerError) Error() string {
+    return fmt.Sprintf("issue tracker %s: %v", e.Op, e.Err)
 }
 
 // In Update, show toast on error
-case beadsErrorMsg:
+case issueTrackerErrorMsg:
     m.toasts = append(m.toasts, Toast{
         Level:   ToastError,
         Message: msg.err.Error(),

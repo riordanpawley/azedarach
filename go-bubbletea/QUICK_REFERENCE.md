@@ -122,7 +122,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 ```go
 func (m model) Init() tea.Cmd {
     return tea.Batch(
-        loadBeads,
+        loadIssues,
         loadProjects,
         tickEvery(2 * time.Second),
     )
@@ -320,9 +320,9 @@ func tmuxCapture(session string) (string, error) {
     return runCommand("tmux", "capture-pane", "-t", session, "-p", "-S", "-50")
 }
 
-// Example: bd CLI
-func beadsList() ([]Task, error) {
-    out, err := runCommand("bd", "list", "--format=json")
+// Example: az issue CLI
+func issueList() ([]Task, error) {
+    out, err := runCommand("az", "issue", "list", "--json")
     if err != nil {
         return nil, err
     }

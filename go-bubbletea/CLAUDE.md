@@ -9,7 +9,7 @@ Purpose: Claude Code entry point for Go/Bubbletea Azedarach development
 
 # Azedarach Project Context - Go/Bubbletea Implementation
 
-> TUI Kanban board for orchestrating parallel Claude Code sessions with Beads task tracking
+> TUI Kanban board for orchestrating parallel Claude Code sessions with issue-tracker workflows
 
 ## Critical Rules (Always Apply)
 
@@ -21,9 +21,9 @@ Purpose: Claude Code entry point for Go/Bubbletea Azedarach development
 
 2. **Modern CLI Tools**: ALWAYS use `rg` (NOT grep), `fd` (NOT find), `bat` (NOT cat). 10x faster, gitignore-aware.
 
-3. **Beads Tracker**: ALWAYS use `bd` CLI commands for beads operations. Use `bd search` for discovery, `bd ready` for unblocked work. NEVER use `bd list` (causes context bloat).
+3. **Issue Tracker**: ALWAYS use `az issue` commands for issue operations. Use `az issue get <id>` for focused work and `az issue list` for discovery as needed.
 
-4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams and use normal `bd sync`. If you're on a truly ephemeral branch (no upstream), DON'T run `bd sync --from-main` at session end - it overwrites local beads changes.
+4. **Branch Workflow**: Azedarach pushes branches at worktree creation (`git push -u`) so they have upstreams; keep branch sync and issue updates coordinated through standard git and `az issue` flows.
 
 5. **File Deletion**: NEVER delete untracked files without permission. Check references first (`rg "filename"`).
 
@@ -125,12 +125,12 @@ make run                         # Build and run
 rg "pattern" --type go           # Search content (NOT grep)
 fd "filename" -t f              # Find files (NOT find)
 
-# Beads (Task Management)
-bd search "keywords"              # Search issues (PRIMARY - not list!)
-bd ready                          # Find unblocked work
-bd create --title="..." --type=task  # Create issue
-bd update <id> --status=in_progress  # Update status
-bd close <id>                     # Mark complete
+# Issue Tracker (Task Management)
+az issue get <id> --json          # Fetch canonical issue state
+az issue list                     # Discover issues
+az issue create "Title" --type task  # Create issue
+az issue update <id> --status in_progress  # Update status
+az issue close <id> --reason "done"  # Mark complete
 ```
 
 ## Architecture Quick Reference
@@ -144,7 +144,7 @@ go-bubbletea/
 │   ├── cli/          # CLI argument parsing
 │   ├── config/       # Configuration management
 │   ├── core/         # Domain models and services
-│   ├── services/     # Business logic (Beads, Tmux, Git)
+│   ├── services/     # Business logic (Issue Tracker, Tmux, Git)
 │   ├── types/        # Type definitions
 │   └── ui/          # Bubbletea UI components
 ├── docs/             # Documentation
@@ -176,7 +176,7 @@ go-bubbletea/
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                        Service Layer (Goroutines)                         │
 │  • Session Monitor (polls tmux for state changes)                        │
-│  • Beads Client (bd CLI wrapper)                                        │
+│  • Issue Tracker Client (CLI/API wrapper)                               │
 │  • Tmux Client (session management)                                      │
 │  • Git Client (worktree operations)                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -184,19 +184,19 @@ go-bubbletea/
 
 ## Task Management
 
-**Track ALL work in beads** (preserves context across sessions):
+**Track ALL work through `az issue`** (preserves context across sessions):
 
 ```bash
-bd ready                          # Find available work
-bd update <id> --status=in_progress  # Claim it
-bd close <id>                     # Mark complete
+az issue list                     # Find available work
+az issue update <id> --status in_progress  # Claim it
+az issue close <id> --reason "done"  # Mark complete
 ```
 
 ## OpenCode Plugins
 
 This project uses two OpenCode plugins:
 
-1. **opencode-beads** - Beads integration (bd prime, /bd-* commands)
+1. **opencode-pty** - PTY integration
 2. **.opencode/plugin/azedarach.js** - Session status monitoring for TUI
 
 Both are configured in `opencode.json`.

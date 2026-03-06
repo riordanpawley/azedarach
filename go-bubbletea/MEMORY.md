@@ -113,7 +113,7 @@ func (m *mockRunner) Run(ctx context.Context, name string, args ...string) ([]by
 }
 
 // Test service
-func TestBeadsClientList(t *testing.T) {
+func TestIssueClientList(t *testing.T) {
     runner := &mockRunner{output: []byte(`[{"id":"az-1"}]`)}
     client := NewClient(runner, slog.Default())
 
@@ -157,7 +157,7 @@ func TestPollingServiceStop(t *testing.T) {
 ### Pattern: Error Handling
 
 ```go
-func TestBeadsClientError(t *testing.T) {
+func TestIssueClientError(t *testing.T) {
     runner := &mockRunner{err: errors.New("command failed")}
     client := NewClient(runner, slog.Default())
 
@@ -168,12 +168,12 @@ func TestBeadsClientError(t *testing.T) {
     }
 
     // Check error type (custom error wrapping)
-    var beadsErr *BeadsError
-    if !errors.As(err, &beadsErr) {
-        t.Errorf("Expected BeadsError, got %T", err)
+    var trackerErr *IssueTrackerError
+    if !errors.As(err, &trackerErr) {
+        t.Errorf("Expected IssueTrackerError, got %T", err)
     }
-    if beadsErr.Op != "list" {
-        t.Errorf("Expected op 'list', got %s", beadsErr.Op)
+    if trackerErr.Op != "list" {
+        t.Errorf("Expected op 'list', got %s", trackerErr.Op)
     }
 }
 ```
