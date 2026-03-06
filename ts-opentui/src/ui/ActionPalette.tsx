@@ -61,7 +61,6 @@ const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	R: "S-r",
 	x: "x",
 	r: "r",
-	v: "v",
 	H: "S-h",
 	i: "i",
 	F: "S-f",
@@ -112,8 +111,6 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState === "busy"
 			case "r": // Dev server toggle - only if worktree exists (session not idle)
 				return sessionState !== "idle"
-			case "v": // View dev server - only if dev server is running
-				return devServerStatus === "running" || devServerStatus === "starting"
 			case "R": // Resume - only if paused
 				return sessionState === "paused"
 			case "x": // Stop - only if not idle
@@ -278,7 +275,6 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 			{/* Dev server */}
 			<ActionLine keyName="r" description={getDevServerLabel()} />
-			<ActionLine keyName="v" description="view server" />
 			<text fg={theme.surface1}>{"─────────"}</text>
 
 			{/* Task actions */}
