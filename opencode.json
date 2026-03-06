@@ -41,8 +41,6 @@
       "git branch": "allow",
       "git add *": "allow",
       "git commit *": "allow",
-      "git push *": "allow",
-      "git push": "allow",
       "bun run type-check *": "allow",
       "bun run type-check": "allow",
       "bun run dev *": "allow",
