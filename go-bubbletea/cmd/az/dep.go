@@ -597,7 +597,7 @@ func handleDepBackendError(
 
 	errorCode := depBackendErrorCode
 	remediation := depBackendRemediation
-	if depErrorIndicatesCycle(commandErr, backendErr) && depBackendTargetsAdd(backendArgs) {
+	if depErrorIndicatesCycle(commandErr, backendErr) && depCommandSupportsCycleReject(spec.Name) {
 		errorCode = depCycleRejectedCode
 		errorMessage = depCycleMessage
 		remediation = depCycleRemediation
@@ -640,8 +640,8 @@ func depErrorIndicatesCycle(commandErr error, backendErr depBackendCommandError)
 	return false
 }
 
-func depBackendTargetsAdd(backendArgs []string) bool {
-	return len(backendArgs) > 0 && backendArgs[0] == depSubcommandAdd
+func depCommandSupportsCycleReject(commandName string) bool {
+	return commandName == depAddCommandName || commandName == depRemoveCommandName
 }
 
 func depAddIssueIDs(backendArgs []string) (string, string, bool) {

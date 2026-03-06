@@ -665,12 +665,21 @@ func showProjectContext() H2ProjectContext {
 	projectID := filepath.Base(cwd)
 
 	if registry, regErr := config.LoadProjectsRegistry(); regErr == nil && registry != nil {
-		if project := registry.FindByPath(cwd); project != nil {
+		if project := resolveRegisteredProjectForPath(registry, cwd); project != nil {
 			projectPath = project.Path
 			if strings.TrimSpace(project.Name) != "" {
 				projectID = project.Name
 			} else {
 				projectID = filepath.Base(project.Path)
+			}
+		} else if gitRoot, ok := showGitProjectRoot(cwd); ok {
+			if project := resolveRegisteredProjectForPath(registry, gitRoot); project != nil {
+				projectPath = project.Path
+				if strings.TrimSpace(project.Name) != "" {
+					projectID = project.Name
+				} else {
+					projectID = filepath.Base(project.Path)
+				}
 			}
 		}
 	}
@@ -680,6 +689,117 @@ func showProjectContext() H2ProjectContext {
 		Path:            projectPath,
 		CanonicalDBPath: filepath.Join(projectPath, ".azedarach", "azedarach.db"),
 	}
+}
+
+func resolveRegisteredProjectForPath(registry *config.ProjectsRegistry, path string) *config.Project {
+	if registry == nil {
+		return nil
+	}
+
+	candidates := []string{path}
+	if normalizedPath := normalizeShowPath(path); normalizedPath != "" && normalizedPath != path {
+		candidates = append(candidates, normalizedPath)
+	}
+
+	for _, candidate := range candidates {
+		if project := registry.FindByPath(candidate); project != nil {
+			return project
+		}
+	}
+
+	for _, project := range registry.Projects {
+		projectPathCandidates := []string{project.Path}
+		if normalizedProjectPath := normalizeShowPath(project.Path); normalizedProjectPath != "" &&
+			normalizedProjectPath != project.Path {
+			projectPathCandidates = append(projectPathCandidates, normalizedProjectPath)
+		}
+
+		for _, candidate := range candidates {
+			for _, projectPath := range projectPathCandidates {
+				if showPathWithinProject(candidate, projectPath) {
+					projectCopy := project
+					return &projectCopy
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func showPathWithinProject(path string, projectPath string) bool {
+	cleanPath := filepath.Clean(path)
+	cleanProjectPath := filepath.Clean(projectPath)
+	return cleanPath == cleanProjectPath ||
+		strings.HasPrefix(cleanPath, cleanProjectPath+string(filepath.Separator))
+}
+
+func normalizeShowPath(path string) string {
+	cleanPath := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(cleanPath)
+	if err != nil {
+		return cleanPath
+	}
+	return filepath.Clean(resolved)
+}
+
+func showGitProjectRoot(path string) (string, bool) {
+	current := filepath.Clean(path)
+	for {
+		gitPath := filepath.Join(current, ".git")
+		info, err := os.Stat(gitPath)
+		if err == nil {
+			if info.IsDir() {
+				return current, true
+			}
+
+			if root, ok := showGitRootFromPointerFile(gitPath, current); ok {
+				return root, true
+			}
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return "", false
+}
+
+func showGitRootFromPointerFile(gitPath string, worktreeRoot string) (string, bool) {
+	content, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", false
+	}
+
+	pointer := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(pointer, "gitdir:") {
+		return "", false
+	}
+
+	gitDir := strings.TrimSpace(strings.TrimPrefix(pointer, "gitdir:"))
+	if gitDir == "" {
+		return "", false
+	}
+
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(worktreeRoot, gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+
+	worktreeMarker := string(filepath.Separator) + ".git" + string(filepath.Separator) + "worktrees" + string(filepath.Separator)
+	if markerIndex := strings.Index(gitDir, worktreeMarker); markerIndex >= 0 {
+		return gitDir[:markerIndex], true
+	}
+
+	gitSuffix := string(filepath.Separator) + ".git"
+	if strings.HasSuffix(gitDir, gitSuffix) {
+		return strings.TrimSuffix(gitDir, gitSuffix), true
+	}
+
+	return "", false
 }
 
 func showExecutionMeta(startedAt time.Time) H2Meta {
