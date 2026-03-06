@@ -65,7 +65,7 @@ From any state except IDLE:
 │ 1. CHECK EXISTING SESSION                                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   tmux has-session -t {bead-id}-az                                          │
+│   tmux has-session -t {issue-id}-az                                          │
 │                                                                              │
 │   ├─→ EXISTS: Skip to step 6 (attach)                                       │
 │   └─→ NOT EXISTS: Continue to step 2                                        │
@@ -77,9 +77,9 @@ From any state except IDLE:
 │ 2. CREATE WORKTREE (if needed)                                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   Path: ../project-{bead-id}/ (from pathTemplate config)                    │
+│   Path: ../project-{issue-id}/ (from pathTemplate config)                    │
 │                                                                              │
-│   git worktree add ../project-{bead-id} -b {bead-id}                        │
+│   git worktree add ../project-{issue-id} -b {issue-id}                        │
 │                                                                              │
 │   ├─→ EXISTS: Reuse existing worktree                                       │
 │   └─→ CREATED: New isolated git environment                                 │
@@ -91,9 +91,9 @@ From any state except IDLE:
 │ 3. CREATE TMUX SESSION                                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   tmux new-session -d -s {bead-id}-az -c {worktree-path}                    │
+│   tmux new-session -d -s {issue-id}-az -c {worktree-path}                    │
 │                                                                              │
-│   Session name: {bead-id}-az (suffix convention)                            │
+│   Session name: {issue-id}-az (suffix convention)                            │
 │   Working directory: worktree path                                          │
 │   Detached mode (-d): runs in background                                    │
 │                                                                              │
@@ -170,7 +170,7 @@ From any state except IDLE:
 │                                                                              │
 │   Spawn actor under Sessions Supervisor:                                     │
 │                                                                              │
-│   SessionMonitor.start(bead_id, session_name)                               │
+│   SessionMonitor.start(issue_id, session_name)                               │
 │                                                                              │
 │   Monitor polls every 500ms:                                                 │
 │   - Captures tmux pane output                                               │
@@ -371,8 +371,8 @@ From any state except IDLE:
 4. Delete local branch:
    git branch -D {branch}
 
-5. Optionally close bead:
-   linear-cli i close {bead-id}
+5. Optionally close issue:
+   linear-cli i close {issue-id}
 
 6. Update state: removed from model
 ```

@@ -9,8 +9,8 @@ Azedarach needs to know when Claude sessions change state (idle, waiting for per
 ## Quick Start
 
 ```bash
-# Install hooks for a specific bead
-az hooks install <bead-id>
+# Install hooks for a specific issue
+az hooks install <issue-id>
 
 # Example
 az hooks install az-4vp
@@ -23,7 +23,7 @@ This creates/updates `.claude/settings.local.json` with the required hooks.
 When Azedarach creates a worktree via `WorktreeManager.create()`, it automatically:
 
 1. Copies `.claude/settings.local.json` from the parent project (preserving user permissions)
-2. Merges in session-specific hooks with the bead ID
+2. Merges in session-specific hooks with the issue ID
 
 **Source:** `src/core/hooks.ts` (shared hook generation) and `src/core/WorktreeManager.ts` (worktree setup)
 
@@ -40,7 +40,7 @@ The following hooks are injected into `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "az notify idle_prompt <bead-id>"
+            "command": "az notify idle_prompt <issue-id>"
           }
         ]
       }
@@ -50,7 +50,7 @@ The following hooks are injected into `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "az notify permission_request <bead-id>"
+            "command": "az notify permission_request <issue-id>"
           }
         ]
       }
@@ -60,7 +60,7 @@ The following hooks are injected into `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "az notify stop <bead-id>"
+            "command": "az notify stop <issue-id>"
           }
         ]
       }
@@ -70,7 +70,7 @@ The following hooks are injected into `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "az notify session_end <bead-id>"
+            "command": "az notify session_end <issue-id>"
           }
         ]
       }
@@ -90,9 +90,9 @@ The following hooks are injected into `.claude/settings.local.json`:
 
 ## CLI Commands
 
-### `az hooks install <bead-id>`
+### `az hooks install <issue-id>`
 
-Installs session state hooks for a specific bead into the current project.
+Installs session state hooks for a specific issue into the current project.
 
 ```bash
 # Basic usage
@@ -110,12 +110,12 @@ az hooks install az-4vp /path/to/project
 **What it does:**
 1. Creates `.claude/` directory if needed
 2. Reads existing `.claude/settings.local.json` (if any)
-3. Merges in hook configuration for the bead ID
+3. Merges in hook configuration for the issue ID
 4. Writes the merged settings
 
 **Output:**
 ```
-✓ Installed hooks for bead az-4vp
+✓ Installed hooks for issue az-4vp
   File: /path/to/project/.claude/settings.local.json
   Events: idle_prompt, permission_request, stop, session_end
 ```
@@ -128,7 +128,7 @@ The `az notify` command sets a tmux session option (`@az_status`) that the `Tmux
 Claude Code → hooks fire → az notify → sets tmux option → TmuxSessionMonitor → updates TUI
 ```
 
-**Tmux session option:** `@az_status` on the `claude-<bead-id>` tmux session
+**Tmux session option:** `@az_status` on the `claude-<issue-id>` tmux session
 
 ## Requirements
 
@@ -147,6 +147,6 @@ Claude Code → hooks fire → az notify → sets tmux option → TmuxSessionMon
 - Check Claude Code is using the correct project directory
 - Test manually: `az notify idle_prompt test-id`
 
-**Hooks for wrong bead ID**
-- Re-run `az hooks install <correct-bead-id>` to update
+**Hooks for wrong issue ID**
+- Re-run `az hooks install <correct-issue-id>` to update
 - Or manually edit `.claude/settings.local.json`

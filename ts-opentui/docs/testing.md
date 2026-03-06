@@ -105,9 +105,9 @@ Session attachment requires tmux sessions to exist. Here's how to test:
 
 ```bash
 # Create a tmux session with a matching name
-# Format: claude-{bead-id}
+# Format: claude-{issue-id}
 
-# Example for bead az-05y:
+# Example for issue az-05y:
 tmux new-session -d -s claude-az-05y "bash -c 'echo Claude session && sleep 3600'"
 
 # Verify it exists
@@ -147,24 +147,24 @@ tmux attach-session -t claude-az-05y
 
 ## Testing Services Directly
 
-### BeadsClient
+### IssueTrackerClient
 
 ```bash
 # Run the example file
-bun run src/core/BeadsClient.example.ts
+bun run src/core/IssueTrackerClient.example.ts
 
 # Or test specific operations:
 bun -e "
 import { Effect } from 'effect'
-import { BeadsClient, BeadsClientLiveWithPlatform } from './src/core/BeadsClient'
+import { IssueTrackerClient, IssueTrackerClientLiveWithPlatform } from './src/core/IssueTrackerClient'
 
 const program = Effect.gen(function* () {
-  const client = yield* BeadsClient
+  const client = yield* IssueTrackerClient
   const issues = yield* client.list()
   console.log('Issues:', issues.length)
 })
 
-Effect.runPromise(program.pipe(Effect.provide(BeadsClientLiveWithPlatform)))
+Effect.runPromise(program.pipe(Effect.provide(IssueTrackerClientLiveWithPlatform)))
 "
 ```
 
@@ -251,7 +251,7 @@ tmux -V
 brew install tmux
 ```
 
-### "BEADS_DIR not found"
+### "LINEAR_DIR not found"
 
 ```bash
 # Ensure you're in a linear-enabled project

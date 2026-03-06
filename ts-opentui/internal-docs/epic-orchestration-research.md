@@ -92,7 +92,7 @@ linear-cli dep add az-db az-epic --type=parent-child
 
 ### MCP Tools Available
 
-The `mcp__plugin_beads_beads__*` tools provide programmatic access to all linear operations. The Gleam service (`gleam/src/azedarach/services/linear.gleam`) wraps these with type safety.
+The `MCP linear plugin tools` tools provide programmatic access to all linear operations. The Gleam service (`gleam/src/azedarach/services/linear.gleam`) wraps these with type safety.
 
 ---
 
@@ -449,7 +449,7 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
 2. **AI Assessment Phase** ✅
    - Clarity, dependencies, scope, risk checklist
    - Decision matrix: spawn/skip/needs_review
-   - Strategy documentation in bead notes
+   - Strategy documentation in issue notes
 
 3. **AI Analysis Phase** ✅
    - Completion, quality, discoveries checklist
@@ -488,7 +488,7 @@ Agent A (UI) ←→ Mailbox ←→ Agent B (API)
    - `file_reservation_paths` for acquiring leases with glob patterns
    - `get_file_reservations` to check existing leases
    - `release_file_reservations` on completion
-   - TTL-based expiration, exclusive mode, reason linking to bead ID
+   - TTL-based expiration, exclusive mode, reason linking to issue ID
 
 4. **Inter-Agent Messaging** ✅
    - `send_message` with subject patterns: [BLOCKED], [DISCOVERY], [QUESTION], [HANDOFF]

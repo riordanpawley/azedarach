@@ -1,7 +1,7 @@
 # effect-atom Architecture: When to Use Services vs Atoms
 
 > **Created**: 2025-12-18
-> **Context**: Bead az-eh8i - understanding effect-atom's purpose
+> **Context**: Issue az-eh8i - understanding effect-atom's purpose
 > **Status**: Architectural decision documented
 
 ## TL;DR

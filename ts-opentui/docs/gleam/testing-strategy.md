@@ -43,7 +43,7 @@ We prioritize:
 | `theme` | Color lookups | `Theme.get("catppuccin-macchiato", "text")` |
 | `ui/model` | Model updates | `update(model, MoveDown) == model with cursor+1` |
 | `ui/keys` | Key mapping | `key_to_action("j", Normal) == MoveDown` |
-| `services/linear` | JSON parsing | `parse_bead_json(json) == Ok(bead)` |
+| `services/linear` | JSON parsing | `parse_issue_json(json) == Ok(issue)` |
 
 ### How to Run
 
@@ -89,7 +89,7 @@ pub fn detect_busy_test() {
 | Component | Test With | Example |
 |-----------|-----------|---------|
 | `tmux` module | Real tmux | Create session, capture pane, send keys |
-| `linear` module | Real linear-cli CLI | List linear, show bead, create bead |
+| `linear` module | Real linear-cli CLI | List linear, show issue, create issue |
 | `worktree` module | Real git | Create worktree, check status |
 | `clipboard` module | Real clipboard | Paste image (on CI, mock or skip) |
 
@@ -155,7 +155,7 @@ jobs:
 
 ### Target
 
-- **Coverage:** Core workflows (session create, bead operations)
+- **Coverage:** Core workflows (session create, issue operations)
 - **Speed:** Full integration suite < 30 seconds
 
 ---
@@ -172,7 +172,7 @@ import azedarach/actors/coordinator
 
 pub fn refresh_updates_tasks_test() {
   // Start coordinator with mock linear data
-  let coord = coordinator.start_link(MockBeadsClient)
+  let coord = coordinator.start_link(MockIssueTrackerClient)
 
   // Send refresh message
   coordinator.send(coord, Refresh)
@@ -243,14 +243,14 @@ test/
 │   ├── config_test.gleam
 │   ├── domain/
 │   │   ├── task_test.gleam
-│   │   └── bead_test.gleam
+│   │   └── issue_test.gleam
 │   └── ui/
 │       ├── model_test.gleam
 │       └── keys_test.gleam
 │
 ├── integration/
 │   ├── tmux_test.gleam
-│   ├── beads_test.gleam
+│   ├── issue_tracker_test.gleam
 │   ├── worktree_test.gleam
 │   └── clipboard_test.gleam
 │
@@ -294,8 +294,8 @@ gleam check                     # Type checking
 
 ```gleam
 // test/fixtures.gleam
-pub fn sample_bead() -> Bead {
-  Bead(
+pub fn sample_issue() -> Issue {
+  Issue(
     id: "az-123",
     title: "Fix login bug",
     status: Open,
@@ -307,7 +307,7 @@ pub fn sample_bead() -> Bead {
 pub fn sample_config() -> Config {
   Config(
     worktree: WorktreeConfig(
-      path_template: "../{project}-{bead-id}",
+      path_template: "../{project}-{issue-id}",
       init_commands: ["direnv allow"],
       ..
     ),

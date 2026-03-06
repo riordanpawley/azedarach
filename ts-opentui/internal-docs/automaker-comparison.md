@@ -119,7 +119,7 @@ interface AIProfile {
 **Inspiration for az:**
 - Add profile system to config schema
 - Quick switch via action menu (Space → p)
-- Per-bead profile override in metadata
+- Per-issue profile override in metadata
 - Profiles could include: model, thinking level, permission settings, custom system prompt additions
 
 ### 2. Board Detail Levels ⭐⭐
@@ -385,7 +385,7 @@ interface QueuedMessage {
 - Sequential processing with isProcessingQueue flag
 
 **Inspiration for az:**
-- Could queue bead updates when offline
+- Could queue issue updates when offline
 - Retry failed sync operations
 
 ### 16. Auto-Mode Event System ⭐⭐
@@ -695,7 +695,7 @@ AutoMaker is a polished GUI tool with strong UX patterns. Key takeaways:
 
 ## Related Linear
 
-| Bead | Title | Priority |
+| Issue | Title | Priority |
 |------|-------|----------|
 | `az-ph1` | Add agent phase detection and display | P1 |
 | `az-et1` | Add elapsed timer to TaskCard | P2 |

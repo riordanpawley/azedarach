@@ -227,7 +227,7 @@ pub fn check_merge_conflicts(
 
 ```gleam
 pub fn merge_main_into_branch(
-  bead_id: String,
+  issue_id: String,
   worktree_path: String,
   base_branch: String,
 ) -> Result(Nil, MergeError) {
@@ -244,7 +244,7 @@ pub fn merge_main_into_branch(
     Ok(MergeResult(has_conflicts: True, files: files)) -> {
       // Start merge (creates conflict markers)
       run_git(
-        ["merge", base_branch, "-m", "Merge " <> base_branch <> " into " <> bead_id],
+        ["merge", base_branch, "-m", "Merge " <> base_branch <> " into " <> issue_id],
         worktree_path,
       )
       |> result.unwrap(Nil)  // Will fail, expected
@@ -254,12 +254,12 @@ pub fn merge_main_into_branch(
       let prompt = "There are merge conflicts in: " <> file_list <> ". Please resolve these conflicts, then stage and commit the resolution."
 
       // Spawn Claude in merge window
-      tmux.new_window(bead_id <> "-az", "merge")
-      tmux.send_keys(bead_id <> "-az:merge", "claude \"" <> prompt <> "\"", True)
+      tmux.new_window(issue_id <> "-az", "merge")
+      tmux.send_keys(issue_id <> "-az:merge", "claude \"" <> prompt <> "\"", True)
 
       // Return error with info
       Error(MergeConflictError(
-        bead_id: bead_id,
+        issue_id: issue_id,
         files: files,
         message: "Conflicts detected. Claude started in 'merge' window.",
       ))

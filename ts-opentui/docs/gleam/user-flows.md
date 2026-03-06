@@ -10,7 +10,7 @@
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  1. Navigate to task                                                         │
-│     └── hjkl to move cursor to desired bead                                 │
+│     └── hjkl to move cursor to desired issue                                 │
 │                                                                              │
 │  2. Press Space to open Action Menu                                          │
 │     ┌─────────────────────────────┐                                         │
@@ -180,7 +180,7 @@
 
 ## 6. Image Attachment
 
-**Goal:** Attach image to bead for context
+**Goal:** Attach image to issue for context
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -201,8 +201,8 @@
 │                                                                              │
 │  3a. Press 'p' to paste from clipboard                                       │
 │      └── Uses: pbpaste (mac) / wl-paste (wayland) / xclip (x11)             │
-│      └── Saves to: .linear/images/{bead-id}/{id}.png                         │
-│      └── Adds markdown link to bead notes                                   │
+│      └── Saves to: .linear/images/{issue-id}/{id}.png                         │
+│      └── Adds markdown link to issue notes                                   │
 │                                                                              │
 │  3b. Press 'f' then type path                                                │
 │      └── /path/to/image.png                                                 │
@@ -366,7 +366,7 @@
 │     └───────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                               │
 │     ┌───────────────────────────────────────────────────────────────────┐   │
-│     │ Phase 3: CREATE BEADS                                              │   │
+│     │ Phase 3: CREATE LINEAR                                              │   │
 │     │ Once approved, creates linear with linear-cli CLI:                          │   │
 │     │ - Epic for the main feature                                        │   │
 │     │ - Child tasks linked to epic (parent-child deps)                   │   │
@@ -459,7 +459,7 @@ Press `a` during generation or review to attach to the planning tmux session. Th
 │                                                                              │
 │  3. Press 'y' to confirm                                                     │
 │     └── All resources cleaned up                                            │
-│     └── Bead stays in linear (can close separately)                          │
+│     └── Issue stays in linear (can close separately)                          │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```

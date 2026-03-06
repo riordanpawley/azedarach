@@ -7,7 +7,7 @@
 | Feature | Description | Priority |
 |---------|-------------|----------|
 | Kanban Board | 4-column board (backlog, in_progress, review, done) | P0 |
-| Task Cards | Show bead info + session state indicator | P0 |
+| Task Cards | Show issue info + session state indicator | P0 |
 | Status Bar | Mode, project, session info, dev server port | P0 |
 | Navigation | hjkl, arrows, Ctrl+Shift+u/d | P0 |
 | Cursor | Visual cursor with column/task position | P0 |
@@ -35,22 +35,22 @@
 | Settings Overlay | s to configure settings | P1 |
 | Diagnostics | d to show system health | P2 |
 | Logs Viewer | Shift+l to view logs | P2 |
-| Detail Panel | Enter to view bead details | P0 |
+| Detail Panel | Enter to view issue details | P0 |
 | Project Selector | g+p to switch projects | P0 |
 | Confirm Dialog | Confirmation for destructive actions | P0 |
 | Merge Choice | Dialog when branch behind main | P0 |
 | Diff Viewer | f in action menu to show diff | P1 |
 
-### Bead Operations
+### Issue Operations
 
 | Feature | Description | Priority |
 |---------|-------------|----------|
 | List Linear | Fetch from linear-cli CLI | P0 |
-| Create Bead | c to create via $EDITOR | P0 |
+| Create Issue | c to create via $EDITOR | P0 |
 | Create via Claude | Shift+c for natural language | P1 |
-| Edit Bead | e in detail panel | P0 |
-| Delete Bead | Shift+d with confirmation | P1 |
-| Move Bead | h/l in action menu | P0 |
+| Edit Issue | e in detail panel | P0 |
+| Delete Issue | Shift+d with confirmation | P1 |
+| Move Issue | h/l in action menu | P0 |
 | Periodic Refresh | Configurable interval (default 30s) | P0 |
 
 ### Image Attachments
@@ -70,7 +70,7 @@
 | Feature | Description | Priority |
 |---------|-------------|----------|
 | Start Session | Space+s | P0 |
-| Start+Work | Space+S with bead context prompt | P0 |
+| Start+Work | Space+S with issue context prompt | P0 |
 | Start Yolo | Space+! skip permissions | P0 |
 | Attach | Space+a switch to tmux | P0 |
 | Pause | Space+p send Ctrl+C, WIP commit | P0 |
@@ -116,7 +116,7 @@
 | Port Allocation | Base port + offset | P0 |
 | Trust Port | No polling for detected port | P0 |
 | One Window per Server | Named dev-{name} | P0 |
-| Multiple Servers | Support multiple per bead | P1 |
+| Multiple Servers | Support multiple per issue | P1 |
 
 ### Init & Background
 
@@ -166,7 +166,7 @@
 | Worktree Config | pathTemplate, initCommands | P0 |
 | Session Config | shell, tmuxPrefix, backgroundTasks | P0 |
 | Dev Server Config | servers, ports | P0 |
-| Polling Config | beadsRefresh, sessionMonitor | P0 |
+| Polling Config | issueRefresh, sessionMonitor | P0 |
 | Theme Config | theme name | P0 |
 | Git Config | workflowMode, pushEnabled, fetchEnabled, baseBranch | P0 |
 | PR Config | enabled, autoDraft, autoMerge | P0 |

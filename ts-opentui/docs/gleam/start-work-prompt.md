@@ -19,8 +19,8 @@ Goal: Make this issue self-sufficient so any future session could pick it up wit
 
 [If images attached:]
 Attached images (use Read tool to view):
-/path/to/.beads/images/{issue-id}/abc123.png
-/path/to/.beads/images/{issue-id}/def456.png
+/path/to/.linear/images/{issue-id}/abc123.png
+/path/to/.linear/images/{issue-id}/def456.png
 ```
 
 ## Example
@@ -39,7 +39,7 @@ Before starting implementation:
 Goal: Make this issue self-sufficient so any future session could pick it up without extra context.
 
 Attached images (use Read tool to view):
-/home/user/project/.beads/images/az-456/screenshot-1734567890.png
+/home/user/project/.linear/images/az-456/screenshot-1734567890.png
 ```
 
 ## Variants

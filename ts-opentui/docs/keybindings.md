@@ -55,7 +55,7 @@ The default mode for navigation and basic actions.
 | `Tab` | Toggle view mode | Switch between Kanban and Compact views |
 | `r` | Refresh git stats | Update git stats for all active sessions |
 | `p` | Open planning | AI-powered planning workflow |
-| `c` | Create bead (manual) | Opens $EDITOR with template |
+| `c` | Create issue (manual) | Opens $EDITOR with template |
 | `C` | Create via Claude | Natural language task creation |
 | `s` | Show settings | Opens interactive settings overlay |
 | `?` | Show help | Press any key to dismiss |
@@ -205,7 +205,7 @@ Settings are stored in `.azedarach.json` in your project root:
     "autoDetect": true
   },
   "issueTracker": {
-    "beads_rust": {
+    "linear": {
       "syncEnabled": true
     }
   },
@@ -329,7 +329,7 @@ Azedarach provides both manual (via $EDITOR) and AI-assisted (via Claude) modes 
 
 ## Manual Create Mode (`c`)
 
-Press `c` to create a new bead using your $EDITOR with a structured template.
+Press `c` to create a new issue using your $EDITOR with a structured template.
 
 ### How It Works
 
@@ -341,7 +341,7 @@ Press `c` to create a new bead using your $EDITOR with a structured template.
    - **Status**: backlog, ready, in_progress, review, done
    - **Description**, **Design**, **Notes**, **Acceptance Criteria**: Optional sections
 3. Save and close the editor
-4. The bead is created via `linear-cli i create`
+4. The issue is created via `linear-cli i create`
 
 ### Template Format
 
@@ -368,19 +368,19 @@ Describe the task here...
 
 ## Manual Edit Mode (`e`)
 
-Press `e` to edit the selected bead in your $EDITOR.
+Press `e` to edit the selected issue in your $EDITOR.
 
 ### How It Works
 
 1. Select a task with hjkl navigation
-2. Press `e` to open your $EDITOR with the bead's current data
+2. Press `e` to open your $EDITOR with the issue's current data
 3. Modify any fields you want to change
 4. Save and close the editor
 5. Changes are applied via `az issue update`
 
 ## Claude Create Mode (`C`)
 
-Press `C` (capital C) to create a task using natural language. This spawns a Claude session that interprets your description and creates the appropriate bead.
+Press `C` (capital C) to create a task using natural language. This spawns a Claude session that interprets your description and creates the appropriate issue.
 
 ### How It Works
 
@@ -389,7 +389,7 @@ Press `C` (capital C) to create a task using natural language. This spawns a Cla
 3. Press `Enter` to launch a Claude session
 4. Claude will:
    - Interpret your description
-   - Create a bead with appropriate title, type, and description using `linear-cli i create`
+   - Create a issue with appropriate title, type, and description using `linear-cli i create`
    - Remain in the session, ready to work on the task if you want
 
 ### Example
@@ -397,7 +397,7 @@ Press `C` (capital C) to create a task using natural language. This spawns a Cla
 1. Press `C`
 2. Type: `Add dark mode toggle to settings page`
 3. Press `Enter`
-4. Claude creates a bead and asks if you'd like to start working on it
+4. Claude creates a issue and asks if you'd like to start working on it
 5. Attach to the session: `tmux attach -t claude-create-xxx`
 
 ### Prompt Shortcuts
@@ -410,7 +410,7 @@ When entering your description:
 
 ## Claude Edit Mode (`E`)
 
-Press `E` (capital E) to edit the selected bead with Claude's assistance.
+Press `E` (capital E) to edit the selected issue with Claude's assistance.
 
 ### How It Works
 
@@ -424,7 +424,7 @@ Press `E` (capital E) to edit the selected bead with Claude's assistance.
 
 1. Select a task
 2. Press `E`
-3. Claude shows you the bead details and asks what you'd like to change
+3. Claude shows you the issue details and asks what you'd like to change
 4. Type: `Change the priority to P1 and add a note about the deadline`
 5. Claude runs the appropriate `az issue update` command
 
@@ -721,7 +721,7 @@ Press `Space` in Normal mode to enter action mode. A floating palette shows avai
 | Sequence | Action | Available When |
 |----------|--------|----------------|
 | `Space` `s` | Start session | Task is idle (creates worktree + tmux) |
-| `Space` `S` | Start+work | Task is idle (starts session with "work on {beadId}" prompt) |
+| `Space` `S` | Start+work | Task is idle (starts session with "work on {issueId}" prompt) |
 | `Space` `!` | Start (yolo) | Task is idle (like S but with --dangerously-skip-permissions) |
 | `Space` `c` | Chat (Haiku) | Task is idle (creates worktree + Haiku session for discussion) |
 | `Space` `a` | Attach to session | Session exists (offers to merge main if behind) |
@@ -748,7 +748,7 @@ The "yolo" start mode (`Space` `!`) launches Claude with the `--dangerously-skip
 Toggle a dev server for the selected task's worktree. Each worktree can have its own dev server running with injected port environment variables to avoid conflicts.
 
 **How it works:**
-1. If no dev server is running for this bead, starts one in a new tmux session
+1. If no dev server is running for this issue, starts one in a new tmux session
 2. If a dev server is already running, stops it
 
 **Port injection:**
@@ -769,12 +769,12 @@ Toggle a dev server for the selected task's worktree. Each worktree can have its
 ```
 
 **StatusBar indicator:**
-- Shows `DEV: localhost:3001` when dev server is running for the selected bead
+- Shows `DEV: localhost:3001` when dev server is running for the selected issue
 - Shows `DEV: starting...` during startup
 - Shows `DEV: error` if the server failed
 
 **Requirements:**
-- A worktree must exist for the bead (start a session first with `Space+s`)
+- A worktree must exist for the issue (start a session first with `Space+s`)
 - The worktree must have a `package.json` with a `dev`, `start`, or `serve` script
 
 #### View Dev Server (Space+v)
@@ -785,12 +785,12 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 - Debugging connection issues
 
 **How it works:**
-1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
+1. Switches the tmux client to the dev server session (`az-dev-{issueId}`)
 2. You can see all server output in real-time
 3. Return to Azedarach with `Ctrl-a Ctrl-a` (double-tap tmux prefix)
 
 **Requirements:**
-- A dev server must be running for the bead (start with `Space+r` first)
+- A dev server must be running for the issue (start with `Space+r` first)
 
 **TaskCard indicator:**
 - Tasks with running dev servers show 🖥️ in their header line
@@ -806,7 +806,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 | `Space` `O` | Open PR | PR exists (opens in browser via `gh pr view --web`) |
 | `Space` `m` | Merge to main | Worktree exists (merge branch to main) |
 | `Space` `M` | Abort merge | Worktree exists (abort stuck merge) |
-| `Space` `b` | Merge bead into... | Worktree exists (merge into another bead) |
+| `Space` `b` | Merge issue into... | Worktree exists (merge into another issue) |
 | `Space` `d` | Delete worktree | Worktree exists (cleanup branches) |
 
 #### Update from Main (Space+u)
@@ -906,55 +906,55 @@ If a merge gets stuck (e.g., Claude is resolving conflicts but you want to cance
 
 **Note:** Aborting a merge preserves your branch's changes but discards the attempted merge from main. The worktree returns to its state before the merge began.
 
-#### Merge Bead Into... (Space+b)
+#### Merge Issue Into... (Space+b)
 
-Merges one bead's work into another bead's branch without going through main or creating a PR. This is useful when you have exploratory work in bead A that you realize belongs with other work in bead B.
+Merges one issue's work into another issue's branch without going through main or creating a PR. This is useful when you have exploratory work in issue A that you realize belongs with other work in issue B.
 
 **How it works:**
 
-1. Select the source bead (must have a worktree with commits)
+1. Select the source issue (must have a worktree with commits)
 2. Press `Space` `b` to enter **merge select mode**
-3. The source bead is highlighted with a distinct border (flamingo color)
-4. Navigate to the target bead using `h/j/k/l`
+3. The source issue is highlighted with a distinct border (flamingo color)
+4. Navigate to the target issue using `h/j/k/l`
 5. Press `Space` or `Enter` to confirm the merge
 6. Press `Esc` to cancel
 
 **Merge behavior:**
 
-- Source bead's commits are merged INTO the target bead's branch
+- Source issue's commits are merged INTO the target issue's branch
 - If target has no worktree yet, one is created automatically
 - Conflicts are handled the same as other merges (Claude session for resolution)
-- After successful merge, the source bead is **closed**
+- After successful merge, the source issue is **closed**
 - Source worktree is kept (for reference or manual cleanup later)
 
 **Visual feedback:**
 
 - **Status bar**: Shows "MRG" mode label with keybinding hints
-- **Source bead**: Highlighted with flamingo-colored border
+- **Source issue**: Highlighted with flamingo-colored border
 - **Toast notifications**: Progress and result messages
 
 **Use cases:**
 
-- Consolidating exploratory work into a main feature bead
+- Consolidating exploratory work into a main feature issue
 - Combining related tasks that were started separately
-- Moving completed work from one bead to another
+- Moving completed work from one issue to another
 
 **Example workflow:**
 
 ```
-1. Work on bead A (exploratory fix)
-2. Realize the fix belongs with bead B (main feature)
-3. Select bead A, press Space+b
-4. Navigate to bead B, press Space
-5. Bead A's work is now in bead B, and A is closed
-6. Continue working on bead B with all the changes
+1. Work on issue A (exploratory fix)
+2. Realize the fix belongs with issue B (main feature)
+3. Select issue A, press Space+b
+4. Navigate to issue B, press Space
+5. Issue A's work is now in issue B, and A is closed
+6. Continue working on issue B with all the changes
 ```
 
 **Requirements:**
 
-- Source bead must have a worktree (has commits to merge)
-- Target bead must exist in the tracker (worktree is created if needed)
-- Cannot merge a bead into itself
+- Source issue must have a worktree (has commits to merge)
+- Target issue must exist in the tracker (worktree is created if needed)
+- Cannot merge a issue into itself
 
 #### Show Diff (Space+f)
 
@@ -996,14 +996,14 @@ After starting Helix, use `Space` `a` to attach to the tmux session.
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `Space` `e` | Edit bead (manual) | Opens in $EDITOR as markdown |
-| `Space` `E` | Edit bead (Claude) | AI-assisted editing |
+| `Space` `e` | Edit issue (manual) | Opens in $EDITOR as markdown |
+| `Space` `E` | Edit issue (Claude) | AI-assisted editing |
 
 ### Fork Actions
 
 | Sequence | Action | Description |
 |----------|--------|-------------|
-| `Space` `F` | Fork bead | Create child, new epic, or sibling fork |
+| `Space` `F` | Fork issue | Create child, new epic, or sibling fork |
 
 ### Attachment Actions
 
@@ -1102,7 +1102,7 @@ Images are scaled to fit the terminal window while preserving aspect ratio.
 
 ### How Image Attachment Works
 
-1. Images are stored in `.linear/images/{bead-id}/`
+1. Images are stored in `.linear/images/{issue-id}/`
 2. Metadata is tracked in `.linear/images/index.json`
 3. Supported formats: PNG, JPG, GIF, WebP, BMP, SVG
 4. Claude sessions can reference attached images for visual context

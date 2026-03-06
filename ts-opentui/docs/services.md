@@ -35,27 +35,27 @@ export const method = (arg: string) =>
 
 ## Available Services
 
-### BeadsClient
+### IssueTrackerClient
 
-**Location:** `src/core/BeadsClient.ts`
+**Location:** `src/core/IssueTrackerClient.ts`
 
 Wrapper around the `linear-cli` CLI for issue tracking operations.
 
 ```typescript
-interface BeadsClientI {
-  list(options?): Effect<Issue[], BeadsError>
+interface IssueTrackerClientI {
+  list(options?): Effect<Issue[], IssueTrackerError>
   show(id): Effect<Issue, NotFoundError | ParseError>
-  create(options): Effect<Issue, BeadsError>
+  create(options): Effect<Issue, IssueTrackerError>
   update(id, fields): Effect<void, NotFoundError>
   close(id, reason?): Effect<void, NotFoundError>
-  ready(): Effect<Issue[], BeadsError>
+  ready(): Effect<Issue[], IssueTrackerError>
 }
 ```
 
 **Usage:**
 ```typescript
 const program = Effect.gen(function* () {
-  const client = yield* BeadsClient
+  const client = yield* IssueTrackerClient
   const issues = yield* client.list({ status: "open" })
   yield* client.update("az-05y", { status: "in_progress" })
 })
@@ -70,10 +70,10 @@ Orchestrates Claude Code sessions in tmux with git worktrees.
 ```typescript
 interface SessionManagerService {
   start(options): Effect<Session, SessionError | GitError>
-  stop(beadId): Effect<void, SessionError>
-  pause(beadId): Effect<void, SessionError>  // Ctrl+C + WIP commit
-  resume(beadId): Effect<void, InvalidStateError>
-  getState(beadId): Effect<SessionState, SessionNotFoundError>
+  stop(issueId): Effect<void, SessionError>
+  pause(issueId): Effect<void, SessionError>  // Ctrl+C + WIP commit
+  resume(issueId): Effect<void, InvalidStateError>
+  getState(issueId): Effect<SessionState, SessionNotFoundError>
   listActive(): Effect<Session[], never>
   subscribeToStateChanges(): Effect<PubSub<SessionStateChange>, never>
 }
@@ -128,14 +128,14 @@ Git worktree lifecycle for isolated task execution.
 ```typescript
 interface WorktreeManagerService {
   create(options): Effect<Worktree, GitError | NotAGitRepoError>
-  remove(beadId): Effect<void, GitError | WorktreeNotFoundError>
+  remove(issueId): Effect<void, GitError | WorktreeNotFoundError>
   list(): Effect<Worktree[], GitError>
-  exists(beadId): Effect<boolean, GitError>
-  get(beadId): Effect<Worktree, WorktreeNotFoundError>
+  exists(issueId): Effect<boolean, GitError>
+  get(issueId): Effect<Worktree, WorktreeNotFoundError>
 }
 ```
 
-**Worktree naming:** `../ProjectName-{beadId}/`
+**Worktree naming:** `../ProjectName-{issueId}/`
 
 ### StateDetector
 
@@ -299,7 +299,7 @@ Services are composed using Effect's Layer system:
 ```typescript
 // Base services with no dependencies
 const baseLayer = Layer.mergeAll(
-  BeadsClientLiveWithPlatform,
+  IssueTrackerClientLiveWithPlatform,
   TmuxServiceLive,
   TerminalServiceLive
 )
@@ -323,14 +323,14 @@ const fullLayer = Layer.mergeAll(
 All services use typed errors with `Data.TaggedError`:
 
 ```typescript
-class BeadsError extends Data.TaggedError("BeadsError")<{
+class IssueTrackerError extends Data.TaggedError("IssueTrackerError")<{
   message: string
   command?: string
 }> {}
 
 // Pattern matching on errors
 yield* someEffect.pipe(
-  Effect.catchTag("BeadsError", (e) => ...),
+  Effect.catchTag("IssueTrackerError", (e) => ...),
   Effect.catchTag("NotFoundError", (e) => ...)
 )
 ```
@@ -340,13 +340,13 @@ yield* someEffect.pipe(
 Each service has a `*Test` layer for mocking:
 
 ```typescript
-const TestBeadsClient = Layer.succeed(BeadsClient, {
+const TestIssueTrackerClient = Layer.succeed(IssueTrackerClient, {
   list: () => Effect.succeed([mockIssue]),
   show: (id) => Effect.succeed(mockIssue),
   // ...
 })
 
 const testProgram = myProgram.pipe(
-  Effect.provide(TestBeadsClient)
+  Effect.provide(TestIssueTrackerClient)
 )
 ```

@@ -175,7 +175,7 @@ src/
 │   ├── SessionManager.ts  # Claude session orchestration
 │   ├── WorktreeManager.ts # Git worktree lifecycle
 │   ├── StateDetector.ts   # Output pattern matching
-│   ├── BeadsClient.ts     # issue tracker CLI wrapper (supports linear-cli backend)
+│   ├── IssueTrackerClient.ts     # issue tracker CLI wrapper (supports linear-cli backend)
 │   └── PRWorkflow.ts      # GitHub PR automation
 │
 ├── hooks/                 # State transition hooks
@@ -673,7 +673,7 @@ const PATTERNS = {
 
 Worktrees created as siblings to the project:
 ```
-../ProjectName-<bead-id>/
+../ProjectName-<issue-id>/
 ```
 
 ### Epic/Task Handling

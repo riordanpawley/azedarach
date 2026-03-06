@@ -160,7 +160,7 @@ I'll write this as: `Ctrl-a d`
 
 When you start az, it runs inside a tmux session (default name: `az`). When you start Claude sessions:
 
-1. **SessionManager** creates a tmux session named after the bead ID
+1. **SessionManager** creates a tmux session named after the issue ID
 2. Claude Code runs inside that tmux session
 3. You can attach to see/interact with Claude
 4. Detaching lets Claude continue working
@@ -170,12 +170,12 @@ When you start az, it runs inside a tmux session (default name: `az`). When you 
 
 Azedarach creates tmux sessions with this pattern:
 - Main TUI: `az` (configurable via `AZ_TMUX_SESSION` env var)
-- Claude sessions: `{bead-id}` (e.g., `az-05y`, `az-xyz`)
+- Claude sessions: `{issue-id}` (e.g., `az-05y`, `az-xyz`)
 
 Examples:
 - `az` - the main Azedarach TUI
-- `az-05y` - Claude session for bead `az-05y`
-- `az-xyz` - Claude session for bead `az-xyz`
+- `az-05y` - Claude session for issue `az-05y`
+- `az-xyz` - Claude session for issue `az-xyz`
 
 ### Attaching to Sessions
 
@@ -318,7 +318,7 @@ tmux kill-session -t claude-test
 ### Test with Azedarach Naming
 
 ```bash
-# 1. Pick a bead ID from your project
+# 1. Pick a issue ID from your project
 linear-cli i list --output json --compact --all | head -1
 # Let's say it returns: az-05y
 

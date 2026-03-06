@@ -103,7 +103,7 @@ Azedarach uses **Helix-style modal keybindings** for efficient navigation.
 |--------------|--------|
 | `Space` `h` | Move selected task(s) to previous column |
 | `Space` `l` | Move selected task(s) to next column |
-| `Space` `F` | Fork bead into epic/child |
+| `Space` `F` | Fork issue into epic/child |
 | `Space` `a` | Attach to session (offers merge if behind main) |
 | `Space` `A` | Attach to session inline (not yet implemented) |
 
@@ -336,7 +336,7 @@ See [VC documentation](https://github.com/steveyegge/vc) for full setup instruct
 **Important:** Session attachment only works when there are active tmux sessions running Claude Code.
 
 To test attachment:
-1. Start a Claude session in a tmux session named `claude-{bead-id}`:
+1. Start a Claude session in a tmux session named `claude-{issue-id}`:
    ```bash
    tmux new-session -d -s claude-az-05y "claude"
    ```
@@ -370,10 +370,10 @@ tmux new-session -d -s claude-test-session "bash"
 # 2. In another terminal, start Azedarach
 bun run dev
 
-# 3. Create a test bead with matching ID (or use existing)
+# 3. Create a test issue with matching ID (or use existing)
 linear-cli i create --title="Test attachment" --type=task
 
-# 4. Note the bead ID (e.g., az-xyz)
+# 4. Note the issue ID (e.g., az-xyz)
 
 # 5. Rename your tmux session to match
 tmux rename-session -t claude-test-session claude-az-xyz
@@ -551,7 +551,7 @@ src/
 │   └── HelpOverlay.tsx # Keyboard help
 │
 ├── core/               # Effect services
-│   ├── BeadsClient.ts      # linear-cli CLI wrapper
+│   ├── IssueTrackerClient.ts      # linear-cli CLI wrapper
 │   ├── SessionManager.ts   # Claude session orchestration
 │   ├── TmuxService.ts      # tmux operations
 │   ├── TerminalService.ts  # Terminal detection

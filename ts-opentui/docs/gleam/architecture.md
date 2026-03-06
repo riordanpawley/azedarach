@@ -67,7 +67,7 @@
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                         tmux Sessions                                  │  │
 │  │  ┌─────────────────────────────────────────────────────────────────┐  │  │
-│  │  │ Session: {bead-id}-az                                           │  │  │
+│  │  │ Session: {issue-id}-az                                           │  │  │
 │  │  │ ├── Window: main       → Claude Code running                    │  │  │
 │  │  │ ├── Window: dev-web    → npm run dev (PORT=3000)                │  │  │
 │  │  │ ├── Window: dev-api    → npm run api (PORT=8000)                │  │  │
@@ -78,7 +78,7 @@
 │                                                                              │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
 │  │                         Git Worktrees                                  │  │
-│  │  ../project-az-123/  ← isolated git environment per bead             │  │
+│  │  ../project-az-123/  ← isolated git environment per issue             │  │
 │  │  ../project-az-456/                                                   │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
@@ -87,7 +87,7 @@
 │  │  .linear/                                                              │  │
 │  │  ├── issues.jsonl      ← task data                                   │  │
 │  │  └── images/           ← attachments                                 │  │
-│  │      └── {bead-id}/                                                  │  │
+│  │      └── {issue-id}/                                                  │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -152,11 +152,11 @@ User presses 's'
 │ 1. Check if session exists                                   │
 │    └─→ If yes: just attach                                  │
 │                                                              │
-│ 2. Worktree.create(bead_id, template)                       │
-│    └─→ git worktree add ../project-{bead-id}                │
+│ 2. Worktree.create(issue_id, template)                       │
+│    └─→ git worktree add ../project-{issue-id}                │
 │                                                              │
-│ 3. Tmux.new_session("{bead-id}-az", worktree_path)          │
-│    └─→ tmux new-session -d -s {bead-id}-az -c {path}        │
+│ 3. Tmux.new_session("{issue-id}-az", worktree_path)          │
+│    └─→ tmux new-session -d -s {issue-id}-az -c {path}        │
 │                                                              │
 │ 4. Run init commands (ONCE, sequentially)                    │
 │    └─→ direnv allow → wait prompt                           │
@@ -300,7 +300,7 @@ services/
 domain/
 ├── task.gleam
 ├── session.gleam
-├── bead.gleam
+├── issue.gleam
 ├── project.gleam
 └── attachment.gleam
 
