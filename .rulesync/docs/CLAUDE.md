@@ -13,6 +13,14 @@ Purpose: Root entry point - redirects to app-specific context
 
 This repository contains multiple implementations of Azedarach, each in its own directory:
 
+## Why This Exists Alongside `AGENTS.md`
+
+This repository intentionally keeps both files:
+- `CLAUDE.md` is the Claude Code entrypoint.
+- `AGENTS.md` is the OpenCode/Codex entrypoint.
+
+They share the same project policy, but each runtime expects a different bootstrap filename and slightly different framing. Both source files live in `.rulesync/docs/` so updates stay centralized and synced.
+
 ## Implementations
 
 ### 🚀 ts-opentui/ (Primary, Active Development)

@@ -18,6 +18,15 @@ Current managed targets:
 - `ts-opentui/CLAUDE.md`
 - `go-bubbletea/CLAUDE.md`
 
+## Why Both `AGENTS.md` and `CLAUDE.md` Exist
+
+We keep both files in `.rulesync/docs/` because different AI runtimes bootstrap from different entrypoint filenames:
+
+- `AGENTS.md` is the OpenCode/Codex-facing entrypoint.
+- `CLAUDE.md` is the Claude Code-facing entrypoint.
+
+The core workflow policy is shared, but each file has tool-specific framing and metadata (for example the `<ai_context ... tool=\"...\">` header and tool-oriented guidance). Keeping both in `.rulesync/` gives us one canonical authoring location while still generating the runtime file each tool expects.
+
 ## Commands
 
 ```bash

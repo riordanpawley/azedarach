@@ -21,6 +21,14 @@ Select the implementation based on user request or current working directory.
 
 This file provides a condensed reference for OpenCode sessions.
 
+## Why This Exists Alongside `CLAUDE.md`
+
+This repository intentionally keeps both files:
+- `AGENTS.md` is the OpenCode/Codex entrypoint.
+- `CLAUDE.md` is the Claude Code entrypoint.
+
+They share the same project policy, but each runtime expects a different bootstrap filename and slightly different framing. Both source files live in `.rulesync/docs/` so updates stay centralized and synced.
+
 ## Critical Rules (Quick Reference)
 
 1. **Type Safety**: ALWAYS use TypeScript strict mode. NEVER use 'as' casting or 'any' (ts-opentui only).
