@@ -28,6 +28,7 @@ This file provides a condensed reference for OpenCode sessions.
 3. **Issue Tracker**: Start sessions with `az prime`, then use `az issue` for all tracked issue operations.
 4. **Commit Before Done**: Always commit all changes before saying "done" or "complete".
 5. **RuleSync Canonical Source**: Edit managed instruction assets in `.rulesync/` and sync, not direct edits in generated targets.
+6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
 
 ## Quick Commands
 
