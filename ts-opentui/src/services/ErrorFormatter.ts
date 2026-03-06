@@ -174,7 +174,8 @@ const ERROR_FORMATTERS: Record<
 		if (stderr.includes("database is locked") || stderr.includes("SQLITE_BUSY")) {
 			return {
 				message: "IssueTracker database is locked",
-				suggestion: "Try: Another process may be using tracker. Wait a moment and try again",
+				suggestion:
+					"Try: Another process may be using the issue tracker backend. Wait a moment and retry your `az issue` command.",
 				category: "tracker",
 			}
 		}
@@ -183,7 +184,8 @@ const ERROR_FORMATTERS: Record<
 		if (stderr.includes("not initialized") || stderr.includes("No tracker directory")) {
 			return {
 				message: "IssueTracker not initialized in this project",
-				suggestion: "Try: Run 'tracker init' to initialize tracker tracking",
+				suggestion:
+					"Try: Ensure this project is initialized for issue tracking (`.azedarach` exists), then rerun `az issue`.",
 				category: "tracker",
 			}
 		}
@@ -192,7 +194,7 @@ const ERROR_FORMATTERS: Record<
 		if (stderr.includes("sync") && stderr.includes("conflict")) {
 			return {
 				message: "IssueTracker sync conflict detected",
-				suggestion: "Try: Run 'tracker sync --from-main' to pull latest changes, then retry",
+				suggestion: "Try: Run `az sync`, then retry your `az issue` command.",
 				category: "tracker",
 			}
 		}
@@ -208,13 +210,13 @@ const ERROR_FORMATTERS: Record<
 
 	NotFoundError: (error) => ({
 		message: `Issue not found: ${error.issueId}`,
-		suggestion: "Try: Check the issue ID or run 'tracker search' to find issues",
+		suggestion: "Try: Check the issue ID or run `az issue list --limit 20` to find candidates.",
 		category: "tracker",
 	}),
 
 	ParseError: (_error) => ({
 		message: "Failed to parse tracker output",
-		suggestion: "Try: This may be a tracker version mismatch. Run 'tracker doctor' to check",
+		suggestion: "Try: Re-run with `az issue --help` to confirm the active command surface, then retry.",
 		category: "tracker",
 	}),
 

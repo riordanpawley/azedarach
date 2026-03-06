@@ -6,6 +6,9 @@ allowed-tools: Bash
 
 # Issue Relations
 
+Prefer `az issue dep ...` for standard Azedarach workflows.
+Use these `linear-cli` relation commands only when direct Linear access is explicitly required.
+
 ```bash
 # List relations
 linear-cli rel list LIN-123
