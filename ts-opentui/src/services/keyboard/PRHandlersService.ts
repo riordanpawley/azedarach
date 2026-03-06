@@ -67,52 +67,50 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 		 * Queued to prevent race conditions with other operations on the same task.
 		 * Internal helper used by merge.
 		 */
-			const doMerge = (issueId: string, targetBranch: string) =>
-				helpers.withQueue(
-					issueId,
-					"merge",
-					Effect.gen(function* () {
-						const progressMessage = (stage: MergeToMainProgressStage): string => {
-							switch (stage) {
-								case "prepare":
-									return `Preparing merge for ${issueId}...`
-								case "commit":
-									return `Committing ${issueId} changes...`
-								case "check-conflicts":
-									return `Checking conflicts against ${targetBranch}...`
-								case "merge":
-									return `Merging ${issueId} into ${targetBranch}...`
-								case "validate":
-									return "Running post-merge validation..."
-								case "push":
-									return `Pushing ${targetBranch}...`
-							}
+		const doMerge = (issueId: string, targetBranch: string, projectPath: string) =>
+			helpers.withQueue(
+				issueId,
+				"merge",
+				Effect.gen(function* () {
+					const progressMessage = (stage: MergeToMainProgressStage): string => {
+						switch (stage) {
+							case "prepare":
+								return `Preparing merge for ${issueId}...`
+							case "commit":
+								return `Committing ${issueId} changes...`
+							case "check-conflicts":
+								return `Checking conflicts against ${targetBranch}...`
+							case "merge":
+								return `Merging ${issueId} into ${targetBranch}...`
+							case "validate":
+								return "Running post-merge validation..."
+							case "push":
+								return `Pushing ${targetBranch}...`
 						}
+					}
 
-						// Get current project path (from ProjectService or cwd fallback)
-						const projectPath = yield* helpers.getProjectPath()
-
-						yield* prWorkflow
-							.mergeToMain({
-								issueId,
-								projectPath,
-								onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
-							})
-							.pipe(
+					yield* prWorkflow
+						.mergeToMain({
+							issueId,
+							projectPath,
+							onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
+						})
+						.pipe(
 							Effect.tap(() =>
 								Effect.gen(function* () {
 									yield* board.patchTaskFromMutation(issueId, {
-									hasMergeConflict: false,
-									updated_at: new Date().toISOString(),
-								})
-								yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
-							}),
+										hasMergeConflict: false,
+										updated_at: new Date().toISOString(),
+									})
+									yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
+								}),
 							),
 							Effect.tap(() => toast.show("success", `Merged ${issueId} into ${targetBranch}`)),
 							Effect.catchAll(helpers.showErrorToast("Merge failed")),
-							)
-					}),
-				)
+						)
+				}),
+				projectPath,
+			)
 
 		/**
 		 * Execute the actual cleanup operation (called via confirm dialog)
@@ -134,6 +132,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
 				}),
+				projectPath,
 			)
 
 		/**
@@ -342,8 +341,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
+
 				// Check if task has an operation in progress
-				const isBusy = yield* helpers.checkBusy(task.id)
+				const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
@@ -351,9 +353,6 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* toast.show("error", `No worktree for ${task.id} - start a session first`)
 					return
 				}
-
-				// Get current project path (from ProjectService or cwd fallback)
-				const projectPath = yield* helpers.getProjectPath()
 
 				// Fail fast if the base-branch repository is already in merge state.
 				// We do not auto-abort; user must explicitly resolve or abort first.
@@ -418,7 +417,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* overlay.push({
 						_tag: "confirm",
 						message,
-						onConfirm: doMerge(task.id, targetBranch),
+						onConfirm: doMerge(task.id, targetBranch, projectPath),
 					})
 					return
 				}
@@ -470,11 +469,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* overlay.push({
 						_tag: "confirm",
 						message,
-						onConfirm: doMerge(task.id, targetBranch),
+						onConfirm: doMerge(task.id, targetBranch, projectPath),
 					})
 				} else {
 					// No conflicts detected, proceed directly
-					yield* doMerge(task.id, targetBranch)
+					yield* doMerge(task.id, targetBranch, projectPath)
 				}
 			})
 
@@ -508,7 +507,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					const task = tasksWithWorktrees[0]!
 
 					// Check if task has an operation in progress
-					const isBusy = yield* helpers.checkBusy(task.id)
+					const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 					if (isBusy) return
 
 					const windows = yield* tmux.listWindows(task.id)
@@ -540,7 +539,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* Effect.all(
 						tasksWithWorktrees.map((task) =>
 							Effect.gen(function* () {
-								const isBusy = yield* helpers.checkBusy(task.id)
+								const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 								if (isBusy) return
 
 								yield* helpers.withQueue(
@@ -549,6 +548,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									prWorkflow
 										.cleanup({ issueId: task.id, projectPath, closeIssue: false })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
+									projectPath,
 								)
 							}),
 						),
@@ -576,7 +576,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* Effect.all(
 						tasksWithWorktrees.map((task) =>
 							Effect.gen(function* () {
-								const isBusy = yield* helpers.checkBusy(task.id)
+								const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 								if (isBusy) return
 
 								yield* helpers.withQueue(
@@ -585,6 +585,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 									prWorkflow
 										.cleanup({ issueId: task.id, projectPath, closeIssue: true })
 										.pipe(Effect.catchAll(helpers.showErrorToast(`Cleanup ${task.id}`))),
+									projectPath,
 								)
 							}),
 						),
@@ -630,8 +631,11 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				const task = yield* helpers.getActionTargetTask()
 				if (!task) return
 
+				// Get current project path (from ProjectService or cwd fallback)
+				const projectPath = yield* helpers.getProjectPath()
+
 				// Check if task has an operation in progress
-				const isBusy = yield* helpers.checkBusy(task.id)
+				const isBusy = yield* helpers.checkBusy(task.id, projectPath)
 				if (isBusy) return
 
 				// Require worktree: active session OR orphaned worktree
@@ -646,9 +650,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					Effect.gen(function* () {
 						yield* toast.show("info", `Aborting merge for ${task.id}...`)
 
-						// Get project path from helpers
-						const abortProjectPath = yield* helpers.getProjectPath()
-						yield* prWorkflow.abortMerge({ issueId: task.id, projectPath: abortProjectPath }).pipe(
+						yield* prWorkflow.abortMerge({ issueId: task.id, projectPath }).pipe(
 							Effect.tap(() =>
 								Effect.gen(function* () {
 									yield* board.patchTaskFromMutation(task.id, {
@@ -666,6 +668,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							}),
 						)
 					}),
+					projectPath,
 				)
 			})
 

@@ -142,8 +142,10 @@ export interface TmuxSessionMonitorService {
  * Previous session state for change detection
  */
 interface PreviousSessionState {
+	readonly issueId: string
 	readonly status: TmuxStatus
 	readonly sessionName: string
+	readonly projectPath: string | null
 }
 
 export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("TmuxSessionMonitor", {
@@ -151,7 +153,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 	scoped: Effect.gen(function* () {
 		const diagnostics = yield* DiagnosticsService
 
-		// Track previous state to detect changes (issueId → {status, sessionName})
+		// Track previous state to detect changes (sessionName → session state snapshot)
 		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
 
 		const listIssueSessions = () =>
@@ -336,9 +338,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 				const initialSessions = yield* listSessions()
 				const initialMap = new Map<string, PreviousSessionState>()
 				for (const session of initialSessions) {
-					initialMap.set(session.issueId, {
+					initialMap.set(session.sessionName, {
+						issueId: session.issueId,
 						status: session.status,
 						sessionName: session.sessionName,
+						projectPath: session.projectPath,
 					})
 				}
 				yield* Ref.set(previousStateRef, initialMap)
@@ -357,12 +361,14 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					const newState = new Map<string, PreviousSessionState>()
 
 					for (const session of sessions) {
-						newState.set(session.issueId, {
+						newState.set(session.sessionName, {
+							issueId: session.issueId,
 							status: session.status,
 							sessionName: session.sessionName,
+							projectPath: session.projectPath,
 						})
 
-						const prevState = previousState.get(session.issueId)
+						const prevState = previousState.get(session.sessionName)
 						if (prevState === undefined || prevState.status !== session.status) {
 							// State changed - call handler
 							yield* Effect.log(
@@ -373,18 +379,18 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					}
 
 					// Check for sessions that disappeared (session ended)
-					for (const [issueId, prevState] of previousState.entries()) {
-						if (!newState.has(issueId)) {
+					for (const [sessionName, prevState] of previousState.entries()) {
+						if (!newState.has(sessionName)) {
 							// Session disappeared - treat as idle
-							// Use the sessionName we stored, createdAt is 0 and paths are null
-							yield* Effect.log(`TmuxSessionMonitor: ${issueId} session ended`)
+							// Use the session metadata we stored, createdAt is 0.
+							yield* Effect.log(`TmuxSessionMonitor: ${prevState.issueId} session ended`)
 							yield* handler({
-								issueId,
+								issueId: prevState.issueId,
 								status: "idle",
 								sessionName: prevState.sessionName,
 								createdAt: 0,
 								worktreePath: null,
-								projectPath: null,
+								projectPath: prevState.projectPath,
 							})
 						}
 					}
