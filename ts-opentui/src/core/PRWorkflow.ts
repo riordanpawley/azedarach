@@ -650,17 +650,22 @@ const runShellCommand = (
 				let stdout = ""
 				if (typeof error === "object" && error !== null && "stdout" in error) {
 					const stdoutCandidate = error.stdout
-					stdout = typeof stdoutCandidate === "string" ? stdoutCandidate : String(stdoutCandidate ?? "")
+					stdout =
+						typeof stdoutCandidate === "string" ? stdoutCandidate : String(stdoutCandidate ?? "")
 				}
 
 				let stderr = ""
 				if (typeof error === "object" && error !== null && "stderr" in error) {
 					const stderrCandidate = error.stderr
-					stderr = typeof stderrCandidate === "string" ? stderrCandidate : String(stderrCandidate ?? "")
+					stderr =
+						typeof stderrCandidate === "string" ? stderrCandidate : String(stderrCandidate ?? "")
 				}
 
 				const fallback = String(error)
-				const output = [stdout, stderr].filter((part) => part.length > 0).join("\n").trim()
+				const output = [stdout, stderr]
+					.filter((part) => part.length > 0)
+					.join("\n")
+					.trim()
 
 				return Effect.succeed({
 					success: false,
@@ -694,15 +699,51 @@ const runGit = (
 	})
 
 /**
- * Check whether a git repository has an in-progress merge.
- *
- * Uses MERGE_HEAD presence as the canonical signal.
+ * Supported in-progress git operation descriptors.
  */
-const hasMergeInProgress = (
+type GitOperationInProgress = {
+	readonly kind: "merge" | "rebase" | "cherry-pick" | "revert"
+	readonly pseudoRef: "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
+	readonly continueArgs: readonly [string, "--continue"]
+	readonly abortArgs: readonly [string, "--abort"]
+}
+
+const GIT_OPERATION_IN_PROGRESS_CHECKS: readonly GitOperationInProgress[] = [
+	{
+		kind: "merge",
+		pseudoRef: "MERGE_HEAD",
+		continueArgs: ["merge", "--continue"],
+		abortArgs: ["merge", "--abort"],
+	},
+	{
+		kind: "rebase",
+		pseudoRef: "REBASE_HEAD",
+		continueArgs: ["rebase", "--continue"],
+		abortArgs: ["rebase", "--abort"],
+	},
+	{
+		kind: "cherry-pick",
+		pseudoRef: "CHERRY_PICK_HEAD",
+		continueArgs: ["cherry-pick", "--continue"],
+		abortArgs: ["cherry-pick", "--abort"],
+	},
+	{
+		kind: "revert",
+		pseudoRef: "REVERT_HEAD",
+		continueArgs: ["revert", "--continue"],
+		abortArgs: ["revert", "--abort"],
+	},
+]
+
+/**
+ * Check whether a git pseudo-ref exists in the target repository.
+ */
+const hasPseudoRef = (
 	cwd: string,
+	refName: GitOperationInProgress["pseudoRef"],
 ): Effect.Effect<boolean, never, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
-		const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
+		const command = Command.make("git", "rev-parse", "-q", "--verify", refName).pipe(
 			Command.workingDirectory(cwd),
 		)
 		const exitCode = yield* Command.exitCode(command).pipe(
@@ -716,25 +757,41 @@ const hasMergeInProgress = (
 	})
 
 /**
- * Fail fast when merge target repository is already in an active merge state.
+ * Detect the first in-progress git operation in the target repository.
+ */
+const getGitOperationInProgress = (
+	cwd: string,
+): Effect.Effect<GitOperationInProgress | undefined, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		for (const operation of GIT_OPERATION_IN_PROGRESS_CHECKS) {
+			const present = yield* hasPseudoRef(cwd, operation.pseudoRef)
+			if (present) return operation
+		}
+		return undefined
+	})
+
+/**
+ * Fail fast when target repository is already in an active git operation state.
  *
  * This prevents ambiguous failures later in merge flow and gives clear recovery guidance.
  */
-const ensureNoMergeInProgress = (options: {
+const ensureNoGitOperationInProgress = (options: {
 	cwd: string
 	issueId: string
-	baseBranch: string
 	contextLabel: string
 }): Effect.Effect<void, PRError, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
-		const { cwd, issueId, baseBranch, contextLabel } = options
-		const mergeInProgress = yield* hasMergeInProgress(cwd)
-		if (!mergeInProgress) return
+		const { cwd, issueId, contextLabel } = options
+		const operation = yield* getGitOperationInProgress(cwd)
+		if (!operation) return
+
+		const continueCommand = `git -C ${cwd} ${operation.continueArgs.join(" ")}`
+		const abortCommand = `git -C ${cwd} ${operation.abortArgs.join(" ")}`
 
 		return yield* Effect.fail(
 			new PRError({
 				issueId,
-				message: `Merge in progress in ${contextLabel} for ${baseBranch}. Resolve and commit it, or run 'git -C ${cwd} merge --abort', then retry Space+m.`,
+				message: `Git ${operation.kind} in progress in ${contextLabel}. Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry Space+m.`,
 			}),
 		)
 	})
@@ -1259,12 +1316,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
 						}
 
-						// Fail fast if the merge target repository is already mid-merge.
+						// Fail fast if the merge target repository already has an in-progress git operation.
 						// Continuing would produce opaque git errors and non-deterministic outcomes.
-						yield* ensureNoMergeInProgress({
+						yield* ensureNoGitOperationInProgress({
 							cwd: mergeDir,
 							issueId,
-							baseBranch,
 							contextLabel: parentEpic ? `epic ${parentEpic.id} worktree` : "project base branch",
 						})
 
@@ -1282,6 +1338,15 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							)
 						}
 						const issueBranch = worktree.branch
+
+						// Fail fast if source worktree already has an in-progress git operation.
+						// This commonly occurs when a prior conflict-resolution merge was started
+						// but not completed/aborted.
+						yield* ensureNoGitOperationInProgress({
+							cwd: worktree.path,
+							issueId,
+							contextLabel: `source worktree ${issueId}`,
+						})
 
 						// 1. Stop any running session first (only if doing full cleanup)
 						// When keepWorktree=true, we want to keep iterating in the same session
@@ -1744,12 +1809,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					)
 					const issueBranch = yield* getIssueBranchName(issueId, projectPath)
 
-					// Fail fast if repository is already in merge state.
-					// Conflict probing is not reliable while merge is unresolved.
-					yield* ensureNoMergeInProgress({
+					// Fail fast if repository already has an in-progress git operation.
+					// Conflict probing is not reliable while operation state is unresolved.
+					yield* ensureNoGitOperationInProgress({
 						cwd: projectPath,
 						issueId,
-						baseBranch: effectiveBaseBranch,
 						contextLabel: "project base branch",
 					})
 

@@ -135,12 +135,43 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 				projectPath,
 			)
 
-		/**
-		 * Check whether repository has an active merge (MERGE_HEAD present).
-		 */
-		const hasMergeInProgress = (cwd: string) =>
+		type GitOperationInProgress = {
+			readonly kind: "merge" | "rebase" | "cherry-pick" | "revert"
+			readonly pseudoRef: "MERGE_HEAD" | "REBASE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD"
+			readonly continueArgs: readonly [string, "--continue"]
+			readonly abortArgs: readonly [string, "--abort"]
+		}
+
+		const GIT_OPERATION_IN_PROGRESS_CHECKS: readonly GitOperationInProgress[] = [
+			{
+				kind: "merge",
+				pseudoRef: "MERGE_HEAD",
+				continueArgs: ["merge", "--continue"],
+				abortArgs: ["merge", "--abort"],
+			},
+			{
+				kind: "rebase",
+				pseudoRef: "REBASE_HEAD",
+				continueArgs: ["rebase", "--continue"],
+				abortArgs: ["rebase", "--abort"],
+			},
+			{
+				kind: "cherry-pick",
+				pseudoRef: "CHERRY_PICK_HEAD",
+				continueArgs: ["cherry-pick", "--continue"],
+				abortArgs: ["cherry-pick", "--abort"],
+			},
+			{
+				kind: "revert",
+				pseudoRef: "REVERT_HEAD",
+				continueArgs: ["revert", "--continue"],
+				abortArgs: ["revert", "--abort"],
+			},
+		]
+
+		const hasPseudoRef = (cwd: string, refName: GitOperationInProgress["pseudoRef"]) =>
 			Effect.gen(function* () {
-				const command = Command.make("git", "rev-parse", "-q", "--verify", "MERGE_HEAD").pipe(
+				const command = Command.make("git", "rev-parse", "-q", "--verify", refName).pipe(
 					Command.workingDirectory(cwd),
 				)
 				const exitCode = yield* Command.exitCode(command).pipe(
@@ -151,6 +182,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					),
 				)
 				return exitCode === 0
+			})
+
+		const getGitOperationInProgress = (cwd: string) =>
+			Effect.gen(function* () {
+				for (const operation of GIT_OPERATION_IN_PROGRESS_CHECKS) {
+					const present = yield* hasPseudoRef(cwd, operation.pseudoRef)
+					if (present) return operation
+				}
+				return undefined
 			})
 
 		// ================================================================
@@ -354,13 +394,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					return
 				}
 
-				// Fail fast if the base-branch repository is already in merge state.
-				// We do not auto-abort; user must explicitly resolve or abort first.
-				const baseMergeInProgress = yield* hasMergeInProgress(projectPath)
-				if (baseMergeInProgress) {
+				// Fail fast if the base-branch repository has an unresolved git operation.
+				// We do not auto-abort; user must explicitly continue/abort first.
+				const baseOperation = yield* getGitOperationInProgress(projectPath)
+				if (baseOperation) {
+					const continueCommand = `git -C ${projectPath} ${baseOperation.continueArgs.join(" ")}`
+					const abortCommand = `git -C ${projectPath} ${baseOperation.abortArgs.join(" ")}`
 					yield* toast.show(
 						"error",
-						`Cannot merge: project base branch is already mid-merge.\nResolve and commit it, or run 'git -C ${projectPath} merge --abort', then retry Space+m.`,
+						`Cannot merge: project base branch has ${baseOperation.kind} in progress.\nContinue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry Space+m.`,
 					)
 					return
 				}
