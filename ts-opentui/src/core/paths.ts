@@ -155,6 +155,7 @@ export function parseIssueSessionName(
 ): { type: SessionType; issueId: string } | undefined {
 	const aiPrefix = AI_SESSION_PREFIXES.find((prefix) => sessionName.startsWith(prefix))
 	const withoutPrefix = aiPrefix ? sessionName.slice(aiPrefix.length) : sessionName
+	const hasProjectStylePrefix = PROJECT_SESSION_PREFIX_PATTERN.test(withoutPrefix)
 
 	if (!withoutPrefix) {
 		return undefined
@@ -168,9 +169,16 @@ export function parseIssueSessionName(
 				return { type: "issue", issueId: prefixedIssueId }
 			}
 		}
+
+		// In a known project context, treat mismatched project-style prefixes as
+		// out-of-scope session names instead of stripping the prefix and causing
+		// cross-project issue ID collisions (for example `ch-f` -> `f`).
+		if (hasProjectStylePrefix) {
+			return undefined
+		}
 	}
 
-	if (PROJECT_SESSION_PREFIX_PATTERN.test(withoutPrefix)) {
+	if (hasProjectStylePrefix) {
 		const prefixedIssueId = decodeIssueSessionName(withoutPrefix.slice(3))
 		if (
 			ISSUE_ID_PATTERN.test(prefixedIssueId) &&

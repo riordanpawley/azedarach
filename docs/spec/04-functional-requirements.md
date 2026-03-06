@@ -254,6 +254,7 @@ This section is normative.
 - AZ-FR-2001: Session naming MUST be deterministic from issue ID.
 - AZ-FR-2001a: Session naming MUST include deterministic project prefix plus issue identity (for example `az-b`, `ch-a`) to avoid cross-project collisions.
 - AZ-FR-2002: App MUST discover existing relevant tmux sessions.
+- AZ-FR-2002a: When project context is known, tmux session discovery MUST ignore project-prefixed sessions belonging to other projects (for example ignore `ch-f` while scoped to Azedarach).
 - AZ-FR-2003: App SHOULD support return-to-board tmux key convention.
 - AZ-FR-2004: App SHOULD support AI<->dev-server toggle tmux key convention.
 

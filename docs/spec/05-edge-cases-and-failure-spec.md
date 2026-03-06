@@ -444,6 +444,12 @@ On failure, logs SHOULD capture:
   - expose adopt/terminate options.
   - avoid auto-terminating without user choice.
 
+### Case F-143: Cross-project prefixed session collision
+
+- Required behavior:
+  - when board/project context is explicit, ignore project-prefixed tmux sessions from other projects.
+  - do not mark a local issue active based on foreign-prefixed session names (for example `ch-f` must not activate `f` in Azedarach context).
+
 ## 5.24 Ordering and Time Anomaly Edge Cases
 
 ### Case F-150: Missing updated timestamp on subset of issues
