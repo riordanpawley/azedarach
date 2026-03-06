@@ -479,12 +479,16 @@ const getRecentNonEmptyChunk = (chunk: string, maxLines: number): string => {
 }
 
 /**
- * Detect state from a chunk by checking all patterns in priority order
+ * Detect state from a chunk using recent-output prioritization.
  *
- * Returns the first matching state, or "busy" if output exists but no patterns match,
+ * Uses a short recent line window to avoid stale scrollback dominating state:
+ * - waiting prompts win immediately
+ * - latest-line explicit errors win next
+ * - active busy indicators outrank older error text
+ * - done is only considered when not actively busy
+ *
+ * Returns "busy" when output exists but no explicit state matches,
  * or null if the chunk is empty/whitespace only.
- *
- * Strips ANSI escape codes before matching to avoid false negatives from color codes.
  */
 const detectState = (chunk: string): SessionState | null => {
 	// Ignore empty or whitespace-only chunks
@@ -565,7 +569,7 @@ const detectPhase = (chunk: string): AgentPhase | null => {
  *
  * The detector maintains state across calls:
  * - Rapid "busy" signals are coalesced (debouncing)
- * - Terminal states ("done", "error") are sticky until explicit reset
+ * - High-priority states ("waiting", "error", "done") apply immediately
  * - "waiting" state is detected immediately
  */
 const createStatefulDetector = (): ((chunk: string) => SessionState | null) => {
