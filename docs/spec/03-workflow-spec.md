@@ -405,6 +405,8 @@ Rules:
 ### Mapping
 
 - detected states update card indicators and optional notifications
+- PTY-based detection SHOULD weight the most recent non-empty output window more heavily than older scrollback
+- stale error-like text in scrollback MUST NOT override concurrent active-work signals
 
 ### Typical Triggers
 
