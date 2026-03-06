@@ -158,6 +158,8 @@ export interface StartSessionOptions {
 	readonly baseBranch?: string
 	/** Optional initial prompt to send to Claude on startup (e.g., "work on bead az-123") */
 	readonly initialPrompt?: string
+	/** Optional image paths to attach to the initial prompt (tool-dependent support). */
+	readonly imagePaths?: readonly string[]
 	/** Optional model to use (haiku, sonnet, opus). Uses Claude default if not specified. */
 	readonly model?: ClaudeModel
 	/** Run Claude with --dangerously-skip-permissions flag (default: false) */
@@ -752,6 +754,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 							projectPath,
 							baseBranch: explicitBaseBranch,
 							initialPrompt,
+							imagePaths,
 							model,
 							dangerouslySkipPermissions,
 							autoCompact,
@@ -880,6 +883,7 @@ export class ClaudeSessionManager extends Effect.Service<ClaudeSessionManager>()
 						// Build command using the CLI tool registry
 						const commandWithOptions = toolDef.buildCommand({
 							initialPrompt,
+							imagePaths,
 							issueId,
 							model: effectiveModel,
 							dangerouslySkipPermissions,
