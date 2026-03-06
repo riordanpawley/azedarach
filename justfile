@@ -1,20 +1,21 @@
-# List all available commands
+# List available commands
 default:
     @just --list
 
-# Update all flake inputs
-# Switch back one generation
+# ts-opentui build (source)
 build-ts:
     @echo "Building ts-opentui"
-    cd ./ts-opentui && bun run build && cd ..
+    cd ./ts-opentui && bun run build
 
-build-run-ts:
-    @echo "Building & running ts-opentui"
-    cd ./ts-opentui && bun run build && cd .. && bun run ./ts-opentui/bin/az.ts
+# ts-opentui build and run from source
+build-run-ts: build-ts
+    @echo "Running ts-opentui from source"
+    cd ./ts-opentui && bun run bin/az.ts
 
+# ts-opentui build (single-file executable)
 build-sfe-ts:
     @echo "Building ts-opentui single-file executable"
-    cd ./ts-opentui && bun build --compile ./bin/az.ts --outfile ./bin/az
+    cd ./ts-opentui && bun run build-sfe
 
 link-sfe-ts:
     @echo "Linking az into PATH"
@@ -36,9 +37,12 @@ link-sfe-ts:
 install-sfe-ts: build-sfe-ts link-sfe-ts
     @echo "Installed az. Try: az --help"
 
-ts-build-link-run: build-sfe-ts link-sfe-ts
-    @echo "Running az"
+run-sfe-ts: install-sfe-ts
+    @echo "Running freshly built SFE"
     az
+
+# Backward-compatible alias
+ts-build-link-run: run-sfe-ts
 
 release-ts-opentui bump='patch' *args:
     ./ts-opentui/scripts/release.sh {{ bump }} {{ args }}
