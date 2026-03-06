@@ -787,7 +787,7 @@ Attach to the dev server's tmux session to view its output. This is useful for:
 **How it works:**
 1. Switches the tmux client to the dev server session (`az-dev-{beadId}`)
 2. You can see all server output in real-time
-3. Return to Azedarach with `Ctrl-a Ctrl-a` (double-tap tmux prefix)
+3. Return to Azedarach with `Ctrl-a g` (default return-to-board bind)
 
 **Requirements:**
 - A dev server must be running for the bead (start with `Space+r` first)
@@ -1180,14 +1180,16 @@ Azedarach registers global tmux keybindings for session navigation:
 
 | Key | Action | Notes |
 |-----|--------|-------|
-| `Ctrl-a Ctrl-a` | Return to az | Double-tap prefix from any Claude session |
-| `Ctrl-a Tab` | Toggle Claude ↔ Dev Server | Quick switch between related sessions |
+| `Ctrl-a g` | Return to az | Default "go board" bind from any AI session |
+| `Ctrl-a Ctrl-a` | Send prefix | Native tmux behavior (not overridden by Az) |
+| `Ctrl-a Tab` | Toggle Claude ↔ Dev Server | Optional custom bind (not auto-installed) |
+
+Set `AZ_RETURN_KEY` to override the default return key if needed.
 
 **Navigation flow:**
 1. From az: `Space` `a` → attach to Claude session
-2. From Claude: `Ctrl-a Ctrl-a` → return to az TUI (double-tap prefix)
-3. From Claude: `Ctrl-a Tab` → jump to dev server session (same worktree)
-4. From dev server: `Ctrl-a Tab` → jump back to Claude session
+2. From Claude: `Ctrl-a g` → return to az TUI
+3. `Ctrl-a Ctrl-a` remains available as tmux send-prefix
 
 This makes az the central hub for all session navigation.
 

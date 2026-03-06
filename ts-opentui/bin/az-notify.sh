@@ -16,6 +16,8 @@
 # Debug log file (comment out LOG_FILE to disable)
 LOG_FILE="/tmp/az-notify-debug.log"
 WAITING_ALERT_OPTION="@az_waiting_alerted"
+WAITING_WINDOW_BELL_STYLE="fg=colour226,bg=colour237,bold"
+WAITING_WINDOW_ACTIVITY_STYLE="fg=colour220,bg=colour237,bold"
 
 log() {
 	if [ -n "$LOG_FILE" ]; then
@@ -67,6 +69,12 @@ if [ $EXIT_CODE -eq 0 ]; then
 else
 	log "WARN: Could not set status (session may not exist yet). Exit code: $EXIT_CODE"
 fi
+
+# Keep alert styling session-local so waiting states are easy to notice in tmux
+# without forcing a global theme change.
+tmux set-option -t "$SESSION_NAME" monitor-bell on 2>/dev/null || true
+tmux set-option -t "$SESSION_NAME" window-status-bell-style "$WAITING_WINDOW_BELL_STYLE" 2>/dev/null || true
+tmux set-option -t "$SESSION_NAME" window-status-activity-style "$WAITING_WINDOW_ACTIVITY_STYLE" 2>/dev/null || true
 
 if [ "$STATUS" = "waiting" ]; then
 	ALERTED="$(tmux show-option -t "$SESSION_NAME" -v "$WAITING_ALERT_OPTION" 2>/dev/null | tr -d '[:space:]')"

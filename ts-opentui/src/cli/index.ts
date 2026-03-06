@@ -1166,6 +1166,8 @@ type HookEvent = (typeof VALID_HOOK_EVENTS)[number]
 const AZ_STATUS_OPTION = "@az_status"
 const AZ_WAITING_ALERTED_OPTION = "@az_waiting_alerted"
 const BELL_CHAR = "\u0007"
+const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
+const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
 
 interface WaitingAttentionPlan {
 	readonly ringBell: boolean
@@ -1260,8 +1262,33 @@ const ringSessionPaneBell = (sessionName: string) =>
 		)
 	})
 
-const applyTmuxWaitingAttentionSignal = (sessionName: string, status: TmuxStatus, verbose: boolean) =>
+const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
 	Effect.gen(function* () {
+		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
+		// in native tmux pickers without changing the user's global theme.
+		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
+		yield* setTmuxSessionOption(
+			sessionName,
+			"window-status-bell-style",
+			WAITING_WINDOW_BELL_STYLE,
+			verbose,
+		)
+		yield* setTmuxSessionOption(
+			sessionName,
+			"window-status-activity-style",
+			WAITING_WINDOW_ACTIVITY_STYLE,
+			verbose,
+		)
+	})
+
+const applyTmuxWaitingAttentionSignal = (
+	sessionName: string,
+	status: TmuxStatus,
+	verbose: boolean,
+) =>
+	Effect.gen(function* () {
+		yield* applyTmuxAttentionStyles(sessionName, verbose)
+
 		const currentFlag = yield* getTmuxSessionOption(sessionName, AZ_WAITING_ALERTED_OPTION)
 		const plan = deriveWaitingAttentionPlan(status, currentFlag.length > 0 ? currentFlag : null)
 
