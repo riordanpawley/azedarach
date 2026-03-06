@@ -20,12 +20,12 @@ Current managed targets:
 
 ## Why Both `AGENTS.md` and `CLAUDE.md` Exist
 
-We keep both files in `.rulesync/docs/` because different AI runtimes bootstrap from different entrypoint filenames:
+RuleSync can fan out a single source file to multiple targets. In this repo, we currently keep both files in `.rulesync/docs/` by choice:
 
 - `AGENTS.md` is the OpenCode/Codex-facing entrypoint.
 - `CLAUDE.md` is the Claude Code-facing entrypoint.
 
-The core workflow policy is shared, but each file has tool-specific framing and metadata (for example the `<ai_context ... tool=\"...\">` header and tool-oriented guidance). Keeping both in `.rulesync/` gives us one canonical authoring location while still generating the runtime file each tool expects.
+The core workflow policy is shared, but each file has tool-specific framing and metadata (for example the `<ai_context ... tool=\"...\">` header and tool-oriented guidance), and we allow them to evolve independently when needed. If we decide that divergence is no longer useful, `mappings.tsv` can be collapsed to a single shared source.
 
 ## Commands
 

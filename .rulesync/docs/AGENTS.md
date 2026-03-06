@@ -27,7 +27,7 @@ This repository intentionally keeps both files:
 - `AGENTS.md` is the OpenCode/Codex entrypoint.
 - `CLAUDE.md` is the Claude Code entrypoint.
 
-They share the same project policy, but each runtime expects a different bootstrap filename and slightly different framing. Both source files live in `.rulesync/docs/` so updates stay centralized and synced.
+RuleSync can generate both targets from a single source, so this split is a content strategy choice, not a generator limitation. We keep separate source files in `.rulesync/docs/` because framing and metadata can differ by runtime, and we may want independent edits without coupling both entrypoints.
 
 ## Critical Rules (Quick Reference)
 
