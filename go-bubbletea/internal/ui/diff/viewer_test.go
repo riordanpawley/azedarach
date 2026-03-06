@@ -9,10 +9,14 @@ import (
 )
 
 func TestNewDiffViewer(t *testing.T) {
-	viewer := NewDiffViewer("/path/to/worktree")
+	viewer := NewDiffViewer("/path/to/worktree", "main")
 
 	if viewer.worktree != "/path/to/worktree" {
 		t.Errorf("Expected worktree '/path/to/worktree', got '%s'", viewer.worktree)
+	}
+
+	if viewer.baseBranch != "main" {
+		t.Errorf("Expected baseBranch 'main', got '%s'", viewer.baseBranch)
 	}
 
 	if viewer.cursor != 0 {
@@ -29,7 +33,7 @@ func TestNewDiffViewer(t *testing.T) {
 }
 
 func TestDiffViewer_Init(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	cmd := viewer.Init()
 
 	if cmd != nil {
@@ -42,7 +46,7 @@ func TestDiffViewer_Init(t *testing.T) {
 }
 
 func TestDiffViewer_LoadDiffMsg(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.loading = true
 
 	// Simulate successful load
@@ -71,8 +75,43 @@ func TestDiffViewer_LoadDiffMsg(t *testing.T) {
 	}
 }
 
+func TestDiffViewer_LoadDiffMsgReducedMode(t *testing.T) {
+	viewer := NewDiffViewer("/test", "main")
+	viewer.loading = true
+
+	diffOutput := `diff --git a/test.go b/test.go
+--- a/test.go
++++ b/test.go
+@@ -1 +1 @@
+-old
++new
+`
+
+	msg := LoadDiffMsg{
+		Output:            diffOutput,
+		Err:               nil,
+		ReducedMode:       true,
+		ReducedModeNotice: "merge-base diff failed; falling back to plain git diff",
+	}
+	updatedModel, _ := viewer.Update(msg)
+	viewer = updatedModel.(*DiffViewer)
+
+	if !viewer.reducedMode {
+		t.Error("Expected reducedMode to be true")
+	}
+
+	if !strings.Contains(viewer.reducedModeNotice, "falling back") {
+		t.Errorf("Expected reduced mode notice to be set, got %q", viewer.reducedModeNotice)
+	}
+
+	view := viewer.View()
+	if !strings.Contains(view, "Reduced diff mode") {
+		t.Errorf("Expected view to include reduced-mode guidance, got %q", view)
+	}
+}
+
 func TestDiffViewer_Navigation(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 
 	// Populate with test files
 	viewer.files = []DiffFile{
@@ -131,7 +170,7 @@ func TestDiffViewer_Navigation(t *testing.T) {
 }
 
 func TestDiffViewer_JumpToTop(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{Path: "file1.go"},
 		{Path: "file2.go"},
@@ -154,7 +193,7 @@ func TestDiffViewer_JumpToTop(t *testing.T) {
 }
 
 func TestDiffViewer_JumpToBottom(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{Path: "file1.go"},
 		{Path: "file2.go"},
@@ -172,7 +211,7 @@ func TestDiffViewer_JumpToBottom(t *testing.T) {
 }
 
 func TestDiffViewer_ToggleExpand(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{Path: "file1.go", Hunks: []DiffHunk{{Header: "@@ -1,1 +1,2 @@"}}},
 	}
@@ -202,7 +241,7 @@ func TestDiffViewer_ToggleExpand(t *testing.T) {
 }
 
 func TestDiffViewer_ExpandAll(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{Path: "file1.go"},
 		{Path: "file2.go"},
@@ -221,7 +260,7 @@ func TestDiffViewer_ExpandAll(t *testing.T) {
 }
 
 func TestDiffViewer_CollapseAll(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{Path: "file1.go"},
 		{Path: "file2.go"},
@@ -246,7 +285,7 @@ func TestDiffViewer_CollapseAll(t *testing.T) {
 }
 
 func TestDiffViewer_Close(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 
 	tests := []struct {
 		name string
@@ -280,7 +319,7 @@ func TestDiffViewer_Close(t *testing.T) {
 }
 
 func TestDiffViewer_Title(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 
 	// No files
 	title := viewer.Title()
@@ -304,7 +343,7 @@ func TestDiffViewer_Title(t *testing.T) {
 }
 
 func TestDiffViewer_Size(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	width, height := viewer.Size()
 
 	if width != 100 {
@@ -321,7 +360,7 @@ func TestDiffViewer_Size(t *testing.T) {
 }
 
 func TestDiffViewer_ViewLoading(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.loading = true
 
 	view := viewer.View()
@@ -332,7 +371,7 @@ func TestDiffViewer_ViewLoading(t *testing.T) {
 }
 
 func TestDiffViewer_ViewError(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.err = &testError{msg: "test error"}
 
 	view := viewer.View()
@@ -343,7 +382,7 @@ func TestDiffViewer_ViewError(t *testing.T) {
 }
 
 func TestDiffViewer_ViewNoChanges(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{}
 
 	view := viewer.View()
@@ -354,7 +393,7 @@ func TestDiffViewer_ViewNoChanges(t *testing.T) {
 }
 
 func TestDiffViewer_ViewWithFiles(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.files = []DiffFile{
 		{
 			Path:      "test.go",
@@ -396,7 +435,7 @@ func TestDiffViewer_ViewWithFiles(t *testing.T) {
 }
 
 func TestDiffViewer_IgnoreKeysWhileLoading(t *testing.T) {
-	viewer := NewDiffViewer("/test")
+	viewer := NewDiffViewer("/test", "main")
 	viewer.loading = true
 	viewer.cursor = 0
 

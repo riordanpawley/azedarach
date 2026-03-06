@@ -1610,8 +1610,12 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		baseBranch := "main"
+		if m.config != nil && strings.TrimSpace(m.config.Git.BaseBranch) != "" {
+			baseBranch = strings.TrimSpace(m.config.Git.BaseBranch)
+		}
 		// Open diff viewer overlay
-		viewer := diff.NewDiffViewer(session.Worktree)
+		viewer := diff.NewDiffViewer(session.Worktree, baseBranch)
 		cmd := m.overlayStack.Push(viewer)
 		return m, tea.Batch(cmd, viewer.LoadDiff(context.Background(), m.gitClient))
 

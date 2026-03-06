@@ -31,6 +31,13 @@ type MergeResult struct {
 	Message       string
 }
 
+// DiffResult represents diff output and whether reduced fallback mode was used.
+type DiffResult struct {
+	Output         string
+	ReducedMode    bool
+	FallbackReason string
+}
+
 // NewClient creates a new git client.
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	if logger == nil {
@@ -124,28 +131,88 @@ func (c *Client) AbortMerge(ctx context.Context, worktree string) error {
 	return nil
 }
 
-// Diff returns the diff output for the working directory.
-func (c *Client) Diff(ctx context.Context, worktree string) (string, error) {
-	c.logger.Debug("getting diff", "worktree", worktree)
-
-	output, err := c.runner.Run(ctx, "diff")
-	if err != nil {
-		return "", fmt.Errorf("failed to get diff: %w", err)
+// Diff returns the diff output for the worktree.
+// Primary mode compares merge-base(baseBranch, HEAD) to HEAD.
+// If that fails, it falls back to plain git diff and marks reduced mode.
+func (c *Client) Diff(ctx context.Context, worktree, baseBranch string) (*DiffResult, error) {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
 	}
 
-	return output, nil
+	c.logger.Debug("getting diff", "worktree", worktree, "baseBranch", baseBranch)
+
+	mergeBase, err := c.runInWorktree(ctx, worktree, "merge-base", baseBranch, "HEAD")
+	if err == nil {
+		mergeBase = strings.TrimSpace(mergeBase)
+		if mergeBase != "" {
+			output, diffErr := c.runInWorktree(ctx, worktree, "diff", mergeBase, "HEAD")
+			if diffErr == nil {
+				return &DiffResult{Output: output}, nil
+			}
+
+			reason := fmt.Sprintf("merge-base diff failed: %v", diffErr)
+			c.logger.Warn("merge-base diff failed; using reduced mode",
+				"worktree", worktree,
+				"baseBranch", baseBranch,
+				"error", diffErr,
+			)
+			return c.diffFallback(ctx, worktree, reason)
+		}
+
+		reason := "merge-base lookup returned empty output"
+		c.logger.Warn("merge-base lookup returned empty output; using reduced mode",
+			"worktree", worktree,
+			"baseBranch", baseBranch,
+		)
+		return c.diffFallback(ctx, worktree, reason)
+	}
+
+	reason := fmt.Sprintf("merge-base lookup failed: %v", err)
+	c.logger.Warn("merge-base lookup failed; using reduced mode",
+		"worktree", worktree,
+		"baseBranch", baseBranch,
+		"error", err,
+	)
+	return c.diffFallback(ctx, worktree, reason)
 }
 
 // DiffStat returns the diff stat output (summary of changes).
 func (c *Client) DiffStat(ctx context.Context, worktree string) (string, error) {
 	c.logger.Debug("getting diff stat", "worktree", worktree)
 
-	output, err := c.runner.Run(ctx, "diff", "--stat")
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--stat")
 	if err != nil {
 		return "", fmt.Errorf("failed to get diff stat: %w", err)
 	}
 
 	return output, nil
+}
+
+func (c *Client) diffFallback(ctx context.Context, worktree, reason string) (*DiffResult, error) {
+	output, err := c.runInWorktree(ctx, worktree, "diff")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get diff: %s; fallback diff failed: %w", reason, err)
+	}
+
+	return &DiffResult{
+		Output:         output,
+		ReducedMode:    true,
+		FallbackReason: reason,
+	}, nil
+}
+
+func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...string) (string, error) {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return c.runner.Run(ctx, args...)
+	}
+
+	cmdArgs := make([]string, 0, len(args)+2)
+	cmdArgs = append(cmdArgs, "-C", worktree)
+	cmdArgs = append(cmdArgs, args...)
+
+	return c.runner.Run(ctx, cmdArgs...)
 }
 
 // Push pushes the specified branch to the remote repository.

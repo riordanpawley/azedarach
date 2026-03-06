@@ -13,24 +13,28 @@ import (
 
 // DiffViewer displays git diff output with file navigation and syntax highlighting
 type DiffViewer struct {
-	worktree   string
-	diffOutput string
-	files      []DiffFile
-	cursor     int
-	scrollY    int
-	expanded   map[int]bool // Which files are expanded to show hunks
-	styles     *Styles
-	width      int
-	height     int
-	viewHeight int // Available height for content display
-	loading    bool
-	err        error
+	worktree          string
+	baseBranch        string
+	diffOutput        string
+	files             []DiffFile
+	cursor            int
+	scrollY           int
+	expanded          map[int]bool // Which files are expanded to show hunks
+	styles            *Styles
+	width             int
+	height            int
+	viewHeight        int // Available height for content display
+	loading           bool
+	err               error
+	reducedMode       bool
+	reducedModeNotice string
 }
 
 // NewDiffViewer creates a new diff viewer for the specified worktree
-func NewDiffViewer(worktree string) *DiffViewer {
+func NewDiffViewer(worktree, baseBranch string) *DiffViewer {
 	return &DiffViewer{
 		worktree:   worktree,
+		baseBranch: strings.TrimSpace(baseBranch),
 		files:      []DiffFile{},
 		cursor:     0,
 		scrollY:    0,
@@ -45,15 +49,25 @@ func NewDiffViewer(worktree string) *DiffViewer {
 
 // LoadDiffMsg is sent when diff loading completes
 type LoadDiffMsg struct {
-	Output string
-	Err    error
+	Output            string
+	Err               error
+	ReducedMode       bool
+	ReducedModeNotice string
 }
 
 // LoadDiff loads the git diff for the worktree
 func (d *DiffViewer) LoadDiff(ctx context.Context, gitClient *git.Client) tea.Cmd {
 	return func() tea.Msg {
-		output, err := gitClient.Diff(ctx, d.worktree)
-		return LoadDiffMsg{Output: output, Err: err}
+		result, err := gitClient.Diff(ctx, d.worktree, d.baseBranch)
+		if err != nil {
+			return LoadDiffMsg{Err: err}
+		}
+
+		return LoadDiffMsg{
+			Output:            result.Output,
+			ReducedMode:       result.ReducedMode,
+			ReducedModeNotice: result.FallbackReason,
+		}
 	}
 }
 
@@ -70,11 +84,19 @@ func (d *DiffViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.loading = false
 		if msg.Err != nil {
 			d.err = msg.Err
+			d.reducedMode = false
+			d.reducedModeNotice = ""
 			return d, nil
 		}
 
+		d.err = nil
 		d.diffOutput = msg.Output
 		d.files = ParseUnifiedDiff(msg.Output)
+		d.reducedMode = msg.ReducedMode
+		d.reducedModeNotice = strings.TrimSpace(msg.ReducedModeNotice)
+		if d.reducedMode && d.reducedModeNotice == "" {
+			d.reducedModeNotice = "Primary merge-base diff path failed, showing plain git diff output."
+		}
 		return d, nil
 
 	case tea.KeyMsg:
@@ -148,11 +170,23 @@ func (d *DiffViewer) View() string {
 		return d.styles.DeleteLine.Render(fmt.Sprintf("Error loading diff: %v", d.err))
 	}
 
+	reducedModeBanner := ""
+	if d.reducedMode {
+		reducedModeBanner = d.styles.Dimmed.Render(fmt.Sprintf("Reduced diff mode: %s", d.reducedModeNotice))
+	}
+
 	if len(d.files) == 0 {
+		if reducedModeBanner != "" {
+			return reducedModeBanner + "\n\n" + d.styles.Dimmed.Render("No changes to display")
+		}
 		return d.styles.Dimmed.Render("No changes to display")
 	}
 
 	var content strings.Builder
+	if reducedModeBanner != "" {
+		content.WriteString(reducedModeBanner)
+		content.WriteString("\n\n")
+	}
 
 	// Render files with proper scrolling
 	visibleLines := d.renderFiles()

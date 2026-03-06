@@ -68,7 +68,7 @@ A  added.txt
 			},
 		},
 		{
-			name:      "untracked files only",
+			name: "untracked files only",
 			gitOutput: `?? file1.txt
 ?? file2.txt`,
 			expectedStatus: &GitStatus{
@@ -315,7 +315,7 @@ func TestCheckout(t *testing.T) {
 	}
 }
 
-func TestDiff(t *testing.T) {
+func TestDiffUsesMergeBaseAndWorktreeContext(t *testing.T) {
 	expectedDiff := `diff --git a/file.txt b/file.txt
 index 1234567..abcdefg 100644
 --- a/file.txt
@@ -324,9 +324,16 @@ index 1234567..abcdefg 100644
 -old content
 +new content`
 
+	var commands [][]string
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 1 && args[0] == "diff" {
+			cmdCopy := append([]string(nil), args...)
+			commands = append(commands, cmdCopy)
+
+			if len(args) == 5 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "merge-base" && args[3] == "main" && args[4] == "HEAD" {
+				return "abc123", nil
+			}
+			if len(args) == 5 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "diff" && args[3] == "abc123" && args[4] == "HEAD" {
 				return expectedDiff, nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
@@ -334,23 +341,122 @@ index 1234567..abcdefg 100644
 	}
 
 	client := NewClient(runner, slog.Default())
-	diff, err := client.Diff(context.Background(), "/fake/worktree")
+	result, err := client.Diff(context.Background(), "/fake/worktree", "main")
 
 	if err != nil {
 		t.Fatalf("Diff() error = %v", err)
 	}
 
-	if diff != expectedDiff {
-		t.Errorf("Diff() = %v, want %v", diff, expectedDiff)
+	if result.Output != expectedDiff {
+		t.Errorf("Diff().Output = %v, want %v", result.Output, expectedDiff)
+	}
+
+	if result.ReducedMode {
+		t.Error("Diff() should not use reduced mode when merge-base diff succeeds")
+	}
+
+	if len(commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(commands))
 	}
 }
 
-func TestDiffStat(t *testing.T) {
+func TestDiffFallsBackToReducedModeWhenMergeBaseFails(t *testing.T) {
+	fallbackDiff := `diff --git a/file.txt b/file.txt
+index 1111111..2222222 100644
+--- a/file.txt
++++ b/file.txt
+@@ -1 +1 @@
+-old
++new`
+
+	var commands [][]string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			cmdCopy := append([]string(nil), args...)
+			commands = append(commands, cmdCopy)
+
+			if len(args) == 5 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "merge-base" && args[3] == "main" && args[4] == "HEAD" {
+				return "", fmt.Errorf("fatal: unknown revision")
+			}
+			if len(args) == 3 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "diff" {
+				return fallbackDiff, nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.Diff(context.Background(), "/fake/worktree", "main")
+
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+
+	if result.Output != fallbackDiff {
+		t.Errorf("Diff().Output = %v, want %v", result.Output, fallbackDiff)
+	}
+
+	if !result.ReducedMode {
+		t.Error("Diff() should use reduced mode when merge-base lookup fails")
+	}
+
+	if !strings.Contains(result.FallbackReason, "merge-base") {
+		t.Errorf("expected fallback reason to mention merge-base, got %q", result.FallbackReason)
+	}
+
+	if len(commands) != 2 {
+		t.Fatalf("expected 2 commands, got %d", len(commands))
+	}
+}
+
+func TestDiffFallsBackToReducedModeWhenPrimaryDiffFails(t *testing.T) {
+	fallbackDiff := "plain diff output"
+
+	var commands [][]string
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			cmdCopy := append([]string(nil), args...)
+			commands = append(commands, cmdCopy)
+
+			if len(args) == 5 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "merge-base" && args[3] == "main" && args[4] == "HEAD" {
+				return "abc123", nil
+			}
+			if len(args) == 5 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "diff" && args[3] == "abc123" && args[4] == "HEAD" {
+				return "", fmt.Errorf("fatal: bad object")
+			}
+			if len(args) == 3 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "diff" {
+				return fallbackDiff, nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	result, err := client.Diff(context.Background(), "/fake/worktree", "main")
+
+	if err != nil {
+		t.Fatalf("Diff() error = %v", err)
+	}
+
+	if result.Output != fallbackDiff {
+		t.Errorf("Diff().Output = %v, want %v", result.Output, fallbackDiff)
+	}
+
+	if !result.ReducedMode {
+		t.Error("Diff() should use reduced mode when merge-base diff fails")
+	}
+
+	if len(commands) != 3 {
+		t.Fatalf("expected 3 commands, got %d", len(commands))
+	}
+}
+
+func TestDiffStatUsesWorktreeContext(t *testing.T) {
 	expectedStat := " file.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
 
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
-			if len(args) >= 2 && args[0] == "diff" && args[1] == "--stat" {
+			if len(args) == 4 && args[0] == "-C" && args[1] == "/fake/worktree" && args[2] == "diff" && args[3] == "--stat" {
 				return expectedStat, nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
