@@ -2,11 +2,15 @@ package worktree
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 // mockTmuxClient is a mock implementation of the tmux client
@@ -44,6 +48,57 @@ func (m *mockTmuxClient) CapturePane(ctx context.Context, name string, lines int
 
 // mockGitClient is a mock implementation of the git client (placeholder)
 type mockGitClient struct{}
+
+type branchOriginGitRunner struct {
+	commands []string
+}
+
+func (r *branchOriginGitRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, strings.Join(args, " "))
+	if len(args) >= 2 && args[0] == "worktree" && args[1] == "list" {
+		return "", nil
+	}
+	return "", nil
+}
+
+func (r *branchOriginGitRunner) hasCommand(fragment string) bool {
+	for _, cmd := range r.commands {
+		if strings.Contains(cmd, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+type branchOriginTmuxRunner struct {
+	commands []string
+}
+
+func (r *branchOriginTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.commands = append(r.commands, strings.Join(args, " "))
+	return "", nil
+}
+
+func newBranchOriginService(t *testing.T, baseBranch string) (*WorktreeSessionService, *branchOriginGitRunner, *branchOriginTmuxRunner) {
+	t.Helper()
+
+	cfg := config.DefaultConfig()
+	cfg.Git.BaseBranch = baseBranch
+
+	gitRunner := &branchOriginGitRunner{}
+	tmuxRunner := &branchOriginTmuxRunner{}
+
+	service := NewWorktreeSessionService(
+		tmux.NewClient(tmuxRunner, slog.Default()),
+		nil,
+		git.NewWorktreeManager(gitRunner, "/home/user/test-repo", slog.Default()),
+		"/home/user/test-repo",
+		cfg,
+		slog.Default(),
+	)
+
+	return service, gitRunner, tmuxRunner
+}
 
 // mockWorktreeManager is a mock implementation of the worktree manager
 type mockWorktreeManager struct {
@@ -256,5 +311,120 @@ func TestBuildClaudeCommand(t *testing.T) {
 				t.Errorf("buildClaudeCommand() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestBuildBranchOriginChooser_IncludesBaseAndUpstreamOptions(t *testing.T) {
+	service, _, _ := newBranchOriginService(t, "main")
+
+	chooser := service.BuildBranchOriginChooser(
+		"AZE-110",
+		[]git.UpstreamBranchSource{{IssueID: "AZE-21", Branch: "az/AZE-21"}},
+		false,
+	)
+
+	if chooser.IssueID != "AZE-110" {
+		t.Fatalf("expected chooser issue AZE-110, got %q", chooser.IssueID)
+	}
+	if chooser.TargetBranch != "az/AZE-110" {
+		t.Fatalf("expected target branch az/AZE-110, got %q", chooser.TargetBranch)
+	}
+	if len(chooser.Options) != 2 {
+		t.Fatalf("expected 2 chooser options, got %d", len(chooser.Options))
+	}
+	if chooser.UpstreamUnavailableReason != "" {
+		t.Fatalf("expected no unavailable reason when upstream exists, got %q", chooser.UpstreamUnavailableReason)
+	}
+}
+
+func TestCreateWithBranchOrigin_RequiresExplicitSourceWhenMultipleUpstreams(t *testing.T) {
+	service, gitRunner, _ := newBranchOriginService(t, "main")
+
+	_, err := service.CreateWithBranchOrigin(
+		context.Background(),
+		"AZE-110",
+		[]git.UpstreamBranchSource{
+			{IssueID: "AZE-21", Branch: "az/AZE-21"},
+			{IssueID: "AZE-22", Branch: "az/AZE-22"},
+		},
+		git.BranchOriginSelection{Kind: git.BranchOriginUpstream},
+		false,
+	)
+	if err == nil {
+		t.Fatal("expected explicit source selection error, got nil")
+	}
+	if !strings.Contains(err.Error(), "explicit source selection required") {
+		t.Fatalf("expected explicit source error, got %v", err)
+	}
+	if gitRunner.hasCommand("worktree add -b") {
+		t.Fatalf("expected no worktree add command on invalid selection, commands=%v", gitRunner.commands)
+	}
+}
+
+func TestCreateWithBranchOrigin_UsesSelectedUpstreamAndCapturesMetadata(t *testing.T) {
+	service, gitRunner, _ := newBranchOriginService(t, "main")
+
+	session, err := service.CreateWithBranchOrigin(
+		context.Background(),
+		"AZE-110",
+		[]git.UpstreamBranchSource{
+			{IssueID: "AZE-21", Branch: "az/AZE-21"},
+			{IssueID: "AZE-22", Branch: "az/AZE-22"},
+		},
+		git.BranchOriginSelection{Kind: git.BranchOriginUpstream, SourceIssueID: "AZE-22"},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("expected successful create with upstream origin, got %v", err)
+	}
+	if session.BranchOriginKind != git.BranchOriginUpstream {
+		t.Fatalf("expected branch origin kind upstream, got %q", session.BranchOriginKind)
+	}
+	if session.BranchOriginIssueID != "AZE-22" {
+		t.Fatalf("expected branch origin issue AZE-22, got %q", session.BranchOriginIssueID)
+	}
+	if session.BranchOriginBranch != "az/AZE-22" {
+		t.Fatalf("expected branch origin branch az/AZE-22, got %q", session.BranchOriginBranch)
+	}
+	if session.BranchRecreated {
+		t.Fatal("expected non-recreate create flow")
+	}
+	if !gitRunner.hasCommand("worktree add -b az/AZE-110 /home/user/test-repo-AZE-110 az/AZE-22") {
+		t.Fatalf("expected worktree add command with selected upstream origin, commands=%v", gitRunner.commands)
+	}
+}
+
+func TestCreateWithBranchOrigin_RecreateFlowKeepsChooserContract(t *testing.T) {
+	service, gitRunner, _ := newBranchOriginService(t, "develop")
+
+	chooser := service.BuildBranchOriginChooser("AZE-111", nil, true)
+	if !chooser.Recreate {
+		t.Fatal("expected recreate chooser flag")
+	}
+	if chooser.UpstreamUnavailableReason == "" {
+		t.Fatal("expected fallback reason when no upstream sources are available")
+	}
+
+	session, err := service.CreateWithBranchOrigin(
+		context.Background(),
+		"AZE-111",
+		nil,
+		git.BranchOriginSelection{Kind: git.BranchOriginBase},
+		true,
+	)
+	if err != nil {
+		t.Fatalf("expected recreate path create to succeed, got %v", err)
+	}
+	if !session.BranchRecreated {
+		t.Fatal("expected recreated branch metadata flag")
+	}
+	if session.BranchOriginKind != git.BranchOriginBase {
+		t.Fatalf("expected base origin kind, got %q", session.BranchOriginKind)
+	}
+	if session.BranchOriginBranch != "develop" {
+		t.Fatalf("expected base origin branch develop, got %q", session.BranchOriginBranch)
+	}
+	if !gitRunner.hasCommand("worktree add -b az/AZE-111 /home/user/test-repo-AZE-111 develop") {
+		t.Fatalf("expected recreate command from configured base branch, commands=%v", gitRunner.commands)
 	}
 }

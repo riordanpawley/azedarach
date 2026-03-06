@@ -583,3 +583,86 @@ branch refs/heads/az/issue-456
 		_ = manager.parseWorktreeList(output)
 	}
 }
+
+func TestWorktreeManager_BuildBranchOriginChooser_IncludesBaseAndEligibleUpstreams(t *testing.T) {
+	manager := NewWorktreeManager(NewMockRunner(), "/home/user/test-repo", slog.Default())
+
+	chooser := manager.BuildBranchOriginChooser(
+		"AZE-110",
+		"main",
+		[]UpstreamBranchSource{
+			{IssueID: "AZE-21", Branch: "az/AZE-21"},
+		},
+		false,
+	)
+
+	require.Equal(t, "AZE-110", chooser.IssueID)
+	require.Equal(t, "az/AZE-110", chooser.TargetBranch)
+	require.Len(t, chooser.Options, 2)
+	require.Empty(t, chooser.UpstreamUnavailableReason)
+
+	baseCount := 0
+	upstreamCount := 0
+	for _, option := range chooser.Options {
+		switch option.Kind {
+		case BranchOriginBase:
+			baseCount++
+			assert.Equal(t, "main", option.Branch)
+		case BranchOriginUpstream:
+			upstreamCount++
+			assert.Equal(t, "AZE-21", option.SourceIssueID)
+			assert.Equal(t, "az/AZE-21", option.Branch)
+		}
+	}
+
+	assert.Equal(t, 1, baseCount)
+	assert.Equal(t, 1, upstreamCount)
+}
+
+func TestWorktreeManager_BuildBranchOriginChooser_MultipleUpstreamsRequireExplicitSource(t *testing.T) {
+	manager := NewWorktreeManager(NewMockRunner(), "/home/user/test-repo", slog.Default())
+	chooser := manager.BuildBranchOriginChooser(
+		"AZE-110",
+		"main",
+		[]UpstreamBranchSource{
+			{IssueID: "AZE-21", Branch: "az/AZE-21"},
+			{IssueID: "AZE-22", Branch: "az/AZE-22"},
+		},
+		false,
+	)
+
+	_, err := chooser.Resolve(BranchOriginSelection{Kind: BranchOriginUpstream})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "explicit source selection required")
+
+	branch, err := chooser.Resolve(BranchOriginSelection{Kind: BranchOriginUpstream, SourceIssueID: "AZE-22"})
+	require.NoError(t, err)
+	assert.Equal(t, "az/AZE-22", branch)
+}
+
+func TestWorktreeManager_BuildBranchOriginChooser_NoUpstreamIncludesFallbackReason(t *testing.T) {
+	manager := NewWorktreeManager(NewMockRunner(), "/home/user/test-repo", slog.Default())
+	chooser := manager.BuildBranchOriginChooser("AZE-110", "develop", nil, false)
+
+	require.Len(t, chooser.Options, 1)
+	assert.Equal(t, BranchOriginBase, chooser.Options[0].Kind)
+	assert.Equal(t, "develop", chooser.Options[0].Branch)
+	assert.NotEmpty(t, chooser.UpstreamUnavailableReason)
+
+	branch, err := chooser.Resolve(BranchOriginSelection{Kind: BranchOriginBase})
+	require.NoError(t, err)
+	assert.Equal(t, "develop", branch)
+}
+
+func TestWorktreeManager_BuildBranchOriginChooser_RecreateFlowStillRequiresChooser(t *testing.T) {
+	manager := NewWorktreeManager(NewMockRunner(), "/home/user/test-repo", slog.Default())
+	chooser := manager.BuildBranchOriginChooser(
+		"AZE-110",
+		"main",
+		[]UpstreamBranchSource{{IssueID: "AZE-21", Branch: "az/AZE-21"}},
+		true,
+	)
+
+	assert.True(t, chooser.Recreate)
+	assert.Len(t, chooser.Options, 2)
+}

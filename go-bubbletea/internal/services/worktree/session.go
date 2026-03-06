@@ -33,6 +33,11 @@ type WorktreeSession struct {
 	Branch       string
 	Status       SessionStatus
 	CreatedAt    time.Time
+	// Branch provisioning metadata for deterministic runtime origin auditability.
+	BranchOriginKind    git.BranchOriginKind
+	BranchOriginBranch  string
+	BranchOriginIssueID string
+	BranchRecreated     bool
 }
 
 // WorktreeSessionService manages Claude sessions in git worktrees
@@ -121,6 +126,48 @@ func (s *WorktreeSessionService) Create(ctx context.Context, issueID, branch str
 	s.sessions[issueID] = session
 
 	s.logger.Info("worktree session created successfully", "issueID", issueID)
+
+	return session, nil
+}
+
+// BuildBranchOriginChooser returns runtime branch-origin options for create/recreate events.
+func (s *WorktreeSessionService) BuildBranchOriginChooser(issueID string, upstreamSources []git.UpstreamBranchSource, recreate bool) git.BranchOriginChooser {
+	baseBranch := "main"
+	if s.config != nil && s.config.Git.BaseBranch != "" {
+		baseBranch = s.config.Git.BaseBranch
+	}
+	return s.worktree.BuildBranchOriginChooser(issueID, baseBranch, upstreamSources, recreate)
+}
+
+// CreateWithBranchOrigin resolves runtime branch-origin selection and creates a session deterministically.
+func (s *WorktreeSessionService) CreateWithBranchOrigin(
+	ctx context.Context,
+	issueID string,
+	upstreamSources []git.UpstreamBranchSource,
+	selection git.BranchOriginSelection,
+	recreate bool,
+) (*WorktreeSession, error) {
+	chooser := s.BuildBranchOriginChooser(issueID, upstreamSources, recreate)
+	originBranch, err := chooser.Resolve(selection)
+	if err != nil {
+		return nil, err
+	}
+
+	session, err := s.Create(ctx, issueID, originBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	// Capture deterministic branch-origin metadata for branch create/recreate events.
+	s.mu.Lock()
+	if tracked, exists := s.sessions[issueID]; exists {
+		tracked.BranchOriginKind = selection.Kind
+		tracked.BranchOriginBranch = originBranch
+		tracked.BranchOriginIssueID = selection.SourceIssueID
+		tracked.BranchRecreated = recreate
+		session = tracked
+	}
+	s.mu.Unlock()
 
 	return session, nil
 }

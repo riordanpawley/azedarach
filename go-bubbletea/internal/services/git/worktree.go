@@ -22,6 +22,85 @@ type Worktree struct {
 	IssueID string // Associated issue ID
 }
 
+// BranchOriginKind represents the source used to create a missing issue branch.
+type BranchOriginKind string
+
+const (
+	BranchOriginBase     BranchOriginKind = "base"
+	BranchOriginUpstream BranchOriginKind = "upstream"
+)
+
+// UpstreamBranchSource represents an eligible upstream-related issue branch.
+type UpstreamBranchSource struct {
+	IssueID string
+	Branch  string
+}
+
+// BranchOriginOption is one selectable runtime origin candidate.
+type BranchOriginOption struct {
+	Kind          BranchOriginKind
+	Branch        string
+	SourceIssueID string
+	Label         string
+}
+
+// BranchOriginSelection captures the explicit user choice for branch origin.
+type BranchOriginSelection struct {
+	Kind          BranchOriginKind
+	SourceIssueID string
+}
+
+// BranchOriginChooser describes runtime branch-origin options for create/recreate flows.
+type BranchOriginChooser struct {
+	IssueID                           string
+	TargetBranch                      string
+	BaseBranch                        string
+	Recreate                          bool
+	Options                           []BranchOriginOption
+	UpstreamUnavailableReason         string
+	RequiresExplicitUpstreamSelection bool
+}
+
+func (c BranchOriginChooser) upstreamOptions() []BranchOriginOption {
+	opts := make([]BranchOriginOption, 0, len(c.Options))
+	for _, option := range c.Options {
+		if option.Kind == BranchOriginUpstream {
+			opts = append(opts, option)
+		}
+	}
+	return opts
+}
+
+// Resolve returns the chosen source branch from a runtime origin selection.
+func (c BranchOriginChooser) Resolve(selection BranchOriginSelection) (string, error) {
+	switch selection.Kind {
+	case BranchOriginBase:
+		if strings.TrimSpace(c.BaseBranch) == "" {
+			return "", fmt.Errorf("base branch is empty")
+		}
+		return c.BaseBranch, nil
+	case BranchOriginUpstream:
+		upstream := c.upstreamOptions()
+		if len(upstream) == 0 {
+			return "", fmt.Errorf("no eligible upstream source branches available")
+		}
+		if len(upstream) > 1 && strings.TrimSpace(selection.SourceIssueID) == "" {
+			return "", fmt.Errorf("explicit source selection required when multiple upstream sources are available")
+		}
+		if strings.TrimSpace(selection.SourceIssueID) == "" {
+			return upstream[0].Branch, nil
+		}
+		for _, option := range upstream {
+			if option.SourceIssueID == selection.SourceIssueID {
+				return option.Branch, nil
+			}
+		}
+		return "", fmt.Errorf("upstream source issue %s is not eligible", selection.SourceIssueID)
+	default:
+		return "", fmt.Errorf("invalid branch origin kind: %q", selection.Kind)
+	}
+}
+
 // NewWorktreeManager creates a new WorktreeManager.
 func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logger) *WorktreeManager {
 	if logger == nil {
@@ -32,6 +111,51 @@ func NewWorktreeManager(runner CommandRunner, repoDir string, logger *slog.Logge
 		logger:  logger,
 		repoDir: repoDir,
 	}
+}
+
+// BuildBranchOriginChooser builds runtime branch-origin options for missing/recreated issue branches.
+func (w *WorktreeManager) BuildBranchOriginChooser(issueID string, baseBranch string, upstreamSources []UpstreamBranchSource, recreate bool) BranchOriginChooser {
+	baseBranch = strings.TrimSpace(baseBranch)
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	chooser := BranchOriginChooser{
+		IssueID:      issueID,
+		TargetBranch: fmt.Sprintf("az/%s", issueID),
+		BaseBranch:   baseBranch,
+		Recreate:     recreate,
+		Options: []BranchOriginOption{
+			{
+				Kind:   BranchOriginBase,
+				Branch: baseBranch,
+				Label:  fmt.Sprintf("Configured base branch (%s)", baseBranch),
+			},
+		},
+	}
+
+	for _, source := range upstreamSources {
+		sourceIssueID := strings.TrimSpace(source.IssueID)
+		sourceBranch := strings.TrimSpace(source.Branch)
+		if sourceIssueID == "" || sourceBranch == "" {
+			continue
+		}
+
+		chooser.Options = append(chooser.Options, BranchOriginOption{
+			Kind:          BranchOriginUpstream,
+			Branch:        sourceBranch,
+			SourceIssueID: sourceIssueID,
+			Label:         fmt.Sprintf("Upstream issue %s (%s)", sourceIssueID, sourceBranch),
+		})
+	}
+
+	upstreamOptions := chooser.upstreamOptions()
+	chooser.RequiresExplicitUpstreamSelection = len(upstreamOptions) > 1
+	if len(upstreamOptions) == 0 {
+		chooser.UpstreamUnavailableReason = "no eligible upstream issue branches available; create from configured base branch"
+	}
+
+	return chooser
 }
 
 // Create creates a new worktree for the given issue ID.
