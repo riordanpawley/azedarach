@@ -406,6 +406,16 @@ const schemaStatements: readonly string[] = [
 
 const nowIso = (): string => new Date().toISOString()
 const LINEAR_KEY_LIKE_ISSUE_ID_PATTERN = /^[A-Z][A-Z0-9_]*-\d+$/
+const LINEAR_LEGACY_DUPLICATE_CLEANUP_META_KEY = "maintenance:linear_duplicate_cleanup_v1"
+const LINEAR_LEGACY_DUPLICATE_CLEANUP_FORCE_ENV = "AZEDARACH_LINEAR_DUPLICATE_CLEANUP_FORCE"
+
+const isTruthyEnvFlag = (value: string | undefined): boolean => {
+	if (value === undefined) {
+		return false
+	}
+	const normalized = value.trim().toLowerCase()
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on"
+}
 
 const looksLikeLinearIssueKey = (value: string): boolean =>
 	LINEAR_KEY_LIKE_ISSUE_ID_PATTERN.test(value.trim())
@@ -417,6 +427,9 @@ const firstSetValue = <A>(set: ReadonlySet<A> | undefined): A | undefined => {
 	const iterator = set.values().next()
 	return iterator.done ? undefined : iterator.value
 }
+
+const shouldRunLegacyLinearDuplicateCleanup = (value: string | undefined): boolean =>
+	isTruthyEnvFlag(value)
 
 const selectCanonicalSnapshotLocalId = (params: {
 	readonly snapshot: ExternalIssueSnapshot
@@ -3454,6 +3467,18 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
+									const shouldAttemptLegacyDuplicateCleanup =
+										target === "linear" &&
+										(shouldRunLegacyLinearDuplicateCleanup(
+											process.env[LINEAR_LEGACY_DUPLICATE_CLEANUP_FORCE_ENV],
+										) ||
+											(yield* sql<MetaRow>`
+												SELECT value
+												FROM meta
+												WHERE key = ${LINEAR_LEGACY_DUPLICATE_CLEANUP_META_KEY}
+												LIMIT 1
+											`.pipe(Effect.map((rows) => rows[0]?.value !== "1"))))
+
 									const activeIssueRows = yield* sql<{
 										readonly id: string
 										readonly created_at: string
@@ -3838,24 +3863,33 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										}
 									}
 
-									const mergedDuplicateIssueIds = new Set<string>()
-									for (const [
-										canonicalIssueId,
-										duplicateIssueIds,
-									] of duplicateIdsByCanonicalId.entries()) {
-										for (const duplicateIssueId of duplicateIssueIds) {
-											if (duplicateIssueId === canonicalIssueId) {
-												continue
+									if (shouldAttemptLegacyDuplicateCleanup) {
+										const mergedDuplicateIssueIds = new Set<string>()
+										for (const [
+											canonicalIssueId,
+											duplicateIssueIds,
+										] of duplicateIdsByCanonicalId.entries()) {
+											for (const duplicateIssueId of duplicateIssueIds) {
+												if (duplicateIssueId === canonicalIssueId) {
+													continue
+												}
+												if (mergedDuplicateIssueIds.has(duplicateIssueId)) {
+													continue
+												}
+												yield* mergeDuplicateIssueIntoCanonical({
+													canonicalIssueId,
+													duplicateIssueId,
+												})
+												mergedDuplicateIssueIds.add(duplicateIssueId)
 											}
-											if (mergedDuplicateIssueIds.has(duplicateIssueId)) {
-												continue
-											}
-											yield* mergeDuplicateIssueIntoCanonical({
-												canonicalIssueId,
-												duplicateIssueId,
-											})
-											mergedDuplicateIssueIds.add(duplicateIssueId)
 										}
+
+										yield* sql`
+											INSERT INTO meta (key, value)
+											VALUES (${LINEAR_LEGACY_DUPLICATE_CLEANUP_META_KEY}, ${"1"})
+											ON CONFLICT(key)
+											DO UPDATE SET value = ${"1"}
+										`
 									}
 
 									return snapshots.length
