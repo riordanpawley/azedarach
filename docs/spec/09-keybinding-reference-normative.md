@@ -55,6 +55,7 @@ This section is a full normative keybinding contract.
 | `g l` | >=1 column | focus = last column |
 | `g w` | visible cards | labels shown, then jump by input |
 | `g p` | multiple projects configured | project selector opened |
+| `g s` | board visible | opens Spec workspace |
 | `Esc` or `q` | goto mode active | return NOR |
 
 ## 9.5 Select Mode Keys
@@ -299,3 +300,11 @@ This section is a full normative keybinding contract.
 - Key assignments in this section are part of the product contract.
 - Changes require explicit versioned migration documentation.
 - If a key is deprecated, provide alias period and visible notice.
+
+## 9.23 Spec Workspace Keys
+
+| Key | Preconditions | Postconditions |
+|---|---|---|
+| `Tab` | spec workspace active | subview cycles Requirements -> Coverage -> Publish -> Requirements |
+| `Esc` | spec workspace active | return to prior board context |
+| `q` | spec workspace active | alias of `Esc` where enabled |

@@ -690,3 +690,35 @@ On failure, logs SHOULD capture:
 - Required behavior:
   - annotate snapshot artifacts with terminal profile metadata.
   - fail with clear profile mismatch diagnostics before comparing baselines.
+
+## 5.30 Spec Publish and Workspace Edge Cases
+
+### Case F-210: Auto-config publish mutation burst causes redundant publish storms
+
+- Required behavior:
+  - coalesce rapid mutation bursts with debounce policy into deterministic publish runs.
+  - preserve per-mutation traceability without requiring one publish invocation per mutation.
+
+### Case F-211: Publish target document missing or renamed remotely
+
+- Required behavior:
+  - fail affected target with actionable remediation guidance (rebind target or recreate expected document).
+  - continue processing remaining configured targets where possible.
+
+### Case F-212: Manual edits inside managed markers conflict with generated content
+
+- Required behavior:
+  - treat managed-marker regions as generated ownership zones and overwrite deterministically.
+  - preserve non-managed regions unchanged.
+
+### Case F-213: Partial publish failure across multi-document output set
+
+- Required behavior:
+  - report per-document success/failure outcomes with requirement/link coverage counts.
+  - keep local spec records unchanged and recoverable for retry.
+
+### Case F-214: Spec workspace exit during pending background publish
+
+- Required behavior:
+  - allow user to exit Spec workspace without losing board context or corrupting publish state.
+  - surface publish completion/failure status through durable status surfaces after exit.
