@@ -8,6 +8,7 @@ import {
 	getSyncTargetForBackend,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
+	resolveSyncProjectPathValue,
 	shouldUseLinearReadFallback,
 	type Issue,
 	withIssueDbTiming,
@@ -203,6 +204,37 @@ describe("shouldUseLinearReadFallback", () => {
 				syncPulledCount: 3,
 			}),
 		).toBe(false)
+	})
+})
+
+describe("resolveSyncProjectPathValue", () => {
+	it("returns the selected project path when present", () => {
+		expect(
+			resolveSyncProjectPathValue({
+				selectedPath: "  /tmp/project-a  ",
+				fallbackProjectPath: "/tmp/fallback",
+			}),
+		).toBe("/tmp/project-a")
+	})
+
+	it("falls back when selected project path is empty", () => {
+		expect(
+			resolveSyncProjectPathValue({
+				selectedPath: "   ",
+				fallbackProjectPath: "/tmp/fallback",
+			}),
+		).toBe("/tmp/fallback")
+	})
+
+	it("captures a stable path value before later context changes", () => {
+		let currentPath = "/tmp/project-a"
+		const captured = resolveSyncProjectPathValue({
+			selectedPath: currentPath,
+			fallbackProjectPath: "/tmp/fallback",
+		})
+		currentPath = "/tmp/project-b"
+		expect(currentPath).toBe("/tmp/project-b")
+		expect(captured).toBe("/tmp/project-a")
 	})
 })
 
