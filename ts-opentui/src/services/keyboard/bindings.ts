@@ -332,9 +332,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "r",
 		mode: "normal",
 		description: "Refresh git stats",
-		action: Effect.all([bc.board.refreshGitStats(), bc.gitSync.fetchAndCheck()], {
-			concurrency: "unbounded",
-		}).pipe(Effect.asVoid),
+		action: bc.gitSync.fetchAndCheck().pipe(Effect.zipRight(bc.board.refreshGitStats())),
 	},
 	{
 		key: "S-r",

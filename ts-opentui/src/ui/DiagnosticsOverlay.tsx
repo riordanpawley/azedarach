@@ -14,6 +14,8 @@ import type {
 } from "../services/DiagnosticsService.js"
 import type { LinearWebhookMode } from "../services/LinearWebhookService.js"
 import { diagnosticsAtom, diagnosticsScrollAtom } from "./atoms.js"
+import { computeDiagnosticsOverlayLayout } from "./diagnosticsOverlayLayout.js"
+import { shouldApplyDiagnosticsScrollCommand } from "./diagnosticsOverlayScroll.js"
 import { sanitizeDiagnosticInlineText, sanitizeDiagnosticTextLines } from "./diagnosticsText.js"
 import { theme } from "./theme.js"
 
@@ -341,12 +343,17 @@ export const DiagnosticsOverlay = () => {
 	const diagnosticsResult = useAtomValue(diagnosticsAtom)
 	const scrollCommandResult = useAtomValue(diagnosticsScrollAtom)
 	const scrollboxRef = useRef<ScrollBoxRenderable>(null)
-	const initializedScrollHandlingRef = useRef(false)
+	const openedAtMsRef = useRef(Date.now())
+	const lastHandledScrollTimestampRef = useRef<number | null>(null)
 	const terminalRows = process.stdout.rows || 24
 	const terminalColumns = process.stdout.columns || 80
-	const panelWidth = Math.max(1, terminalColumns - 2)
-	const panelHeight = Math.max(1, terminalRows - 2)
-	const dividerLength = Math.max(1, panelWidth - 4)
+	const layout = useMemo(
+		() => computeDiagnosticsOverlayLayout(terminalRows, terminalColumns),
+		[terminalRows, terminalColumns],
+	)
+	const panelWidth = layout.panelWidth
+	const panelHeight = layout.panelHeight
+	const dividerLength = layout.dividerLength
 	const dividerLine = "━".repeat(dividerLength)
 
 	// Handle loading/error states - extract fibers, services, and events with defaults
@@ -368,19 +375,28 @@ export const DiagnosticsOverlay = () => {
 		return null
 	}, [scrollCommandResult])
 	useEffect(() => {
-		// Ignore any stale command already present in SubscriptionRef when
-		// the overlay mounts; only process commands emitted after mount.
-		if (!initializedScrollHandlingRef.current) {
-			initializedScrollHandlingRef.current = true
+		if (!scrollboxRef.current) return
+		if (
+			!shouldApplyDiagnosticsScrollCommand(
+				scrollCommand,
+				openedAtMsRef.current,
+				lastHandledScrollTimestampRef.current,
+			)
+		) {
 			return
 		}
-		if (!scrollboxRef.current || !scrollCommand || scrollCommand.target !== "diagnostics") return
+		lastHandledScrollTimestampRef.current = scrollCommand.timestamp
 		if (scrollCommand.type === "line") {
 			scrollboxRef.current.scrollBy(scrollCommand.amount, "step")
 			return
 		}
 		scrollboxRef.current.scrollBy(scrollCommand.amount * 0.5, "viewport")
 	}, [scrollCommand])
+
+	useEffect(() => {
+		if (!scrollboxRef.current) return
+		scrollboxRef.current.scrollTo({ x: 0, y: 0 })
+	}, [])
 
 	const handleMouseScroll = (event: MouseEvent) => {
 		const scroll = event.scroll
@@ -432,8 +448,10 @@ export const DiagnosticsOverlay = () => {
 					ref={scrollboxRef}
 					scrollY={true}
 					flexDirection="column"
-					flexGrow={1}
+					height={layout.scrollViewportHeight}
 					width="100%"
+					stickyScroll={false}
+					viewportCulling={false}
 					onMouseScroll={handleMouseScroll}
 				>
 					<text> </text>

@@ -51,7 +51,7 @@ The status bar MUST show active mode abbreviation.
 | `g` | enter goto mode | `GTO` |
 | `v` | enter select mode | `SEL` |
 | `Tab` | toggle view | Kanban <-> Compact |
-| `r` | refresh git/task stats | update metadata |
+| `r` | refresh git stats | update git metadata |
 | `p` | open planning | planning overlay |
 | `c` | create manual | editor or creation flow |
 | `C` | create via AI | prompt overlay/session |
