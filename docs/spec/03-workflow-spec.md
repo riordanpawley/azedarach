@@ -139,9 +139,11 @@ If running:
 
 ### Main Path
 
-1. fetch latest configured base branch
-2. merge/rebase base branch into task branch per profile
-3. if conflict-free, complete and notify success
+1. detect whether the effective base-branch context is already in an active git operation state (`MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD`, or `REVERT_HEAD`)
+2. if active operation is detected, fail fast with explicit continue/abort guidance and stop
+3. fetch latest configured base branch
+4. merge/rebase base branch into task branch per profile
+5. if conflict-free, complete and notify success
 
 ### Conflict Path
 
@@ -210,6 +212,7 @@ For each queued issue item, source branch resolves as:
 
 ### Failure Modes
 
+- effective base context has active git operation; pre-sync blocks PR creation until resolved/aborted
 - network unavailable
 - auth missing/expired
 - remote push rejected

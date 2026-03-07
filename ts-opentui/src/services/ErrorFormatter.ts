@@ -275,55 +275,62 @@ const ERROR_FORMATTERS: Record<
 		category: "tmux",
 	}),
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// PR Errors
-	// ─────────────────────────────────────────────────────────────────────────
-	PRError: (error) => {
-		const message = String(error.message || "")
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR Errors
+    // ─────────────────────────────────────────────────────────────────────────
+    GitOperationInProgressError: (error) => {
+        const operation = String(error.operation || "git operation")
+        const continueCommand = String(error.continueCommand || "git <operation> --continue")
+        const abortCommand = String(error.abortCommand || "git <operation> --abort")
 
-		// Generic git operation in progress in target repository
-		const gitOperationInProgressMatch = message.match(/Git ([a-z-]+) in progress in/i)
-		if (gitOperationInProgressMatch) {
-			const operation = gitOperationInProgressMatch[1]?.toLowerCase() ?? "git operation"
-			return {
-				message: `Target repository has ${operation} in progress`,
-				suggestion: `Try: Continue or abort that ${operation} in the target repo, then retry Space+m`,
-				category: "pr",
-			}
-		}
+        return {
+            message: `Target repository has ${operation} in progress`,
+            suggestion: `Try: Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action`,
+            category: "pr",
+        }
+    },
 
-		// Backward-compat for older merge-only message variant
-		if (message.includes("Merge in progress in")) {
-			return {
-				message: "Merge target already has an active merge",
-				suggestion:
-					"Try: Resolve and commit that merge, or run 'git merge --abort' in that repo, then retry",
-				category: "pr",
-			}
-		}
+    PRAlreadyExistsError: (error) => {
+        const branch = String(error.branch || "")
+        const baseBranch = String(error.baseBranch || "")
 
-		// Branch protection
-		if (message.includes("protected branch") || message.includes("branch protection")) {
-			return {
-				message: "Branch is protected",
-				suggestion: "Try: Create a PR instead of direct push, or check branch protection rules",
-				category: "pr",
-			}
-		}
+        return {
+            message: "PR already exists for this branch",
+            suggestion:
+                branch && baseBranch
+                    ? `Try: Open the existing PR for '${branch}' into '${baseBranch}' (Space+O), or continue updating that PR`
+                    : "Try: Open the existing PR (Space+O) or continue updating it",
+            category: "pr",
+        }
+    },
 
-		// PR already exists
-		if (message.includes("already exists")) {
-			return {
-				message: "PR already exists for this branch",
-				suggestion: "Try: View the existing PR or use a different branch",
-				category: "pr",
-			}
-		}
+    PRBranchProtectionError: (error) => {
+        const operation = String(error.operation || "")
+        const branch = String(error.branch || "")
 
-		return {
-			message: `PR operation failed: ${message}`,
-			category: "pr",
-		}
+        if (operation === "push") {
+            return {
+                message: `Push blocked by branch protection${branch ? ` on '${branch}'` : ""}`,
+                suggestion:
+                    "Try: Push to a feature branch allowed by repository rules, then retry PR creation",
+                category: "pr",
+            }
+        }
+
+        return {
+            message: "PR creation blocked by branch protection policy",
+            suggestion: "Try: Follow repository branch rules, then retry PR creation",
+            category: "pr",
+        }
+    },
+
+    PRError: (error) => {
+        const message = String(error.message || "")
+
+        return {
+            message: `PR operation failed: ${message}`,
+            category: "pr",
+        }
 	},
 
 	GHCLIError: (error) => {
