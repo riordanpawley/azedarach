@@ -237,10 +237,23 @@ describe("buildLinearFallbackSnapshots", () => {
 			],
 		})
 
-		expect(buildLinearFallbackSnapshots([issue])).toEqual([
+		expect(
+			buildLinearFallbackSnapshots(
+				[issue],
+				new Map([
+					[
+						"AZE-42",
+						{
+							externalId: "4f7b8f9d-2fcb-4d7e-92e2-2fbf4cedd54b",
+							externalKey: "AZE-42",
+						},
+					],
+				]),
+			),
+		).toEqual([
 			{
 				localId: "AZE-42",
-				externalId: "AZE-42",
+				externalId: "4f7b8f9d-2fcb-4d7e-92e2-2fbf4cedd54b",
 				externalKey: "AZE-42",
 				title: "Backfill me",
 				description: undefined,
@@ -259,6 +272,11 @@ describe("buildLinearFallbackSnapshots", () => {
 				parentLocalId: "AZE-1",
 			},
 		])
+	})
+
+	it("drops issues whose external refs cannot be resolved", () => {
+		const issue = makeIssue({ id: "AZE-999" })
+		expect(buildLinearFallbackSnapshots([issue], new Map())).toEqual([])
 	})
 })
 

@@ -187,7 +187,7 @@ stateDiagram-v2
 
   note right of SdkEventsLocalRefresh
     localRefreshOnly=true
-    PTY-triggered refresh uses local session/git refresh only
+    PTY-triggered refresh uses local session-state updates only
   end note
 ```
 
@@ -214,4 +214,4 @@ flowchart TD
 - Hydration pull in flush is interval-gated (`LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 60_000`), not triggered on every push.
 - Parent-child mapping safety: child upsert is retried when parent local id exists but parent external ref is missing.
 - Collapse safety: grouped `upsert + close` resolves to `upsert` so create-intent is not dropped before first sync.
-- PTY-triggered board refresh is intentionally local-only (session/git state), not a remote backend sync trigger.
+- PTY-triggered board refresh is intentionally local-only (session state + PTY-derived fields only), not a remote backend sync trigger.

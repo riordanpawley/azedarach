@@ -7,8 +7,9 @@ import {
 } from "../core/SessionManager.js"
 import { TmuxError } from "../core/TmuxService.js"
 import {
-	classifySessionRecoveryError,
-	resolveLinearSdkEventsTickerBehavior,
+    classifySessionRecoveryError,
+    resolveBoardRefreshExecutionMode,
+    resolveLinearSdkEventsTickerBehavior,
 } from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
@@ -53,18 +54,65 @@ describe("BoardService session recovery classification", () => {
 })
 
 describe("resolveLinearSdkEventsTickerBehavior", () => {
-	it("enables slow defensive reconciliation only when sdk mode is healthy", () => {
-		expect(resolveLinearSdkEventsTickerBehavior("sdk", true)).toEqual({
-			localRefreshOnly: true,
-			defensiveReconciliationInterval: "2 minutes",
+    it("enables slow defensive reconciliation only when sdk mode is healthy", () => {
+        expect(resolveLinearSdkEventsTickerBehavior("sdk", true)).toEqual({
+            localRefreshOnly: true,
+            defensiveReconciliationInterval: "15 minutes",
 		})
 		expect(resolveLinearSdkEventsTickerBehavior("sdk", false)).toEqual({
 			localRefreshOnly: false,
 			defensiveReconciliationInterval: undefined,
 		})
-		expect(resolveLinearSdkEventsTickerBehavior("failed", false)).toEqual({
-			localRefreshOnly: false,
-			defensiveReconciliationInterval: undefined,
-		})
-	})
+        expect(resolveLinearSdkEventsTickerBehavior("failed", false)).toEqual({
+            localRefreshOnly: false,
+            defensiveReconciliationInterval: undefined,
+        })
+    })
+})
+
+describe("resolveBoardRefreshExecutionMode", () => {
+    it("forces PTY refreshes to session-only local updates", () => {
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: false,
+                options: { reason: "pty" },
+            }),
+        ).toBe("local-session-only")
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: true,
+                options: { reason: "pty" },
+            }),
+        ).toBe("local-session-only")
+    })
+
+    it("forces remote refresh when requested", () => {
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: true,
+                options: { reason: "pty", forceRemote: true },
+            }),
+        ).toBe("remote")
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: true,
+                options: { forceRemote: true },
+            }),
+        ).toBe("remote")
+    })
+
+    it("uses local session+git refresh only for webhook-local mode default reasons", () => {
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: true,
+                options: { reason: "default" },
+            }),
+        ).toBe("local-session-and-git")
+        expect(
+            resolveBoardRefreshExecutionMode({
+                localRefreshOnly: true,
+                options: undefined,
+            }),
+        ).toBe("local-session-and-git")
+    })
 })

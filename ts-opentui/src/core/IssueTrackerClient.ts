@@ -1014,29 +1014,44 @@ export const shouldUseLinearReadFallback = (input: LinearReadFallbackInput): boo
 const getParentLocalIdFromIssue = (issue: Issue): string | undefined =>
 	issue.dependencies?.find((dependency) => dependency.dependency_type === "parent-child")?.id
 
+export interface LinearFallbackExternalRef {
+	readonly externalId: string
+	readonly externalKey?: string
+}
+
 export const buildLinearFallbackSnapshots = (
 	issues: readonly Issue[],
-): readonly ExternalIssueSnapshot[] =>
-	issues.map((issue) => ({
-		localId: issue.id,
-		externalId: issue.id,
-		externalKey: issue.id,
-		title: issue.title,
-		description: issue.description,
-		status: issue.status,
-		priority: issue.priority,
-		issueType: issue.issue_type,
-		createdAt: issue.created_at,
-		updatedAt: issue.updated_at,
-		closedAt: issue.closed_at,
-		assignee: issue.assignee,
-		labels: issue.labels ?? [],
-		notes: issue.notes,
-		design: issue.design,
-		acceptance: issue.acceptance,
-		estimate: issue.estimate,
-		parentLocalId: getParentLocalIdFromIssue(issue),
-	}))
+	externalRefsByIdentifier: ReadonlyMap<string, LinearFallbackExternalRef>,
+): readonly ExternalIssueSnapshot[] => {
+	const snapshots: ExternalIssueSnapshot[] = []
+	for (const issue of issues) {
+		const externalRef = externalRefsByIdentifier.get(issue.id)
+		if (externalRef === undefined) {
+			continue
+		}
+		snapshots.push({
+			localId: issue.id,
+			externalId: externalRef.externalId,
+			externalKey: externalRef.externalKey ?? issue.id,
+			title: issue.title,
+			description: issue.description,
+			status: issue.status,
+			priority: issue.priority,
+			issueType: issue.issue_type,
+			createdAt: issue.created_at,
+			updatedAt: issue.updated_at,
+			closedAt: issue.closed_at,
+			assignee: issue.assignee,
+			labels: issue.labels ?? [],
+			notes: issue.notes,
+			design: issue.design,
+			acceptance: issue.acceptance,
+			estimate: issue.estimate,
+			parentLocalId: getParentLocalIdFromIssue(issue),
+		})
+	}
+	return snapshots
+}
 
 export const collectLinearFallbackIssuesById = <E, R>(
 	issueIds: readonly string[],
@@ -1070,6 +1085,13 @@ interface IssueDbClient {
 		cwd?: string,
 	) => Effect.Effect<string, IssueTrackerError, CommandExecutor.CommandExecutor>
 	readonly parseSyncResult: (output: string) => Effect.Effect<SyncResult, ParseError>
+	readonly resolveExternalRefsByIdentifier?: (
+		identifiers: readonly string[],
+	) => Effect.Effect<
+		ReadonlyMap<string, LinearFallbackExternalRef>,
+		IssueTrackerError,
+		CommandExecutor.CommandExecutor
+	>
 }
 
 interface IssueDbTimingRecorder {
@@ -2361,12 +2383,42 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					}
 				})
 
+			const resolveExternalRefsByIdentifier = (
+				identifiers: readonly string[],
+			): Effect.Effect<
+				ReadonlyMap<string, LinearFallbackExternalRef>,
+				IssueTrackerError,
+				CommandExecutor.CommandExecutor
+			> => {
+				if (identifiers.length === 0) {
+					return Effect.succeed(new Map())
+				}
+
+				const requested = [...new Set(identifiers)]
+				return withLinearSdkTiming(["i", "get", ...requested], buildLinearIssueSnapshot()).pipe(
+					Effect.map((snapshot) => {
+						const refs = new Map<string, LinearFallbackExternalRef>()
+						for (const identifier of requested) {
+							const externalId = snapshot.linearIdByIdentifier.get(identifier)
+							if (externalId !== undefined) {
+								refs.set(identifier, {
+									externalId,
+									externalKey: identifier,
+								})
+							}
+						}
+						return refs
+					}),
+				)
+			}
+
 			return {
 				flavor: "linear",
 				executable: "linear-sdk",
 				runJson,
 				runDirect: (args, runCwd) => runJson(args, runCwd),
 				parseSyncResult: () => Effect.succeed(ZERO_SYNC_RESULT),
+				resolveExternalRefsByIdentifier,
 			}
 		}
 
@@ -2525,12 +2577,26 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			if (issues.length === 0) {
 				return Effect.void
 			}
+			if (linearIssueDbClient?.resolveExternalRefsByIdentifier === undefined) {
+				return Effect.logWarning(
+					"Linear fallback local-store backfill skipped: external ref resolver unavailable",
+				).pipe(Effect.asVoid)
+			}
 
-			const snapshots = buildLinearFallbackSnapshots(issues)
-			return fromLocalStore(
-				"local-store importExternalSnapshot",
-				localIssueStore.importExternalSnapshot("linear", snapshots, runCwd),
-			).pipe(
+			const identifiers = issues.map((issue) => issue.id)
+			return linearIssueDbClient.resolveExternalRefsByIdentifier(identifiers).pipe(
+				Effect.flatMap((externalRefsByIdentifier) => {
+					const snapshots = buildLinearFallbackSnapshots(issues, externalRefsByIdentifier)
+					if (snapshots.length === 0) {
+						return Effect.logWarning(
+							`Linear fallback local-store backfill skipped: no external refs resolved for ${identifiers.join(",")}`,
+						).pipe(Effect.asVoid)
+					}
+					return fromLocalStore(
+						"local-store importExternalSnapshot",
+						localIssueStore.importExternalSnapshot("linear", snapshots, runCwd),
+					).pipe(Effect.asVoid)
+				}),
 				Effect.catchAll((error) =>
 					Effect.logWarning(
 						`Linear fallback local-store backfill failed: ${error.message}`,

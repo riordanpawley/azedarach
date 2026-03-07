@@ -249,8 +249,8 @@ const normalizeLinearWebhookPriority = (priority: number | undefined): number =>
 }
 
 interface LinearSdkEventsTickerBehavior {
-	readonly localRefreshOnly: boolean
-	readonly defensiveReconciliationInterval: Duration.DurationInput | undefined
+    readonly localRefreshOnly: boolean
+    readonly defensiveReconciliationInterval: Duration.DurationInput | undefined
 }
 
 export const resolveLinearSdkEventsTickerBehavior = (
@@ -262,10 +262,36 @@ export const resolveLinearSdkEventsTickerBehavior = (
 				localRefreshOnly: true,
 				defensiveReconciliationInterval: LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL,
 			}
-		: {
-				localRefreshOnly: false,
-				defensiveReconciliationInterval: undefined,
-			}
+        : {
+                localRefreshOnly: false,
+                defensiveReconciliationInterval: undefined,
+            }
+
+export type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch" | "pty"
+
+interface BoardRefreshOptions {
+    readonly reason?: BoardRefreshReason
+    readonly forceRemote?: boolean
+}
+
+type BoardRefreshExecutionMode = "remote" | "local-session-only" | "local-session-and-git"
+
+export const resolveBoardRefreshExecutionMode = (params: {
+    readonly localRefreshOnly: boolean
+    readonly options: BoardRefreshOptions | undefined
+}): BoardRefreshExecutionMode => {
+    if (params.options?.forceRemote === true) return "remote"
+    if (params.options?.reason === "pty") return "local-session-only"
+    if (!params.localRefreshOnly) return "remote"
+    switch (params.options?.reason ?? "default") {
+        case "mutation":
+        case "initial-load":
+        case "project-switch":
+            return "remote"
+        default:
+            return "local-session-and-git"
+    }
+}
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -480,20 +506,13 @@ interface LinearWebhookListenerConfig {
 }
 
 interface ActiveLinearRefreshStrategy {
-	readonly key: string
-	readonly fiber: Fiber.RuntimeFiber<unknown, never>
+    readonly key: string
+    readonly fiber: Fiber.RuntimeFiber<unknown, never>
 }
 
 interface LinearRefreshStrategyPlan {
-	readonly key: string
-	readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
-}
-
-type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch" | "pty"
-
-interface BoardRefreshOptions {
-	readonly reason?: BoardRefreshReason
-	readonly forceRemote?: boolean
+    readonly key: string
+    readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
 }
 
 interface MutationTaskUpsertOptions {
@@ -1602,54 +1621,60 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				),
 			)
 
-		const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
-			Effect.gen(function* () {
-				const projectPath = yield* resolveProjectPath(preferredProjectPath)
-				const currentVisibleTaskIds = yield* SubscriptionRef.get(visibleTaskIds)
-				const activeSessions = yield* sessionManager
-					.listActive(projectPath ?? undefined)
-					.pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+        const refreshLocalSessionState = (params: {
+            readonly preferredProjectPath?: string | null
+            readonly includeGitStatus: boolean
+        }) =>
+            Effect.gen(function* () {
+                const projectPath = yield* resolveProjectPath(params.preferredProjectPath)
+                const activeSessions = yield* sessionManager
+                    .listActive(projectPath ?? undefined)
+                    .pipe(
+                        Effect.catchAll((error) =>
+                            Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 								Effect.zipRight(Effect.succeed([])),
 							),
 						),
-					)
-				const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
-				const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
-				const gitConfig = yield* appConfig.getGitConfig()
-				const { baseBranch, showLineChanges } = gitConfig
-				const currentTasks = yield* SubscriptionRef.get(tasks)
+                    )
+                const sessionMap = new Map(activeSessions.map((session) => [session.issueId, session]))
+                const allMetrics = yield* SubscriptionRef.get(ptyMonitor.metrics)
+                const currentTasks = yield* SubscriptionRef.get(tasks)
+                const currentVisibleTaskIds = params.includeGitStatus
+                    ? yield* SubscriptionRef.get(visibleTaskIds)
+                    : undefined
+                const gitConfig = params.includeGitStatus ? yield* appConfig.getGitConfig() : undefined
 
-				const nextTasks = yield* Effect.all(
-					currentTasks.map((task) =>
-						Effect.gen(function* () {
+                const nextTasks = yield* Effect.all(
+                    currentTasks.map((task) =>
+                        Effect.gen(function* () {
 							const session = sessionMap.get(task.id)
 							const metricsOpt = HashMap.get(allMetrics, task.id)
 							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
 							const sessionState = session?.state ?? "idle"
 
-							let gitStatus: GitStatus = {
-								gitBehindCount: undefined,
-								hasUncommittedChanges: undefined,
-								gitAdditions: undefined,
-								gitDeletions: undefined,
-							}
-							if (
-								projectPath &&
-								currentVisibleTaskIds.has(task.id) &&
-								(sessionState !== "idle" || task.hasWorktree === true)
-							) {
-								const worktreePath = getWorktreePath(projectPath, task.id)
-								const effectiveBaseBranch = task.parentEpicId ?? baseBranch
-								const cachedStatus = yield* getCachedGitStatus(
-									worktreePath,
-									effectiveBaseBranch,
-									showLineChanges,
-								)
-								gitStatus = {
-									gitBehindCount: cachedStatus.gitBehindCount,
-									hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
+                            let gitStatus: GitStatus = {
+                                gitBehindCount: undefined,
+                                hasUncommittedChanges: undefined,
+                                gitAdditions: undefined,
+                                gitDeletions: undefined,
+                            }
+                            if (
+                                params.includeGitStatus &&
+                                gitConfig !== undefined &&
+                                projectPath &&
+                                currentVisibleTaskIds?.has(task.id) &&
+                                (sessionState !== "idle" || task.hasWorktree === true)
+                            ) {
+                                const worktreePath = getWorktreePath(projectPath, task.id)
+                                const effectiveBaseBranch = task.parentEpicId ?? gitConfig.baseBranch
+                                const cachedStatus = yield* getCachedGitStatus(
+                                    worktreePath,
+                                    effectiveBaseBranch,
+                                    gitConfig.showLineChanges,
+                                )
+                                gitStatus = {
+                                    gitBehindCount: cachedStatus.gitBehindCount,
+                                    hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
 									gitAdditions: cachedStatus.gitAdditions,
 									gitDeletions: cachedStatus.gitDeletions,
 								}
@@ -1673,62 +1698,70 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				yield* SubscriptionRef.set(tasks, nextTasks)
 				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
-				yield* updateFilteredTasks()
-				yield* saveCurrentToMap()
-			})
+                yield* updateFilteredTasks()
+                yield* saveCurrentToMap()
+            })
 
-		const shouldUseLocalRefreshOnly = (
-			localRefreshOnly: boolean,
-			options: BoardRefreshOptions | undefined,
-		): boolean => {
-			if (options?.forceRemote === true) return false
-			if (options?.reason === "pty") return true
-			if (!localRefreshOnly) return false
-			switch (options?.reason ?? "default") {
-				case "mutation":
-				case "initial-load":
-				case "project-switch":
-					return false
-				default:
-					return true
-			}
-		}
+        const refreshLocalSessionAndGitState = (preferredProjectPath?: string | null) =>
+            refreshLocalSessionState({
+                preferredProjectPath,
+                includeGitStatus: true,
+            })
 
-		const refreshWithPolicy = (
-			options?: BoardRefreshOptions,
-			preferredProjectPath?: string | null,
-		) =>
-			Effect.gen(function* () {
-				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-				const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
-				const refreshEffect = useLocalRefresh
-					? refreshLocalSessionAndGitState(preferredProjectPath)
-					: refreshWithRecovery(preferredProjectPath)
-				yield* refreshSemaphore.withPermits(1)(refreshEffect)
-			})
+        const refreshLocalSessionOnly = (preferredProjectPath?: string | null) =>
+            refreshLocalSessionState({
+                preferredProjectPath,
+                includeGitStatus: false,
+            })
 
-		const requestRefresh = (options?: BoardRefreshOptions) =>
-			Effect.gen(function* () {
+        const refreshWithPolicy = (
+            options?: BoardRefreshOptions,
+            preferredProjectPath?: string | null,
+        ) =>
+            Effect.gen(function* () {
+                const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+                const refreshMode = resolveBoardRefreshExecutionMode({
+                    localRefreshOnly,
+                    options,
+                })
+                const refreshEffect =
+                    refreshMode === "remote"
+                        ? refreshWithRecovery(preferredProjectPath)
+                        : refreshMode === "local-session-only"
+                          ? refreshLocalSessionOnly(preferredProjectPath)
+                          : refreshLocalSessionAndGitState(preferredProjectPath)
+                yield* refreshSemaphore.withPermits(1)(refreshEffect)
+            })
+
+        const requestRefresh = (options?: BoardRefreshOptions) =>
+            Effect.gen(function* () {
 				const existingFiber = yield* Ref.get(debounceFiberRef)
-				if (existingFiber) {
-					yield* Fiber.interrupt(existingFiber)
-				}
-				const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
-				const useLocalRefresh = shouldUseLocalRefreshOnly(localRefreshOnly, options)
-				// Fork into the service's scope (not daemon) so fiber is tied to service lifetime
-				const fiber = yield* Effect.gen(function* () {
-					yield* Effect.sleep("500 millis")
-					yield* refreshWithPolicy(options).pipe(
-						Effect.catchAllCause((cause) =>
-							Effect.logWarning(cause).pipe(
-								Effect.zipRight(
-									logAndToastRefreshFailure(
-										useLocalRefresh ? "debounced-local" : "debounced",
-										cause,
-									),
-								),
-							),
-						),
+                if (existingFiber) {
+                    yield* Fiber.interrupt(existingFiber)
+                }
+                const localRefreshOnly = yield* Ref.get(localRefreshOnlyRef)
+                const refreshMode = resolveBoardRefreshExecutionMode({
+                    localRefreshOnly,
+                    options,
+                })
+                // Fork into the service's scope (not daemon) so fiber is tied to service lifetime
+                const fiber = yield* Effect.gen(function* () {
+                    yield* Effect.sleep("500 millis")
+                    yield* refreshWithPolicy(options).pipe(
+                        Effect.catchAllCause((cause) =>
+                            Effect.logWarning(cause).pipe(
+                                Effect.zipRight(
+                                    logAndToastRefreshFailure(
+                                        refreshMode === "remote"
+                                            ? "debounced"
+                                            : refreshMode === "local-session-only"
+                                              ? "debounced-local-session"
+                                              : "debounced-local",
+                                        cause,
+                                    ),
+                                ),
+                            ),
+                        ),
 					)
 				}).pipe(Effect.forkIn(serviceScope))
 				yield* Ref.set(debounceFiberRef, fiber)
@@ -2078,42 +2111,42 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				return linearWebhookFallbackFiber
 			})
 
-		const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
-			Effect.repeat(Schedule.spaced(interval))(
-				Effect.gen(function* () {
-					const projectPath = yield* projectService.getCurrentPath()
-					if (projectPath !== null) {
-						yield* issueTrackerClient.sync(projectPath).pipe(
-							Effect.tap((syncResult) =>
-								syncResult.pushed > 0 || syncResult.pulled > 0
-									? Effect.log(
-											`Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
-										)
-									: Effect.void,
-							),
-							Effect.catchAll((error) =>
-								Effect.logWarning(
-									`Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
-								).pipe(Effect.asVoid),
-							),
-						)
-					}
+        const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
+            Effect.repeat(Schedule.spaced(interval))(
+                Effect.gen(function* () {
+                    const projectPath = yield* projectService.getCurrentPath()
+                    if (projectPath !== null) {
+                        yield* issueTrackerClient.sync(projectPath).pipe(
+                            Effect.tap((syncResult) =>
+                                syncResult.pushed > 0 || syncResult.pulled > 0
+                                    ? Effect.log(
+                                            `Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+                                        )
+                                    : Effect.void,
+                            ),
+                            Effect.catchAll((error) =>
+                                Effect.logWarning(
+                                    `Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
+                                ).pipe(Effect.asVoid),
+                            ),
+                        )
+                    }
 
-					yield* refreshWithPolicy({ forceRemote: true }).pipe(
-						Effect.catchAllCause((cause) =>
-							Effect.logWarning(
-								`Linear SDK defensive reconciliation refresh failed: ${formatRefreshFailureMessage(cause)}`,
-							).pipe(Effect.asVoid),
-						),
-					)
-				}).pipe(
-					Effect.catchAllCause((cause) =>
-						Effect.logWarning(
-							`Linear SDK defensive reconciliation iteration failed: ${formatRefreshFailureMessage(cause)}`,
-						).pipe(Effect.asVoid),
-					),
-				),
-			)
+                    yield* refreshWithPolicy({ forceRemote: true }).pipe(
+                        Effect.catchAllCause((cause) =>
+                            Effect.logWarning(
+                                `Linear SDK defensive reconciliation refresh failed: ${formatRefreshFailureMessage(cause)}`,
+                            ).pipe(Effect.asVoid),
+                        ),
+                    )
+                }).pipe(
+                    Effect.catchAllCause((cause) =>
+                        Effect.logWarning(
+                            `Linear SDK defensive reconciliation iteration failed: ${formatRefreshFailureMessage(cause)}`,
+                        ).pipe(Effect.asVoid),
+                    ),
+                ),
+            )
 
 		const startLinearSdkEventsFiber = (tickerBehavior: LinearSdkEventsTickerBehavior) =>
 			Effect.gen(function* () {
