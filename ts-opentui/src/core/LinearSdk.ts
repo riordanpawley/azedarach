@@ -9,6 +9,9 @@ export class LinearSdkError extends Data.TaggedError("LinearSdkError")<{
 type LinearIssuesArgs = Parameters<LinearClient["issues"]>[0]
 type LinearIssuesResult = Awaited<ReturnType<LinearClient["issues"]>>
 type LinearIssueResult = Awaited<ReturnType<LinearClient["issue"]>>
+type LinearDocumentsArgs = Parameters<LinearClient["documents"]>[0]
+type LinearDocumentsResult = Awaited<ReturnType<LinearClient["documents"]>>
+type LinearDocumentResult = Awaited<ReturnType<LinearClient["document"]>>
 type LinearWorkflowStatesResult = Awaited<ReturnType<LinearClient["workflowStates"]>>
 type LinearIssueLabelsResult = Awaited<ReturnType<LinearClient["issueLabels"]>>
 type LinearUsersResult = Awaited<ReturnType<LinearClient["users"]>>
@@ -18,6 +21,10 @@ type LinearCreateIssueInput = Parameters<LinearClient["createIssue"]>[0]
 type LinearCreateIssueResult = Awaited<ReturnType<LinearClient["createIssue"]>>
 type LinearUpdateIssueInput = Parameters<LinearClient["updateIssue"]>[1]
 type LinearUpdateIssueResult = Awaited<ReturnType<LinearClient["updateIssue"]>>
+type LinearCreateDocumentInput = Parameters<LinearClient["createDocument"]>[0]
+type LinearCreateDocumentResult = Awaited<ReturnType<LinearClient["createDocument"]>>
+type LinearUpdateDocumentInput = Parameters<LinearClient["updateDocument"]>[1]
+type LinearUpdateDocumentResult = Awaited<ReturnType<LinearClient["updateDocument"]>>
 type LinearCreateWebhookInput = Parameters<LinearClient["createWebhook"]>[0]
 type LinearCreateWebhookResult = Awaited<ReturnType<LinearClient["createWebhook"]>>
 type LinearDeleteWebhookResult = Awaited<ReturnType<LinearClient["deleteWebhook"]>>
@@ -35,6 +42,14 @@ export interface LinearSdkApi {
 		id: string,
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<LinearIssueResult, LinearSdkError>
+	readonly documents: (
+		args?: LinearDocumentsArgs,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<LinearDocumentsResult, LinearSdkError>
+	readonly document: (
+		id: string,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<LinearDocumentResult, LinearSdkError>
 	readonly workflowStates: (
 		args: Parameters<LinearClient["workflowStates"]>[0],
 		options?: { readonly maxWaitMs?: number },
@@ -58,11 +73,20 @@ export interface LinearSdkApi {
 		input: LinearCreateIssueInput,
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<LinearCreateIssueResult, LinearSdkError>
+	readonly createDocument: (
+		input: LinearCreateDocumentInput,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<LinearCreateDocumentResult, LinearSdkError>
 	readonly updateIssue: (
 		id: string,
 		input: LinearUpdateIssueInput,
 		options?: { readonly maxWaitMs?: number },
 	) => Effect.Effect<LinearUpdateIssueResult, LinearSdkError>
+	readonly updateDocument: (
+		id: string,
+		input: LinearUpdateDocumentInput,
+		options?: { readonly maxWaitMs?: number },
+	) => Effect.Effect<LinearUpdateDocumentResult, LinearSdkError>
 	readonly createWebhook: (
 		input: LinearCreateWebhookInput,
 		options?: { readonly maxWaitMs?: number },
@@ -167,6 +191,22 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: `Failed to fetch issue ${id} from Linear`,
 			})
 
+		const documents: LinearSdkApi["documents"] = (args, options) =>
+			runWithClient({
+				operation: "documents",
+				maxWaitMs: options?.maxWaitMs,
+				request: (client) => client.documents(args),
+				fallbackError: "Failed to fetch documents from Linear",
+			})
+
+		const document: LinearSdkApi["document"] = (id, options) =>
+			runWithClient({
+				operation: "document",
+				maxWaitMs: options?.maxWaitMs,
+				request: (client) => client.document(id),
+				fallbackError: `Failed to fetch document ${id} from Linear`,
+			})
+
 		const workflowStates: LinearSdkApi["workflowStates"] = (args, options) =>
 			runWithClient({
 				operation: "workflowStates",
@@ -215,12 +255,28 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 				fallbackError: "Failed to create issue in Linear",
 			})
 
+		const createDocument: LinearSdkApi["createDocument"] = (input, options) =>
+			runWithClient({
+				operation: "createDocument",
+				maxWaitMs: options?.maxWaitMs,
+				request: (client) => client.createDocument(input),
+				fallbackError: "Failed to create document in Linear",
+			})
+
 		const updateIssue: LinearSdkApi["updateIssue"] = (id, input, options) =>
 			runWithClient({
 				operation: "updateIssue",
 				maxWaitMs: options?.maxWaitMs,
 				request: (client) => client.updateIssue(id, input),
 				fallbackError: `Failed to update issue ${id} in Linear`,
+			})
+
+		const updateDocument: LinearSdkApi["updateDocument"] = (id, input, options) =>
+			runWithClient({
+				operation: "updateDocument",
+				maxWaitMs: options?.maxWaitMs,
+				request: (client) => client.updateDocument(id, input),
+				fallbackError: `Failed to update document ${id} in Linear`,
 			})
 
 		const createWebhook: LinearSdkApi["createWebhook"] = (input, options) =>
@@ -346,13 +402,17 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 		return {
 			issues,
 			issue,
+			documents,
+			document,
 			workflowStates,
 			issueLabels,
 			users,
 			viewer,
 			teams,
 			createIssue,
+			createDocument,
 			updateIssue,
+			updateDocument,
 			createWebhook,
 			deleteWebhook,
 			resolveTeamId,

@@ -73,9 +73,10 @@ export const HelpOverlay = () => {
 				<KeyLine keys="gg" description="Go to first task" />
 				<KeyLine keys="ge" description="Go to last task" />
 				<KeyLine keys="gh" description="Go to first column" />
-				<KeyLine keys="gl" description="Go to last column" />
-				<KeyLine keys="gw" description="Jump mode (shows labels)" />
-				<text> </text>
+                <KeyLine keys="gl" description="Go to last column" />
+                <KeyLine keys="gw" description="Jump mode (shows labels)" />
+                <KeyLine keys="gs" description="Enter Spec workspace" />
+                <text> </text>
 
 				{/* Modes section */}
 				<SectionHeader title="Modes:" />
@@ -134,13 +135,19 @@ export const HelpOverlay = () => {
 				<KeyLine keys="0-4" description="Toggle P0-P4 priority" />
 				<KeyLine keys="o/i/b/d" description="Open / In progress / Blocked / Closed" />
 				<KeyLine keys="c" description="Clear all filters" />
-				<KeyLine keys="Esc / q" description="Exit filter mode" />
-				<text> </text>
+                <KeyLine keys="Esc / q" description="Exit filter mode" />
+                <text> </text>
 
-				{/* General section */}
-				<SectionHeader title="General:" />
-				<KeyLine keys="Enter" description="Show task details / Enter epic" />
-				<KeyLine keys="Tab" description="Toggle view (Kanban / Compact)" />
+                {/* Spec workspace section */}
+                <SectionHeader title="Spec Workspace (gs):" />
+                <KeyLine keys="Tab" description="Cycle Requirements/Coverage/Publish" />
+                <KeyLine keys="Esc / q" description="Return to board view" />
+                <text> </text>
+
+                {/* General section */}
+                <SectionHeader title="General:" />
+                <KeyLine keys="Enter" description="Show task details / Enter epic" />
+                <KeyLine keys="Tab" description="Toggle board view (Kanban / Compact)" />
 				<KeyLine keys="a" description="Toggle VC auto-pilot" />
 				<KeyLine keys="d" description="Show diagnostics" />
 				<KeyLine keys="s" description="Show settings" />

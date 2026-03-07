@@ -1006,6 +1006,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 							return "sort"
 						case "filter":
 							return "filter"
+						case "spec":
+							return "spec"
 						case "orchestrate":
 							return "orchestrate"
 						case "mergeSelect":

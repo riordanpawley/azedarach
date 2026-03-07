@@ -118,8 +118,14 @@ Requirement IDs are in `04-functional-requirements.md` and are referenced by acc
 
 Format:
 
-- Requirement: `AZ-FR-####`
-- Acceptance scenario: `AZ-AT-####`
+- Requirement doc code: `AZ-FR-####` (optional suffix: `AZ-FR-####a`)
+- Acceptance scenario doc code: `AZ-AT-####` (optional suffix: `AZ-AT-####a`)
+
+`AZ-*` values are canonical document/external codes. In az spec storage, identity is split into:
+
+- `id`: opaque internal identifier
+- `local_id`: short project-local identifier
+- `external_code`: optional docs/spec code (for example `AZ-FR-4201`)
 
 ## Definition of Complete Implementation (from this spec)
 

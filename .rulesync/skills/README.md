@@ -10,6 +10,7 @@ This directory is the canonical RuleSync skill source.
 This tree now contains:
 - Linear/OpenCode workflow skills (`linear-*`)
 - Migrated Claude Code domain skills (`effect-*`, `go-*`, `workflow-*`, `gleam-*`)
+- Effect schema codec guidance in `effect-schema`
 
 ## Migration Note
 

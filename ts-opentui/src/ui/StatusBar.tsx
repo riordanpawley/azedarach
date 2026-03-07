@@ -101,6 +101,10 @@ const MODE_KEYBINDINGS: Record<EditorMode["_tag"], KeyBinding[]> = {
 		{ key: "0-4", action: "P0-P4" },
 		{ key: "Esc/q", action: "Cancel" },
 	],
+	spec: [
+		{ key: "Tab", action: "Subview" },
+		{ key: "Esc/q", action: "Board" },
+	],
 	orchestrate: [
 		{ key: "jk", action: "Nav" },
 		{ key: "Space", action: "Toggle" },
@@ -161,6 +165,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return theme.teal
 			case "filter":
 				return theme.lavender
+			case "spec":
+				return theme.pink
 			case "mergeSelect":
 				return theme.flamingo
 			default:
@@ -185,6 +191,8 @@ export const StatusBar = (props: StatusBarProps) => {
 				return "SRT"
 			case "filter":
 				return "FLT"
+			case "spec":
+				return "SPC"
 			case "mergeSelect":
 				return "MRG"
 			default:

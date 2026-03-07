@@ -332,9 +332,7 @@ export const createDefaultBindings = (bc: BindingContext): ReadonlyArray<Keybind
 		key: "r",
 		mode: "normal",
 		description: "Refresh git stats",
-		action: Effect.all([bc.board.refreshGitStats(), bc.gitSync.fetchAndCheck()], {
-			concurrency: "unbounded",
-		}).pipe(Effect.asVoid),
+		action: bc.gitSync.fetchAndCheck().pipe(Effect.zipRight(bc.board.refreshGitStats())),
 	},
 	{
 		key: "S-r",
@@ -688,6 +686,12 @@ done
 		}),
 	},
 	{
+		key: "s",
+		mode: "goto-pending",
+		description: "Enter spec workspace",
+		action: bc.editor.enterSpecWorkspace(),
+	},
+	{
 		key: "p",
 		mode: "goto-pending",
 		description: "Open project selector",
@@ -1012,9 +1016,19 @@ done
 	},
 	{
 		key: "q",
-		mode: ["action", "goto-pending", "sort", "filter"],
+		mode: ["action", "goto-pending", "sort", "filter", "spec"],
 		description: "Exit/cancel",
 		action: Effect.suspend(() => bc.inputHandlers.handleEscape()),
+	},
+
+	// ========================================================================
+	// Spec Workspace Mode
+	// ========================================================================
+	{
+		key: "tab",
+		mode: "spec",
+		description: "Cycle spec subview",
+		action: bc.editor.cycleSpecSubview(),
 	},
 
 	// ========================================================================

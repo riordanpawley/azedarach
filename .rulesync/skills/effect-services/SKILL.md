@@ -14,6 +14,9 @@ targets: ["claudecode"]
 
 Effect's service architecture uses **Layers** for dependency injection, providing composable, testable, and type-safe service construction. This skill covers the patterns used in this codebase.
 
+For JSON/persistence boundary contracts, pair this skill with:
+- `.claude/skills/effect-schema/SKILL.md`
+
 ## Core Concepts
 
 ### The Three Type Parameters
