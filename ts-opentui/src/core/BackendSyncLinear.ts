@@ -9,8 +9,8 @@ export class BackendSyncLinear extends Effect.Service<BackendSyncLinear>()("Back
 
 		return {
 			target: "linear",
-			bootstrap: (cwd?: string) => issueSyncService.bootstrapLinear(cwd),
-			flushQueue: (cwd?: string) => issueSyncService.flushLinearQueue(cwd),
+			bootstrap: (projectPath: string) => issueSyncService.bootstrapLinear(projectPath),
+			flushQueue: (projectPath: string) => issueSyncService.flushLinearQueue(projectPath),
 		} satisfies BackendSyncInterface
 	}),
 }) {}

@@ -88,6 +88,15 @@ export interface AppConfigService {
 		readonly syncEnabled: boolean
 	}>
 
+	/** Get issue backend configuration for an explicit project path (non-reactive, path-scoped load) */
+	readonly getIssueTrackerSyncConfigForProjectPath: (projectPath: string) => Effect.Effect<
+		{
+			readonly issueTracker: ResolvedConfig["issueTracker"]
+			readonly syncEnabled: boolean
+		},
+		ConfigParseError
+	>
+
 	/** Get network configuration section */
 	readonly getNetworkConfig: () => Effect.Effect<ResolvedConfig["network"]>
 
@@ -550,6 +559,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				Effect.map(SubscriptionRef.get(configRef), (c) => c.notifications),
 			getIssueTrackerSyncConfig: () =>
 				Effect.map(SubscriptionRef.get(configRef), (c) => ({
+					issueTracker: c.issueTracker,
+					syncEnabled: getIssueBackendSyncEnabled(c),
+				})),
+			getIssueTrackerSyncConfigForProjectPath: (projectPath: string) =>
+				Effect.map(loadConfigForPath(projectPath), (c) => ({
 					issueTracker: c.issueTracker,
 					syncEnabled: getIssueBackendSyncEnabled(c),
 				})),
