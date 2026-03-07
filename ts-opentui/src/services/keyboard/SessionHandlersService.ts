@@ -170,6 +170,79 @@ Delete the duplicate worktree and retry?`
 				return trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)
 			}
 
+			const validateSafeExistingImagePath = (
+				taskId: string,
+				candidatePath: string,
+				source: "worktree" | "project",
+			) =>
+				Effect.gen(function* () {
+					if (!isSafeImagePath(candidatePath)) {
+						yield* Effect.logWarning(
+							`Skipping unsafe ${source} attachment path for ${taskId}: ${JSON.stringify(candidatePath)}`,
+						)
+						return null
+					}
+
+					const exists = yield* fs.exists(candidatePath).pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
+
+					if (!exists) {
+						yield* Effect.logWarning(
+							`Skipping missing ${source} attachment path for ${taskId}: ${candidatePath}`,
+						)
+						return null
+					}
+
+					return candidatePath
+				})
+
+			const resolveAttachmentPathWithFallback = (
+				taskId: string,
+				attachmentId: string,
+				worktreePath: string,
+			) =>
+				Effect.gen(function* () {
+					const worktreeCandidate = yield* imageAttachment
+						.getPathForProjectRoot(taskId, attachmentId, worktreePath)
+						.pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						)
+					if (worktreeCandidate.length > 0) {
+						const validatedWorktreePath = yield* validateSafeExistingImagePath(
+							taskId,
+							worktreeCandidate,
+							"worktree",
+						)
+						if (validatedWorktreePath) {
+							return validatedWorktreePath
+						}
+
+						yield* Effect.logWarning(
+							`Falling back to project-root attachment materialization for ${taskId}/${attachmentId}`,
+						)
+					}
+
+					const projectCandidate = yield* imageAttachment.getPath(taskId, attachmentId).pipe(
+						Effect.tapError((error) =>
+							Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+						),
+						Effect.orElseSucceed(() => ""),
+					)
+					if (projectCandidate.length === 0) {
+						return null
+					}
+
+					return yield* validateSafeExistingImagePath(taskId, projectCandidate, "project")
+				})
+
 			const resolveSessionImagePaths = (taskId: string, projectPath: string) =>
 				Effect.gen(function* () {
 					const worktreePath = getWorktreePath(projectPath, taskId)
@@ -182,44 +255,11 @@ Delete the duplicate worktree and retry?`
 								),
 							),
 						)
-					const candidatePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment.getPathForProjectRoot(taskId, attachment.id, worktreePath).pipe(
-							Effect.tapError((error) =>
-								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
-							),
-							Effect.orElseSucceed(() => ""),
-						),
-					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
-
-					const validated = yield* Effect.forEach(candidatePaths, (candidatePath) =>
-						Effect.gen(function* () {
-							if (!isSafeImagePath(candidatePath)) {
-								yield* Effect.logWarning(
-									`Skipping unsafe attachment path for ${taskId}: ${JSON.stringify(candidatePath)}`,
-								)
-								return null
-							}
-
-							const exists = yield* fs.exists(candidatePath).pipe(
-								Effect.catchAll((error) =>
-									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed(false)),
-									),
-								),
-							)
-
-							if (!exists) {
-								yield* Effect.logWarning(
-									`Skipping missing attachment path for ${taskId}: ${candidatePath}`,
-								)
-								return null
-							}
-
-							return candidatePath
-						}),
+					const resolved = yield* Effect.forEach(attachments, (attachment) =>
+						resolveAttachmentPathWithFallback(taskId, attachment.id, worktreePath),
 					)
 
-					return validated.filter((path): path is string => path !== null)
+					return resolved.filter((path): path is string => path !== null)
 				})
 
 			const isWorktreeNameClashError = (error: unknown): error is WorktreeNameClashError =>
