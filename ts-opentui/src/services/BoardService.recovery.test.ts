@@ -7,6 +7,7 @@ import {
 } from "../core/SessionManager.js"
 import { TmuxError } from "../core/TmuxService.js"
 import {
+    applySessionRefreshPatch,
     classifySessionRecoveryError,
     resolveBoardRefreshExecutionMode,
     resolveLinearSdkEventsTickerBehavior,
@@ -57,8 +58,8 @@ describe("resolveLinearSdkEventsTickerBehavior", () => {
     it("enables slow defensive reconciliation only when sdk mode is healthy", () => {
         expect(resolveLinearSdkEventsTickerBehavior("sdk", true)).toEqual({
             localRefreshOnly: true,
-            defensiveReconciliationInterval: "15 minutes",
-		})
+            defensiveReconciliationInterval: "2 minutes",
+        })
 		expect(resolveLinearSdkEventsTickerBehavior("sdk", false)).toEqual({
 			localRefreshOnly: false,
 			defensiveReconciliationInterval: undefined,
@@ -114,5 +115,62 @@ describe("resolveBoardRefreshExecutionMode", () => {
                 options: undefined,
             }),
         ).toBe("local-session-and-git")
+    })
+})
+
+describe("applySessionRefreshPatch", () => {
+    const baseTask = {
+        id: "AZE-1",
+        title: "Task",
+        status: "open",
+        priority: 2,
+        issue_type: "task",
+        created_at: "2026-03-07T00:00:00.000Z",
+        updated_at: "2026-03-07T00:00:00.000Z",
+        sessionState: "busy",
+        gitBehindCount: 3,
+        hasUncommittedChanges: true,
+        gitAdditions: 20,
+        gitDeletions: 5,
+    } as const
+
+    it("preserves existing git fields when gitStatusPatch is undefined", () => {
+        const updated = applySessionRefreshPatch({
+            task: baseTask,
+            sessionState: "waiting",
+            sessionStartedAt: "2026-03-07T00:10:00.000Z",
+            estimatedTokens: 1234,
+            recentOutput: "working",
+            agentPhase: "planning",
+            gitStatusPatch: undefined,
+        })
+
+        expect(updated.sessionState).toBe("waiting")
+        expect(updated.gitBehindCount).toBe(3)
+        expect(updated.hasUncommittedChanges).toBe(true)
+        expect(updated.gitAdditions).toBe(20)
+        expect(updated.gitDeletions).toBe(5)
+    })
+
+    it("updates git fields when gitStatusPatch is provided", () => {
+        const updated = applySessionRefreshPatch({
+            task: baseTask,
+            sessionState: "busy",
+            sessionStartedAt: "2026-03-07T00:10:00.000Z",
+            estimatedTokens: 1500,
+            recentOutput: "running",
+            agentPhase: "action",
+            gitStatusPatch: {
+                gitBehindCount: 0,
+                hasUncommittedChanges: false,
+                gitAdditions: 0,
+                gitDeletions: 0,
+            },
+        })
+
+        expect(updated.gitBehindCount).toBe(0)
+        expect(updated.hasUncommittedChanges).toBe(false)
+        expect(updated.gitAdditions).toBe(0)
+        expect(updated.gitDeletions).toBe(0)
     })
 })

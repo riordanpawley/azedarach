@@ -293,6 +293,24 @@ export const resolveBoardRefreshExecutionMode = (params: {
     }
 }
 
+export const applySessionRefreshPatch = (params: {
+    readonly task: TaskWithSession
+    readonly sessionState: TaskWithSession["sessionState"]
+    readonly sessionStartedAt: string | undefined
+    readonly estimatedTokens: number | undefined
+    readonly recentOutput: string | undefined
+    readonly agentPhase: TaskWithSession["agentPhase"]
+    readonly gitStatusPatch: GitStatus | undefined
+}): TaskWithSession => ({
+    ...params.task,
+    ...(params.gitStatusPatch ?? {}),
+    sessionState: params.sessionState,
+    sessionStartedAt: params.sessionStartedAt,
+    estimatedTokens: params.estimatedTokens,
+    recentOutput: params.recentOutput,
+    agentPhase: params.agentPhase,
+})
+
 // ============================================================================
 // Sort Orders using Effect's composable Order module
 // ============================================================================
@@ -1647,17 +1665,22 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
                 const nextTasks = yield* Effect.all(
                     currentTasks.map((task) =>
                         Effect.gen(function* () {
-							const session = sessionMap.get(task.id)
-							const metricsOpt = HashMap.get(allMetrics, task.id)
-							const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
-							const sessionState = session?.state ?? "idle"
+                            const session = sessionMap.get(task.id)
+                            const metricsOpt = HashMap.get(allMetrics, task.id)
+                            const metrics = metricsOpt._tag === "Some" ? metricsOpt.value : undefined
+                            const sessionState = session?.state ?? "idle"
+                            const sessionStartedAt = session?.startedAt
+                                ? DateTime.formatIso(session.startedAt)
+                                : undefined
 
-                            let gitStatus: GitStatus = {
-                                gitBehindCount: undefined,
-                                hasUncommittedChanges: undefined,
-                                gitAdditions: undefined,
-                                gitDeletions: undefined,
-                            }
+                            let gitStatusPatch: GitStatus | undefined = params.includeGitStatus
+                                ? {
+                                        gitBehindCount: undefined,
+                                        hasUncommittedChanges: undefined,
+                                        gitAdditions: undefined,
+                                        gitDeletions: undefined,
+                                    }
+                                : undefined
                             if (
                                 params.includeGitStatus &&
                                 gitConfig !== undefined &&
@@ -1672,29 +1695,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
                                     effectiveBaseBranch,
                                     gitConfig.showLineChanges,
                                 )
-                                gitStatus = {
+                                gitStatusPatch = {
                                     gitBehindCount: cachedStatus.gitBehindCount,
                                     hasUncommittedChanges: cachedStatus.hasUncommittedChanges,
-									gitAdditions: cachedStatus.gitAdditions,
-									gitDeletions: cachedStatus.gitDeletions,
-								}
-							}
+                                    gitAdditions: cachedStatus.gitAdditions,
+                                    gitDeletions: cachedStatus.gitDeletions,
+                                }
+                            }
 
-							return {
-								...task,
-								sessionState,
-								...gitStatus,
-								sessionStartedAt: session?.startedAt
-									? DateTime.formatIso(session.startedAt)
-									: undefined,
-								estimatedTokens: metrics?.estimatedTokens,
-								recentOutput: metrics?.recentOutput,
-								agentPhase: metrics?.agentPhase,
-							} satisfies TaskWithSession
-						}),
-					),
-					{ concurrency: 4 },
-				)
+                            return applySessionRefreshPatch({
+                                task,
+                                sessionState,
+                                sessionStartedAt,
+                                estimatedTokens: metrics?.estimatedTokens,
+                                recentOutput: metrics?.recentOutput,
+                                agentPhase: metrics?.agentPhase,
+                                gitStatusPatch,
+                            })
+                        }),
+                    ),
+                    { concurrency: 4 },
+                )
 
 				yield* SubscriptionRef.set(tasks, nextTasks)
 				yield* SubscriptionRef.set(tasksByColumn, groupTasksByColumn(nextTasks))
