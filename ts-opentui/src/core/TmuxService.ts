@@ -1,5 +1,5 @@
 import { Command } from "@effect/platform"
-import { Data, Effect, Option } from "effect"
+import { Data, Effect, Option, Stream } from "effect"
 
 // Errors
 // biome-ignore lint/complexity/noBannedTypes: <eh>
@@ -16,6 +16,8 @@ export interface TmuxSession {
 	created: Date
 	attached: boolean
 }
+
+const TMUX_LITERAL_CHUNK_SIZE = 512
 
 // Helper to run tmux commands
 const runTmux = (args: string[]) =>
@@ -139,7 +141,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			sendLiteralCommand: (session: string, command: string) =>
 				Effect.gen(function* () {
-					yield* runTmux(["send-keys", "-t", session, "-l", command])
+					yield* Stream.fromIterable([...command]).pipe(
+						Stream.chunksOf(TMUX_LITERAL_CHUNK_SIZE),
+						Stream.map((chunk) => chunk.join("")),
+						Stream.runForEach((chunk) => runTmux(["send-keys", "-t", session, "-l", chunk])),
+					)
 					yield* runTmux(["send-keys", "-t", session, "Enter"])
 				}).pipe(
 					Effect.asVoid,
