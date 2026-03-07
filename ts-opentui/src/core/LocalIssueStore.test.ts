@@ -169,6 +169,144 @@ describe("importExternalSnapshot", () => {
 			rmSync(projectPath, { recursive: true, force: true })
 		}
 	})
+
+	it("reuses existing local issue id mapped by external id", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-external-id-map-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const created = yield* store.create({ title: "Local issue" }, undefined, projectPath)
+
+					yield* store.upsertExternalRef(
+						{
+							issueId: created.id,
+							target: "linear",
+							externalId: "lin-dup-1",
+							externalKey: "AZE-123",
+						},
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-123",
+								externalId: "lin-dup-1",
+								externalKey: "AZE-123",
+								title: "Remote title update",
+								status: created.status,
+								priority: created.priority,
+								issueType: created.issue_type,
+								createdAt: created.created_at,
+								updatedAt: created.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					const canonicalIssue = yield* store.show(created.id, projectPath)
+					const duplicateIssue = yield* store.show("AZE-123", projectPath)
+					const externalRef = yield* store.getExternalRef(created.id, "linear", projectPath)
+					return { createdId: created.id, canonicalIssue, duplicateIssue, externalRef }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.canonicalIssue?.id).toBe(result.createdId)
+			expect(result.canonicalIssue?.title).toBe("Remote title update")
+			expect(result.duplicateIssue).toBeUndefined()
+			expect(result.externalRef).toEqual({
+				externalId: "lin-dup-1",
+				externalKey: "AZE-123",
+			})
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("remaps parent dependencies to canonical local ids during import", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-parent-remap-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const parent = yield* store.create({ title: "Parent issue" }, undefined, projectPath)
+					const child = yield* store.create({ title: "Child issue" }, undefined, projectPath)
+
+					yield* store.upsertExternalRef(
+						{
+							issueId: parent.id,
+							target: "linear",
+							externalId: "lin-parent",
+							externalKey: "AZE-200",
+						},
+						projectPath,
+					)
+					yield* store.upsertExternalRef(
+						{
+							issueId: child.id,
+							target: "linear",
+							externalId: "lin-child",
+							externalKey: "AZE-201",
+						},
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-200",
+								externalId: "lin-parent",
+								externalKey: "AZE-200",
+								title: "Parent issue (remote)",
+								status: parent.status,
+								priority: parent.priority,
+								issueType: parent.issue_type,
+								createdAt: parent.created_at,
+								updatedAt: parent.updated_at,
+								labels: [],
+							},
+							{
+								localId: "AZE-201",
+								externalId: "lin-child",
+								externalKey: "AZE-201",
+								title: "Child issue (remote)",
+								status: child.status,
+								priority: child.priority,
+								issueType: child.issue_type,
+								createdAt: child.created_at,
+								updatedAt: child.updated_at,
+								labels: [],
+								parentLocalId: "AZE-200",
+							},
+						],
+						projectPath,
+					)
+
+					const childAfterImport = yield* store.show(child.id, projectPath)
+					const duplicateParentIssue = yield* store.show("AZE-200", projectPath)
+					const duplicateChildIssue = yield* store.show("AZE-201", projectPath)
+					return { parentId: parent.id, childAfterImport, duplicateParentIssue, duplicateChildIssue }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			const parentDependency = result.childAfterImport?.dependencies?.find(
+				(dependency) => dependency.dependency_type === "parent-child",
+			)
+			expect(parentDependency?.id).toBe(result.parentId)
+			expect(result.duplicateParentIssue).toBeUndefined()
+			expect(result.duplicateChildIssue).toBeUndefined()
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
 })
 
 describe("spec requirements and links", () => {

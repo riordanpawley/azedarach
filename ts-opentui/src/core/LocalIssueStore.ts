@@ -3390,7 +3390,49 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
+									const existingRefs = yield* sql<ExternalRefRow>`
+										SELECT issue_id, target, external_id, external_key, last_synced_at
+										FROM issue_external_refs
+										WHERE target = ${target}
+										ORDER BY last_synced_at DESC, issue_id ASC
+									`
+
+									const localIdByExternalId = new Map<string, string>()
+									const localIdByExternalKey = new Map<string, string>()
+									for (const ref of existingRefs) {
+										if (!localIdByExternalId.has(ref.external_id)) {
+											localIdByExternalId.set(ref.external_id, ref.issue_id)
+										}
+										if (ref.external_key !== null && !localIdByExternalKey.has(ref.external_key)) {
+											localIdByExternalKey.set(ref.external_key, ref.issue_id)
+										}
+									}
+
+									const snapshotLocalIdRemap = new Map<string, string>()
 									for (const snapshot of snapshots) {
+										const snapshotKey = snapshot.externalKey ?? snapshot.localId
+										const resolvedLocalId =
+											localIdByExternalId.get(snapshot.externalId) ??
+											localIdByExternalKey.get(snapshotKey) ??
+											snapshot.localId
+										snapshotLocalIdRemap.set(snapshot.localId, resolvedLocalId)
+										localIdByExternalId.set(snapshot.externalId, resolvedLocalId)
+										localIdByExternalKey.set(snapshot.localId, resolvedLocalId)
+										if (snapshot.externalKey !== undefined) {
+											localIdByExternalKey.set(snapshot.externalKey, resolvedLocalId)
+										}
+									}
+
+									for (const snapshot of snapshots) {
+										const localId =
+											snapshotLocalIdRemap.get(snapshot.localId) ?? snapshot.localId
+										const parentLocalId =
+											snapshot.parentLocalId === undefined
+												? undefined
+												: (snapshotLocalIdRemap.get(snapshot.parentLocalId) ??
+													localIdByExternalKey.get(snapshot.parentLocalId) ??
+													snapshot.parentLocalId)
+
 										yield* sql`
 											INSERT INTO issues (
 												id,
@@ -3411,7 +3453,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												deleted_at
 											)
 											VALUES (
-												${snapshot.localId},
+												${localId},
 												${snapshot.title},
 												${snapshot.description ?? null},
 												${snapshot.status},
@@ -3447,6 +3489,23 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 									`
 
 										yield* sql`
+											DELETE FROM issue_external_refs
+											WHERE
+												target = ${target}
+												AND external_id = ${snapshot.externalId}
+												AND issue_id <> ${localId}
+										`
+										if (snapshot.externalKey !== undefined) {
+											yield* sql`
+												DELETE FROM issue_external_refs
+												WHERE
+													target = ${target}
+													AND external_key = ${snapshot.externalKey}
+													AND issue_id <> ${localId}
+											`
+										}
+
+										yield* sql`
 											INSERT INTO issue_external_refs (
 												issue_id,
 												target,
@@ -3455,7 +3514,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 												last_synced_at
 											)
 											VALUES (
-												${snapshot.localId},
+												${localId},
 												${target},
 												${snapshot.externalId},
 												${snapshot.externalKey ?? null},
@@ -3470,9 +3529,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 
 										yield* sql`
 											DELETE FROM issue_dependencies
-											WHERE issue_id = ${snapshot.localId} AND dependency_type = ${"parent-child"}
+											WHERE issue_id = ${localId} AND dependency_type = ${"parent-child"}
 										`
-										if (snapshot.parentLocalId !== undefined) {
+										if (parentLocalId !== undefined && parentLocalId !== localId) {
 											yield* sql`
 												INSERT INTO issue_dependencies (
 													issue_id,
@@ -3481,8 +3540,8 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													tombstoned_at
 												)
 												VALUES (
-													${snapshot.localId},
-													${snapshot.parentLocalId},
+													${localId},
+													${parentLocalId},
 													${"parent-child"},
 													${null}
 												)
