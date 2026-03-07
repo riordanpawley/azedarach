@@ -995,10 +995,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		ImageAttachmentService.Default,
 		DiagnosticsService.Default,
 	],
-	effect: Effect.gen(function* () {
-		const worktreeManager = yield* WorktreeManager
-		const issueTrackerClient = yield* IssueTrackerClient
-		const sessionManager = yield* SessionManager
+    scoped: Effect.gen(function* () {
+        const serviceScope = yield* Effect.scope
+        const worktreeManager = yield* WorktreeManager
+        const issueTrackerClient = yield* IssueTrackerClient
+        const sessionManager = yield* SessionManager
 		const tmuxService = yield* TmuxService
 		const worktreeSession = yield* WorktreeSessionService
 		const fileLockManager = yield* FileLockManager
@@ -1995,7 +1996,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
                                     ),
                                 )
 
-                                yield* Effect.fork(runDeferredPush)
+                                yield* Effect.forkIn(runDeferredPush, serviceScope)
                             }
                             // Silently skip if offline/disabled - merge already succeeded locally
                         }
