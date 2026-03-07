@@ -293,28 +293,10 @@ const ERROR_FORMATTERS: Record<
     PRError: (error) => {
         const message = String(error.message || "")
 
-        // Branch protection
-        if (message.includes("protected branch") || message.includes("branch protection")) {
-			return {
-				message: "Branch is protected",
-				suggestion: "Try: Create a PR instead of direct push, or check branch protection rules",
-				category: "pr",
-			}
-		}
-
-		// PR already exists
-		if (message.includes("already exists")) {
-			return {
-				message: "PR already exists for this branch",
-				suggestion: "Try: View the existing PR or use a different branch",
-				category: "pr",
-			}
-		}
-
-		return {
-			message: `PR operation failed: ${message}`,
-			category: "pr",
-		}
+        return {
+            message: `PR operation failed: ${message}`,
+            category: "pr",
+        }
 	},
 
 	GHCLIError: (error) => {
