@@ -285,26 +285,30 @@ describe("formatIssueDetailSections", () => {
                 created_at: "2026-03-05T10:00:00.000Z",
                 updated_at: "2026-03-05T11:00:00.000Z",
             },
-            {
-                linkedSpecRequirements: [
-                    {
-                        id: "AZ-FR-4201",
-                        title: "Persist requirements and links",
-                        kind: "functional",
-                        link_type: "implements",
-                    },
-                    {
-                        id: "AZ-AT-2901",
-                        title: "Acceptance path is covered",
-                        kind: "acceptance",
-                        link_type: "tests",
-                    },
-                ],
-            },
-        )
+	            {
+	                linkedSpecRequirements: [
+	                    {
+	                        id: "AZ-FR-4201",
+	                        local_id: "fr4201",
+	                        external_code: "AZ-FR-4201",
+	                        title: "Persist requirements and links",
+	                        kind: "functional",
+	                        link_type: "implements",
+	                    },
+	                    {
+	                        id: "AZ-AT-2901",
+	                        local_id: "at2901",
+	                        external_code: "AZ-AT-2901",
+	                        title: "Acceptance path is covered",
+	                        kind: "acceptance",
+	                        link_type: "tests",
+	                    },
+	                ],
+	            },
+	        )
 
-        expect(sections).toEqual([
-            "Linked Spec Requirements:\nAZ-FR-4201 [functional] (implements) Persist requirements and links\nAZ-AT-2901 [acceptance] (tests) Acceptance path is covered",
-        ])
-    })
+	        expect(sections).toEqual([
+	            "Linked Spec Requirements:\nfr4201 (AZ-FR-4201) [functional] (implements) Persist requirements and links\nat2901 (AZ-AT-2901) [acceptance] (tests) Acceptance path is covered",
+	        ])
+	    })
 })

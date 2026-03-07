@@ -46,6 +46,7 @@ import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
 import { SpecService } from "../core/SpecService.js"
+import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
 import {
 	getIssueSessionName,
 	issueIdsEqualForLookup,
@@ -564,6 +565,97 @@ type DependencyCountLabel =
 	| "discoveredBy"
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 type RelationshipSpecLinkType = "implements" | "tests" | "blocks" | "relates"
+type SpecRequirementLookupInput = {
+	readonly reference: string
+	readonly selector: SpecRequirementLookupSelector
+}
+
+const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
+
+const normalizeSpecExternalCodeForCli = (value: string): string =>
+	value.trim().toUpperCase().replace(/\s+/g, "")
+
+const inferSpecRequirementKindFromExternalCodeForCli = (
+	externalCode: string,
+): "functional" | "acceptance" | "other" => {
+	if (externalCode.startsWith("AZ-FR-")) {
+		return "functional"
+	}
+	if (externalCode.startsWith("AZ-AT-")) {
+		return "acceptance"
+	}
+	return "other"
+}
+
+const formatSpecRequirementReference = (requirement: {
+	readonly local_id: string
+	readonly external_code: string | null
+}): string =>
+	requirement.external_code === null
+		? requirement.local_id
+		: `${requirement.local_id} (${requirement.external_code})`
+
+const resolveSpecRequirementLookupInput = (args: {
+	readonly reference: Option.Option<string>
+	readonly id: Option.Option<string>
+	readonly localId: Option.Option<string>
+	readonly externalCode: Option.Option<string>
+}): Effect.Effect<SpecRequirementLookupInput, Error> =>
+	Effect.gen(function* () {
+		const byId = Option.getOrUndefined(args.id)?.trim()
+		const byLocalId = Option.getOrUndefined(args.localId)?.trim()
+		const byExternalCode = Option.getOrUndefined(args.externalCode)?.trim()
+		const positionalRef = Option.getOrUndefined(args.reference)?.trim()
+
+		const explicitSelectors = [
+			byId === undefined || byId.length === 0
+				? undefined
+				: ({ selector: "id", reference: byId } as const),
+			byLocalId === undefined || byLocalId.length === 0
+				? undefined
+				: ({ selector: "local_id", reference: byLocalId } as const),
+			byExternalCode === undefined || byExternalCode.length === 0
+				? undefined
+				: ({
+						selector: "external_code",
+						reference: normalizeSpecExternalCodeForCli(byExternalCode),
+					} as const),
+		].filter((value) => value !== undefined)
+
+		if (explicitSelectors.length > 1) {
+			return yield* Effect.fail(
+				new Error("Use only one selector flag: --id, --local-id, or --external-code."),
+			)
+		}
+
+		if (explicitSelectors.length === 1) {
+			if (positionalRef !== undefined && positionalRef.length > 0) {
+				return yield* Effect.fail(
+					new Error(
+						"Provide either a positional requirement reference OR one selector flag (--id/--local-id/--external-code), not both.",
+					),
+				)
+			}
+			const selected = explicitSelectors[0]
+			if (selected === undefined) {
+				return yield* Effect.fail(new Error("Invalid selector input"))
+			}
+			return selected
+		}
+
+		if (positionalRef === undefined || positionalRef.length === 0) {
+			return yield* Effect.fail(
+				new Error(
+					"Missing spec requirement reference. Provide a positional ref or use one selector flag (--id/--local-id/--external-code).",
+				),
+			)
+		}
+
+		return {
+			selector: "auto",
+			reference: positionalRef,
+		}
+	})
 
 const parseRelationshipDependencyType = (
 	value: string | undefined,
@@ -700,6 +792,8 @@ const formatIssueLinkedSpecSection = (
 	linkedSpecRequirements:
 		| readonly {
 				readonly id: string
+				readonly local_id: string
+				readonly external_code: string | null
 				readonly title: string
 				readonly kind: string
 				readonly link_type: string
@@ -712,20 +806,22 @@ const formatIssueLinkedSpecSection = (
 
 	const lines = linkedSpecRequirements.map(
 		(requirement) =>
-			`${requirement.id} [${requirement.kind}] (${requirement.link_type}) ${compactSingleLineText(requirement.title)}`,
+			`${formatSpecRequirementReference(requirement)} [${requirement.kind}] (${requirement.link_type}) ${compactSingleLineText(requirement.title)}`,
 	)
 	return `Linked Spec Requirements:\n${lines.join("\n")}`
 }
 
 const formatIssueDetailSections = (
 	issue: TrackedIssue,
-	options?: {
-		readonly linkedSpecRequirements?:
-			| readonly {
-					readonly id: string
-					readonly title: string
-					readonly kind: string
-					readonly link_type: string
+		options?: {
+			readonly linkedSpecRequirements?:
+				| readonly {
+						readonly id: string
+						readonly local_id: string
+						readonly external_code: string | null
+						readonly title: string
+						readonly kind: string
+						readonly link_type: string
 			  }[]
 			| undefined
 	},
@@ -1204,13 +1300,15 @@ const issueDeleteHandler = (args: {
 
 const formatSpecRequirementSummaryLine = (requirement: {
 	readonly id: string
+	readonly local_id: string
+	readonly external_code: string | null
 	readonly title: string
 	readonly kind: string
 	readonly status: string
 	readonly priority: number
 	readonly updated_at: string
 }): string =>
-	`${requirement.id}: ${compactSingleLineText(requirement.title)} [kind=${requirement.kind} status=${requirement.status} priority=${requirement.priority} updated_at=${requirement.updated_at}]`
+	`${formatSpecRequirementReference(requirement)}: ${compactSingleLineText(requirement.title)} [id=${requirement.id} kind=${requirement.kind} status=${requirement.status} priority=${requirement.priority} updated_at=${requirement.updated_at}]`
 
 /**
  * List spec requirements
@@ -1251,7 +1349,10 @@ const specReqListHandler = (args: {
  * Get spec requirement details
  */
 const specReqGetHandler = (args: {
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
@@ -1260,13 +1361,27 @@ const specReqGetHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: args.requirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
 
 		const specService = yield* SpecService
-		const requirement = yield* specService.getRequirement(args.requirementId, explicitProjectDir)
+		const requirement = yield* specService.getRequirement(
+			lookup.reference,
+			explicitProjectDir,
+			lookup.selector,
+		)
 		if (requirement === undefined) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${args.requirementId}`))
+			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
 		}
-		const linkedIssues = yield* specService.listRequirementIssues(requirement.id, explicitProjectDir)
+		const linkedIssues = yield* specService.listRequirementIssues(
+			lookup.reference,
+			explicitProjectDir,
+			lookup.selector,
+		)
 
 		if (args.json) {
 			yield* Console.log(
@@ -1304,7 +1419,9 @@ const specReqGetHandler = (args: {
  * Create spec requirement
  */
 const specReqCreateHandler = (args: {
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly localId: Option.Option<string>
+	readonly externalCode: Option.Option<string>
 	readonly title: string
 	readonly body: string
 	readonly kind: Option.Option<string>
@@ -1317,9 +1434,55 @@ const specReqCreateHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const positionalRef = Option.getOrUndefined(args.requirementRef)?.trim()
+		const optionLocalId = Option.getOrUndefined(args.localId)?.trim()
+		const optionExternalCodeRaw = Option.getOrUndefined(args.externalCode)?.trim()
+		const optionExternalCode =
+			optionExternalCodeRaw === undefined || optionExternalCodeRaw.length === 0
+				? undefined
+				: normalizeSpecExternalCodeForCli(optionExternalCodeRaw)
+
+		if (optionExternalCode !== undefined && !SPEC_EXTERNAL_CODE_PATTERN.test(optionExternalCode)) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid external code '${optionExternalCodeRaw}'. Expected AZ-FR-####[a-z]? or AZ-AT-####[a-z]?.`,
+				),
+			)
+		}
+
+		let localId = optionLocalId
+		let externalCode = optionExternalCode
+		if (positionalRef !== undefined && positionalRef.length > 0) {
+			if (optionLocalId !== undefined || optionExternalCode !== undefined) {
+				return yield* Effect.fail(
+					new Error(
+						"Provide either positional requirement ref OR --local-id/--external-code options, not both.",
+					),
+				)
+			}
+			const normalizedPositionalExternal = normalizeSpecExternalCodeForCli(positionalRef)
+			if (SPEC_EXTERNAL_CODE_PATTERN.test(normalizedPositionalExternal)) {
+				externalCode = normalizedPositionalExternal
+			} else {
+				localId = positionalRef
+			}
+		}
+		if (
+			(localId === undefined || localId.length === 0) &&
+			(externalCode === undefined || externalCode.length === 0)
+		) {
+			return yield* Effect.fail(
+				new Error(
+					"Missing requirement identifier. Provide a positional ref, --local-id, or --external-code.",
+				),
+			)
+		}
 
 		const kind = Option.match(args.kind, {
-			onNone: () => undefined,
+			onNone: () =>
+				externalCode === undefined
+					? undefined
+					: inferSpecRequirementKindFromExternalCodeForCli(externalCode),
 			onSome: (value): "functional" | "acceptance" | "other" | undefined => {
 				const normalized = value.trim().toLowerCase()
 				if (normalized === "functional") return "functional"
@@ -1334,31 +1497,35 @@ const specReqCreateHandler = (args: {
 			)
 		}
 
-		const specService = yield* SpecService
-		const created = yield* specService.createRequirement(
-			{
-				id: args.requirementId,
-				title: args.title,
-				body: args.body,
-				kind,
+			const specService = yield* SpecService
+			const created = yield* specService.createRequirement(
+				{
+					local_id: localId,
+					external_code: externalCode,
+					title: args.title,
+					body: args.body,
+					kind,
 				status: Option.getOrUndefined(args.status),
 				priority: Option.getOrUndefined(args.priority),
 			},
 			explicitProjectDir,
 		)
 
-		if (args.json) {
-			yield* Console.log(JSON.stringify(created, null, 2))
-			return
-		}
-		yield* Console.log(`Created spec requirement ${created.id}`)
-	})
+			if (args.json) {
+				yield* Console.log(JSON.stringify(created, null, 2))
+				return
+			}
+			yield* Console.log(`Created spec requirement ${formatSpecRequirementReference(created)}`)
+		})
 
 /**
  * Update spec requirement
  */
 const specReqUpdateHandler = (args: {
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly title: Option.Option<string>
 	readonly body: Option.Option<string>
 	readonly kind: Option.Option<string>
@@ -1371,6 +1538,12 @@ const specReqUpdateHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: args.requirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
 
 		const parsedKind = Option.match(args.kind, {
 			onNone: () => undefined,
@@ -1402,24 +1575,42 @@ const specReqUpdateHandler = (args: {
 			)
 		}
 
-		const specService = yield* SpecService
-		const updated = yield* specService.updateRequirement(args.requirementId, fields, explicitProjectDir)
-		if (!updated) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${args.requirementId}`))
-		}
+			const specService = yield* SpecService
+			const updated = yield* specService.updateRequirement(
+				lookup.reference,
+				fields,
+				explicitProjectDir,
+				lookup.selector,
+			)
+			if (!updated) {
+				return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
+			}
 
-		if (args.json) {
-			yield* Console.log(JSON.stringify({ id: args.requirementId, updated: true }, null, 2))
-			return
-		}
-		yield* Console.log(`Updated spec requirement ${args.requirementId}`)
-	})
+			if (args.json) {
+				yield* Console.log(
+					JSON.stringify(
+						{
+							reference: lookup.reference,
+							selector: lookup.selector,
+							updated: true,
+						},
+						null,
+						2,
+					),
+				)
+				return
+			}
+			yield* Console.log(`Updated spec requirement ${lookup.reference}`)
+		})
 
 /**
  * Delete spec requirement
  */
 const specReqDeleteHandler = (args: {
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -1427,18 +1618,38 @@ const specReqDeleteHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: args.requirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
 
 		const specService = yield* SpecService
-		const deleted = yield* specService.deleteRequirement(args.requirementId, explicitProjectDir)
+		const deleted = yield* specService.deleteRequirement(
+			lookup.reference,
+			explicitProjectDir,
+			lookup.selector,
+		)
 		if (!deleted) {
-			return yield* Effect.fail(new Error(`Spec requirement not found: ${args.requirementId}`))
+			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
 		}
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify({ id: args.requirementId, deleted: true }, null, 2))
+			yield* Console.log(
+				JSON.stringify(
+					{
+						reference: lookup.reference,
+						selector: lookup.selector,
+						deleted: true,
+					},
+					null,
+					2,
+				),
+			)
 			return
 		}
-		yield* Console.log(`Deleted spec requirement ${args.requirementId}`)
+		yield* Console.log(`Deleted spec requirement ${lookup.reference}`)
 	})
 
 /**
@@ -1446,7 +1657,10 @@ const specReqDeleteHandler = (args: {
  */
 const specLinkListHandler = (args: {
 	readonly issueId: Option.Option<string>
+	readonly requirementRef: Option.Option<string>
 	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -1459,12 +1673,32 @@ const specLinkListHandler = (args: {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
 			onSome: (value) => resolveCliIssueId(value, resolverCwd).pipe(Effect.map((resolved) => resolved)),
 		})
-		const requirementId = Option.getOrUndefined(args.requirementId)
+		const requirementLookup = yield* Option.match(args.requirementRef, {
+			onNone: () =>
+				Option.isNone(args.requirementId) &&
+				Option.isNone(args.requirementLocalId) &&
+				Option.isNone(args.requirementExternalCode)
+					? Effect.succeed<SpecRequirementLookupInput | undefined>(undefined)
+					: resolveSpecRequirementLookupInput({
+							reference: args.requirementRef,
+							id: args.requirementId,
+							localId: args.requirementLocalId,
+							externalCode: args.requirementExternalCode,
+						}).pipe(Effect.map((lookup) => lookup)),
+			onSome: () =>
+				resolveSpecRequirementLookupInput({
+					reference: args.requirementRef,
+					id: args.requirementId,
+					localId: args.requirementLocalId,
+					externalCode: args.requirementExternalCode,
+				}).pipe(Effect.map((lookup) => lookup)),
+		})
 		const specService = yield* SpecService
 		const links = yield* specService.listLinks(
 			{
 				issueId,
-				requirementId,
+				requirementId: requirementLookup?.reference,
+				requirementSelector: requirementLookup?.selector,
 			},
 			explicitProjectDir,
 		)
@@ -1478,8 +1712,12 @@ const specLinkListHandler = (args: {
 			return
 		}
 		for (const link of links) {
+			const requirementRef =
+				link.requirement_external_code === null
+					? link.requirement_local_id
+					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${link.requirement_id} [type=${link.link_type}] updated_at=${link.updated_at}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] id=${link.requirement_id} updated_at=${link.updated_at}`,
 			)
 		}
 	})
@@ -1489,7 +1727,10 @@ const specLinkListHandler = (args: {
  */
 const specLinkAddHandler = (args: {
 	readonly issueId: string
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
@@ -1500,6 +1741,12 @@ const specLinkAddHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: args.requirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
 		const linkType = yield* Option.match(args.linkType, {
 			onNone: () => Effect.succeed<RelationshipSpecLinkType>("relates"),
 			onSome: (value) => {
@@ -1516,14 +1763,20 @@ const specLinkAddHandler = (args: {
 		})
 
 		const specService = yield* SpecService
-		yield* specService.addIssueLink(issueId, args.requirementId, linkType, explicitProjectDir)
+		yield* specService.addIssueLink(
+			issueId,
+			lookup.reference,
+			linkType,
+			explicitProjectDir,
+			lookup.selector,
+		)
 
 		if (args.json) {
 			yield* Console.log(
 				JSON.stringify(
 					{
 						issueId,
-						requirementId: args.requirementId,
+						requirement: lookup,
 						type: linkType,
 						updated: true,
 					},
@@ -1533,7 +1786,7 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Added spec link: ${issueId} -> ${args.requirementId} (${linkType})`)
+		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
 	})
 
 /**
@@ -1541,7 +1794,10 @@ const specLinkAddHandler = (args: {
  */
 const specLinkRemoveHandler = (args: {
 	readonly issueId: string
-	readonly requirementId: string
+	readonly requirementRef: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
@@ -1552,6 +1808,12 @@ const specLinkRemoveHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: args.requirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
 		const linkType = Option.match(args.linkType, {
 			onNone: () => undefined,
 			onSome: (value) => parseRelationshipSpecLinkType(value),
@@ -1567,9 +1829,10 @@ const specLinkRemoveHandler = (args: {
 		const specService = yield* SpecService
 		const removed = yield* specService.removeIssueLink(
 			issueId,
-			args.requirementId,
+			lookup.reference,
 			linkType,
 			explicitProjectDir,
+			lookup.selector,
 		)
 
 		if (args.json) {
@@ -2766,8 +3029,26 @@ const issueCommand = Command.make("issue", {}, () =>
 	]),
 )
 
-const requirementIdArg = Args.text({ name: "requirement-id" }).pipe(
-	Args.withDescription("Spec requirement ID (for example AZ-FR-4201)"),
+const requirementRefArg = Args.text({ name: "requirement-ref" }).pipe(
+	Args.optional,
+	Args.withDescription(
+		"Spec requirement reference (auto-resolved by local_id, id, then external_code)",
+	),
+)
+
+const requirementByIdOption = Options.text("id").pipe(
+	Options.optional,
+	Options.withDescription("Lookup by internal opaque requirement id"),
+)
+
+const requirementByLocalIdOption = Options.text("local-id").pipe(
+	Options.optional,
+	Options.withDescription("Lookup by requirement local_id"),
+)
+
+const requirementByExternalCodeOption = Options.text("external-code").pipe(
+	Options.optional,
+	Options.withDescription("Lookup by docs/spec external code (for example AZ-FR-4201)"),
 )
 
 const specReqListCommand = Command.make(
@@ -2783,7 +3064,10 @@ const specReqListCommand = Command.make(
 const specReqGetCommand = Command.make(
 	"get",
 	{
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
@@ -2794,7 +3078,9 @@ const specReqGetCommand = Command.make(
 const specReqCreateCommand = Command.make(
 	"create",
 	{
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		localId: requirementByLocalIdOption,
+		externalCode: requirementByExternalCodeOption,
 		title: Options.text("title").pipe(Options.withDescription("Requirement title")),
 		body: Options.text("body").pipe(Options.withDescription("Requirement body markdown")),
 		kind: Options.text("kind").pipe(
@@ -2818,7 +3104,10 @@ const specReqCreateCommand = Command.make(
 const specReqUpdateCommand = Command.make(
 	"update",
 	{
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
 		title: Options.text("title").pipe(Options.optional, Options.withDescription("Requirement title")),
 		body: Options.text("body").pipe(
 			Options.optional,
@@ -2845,7 +3134,10 @@ const specReqUpdateCommand = Command.make(
 const specReqDeleteCommand = Command.make(
 	"delete",
 	{
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
 	},
@@ -2853,7 +3145,9 @@ const specReqDeleteCommand = Command.make(
 ).pipe(Command.withDescription("Delete a spec requirement"))
 
 const specReqCommand = Command.make("req", {}, () =>
-	Console.log("Usage: az spec req [list|get|create|update|delete] ..."),
+	Console.log(
+		"Usage: az spec req [list|get|create|update|delete] [<requirement-ref>] [--id|--local-id|--external-code] ...",
+	),
 ).pipe(
 	Command.withDescription("Manage spec requirement records"),
 	Command.withSubcommands([
@@ -2872,9 +3166,21 @@ const specLinkListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by issue ID"),
 		),
-		requirementId: Options.text("req").pipe(
+		requirementRef: Options.text("req").pipe(
 			Options.optional,
-			Options.withDescription("Filter by requirement ID"),
+			Options.withDescription("Filter by requirement reference (auto selector)"),
+		),
+		requirementId: Options.text("req-id").pipe(
+			Options.optional,
+			Options.withDescription("Filter by requirement internal id"),
+		),
+		requirementLocalId: Options.text("req-local-id").pipe(
+			Options.optional,
+			Options.withDescription("Filter by requirement local_id"),
+		),
+		requirementExternalCode: Options.text("req-external-code").pipe(
+			Options.optional,
+			Options.withDescription("Filter by requirement external code"),
 		),
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
@@ -2886,7 +3192,10 @@ const specLinkAddCommand = Command.make(
 	"add",
 	{
 		issueId: issueIdArg,
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
 		linkType: Options.text("type").pipe(
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
@@ -2901,7 +3210,10 @@ const specLinkRemoveCommand = Command.make(
 	"remove",
 	{
 		issueId: issueIdArg,
-		requirementId: requirementIdArg,
+		requirementRef: requirementRefArg,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
 		linkType: Options.text("type").pipe(
 			Options.optional,
 			Options.withDescription("Optional link type filter"),

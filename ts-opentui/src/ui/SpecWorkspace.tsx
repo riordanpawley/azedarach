@@ -50,6 +50,14 @@ const gapLabel = (gap: SpecCoverageGap): string => {
     return `Missing requirement ${gap.requirement_id ?? ""}`.trim()
 }
 
+const requirementReference = (requirement: {
+	readonly local_id: string
+	readonly external_code: string | null
+}): string =>
+	requirement.external_code === null
+		? requirement.local_id
+		: `${requirement.local_id} (${requirement.external_code})`
+
 interface SpecWorkspaceProps {
     readonly subview: SpecSubview
     readonly state: SpecWorkspaceState
@@ -100,11 +108,12 @@ export const SpecWorkspace = ({ subview, state }: SpecWorkspaceProps) => {
                             {requirements.map((requirement) => (
                                 <box key={requirement.id} flexDirection="column" paddingBottom={1}>
                                     <text fg={theme.text} attributes={ATTR_BOLD}>
-                                        {requirement.id} [{requirement.kind}] links={requirement.linked_issue_count}
+                                        {requirementReference(requirement)} [{requirement.kind}] links=
+                                        {requirement.linked_issue_count}
                                     </text>
                                     <text fg={theme.subtext1}>{requirement.title}</text>
                                     <text fg={theme.overlay1}>
-                                        status={requirement.status} priority={requirement.priority}
+                                        id={requirement.id} status={requirement.status} priority={requirement.priority}
                                     </text>
                                 </box>
                             ))}

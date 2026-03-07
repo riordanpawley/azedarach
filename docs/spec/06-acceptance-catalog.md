@@ -4,7 +4,7 @@ This catalog defines validation scenarios for requirements in Section 04.
 
 ## 6.1 Scenario Format
 
-- ID: `AZ-AT-####` with optional single-letter suffix (`AZ-AT-####a`)
+- ID (document/external code): `AZ-AT-####` with optional single-letter suffix (`AZ-AT-####a`)
 - Preconditions
 - Steps
 - Expected Results
@@ -1086,8 +1086,8 @@ A release candidate MUST pass:
 
 ### AZ-AT-2901 Create/list/get az spec requirement records
 
-- Steps: create requirement records with explicit IDs, list requirements, and fetch one by ID.
-- Expected: records persist with stable IDs and are retrievable without ID mutation.
+- Steps: create requirement records with explicit `local_id` and optional docs/spec `external_code`, list requirements, and fetch one by reference.
+- Expected: records persist with stable identity fields (`id`, `local_id`, `external_code`) and are retrievable without identity mutation.
 - Links: AZ-FR-4201.
 
 ### AZ-AT-2902 Link issue and requirement with typed relationship

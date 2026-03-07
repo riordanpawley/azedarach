@@ -54,5 +54,9 @@
 
 ## Requirement/Acceptance IDs
 
-- `AZ-FR-####` / `AZ-FR-####a`: functional requirement identifier.
-- `AZ-AT-####` / `AZ-AT-####a`: acceptance scenario identifier.
+- `AZ-FR-####` / `AZ-FR-####a`: functional requirement document/external code.
+- `AZ-AT-####` / `AZ-AT-####a`: acceptance scenario document/external code.
+- az spec requirement identity:
+  - `id`: opaque internal identifier.
+  - `local_id`: short project-local identifier.
+  - `external_code`: optional docs/spec code (for example `AZ-FR-4201`).

@@ -501,7 +501,7 @@ This section is normative.
 
 ## 4.45 Spec Tool Requirements
 
-- AZ-FR-4201: The system MUST provide az-native specification requirement records with stable IDs.
+- AZ-FR-4201: The system MUST provide az-native specification requirement records with stable identity (`id` opaque internal identifier + `local_id` project-local identifier) and optional `external_code` for docs/spec interoperability.
 - AZ-FR-4202: The system MUST support typed links between issues and specification requirements.
 - AZ-FR-4203: `az issue get` and `az spec req get` MUST expose linked specification relationships in both directions.
 - AZ-FR-4204: The system MUST provide one-way publish from az specification records to Linear project documents.

@@ -172,29 +172,31 @@ describe("importExternalSnapshot", () => {
 })
 
 describe("spec requirements and links", () => {
-	it("accepts suffixed spec requirement IDs from docs/spec", async () => {
+		it("accepts suffixed spec requirement IDs from docs/spec", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
 		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
 
 		try {
-			const requirement = await Effect.runPromise(
-				Effect.gen(function* () {
-					const store = yield* LocalIssueStore
-					return yield* store.createSpecRequirement(
-						{
-							id: "AZ-FR-0802a",
-							title: "Suffixed requirement ID support",
-							body: "Allow optional single-letter suffix in requirement IDs.",
-						},
-						projectPath,
-					)
-				}).pipe(Effect.provide(testLayer)),
-			)
+				const requirement = await Effect.runPromise(
+					Effect.gen(function* () {
+						const store = yield* LocalIssueStore
+						return yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-FR-0802a",
+								title: "Suffixed requirement ID support",
+								body: "Allow optional single-letter suffix in requirement IDs.",
+							},
+							projectPath,
+						)
+					}).pipe(Effect.provide(testLayer)),
+				)
 
-			expect(requirement.id).toBe("AZ-FR-0802A")
-			expect(requirement.kind).toBe("functional")
-		} finally {
-			rmSync(projectPath, { recursive: true, force: true })
+				expect(requirement.id.startsWith("sr_")).toBe(true)
+				expect(requirement.local_id).toBe("fr0802a")
+				expect(requirement.external_code).toBe("AZ-FR-0802A")
+				expect(requirement.kind).toBe("functional")
+			} finally {
+				rmSync(projectPath, { recursive: true, force: true })
 		}
 	})
 
@@ -208,21 +210,21 @@ describe("spec requirements and links", () => {
 					const store = yield* LocalIssueStore
 
 					const issue = yield* store.create({ title: "Implement feature" }, undefined, projectPath)
-					const requirement = yield* store.createSpecRequirement(
-						{
-							id: "AZ-FR-4201",
-							title: "Track requirement records",
-							body: "The store must persist requirements.",
-						},
-						projectPath,
-					)
-					yield* store.createSpecRequirement(
-						{
-							id: "AZ-AT-2901",
-							title: "Acceptance coverage",
-							body: "Acceptance requirement with no links yet.",
-						},
-						projectPath,
+						const requirement = yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-FR-4201",
+								title: "Track requirement records",
+								body: "The store must persist requirements.",
+							},
+							projectPath,
+						)
+						const acceptanceRequirement = yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-AT-2901",
+								title: "Acceptance coverage",
+								body: "Acceptance requirement with no links yet.",
+							},
+							projectPath,
 					)
 
 					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
@@ -234,28 +236,36 @@ describe("spec requirements and links", () => {
 					)
 					const coverage = yield* store.getSpecCoverageReport(projectPath)
 
-					return {
-						issueRequirements,
-						requirementIssues,
-						coverage,
-					}
+						return {
+							requirement,
+							acceptanceRequirement,
+							issueRequirements,
+							requirementIssues,
+							coverage,
+						}
 				}).pipe(Effect.provide(testLayer)),
 			)
 
-			expect(result.issueRequirements).toHaveLength(1)
-			expect(result.issueRequirements[0]?.id).toBe("AZ-FR-4201")
-			expect(result.issueRequirements[0]?.link_type).toBe("implements")
+				expect(result.issueRequirements).toHaveLength(1)
+				expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
+				expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
+				expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
+				expect(result.issueRequirements[0]?.link_type).toBe("implements")
 
-			expect(result.requirementIssues).toHaveLength(1)
-			expect(result.requirementIssues[0]?.link_type).toBe("implements")
+				expect(result.requirementIssues).toHaveLength(1)
+				expect(result.requirementIssues[0]?.link_type).toBe("implements")
 
-			expect(result.coverage.requirements).toHaveLength(2)
-			expect(result.coverage.unlinked_requirement_ids).toContain("AZ-AT-2901")
-			expect(
-				result.coverage.integrity_gaps.some(
-					(gap) => gap.kind === "unlinked_requirement" && gap.requirement_id === "AZ-AT-2901",
-				),
-			).toBe(true)
+				expect(result.coverage.requirements).toHaveLength(2)
+				expect(result.coverage.unlinked_requirement_ids).toContain(
+					result.acceptanceRequirement.local_id,
+				)
+				expect(
+					result.coverage.integrity_gaps.some(
+						(gap) =>
+							gap.kind === "unlinked_requirement" &&
+							gap.requirement_id === result.acceptanceRequirement.local_id,
+					),
+				).toBe(true)
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

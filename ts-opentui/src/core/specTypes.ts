@@ -2,9 +2,12 @@ import type { DateTime } from "effect"
 
 export type SpecRequirementKind = "functional" | "acceptance" | "other"
 export type SpecLinkType = "implements" | "tests" | "blocks" | "relates"
+export type SpecRequirementLookupSelector = "auto" | "id" | "local_id" | "external_code"
 
 export interface SpecRequirement {
 	readonly id: string
+	readonly local_id: string
+	readonly external_code: string | null
 	readonly title: string
 	readonly body: string
 	readonly kind: SpecRequirementKind
@@ -17,6 +20,8 @@ export interface SpecRequirement {
 export interface SpecIssueLink {
 	readonly issue_id: string
 	readonly requirement_id: string
+	readonly requirement_local_id: string
+	readonly requirement_external_code: string | null
 	readonly link_type: SpecLinkType
 	readonly created_at: string
 	readonly updated_at: string
@@ -32,6 +37,8 @@ export interface SpecIssueRef {
 
 export interface SpecRequirementRef {
 	readonly id: string
+	readonly local_id: string
+	readonly external_code: string | null
 	readonly title: string
 	readonly kind: SpecRequirementKind
 	readonly link_type: SpecLinkType

@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url"
 type RequirementKind = "functional" | "acceptance"
 
 interface ParsedRequirement {
-	readonly id: string
+	readonly externalCode: string
+	readonly localId: string
 	readonly title: string
 	readonly body: string
 	readonly kind: RequirementKind
@@ -24,6 +25,20 @@ interface CliOptions {
 const functionalRequirementPattern = /^- (AZ-FR-\d{4}[A-Za-z]?):\s*(.+)$/
 const acceptanceRequirementHeadingPattern = /^### (AZ-AT-\d{4}[A-Za-z]?)\s+(.+)$/
 const sectionHeadingPattern = /^##\s+(.+)$/
+
+const toLocalIdFromExternalCode = (externalCode: string): string => {
+	const match = /^AZ-(FR|AT)-(\d{4})([A-Z]?)$/.exec(externalCode)
+	if (match === null) {
+		return externalCode
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+	}
+	const prefix = (match[1] ?? "").toLowerCase()
+	const number = match[2] ?? ""
+	const suffix = (match[3] ?? "").toLowerCase()
+	return `${prefix}${number}${suffix}`
+}
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const tsOpentuiDir = resolve(scriptDir, "..")
@@ -87,16 +102,17 @@ const parseFunctionalRequirements = (sourcePath: string): ParsedRequirement[] =>
 			continue
 		}
 
-		const id = (match[1] ?? "").toUpperCase()
+		const externalCode = (match[1] ?? "").toUpperCase()
 		const statement = (match[2] ?? "").trim()
 		if (statement.length === 0) {
 			throw new Error(
-				`Missing requirement statement for ${id} at ${relativeSourcePath}:${index + 1}`,
+				`Missing requirement statement for ${externalCode} at ${relativeSourcePath}:${index + 1}`,
 			)
 		}
 
 		requirements.push({
-			id,
+			externalCode,
+			localId: toLocalIdFromExternalCode(externalCode),
 			title: statement,
 			body: statement,
 			kind: "functional",
@@ -145,7 +161,8 @@ const parseAcceptanceRequirements = (sourcePath: string): ParsedRequirement[] =>
 			)
 		}
 		requirements.push({
-			id: currentId,
+			externalCode: currentId,
+			localId: toLocalIdFromExternalCode(currentId),
 			title: currentTitle,
 			body,
 			kind: "acceptance",
@@ -184,13 +201,13 @@ const parseAcceptanceRequirements = (sourcePath: string): ParsedRequirement[] =>
 const assertNoDuplicateIds = (requirements: readonly ParsedRequirement[]): void => {
 	const seen = new Map<string, ParsedRequirement>()
 	for (const requirement of requirements) {
-		const existing = seen.get(requirement.id)
+		const existing = seen.get(requirement.externalCode)
 		if (existing) {
 			throw new Error(
-				`Duplicate requirement ID ${requirement.id} at ${requirement.sourcePath}:${requirement.sourceLine} (already seen at ${existing.sourcePath}:${existing.sourceLine})`,
+				`Duplicate requirement ID ${requirement.externalCode} at ${requirement.sourcePath}:${requirement.sourceLine} (already seen at ${existing.sourcePath}:${existing.sourceLine})`,
 			)
 		}
-		seen.set(requirement.id, requirement)
+		seen.set(requirement.externalCode, requirement)
 	}
 }
 
@@ -219,7 +236,18 @@ const runAzCommand = async (args: readonly string[]): Promise<{ readonly stdout:
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null
 
-const parseExistingRequirements = async (projectDir: string): Promise<Set<string>> => {
+interface ExistingRequirementRef {
+	readonly id: string
+	readonly local_id: string
+	readonly external_code: string | null
+}
+
+const parseExistingRequirements = async (
+	projectDir: string,
+): Promise<{
+	readonly byExternalCode: ReadonlyMap<string, ExistingRequirementRef>
+	readonly byLocalId: ReadonlyMap<string, ExistingRequirementRef>
+}> => {
 	const { stdout } = await runAzCommand([
 		"spec",
 		"req",
@@ -233,18 +261,40 @@ const parseExistingRequirements = async (projectDir: string): Promise<Set<string
 		throw new Error("Unexpected JSON from az spec req list --json (expected array)")
 	}
 
-	const ids = new Set<string>()
+	const byExternalCode = new Map<string, ExistingRequirementRef>()
+	const byLocalId = new Map<string, ExistingRequirementRef>()
 	for (const item of parsed) {
 		if (!isRecord(item)) {
 			throw new Error("Unexpected requirement item in list output")
 		}
 		const idValue = item.id
-		if (typeof idValue !== "string" || idValue.trim().length === 0) {
+		const localIdValue = item.local_id
+		const externalCodeValue = item.external_code
+		if (
+			typeof idValue !== "string" ||
+			idValue.trim().length === 0 ||
+			typeof localIdValue !== "string" ||
+			localIdValue.trim().length === 0
+		) {
 			throw new Error("Requirement list output missing string id field")
 		}
-		ids.add(idValue.trim().toUpperCase())
+		const normalizedRecord: ExistingRequirementRef = {
+			id: idValue.trim(),
+			local_id: localIdValue.trim(),
+			external_code:
+				typeof externalCodeValue === "string" && externalCodeValue.trim().length > 0
+					? externalCodeValue.trim().toUpperCase()
+					: null,
+		}
+		byLocalId.set(normalizedRecord.local_id, normalizedRecord)
+		if (normalizedRecord.external_code !== null) {
+			byExternalCode.set(normalizedRecord.external_code, normalizedRecord)
+		}
 	}
-	return ids
+	return {
+		byExternalCode,
+		byLocalId,
+	}
 }
 
 const formatTrace = (requirement: ParsedRequirement): string => {
@@ -265,8 +315,10 @@ const migrate = async (options: CliOptions): Promise<void> => {
 	console.log(`Mode: ${options.apply ? "apply" : "dry-run"}`)
 	console.log(`Target project dir: ${options.projectDir}`)
 
-	const existingIds = await parseExistingRequirements(options.projectDir)
-	console.log(`Existing az spec requirements: ${existingIds.size}`)
+	const existing = await parseExistingRequirements(options.projectDir)
+	console.log(
+		`Existing az spec requirements: ${existing.byLocalId.size} (with external_code=${existing.byExternalCode.size})`,
+	)
 
 	let createdCount = 0
 	let updatedCount = 0
@@ -276,14 +328,17 @@ const migrate = async (options: CliOptions): Promise<void> => {
 		if (!requirement) {
 			continue
 		}
-		const exists = existingIds.has(requirement.id)
+		const existingByExternalCode = existing.byExternalCode.get(requirement.externalCode)
+		const existingByLocalId = existing.byLocalId.get(requirement.localId)
+		const existingRequirement = existingByExternalCode ?? existingByLocalId
+		const exists = existingRequirement !== undefined
 		const actionLabel = exists ? "update" : "create"
 		const trace = formatTrace(requirement)
 		const progress = `[${index + 1}/${parsedRequirements.length}]`
 
 		if (!options.apply) {
 			console.log(
-				`${progress} ${actionLabel.toUpperCase()} ${requirement.id} (${requirement.kind}) <- ${trace}`,
+				`${progress} ${actionLabel.toUpperCase()} ${requirement.localId} (${requirement.externalCode}, ${requirement.kind}) <- ${trace}`,
 			)
 			if (exists) {
 				updatedCount += 1
@@ -294,22 +349,28 @@ const migrate = async (options: CliOptions): Promise<void> => {
 		}
 
 		if (exists) {
+			const updateSelectorArgs =
+				existingRequirement?.external_code !== null && existingRequirement?.external_code !== undefined
+					? ["--external-code", existingRequirement.external_code]
+					: ["--local-id", existingRequirement?.local_id ?? requirement.localId]
 			await runAzCommand([
 				"spec",
 				"req",
 				"update",
 				"--project-dir",
 				options.projectDir,
+				...updateSelectorArgs,
 				"--title",
 				requirement.title,
 				"--body",
 				requirement.body,
 				"--kind",
 				requirement.kind,
-				requirement.id,
 			])
 			updatedCount += 1
-			console.log(`${progress} UPDATED ${requirement.id} (${requirement.kind}) <- ${trace}`)
+			console.log(
+				`${progress} UPDATED ${requirement.localId} (${requirement.externalCode}, ${requirement.kind}) <- ${trace}`,
+			)
 			continue
 		}
 
@@ -319,17 +380,28 @@ const migrate = async (options: CliOptions): Promise<void> => {
 			"create",
 			"--project-dir",
 			options.projectDir,
+			"--local-id",
+			requirement.localId,
+			"--external-code",
+			requirement.externalCode,
 			"--title",
 			requirement.title,
 			"--body",
 			requirement.body,
 			"--kind",
 			requirement.kind,
-			requirement.id,
 		])
-		existingIds.add(requirement.id)
+		const createdRef: ExistingRequirementRef = {
+			id: requirement.localId,
+			local_id: requirement.localId,
+			external_code: requirement.externalCode,
+		}
+		existing.byLocalId.set(requirement.localId, createdRef)
+		existing.byExternalCode.set(requirement.externalCode, createdRef)
 		createdCount += 1
-		console.log(`${progress} CREATED ${requirement.id} (${requirement.kind}) <- ${trace}`)
+		console.log(
+			`${progress} CREATED ${requirement.localId} (${requirement.externalCode}, ${requirement.kind}) <- ${trace}`,
+		)
 	}
 
 	console.log(
