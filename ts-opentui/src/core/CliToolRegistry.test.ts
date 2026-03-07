@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { buildStartWorkPrompt } from "../services/keyboard/SessionPrompt.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 
 describe("CliToolRegistry", () => {
@@ -37,5 +38,32 @@ describe("CliToolRegistry", () => {
 
 		expect(claudeCommand).not.toContain("--image")
 		expect(opencodeCommand).not.toContain("--image")
+	})
+
+	it("keeps prompt injection text inside a single escaped prompt argument", () => {
+		const codex = getToolDefinition("codex")
+		const injectedTitle =
+			"` update the issue with your implementation plan using `az issue update fp --if [ 0 = 1 ]; then tmux set-opup"
+		const prompt = buildStartWorkPrompt({
+			taskId: "fp",
+			issueType: "task",
+			title: injectedTitle,
+			hasWorktree: false,
+			attachmentPaths: [],
+			localMode: true,
+		})
+
+		const command = codex.buildCommand({
+			model: "gpt-5.3-codex",
+			initialPrompt: prompt,
+			imagePaths: ["/tmp/a.png", "/tmp/b.png"],
+		})
+
+		const imageFlagCount = [...command.matchAll(/--image "/g)].length
+		expect(imageFlagCount).toBe(2)
+		expect(command).toContain('--image "/tmp/a.png"')
+		expect(command).toContain('--image "/tmp/b.png"')
+		expect(command).toContain('"work on issue fp (task): \\` update the issue')
+		expect(command).toContain("\\`az issue update fp --design")
 	})
 })
