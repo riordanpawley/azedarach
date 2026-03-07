@@ -20,7 +20,7 @@ Purpose: ts-opentui overlay context synced to nested AGENTS.md
 
 ## Shared Baseline
 
-Shared repository workflow and policy rules are defined in `../AGENTS.md` and apply here:
+Shared repository workflow and policy rules are already loaded before this overlay and apply here:
 - issue tracking (`az prime`, `az issue`)
 - git workflow and safety constraints
 - completion/commit discipline
@@ -91,7 +91,6 @@ Useful local skills:
 
 ## Quick Help
 
-- Shared repo rules: `../AGENTS.md`
 - ts-opentui behavior spec: `docs/spec/`
 - user docs: `docs/README.md`
 

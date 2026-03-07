@@ -20,7 +20,7 @@ Purpose: go-bubbletea overlay context synced to nested AGENTS.md
 
 ## Shared Baseline
 
-Shared repository workflow and policy rules are defined in `../AGENTS.md` and apply here:
+Shared repository workflow and policy rules are already loaded before this overlay and apply here:
 - issue tracking (`az prime`, `az issue`)
 - git workflow and safety constraints
 - completion/commit discipline
@@ -84,7 +84,6 @@ go-bubbletea/
 
 ## Quick Help
 
-- Shared repo rules: `../AGENTS.md`
 - go docs: `docs/`
 
 </ai_context>
