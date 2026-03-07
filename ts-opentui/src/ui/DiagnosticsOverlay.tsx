@@ -92,9 +92,9 @@ const severityColor = (severity: DiagnosticSeverity): string => {
 const severityIcon = (severity: DiagnosticSeverity): string => {
 	switch (severity) {
 		case "info":
-			return "ℹ"
+			return "i"
 		case "warning":
-			return "⚠"
+			return "!"
 		case "error":
 			return "✗"
 		default:
@@ -442,14 +442,7 @@ export const DiagnosticsOverlay = () => {
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
 					{dividerLine}
 				</text>
-				<scrollbox
-					ref={scrollboxRef}
-					scrollY={true}
-					flexDirection="column"
-					maxHeight={layout.maxScrollHeight}
-					flexGrow={1}
-					onMouseScroll={handleMouseScroll}
-				>
+				<scrollbox ref={scrollboxRef} scrollY={true} flexGrow={1} onMouseScroll={handleMouseScroll}>
 					<text> </text>
 
 					{/* Services section */}
