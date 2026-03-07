@@ -1,10 +1,10 @@
 ---
-root: true
 targets:
-  - codexcli
-  - opencode
+  - agentsmd
+description: go-bubbletea scoped context
+agentsmd:
+  subprojectPath: go-bubbletea
 ---
-
 <!--
 File: CONTEXT.md
 Version: 1.0.0

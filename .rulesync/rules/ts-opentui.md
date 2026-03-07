@@ -1,10 +1,10 @@
 ---
-root: true
 targets:
-  - codexcli
-  - opencode
+  - agentsmd
+description: ts-opentui scoped context
+agentsmd:
+  subprojectPath: ts-opentui
 ---
-
 <!--
 File: CONTEXT.md
 Version: 2.3.0

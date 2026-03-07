@@ -1,8 +1,7 @@
 ---
 root: true
 targets:
-  - codexcli
-  - opencode
+  - agentsmd
 ---
 
 <!--
@@ -81,11 +80,13 @@ Managed paths are generated from `.rulesync/`:
 
 Canonical context sources:
 - `./.rulesync/rules/overview.md` -> `AGENTS.md`
-- `./ts-opentui/.rulesync/rules/overview.md` -> `ts-opentui/AGENTS.md`
-- `./go-bubbletea/.rulesync/rules/overview.md` -> `go-bubbletea/AGENTS.md`
+- `./.rulesync/rules/ts-opentui.md` + `agentsmd.subprojectPath: ts-opentui` -> `ts-opentui/AGENTS.md`
+- `./.rulesync/rules/go-bubbletea.md` + `agentsmd.subprojectPath: go-bubbletea` -> `go-bubbletea/AGENTS.md`
 
 Sync behavior:
-- `post-checkout` and `post-merge` run `rulesync generate -c rulesync.jsonc --silent`
+- `post-checkout` and `post-merge` run:
+  - `rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent`
+  - `rulesync generate -c rulesync.jsonc --silent`
 - Set `RULESYNC_SKIP=1` to bypass auto-sync for one command/session
 - OpenCode plugin files are intentionally not managed by RuleSync
 

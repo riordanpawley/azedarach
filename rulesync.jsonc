@@ -1,7 +1,7 @@
 {
   "targets": ["codexcli", "opencode"],
-  "features": ["rules", "subagents", "skills"],
-  "baseDirs": [".", "ts-opentui", "go-bubbletea"],
+  "features": ["subagents", "skills"],
+  "baseDirs": ["."],
   "delete": true,
   "silent": true
 }

@@ -7,4 +7,8 @@ if [ "${RULESYNC_SKIP:-0}" = "1" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-(cd "$repo_root" && rulesync generate -c rulesync.jsonc --silent) >/dev/null
+(
+  cd "$repo_root" && \
+  rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent && \
+  rulesync generate -c rulesync.jsonc --silent
+) >/dev/null
