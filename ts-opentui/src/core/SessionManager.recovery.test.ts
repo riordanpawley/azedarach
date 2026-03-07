@@ -1,0 +1,29 @@
+import { describe, expect, it } from "bun:test"
+import {
+	ACTIVE_SESSION_STATES,
+	isActiveSessionState,
+	resolveDiscoveredSessionState,
+} from "./SessionManager.js"
+
+describe("SessionManager discovered session recovery", () => {
+	it("marks active sessions without code window as crashed", () => {
+		expect(resolveDiscoveredSessionState("initializing", false)).toBe("crashed")
+		expect(resolveDiscoveredSessionState("busy", false)).toBe("crashed")
+		expect(resolveDiscoveredSessionState(undefined, false)).toBe("crashed")
+	})
+
+	it("preserves non-active states when code window is missing", () => {
+		expect(resolveDiscoveredSessionState("done", false)).toBe("done")
+		expect(resolveDiscoveredSessionState("error", false)).toBe("error")
+	})
+
+	it("defaults to busy when code window exists and no persisted state is available", () => {
+		expect(resolveDiscoveredSessionState(undefined, true)).toBe("busy")
+	})
+
+	it("tracks active states consistently", () => {
+		expect(ACTIVE_SESSION_STATES.has("waiting")).toBe(true)
+		expect(isActiveSessionState("paused")).toBe(true)
+		expect(isActiveSessionState("done")).toBe(false)
+	})
+})
