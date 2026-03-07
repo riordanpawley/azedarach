@@ -1,5 +1,5 @@
 {
-  "$schema": 4,
+  "$schema": 5,
   "cliTool": "codex",
   "issueTracker": {
     "linear": {
@@ -46,7 +46,7 @@
     ],
     "fixCommand": "cd ts-opentui && bun run fix",
     "maxFixAttempts": 2,
-    "startClaudeOnFailure": true
+    "startAiSessionOnFailure": true
   },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
