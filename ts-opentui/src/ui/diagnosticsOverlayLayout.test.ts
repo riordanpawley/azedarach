@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test"
+import { shouldResetScrollCommandOnPush } from "../services/OverlayService.js"
 import { computeDiagnosticsOverlayLayout } from "./diagnosticsOverlayLayout.js"
 import { shouldApplyDiagnosticsScrollCommand } from "./diagnosticsOverlayScroll.js"
 
@@ -7,18 +8,18 @@ describe("computeDiagnosticsOverlayLayout", () => {
 		const layout = computeDiagnosticsOverlayLayout(50, 120)
 
 		expect(layout.panelWidth).toBe(118)
-		expect(layout.panelHeight).toBe(48)
+		expect(layout.maxPanelHeight).toBe(48)
 		expect(layout.dividerLength).toBe(114)
-		expect(layout.scrollViewportHeight).toBe(40)
+		expect(layout.maxScrollHeight).toBe(38)
 	})
 
-	it("clamps all dimensions to at least 1", () => {
+	it("clamps panel dimensions and enforces minimum scroll viewport", () => {
 		const layout = computeDiagnosticsOverlayLayout(1, 1)
 
 		expect(layout.panelWidth).toBe(1)
-		expect(layout.panelHeight).toBe(1)
+		expect(layout.maxPanelHeight).toBe(1)
 		expect(layout.dividerLength).toBe(1)
-		expect(layout.scrollViewportHeight).toBe(1)
+		expect(layout.maxScrollHeight).toBe(10)
 	})
 })
 
@@ -81,5 +82,17 @@ describe("shouldApplyDiagnosticsScrollCommand", () => {
 		)
 
 		expect(shouldApply).toBe(false)
+	})
+})
+
+describe("shouldResetScrollCommandOnPush", () => {
+	it("resets scroll command when opening scrollable overlays", () => {
+		expect(shouldResetScrollCommandOnPush({ _tag: "detail", taskId: "AZE-1" })).toBe(true)
+		expect(shouldResetScrollCommandOnPush({ _tag: "diagnostics" })).toBe(true)
+	})
+
+	it("does not reset scroll command for unrelated overlays", () => {
+		expect(shouldResetScrollCommandOnPush({ _tag: "help" })).toBe(false)
+		expect(shouldResetScrollCommandOnPush({ _tag: "settings" })).toBe(false)
 	})
 })

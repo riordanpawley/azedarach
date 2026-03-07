@@ -78,6 +78,9 @@ export type Overlay =
 	| { readonly _tag: "devServerMenu"; readonly issueId: string }
 	| { readonly _tag: "planning" }
 
+export const shouldResetScrollCommandOnPush = (overlay: Overlay): boolean =>
+	overlay._tag === "detail" || overlay._tag === "diagnostics"
+
 export class OverlayService extends Effect.Service<OverlayService>()("OverlayService", {
 	dependencies: [ImageAttachmentService.Default],
 	effect: Effect.gen(function* () {
@@ -113,6 +116,9 @@ export class OverlayService extends Effect.Service<OverlayService>()("OverlaySer
 
 			push: (overlay: Overlay) =>
 				Effect.gen(function* () {
+					if (shouldResetScrollCommandOnPush(overlay)) {
+						yield* SubscriptionRef.set(scrollCommand, null)
+					}
 					yield* SubscriptionRef.update(stack, (s) => [...s, Data.struct(overlay)])
 
 					// Load attachments when opening detail overlay

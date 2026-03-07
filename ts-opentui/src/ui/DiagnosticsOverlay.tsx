@@ -92,9 +92,9 @@ const severityColor = (severity: DiagnosticSeverity): string => {
 const severityIcon = (severity: DiagnosticSeverity): string => {
 	switch (severity) {
 		case "info":
-			return "ℹ"
+			return "i"
 		case "warning":
-			return "⚠"
+			return "!"
 		case "error":
 			return "✗"
 		default:
@@ -352,7 +352,6 @@ export const DiagnosticsOverlay = () => {
 		[terminalRows, terminalColumns],
 	)
 	const panelWidth = layout.panelWidth
-	const panelHeight = layout.panelHeight
 	const dividerLength = layout.dividerLength
 	const dividerLine = "━".repeat(dividerLength)
 
@@ -404,9 +403,8 @@ export const DiagnosticsOverlay = () => {
 		if (scroll.direction !== "up" && scroll.direction !== "down") return
 		event.preventDefault()
 		event.stopPropagation()
-		// Wheel delta values vary widely by terminal/input device; clamp to
-		// single-step scrolling to avoid overshooting into blank space.
-		const amount = scroll.direction === "down" ? 1 : -1
+		const delta = Math.max(1, Math.trunc(Math.abs(scroll.delta)))
+		const amount = scroll.direction === "down" ? delta : -delta
 		scrollboxRef.current.scrollBy(amount, "step")
 	}
 
@@ -431,7 +429,7 @@ export const DiagnosticsOverlay = () => {
 				paddingTop={1}
 				paddingBottom={1}
 				width={panelWidth}
-				height={panelHeight}
+				maxHeight={layout.maxPanelHeight}
 				flexDirection="column"
 			>
 				{/* Header */}
@@ -444,16 +442,7 @@ export const DiagnosticsOverlay = () => {
 				<text fg={theme.teal} attributes={ATTR_BOLD}>
 					{dividerLine}
 				</text>
-				<scrollbox
-					ref={scrollboxRef}
-					scrollY={true}
-					flexDirection="column"
-					height={layout.scrollViewportHeight}
-					width="100%"
-					stickyScroll={false}
-					viewportCulling={false}
-					onMouseScroll={handleMouseScroll}
-				>
+				<scrollbox ref={scrollboxRef} scrollY={true} flexGrow={1} onMouseScroll={handleMouseScroll}>
 					<text> </text>
 
 					{/* Services section */}

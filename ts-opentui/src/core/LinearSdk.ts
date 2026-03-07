@@ -6,6 +6,133 @@ export class LinearSdkError extends Data.TaggedError("LinearSdkError")<{
 	readonly message: string
 }> {}
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null
+
+const extractErrorMessage = (value: unknown): string | undefined => {
+	if (value instanceof Error) {
+		return value.message
+	}
+	if (!isRecord(value)) {
+		return undefined
+	}
+	const message = value.message
+	if (typeof message !== "string") {
+		return undefined
+	}
+	const trimmed = message.trim()
+	return trimmed.length > 0 ? trimmed : undefined
+}
+
+const normalizePathSegment = (value: unknown): string | undefined => {
+	if (typeof value === "string") {
+		const trimmed = value.trim()
+		return trimmed.length > 0 ? trimmed : undefined
+	}
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return String(value)
+	}
+	return undefined
+}
+
+const formatValidationValue = (value: unknown): string => {
+	if (typeof value === "string") {
+		return JSON.stringify(value)
+	}
+	const serialized = JSON.stringify(value)
+	if (serialized === undefined) {
+		return String(value)
+	}
+	return serialized.length <= 160 ? serialized : `${serialized.slice(0, 157)}...`
+}
+
+const findFirstValidationConstraint = (
+	node: unknown,
+	pathPrefix: readonly string[],
+): { readonly path: string; readonly message: string; readonly value: unknown } | undefined => {
+	if (!isRecord(node)) return undefined
+	const propertySegment = normalizePathSegment(node.property)
+	const nextPath = propertySegment === undefined ? [...pathPrefix] : [...pathPrefix, propertySegment]
+
+	const constraints = node.constraints
+	if (isRecord(constraints)) {
+		for (const [constraintName, constraintMessage] of Object.entries(constraints)) {
+			if (typeof constraintMessage !== "string") {
+				continue
+			}
+			const trimmedConstraintMessage = constraintMessage.trim()
+			if (trimmedConstraintMessage.length === 0) {
+				continue
+			}
+			return {
+				path: nextPath.length === 0 ? "<root>" : nextPath.join("."),
+				message: `${constraintName}: ${trimmedConstraintMessage}`,
+				value: node.value,
+			}
+		}
+	}
+
+	const children = node.children
+	if (!Array.isArray(children)) {
+		return undefined
+	}
+	for (const child of children) {
+		const found = findFirstValidationConstraint(child, nextPath)
+		if (found !== undefined) {
+			return found
+		}
+	}
+	return undefined
+}
+
+const extractLinearValidationDetails = (cause: unknown): string | undefined => {
+	if (!isRecord(cause)) return undefined
+	const raw = cause.raw
+	if (!isRecord(raw)) return undefined
+	const response = raw.response
+	if (!isRecord(response)) return undefined
+	const errors = response.errors
+	if (!Array.isArray(errors) || errors.length === 0) return undefined
+	const firstError = errors[0]
+	if (!isRecord(firstError)) return undefined
+	const extensions = firstError.extensions
+	if (!isRecord(extensions)) return undefined
+	const validationErrors = extensions.validationErrors
+	if (!Array.isArray(validationErrors) || validationErrors.length === 0) return undefined
+
+	const rootPathRaw = firstError.path
+	const rootPath =
+		Array.isArray(rootPathRaw) && rootPathRaw.length > 0
+			? rootPathRaw
+					.map((segment) => normalizePathSegment(segment))
+					.filter((segment): segment is string => segment !== undefined)
+			: []
+
+	const renderedDetails: string[] = []
+	for (const validationError of validationErrors) {
+		const firstConstraint = findFirstValidationConstraint(validationError, rootPath)
+		if (firstConstraint === undefined) continue
+		renderedDetails.push(
+			`${firstConstraint.path} -> ${firstConstraint.message} (value=${formatValidationValue(firstConstraint.value)})`,
+		)
+	}
+
+	if (renderedDetails.length === 0) return undefined
+	return renderedDetails.join(" | ")
+}
+
+export const formatLinearOperationError = (params: {
+	readonly operation: string
+	readonly fallbackError: string
+	readonly cause: unknown
+}): string => {
+	const baseMessage = extractErrorMessage(params.cause) ?? params.fallbackError
+	const validationDetails = extractLinearValidationDetails(params.cause)
+	return validationDetails === undefined
+		? `${params.operation}: ${baseMessage}`
+		: `${params.operation}: ${baseMessage}; validation=${validationDetails}`
+}
+
 type LinearIssuesArgs = Parameters<LinearClient["issues"]>[0]
 type LinearIssuesResult = Awaited<ReturnType<LinearClient["issues"]>>
 type LinearIssueResult = Awaited<ReturnType<LinearClient["issue"]>>
@@ -157,10 +284,11 @@ export class LinearSdk extends Effect.Service<LinearSdk>()("LinearSdk", {
 						try: () => params.request(client),
 						catch: (cause) =>
 							new LinearSdkError({
-								message:
-									cause instanceof Error
-										? `${params.operation}: ${cause.message}`
-										: `${params.operation}: ${params.fallbackError}`,
+								message: formatLinearOperationError({
+									operation: params.operation,
+									fallbackError: params.fallbackError,
+									cause,
+								}),
 							}),
 					}),
 					maxWaitMs: params.maxWaitMs,

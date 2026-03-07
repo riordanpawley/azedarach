@@ -96,9 +96,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 	const panelWidth = isSmallScreenLayout ? Math.max(40, terminalColumns - 4) : undefined
 	const panelHorizontalPadding = isSmallScreenLayout ? 1 : 2
 	const metadataDirection = isSmallScreenLayout ? "column" : "row"
-	const dividerLength = isSmallScreenLayout
-		? Math.max(20, (panelWidth ?? terminalColumns) - 4)
-		: 89
+	const dividerLength = isSmallScreenLayout ? Math.max(20, (panelWidth ?? terminalColumns) - 4) : 89
 	const dividerLine = "━".repeat(dividerLength)
 
 	// Subscribe to scroll commands from Effect layer
@@ -343,7 +341,6 @@ export const DetailPanel = (props: DetailPanelProps) => {
 					ref={scrollboxRef}
 					scrollY={true}
 					maxHeight={maxScrollHeight}
-					flexDirection="column"
 					flexGrow={1}
 					onMouseScroll={handleScrollboxMouseScroll}
 				>
@@ -471,7 +468,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 								{props.task.gitBehindCount !== undefined && props.task.gitBehindCount > 0 && (
 									<text fg={theme.yellow}>{`↓${props.task.gitBehindCount} behind`}</text>
 								)}
-								{props.task.hasMergeConflict && <text fg={theme.red}>{"⚔️ Merge conflict"}</text>}
+								{props.task.hasMergeConflict && <text fg={theme.red}>{"⚔ Merge conflict"}</text>}
 							</box>
 							{(props.task.gitAdditions !== undefined || props.task.gitDeletions !== undefined) && (
 								<box flexDirection="row" gap={1}>
@@ -546,9 +543,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 				{/* Footer instructions - stays fixed */}
 				<text> </text>
 				<text fg={theme.subtext0}>
-					{isSmallScreenLayout
-						? "Ctrl+u/d:scroll"
-						: "Ctrl+u/d:scroll  Enter/Esc:close"}
+					{isSmallScreenLayout ? "Ctrl+u/d:scroll" : "Ctrl+u/d:scroll  Enter/Esc:close"}
 				</text>
 				{isSmallScreenLayout && <text fg={theme.subtext0}>{"Enter/Esc:close"}</text>}
 			</box>
