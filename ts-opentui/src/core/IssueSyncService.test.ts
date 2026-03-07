@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+	buildLinearIssuesPageQuery,
 	buildLinearIssueFilter,
 	groupLinearSyncBatchByIdentity,
 	resolveCollapsedSyncOperation,
@@ -181,6 +182,36 @@ describe("buildLinearIssueFilter", () => {
 					{ name: { eqIgnoreCase: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c" } },
 				],
 			},
+		})
+	})
+})
+
+describe("buildLinearIssuesPageQuery", () => {
+	it("omits optional fields when cursor and filter are undefined", () => {
+		expect(
+			buildLinearIssuesPageQuery({
+				afterCursor: undefined,
+				filter: undefined,
+			}),
+		).toEqual({ first: 250 })
+	})
+
+	it("includes cursor and filter only when provided", () => {
+		const filter = {
+			team: {
+				or: [{ key: { eqIgnoreCase: "AZE" } }],
+			},
+		}
+
+		expect(
+			buildLinearIssuesPageQuery({
+				afterCursor: "cursor-1",
+				filter,
+			}),
+		).toEqual({
+			first: 250,
+			after: "cursor-1",
+			filter,
 		})
 	})
 })

@@ -17,7 +17,8 @@ describe("session prompts", () => {
 			"Context for this session is already injected (`az prime` + `az issue get az-f4625d`)",
 		)
 		expect(prompt).toContain("Only rerun `az issue get az-f4625d` if details are stale or missing")
-		expect(prompt).toContain('`az issue update az-f4625d --design "..."`')
+		expect(prompt).toContain("`az issue update az-f4625d --design '...'`")
+		expect(prompt).toContain("avoid unescaped backticks in `--design` text")
 		expect(prompt).toContain("Issue nesting rule:")
 		expect(prompt).toContain("must be completed before closing `az-f4625d`")
 		expect(prompt).toContain("child of `az-f4625d`")
