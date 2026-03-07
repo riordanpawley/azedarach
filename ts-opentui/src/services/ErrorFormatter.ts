@@ -290,6 +290,40 @@ const ERROR_FORMATTERS: Record<
         }
     },
 
+    PRAlreadyExistsError: (error) => {
+        const branch = String(error.branch || "")
+        const baseBranch = String(error.baseBranch || "")
+
+        return {
+            message: "PR already exists for this branch",
+            suggestion:
+                branch && baseBranch
+                    ? `Try: Open the existing PR for '${branch}' into '${baseBranch}' (Space+O), or continue updating that PR`
+                    : "Try: Open the existing PR (Space+O) or continue updating it",
+            category: "pr",
+        }
+    },
+
+    PRBranchProtectionError: (error) => {
+        const operation = String(error.operation || "")
+        const branch = String(error.branch || "")
+
+        if (operation === "push") {
+            return {
+                message: `Push blocked by branch protection${branch ? ` on '${branch}'` : ""}`,
+                suggestion:
+                    "Try: Push to a feature branch allowed by repository rules, then retry PR creation",
+                category: "pr",
+            }
+        }
+
+        return {
+            message: "PR creation blocked by branch protection policy",
+            suggestion: "Try: Follow repository branch rules, then retry PR creation",
+            category: "pr",
+        }
+    },
+
     PRError: (error) => {
         const message = String(error.message || "")
 

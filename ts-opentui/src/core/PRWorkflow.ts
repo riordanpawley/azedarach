@@ -241,14 +241,35 @@ export class GitOperationInProgressError extends Data.TaggedError("GitOperationI
  * Error when gh CLI is not installed or not authenticated
  */
 export class GHCLIError extends Data.TaggedError("GHCLIError")<{
-	readonly message: string
+    readonly message: string
+}> {}
+
+/**
+ * Error when attempting to create a PR but one already exists for the branch.
+ */
+export class PRAlreadyExistsError extends Data.TaggedError("PRAlreadyExistsError")<{
+    readonly message: string
+    readonly issueId?: string
+    readonly branch?: string
+    readonly baseBranch?: string
+}> {}
+
+/**
+ * Error when branch protection prevents push or PR creation workflow steps.
+ */
+export class PRBranchProtectionError extends Data.TaggedError("PRBranchProtectionError")<{
+    readonly message: string
+    readonly operation: "push" | "pr-create"
+    readonly issueId?: string
+    readonly branch?: string
+    readonly baseBranch?: string
 }> {}
 
 /**
  * Error when PR is not found
  */
 export class PRNotFoundError extends Data.TaggedError("PRNotFoundError")<{
-	readonly issueId: string
+    readonly issueId: string
 	readonly branch: string
 }> {}
 
@@ -306,17 +327,19 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly createPR: (
-		options: CreatePROptions,
-	) => Effect.Effect<
-		PR,
-		| PRError
-		| GHCLIError
-		| GitError
-		| NotAGitRepoError
-		| IssueTrackerError
-		| NotFoundError
-		| ParseError
+    readonly createPR: (
+        options: CreatePROptions,
+    ) => Effect.Effect<
+        PR,
+        | PRError
+        | GHCLIError
+        | PRAlreadyExistsError
+        | PRBranchProtectionError
+        | GitError
+        | NotAGitRepoError
+        | IssueTrackerError
+        | NotFoundError
+        | ParseError
 		| OfflineError,
 		CommandExecutor.CommandExecutor
 	>
@@ -827,25 +850,45 @@ const ensureNoGitOperationInProgress = (options: {
  * Execute a gh command and return stdout
  */
 const runGH = (
-	args: readonly string[],
-	cwd: string,
-): Effect.Effect<string, PRError | GHCLIError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		const command = Command.make("gh", ...args).pipe(Command.workingDirectory(cwd))
-		return yield* Command.string(command).pipe(
-			Effect.mapError((error) => {
-				const errorStr = String(error)
-				if (errorStr.includes("gh auth login") || errorStr.includes("not logged")) {
-					return new GHCLIError({ message: "gh CLI not authenticated. Run: gh auth login" })
-				}
-				if (errorStr.includes("command not found") || errorStr.includes("ENOENT")) {
-					return new GHCLIError({ message: "gh CLI not installed. Run: brew install gh" })
-				}
-				return new PRError({
-					message: `gh ${args.join(" ")} failed: ${errorStr}`,
-					command: `gh ${args.join(" ")}`,
-				})
-			}),
+    args: readonly string[],
+    cwd: string,
+): Effect.Effect<
+    string,
+    PRError | GHCLIError | PRAlreadyExistsError | PRBranchProtectionError,
+    CommandExecutor.CommandExecutor
+> =>
+    Effect.gen(function* () {
+        const command = Command.make("gh", ...args).pipe(Command.workingDirectory(cwd))
+        return yield* Command.string(command).pipe(
+            Effect.mapError((error) => {
+                const errorStr = String(error)
+                const isPRCreate = args[0] === "pr" && args[1] === "create"
+
+                if (errorStr.includes("gh auth login") || errorStr.includes("not logged")) {
+                    return new GHCLIError({ message: "gh CLI not authenticated. Run: gh auth login" })
+                }
+                if (errorStr.includes("command not found") || errorStr.includes("ENOENT")) {
+                    return new GHCLIError({ message: "gh CLI not installed. Run: brew install gh" })
+                }
+                if (isPRCreate && errorStr.includes("already exists")) {
+                    return new PRAlreadyExistsError({
+                        message: "A pull request already exists for this branch",
+                    })
+                }
+                if (
+                    isPRCreate &&
+                    (errorStr.includes("protected branch") || errorStr.includes("branch protection"))
+                ) {
+                    return new PRBranchProtectionError({
+                        operation: "pr-create",
+                        message: "Branch protection prevented PR creation",
+                    })
+                }
+                return new PRError({
+                    message: `gh ${args.join(" ")} failed: ${errorStr}`,
+                    command: `gh ${args.join(" ")}`,
+                })
+            }),
 		)
 	})
 
@@ -1137,16 +1180,28 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							),
 						) // Ignore if nothing to commit
 
-						// Push branch to origin
-						yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
-							Effect.mapError(
-								(e) =>
-									new GitError({
-										message: `Failed to push branch: ${e.message}`,
-										command: "git push",
-									}),
-							),
-						)
+                        // Push branch to origin
+                        yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
+                            Effect.mapError((e) => {
+                                const stderr = e.stderr ?? e.message
+                                if (
+                                    stderr.includes("protected branch") ||
+                                    stderr.includes("branch protection")
+                                ) {
+                                    return new PRBranchProtectionError({
+                                        operation: "push",
+                                        issueId,
+                                        branch: issueBranch,
+                                        baseBranch,
+                                        message: `Push blocked by branch protection for ${issueBranch}`,
+                                    })
+                                }
+                                return new GitError({
+                                    message: `Failed to push branch: ${e.message}`,
+                                    command: "git push",
+                                })
+                            }),
+                        )
 
 						// Generate PR title and body
 						const title = options.title ?? generateIssuePRTitle(issue)
@@ -1158,9 +1213,30 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							ghArgs.push("--draft")
 						}
 
-						const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
-							Effect.map((output) => output.trim()),
-						)
+                        const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
+                            Effect.map((output) => output.trim()),
+                            Effect.mapError((error) => {
+                                switch (error._tag) {
+                                    case "PRAlreadyExistsError":
+                                        return new PRAlreadyExistsError({
+                                            message: error.message,
+                                            issueId,
+                                            branch: issueBranch,
+                                            baseBranch,
+                                        })
+                                    case "PRBranchProtectionError":
+                                        return new PRBranchProtectionError({
+                                            operation: error.operation,
+                                            message: error.message,
+                                            issueId,
+                                            branch: issueBranch,
+                                            baseBranch,
+                                        })
+                                    default:
+                                        return error
+                                }
+                            }),
+                        )
 
 						// Extract PR number from URL
 						const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
