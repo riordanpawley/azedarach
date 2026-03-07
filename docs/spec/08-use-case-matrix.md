@@ -583,6 +583,7 @@ This section expands product behavior into concrete user-centered use cases.
 - Optimistic mutation -> AZ-FR-3801..3816
 - Background operations -> AZ-FR-3901..3909
 - State probe and harness -> AZ-FR-4001..4008, AZ-FR-4101..4110
+- Spec workflows -> AZ-FR-4201..4212, AZ-FR-4301..4310
 
 ## 8.22 Extended Scenario Catalog (Condensed)
 
