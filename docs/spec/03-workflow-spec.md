@@ -860,3 +860,25 @@ Enable full-screen correctness assertions for TUI rendering beyond state-only ch
 
 - snapshots MUST be profile-scoped by terminal size, color capability, and font metrics assumptions
 - snapshot assertions SHOULD be used with probe assertions for robust failure triage
+
+## 3.43 Spec Workspace Workflow
+
+### Trigger
+
+- user presses `g s` from board context
+
+### Behavior
+
+1. enter Spec workspace with `Requirements` as initial subview
+2. pressing `Tab` cycles subviews in fixed order:
+   - Requirements -> Coverage -> Publish -> Requirements
+3. `Requirements` shows requirement identity and linked-issue counts
+4. `Coverage` highlights unlinked requirements and link integrity gaps
+5. `Publish` shows target state, auto-config status, and most recent publish outcome
+6. if auto-config publish is enabled, qualifying spec mutations enqueue debounced publish work
+7. pressing `Esc` exits Spec workspace and restores prior board context/focus
+
+### Contract Notes
+
+- board `Tab` behavior remains Kanban/Compact toggle and is not overridden globally by Spec workspace behavior
+- publish remains one-way from local az spec records to Linear project documents

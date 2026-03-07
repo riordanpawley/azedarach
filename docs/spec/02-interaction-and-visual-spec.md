@@ -71,12 +71,30 @@ The status bar MUST show active mode abbreviation.
 | `g l` | jump to last column |
 | `g w` | show jump labels, then jump by two-char code |
 | `g p` | open project selector |
+| `g s` | open Spec workspace |
 
 ### Jump Labels
 
 - Labels are generated for visible cards.
 - Labels SHOULD prioritize home-row keys (e.g., `a s d f g h j k l ;`).
 - Typing a valid two-char label MUST move cursor to target card.
+
+## 2.5a Spec Workspace
+
+The Spec workspace is a dedicated keyboard-first view for spec operations.
+
+Entry/exit contract:
+
+- `g s` from board enters Spec workspace.
+- `Esc` exits Spec workspace and returns to prior board context.
+- `q` MAY mirror `Esc` in Spec workspace.
+
+Subview contract:
+
+- Spec workspace includes `Requirements`, `Coverage`, and `Publish` subviews.
+- `Tab` cycles subviews in deterministic order:
+  - Requirements -> Coverage -> Publish -> Requirements
+- status bar and key-hint surfaces MUST show active workspace and subview.
 
 ## 2.6 Select Mode (`v`)
 

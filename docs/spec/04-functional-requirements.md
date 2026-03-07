@@ -498,3 +498,31 @@ This section is normative.
 - AZ-FR-4108: E2E suite MUST include performance assertions for representative critical flows.
 - AZ-FR-4109: E2E suite MUST include stress scenarios for scale datasets and rapid operation concurrency.
 - AZ-FR-4110: E2E release validation SHOULD combine probe assertions with visual assertions for high-risk workflows.
+
+## 4.45 Spec Tool Requirements
+
+- AZ-FR-4201: The system MUST provide az-native specification requirement records with stable IDs.
+- AZ-FR-4202: The system MUST support typed links between issues and specification requirements.
+- AZ-FR-4203: `az issue get` and `az spec req get` MUST expose linked specification relationships in both directions.
+- AZ-FR-4204: The system MUST provide one-way publish from az specification records to Linear project documents.
+- AZ-FR-4205: When auto-config publish is enabled, spec mutations (requirement create/update/delete and issue-link add/remove) MUST schedule unattended publish using debounced coalescing.
+- AZ-FR-4206: Auto-config publish settings (enabled state, debounce configuration, and target selection) MUST be persisted per project and inspectable from CLI surfaces.
+- AZ-FR-4207: Publish operations MUST be idempotent and MUST update only managed document sections delimited by stable markers keyed to spec identifiers.
+- AZ-FR-4208: Publish workflows MUST remain one-way for now and MUST NOT ingest edits from Linear project documents back into az spec storage.
+- AZ-FR-4209: Publish results MUST report per-document outcomes and requirement/link coverage counts.
+- AZ-FR-4210: Publish failures (network/auth/permission/target missing) MUST preserve local spec data and provide actionable remediation guidance.
+- AZ-FR-4211: Publish document contract MUST include a deterministic logical set of outputs: Spec Overview, Requirements Index, Acceptance Index, and Change Log.
+- AZ-FR-4212: Publish MUST preserve non-managed content outside managed markers in target Linear project documents.
+
+## 4.46 TUI Spec Workspace Requirements
+
+- AZ-FR-4301: From board context, `g s` MUST enter the dedicated Spec workspace.
+- AZ-FR-4302: Exiting the Spec workspace MUST return users to prior board context with deterministic focus restoration.
+- AZ-FR-4303: Board `Tab` behavior MUST remain scoped to board view toggling and MUST NOT be repurposed globally by Spec workspace features.
+- AZ-FR-4304: The Spec workspace MUST provide at least Requirements, Coverage, and Publish subviews.
+- AZ-FR-4305: While Spec workspace is active, `Tab` MUST cycle subviews in deterministic order: Requirements -> Coverage -> Publish -> Requirements.
+- AZ-FR-4306: Requirements subview MUST expose requirement identity and linked-issue counts.
+- AZ-FR-4307: Coverage subview MUST expose unlinked requirements and link integrity gaps.
+- AZ-FR-4308: Publish subview MUST expose publish target state, auto-config status, and most recent outcome summary.
+- AZ-FR-4309: Status bar and key-hint surfaces MUST reflect active workspace/subview context.
+- AZ-FR-4310: `Esc` from Spec workspace MUST return to prior board context.

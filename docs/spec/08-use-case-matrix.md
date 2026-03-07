@@ -725,3 +725,35 @@ The following condensed scenarios provide additional edge and scale coverage.
 
 - Trigger: run perf and stress test profiles on large dependency graph
 - Expected: latency budgets pass and UI remains stable under concurrent operations
+
+## 8.25 Spec Workflow Use Cases
+
+### UC-SPEC-001 Enter and exit Spec workspace with preserved board context
+
+- Trigger: user presses `g s`, then exits with `Esc`
+- Expected: Spec workspace opens and closes without losing prior board focus context
+
+### UC-SPEC-002 Cycle Spec subviews deterministically
+
+- Trigger: user presses `Tab` repeatedly while in Spec workspace
+- Expected: subviews rotate Requirements -> Coverage -> Publish -> Requirements
+
+### UC-SPEC-003 Detect coverage gaps before implementation
+
+- Trigger: user opens Coverage subview with mixed linked/unlinked requirements
+- Expected: unlinked requirements and integrity gaps are clearly listed
+
+### UC-SPEC-004 Auto-config publish coalesces rapid mutations
+
+- Trigger: user performs multiple requirement/link mutations in short succession with auto-config enabled
+- Expected: publish is triggered by mutation events and coalesced via debounce policy
+
+### UC-SPEC-005 Publish updates only managed sections
+
+- Trigger: target Linear documents contain both managed sections and manual notes
+- Expected: publish updates managed markers only and preserves non-managed content
+
+### UC-SPEC-006 Remote doc edits do not mutate local spec records
+
+- Trigger: collaborator edits published Linear documents directly
+- Expected: local az spec records remain unchanged unless explicit import is invoked
