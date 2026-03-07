@@ -508,7 +508,7 @@ describe("importExternalSnapshot", () => {
 })
 
 describe("spec requirements and links", () => {
-		it("accepts suffixed spec requirement IDs from docs/spec", async () => {
+		it("accepts suffixed spec requirement external codes", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
 		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
 

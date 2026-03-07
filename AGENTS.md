@@ -37,7 +37,7 @@ Select the implementation based on user request or current working directory.
 5. **RuleSync Canonical Source**: Edit managed instruction assets in `.rulesync/` and sync, not direct edits in generated targets.
 6. **Git CWD Discipline**: When already in the target worktree/repo, use plain `git` commands. Use `git -C <path>` only when intentionally targeting a different path.
 7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
-8. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
+8. **Spec Sync Discipline (ts-opentui)**: Keep `az spec` requirements/links aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
 10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 
@@ -143,7 +143,7 @@ When user requests work, use this matrix to decide which implementation to work 
 - ✅ Subagents must create, maintain, and close child issues linked to the active parent issue
 - ✅ Keep issue status updated as work progresses
 - ✅ Keep the issue tracker as the single source of truth for issue state
-- ✅ For `ts-opentui` behavior changes, update `docs/spec/` or document `Spec impact: none` with concrete file-based rationale
+- ✅ For `ts-opentui` behavior changes, update `az spec` requirement/link records or document `Spec impact: none` with concrete file-based rationale
 - ❌ Do NOT create markdown TODO lists as a parallel tracker
 
 ## Landing the Plane (Session Completion)

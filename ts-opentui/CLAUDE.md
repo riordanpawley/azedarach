@@ -118,8 +118,8 @@ Purpose: Claude Code entry point for Azedarach development
     ```
 
 14. **Spec Sync Required for ts-opentui Behavior Changes**:
-    - If a task changes `ts-opentui` product behavior (user-visible flow, workflow semantics, validation, state/status transitions, failure/retry handling, or release-gate expectations), update `docs/spec/` in the same task.
-    - If no spec edit is needed, add an explicit issue note with `Spec impact: none` and a concrete rationale tied to changed files.
+    - If a task changes `ts-opentui` product behavior (user-visible flow, workflow semantics, validation, state/status transitions, failure/retry handling, or release-gate expectations), update `az spec` requirements/links in the same task.
+    - If no spec update is needed, add an explicit issue note with `Spec impact: none` and a concrete rationale tied to changed files.
     - Use the workflow spec-maintenance skill to drive analysis and validation: `.claude/skills/workflow-spec-maintenance/SKILL.md`.
     - Do not close work as complete until spec updates (or a justified no-impact note) are recorded.
 
@@ -663,7 +663,7 @@ Skills available in this repository:
 
 **Workflow Skills:**
 - Issue tracking workflow skill (use local workflow skill that documents current `az issue` process)
-- Spec maintenance workflow skill (use local workflow skill that keeps `docs/spec/` aligned with behavior changes)
+- Spec maintenance workflow skill (use local workflow skill that keeps `az spec` requirements/links aligned with behavior changes)
 
 **Effect Skills:**
 - `.claude/skills/effect-services/SKILL.md` - Services, layers, dependency injection

@@ -3048,7 +3048,7 @@ const requirementByLocalIdOption = Options.text("local-id").pipe(
 
 const requirementByExternalCodeOption = Options.text("external-code").pipe(
 	Options.optional,
-	Options.withDescription("Lookup by docs/spec external code (for example AZ-FR-4201)"),
+	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
 
 const specReqListCommand = Command.make(

@@ -13,25 +13,23 @@ Before anything else, load and follow:
 
 ## Mission
 
-Convert the current Markdown spec (`docs/spec/*.md`) into a concrete `az issue` execution plan for a requested scope.
-
-This agent must plan against today's docs-based spec model and must not depend on future `az spec` command surfaces.
+Convert current `az spec` requirement records into a concrete `az issue` execution plan for a requested scope.
 
 ## Inputs
 
 The orchestrator should provide:
-- Parent issue ID (required)
-- Planning scope / feature theme (required)
-- Optional constraints (time horizon, priority constraints, ordering constraints)
+- parent issue ID (required)
+- planning scope / feature theme (required)
+- optional constraints (time horizon, priority constraints, ordering constraints)
 
 ## Workflow
 
 ### 1) Collect Spec Evidence
 
-Read relevant sections from `docs/spec/` and extract:
-- `AZ-FR-*` requirements in scope
-- linked `AZ-AT-*` acceptance scenarios
-- failure-mode constraints when applicable (`05-edge-cases-and-failure-spec.md`)
+Read relevant records from `az spec` and extract:
+- functional requirements (`AZ-FR-*`)
+- acceptance requirements (`AZ-AT-*`)
+- existing issue/spec links that indicate current coverage
 
 ### 2) Synthesize Work Breakdown
 
@@ -42,8 +40,8 @@ Build a plan with:
 
 Each task must include spec trace references:
 - `description`: problem/goal in user terms
-- `design`: implementation shape + `AZ-FR-*` references
-- `acceptance`: validation checks + `AZ-AT-*` references
+- `design`: implementation shape + requirement refs
+- `acceptance`: validation checks + acceptance refs
 
 ### 3) Write Plan to `az issue`
 
@@ -57,8 +55,8 @@ Do not create markdown TODO tracking artifacts.
 ### 4) Coverage and Sanity Checks
 
 Before finalizing:
-- every task references at least one in-scope `AZ-FR-*`
-- key acceptance scenarios are represented across tasks
+- every task references at least one in-scope requirement
+- key acceptance requirements are represented across tasks
 - dependency graph is acyclic and not over-constrained
 - parent issue notes include a concise plan summary
 
@@ -73,8 +71,8 @@ Return:
 - ...
 
 ### Spec Inputs Used
-- AZ-FR-...
-- AZ-AT-...
+- fr4201 (AZ-FR-4201)
+- at2901 (AZ-AT-2901)
 
 ### Issues Created / Updated
 - epic: <id>
@@ -84,8 +82,8 @@ Return:
 - <downstream> blocks on <upstream>
 
 ### Coverage Summary
-- FR coverage: ...
-- AT coverage: ...
+- requirement coverage: ...
+- acceptance coverage: ...
 
 ### Open Questions
 - ...
@@ -93,7 +91,7 @@ Return:
 
 ## Guardrails
 
-- Keep plans grounded in existing `docs/spec` content.
-- Prefer explicit, traceable issue fields over shorthand notes.
-- Avoid speculative tasks that lack clear spec backing.
-- If scope is ambiguous, create a short investigation task and record uncertainty in parent notes.
+- keep plans grounded in current `az spec` records
+- prefer explicit, traceable issue fields over shorthand notes
+- avoid speculative tasks that lack clear spec backing
+- if scope is ambiguous, create a short investigation task and record uncertainty in parent notes
