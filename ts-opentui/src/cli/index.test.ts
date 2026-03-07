@@ -92,14 +92,15 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az"])).toBe("tui")
 	})
 
-	it("uses command mode for non-dev subcommands", () => {
-		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
-		expect(
-			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
-		).toBe("command")
-		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
-		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
-	})
+    it("uses command mode for non-dev subcommands", () => {
+        expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
+        expect(
+            resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
+        ).toBe("command")
+        expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
+        expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
+        expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
+    })
 
 	it("uses dev-command mode for az dev", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "dev", "list"])).toBe("dev-command")
@@ -245,8 +246,8 @@ describe("formatIssueDetailSections", () => {
 		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
 	})
 
-	it("formats directional counts for blocks and parent-child relationships", () => {
-		const sections = formatIssueDetailSections({
+    it("formats directional counts for blocks and parent-child relationships", () => {
+        const sections = formatIssueDetailSections({
 			id: "az-123",
 			title: "Title",
 			status: "open",
@@ -266,10 +267,44 @@ describe("formatIssueDetailSections", () => {
 			],
 		})
 
-		expect(sections).toEqual([
-			"Dependency Counts: blocking: 1, blockedBy: 2, children: 2, parent: 1",
-			"Dependencies:\nAZE-11, AZE-12, AZE-10",
-			"Dependents:\nAZE-90, AZE-91, AZE-92",
-		])
-	})
+        expect(sections).toEqual([
+            "Dependency Counts: blocking: 1, blockedBy: 2, children: 2, parent: 1",
+            "Dependencies:\nAZE-11, AZE-12, AZE-10",
+            "Dependents:\nAZE-90, AZE-91, AZE-92",
+        ])
+    })
+
+    it("includes linked spec requirements when provided", () => {
+        const sections = formatIssueDetailSections(
+            {
+                id: "az-123",
+                title: "Title",
+                status: "open",
+                priority: 2,
+                issue_type: "task",
+                created_at: "2026-03-05T10:00:00.000Z",
+                updated_at: "2026-03-05T11:00:00.000Z",
+            },
+            {
+                linkedSpecRequirements: [
+                    {
+                        id: "AZ-FR-4201",
+                        title: "Persist requirements and links",
+                        kind: "functional",
+                        link_type: "implements",
+                    },
+                    {
+                        id: "AZ-AT-2901",
+                        title: "Acceptance path is covered",
+                        kind: "acceptance",
+                        link_type: "tests",
+                    },
+                ],
+            },
+        )
+
+        expect(sections).toEqual([
+            "Linked Spec Requirements:\nAZ-FR-4201 [functional] (implements) Persist requirements and links\nAZ-AT-2901 [acceptance] (tests) Acceptance path is covered",
+        ])
+    })
 })

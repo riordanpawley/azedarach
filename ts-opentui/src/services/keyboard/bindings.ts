@@ -688,6 +688,12 @@ done
 		}),
 	},
 	{
+		key: "s",
+		mode: "goto-pending",
+		description: "Enter spec workspace",
+		action: bc.editor.enterSpecWorkspace(),
+	},
+	{
 		key: "p",
 		mode: "goto-pending",
 		description: "Open project selector",
@@ -1012,9 +1018,19 @@ done
 	},
 	{
 		key: "q",
-		mode: ["action", "goto-pending", "sort", "filter"],
+		mode: ["action", "goto-pending", "sort", "filter", "spec"],
 		description: "Exit/cancel",
 		action: Effect.suspend(() => bc.inputHandlers.handleEscape()),
+	},
+
+	// ========================================================================
+	// Spec Workspace Mode
+	// ========================================================================
+	{
+		key: "tab",
+		mode: "spec",
+		description: "Cycle spec subview",
+		action: bc.editor.cycleSpecSubview(),
 	},
 
 	// ========================================================================
