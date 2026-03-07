@@ -12,7 +12,7 @@
  * Converted from factory pattern to Effect.Service layer.
  */
 
-import type { CommandExecutor } from "@effect/platform"
+import { FileSystem, type CommandExecutor } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { AttachmentService } from "../../core/AttachmentService.js"
@@ -64,6 +64,7 @@ export class SessionHandlersService extends Effect.Service<SessionHandlersServic
 			const sessionManager = yield* SessionManager
 			const attachment = yield* AttachmentService
 			const imageAttachment = yield* ImageAttachmentService
+			const fs = yield* FileSystem.FileSystem
 			const tmux = yield* TmuxService
 			const worktreeSession = yield* WorktreeSessionService
 			const worktreeManager = yield* WorktreeManager
@@ -160,6 +161,65 @@ Delete the duplicate worktree and retry?`
 							yield* retry
 						}),
 					})
+				})
+
+			const isSafeImagePath = (imagePath: string): boolean => {
+				const trimmed = imagePath.trim()
+				if (trimmed.length === 0) return false
+				if (/[\u0000\r\n]/.test(trimmed)) return false
+				return trimmed.startsWith("/") || /^[A-Za-z]:[\\/]/.test(trimmed)
+			}
+
+			const resolveSessionImagePaths = (taskId: string, projectPath: string) =>
+				Effect.gen(function* () {
+					const worktreePath = getWorktreePath(projectPath, taskId)
+					const attachments = yield* imageAttachment
+						.list(taskId)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+									Effect.zipRight(Effect.succeed([] as const)),
+								),
+							),
+						)
+					const candidatePaths = yield* Effect.forEach(attachments, (attachment) =>
+						imageAttachment.getPathForProjectRoot(taskId, attachment.id, worktreePath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						),
+					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
+
+					const validated = yield* Effect.forEach(candidatePaths, (candidatePath) =>
+						Effect.gen(function* () {
+							if (!isSafeImagePath(candidatePath)) {
+								yield* Effect.logWarning(
+									`Skipping unsafe attachment path for ${taskId}: ${JSON.stringify(candidatePath)}`,
+								)
+								return null
+							}
+
+							const exists = yield* fs.exists(candidatePath).pipe(
+								Effect.catchAll((error) =>
+									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+										Effect.zipRight(Effect.succeed(false)),
+									),
+								),
+							)
+
+							if (!exists) {
+								yield* Effect.logWarning(
+									`Skipping missing attachment path for ${taskId}: ${candidatePath}`,
+								)
+								return null
+							}
+
+							return candidatePath
+						}),
+					)
+
+					return validated.filter((path): path is string => path !== null)
 				})
 
 			const isWorktreeNameClashError = (error: unknown): error is WorktreeNameClashError =>
@@ -264,27 +324,10 @@ Delete the duplicate worktree and retry?`
 					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
 
-					// Check for attached images and include their paths
+					// Check for attached images and include only safe, existing paths.
 					// Non-Codex tools consume these via prompt text + Read tool.
 					// Codex receives them as native --image inputs (see sessionManager.start below).
-					const worktreePath = getWorktreePath(projectPath, task.id)
-					const attachments = yield* imageAttachment
-						.list(task.id)
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed([] as const)),
-								),
-							),
-						)
-					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment.getPathForProjectRoot(task.id, attachment.id, worktreePath).pipe(
-							Effect.tapError((error) =>
-								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
-							),
-							Effect.orElseSucceed(() => ""),
-						),
-					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
+					const imagePaths = yield* resolveSessionImagePaths(task.id, projectPath)
 
 					const initialPrompt = buildStartWorkPrompt({
 						taskId: task.id,
@@ -340,26 +383,8 @@ Delete the duplicate worktree and retry?`
 					// Get current project path
 					const projectPath = yield* helpers.getProjectPath()
 					const cliTool = yield* appConfig.getCliTool()
-					const worktreePath = getWorktreePath(projectPath, task.id)
-
-					// Check for attached images and include their paths
-					const attachments = yield* imageAttachment
-						.list(task.id)
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed([] as const)),
-								),
-							),
-						)
-					const imagePaths = yield* Effect.forEach(attachments, (attachment) =>
-						imageAttachment.getPathForProjectRoot(task.id, attachment.id, worktreePath).pipe(
-							Effect.tapError((error) =>
-								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
-							),
-							Effect.orElseSucceed(() => ""),
-						),
-					).pipe(Effect.map((paths) => paths.filter((p) => p.length > 0)))
+					// Check for attached images and include only safe, existing paths.
+					const imagePaths = yield* resolveSessionImagePaths(task.id, projectPath)
 
 					const initialPrompt = buildStartWorkPrompt({
 						taskId: task.id,
