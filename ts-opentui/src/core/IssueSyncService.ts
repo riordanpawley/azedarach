@@ -379,6 +379,15 @@ export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFil
 	return { and: constraints }
 }
 
+export const buildLinearIssuesPageQuery = (params: {
+	readonly afterCursor: string | undefined
+	readonly filter: LinearIssuesFilter | undefined
+}): LinearIssuesQuery => ({
+	first: 250,
+	...(params.afterCursor === undefined ? {} : { after: params.afterCursor }),
+	...(params.filter === undefined ? {} : { filter: params.filter }),
+})
+
 const formatSyncQueueSummary = (summary: SyncQueueSummary): string =>
 	`queueTotal=${summary.total} pendingReady=${summary.pendingReady} pendingDelayed=${summary.pendingDelayed} processingActive=${summary.processingActive} processingStale=${summary.processingStale} failed=${summary.failed}`
 
@@ -878,11 +887,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				const filter = buildLinearIssueFilter(scope)
 				const fetchIssuesPage = (afterCursor: string | undefined) =>
 					linearSdk
-						.issues({
-							first: 250,
-							after: afterCursor,
-							filter,
-						})
+						.issues(buildLinearIssuesPageQuery({ afterCursor, filter }))
 						.pipe(
 							Effect.mapError(
 								(error) =>
@@ -915,7 +920,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					linearSdk
 						.issueLabels({
 							first: LINEAR_LABELS_PAGE_SIZE,
-							after: afterCursor,
+							...(afterCursor === undefined ? {} : { after: afterCursor }),
 						})
 						.pipe(
 							Effect.mapError(
@@ -953,7 +958,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					linearSdk
 						.workflowStates({
 							first: LINEAR_WORKFLOW_STATES_PAGE_SIZE,
-							after: afterCursor,
+							...(afterCursor === undefined ? {} : { after: afterCursor }),
 						})
 						.pipe(
 							Effect.mapError(
