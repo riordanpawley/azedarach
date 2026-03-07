@@ -1,41 +1,35 @@
 # RuleSync
 
-This repository treats `.rulesync/` as the canonical source for selected Claude-facing workflow assets.
+This repository treats RuleSync-native sources as canonical for AI tool context generation.
 
-## Managed Mappings
+## Native Sources
 
-`rulesync` generates RuleSync-native features from `rulesync.jsonc`:
-- `.rulesync/subagents/` -> `.claude/agents/`
-- `.rulesync/skills/` -> `.claude/skills/`
+`rulesync` is configured via `rulesync.jsonc` with:
+- targets: `agentsmd`, `codexcli`, `opencode`
+- features:
+  - `agentsmd`: `rules`
+  - `codexcli`: `subagents`, `skills`
+  - `opencode`: `subagents`, `skills`
+- baseDirs: `.`
 
-Additional passthrough mappings are declared in `.rulesync/mappings.tsv` and synced by `scripts/rulesync-sync.sh`.
+Rule sources:
+- `./.rulesync/rules/overview.md` (root workspace context)
+- `./.rulesync/rules/ts-opentui.md` (ts-opentui context, `agentsmd.subprojectPath`)
+- `./.rulesync/rules/go-bubbletea.md` (go-bubbletea context, `agentsmd.subprojectPath`)
 
-Current managed targets:
-- `.claude/agents/`
-- `.claude/commands/`
-- `.claude/hooks/`
-- `.claude/session-templates/`
-- `.claude/skills/`
-- `AGENTS.md`
-- `CLAUDE.md`
-- `ts-opentui/AGENTS.md`
-- `ts-opentui/CLAUDE.md`
-- `go-bubbletea/CLAUDE.md`
-
-## Unified Root Context Source
-
-Root entrypoint files are now unified to a single canonical source:
-
-- Source: `.rulesync/docs/CONTEXT.md`
-- Targets: `AGENTS.md` and `CLAUDE.md`
-
-`mappings.tsv` fans out this one source to both runtime entrypoint filenames.
+Generation runs in one RuleSync pass:
+- `agentsmd + rules` emits path-scoped `AGENTS.md` files (`AGENTS.md`,
+  `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`) using
+  `agentsmd.subprojectPath`.
+- `codexcli/opencode + subagents/skills` emits tool-specific subagent/skill outputs.
+- `opencode` rules are intentionally disabled to avoid `.opencode/memories` outputs.
 
 ## Commands
 
 ```bash
-just rulesync-sync
-just rulesync-check
+rulesync generate -c rulesync.jsonc --silent
+
+rulesync generate -c rulesync.jsonc --check --silent
 ```
 
 ## Auto Sync Hooks
