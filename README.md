@@ -102,9 +102,9 @@ See [ts-opentui/docs/install.md](./ts-opentui/docs/install.md) for full setup de
 **Quick Start:**
 ```bash
 cd go-bubbletea
-make build              # Build Go binary
-make run                # Build and run
-make test               # Run tests
+just build              # Build Go binary
+just run                # Build and run
+just test               # Run tests
 ```
 
 ---
@@ -165,9 +165,9 @@ bun run build
 
 # go-bubbletea (rewrite track)
 cd go-bubbletea
-make build
-make run
-make test
+just build
+just run
+just test
 ```
 
 ---

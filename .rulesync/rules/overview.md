@@ -56,9 +56,9 @@ bun run build                     # Build the project
 
 # go-bubbletea (Go)
 cd go-bubbletea
-make build                        # Build Go binary
-make test                         # Run tests
-make run                          # Build and run
+just build                        # Build Go binary
+just test                         # Run tests
+just run                          # Build and run
 
 # Search (modern tools)
 rg "pattern" --type ts            # Search content (NOT grep)

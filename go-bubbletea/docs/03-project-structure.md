@@ -80,7 +80,7 @@ go-bubbletea/
 ├── testdata/                  # Golden files for snapshot tests
 ├── go.mod
 ├── go.sum
-├── Makefile
+├── justfile
 ├── .goreleaser.yaml          # Release automation
 ├── PLAN.md
 ├── ARCHITECTURE.md
@@ -105,25 +105,29 @@ go-bubbletea/
 
 ## Build & Distribution
 
-```makefile
-# Makefile
-.PHONY: build install release
-
+```just
+# justfile
 build:
-	go build -o bin/azedarach ./cmd/azedarach
+	go build -o bin/az ./cmd/az
+
+run:
+	go run ./cmd/az
+
+test:
+	go test -v ./...
+
+test-coverage:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+type-check:
+	go build ./...
 
 install:
-	go install ./cmd/azedarach
+	go install ./cmd/az
 
-release:
-	goreleaser release --clean
-
-# Cross-compile
-build-all:
-	GOOS=darwin GOARCH=amd64 go build -o bin/azedarach-darwin-amd64 ./cmd/azedarach
-	GOOS=darwin GOARCH=arm64 go build -o bin/azedarach-darwin-arm64 ./cmd/azedarach
-	GOOS=linux GOARCH=amd64 go build -o bin/azedarach-linux-amd64 ./cmd/azedarach
-	GOOS=windows GOARCH=amd64 go build -o bin/azedarach-windows-amd64.exe ./cmd/azedarach
+lint:
+	golangci-lint run ./...
 ```
 
 ## Configuration Schema

@@ -10,7 +10,7 @@
 
 ## Deliverables
 
-- [ ] Project setup (go.mod, Makefile, .goreleaser.yaml)
+- [ ] Project setup (go.mod, justfile, .goreleaser.yaml)
 - [ ] Main model struct with cursor, mode, basic state
 - [ ] Basic keybinding handling (hjkl + arrows navigation)
 - [ ] Half-page scroll (`Ctrl-Shift-d/u`)
@@ -622,17 +622,15 @@ internal/ui/styles/theme.go       # Catppuccin colors
 internal/ui/styles/styles.go      # Component styles
 go.mod
 go.sum
-Makefile
+justfile
 .goreleaser.yaml
 ```
 
 ---
 
-## Makefile
+## justfile
 
-```makefile
-.PHONY: build run test clean
-
+```just
 build:
 	go build -o bin/az ./cmd/az
 
@@ -640,13 +638,17 @@ run:
 	go run ./cmd/az
 
 test:
-	go test ./...
+	go test -v ./...
 
-test-golden:
-	go test ./... -update
+test-coverage:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+type-check:
+	go build ./...
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ coverage.out coverage.html
 
 install:
 	go install ./cmd/az

@@ -2,27 +2,29 @@
 File: CONTEXT.md
 Version: 2.0.1
 Updated: 2026-03-07
-Purpose: Canonical root AI context source synced to AGENTS.md entrypoints
+Purpose: Canonical root AI context source synced to AGENTS.md and CLAUDE.md
 -->
 
 <ai_context version="1.0" tool="shared">
 
 # Azedarach Project Context
 
-> TUI Kanban board for orchestrating parallel AI sessions with issue tracking
+> TUI Kanban board for orchestrating parallel Claude Code sessions with issue tracking
 
 ## Entrypoint Generation
 
-This file is the canonical root context source in `.rulesync/rules/`.
+This file is the canonical root context source in `.rulesync/docs/`.
 
-RuleSync generates root and nested `AGENTS.md` files from path-scoped rule sources.
+RuleSync mapping fans this one file out to:
+- `AGENTS.md` (OpenCode/Codex entrypoint filename)
+- `CLAUDE.md` (Claude Code entrypoint filename)
 
 ## Instructions Reference
 
 **This repository has multiple implementations:**
 
-- **ts-opentui/** -> [AGENTS.md](./ts-opentui/AGENTS.md) (TypeScript, Bun, OpenTUI, Effect)
-- **go-bubbletea/** -> [AGENTS.md](./go-bubbletea/AGENTS.md) (Go, Bubbletea)
+- **ts-opentui/** -> [CLAUDE.md](./ts-opentui/CLAUDE.md) (TypeScript, Bun, OpenTUI, Effect)
+- **go-bubbletea/** -> [CLAUDE.md](./go-bubbletea/CLAUDE.md) (Go, Bubbletea)
 
 Select the implementation based on user request or current working directory.
 
@@ -69,19 +71,15 @@ just rulesync-check               # Verify managed files are in sync
 ## RuleSync Workflow
 
 Managed paths are generated from `.rulesync/`:
-- `.rulesync/rules/` -> `AGENTS.md`, `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`
-- `.rulesync/subagents/` -> Codex/OpenCode subagent outputs
-- `.rulesync/skills/` -> Codex/OpenCode skill outputs
-
-Canonical context sources:
-- `./.rulesync/rules/overview.md` -> `AGENTS.md`
-- `./.rulesync/rules/ts-opentui.md` + `agentsmd.subprojectPath: ts-opentui` -> `ts-opentui/AGENTS.md`
-- `./.rulesync/rules/go-bubbletea.md` + `agentsmd.subprojectPath: go-bubbletea` -> `go-bubbletea/AGENTS.md`
+- `.claude/agents/`
+- `.claude/commands/`
+- `.claude/hooks/`
+- `.claude/session-templates/`
+- `.claude/skills/`
+- `AGENTS.md`, `CLAUDE.md`, `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`, `go-bubbletea/CLAUDE.md`
 
 Sync behavior:
-- `post-checkout` and `post-merge` run:
-  - `rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent`
-  - `rulesync generate -c rulesync.jsonc --silent`
+- `post-checkout` and `post-merge` run `scripts/rulesync-sync.sh sync`
 - Set `RULESYNC_SKIP=1` to bypass auto-sync for one command/session
 - OpenCode plugin files are intentionally not managed by RuleSync
 
@@ -173,13 +171,13 @@ When user requests work, use this matrix to decide which implementation to work 
 
 ## Shared Skills
 
-This repository has shared skills in `.rulesync/skills/` that apply to all implementations:
+This repository has shared skills in `.claude/skills/` that apply to all implementations:
 
 - **Workflow Skills** (`workflow/`): issue tracking, Azedarach CLI workflows, and spec maintenance
 - **Effect Skills** (`effect/`): Effect patterns (ts-opentui only)
 - **Gleam Skills** (`gleam/`): Gleam patterns (gleam only)
 
-See `.rulesync/skills/README.md` for skill documentation.
+See `.claude/skills/README.md` for skill documentation.
 
 ## OpenCode Plugins
 
