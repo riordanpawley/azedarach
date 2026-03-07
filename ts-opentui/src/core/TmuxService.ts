@@ -1,5 +1,5 @@
 import { Command } from "@effect/platform"
-import { Data, Effect, Option } from "effect"
+import { Data, Effect, Option, Stream } from "effect"
 
 // Errors
 // biome-ignore lint/complexity/noBannedTypes: <eh>
@@ -18,19 +18,6 @@ export interface TmuxSession {
 }
 
 const TMUX_LITERAL_CHUNK_SIZE = 512
-
-const chunkLiteralCommand = (command: string): readonly string[] => {
-	const chars = [...command]
-	if (chars.length <= TMUX_LITERAL_CHUNK_SIZE) {
-		return [command]
-	}
-
-	const chunks: string[] = []
-	for (let i = 0; i < chars.length; i += TMUX_LITERAL_CHUNK_SIZE) {
-		chunks.push(chars.slice(i, i + TMUX_LITERAL_CHUNK_SIZE).join(""))
-	}
-	return chunks
-}
 
 // Helper to run tmux commands
 const runTmux = (args: string[]) =>
@@ -154,10 +141,11 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			sendLiteralCommand: (session: string, command: string) =>
 				Effect.gen(function* () {
-					const chunks = chunkLiteralCommand(command)
-					for (const chunk of chunks) {
-						yield* runTmux(["send-keys", "-t", session, "-l", chunk])
-					}
+					yield* Stream.fromIterable([...command]).pipe(
+						Stream.chunksOf(TMUX_LITERAL_CHUNK_SIZE),
+						Stream.map((chunk) => chunk.join("")),
+						Stream.runForEach((chunk) => runTmux(["send-keys", "-t", session, "-l", chunk])),
+					)
 					yield* runTmux(["send-keys", "-t", session, "Enter"])
 				}).pipe(
 					Effect.asVoid,
