@@ -346,6 +346,7 @@ export const applySessionRefreshPatch = (params: {
     readonly estimatedTokens: number | undefined
     readonly recentOutput: string | undefined
     readonly agentPhase: TaskWithSession["agentPhase"]
+    readonly checklistProgress?: TaskWithSession["checklistProgress"]
     readonly gitStatusPatch: GitStatus | undefined
 }): TaskWithSession => ({
     ...params.task,
@@ -355,6 +356,7 @@ export const applySessionRefreshPatch = (params: {
     estimatedTokens: params.estimatedTokens,
     recentOutput: params.recentOutput,
     agentPhase: params.agentPhase,
+    checklistProgress: params.checklistProgress,
 })
 
 // ============================================================================
@@ -1348,6 +1350,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								estimatedTokens: metrics?.estimatedTokens,
 								recentOutput: metrics?.recentOutput,
 								agentPhase: metrics?.agentPhase,
+								checklistProgress: metrics?.checklistProgress,
 							}
 
 							// Apply optimistic updates
@@ -1756,6 +1759,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
                                 estimatedTokens: metrics?.estimatedTokens,
                                 recentOutput: metrics?.recentOutput,
                                 agentPhase: metrics?.agentPhase,
+                                checklistProgress: metrics?.checklistProgress,
                                 gitStatusPatch,
                             })
                         }),

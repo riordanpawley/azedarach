@@ -55,6 +55,12 @@ export interface SessionMetrics {
 	recentOutput?: string
 	/** Current agent workflow phase (planning/action/verification) */
 	agentPhase?: AgentPhase
+	/**
+	 * Checklist progress extracted from terminal output: [completedCount, totalCount].
+	 * Derived from markdown-style task lists (e.g. "- [x] step 1 / - [ ] step 2")
+	 * that the agent prints as it works through a plan.
+	 */
+	checklistProgress?: readonly [number, number]
 }
 
 /**

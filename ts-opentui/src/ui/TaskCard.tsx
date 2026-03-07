@@ -66,6 +66,21 @@ const truncateText = (text: string, maxWidthPerLine: number): string => {
 	return `${text.slice(0, maxChars - 1)}…`
 }
 
+/**
+ * Build a compact checklist progress bar for the task card.
+ * e.g. "[████░░░░] 3/8"
+ *
+ * Inspired by t3code's turn.plan.updated activity tracking — shows how far
+ * through a plan the agent has progressed without requiring extra screen height.
+ */
+const buildChecklistProgressBar = (completed: number, total: number): string => {
+	if (total === 0) return "[░░░░░░] 0/0"
+	const BAR_WIDTH = 6
+	const filled = Math.round((completed / total) * BAR_WIDTH)
+	const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled)
+	return `[${bar}] ${completed}/${total}`
+}
+
 export interface TaskCardProps {
 	task: TaskWithSession
 	isSelected?: boolean
@@ -296,6 +311,15 @@ export const TaskCard = (props: TaskCardProps) => {
 				{props.isBlocked ? "⊘ " : ""}
 				{truncateText(props.task.title, maxTitleWidth - (props.isBlocked ? 2 : 0))}
 			</text>
+			{/* Checklist progress row: compact bar shown when agent is tracking plan steps */}
+			{props.task.checklistProgress && props.task.checklistProgress[1] > 0 && (
+				<text fg={theme.teal}>
+					{buildChecklistProgressBar(
+						props.task.checklistProgress[0],
+						props.task.checklistProgress[1],
+					)}
+				</text>
+			)}
 		</box>
 	)
 }
