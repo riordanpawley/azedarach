@@ -70,6 +70,22 @@ The probe contract is behavioral and transport-agnostic.
       }
     ]
   },
+  "spec": {
+    "workspace": {
+      "active": false,
+      "subview": null
+    },
+    "publish": {
+      "autoConfigEnabled": true,
+      "debouncePending": false,
+      "lastRunStatus": "succeeded",
+      "lastRunAt": "2026-03-03T02:29:40Z",
+      "lastRunTargets": {
+        "succeeded": 4,
+        "failed": 0
+      }
+    }
+  },
   "errors": {
     "recent": []
   }
@@ -84,6 +100,12 @@ The probe contract is behavioral and transport-agnostic.
 - `board.visibleWindow.issueIds`: IDs rendered in current viewport.
 - `board.indicators[*].staleness`: freshness hint (`fresh`, `loading`, `stale`) for user-visible indicator convergence checks.
 - `operations.queue[*].state`: one of `queued`, `running`, `succeeded`, `failed`, `canceled`.
+- `spec.workspace.active`: whether Spec workspace is currently focused.
+- `spec.workspace.subview`: active Spec subview (`Requirements`, `Coverage`, `Publish`) or `null` when not in Spec workspace.
+- `spec.publish.autoConfigEnabled`: whether mutation-triggered unattended publish is enabled.
+- `spec.publish.debouncePending`: whether a debounced publish trigger is currently pending.
+- `spec.publish.lastRunStatus`: most recent publish summary status (`succeeded`, `partial`, `failed`, `never`).
+- `spec.publish.lastRunTargets`: summarized target outcomes for the most recent publish run.
 
 ## 10.5 Example: Overlay + Selection State
 
@@ -118,6 +140,22 @@ The probe contract is behavioral and transport-agnostic.
   "operations": {
     "queue": []
   },
+  "spec": {
+    "workspace": {
+      "active": false,
+      "subview": null
+    },
+    "publish": {
+      "autoConfigEnabled": true,
+      "debouncePending": false,
+      "lastRunStatus": "partial",
+      "lastRunAt": "2026-03-03T02:30:58Z",
+      "lastRunTargets": {
+        "succeeded": 3,
+        "failed": 1
+      }
+    }
+  },
   "errors": {
     "recent": [
       {
@@ -131,7 +169,58 @@ The probe contract is behavioral and transport-agnostic.
 }
 ```
 
-## 10.6 Assertion Guidance
+## 10.6 Example: Spec Workspace + Publish Automation State
+
+```json
+{
+  "schemaVersion": "1.0",
+  "snapshot": {
+    "revision": 1912,
+    "capturedAt": "2026-03-03T02:32:41Z"
+  },
+  "app": {
+    "projectId": "azedarach",
+    "view": "kanban",
+    "mode": "NOR",
+    "overlays": []
+  },
+  "focus": {
+    "issueId": "az-151",
+    "column": "open",
+    "indexInColumn": 2
+  },
+  "board": {
+    "visibleWindow": {
+      "columns": ["open", "in_progress", "blocked", "closed"],
+      "issueIds": ["az-151", "az-154", "az-157"]
+    }
+  },
+  "operations": {
+    "queue": []
+  },
+  "spec": {
+    "workspace": {
+      "active": true,
+      "subview": "Publish"
+    },
+    "publish": {
+      "autoConfigEnabled": true,
+      "debouncePending": true,
+      "lastRunStatus": "succeeded",
+      "lastRunAt": "2026-03-03T02:32:10Z",
+      "lastRunTargets": {
+        "succeeded": 4,
+        "failed": 0
+      }
+    }
+  },
+  "errors": {
+    "recent": []
+  }
+}
+```
+
+## 10.7 Assertion Guidance
 
 - Assert both state and ordering: compare `snapshot.revision` and `capturedAt`.
 - For responsiveness checks, assert viewport IDs update before off-screen hydration completes.
