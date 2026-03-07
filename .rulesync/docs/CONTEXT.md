@@ -7,7 +7,7 @@ Purpose: Deprecated docs-path placeholder to prevent root-context duplication
 
 # Deprecated Path
 
-Root context canonical source is `../rules/overview.md`.
+Root context canonical source is `../rules/root-context.md`.
 
 Do not place workflow or policy content in this file.
 Keep this file as a redirect-only placeholder.
