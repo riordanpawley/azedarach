@@ -205,6 +205,102 @@ const projectDirArg = Args.directory().pipe(
 	Args.withDescription("Project directory (default: current directory)"),
 )
 
+const TOP_LEVEL_COMMAND_ALIASES = {
+	a: "add",
+	ls: "list",
+	l: "list",
+	at: "attach",
+	pa: "pause",
+	k: "kill",
+	i: "issue",
+	pr: "prime",
+	g: "gate",
+	sy: "sync",
+	se: "status",
+	p: "project",
+	sp: "spec",
+	n: "notify",
+	h: "hooks",
+	o: "opencode",
+	d: "dev",
+	s: "status",
+	st: "start",
+} as const
+
+const TOP_LEVEL_NESTED_COMMAND_ALIASES = {
+	issue: {
+		l: "list",
+		g: "get",
+		c: "create",
+		u: "update",
+		d: "dep",
+		x: "close",
+		t: "close",
+		rm: "delete",
+		del: "delete",
+	},
+	"issue/dep": {
+		a: "add",
+	},
+	spec: {
+		r: "req",
+		l: "link",
+		p: "publish",
+		c: "req",
+	},
+	"spec/req": {
+		l: "list",
+		g: "get",
+		c: "create",
+		u: "update",
+		d: "delete",
+		del: "delete",
+		ls: "list",
+		rm: "delete",
+	},
+	"spec/link": {
+		l: "list",
+		a: "add",
+		r: "remove",
+		rm: "remove",
+	},
+	"spec/publish": {
+		r: "run",
+		c: "config",
+	},
+	project: {
+		a: "add",
+		l: "list",
+		r: "remove",
+		rm: "remove",
+		s: "switch",
+		sw: "switch",
+	},
+	opencode: {
+		i: "init",
+		p: "plugin",
+		pl: "plugin",
+	},
+	hooks: {
+		i: "install",
+		in: "install",
+		ins: "install",
+	},
+	dev: {
+		s: "start",
+		st: "start",
+		r: "restart",
+		re: "restart",
+		x: "stop",
+		stp: "stop",
+		sto: "stop",
+		l: "list",
+		ls: "list",
+		t: "status",
+		stt: "status",
+	},
+} as const satisfies Record<string, Record<string, string>>
+
 // ============================================================================
 // Validation Helpers
 // ============================================================================
@@ -2133,6 +2229,7 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az issue get <issue-id>\`
+- Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
 - Common issue commands:
   - \`az issue list --limit 20\` (lists most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
@@ -2764,6 +2861,7 @@ const syncCommand = Command.make(
 	"sync",
 	{
 		all: Options.boolean("all").pipe(
+			Options.withAlias("a"),
 			Options.withDescription("Sync all worktrees (not just current)"),
 		),
 		projectDir: projectDirArg,
@@ -2781,7 +2879,10 @@ const gateCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirArg,
 		verbose: verboseOption,
-		fix: Options.boolean("fix").pipe(Options.withDescription("Auto-fix lint issues")),
+		fix: Options.boolean("fix").pipe(
+			Options.withAlias("f"),
+			Options.withDescription("Auto-fix lint issues"),
+		),
 	},
 	gateHandler,
 ).pipe(Command.withDescription("Run quality gates (type-check, lint, test, build) for a task"))
@@ -2806,24 +2907,31 @@ const issueListCommand = Command.make(
 	"list",
 	{
 		status: Options.text("status").pipe(
+			Options.withAlias("s"),
 			Options.optional,
 			Options.withDescription("Filter by status"),
 		),
 		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Filter by priority (1-5)"),
 		),
 		issueType: Options.text("type").pipe(
+			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Filter by issue type"),
 		),
 		limit: Options.integer("limit").pipe(
+			Options.withAlias("l"),
 			Options.optional,
 			Options.withDescription("Maximum number of issues to return"),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output raw JSON"),
+		),
 	},
 	issueListHandler,
 ).pipe(Command.withDescription("List issues sorted by most recently updated"))
@@ -2837,11 +2945,16 @@ const issueGetCommand = Command.make(
 		issueId: issueIdArg,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output raw JSON"),
+		),
 		wait: Options.boolean("wait").pipe(
+			Options.withAlias("w"),
 			Options.withDescription("Wait for external sync before returning"),
 		),
 		maxWaitMs: Options.integer("max-wait-ms").pipe(
+			Options.withAlias("m"),
 			Options.optional,
 			Options.withDescription("Maximum sync wait time in milliseconds"),
 		),
@@ -2857,44 +2970,56 @@ const issueCreateCommand = Command.make(
 	{
 		title: issueTitleArg,
 		issueType: Options.text("type").pipe(
+			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Issue type (task, bug, epic, chore)"),
 		),
 		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Priority (1-5)"),
 		),
 		description: Options.text("description").pipe(
 			Options.optional,
+			Options.withAlias("d"),
 			Options.withDescription("Issue description"),
 		),
 		design: Options.text("design").pipe(
+			Options.withAlias("D"),
 			Options.optional,
 			Options.withDescription("Design/implementation notes"),
 		),
 		acceptance: Options.text("acceptance").pipe(
+			Options.withAlias("a"),
 			Options.optional,
 			Options.withDescription("Acceptance criteria"),
 		),
 		assignee: Options.text("assignee").pipe(
+			Options.withAlias("s"),
 			Options.optional,
 			Options.withDescription("Assignee value"),
 		),
 		estimate: Options.integer("estimate").pipe(
+			Options.withAlias("e"),
 			Options.optional,
 			Options.withDescription("Estimate points/minutes (backend-specific)"),
 		),
 		labels: Options.text("labels").pipe(
+			Options.withAlias("l"),
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
 		parent: Options.text("parent").pipe(
+			Options.withAlias("r"),
 			Options.optional,
 			Options.withDescription("Parent epic issue ID"),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output raw JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output raw JSON"),
+		),
 	},
 	issueCreateHandler,
 ).pipe(Command.withDescription("Create a new issue"))
@@ -2906,45 +3031,72 @@ const issueUpdateCommand = Command.make(
 	"update",
 	{
 		issueId: issueIdArg,
-		status: Options.text("status").pipe(Options.optional, Options.withDescription("Issue status")),
-		notes: Options.text("notes").pipe(Options.optional, Options.withDescription("Issue notes")),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Issue status"),
+		),
+		notes: Options.text("notes").pipe(
+			Options.withAlias("n"),
+			Options.optional,
+			Options.withDescription("Issue notes"),
+		),
 		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Priority (1-5)"),
 		),
-		title: Options.text("title").pipe(Options.optional, Options.withDescription("New title")),
-		issueType: Options.text("type").pipe(Options.optional, Options.withDescription("Issue type")),
+		title: Options.text("title").pipe(
+			Options.withAlias("T"),
+			Options.optional,
+			Options.withDescription("New title"),
+		),
+		issueType: Options.text("type").pipe(
+			Options.withAlias("y"),
+			Options.optional,
+			Options.withDescription("Issue type"),
+		),
 		description: Options.text("description").pipe(
 			Options.optional,
+			Options.withAlias("d"),
 			Options.withDescription("Issue description"),
 		),
 		design: Options.text("design").pipe(
+			Options.withAlias("D"),
 			Options.optional,
 			Options.withDescription("Design/implementation notes"),
 		),
 		acceptance: Options.text("acceptance").pipe(
+			Options.withAlias("a"),
 			Options.optional,
 			Options.withDescription("Acceptance criteria"),
 		),
 		assignee: Options.text("assignee").pipe(
+			Options.withAlias("A"),
 			Options.optional,
 			Options.withDescription("Assignee value"),
 		),
 		estimate: Options.integer("estimate").pipe(
+			Options.withAlias("e"),
 			Options.optional,
 			Options.withDescription("Estimate points/minutes (backend-specific)"),
 		),
 		labels: Options.text("labels").pipe(
+			Options.withAlias("L"),
 			Options.optional,
 			Options.withDescription("Comma-separated labels (replaces labels)"),
 		),
 		parent: Options.text("parent").pipe(
+			Options.withAlias("P"),
 			Options.optional,
 			Options.withDescription("Parent epic issue ID"),
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON confirmation"),
+		),
 	},
 	issueUpdateHandler,
 ).pipe(Command.withDescription("Update issue fields"))
@@ -2958,6 +3110,7 @@ const issueDepAddCommand = Command.make(
 		issueId: issueIdArg,
 		dependsOnId: dependsOnIssueIdArg,
 		dependencyType: Options.text("type").pipe(
+			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription(
 				"Dependency type (blocks, related, parent-child, discovered-from). Default: blocks",
@@ -2965,7 +3118,10 @@ const issueDepAddCommand = Command.make(
 		),
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON confirmation"),
+		),
 	},
 	issueDepAddHandler,
 ).pipe(Command.withDescription("Add a dependency edge between issues"))
@@ -2983,14 +3139,21 @@ const issueDepCommand = Command.make("dep", {}, () =>
 /**
  * az issue close <issue-id> - Close issue
  */
-const issueCloseCommand = Command.make(
-	"close",
-	{
-		issueId: issueIdArg,
-		reason: Options.text("reason").pipe(Options.optional, Options.withDescription("Close reason")),
-		projectDir: projectDirOption,
-		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
+	const issueCloseCommand = Command.make(
+		"close",
+		{
+			issueId: issueIdArg,
+			reason: Options.text("reason").pipe(
+				Options.withAlias("r"),
+				Options.optional,
+				Options.withDescription("Close reason"),
+			),
+			projectDir: projectDirOption,
+			verbose: verboseOption,
+			json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON confirmation"),
+		),
 	},
 	issueCloseHandler,
 ).pipe(Command.withDescription("Close an issue"))
@@ -3003,10 +3166,14 @@ const issueDeleteCommand = Command.make(
 	{
 		issueId: issueIdArg,
 		force: Options.boolean("force").pipe(
+			Options.withAlias("f"),
 			Options.withDescription("Required: confirms irreversible deletion"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON confirmation")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON confirmation"),
+		),
 	},
 	issueDeleteHandler,
 ).pipe(Command.withDescription("Delete an issue (requires --force)"))
@@ -3017,7 +3184,7 @@ const issueDeleteCommand = Command.make(
 const issueCommand = Command.make("issue", {}, () =>
 	Console.log("Use 'az issue --help' to see available issue commands"),
 ).pipe(
-	Command.withDescription("Issue operations"),
+	Command.withDescription("Issue operations (alias: i)"),
 	Command.withSubcommands([
 		issueListCommand,
 		issueGetCommand,
@@ -3037,16 +3204,21 @@ const requirementRefArg = Args.text({ name: "requirement-ref" }).pipe(
 )
 
 const requirementByIdOption = Options.text("id").pipe(
+	Options.withAlias("I"),
 	Options.optional,
 	Options.withDescription("Lookup by internal opaque requirement id"),
 )
 
 const requirementByLocalIdOption = Options.text("local-id").pipe(
+	Options.withAlias("l"),
+	Options.withAlias("L"),
 	Options.optional,
 	Options.withDescription("Lookup by requirement local_id"),
 )
 
 const requirementByExternalCodeOption = Options.text("external-code").pipe(
+	Options.withAlias("e"),
+	Options.withAlias("E"),
 	Options.optional,
 	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
@@ -3056,7 +3228,10 @@ const specReqListCommand = Command.make(
 	{
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specReqListHandler,
 ).pipe(Command.withDescription("List spec requirements"))
@@ -3070,7 +3245,10 @@ const specReqGetCommand = Command.make(
 		requirementExternalCode: requirementByExternalCodeOption,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specReqGetHandler,
 ).pipe(Command.withDescription("Show spec requirement details"))
@@ -3081,22 +3259,34 @@ const specReqCreateCommand = Command.make(
 		requirementRef: requirementRefArg,
 		localId: requirementByLocalIdOption,
 		externalCode: requirementByExternalCodeOption,
-		title: Options.text("title").pipe(Options.withDescription("Requirement title")),
-		body: Options.text("body").pipe(Options.withDescription("Requirement body markdown")),
+		title: Options.text("title").pipe(
+			Options.withAlias("t"),
+			Options.withDescription("Requirement title"),
+		),
+		body: Options.text("body").pipe(
+			Options.withAlias("b"),
+			Options.withDescription("Requirement body markdown"),
+		),
 		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
 			Options.optional,
 			Options.withDescription("Requirement kind (functional|acceptance|other)"),
 		),
 		status: Options.text("status").pipe(
+			Options.withAlias("s"),
 			Options.optional,
 			Options.withDescription("Requirement status"),
 		),
 		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Requirement priority"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specReqCreateHandler,
 ).pipe(Command.withDescription("Create a spec requirement"))
@@ -3108,25 +3298,36 @@ const specReqUpdateCommand = Command.make(
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
-		title: Options.text("title").pipe(Options.optional, Options.withDescription("Requirement title")),
+		title: Options.text("title").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Requirement title"),
+		),
 		body: Options.text("body").pipe(
+			Options.withAlias("b"),
 			Options.optional,
 			Options.withDescription("Requirement body markdown"),
 		),
 		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
 			Options.optional,
 			Options.withDescription("Requirement kind (functional|acceptance|other)"),
 		),
 		status: Options.text("status").pipe(
+			Options.withAlias("s"),
 			Options.optional,
 			Options.withDescription("Requirement status"),
 		),
 		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Requirement priority"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specReqUpdateHandler,
 ).pipe(Command.withDescription("Update a spec requirement"))
@@ -3139,7 +3340,10 @@ const specReqDeleteCommand = Command.make(
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specReqDeleteHandler,
 ).pipe(Command.withDescription("Delete a spec requirement"))
@@ -3163,27 +3367,35 @@ const specLinkListCommand = Command.make(
 	"list",
 	{
 		issueId: Options.text("issue").pipe(
+			Options.withAlias("i"),
 			Options.optional,
 			Options.withDescription("Filter by issue ID"),
 		),
 		requirementRef: Options.text("req").pipe(
+			Options.withAlias("r"),
 			Options.optional,
 			Options.withDescription("Filter by requirement reference (auto selector)"),
 		),
 		requirementId: Options.text("req-id").pipe(
+			Options.withAlias("I"),
 			Options.optional,
 			Options.withDescription("Filter by requirement internal id"),
 		),
 		requirementLocalId: Options.text("req-local-id").pipe(
+			Options.withAlias("L"),
 			Options.optional,
 			Options.withDescription("Filter by requirement local_id"),
 		),
 		requirementExternalCode: Options.text("req-external-code").pipe(
+			Options.withAlias("E"),
 			Options.optional,
 			Options.withDescription("Filter by requirement external code"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specLinkListHandler,
 ).pipe(Command.withDescription("List typed issue<->requirement links"))
@@ -3197,11 +3409,15 @@ const specLinkAddCommand = Command.make(
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
 		linkType: Options.text("type").pipe(
+			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specLinkAddHandler,
 ).pipe(Command.withDescription("Add typed issue<->requirement link"))
@@ -3215,11 +3431,15 @@ const specLinkRemoveCommand = Command.make(
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
 		linkType: Options.text("type").pipe(
+			Options.withAlias("t"),
 			Options.optional,
 			Options.withDescription("Optional link type filter"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specLinkRemoveHandler,
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
@@ -3235,7 +3455,10 @@ const specPublishRunCommand = Command.make(
 	"run",
 	{
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specPublishRunHandler,
 ).pipe(Command.withDescription("Run one-way spec publish to Linear project documents"))
@@ -3244,7 +3467,10 @@ const specPublishConfigGetCommand = Command.make(
 	"get",
 	{
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specPublishConfigGetHandler,
 ).pipe(Command.withDescription("Inspect spec publish config and last outcome"))
@@ -3253,35 +3479,45 @@ const specPublishConfigSetCommand = Command.make(
 	"set",
 	{
 		enabled: Options.boolean("enabled").pipe(
+			Options.withAlias("e"),
 			Options.optional,
 			Options.withDescription("Enable or disable auto-publish"),
 		),
 		debounceMs: Options.integer("debounce-ms").pipe(
+			Options.withAlias("d"),
 			Options.optional,
 			Options.withDescription("Auto-publish debounce window in milliseconds"),
 		),
 		project: Options.text("project").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Target Linear project reference"),
 		),
 		overview: Options.text("doc-overview").pipe(
+			Options.withAlias("o"),
 			Options.optional,
 			Options.withDescription("Spec Overview document title"),
 		),
 		requirements: Options.text("doc-requirements").pipe(
+			Options.withAlias("r"),
 			Options.optional,
 			Options.withDescription("Requirements Index document title"),
 		),
 		acceptance: Options.text("doc-acceptance").pipe(
+			Options.withAlias("a"),
 			Options.optional,
 			Options.withDescription("Acceptance Index document title"),
 		),
 		changeLog: Options.text("doc-change-log").pipe(
+			Options.withAlias("c"),
 			Options.optional,
 			Options.withDescription("Change Log document title"),
 		),
 		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(Options.withDescription("Output JSON")),
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
 	},
 	specPublishConfigSetHandler,
 ).pipe(Command.withDescription("Update spec publish config"))
@@ -3556,10 +3792,12 @@ const opencodePluginInstallCommand = Command.make(
 	"install",
 	{
 		globalDir: Options.directory("global-dir").pipe(
+			Options.withAlias("g"),
 			Options.optional,
 			Options.withDescription("Global plugin directory (default: ~/.config/opencode/plugins)"),
 		),
 		projectDir: Options.directory("project-dir").pipe(
+			Options.withAlias("p"),
 			Options.optional,
 			Options.withDescription("Optional project root to install .opencode/plugins/opencode-az.js"),
 		),
@@ -3884,9 +4122,77 @@ const normalizeIssueJsonFlagOrder = normalizeIssueOptionOrder
 const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
 	argv.includes("--verbose") || argv.includes("-v")
 
+const findTopLevelSubcommandIndex = (argv: ReadonlyArray<string>): number | null => {
+	for (let index = 2; index < argv.length; index++) {
+		const arg = argv[index]
+		if (arg === "--") return null
+		if (arg === "--config" || arg === "-c") {
+			index += 1
+			continue
+		}
+		if (arg.startsWith("--config=") || arg.startsWith("-c=") || arg.startsWith("-")) {
+			continue
+		}
+		return index
+	}
+	return null
+}
+
+const normalizeTopLevelCommandAlias = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+	const topLevelIndex = findTopLevelSubcommandIndex(argv)
+	if (topLevelIndex === null) return argv
+
+	const topLevelArg = argv[topLevelIndex]
+	if (topLevelArg === undefined) return argv
+
+	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg as keyof typeof TOP_LEVEL_COMMAND_ALIASES]
+	if (replacement === undefined) return argv
+
+	const normalized = [...argv]
+	normalized[topLevelIndex] = replacement
+	return normalized
+}
+
+const normalizeCliAliases = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+	const withTopLevelAlias = normalizeTopLevelCommandAlias(argv)
+	const topLevelIndex = findTopLevelSubcommandIndex(withTopLevelAlias)
+	if (topLevelIndex === null) return withTopLevelAlias
+
+	const topLevelArg = withTopLevelAlias[topLevelIndex]
+	if (topLevelArg === undefined) return withTopLevelAlias
+
+	const normalized = [...withTopLevelAlias]
+	let commandPath = topLevelArg
+	let currentIndex = topLevelIndex + 1
+
+	while (currentIndex < normalized.length) {
+		const candidate = normalized[currentIndex]
+		if (candidate.startsWith("-")) {
+			break
+		}
+
+		const aliasesForCommand = TOP_LEVEL_NESTED_COMMAND_ALIASES[commandPath]
+		if (aliasesForCommand === undefined) {
+			break
+		}
+
+		const replacement = aliasesForCommand[candidate as keyof typeof aliasesForCommand]
+		if (replacement === undefined) {
+			break
+		}
+
+		normalized[currentIndex] = replacement
+		commandPath = `${commandPath}/${replacement}`
+		currentIndex += 1
+	}
+
+	return normalized
+}
+
 const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"add",
 	"list",
+	"i",
 	"prime",
 	"start",
 	"attach",
@@ -3907,28 +4213,21 @@ const TOP_LEVEL_SUBCOMMANDS = new Set([
 type CliExecutionMode = "tui" | "command" | "dev-command"
 
 const parseTopLevelSubcommand = (argv: ReadonlyArray<string>): string | null => {
-	for (let index = 2; index < argv.length; index++) {
-		const arg = argv[index]
-		if (arg === "--") return null
-		if (arg === "--config" || arg === "-c") {
-			index += 1
-			continue
-		}
-		if (arg.startsWith("--config=") || arg.startsWith("-c=") || arg.startsWith("-")) {
-			continue
-		}
-		return TOP_LEVEL_SUBCOMMANDS.has(arg) ? arg : null
-	}
-	return null
+	const topLevelArgIndex = findTopLevelSubcommandIndex(argv)
+	if (topLevelArgIndex === null) return null
+
+	const arg = argv[topLevelArgIndex]
+	return arg !== undefined && TOP_LEVEL_SUBCOMMANDS.has(arg) ? arg : null
 }
 
 const hasGlobalHelpOrVersionFlag = (argv: ReadonlyArray<string>): boolean =>
 	argv.includes("--help") || argv.includes("-h") || argv.includes("--version")
 
 const resolveCliExecutionMode = (argv: ReadonlyArray<string>): CliExecutionMode => {
-	const subcommand = parseTopLevelSubcommand(argv)
+	const normalizedArgv = normalizeCliAliases(argv)
+	const subcommand = parseTopLevelSubcommand(normalizedArgv)
 	if (subcommand === null) {
-		return hasGlobalHelpOrVersionFlag(argv) ? "command" : "tui"
+		return hasGlobalHelpOrVersionFlag(normalizedArgv) ? "command" : "tui"
 	}
 	if (subcommand === "dev") {
 		return "dev-command"
@@ -3972,7 +4271,7 @@ const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
  * CLI runner function - returns an Effect that still needs BunContext
  */
 const cliRunner = (argv: ReadonlyArray<string>) => {
-	const normalizedArgv = normalizeIssueOptionOrder(argv)
+	const normalizedArgv = normalizeIssueOptionOrder(normalizeCliAliases(argv))
 	const mode = resolveCliExecutionMode(normalizedArgv)
 	const minimumLogLevel = hasVerboseFlag(normalizedArgv) ? LogLevel.Info : LogLevel.None
 	const runEffect =
@@ -4008,6 +4307,7 @@ export {
 	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
+	normalizeCliAliases,
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
