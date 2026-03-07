@@ -32,6 +32,24 @@ import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { getIssueSessionName, getWorktreePath } from "./paths.js"
 import { SessionNotFoundError, TmuxError, TmuxService } from "./TmuxService.js"
 
+const INIT_DONE_OPTION = "@az_init_done"
+const INIT_WAIT_TIMEOUT_OPTION = "@az_init_wait_timed_out"
+export const DEFAULT_INIT_WAIT_TIMEOUT_SECONDS = 180
+
+export const buildInitWaitCommand = (
+	sessionName: string,
+	timeoutSeconds: number = DEFAULT_INIT_WAIT_TIMEOUT_SECONDS,
+): string => {
+	const boundedTimeoutSeconds = Math.max(1, Math.floor(timeoutSeconds))
+	const showDoneCommand = `tmux show-option -t ${sessionName} -v ${INIT_DONE_OPTION} 2>/dev/null`
+	return [
+		`az_wait_timeout=${boundedTimeoutSeconds}`,
+		"az_wait_elapsed=0",
+		`while [ "$(${showDoneCommand})" != "1" ] && [ "$az_wait_elapsed" -lt "$az_wait_timeout" ]; do sleep 1; az_wait_elapsed=$((az_wait_elapsed+1)); done`,
+		`if [ "$(${showDoneCommand})" != "1" ]; then tmux set-option -t ${sessionName} ${INIT_WAIT_TIMEOUT_OPTION} 1; fi`,
+	].join("; ")
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -257,6 +275,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 									})
 
 									yield* waitForShellReady(sessionName, "@az_shell_ready")
+									yield* tmux.setUserOption(sessionName, INIT_DONE_OPTION, "0")
+									yield* tmux.setUserOption(sessionName, INIT_WAIT_TIMEOUT_OPTION, "0")
 
 									if (initCommands && initCommands.length > 0) {
 										for (const cmd of initCommands) {
@@ -264,7 +284,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 										}
 									}
 
-									const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+									const marker = `tmux set-option -t ${sessionName} ${INIT_DONE_OPTION} 1; tmux set-option -t ${sessionName} ${INIT_WAIT_TIMEOUT_OPTION} 0`
 									yield* tmux.sendKeys(sessionName, marker)
 
 									// Spawn background tasks in separate windows
@@ -286,7 +306,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 												const target = `${sessionName}:${taskWindowName}`
 												yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
 
-												const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+												const waitCmd = buildInitWaitCommand(sessionName)
 												yield* tmux.sendKeys(target, waitCmd)
 
 												if (initCommands && initCommands.length > 0) {
@@ -320,7 +340,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
-								const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+								const waitCmd = buildInitWaitCommand(sessionName)
 								yield* tmux.sendKeys(target, waitCmd)
 
 								yield* Effect.log(`[buildTmuxSessionFromIssue] Shell ready for ${target}`)
@@ -378,6 +398,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								})
 
 								yield* waitForShellReady(sessionName, "@az_shell_ready")
+								yield* tmux.setUserOption(sessionName, INIT_DONE_OPTION, "0")
+								yield* tmux.setUserOption(sessionName, INIT_WAIT_TIMEOUT_OPTION, "0")
 
 								if (options.initCommands && options.initCommands.length > 0) {
 									for (const cmd of options.initCommands) {
@@ -385,7 +407,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 									}
 								}
 
-								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+								const marker = `tmux set-option -t ${sessionName} ${INIT_DONE_OPTION} 1; tmux set-option -t ${sessionName} ${INIT_WAIT_TIMEOUT_OPTION} 0`
 								yield* tmux.sendKeys(sessionName, marker)
 
 								// Spawn background tasks in separate windows after init completes
@@ -408,7 +430,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											const target = `${sessionName}:${windowName}`
 											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
 
-											const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+											const waitCmd = buildInitWaitCommand(sessionName)
 											yield* tmux.sendKeys(target, waitCmd)
 
 											// Run initCommands in the background window (environment setup)
@@ -462,7 +484,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
-								const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+								const waitCmd = buildInitWaitCommand(sessionName)
 								yield* tmux.sendKeys(target, waitCmd)
 
 								yield* Effect.log(
@@ -535,6 +557,8 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 										projectPath,
 									},
 								})
+								yield* tmux.setUserOption(sessionName, INIT_DONE_OPTION, "0")
+								yield* tmux.setUserOption(sessionName, INIT_WAIT_TIMEOUT_OPTION, "0")
 
 								// Give shell time to initialize
 								yield* Effect.sleep("300 millis")
@@ -549,7 +573,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								// Signal init completion
 								// We send this to the shell so it runs AFTER initCommands complete
-								const marker = `tmux set-option -t ${sessionName} @az_init_done 1`
+								const marker = `tmux set-option -t ${sessionName} ${INIT_DONE_OPTION} 1; tmux set-option -t ${sessionName} ${INIT_WAIT_TIMEOUT_OPTION} 0`
 								yield* tmux.sendKeys(sessionName, marker)
 
 								// Send the main command last
@@ -578,7 +602,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 											// Background tasks MUST wait for main session init to complete.
 											// We use a shell loop to wait for the @az_init_done option to be set.
-											const waitCmd = `until [ "$(tmux show-option -t ${sessionName} -v @az_init_done 2>/dev/null)" = "1" ]; do sleep 1; done`
+											const waitCmd = buildInitWaitCommand(sessionName)
 											yield* tmux.sendKeys(target, waitCmd)
 
 											// Run initCommands in the background window (environment only)
