@@ -6,7 +6,10 @@ import {
 	SessionNotFoundError,
 } from "../core/SessionManager.js"
 import { TmuxError } from "../core/TmuxService.js"
-import { classifySessionRecoveryError } from "./BoardService.js"
+import {
+	classifySessionRecoveryError,
+	resolveLinearSdkEventsTickerBehavior,
+} from "./BoardService.js"
 
 describe("BoardService session recovery classification", () => {
 	it("marks tmux and session-limit errors as transient", () => {
@@ -46,5 +49,22 @@ describe("BoardService session recovery classification", () => {
 		expect(classifySessionRecoveryError(notFoundError)).toBe("terminal")
 		expect(classifySessionRecoveryError(invalidStateError)).toBe("terminal")
 		expect(classifySessionRecoveryError(terminalSessionError)).toBe("terminal")
+	})
+})
+
+describe("resolveLinearSdkEventsTickerBehavior", () => {
+	it("enables slow defensive reconciliation only when sdk mode is healthy", () => {
+		expect(resolveLinearSdkEventsTickerBehavior("sdk", true)).toEqual({
+			localRefreshOnly: true,
+			defensiveReconciliationInterval: "2 minutes",
+		})
+		expect(resolveLinearSdkEventsTickerBehavior("sdk", false)).toEqual({
+			localRefreshOnly: false,
+			defensiveReconciliationInterval: undefined,
+		})
+		expect(resolveLinearSdkEventsTickerBehavior("failed", false)).toEqual({
+			localRefreshOnly: false,
+			defensiveReconciliationInterval: undefined,
+		})
 	})
 })

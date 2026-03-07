@@ -56,6 +56,7 @@ import {
 	normalizePublicBaseUrl,
 	parseTailscaleDnsName,
 	type LinearIssueWebhookEvent,
+	type LinearWebhookMode,
 } from "./LinearWebhookService.js"
 import { MutationQueue } from "./MutationQueue.js"
 import { PRStateService } from "./PRStateService.js"
@@ -73,6 +74,7 @@ const LINEAR_WEBHOOK_DEFAULT_EVENTS: readonly string[] = ["Issue"]
 const LINEAR_WEBHOOK_PUBLIC_URL_ENV = "LINEAR_WEBHOOK_PUBLIC_URL"
 const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
+const LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL = "2 minutes"
 const SQLITE_LOCK_RETRY_ATTEMPTS = 3
 const SQLITE_LOCK_RETRY_DELAY = "120 millis"
 const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
@@ -245,6 +247,25 @@ const normalizeLinearWebhookPriority = (priority: number | undefined): number =>
 	if (priority === 3) return 2
 	return 3
 }
+
+interface LinearSdkEventsTickerBehavior {
+	readonly localRefreshOnly: boolean
+	readonly defensiveReconciliationInterval: Duration.DurationInput | undefined
+}
+
+export const resolveLinearSdkEventsTickerBehavior = (
+	mode: LinearWebhookMode,
+	healthy: boolean,
+): LinearSdkEventsTickerBehavior =>
+	mode === "sdk" && healthy
+		? {
+				localRefreshOnly: true,
+				defensiveReconciliationInterval: LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL,
+			}
+		: {
+				localRefreshOnly: false,
+				defensiveReconciliationInterval: undefined,
+			}
 
 // ============================================================================
 // Sort Orders using Effect's composable Order module
@@ -2057,23 +2078,74 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				return linearWebhookFallbackFiber
 			})
 
-		const startLinearSdkEventsFiber = () =>
+		const runLinearSdkDefensiveReconciliationLoop = (interval: Duration.DurationInput) =>
+			Effect.repeat(Schedule.spaced(interval))(
+				Effect.gen(function* () {
+					const projectPath = yield* projectService.getCurrentPath()
+					if (projectPath !== null) {
+						yield* issueTrackerClient.sync(projectPath).pipe(
+							Effect.tap((syncResult) =>
+								syncResult.pushed > 0 || syncResult.pulled > 0
+									? Effect.log(
+											`Linear SDK defensive reconciliation sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+										)
+									: Effect.void,
+							),
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Linear SDK defensive reconciliation sync failed for projectPath=${projectPath}: ${String(error)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
+					}
+
+					yield* refreshWithPolicy({ forceRemote: true }).pipe(
+						Effect.catchAllCause((cause) =>
+							Effect.logWarning(
+								`Linear SDK defensive reconciliation refresh failed: ${formatRefreshFailureMessage(cause)}`,
+							).pipe(Effect.asVoid),
+						),
+					)
+				}).pipe(
+					Effect.catchAllCause((cause) =>
+						Effect.logWarning(
+							`Linear SDK defensive reconciliation iteration failed: ${formatRefreshFailureMessage(cause)}`,
+						).pipe(Effect.asVoid),
+					),
+				),
+			)
+
+		const startLinearSdkEventsFiber = (tickerBehavior: LinearSdkEventsTickerBehavior) =>
 			Effect.gen(function* () {
 				const linearWebhookFiber = yield* Effect.forkScoped(
-					Stream.runForEach(linearWebhookService.issueEvents, (event) =>
-						applyLinearWebhookIssueEvent(event).pipe(
-							Effect.catchAllCause((cause) =>
-								Effect.logWarning(cause).pipe(
-									Effect.zipRight(logAndToastRefreshFailure("linear-webhook-sdk", cause)),
+					Effect.all(
+						[
+							Stream.runForEach(linearWebhookService.issueEvents, (event) =>
+								applyLinearWebhookIssueEvent(event).pipe(
+									Effect.catchAllCause((cause) =>
+										Effect.logWarning(cause).pipe(
+											Effect.zipRight(logAndToastRefreshFailure("linear-webhook-sdk", cause)),
+										),
+									),
 								),
 							),
-						),
+							tickerBehavior.defensiveReconciliationInterval
+								? runLinearSdkDefensiveReconciliationLoop(
+										tickerBehavior.defensiveReconciliationInterval,
+									)
+								: Effect.void,
+						],
+						{
+							concurrency: "unbounded",
+							discard: true,
+						},
 					),
 				)
 				yield* diagnostics.registerFiber({
 					id: "board-linear-webhook-sdk-events",
 					name: "Board Linear SDK Webhook Events",
-					description: "Applies Linear SDK webhook issue events to board state",
+					description:
+						"Applies Linear SDK webhook issue events and runs slow defensive reconciliation",
 					fiber: linearWebhookFiber,
 				})
 				return linearWebhookFiber
@@ -2172,18 +2244,19 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
 				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
-				if (sdkMode === "sdk" && sdkHealthy) {
+				const sdkTickerBehavior = resolveLinearSdkEventsTickerBehavior(sdkMode, sdkHealthy)
+				if (sdkTickerBehavior.localRefreshOnly) {
 					return {
 						key: "linear:sdk-events",
 						start: Effect.gen(function* () {
-							yield* Ref.set(localRefreshOnlyRef, true)
+							yield* Ref.set(localRefreshOnlyRef, sdkTickerBehavior.localRefreshOnly)
 							yield* reportLinearWebhookHealth({
 								mode: sdkMode,
 								strategy: "sdk-events",
 								healthy: true,
 								message: "Using SDK webhook events with local refresh-only updates.",
 							})
-							return yield* startLinearSdkEventsFiber()
+							return yield* startLinearSdkEventsFiber(sdkTickerBehavior)
 						}),
 					} satisfies LinearRefreshStrategyPlan
 				}
