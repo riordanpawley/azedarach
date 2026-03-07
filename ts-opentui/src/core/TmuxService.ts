@@ -137,6 +137,19 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					),
 				),
 
+			sendLiteralCommand: (session: string, command: string) =>
+				Effect.gen(function* () {
+					yield* runTmux(["send-keys", "-t", session, "-l", command])
+					yield* runTmux(["send-keys", "-t", session, "Enter"])
+				}).pipe(
+					Effect.asVoid,
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(Effect.fail(new SessionNotFoundError({ session }))),
+						),
+					),
+				),
+
 			attachCommand: (session: string) => `tmux attach-session -t ${session}`,
 
 			switchClient: (session: string) =>
