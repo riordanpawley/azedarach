@@ -1,22 +1,24 @@
 import { describe, expect, it } from "bun:test"
-import {
-	buildInitWaitCommand,
-	DEFAULT_INIT_WAIT_TIMEOUT_SECONDS,
-} from "./WorktreeSessionService.js"
+import { buildGuardedInitCommand, buildInitWaitCommand } from "./WorktreeSessionService.js"
 
 describe("buildInitWaitCommand", () => {
-	it("builds a bounded wait script with timeout fallback marker", () => {
+	it("waits indefinitely for init completion marker", () => {
 		const command = buildInitWaitCommand("aze-123")
 
-		expect(command).toContain(`az_wait_timeout=${DEFAULT_INIT_WAIT_TIMEOUT_SECONDS}`)
-		expect(command).toContain("az_wait_elapsed=0")
-		expect(command).toContain("$az_wait_elapsed")
+		expect(command).toContain("until [")
 		expect(command).toContain("@az_init_done")
-		expect(command).toContain("@az_init_wait_timed_out 1")
+		expect(command).toContain("do sleep 1; done")
 	})
+})
 
-	it("clamps invalid timeout values to one second", () => {
-		const command = buildInitWaitCommand("aze-123", 0)
-		expect(command).toContain("az_wait_timeout=1")
+describe("buildGuardedInitCommand", () => {
+	it("records init failure metadata and marks startup as done when a command fails", () => {
+		const command = buildGuardedInitCommand("aze-123", "pnpm install")
+
+		expect(command).toContain("@az_init_failed 1")
+		expect(command).toContain("@az_init_failed_command")
+		expect(command).toContain("@az_init_done 1")
+		expect(command).toContain("@az_status waiting")
+		expect(command).toContain("Session startup blocked")
 	})
 })

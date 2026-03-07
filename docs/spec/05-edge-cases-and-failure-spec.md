@@ -41,12 +41,12 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - validate session existence after start.
   - surface mismatch and offer retry.
 
-### Case F-010a: Session init marker never completes before bounded launch wait
+### Case F-010a: Session init command fails before startup completes
 
 - Required behavior:
-  - stop waiting after bounded timeout and continue AI launch in `code` window.
-  - record init-timeout marker metadata for diagnostics/recovery.
-  - avoid indefinite blocked startup state.
+  - block AI launch in `code` window for that startup attempt.
+  - record init-failure marker metadata including failed command identity.
+  - show actionable guidance in pane output so user can fix init and retry.
 
 ### Case F-011: Attach requested but no session found
 

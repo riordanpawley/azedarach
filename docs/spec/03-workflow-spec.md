@@ -28,7 +28,7 @@ Workflows are written as behavior contracts, not implementation details.
 4. optionally sync tracker state for new context
 5. update issue status to in_progress when needed
 6. spawn/ensure task tmux session using deterministic project-prefixed session naming
-7. gate AI launch on session init-complete marker with a bounded timeout; if timeout is reached, continue launch and mark init-timeout metadata for diagnostics/recovery
+7. gate AI launch on session init-complete marker and block launch when init fails; emit durable failure metadata and actionable startup-blocked guidance
 8. launch selected AI CLI command
 9. reflect session lifecycle state (`initializing`/`busy`/`waiting`/`done`/`error`/`paused`/`idle`) as telemetry arrives
 

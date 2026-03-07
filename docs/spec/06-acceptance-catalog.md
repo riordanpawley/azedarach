@@ -258,11 +258,11 @@ Canonical fixture profile names:
 - Expected: session start ensures issue branch context exists; detector maps and displays busy/waiting/done/error/paused accurately.
 - Links: AZ-FR-0806, AZ-FR-0815, AZ-FR-0815b, AZ-FR-0815c, AZ-FR-0815d.
 
-### AZ-AT-2836 Session start init timeout still launches AI and records timeout marker
+### AZ-AT-2836 Session start init failure blocks AI launch and records failure marker
 
-- Preconditions: configure init command path that never reaches init-done marker in bounded wait window.
+- Preconditions: configure init command path that exits non-zero.
 - Steps: invoke `Space s` and inspect tmux session/window options plus code window process state.
-- Expected: AI command launches in `code` window after bounded wait, and timeout marker metadata is present for diagnostics/recovery.
+- Expected: AI command does not launch in `code` window, startup-blocked guidance is visible in the pane, and failure marker metadata (including failed command) is present for diagnostics/recovery.
 - Links: AZ-FR-0821.
 
 ### AZ-AT-2837 Reconciliation marks issue session missing `code` window as recoverable crashed
