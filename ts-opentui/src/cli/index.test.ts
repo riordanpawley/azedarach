@@ -3,6 +3,7 @@ import {
 	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
+	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
 } from "./index.js"
@@ -92,23 +93,236 @@ describe("resolveCliExecutionMode", () => {
 		expect(resolveCliExecutionMode(["bun", "az"])).toBe("tui")
 	})
 
-    it("uses command mode for non-dev subcommands", () => {
-        expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
-        expect(
-            resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
-        ).toBe("command")
-        expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
-        expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
-        expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
-    })
+	it("uses command mode for non-dev subcommands", () => {
+		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
+		expect(
+			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
+		).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")
+	})
+
+	it("treats `az i` as `az issue` for mode resolution", () => {
+		expect(resolveCliExecutionMode(["bun", "az", "i", "create", "Title"])).toBe("command")
+	})
+
+	it("treats `az ls` and `az st` as command aliases", () => {
+		expect(resolveCliExecutionMode(["bun", "az", "ls", "show"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "st", "a1"])).toBe("command")
+	})
 
 	it("uses dev-command mode for az dev", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "dev", "list"])).toBe("dev-command")
+		expect(resolveCliExecutionMode(["bun", "az", "d", "list"])).toBe("dev-command")
 	})
 
 	it("uses command mode for top-level help/version", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "--help"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "--version"])).toBe("command")
+	})
+
+	it("handles nested shorthand resolution while keeping command mode", () => {
+		expect(resolveCliExecutionMode(["bun", "az", "a", "list"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "i", "c", "Fix typo"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "sp", "r", "ls"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "i", "rm", "AZE-1"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "p", "a", "myproject"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "p", "sw", "myproject"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "o", "i", "project"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "o", "pl", "my-plugin"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "h", "i", "hook-name"])).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "d", "stp", "AZE-1"])).toBe("dev-command")
+		expect(resolveCliExecutionMode(["bun", "az", "d", "ls"])).toBe("dev-command")
+		expect(resolveCliExecutionMode(["bun", "az", "d", "s", "AZE-1"])).toBe("dev-command")
+	})
+})
+
+describe("normalizeCliAliases", () => {
+	it("normalizes top-level `i` to `issue`", () => {
+		const argv = ["bun", "az", "i", "create", "Title", "--type", "task"]
+		expect(normalizeCliAliases(argv)).toEqual(["bun", "az", "issue", "create", "Title", "--type", "task"])
+	})
+
+	it("normalizes common top-level shorthands to canonical commands", () => {
+		expect(normalizeCliAliases(["bun", "az", "a", "list"])).toEqual(["bun", "az", "add", "list"])
+		expect(normalizeCliAliases(["bun", "az", "ls", "list"])).toEqual(["bun", "az", "list"])
+		expect(normalizeCliAliases(["bun", "az", "st", "a1"])).toEqual(["bun", "az", "start", "a1"])
+		expect(normalizeCliAliases(["bun", "az", "p", "list"])).toEqual(["bun", "az", "project", "list"])
+		expect(normalizeCliAliases(["bun", "az", "pr", "list"])).toEqual(["bun", "az", "prime", "list"])
+		expect(normalizeCliAliases(["bun", "az", "at", "a1"])).toEqual(["bun", "az", "attach", "a1"])
+		expect(normalizeCliAliases(["bun", "az", "pa", "a1"])).toEqual(["bun", "az", "pause", "a1"])
+		expect(normalizeCliAliases(["bun", "az", "k", "a1"])).toEqual(["bun", "az", "kill", "a1"])
+		expect(normalizeCliAliases(["bun", "az", "se", "status"])).toEqual(["bun", "az", "status", "status"])
+	})
+
+	it("does not rewrite short option aliases for issue operations", () => {
+		const argv = ["bun", "az", "issue", "create", "-d", "Add missing alias support", "Create alias coverage"]
+		expect(normalizeCliAliases(argv)).toEqual(argv)
+	})
+
+	it("normalizes issue subcommand shorthands", () => {
+		expect(normalizeCliAliases(["bun", "az", "i", "c", "Fix typo"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"create",
+			"Fix typo",
+		])
+		expect(normalizeCliAliases(["bun", "az", "issue", "d", "add", "AZE-1", "AZE-2"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"dep",
+			"add",
+			"AZE-1",
+			"AZE-2",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "x", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"close",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "rm", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"delete",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "del", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"delete",
+			"AZE-1",
+		])
+	})
+
+	it("normalizes spec nested command shorthands", () => {
+		expect(normalizeCliAliases(["bun", "az", "sp", "r", "ls"])).toEqual([
+			"bun",
+			"az",
+			"spec",
+			"req",
+			"list",
+		])
+		expect(normalizeCliAliases(["bun", "az", "spec", "l", "a", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"spec",
+			"link",
+			"add",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "spec", "p", "c"])).toEqual([
+			"bun",
+			"az",
+			"spec",
+			"publish",
+			"config",
+		])
+	})
+
+	it("normalizes project, opencode, and hooks nested shorthands", () => {
+		expect(normalizeCliAliases(["bun", "az", "p", "a", "myproject"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"add",
+			"myproject",
+		])
+		expect(normalizeCliAliases(["bun", "az", "p", "l"])).toEqual(["bun", "az", "project", "list"])
+		expect(normalizeCliAliases(["bun", "az", "p", "r", "myproject"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"remove",
+			"myproject",
+		])
+		expect(normalizeCliAliases(["bun", "az", "p", "rm", "myproject"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"remove",
+			"myproject",
+		])
+		expect(normalizeCliAliases(["bun", "az", "p", "s", "myproject"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"switch",
+			"myproject",
+		])
+		expect(normalizeCliAliases(["bun", "az", "p", "sw", "myproject"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"switch",
+			"myproject",
+		])
+		expect(normalizeCliAliases(["bun", "az", "o", "i", "project"])).toEqual([
+			"bun",
+			"az",
+			"opencode",
+			"init",
+			"project",
+		])
+		expect(normalizeCliAliases(["bun", "az", "o", "p", "my-plugin"])).toEqual([
+			"bun",
+			"az",
+			"opencode",
+			"plugin",
+			"my-plugin",
+		])
+		expect(normalizeCliAliases(["bun", "az", "o", "pl", "my-plugin"])).toEqual([
+			"bun",
+			"az",
+			"opencode",
+			"plugin",
+			"my-plugin",
+		])
+		expect(normalizeCliAliases(["bun", "az", "h", "i", "hook-name"])).toEqual([
+			"bun",
+			"az",
+			"hooks",
+			"install",
+			"hook-name",
+		])
+		expect(normalizeCliAliases(["bun", "az", "h", "ins", "hook-name"])).toEqual([
+			"bun",
+			"az",
+			"hooks",
+			"install",
+			"hook-name",
+		])
+	})
+
+	it("normalizes dev command subcommand shorthands", () => {
+		expect(normalizeCliAliases(["bun", "az", "d", "s", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"dev",
+			"start",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "dev", "r", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"dev",
+			"restart",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "d", "stp", "AZE-1"])).toEqual([
+			"bun",
+			"az",
+			"dev",
+			"stop",
+			"AZE-1",
+		])
+		expect(normalizeCliAliases(["bun", "az", "d", "ls"])).toEqual(["bun", "az", "dev", "list"])
 	})
 })
 

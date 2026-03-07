@@ -54,7 +54,10 @@ const serverOption = Options.text("server").pipe(
 	Options.withDescription("Server name (default: 'default')"),
 )
 
-const jsonOption = Options.boolean("json").pipe(Options.withDescription("Output in JSON format"))
+const jsonOption = Options.boolean("json").pipe(
+	Options.withAlias("j"),
+	Options.withDescription("Output in JSON format"),
+)
 
 // ============================================================================
 // Helper to get project path
