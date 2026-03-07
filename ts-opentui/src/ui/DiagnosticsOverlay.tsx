@@ -382,6 +382,11 @@ export const DiagnosticsOverlay = () => {
 		scrollboxRef.current.scrollBy(scrollCommand.amount * 0.5, "viewport")
 	}, [scrollCommand])
 
+	useEffect(() => {
+		if (!scrollboxRef.current) return
+		scrollboxRef.current.scrollTo(0)
+	}, [])
+
 	const handleMouseScroll = (event: MouseEvent) => {
 		const scroll = event.scroll
 		if (!scrollboxRef.current || !scroll) return
@@ -434,6 +439,8 @@ export const DiagnosticsOverlay = () => {
 					flexDirection="column"
 					flexGrow={1}
 					width="100%"
+					stickyScroll={false}
+					viewportCulling={false}
 					onMouseScroll={handleMouseScroll}
 				>
 					<text> </text>

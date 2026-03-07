@@ -97,6 +97,16 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 			}
 		}
 
+		const syncAfterMutation = (taskId: string) =>
+			issueTrackerClient.sync().pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`MutationQueue post-mutation sync failed for task ${taskId}: ${String(error)}`,
+					).pipe(Effect.asVoid),
+				),
+				Effect.asVoid,
+			)
+
 		const process = (taskId: string) =>
 			Effect.gen(function* () {
 				const queue = yield* Ref.get(mutationsRef)
@@ -133,6 +143,7 @@ export class MutationQueue extends Effect.Service<MutationQueue>()("MutationQueu
 								newQueue.delete(taskId)
 								return newQueue
 							})
+							yield* syncAfterMutation(taskId)
 							yield* Effect.log(
 								`Successfully processed ${queued.mutation._tag} mutation for task ${taskId}`,
 							)
