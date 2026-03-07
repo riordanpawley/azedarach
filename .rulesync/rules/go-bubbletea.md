@@ -195,6 +195,7 @@ go-bubbletea/
 **Track ALL work through issue tracking** (preserves context across sessions).
 
 Run `az prime` first in each session, then use `az issue` for all issue operations.
+Skills are task-scoped references, not mandatory bootstrap. Load only the specific skill(s) needed for the current task.
 
 ```bash
 az issue --help

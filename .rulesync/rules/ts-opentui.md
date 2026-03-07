@@ -667,6 +667,7 @@ Configurable: Ready PR, auto-merge after CI, immediate merge
 ## Skills
 
 Skills available in this repository:
+Skills are task-scoped references, not mandatory bootstrap. Load only the specific skill(s) needed for the current task.
 
 **Workflow Skills:**
 - Issue tracking workflow skill (use local workflow skill that documents current `az issue` process)
