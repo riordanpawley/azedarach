@@ -13,7 +13,7 @@ This repository treats RuleSync-native sources as canonical for AI tool context 
 - baseDirs: `.`
 
 Rule sources:
-- `./.rulesync/rules/overview.md` (root workspace context)
+- `./.rulesync/rules/root-context.md` (root workspace context)
 - `./.rulesync/rules/ts-opentui.md` (ts-opentui context, `agentsmd.subprojectPath`)
 - `./.rulesync/rules/go-bubbletea.md` (go-bubbletea context, `agentsmd.subprojectPath`)
 

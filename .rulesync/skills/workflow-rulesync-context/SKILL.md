@@ -45,7 +45,7 @@ Rules:
 
 ### Source-of-truth layout
 
-- Shared context policy: `.rulesync/rules/overview.md`
+- Shared context policy: `.rulesync/rules/root-context.md`
 - Nested overlays:
   - `.rulesync/rules/ts-opentui.md`
   - `.rulesync/rules/go-bubbletea.md`
@@ -72,7 +72,7 @@ This maps overlays to:
 ## Operating Principles
 
 1. Root-first policy ownership:
-   - Put shared workflow and guardrails in `overview.md` once.
+   - Put shared workflow and guardrails in `root-context.md` once.
    - Keep overlays implementation-specific only.
 2. Overlay minimalism:
    - No repeated global policy text.
@@ -89,7 +89,7 @@ This maps overlays to:
 
 Use when a rule should apply repo-wide.
 
-1. Edit `.rulesync/rules/overview.md`.
+1. Edit `.rulesync/rules/root-context.md`.
 2. Do not copy the same change into ts/go overlays unless behavior is implementation-specific.
 3. Regenerate and validate (see Validation section).
 
@@ -171,7 +171,7 @@ Cause:
 - Shared policy duplicated across overlays.
 
 Fix:
-1. Move shared text to `overview.md`.
+1. Move shared text to `root-context.md`.
 2. Keep overlays implementation-specific.
 3. Regenerate.
 
