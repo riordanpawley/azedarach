@@ -1995,7 +1995,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
                                     ),
                                 )
 
-                                yield* Effect.forkDaemon(runDeferredPush)
+                                yield* Effect.fork(runDeferredPush)
                             }
                             // Silently skip if offline/disabled - merge already succeeded locally
                         }
