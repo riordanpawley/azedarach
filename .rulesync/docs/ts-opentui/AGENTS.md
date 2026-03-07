@@ -9,6 +9,7 @@ When spawning subagents, each subagent must create, maintain, and close a child 
 For `ts-opentui` behavior changes, keep `docs/spec/` aligned in the same task; if there is no spec delta, log `Spec impact: none` with file-specific rationale in issue notes before completion.
 Use `.claude/skills/workflow-spec-maintenance/SKILL.md` for spec-sync analysis and validation.
 When already in the target worktree/repo, use plain `git` commands (avoid defensive `git -C <same-path>`).
+Never parse free-form error/message text for logic gates; use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 
 ## Landing the Plane (Session Completion)
 

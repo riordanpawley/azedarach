@@ -220,23 +220,56 @@ export interface MergeConflictCheck {
  * Error when PR operation fails
  */
 export class PRError extends Data.TaggedError("PRError")<{
-	readonly message: string
-	readonly command?: string
-	readonly issueId?: string
+    readonly message: string
+    readonly command?: string
+    readonly issueId?: string
+}> {}
+
+/**
+ * Error when a target repository already has an active git operation in progress.
+ */
+export class GitOperationInProgressError extends Data.TaggedError("GitOperationInProgressError")<{
+    readonly issueId: string
+    readonly operation: "merge" | "rebase" | "cherry-pick" | "revert"
+    readonly contextLabel: string
+    readonly continueCommand: string
+    readonly abortCommand: string
+    readonly message: string
 }> {}
 
 /**
  * Error when gh CLI is not installed or not authenticated
  */
 export class GHCLIError extends Data.TaggedError("GHCLIError")<{
-	readonly message: string
+    readonly message: string
+}> {}
+
+/**
+ * Error when attempting to create a PR but one already exists for the branch.
+ */
+export class PRAlreadyExistsError extends Data.TaggedError("PRAlreadyExistsError")<{
+    readonly message: string
+    readonly issueId?: string
+    readonly branch?: string
+    readonly baseBranch?: string
+}> {}
+
+/**
+ * Error when branch protection prevents push or PR creation workflow steps.
+ */
+export class PRBranchProtectionError extends Data.TaggedError("PRBranchProtectionError")<{
+    readonly message: string
+    readonly operation: "push" | "pr-create"
+    readonly issueId?: string
+    readonly branch?: string
+    readonly baseBranch?: string
 }> {}
 
 /**
  * Error when PR is not found
  */
 export class PRNotFoundError extends Data.TaggedError("PRNotFoundError")<{
-	readonly issueId: string
+    readonly issueId: string
 	readonly branch: string
 }> {}
 
@@ -294,17 +327,19 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly createPR: (
-		options: CreatePROptions,
-	) => Effect.Effect<
-		PR,
-		| PRError
-		| GHCLIError
-		| GitError
-		| NotAGitRepoError
-		| IssueTrackerError
-		| NotFoundError
-		| ParseError
+    readonly createPR: (
+        options: CreatePROptions,
+    ) => Effect.Effect<
+        PR,
+        | PRError
+        | GHCLIError
+        | PRAlreadyExistsError
+        | PRBranchProtectionError
+        | GitError
+        | NotAGitRepoError
+        | IssueTrackerError
+        | NotFoundError
+        | ParseError
 		| OfflineError,
 		CommandExecutor.CommandExecutor
 	>
@@ -387,14 +422,15 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly mergeToMain: (
-		options: MergeToMainOptions,
-	) => Effect.Effect<
-		void,
-		| PRError
-		| MergeConflictError
-		| TypeCheckError
-		| GitError
+    readonly mergeToMain: (
+        options: MergeToMainOptions,
+    ) => Effect.Effect<
+        void,
+        | PRError
+        | GitOperationInProgressError
+        | MergeConflictError
+        | TypeCheckError
+        | GitError
 		| NotAGitRepoError
 		| SessionError
 		| TmuxError
@@ -425,10 +461,14 @@ export interface PRWorkflowService {
 	 * }
 	 * ```
 	 */
-	readonly checkMergeConflicts: (options: {
-		issueId: string
-		projectPath: string
-	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
+    readonly checkMergeConflicts: (options: {
+        issueId: string
+        projectPath: string
+    }) => Effect.Effect<
+        MergeConflictCheck,
+        PRError | GitOperationInProgressError | GitError,
+        CommandExecutor.CommandExecutor
+    >
 
 	/**
 	 * Abort an in-progress merge in the worktree
@@ -496,13 +536,19 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly updateFromBase: (
-		options: UpdateFromBaseOptions,
-	) => Effect.Effect<
-		void,
-		PRError | MergeConflictError | GitError | NotAGitRepoError | IssueTrackerError | NotFoundError,
-		CommandExecutor.CommandExecutor
-	>
+    readonly updateFromBase: (
+        options: UpdateFromBaseOptions,
+    ) => Effect.Effect<
+        void,
+        | PRError
+        | GitOperationInProgressError
+        | MergeConflictError
+        | GitError
+        | NotAGitRepoError
+        | IssueTrackerError
+        | NotFoundError,
+        CommandExecutor.CommandExecutor
+    >
 
 	/**
 	 * Get PR comments for a bead's branch
@@ -776,49 +822,73 @@ const getGitOperationInProgress = (
  * This prevents ambiguous failures later in merge flow and gives clear recovery guidance.
  */
 const ensureNoGitOperationInProgress = (options: {
-	cwd: string
-	issueId: string
-	contextLabel: string
-}): Effect.Effect<void, PRError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		const { cwd, issueId, contextLabel } = options
-		const operation = yield* getGitOperationInProgress(cwd)
-		if (!operation) return
+    cwd: string
+    issueId: string
+    contextLabel: string
+}): Effect.Effect<void, GitOperationInProgressError, CommandExecutor.CommandExecutor> =>
+    Effect.gen(function* () {
+        const { cwd, issueId, contextLabel } = options
+        const operation = yield* getGitOperationInProgress(cwd)
+        if (!operation) return
 
-		const continueCommand = `git -C ${cwd} ${operation.continueArgs.join(" ")}`
-		const abortCommand = `git -C ${cwd} ${operation.abortArgs.join(" ")}`
+        const continueCommand = `git -C ${cwd} ${operation.continueArgs.join(" ")}`
+        const abortCommand = `git -C ${cwd} ${operation.abortArgs.join(" ")}`
 
-		return yield* Effect.fail(
-			new PRError({
-				issueId,
-				message: `Git ${operation.kind} in progress in ${contextLabel}. Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry Space+m.`,
-			}),
-		)
-	})
+        return yield* Effect.fail(
+            new GitOperationInProgressError({
+                issueId,
+                operation: operation.kind,
+                contextLabel,
+                continueCommand,
+                abortCommand,
+                message: `Git ${operation.kind} in progress in ${contextLabel}. Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action.`,
+            }),
+        )
+    })
 
 /**
  * Execute a gh command and return stdout
  */
 const runGH = (
-	args: readonly string[],
-	cwd: string,
-): Effect.Effect<string, PRError | GHCLIError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		const command = Command.make("gh", ...args).pipe(Command.workingDirectory(cwd))
-		return yield* Command.string(command).pipe(
-			Effect.mapError((error) => {
-				const errorStr = String(error)
-				if (errorStr.includes("gh auth login") || errorStr.includes("not logged")) {
-					return new GHCLIError({ message: "gh CLI not authenticated. Run: gh auth login" })
-				}
-				if (errorStr.includes("command not found") || errorStr.includes("ENOENT")) {
-					return new GHCLIError({ message: "gh CLI not installed. Run: brew install gh" })
-				}
-				return new PRError({
-					message: `gh ${args.join(" ")} failed: ${errorStr}`,
-					command: `gh ${args.join(" ")}`,
-				})
-			}),
+    args: readonly string[],
+    cwd: string,
+): Effect.Effect<
+    string,
+    PRError | GHCLIError | PRAlreadyExistsError | PRBranchProtectionError,
+    CommandExecutor.CommandExecutor
+> =>
+    Effect.gen(function* () {
+        const command = Command.make("gh", ...args).pipe(Command.workingDirectory(cwd))
+        return yield* Command.string(command).pipe(
+            Effect.mapError((error) => {
+                const errorStr = String(error)
+                const isPRCreate = args[0] === "pr" && args[1] === "create"
+
+                if (errorStr.includes("gh auth login") || errorStr.includes("not logged")) {
+                    return new GHCLIError({ message: "gh CLI not authenticated. Run: gh auth login" })
+                }
+                if (errorStr.includes("command not found") || errorStr.includes("ENOENT")) {
+                    return new GHCLIError({ message: "gh CLI not installed. Run: brew install gh" })
+                }
+                if (isPRCreate && errorStr.includes("already exists")) {
+                    return new PRAlreadyExistsError({
+                        message: "A pull request already exists for this branch",
+                    })
+                }
+                if (
+                    isPRCreate &&
+                    (errorStr.includes("protected branch") || errorStr.includes("branch protection"))
+                ) {
+                    return new PRBranchProtectionError({
+                        operation: "pr-create",
+                        message: "Branch protection prevented PR creation",
+                    })
+                }
+                return new PRError({
+                    message: `gh ${args.join(" ")} failed: ${errorStr}`,
+                    command: `gh ${args.join(" ")}`,
+                })
+            }),
 		)
 	})
 
@@ -966,10 +1036,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		 * Internal helper to get effective base branch for a bead.
 		 * Uses parent epic branch if child of epic, otherwise uses configured base branch.
 		 */
-		const getIssueBaseBranch = (
-			issueId: string,
-			projectPath: string,
-			explicitBaseBranch?: string,
+        const getIssueBaseBranch = (
+            issueId: string,
+            projectPath: string,
+            explicitBaseBranch?: string,
 		): Effect.Effect<
 			{ baseBranch: string; parentEpic: Issue | undefined },
 			IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
@@ -986,9 +1056,46 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const baseBranch = yield* getIssueBranchName(parentEpic.id, projectPath)
 					return { baseBranch, parentEpic }
 				}
-				// No parent epic: use the standard base branch
-				return { baseBranch: gitConfig.baseBranch, parentEpic: undefined }
-			})
+                // No parent epic: use the standard base branch
+                return { baseBranch: gitConfig.baseBranch, parentEpic: undefined }
+            })
+
+        /**
+         * Resolve which repository context owns the effective base branch operation state.
+         *
+         * Standalone tasks use the project base-branch context.
+         * Epic children use the parent epic worktree when available.
+         */
+        const getBaseOperationContext = (
+            projectPath: string,
+            parentEpic: Issue | undefined,
+        ): Effect.Effect<
+            { cwd: string; contextLabel: string },
+            GitError | NotAGitRepoError,
+            CommandExecutor.CommandExecutor
+        > =>
+            Effect.gen(function* () {
+                if (!parentEpic) {
+                    return { cwd: projectPath, contextLabel: "project base branch" }
+                }
+
+                const epicWorktree = yield* worktreeManager.get({
+                    issueId: parentEpic.id,
+                    projectPath,
+                })
+
+                if (epicWorktree) {
+                    return {
+                        cwd: epicWorktree.path,
+                        contextLabel: `epic ${parentEpic.id} worktree`,
+                    }
+                }
+
+                return {
+                    cwd: projectPath,
+                    contextLabel: `epic ${parentEpic.id} branch context`,
+                }
+            })
 
 		return {
 			createPR: (options: CreatePROptions) =>
@@ -1073,16 +1180,28 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							),
 						) // Ignore if nothing to commit
 
-						// Push branch to origin
-						yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
-							Effect.mapError(
-								(e) =>
-									new GitError({
-										message: `Failed to push branch: ${e.message}`,
-										command: "git push",
-									}),
-							),
-						)
+                        // Push branch to origin
+                        yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
+                            Effect.mapError((e) => {
+                                const stderr = e.stderr ?? e.message
+                                if (
+                                    stderr.includes("protected branch") ||
+                                    stderr.includes("branch protection")
+                                ) {
+                                    return new PRBranchProtectionError({
+                                        operation: "push",
+                                        issueId,
+                                        branch: issueBranch,
+                                        baseBranch,
+                                        message: `Push blocked by branch protection for ${issueBranch}`,
+                                    })
+                                }
+                                return new GitError({
+                                    message: `Failed to push branch: ${e.message}`,
+                                    command: "git push",
+                                })
+                            }),
+                        )
 
 						// Generate PR title and body
 						const title = options.title ?? generateIssuePRTitle(issue)
@@ -1094,9 +1213,30 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							ghArgs.push("--draft")
 						}
 
-						const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
-							Effect.map((output) => output.trim()),
-						)
+                        const prUrl = yield* runGH(ghArgs, worktree.path).pipe(
+                            Effect.map((output) => output.trim()),
+                            Effect.mapError((error) => {
+                                switch (error._tag) {
+                                    case "PRAlreadyExistsError":
+                                        return new PRAlreadyExistsError({
+                                            message: error.message,
+                                            issueId,
+                                            branch: issueBranch,
+                                            baseBranch,
+                                        })
+                                    case "PRBranchProtectionError":
+                                        return new PRBranchProtectionError({
+                                            operation: error.operation,
+                                            message: error.message,
+                                            issueId,
+                                            branch: issueBranch,
+                                            baseBranch,
+                                        })
+                                    default:
+                                        return error
+                                }
+                            }),
+                        )
 
 						// Extract PR number from URL
 						const prNumberMatch = prUrl.match(/\/pull\/(\d+)/)
@@ -2009,9 +2149,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 				}),
 
-			updateFromBase: (options: UpdateFromBaseOptions) =>
-				diagnostics.measure(
-					{
+            updateFromBase: (options: UpdateFromBaseOptions) =>
+                diagnostics.measure(
+                    {
 						source: "PRWorkflow",
 						name: "updateFromBase",
 						thresholdMs: 1000,
@@ -2022,11 +2162,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const { issueId, projectPath, baseBranch: explicitBaseBranch } = options
 
 						// Determine effective base branch (epic branch for children, main for epics/standalone)
-						const { baseBranch } = yield* getIssueBaseBranch(
-							issueId,
-							projectPath,
-							explicitBaseBranch,
-						)
+                        const { baseBranch, parentEpic } = yield* getIssueBaseBranch(
+                            issueId,
+                            projectPath,
+                            explicitBaseBranch,
+                        )
 
 						// Get worktree info
 						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
@@ -2037,11 +2177,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									issueId,
 								}),
 							)
-						}
-						const issueBranch = worktree.branch
+                        }
+                        const issueBranch = worktree.branch
 
-						// === Step 1: Update local base branch to match origin ===
-						if (gitConfig.fetchEnabled) {
+                        // Fail fast if the effective base context is already in an active git operation.
+                        // Continuing from an unresolved base state can produce misleading merge outcomes.
+                        const baseOperationContext = yield* getBaseOperationContext(projectPath, parentEpic)
+                        yield* ensureNoGitOperationInProgress({
+                            cwd: baseOperationContext.cwd,
+                            issueId,
+                            contextLabel: baseOperationContext.contextLabel,
+                        })
+
+                        // === Step 1: Update local base branch to match origin ===
+                        if (gitConfig.fetchEnabled) {
 							// Fetch latest from origin
 							yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
 								Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
@@ -2332,27 +2481,36 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
 			 */
-			mergeBaseIntoBranch: (options: { issueId: string; projectPath: string }) =>
-				Effect.gen(function* () {
-					const { issueId, projectPath } = options
-					const gitConfig = yield* getGitConfig()
+            mergeBaseIntoBranch: (options: { issueId: string; projectPath: string }) =>
+                Effect.gen(function* () {
+                    const { issueId, projectPath } = options
+                    const gitConfig = yield* getGitConfig()
 
-					// Get effective base branch (parent epic for children, main for others)
-					const { baseBranch } = yield* getIssueBaseBranch(issueId, projectPath)
+                    // Get effective base branch (parent epic for children, main for others)
+                    const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, projectPath)
 
-					// Get worktree info
-					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
+                    // Get worktree info
+                    const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
 								message: `No worktree found for ${issueId}`,
 								issueId,
 							}),
-						)
-					}
+                            )
+                        }
 
-					if (gitConfig.fetchEnabled) {
-						yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+                    // Fail fast if the effective base context is already in an active git operation.
+                    // This keeps attach-time sync from mutating around unresolved base conflicts.
+                    const baseOperationContext = yield* getBaseOperationContext(projectPath, parentEpic)
+                    yield* ensureNoGitOperationInProgress({
+                        cwd: baseOperationContext.cwd,
+                        issueId,
+                        contextLabel: baseOperationContext.contextLabel,
+                    })
+
+                    if (gitConfig.fetchEnabled) {
+                        yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
 							Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
 						)
 						yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(
