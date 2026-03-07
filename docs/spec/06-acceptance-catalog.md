@@ -1101,13 +1101,13 @@ A release candidate MUST pass:
 
 - Preconditions: spec requirements exist with linked issues.
 - Steps: run publish to a configured Linear project documents target.
-- Expected: managed documents update with stable requirement identifiers and link context.
-- Links: AZ-FR-4204, AZ-FR-4207.
+- Expected: logical output set (Spec Overview, Requirements Index, Acceptance Index, Change Log) is updated one-way; only managed marker sections are mutated; non-managed content remains unchanged.
+- Links: AZ-FR-4204, AZ-FR-4207, AZ-FR-4211, AZ-FR-4212.
 
 ### AZ-AT-2904 Auto-config publish behavior and persistence
 
-- Steps: enable publish auto-config; trigger qualifying spec mutation; inspect stored config.
-- Expected: publish runs unattended per configured policy and configuration remains project-persistent/inspectable.
+- Steps: enable publish auto-config with configured debounce window; trigger multiple qualifying spec mutations in quick succession; inspect stored config.
+- Expected: unattended publish is triggered by mutation events and coalesced by debounce policy; persisted config exposes enabled state, debounce configuration, and target selection.
 - Links: AZ-FR-4205, AZ-FR-4206.
 
 ### AZ-AT-2905 One-way contract under remote document edits
@@ -1128,9 +1128,9 @@ A release candidate MUST pass:
 
 ### AZ-AT-2907 Enter and exit Spec workspace from board context
 
-- Steps: open Spec workspace from board via keyboard path, then exit back to board.
+- Steps: from board press `g s` to open Spec workspace, then press `Esc` to return.
 - Expected: entry succeeds from board workflow and exit restores prior board context with deterministic focus.
-- Links: AZ-FR-4301, AZ-FR-4302.
+- Links: AZ-FR-4301, AZ-FR-4302, AZ-FR-4310.
 
 ### AZ-AT-2908 Board `Tab` behavior remains board-scoped
 
@@ -1140,8 +1140,8 @@ A release candidate MUST pass:
 
 ### AZ-AT-2909 Spec subview switching and context hints
 
-- Steps: in Spec workspace, cycle subviews via keyboard and inspect status/key-hint surfaces.
-- Expected: subview switching is deterministic; Requirements, Coverage, and Publish are available; status/key hints reflect active workspace/subview.
+- Steps: in Spec workspace, press `Tab` repeatedly and inspect status/key-hint surfaces.
+- Expected: `Tab` cycles deterministically in order Requirements -> Coverage -> Publish -> Requirements; status/key hints reflect active workspace/subview.
 - Links: AZ-FR-4304, AZ-FR-4305, AZ-FR-4309.
 
 ### AZ-AT-2910 Requirements subview identity and link counts
