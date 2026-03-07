@@ -1,11 +1,11 @@
 <!--
-File: CLAUDE.md
+File: CONTEXT.md
 Version: 2.3.0
 Updated: 2026-03-07
-Purpose: Claude Code entry point for Azedarach development
+Purpose: Canonical ts-opentui AI context source synced to nested entrypoints
 -->
 
-<ai_context version="1.0" tool="claude">
+<ai_context version="1.0" tool="shared">
 
 # Azedarach Project Context
 
@@ -120,7 +120,7 @@ Purpose: Claude Code entry point for Azedarach development
 14. **Spec Sync Required for ts-opentui Behavior Changes**:
     - If a task changes `ts-opentui` product behavior (user-visible flow, workflow semantics, validation, state/status transitions, failure/retry handling, or release-gate expectations), update `docs/spec/` in the same task.
     - If no spec edit is needed, add an explicit issue note with `Spec impact: none` and a concrete rationale tied to changed files.
-    - Use the workflow spec-maintenance skill to drive analysis and validation: `.claude/skills/workflow-spec-maintenance/SKILL.md`.
+    - Use the workflow spec-maintenance skill to drive analysis and validation: `.rulesync/skills/workflow-spec-maintenance/SKILL.md`.
     - Do not close work as complete until spec updates (or a justified no-impact note) are recorded.
 
 ## Quick Commands
@@ -666,10 +666,10 @@ Skills available in this repository:
 - Spec maintenance workflow skill (use local workflow skill that keeps `docs/spec/` aligned with behavior changes)
 
 **Effect Skills:**
-- `.claude/skills/effect-services/SKILL.md` - Services, layers, dependency injection
-- `.claude/skills/effect-errors/SKILL.md` - Tagged errors, retry, timeout patterns
-- `.claude/skills/effect-concurrency/SKILL.md` - Fibers, forking, scheduling, Ref/SubscriptionRef
-- `.claude/skills/effect-resources/SKILL.md` - Scopes, acquireRelease, resource lifecycle
+- `.rulesync/skills/effect-services/SKILL.md` - Services, layers, dependency injection
+- `.rulesync/skills/effect-errors/SKILL.md` - Tagged errors, retry, timeout patterns
+- `.rulesync/skills/effect-concurrency/SKILL.md` - Fibers, forking, scheduling, Ref/SubscriptionRef
+- `.rulesync/skills/effect-resources/SKILL.md` - Scopes, acquireRelease, resource lifecycle
 
 ## Development Tips
 

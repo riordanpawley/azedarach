@@ -1,11 +1,11 @@
 <!--
-File: CLAUDE.md
+File: CONTEXT.md
 Version: 1.0.0
 Updated: 2025-12-21
-Purpose: Claude Code entry point for Go/Bubbletea Azedarach development
+Purpose: Canonical go-bubbletea AI context source synced to nested entrypoints
 -->
 
-<ai_context version="1.0" tool="claude">
+<ai_context version="1.0" tool="shared">
 
 # Azedarach Project Context - Go/Bubbletea Implementation
 
