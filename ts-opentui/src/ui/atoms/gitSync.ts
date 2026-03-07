@@ -49,7 +49,7 @@ export const isFetchingAtom = appRuntime.subscriptionRef(
 /**
  * Trigger a manual git fetch and check for updates
  *
- * This is called when the user presses 'r' to refresh.
+ * This is used by explicit sync actions that need a fetch check.
  *
  * Usage: const fetchAndCheck = useAtomSet(fetchAndCheckAtom, { mode: "promise" })
  *        fetchAndCheck()

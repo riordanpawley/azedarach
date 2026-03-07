@@ -37,7 +37,7 @@ This section is a full normative keybinding contract.
 | `g` | board visible | enters goto mode |
 | `v` | board visible | enters select mode |
 | `Tab` | board visible | toggles view |
-| `r` | board visible | refreshes git/task metadata |
+| `r` | board visible | refreshes git metadata |
 | `p` | board visible | opens planning overlay |
 | `c` | board visible | opens manual create flow |
 | `C` | board visible | opens AI create flow |
