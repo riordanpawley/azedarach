@@ -43,7 +43,7 @@ const LINEAR_LABELS_PAGE_SIZE = 250
 const API_KEY_CACHE_TTL_MS = 30_000
 const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
-const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 5_000
+const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 60_000
 
 type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
@@ -219,6 +219,16 @@ const deterministicLinearCreateId = (issueId: string, payloadJson: string | null
 	return formatUuidFromBytes(bytes)
 }
 
+export const resolveCollapsedSyncOperation = (params: {
+	readonly latestOperation: SyncOperation
+	readonly groupedOperations: readonly SyncOperation[]
+}): SyncOperation => {
+	if (params.latestOperation !== "close") {
+		return params.latestOperation
+	}
+	return params.groupedOperations.includes("upsert") ? "upsert" : "close"
+}
+
 const collapsePendingItems = (items: readonly PendingSyncItem[]): readonly CollapsedSyncItem[] => {
 	const itemsByIssue = new Map<string, PendingSyncItem[]>()
 	for (const item of items) {
@@ -247,7 +257,10 @@ const collapsePendingItems = (items: readonly PendingSyncItem[]): readonly Colla
 		collapsed.push({
 			issueId,
 			target: latest.target,
-			operation: latest.operation,
+			operation: resolveCollapsedSyncOperation({
+				latestOperation: latest.operation,
+				groupedOperations: sorted.map((item) => item.operation),
+			}),
 			claims,
 			maxQueueId: latest.id,
 			attempts: maxAttempts,
@@ -257,6 +270,19 @@ const collapsePendingItems = (items: readonly PendingSyncItem[]): readonly Colla
 
 	return collapsed
 }
+
+export const shouldRunRemoteHydration = (params: {
+	readonly nowMs: number
+	readonly lastHydrationAtMs: number | undefined
+	readonly minIntervalMs: number
+}): boolean =>
+	params.lastHydrationAtMs === undefined ||
+	params.nowMs - params.lastHydrationAtMs >= params.minIntervalMs
+
+export const shouldRetryUpsertForMissingParent = (params: {
+	readonly parentLocalId: string | undefined
+	readonly parentExternalId: string | undefined
+}): boolean => params.parentLocalId !== undefined && params.parentExternalId === undefined
 
 const toRetryDelaySeconds = (attempt: number): number => {
 	const cappedAttempt = Math.max(0, Math.min(8, attempt))
@@ -1044,6 +1070,18 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					(dependency) => dependency.dependency_type === "parent-child",
 				)?.id
 				const parentId = yield* ensureParentExternalId(parentLocalId, request.cwd)
+				if (
+					shouldRetryUpsertForMissingParent({
+						parentLocalId,
+						parentExternalId: parentId,
+					})
+				) {
+					return yield* Effect.fail(
+						new IssueSyncError({
+							message: `Parent external ref missing for ${issue.id} (parent=${parentLocalId}); retrying after parent sync`,
+						}),
+					)
+				}
 				const labelIds = yield* resolveLabelIds(issue.labels ?? [])
 				const description = buildMergedDescription(issue)
 				const assigneeId =
@@ -1487,7 +1525,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			readonly runtime: LinearRuntime
 			readonly cwd: string | undefined
 			readonly flushRun: SyncRunStart
-			readonly pushedClaims: number
 		}): Effect.Effect<number, IssueSyncError> =>
 			Effect.gen(function* () {
 				const projectPath = getEffectiveProjectPath(params.cwd)
@@ -1495,12 +1532,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				const lastHydrationAt = yield* Ref.get(lastRemoteHydrationAtRef).pipe(
 					Effect.map((entries) => entries.get(projectPath)),
 				)
-				const dueToPush = params.pushedClaims > 0
-				const dueToInterval =
-					lastHydrationAt === undefined ||
-					nowMs - lastHydrationAt >= LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS
+				const dueToInterval = shouldRunRemoteHydration({
+					nowMs,
+					lastHydrationAtMs: lastHydrationAt,
+					minIntervalMs: LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS,
+				})
 
-				if (!dueToPush && !dueToInterval) {
+				if (!dueToInterval) {
 					const ageMs = lastHydrationAt === undefined ? "none" : String(nowMs - lastHydrationAt)
 					yield* Effect.log(
 						`Linear remote hydration skipped: run=${params.flushRun.runId} projectPath=${projectPath} reason=cooldown ageMs=${ageMs} minIntervalMs=${LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS}`,
@@ -1508,9 +1546,8 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return 0
 				}
 
-				const reason = dueToPush ? "post-push" : "interval"
 				yield* Effect.log(
-					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=${reason}`,
+					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=interval`,
 				)
 
 				const snapshots = yield* buildBootstrapSnapshots({
@@ -1876,7 +1913,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							runtime: runtimeOption.value,
 							cwd,
 							flushRun,
-							pushedClaims: pushed,
 						})
 						const queueSummaryAfter = yield* fromStore(
 							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, cwd),
