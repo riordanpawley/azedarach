@@ -1,3 +1,4 @@
+import { DateTime } from "effect"
 import type { SpecSubview } from "../services/EditorService.js"
 import type { SpecCoverageGap } from "../core/specTypes.js"
 import type { SpecWorkspaceState } from "./atoms/spec.js"
@@ -13,6 +14,9 @@ const subviewLabels: ReadonlyArray<{ readonly id: SpecSubview; readonly label: s
 
 const formatTimestamp = (timestamp: string | null): string =>
     timestamp === null ? "never" : new Date(timestamp).toLocaleString()
+
+const formatDateTimeUtc = (timestamp: DateTime.Utc): string =>
+    new Date(DateTime.formatIso(timestamp)).toLocaleString()
 
 const publishStatusColor = (status: "success" | "partial" | "failed"): string => {
     switch (status) {
@@ -170,7 +174,7 @@ export const SpecWorkspace = ({ subview, state }: SpecWorkspaceProps) => {
                                 <box flexDirection="column" gap={1}>
                                     <text fg={publishStatusColor(state.lastPublishOutcome.status)} attributes={ATTR_BOLD}>
                                         last_status={state.lastPublishOutcome.status} finished=
-                                        {formatTimestamp(state.lastPublishOutcome.finished_at)}
+                                        {formatDateTimeUtc(state.lastPublishOutcome.finished_at)}
                                     </text>
                                     <text fg={theme.subtext1}>
                                         requirements={state.lastPublishOutcome.total_requirements} links=

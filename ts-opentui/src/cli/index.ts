@@ -22,6 +22,7 @@ import {
 import { BunContext } from "@effect/platform-bun"
 import {
 	Console,
+	DateTime,
 	Duration,
 	Effect,
 	Layer,
@@ -1640,7 +1641,7 @@ const specPublishConfigGetHandler = (args: {
 		)
 		if (lastOutcome) {
 			yield* Console.log(
-				`last_outcome=${lastOutcome.status} finished_at=${lastOutcome.finished_at} requirements=${lastOutcome.total_requirements} links=${lastOutcome.total_links}`,
+				`last_outcome=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)} requirements=${lastOutcome.total_requirements} links=${lastOutcome.total_links}`,
 			)
 		}
 	})

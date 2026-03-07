@@ -48,9 +48,9 @@ const SpecPublishConfigJsonSchema = Schema.parseJson(
 	}),
 )
 const SpecPublishOutcomeJsonSchema = Schema.parseJson(
-    Schema.Struct({
-        started_at: Schema.String,
-		finished_at: Schema.String,
+	Schema.Struct({
+		started_at: Schema.DateTimeUtc,
+		finished_at: Schema.DateTimeUtc,
 		status: Schema.Literal("success", "partial", "failed"),
 		total_requirements: Schema.Number,
 		total_links: Schema.Number,
@@ -63,8 +63,8 @@ const SpecPublishOutcomeJsonSchema = Schema.parseJson(
 				requirement_count: Schema.Number,
 				link_count: Schema.Number,
 			}),
-        ),
-    }),
+		),
+	}),
 )
 const SyncQueuePayloadJsonSchema = Schema.parseJson(
     Schema.Struct({

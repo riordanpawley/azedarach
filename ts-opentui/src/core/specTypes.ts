@@ -1,3 +1,5 @@
+import type { DateTime } from "effect"
+
 export type SpecRequirementKind = "functional" | "acceptance" | "other"
 export type SpecLinkType = "implements" | "tests" | "blocks" | "relates"
 
@@ -74,8 +76,8 @@ export interface SpecPublishDocumentOutcome {
 }
 
 export interface SpecPublishOutcome {
-	readonly started_at: string
-	readonly finished_at: string
+	readonly started_at: DateTime.Utc
+	readonly finished_at: DateTime.Utc
 	readonly status: "success" | "partial" | "failed"
 	readonly total_requirements: number
 	readonly total_links: number
@@ -93,4 +95,3 @@ export const DEFAULT_SPEC_PUBLISH_CONFIG: SpecPublishConfig = {
 		change_log: "Change Log",
 	},
 }
-

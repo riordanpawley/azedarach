@@ -1,4 +1,4 @@
-import { Data, Effect, Fiber, Ref, SubscriptionRef } from "effect"
+import { Data, DateTime, Effect, Fiber, Ref, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { ProjectService } from "../services/ProjectService.js"
 import { LinearSdk } from "./LinearSdk.js"
@@ -291,7 +291,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					fromStore("getSpecPublishConfig", localIssueStore.getSpecPublishConfig(effectiveCwd)),
 				])
 
-				const startedAt = new Date().toISOString()
+				const startedAt = yield* DateTime.now
 				const requirementCount = requirements.length
 				const linkCount = links.length
 				const renderedDocs = renderPublishDocuments(requirements, links).map((document) => ({
@@ -381,7 +381,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 						: successCount === 0
 							? "failed"
 							: "partial"
-				const finishedAt = new Date().toISOString()
+				const finishedAt = yield* DateTime.now
 				const outcome: SpecPublishOutcome = {
 					started_at: startedAt,
 					finished_at: finishedAt,

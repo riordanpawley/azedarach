@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import {
     allocateNextAlphaIssueId,
     encodeAlphaIssueIndex,
@@ -258,8 +258,8 @@ describe("spec requirements and links", () => {
                     yield* store.setSpecPublishConfig(config, projectPath)
 
                     const outcome: SpecPublishOutcome = {
-                        started_at: "2026-03-07T00:00:00.000Z",
-                        finished_at: "2026-03-07T00:00:01.000Z",
+                        started_at: DateTime.unsafeFromDate(new Date("2026-03-07T00:00:00.000Z")),
+                        finished_at: DateTime.unsafeFromDate(new Date("2026-03-07T00:00:01.000Z")),
                         status: "partial",
                         total_requirements: 2,
                         total_links: 1,
@@ -298,6 +298,12 @@ describe("spec requirements and links", () => {
             expect(result.savedConfig.debounce_ms).toBe(1500)
             expect(result.savedConfig.target_project).toBe("AZE")
             expect(result.savedOutcome?.status).toBe("partial")
+            expect(result.savedOutcome && DateTime.formatIso(result.savedOutcome.started_at)).toBe(
+                "2026-03-07T00:00:00.000Z",
+            )
+            expect(result.savedOutcome && DateTime.formatIso(result.savedOutcome.finished_at)).toBe(
+                "2026-03-07T00:00:01.000Z",
+            )
             expect(result.savedOutcome?.outcomes).toHaveLength(2)
         } finally {
             rmSync(projectPath, { recursive: true, force: true })
