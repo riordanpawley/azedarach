@@ -42,6 +42,7 @@ export type KeyMode =
 	| "overlay"
 	| "sort"
 	| "filter"
+	| "spec"
 	| "orchestrate"
 	| "mergeSelect"
 	| "*"

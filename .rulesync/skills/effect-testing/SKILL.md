@@ -15,6 +15,9 @@ TDD with Effect requires understanding how to test effectful computations. This 
 
 **Core Principle:** Tests are **specifications**, not just coverage metrics.
 
+When tests involve schema boundaries (DB metadata, JSON payloads, config codecs), use:
+- `.claude/skills/effect-schema/SKILL.md`
+
 ## TDD Cycle
 
 ### 1. Write Failing Test (RED)
@@ -133,6 +136,35 @@ describe("SessionManager errors", () => {
     })
 })
 ```
+
+### Testing Schema Codecs
+
+When code uses `Schema.parseJson(...)` contracts, test both decode and encode paths.
+
+```typescript
+import { DateTime, Schema } from "effect"
+
+const PayloadJsonSchema = Schema.parseJson(
+    Schema.Struct({
+        idempotencyKey: Schema.String,
+        startedAt: Schema.DateTimeUtc,
+    }),
+)
+
+it("round-trips payload through schema codec", () => {
+    const payload = {
+        idempotencyKey: "linear:upsert:AZ-123",
+        startedAt: DateTime.unsafeFromDate(new Date("2026-03-07T00:00:00.000Z")),
+    }
+
+    const encoded = Schema.encodeSync(PayloadJsonSchema)(payload)
+    const decoded = Schema.decodeUnknownSync(PayloadJsonSchema)(encoded)
+
+    expect(decoded).toEqual(payload)
+})
+```
+
+Also add one invalid-input test to verify decode failure behavior.
 
 ### Testing with TestClock
 

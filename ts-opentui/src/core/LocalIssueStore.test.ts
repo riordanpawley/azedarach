@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
-import { Effect, Layer } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import {
 	allocateNextAlphaIssueId,
 	encodeAlphaIssueIndex,
@@ -12,6 +12,7 @@ import {
 	resolveLocalIssueStorageRoot,
 	selectBackupFilesToPrune,
 } from "./LocalIssueStore.js"
+import type { SpecPublishConfig, SpecPublishOutcome } from "./specTypes.js"
 
 describe("resolveLocalIssueStorageRoot", () => {
 	it("prefers explicit project path over current project path", () => {
@@ -164,6 +165,182 @@ describe("importExternalSnapshot", () => {
 			expect(issue?.notes).toBe("Local notes should survive import")
 			expect(issue?.acceptance).toBe("Local acceptance should survive import")
 			expect(issue?.estimate).toBe(5)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
+describe("spec requirements and links", () => {
+		it("accepts suffixed spec requirement IDs from docs/spec", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+				const requirement = await Effect.runPromise(
+					Effect.gen(function* () {
+						const store = yield* LocalIssueStore
+						return yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-FR-0802a",
+								title: "Suffixed requirement ID support",
+								body: "Allow optional single-letter suffix in requirement IDs.",
+							},
+							projectPath,
+						)
+					}).pipe(Effect.provide(testLayer)),
+				)
+
+				expect(requirement.id.startsWith("sr_")).toBe(true)
+				expect(requirement.local_id).toBe("fr0802a")
+				expect(requirement.external_code).toBe("AZ-FR-0802A")
+				expect(requirement.kind).toBe("functional")
+			} finally {
+				rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("supports requirement CRUD, bidirectional links, and coverage gaps", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					const issue = yield* store.create({ title: "Implement feature" }, undefined, projectPath)
+						const requirement = yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-FR-4201",
+								title: "Track requirement records",
+								body: "The store must persist requirements.",
+							},
+							projectPath,
+						)
+						const acceptanceRequirement = yield* store.createSpecRequirement(
+							{
+								external_code: "AZ-AT-2901",
+								title: "Acceptance coverage",
+								body: "Acceptance requirement with no links yet.",
+							},
+							projectPath,
+					)
+
+					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
+
+					const issueRequirements = yield* store.listIssueSpecRequirements(issue.id, projectPath)
+					const requirementIssues = yield* store.listRequirementLinkedIssues(
+						requirement.id,
+						projectPath,
+					)
+					const coverage = yield* store.getSpecCoverageReport(projectPath)
+
+						return {
+							requirement,
+							acceptanceRequirement,
+							issueRequirements,
+							requirementIssues,
+							coverage,
+						}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+				expect(result.issueRequirements).toHaveLength(1)
+				expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
+				expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
+				expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
+				expect(result.issueRequirements[0]?.link_type).toBe("implements")
+
+				expect(result.requirementIssues).toHaveLength(1)
+				expect(result.requirementIssues[0]?.link_type).toBe("implements")
+
+				expect(result.coverage.requirements).toHaveLength(2)
+				expect(result.coverage.unlinked_requirement_ids).toContain(
+					result.acceptanceRequirement.local_id,
+				)
+				expect(
+					result.coverage.integrity_gaps.some(
+						(gap) =>
+							gap.kind === "unlinked_requirement" &&
+							gap.requirement_id === result.acceptanceRequirement.local_id,
+					),
+				).toBe(true)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("persists publish config and last publish outcome metadata", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-publish-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					const config: SpecPublishConfig = {
+						enabled: true,
+						debounce_ms: 1500,
+						target_project: "AZE",
+						documents: {
+							overview: "Spec Overview",
+							requirements: "Requirements Index",
+							acceptance: "Acceptance Index",
+							change_log: "Change Log",
+						},
+					}
+					yield* store.setSpecPublishConfig(config, projectPath)
+
+					const outcome: SpecPublishOutcome = {
+						started_at: DateTime.unsafeFromDate(new Date("2026-03-07T00:00:00.000Z")),
+						finished_at: DateTime.unsafeFromDate(new Date("2026-03-07T00:00:01.000Z")),
+						status: "partial",
+						total_requirements: 2,
+						total_links: 1,
+						outcomes: [
+							{
+								document_key: "overview",
+								title: "Spec Overview",
+								status: "success",
+								message: "Updated",
+								requirement_count: 2,
+								link_count: 1,
+							},
+							{
+								document_key: "requirements",
+								title: "Requirements Index",
+								status: "failed",
+								message: "permission denied",
+								requirement_count: 2,
+								link_count: 1,
+							},
+						],
+					}
+					yield* store.setSpecPublishOutcome(outcome, projectPath)
+
+					const savedConfig = yield* store.getSpecPublishConfig(projectPath)
+					const savedOutcome = yield* store.getSpecPublishOutcome(projectPath)
+
+					return {
+						savedConfig,
+						savedOutcome,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.savedConfig.enabled).toBe(true)
+			expect(result.savedConfig.debounce_ms).toBe(1500)
+			expect(result.savedConfig.target_project).toBe("AZE")
+			expect(result.savedOutcome?.status).toBe("partial")
+			expect(result.savedOutcome && DateTime.formatIso(result.savedOutcome.started_at)).toBe(
+				"2026-03-07T00:00:00.000Z",
+			)
+			expect(result.savedOutcome && DateTime.formatIso(result.savedOutcome.finished_at)).toBe(
+				"2026-03-07T00:00:01.000Z",
+			)
+			expect(result.savedOutcome?.outcomes).toHaveLength(2)
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

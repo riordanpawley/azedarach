@@ -33,6 +33,8 @@ export interface OrchestrationTask {
  */
 export type GotoSubMode = "pending" | "jump"
 
+export type SpecSubview = "requirements" | "coverage" | "publish"
+
 /**
  * Sort criteria for tasks
  */
@@ -142,6 +144,7 @@ export type EditorMode =
 	| { readonly _tag: "search"; readonly query: string }
 	| { readonly _tag: "sort" }
 	| { readonly _tag: "filter"; readonly activeField: FilterField | null }
+	| { readonly _tag: "spec"; readonly subview: SpecSubview }
 	| {
 			readonly _tag: "orchestrate"
 			readonly epicId: string
@@ -683,6 +686,45 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 						config.updatedDaysAgo !== null
 					)
 				}),
+
+			// ========================================================================
+			// Spec Workspace
+			// ========================================================================
+
+			enterSpecWorkspace: () =>
+				SubscriptionRef.set(
+					mode,
+					Data.struct({
+						_tag: "spec" as const,
+						subview: "requirements" as const,
+					}),
+				),
+
+			getSpecSubview: (): Effect.Effect<SpecSubview | null> =>
+				Effect.gen(function* () {
+					const current = yield* SubscriptionRef.get(mode)
+					return current._tag === "spec" ? current.subview : null
+				}),
+
+			cycleSpecSubview: () =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "spec") return m
+					const nextSubview: SpecSubview =
+						m.subview === "requirements"
+							? "coverage"
+							: m.subview === "coverage"
+								? "publish"
+								: "requirements"
+					return Data.struct({
+						_tag: "spec" as const,
+						subview: nextSubview,
+					})
+				}),
+
+			exitSpecWorkspace: () =>
+				SubscriptionRef.update(mode, (m): EditorMode =>
+					m._tag === "spec" ? Data.struct({ _tag: "normal" as const }) : m,
+				),
 
 			// ========================================================================
 			// Orchestrate Mode

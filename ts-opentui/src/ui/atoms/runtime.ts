@@ -22,6 +22,7 @@ import { TerminalService } from "../../core/TerminalService.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { VCService } from "../../core/VCService.js"
+import { SpecService } from "../../core/SpecService.js"
 import { BoardService } from "../../services/BoardService.js"
 import { ClockService } from "../../services/ClockService.js"
 import { CommandQueueService } from "../../services/CommandQueueService.js"
@@ -79,8 +80,9 @@ export const appLayer = Layer.mergeAll(
 	OfflineService.Default,
 	DevServerService.Default,
 	DiffService.Default,
-	PlanningService.Default,
-	GitSyncService.Default,
+    PlanningService.Default,
+    GitSyncService.Default,
+    SpecService.Default,
 ).pipe(
 	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
 	Layer.provideMerge(platformLayer),

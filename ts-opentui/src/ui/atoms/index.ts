@@ -169,6 +169,13 @@ export { planningStateAtom, resetPlanningAtom, runPlanningAtom } from "./plannin
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
 // Project service atoms
 export { currentProjectAtom, projectsAtom, switchProjectAtom } from "./project.js"
+// Spec workspace atoms
+export {
+    DEFAULT_SPEC_WORKSPACE_STATE,
+    refreshSpecWorkspaceAtom,
+    specWorkspaceStateAtom,
+    type SpecWorkspaceState,
+} from "./spec.js"
 // Runtime (foundation for all other atoms)
 export { appRuntime } from "./runtime.js"
 // Session management atoms

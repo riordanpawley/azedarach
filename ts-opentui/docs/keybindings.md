@@ -52,7 +52,7 @@ The default mode for navigation and basic actions.
 | `/` | Enter Search mode | Filter tasks by title/ID |
 | `g` | Enter Goto mode | Prefix for jumps |
 | `v` | Enter Select mode | Multi-selection |
-| `Tab` | Toggle view mode | Switch between Kanban and Compact views |
+| `Tab` | Toggle view mode | Switch between Kanban and Compact views (board only) |
 | `r` | Refresh git stats | Update git stats for all active sessions |
 | `p` | Open planning | AI-powered planning workflow |
 | `c` | Create bead (manual) | Opens $EDITOR with template |
@@ -461,6 +461,7 @@ Press `g` to enter goto mode. The next key determines the jump target.
 | `g` `h` | First column | Jump to first column |
 | `g` `l` | Last column | Jump to last column |
 | `g` `w` | Jump labels | Shows 2-char labels on each task |
+| `g` `s` | Spec workspace | Enter Spec workspace (Requirements/Coverage/Publish) |
 | `g` `p` | Project selector | Switch between registered projects |
 
 ### Jump Labels (gw)
@@ -478,6 +479,20 @@ When you press `g` `w`, each visible task gets a 2-character label from the home
 ```
 
 Labels use these home row keys: `a s d f g h j k l ;`
+
+## Spec Workspace
+
+Press `g` `s` from Normal mode to enter the Spec workspace.
+
+| Key | Action | Notes |
+|-----|--------|-------|
+| `Tab` | Cycle subview | Requirements → Coverage → Publish → Requirements |
+| `Esc` / `q` | Return to board | Restores normal board navigation context |
+
+### Notes
+
+- `Tab` continues to toggle Kanban/Compact when you are on the board.
+- Inside Spec workspace, `Tab` is reserved for subview cycling.
 
 ## Select Mode
 
