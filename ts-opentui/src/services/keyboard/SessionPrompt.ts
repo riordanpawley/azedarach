@@ -1,20 +1,30 @@
 export const buildStartWorkPrompt = (params: {
-	readonly taskId: string
-	readonly issueType: string
-	readonly title: string
-	readonly hasWorktree: boolean
-	readonly attachmentPaths: readonly string[]
-	readonly localMode: boolean
+    readonly taskId: string
+    readonly issueType: string
+    readonly title: string
+    readonly hasWorktree: boolean
+    readonly attachmentPaths: readonly string[]
+    readonly localMode: boolean
+    readonly issueContextInjected: boolean
+    readonly issueDescription?: string
+    readonly issueDesign?: string
+    readonly issueAcceptance?: string
+    readonly issueNotes?: string
 }): string => {
-	const safeIssueType = sanitizePromptInline(params.issueType)
-	const safeTitle = sanitizePromptInline(params.title)
-	const showCommand = `az issue get ${params.taskId}`
-	const updateCommand = `az issue update ${params.taskId} --design '...'`
+    const safeIssueType = sanitizePromptInline(params.issueType)
+    const safeTitle = sanitizePromptInline(params.title)
+    const updateCommand = `az issue update ${params.taskId} --design '...'`
+    const issueDetailsSnapshot = buildIssueDetailsSnapshot({
+        description: params.issueDescription,
+        design: params.issueDesign,
+        acceptance: params.issueAcceptance,
+        notes: params.issueNotes,
+    })
 
-	let prompt = `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
+    let prompt = `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
 
-Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
-Only rerun \`${showCommand}\` if details are stale or missing.
+${buildIssueContextInstructions(params.taskId, params.issueContextInjected)}
+${issueDetailsSnapshot}
 
 Before starting implementation:
 1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
@@ -56,17 +66,27 @@ NOTE: This worktree has existing work. Check:
 }
 
 export const buildChatPrompt = (params: {
-	readonly taskId: string
-	readonly title: string
-	readonly chatModel: string
+    readonly taskId: string
+    readonly title: string
+    readonly chatModel: string
+    readonly issueContextInjected: boolean
+    readonly issueDescription?: string
+    readonly issueDesign?: string
+    readonly issueAcceptance?: string
+    readonly issueNotes?: string
 }): string => {
-	const safeTitle = sanitizePromptInline(params.title)
-	const showCommand = `az issue get ${params.taskId}`
+    const safeTitle = sanitizePromptInline(params.title)
+    const issueDetailsSnapshot = buildIssueDetailsSnapshot({
+        description: params.issueDescription,
+        design: params.issueDesign,
+        acceptance: params.issueAcceptance,
+        notes: params.issueNotes,
+    })
 
-	return `Let's chat about issue ${params.taskId}: ${safeTitle}
+    return `Let's chat about issue ${params.taskId}: ${safeTitle}
 
-Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
-Only rerun \`${showCommand}\` if details are stale or missing.
+${buildIssueContextInstructions(params.taskId, params.issueContextInjected)}
+${issueDetailsSnapshot}
 
 Help me with one of:
 - Clarifying requirements or scope
@@ -80,7 +100,59 @@ Note: You're running with ${params.chatModel} for fast, cheap discussion. When r
 What would you like to discuss?`
 }
 
-const sanitizePromptInline = (value: string): string => {
-	const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()
-	return normalized.replace(/</g, "[").replace(/>/g, "]")
+const buildIssueContextInstructions = (taskId: string, issueContextInjected: boolean): string => {
+    const showCommand = `az issue get ${taskId}`
+    if (issueContextInjected) {
+        return `Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
+Only rerun \`${showCommand}\` if details are stale or missing.`
+    }
+    return `Issue context is not auto-injected for this tool.
+Run \`az prime\` then \`${showCommand}\` before implementation if details are missing or stale.`
 }
+
+const buildIssueDetailsSnapshot = (details: {
+    readonly description?: string
+    readonly design?: string
+    readonly acceptance?: string
+    readonly notes?: string
+}): string => {
+    const sections = [
+        formatIssueDetailSection("Description", details.description),
+        formatIssueDetailSection("Design", details.design),
+        formatIssueDetailSection("Acceptance", details.acceptance),
+        formatIssueDetailSection("Notes", details.notes),
+    ].filter((section): section is string => section !== undefined)
+
+    if (sections.length === 0) {
+        return "Issue details snapshot: unavailable in board cache."
+    }
+
+    return `Issue details snapshot (cached):\n${sections.join("\n")}`
+}
+
+const formatIssueDetailSection = (label: string, content?: string): string | undefined => {
+    if (!content) {
+        return undefined
+    }
+
+    const normalized = sanitizePromptBlock(content)
+    if (!normalized) {
+        return undefined
+    }
+
+    const clipped = normalized.length > 700 ? `${normalized.slice(0, 700)}...` : normalized
+    return `- ${label}: ${clipped}`
+}
+
+const sanitizePromptInline = (value: string): string => {
+    const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()
+    return normalized.replace(/</g, "[").replace(/>/g, "]")
+}
+
+const sanitizePromptBlock = (value: string): string =>
+    value
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/</g, "[")
+        .replace(/>/g, "]")

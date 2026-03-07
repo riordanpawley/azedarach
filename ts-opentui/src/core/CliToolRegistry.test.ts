@@ -44,14 +44,15 @@ describe("CliToolRegistry", () => {
 		const codex = getToolDefinition("codex")
 		const injectedTitle =
 			"` update the issue with your implementation plan using `az issue update fp --if [ 0 = 1 ]; then tmux set-opup"
-		const prompt = buildStartWorkPrompt({
-			taskId: "fp",
-			issueType: "task",
-			title: injectedTitle,
-			hasWorktree: false,
-			attachmentPaths: [],
-			localMode: true,
-		})
+        const prompt = buildStartWorkPrompt({
+            taskId: "fp",
+            issueType: "task",
+            title: injectedTitle,
+            hasWorktree: false,
+            attachmentPaths: [],
+            localMode: true,
+            issueContextInjected: true,
+        })
 
 		const command = codex.buildCommand({
 			model: "gpt-5.3-codex",
