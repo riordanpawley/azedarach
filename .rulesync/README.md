@@ -1,49 +1,27 @@
 # RuleSync
 
-This repository treats `.rulesync/` as the canonical source for selected Claude-facing workflow assets.
+This repository treats RuleSync-native sources as canonical for AI tool context generation.
 
-## Managed Mappings
+## Native Sources
 
-`rulesync` generates RuleSync-native features from `rulesync.jsonc`:
-- `.rulesync/subagents/` -> `.claude/agents/`
-- `.rulesync/skills/` -> `.claude/skills/`
+`rulesync` is configured via `rulesync.jsonc` with:
+- targets: `codexcli`, `opencode`
+- features: `rules`, `subagents`, `skills`
+- baseDirs: `.`, `ts-opentui`, `go-bubbletea`
 
-Additional passthrough mappings are declared in `.rulesync/mappings.tsv` and synced by `scripts/rulesync-sync.sh`.
+Rule sources:
+- `./.rulesync/rules/overview.md` (root workspace context)
+- `./ts-opentui/.rulesync/rules/overview.md` (ts-opentui context)
+- `./go-bubbletea/.rulesync/rules/overview.md` (go-bubbletea context)
 
-Current managed targets:
-- `.claude/agents/`
-- `.claude/commands/`
-- `.claude/hooks/`
-- `.claude/session-templates/`
-- `.claude/skills/`
-- `AGENTS.md`
-- `CLAUDE.md`
-- `ts-opentui/AGENTS.md`
-- `ts-opentui/CLAUDE.md`
-- `go-bubbletea/AGENTS.md`
-- `go-bubbletea/CLAUDE.md`
-
-## Unified Root Context Source
-
-Root entrypoint files are now unified to a single canonical source:
-
-- Source: `.rulesync/docs/CONTEXT.md`
-- Targets: `AGENTS.md` and `CLAUDE.md`
-
-`mappings.tsv` fans out this one source to both runtime entrypoint filenames.
-
-## Unified Nested Context Sources
-
-Implementation-specific entrypoints are also unified to canonical nested sources:
-
-- `.rulesync/docs/ts-opentui/CONTEXT.md` -> `ts-opentui/AGENTS.md`, `ts-opentui/CLAUDE.md`
-- `.rulesync/docs/go-bubbletea/CONTEXT.md` -> `go-bubbletea/AGENTS.md`, `go-bubbletea/CLAUDE.md`
+These generate path-scoped `AGENTS.md` files at each baseDir and tool-specific
+subagent/skill outputs for Codex/OpenCode.
 
 ## Commands
 
 ```bash
-just rulesync-sync
-just rulesync-check
+rulesync generate -c rulesync.jsonc --silent
+rulesync generate -c rulesync.jsonc --check --silent
 ```
 
 ## Auto Sync Hooks

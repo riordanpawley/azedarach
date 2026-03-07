@@ -1,7 +1,7 @@
 {
-  "targets": ["claudecode"],
-  "features": ["subagents", "skills"],
-  "baseDirs": ["."],
+  "targets": ["codexcli", "opencode"],
+  "features": ["rules", "subagents", "skills"],
+  "baseDirs": [".", "ts-opentui", "go-bubbletea"],
   "delete": true,
   "silent": true
 }

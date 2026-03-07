@@ -27,14 +27,26 @@ Thumbs.db
 .beads/last-touched
 .beads/.br_history
 
-# Claude artifacts are generated locally from .rulesync
+# RuleSync-generated artifacts
+**/AGENTS.md
+**/.codex/memories/
+**/.codex/rules/
+**/.codex/skills/
+**/.codex/agents/
+**/.opencode/memories/
+**/.opencode/plugins/
+**/.opencode/command/
+**/.opencode/agent/
+**/.opencode/skill/
+.rulesync/skills/.curated/
+.rulesync/rules/*.local.md
+rulesync.local.jsonc
+!.rulesync/.aiignore
+
+# Legacy Claude local artifacts
 .claude/
-/AGENTS.md
-/CLAUDE.md
-/ts-opentui/AGENTS.md
-/ts-opentui/CLAUDE.md
-/go-bubbletea/AGENTS.md
-/go-bubbletea/CLAUDE.md
+**/CLAUDE.md
+**/CLAUDE.local.md
 
 # Environment
 .env.local

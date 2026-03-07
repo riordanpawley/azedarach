@@ -1,3 +1,10 @@
+---
+root: true
+targets:
+  - codexcli
+  - opencode
+---
+
 <!--
 File: CONTEXT.md
 Version: 2.0.0
