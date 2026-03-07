@@ -71,23 +71,6 @@ export const buildGuardedInitCommand = (sessionName: string, initCommand: string
 	].join(" ")
 }
 
-const buildRunIfInitSucceededCommand = (sessionName: string, command: string): string => {
-	const failedCheck = `$(tmux show-option -t ${sessionName} -v ${INIT_FAILED_OPTION} 2>/dev/null)`
-	const failedCommand = `$(tmux show-option -t ${sessionName} -v ${INIT_FAILED_COMMAND_OPTION} 2>/dev/null)`
-	const blockedMessage = quoteForShellSingleString(
-		"[azedarach] Session startup blocked because init failed. Fix the issue above and restart with Space+s.",
-	)
-	return [
-		`if [ "${failedCheck}" = "1" ]; then`,
-		`tmux set-option -t ${sessionName} ${INIT_FAILED_STATUS_OPTION} waiting;`,
-		`printf '%s\\n' ${blockedMessage};`,
-		`printf 'Failed init command: %s\\n' "${failedCommand}";`,
-		"else",
-		command,
-		"fi",
-	].join(" ")
-}
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -240,6 +223,36 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					)
 				})
 
+			const sendCommandIfInitSucceeded = (
+				sessionName: string,
+				target: string,
+				command: string,
+			): Effect.Effect<
+				void,
+				SessionNotFoundError | TmuxError,
+				CommandExecutor.CommandExecutor
+			> =>
+				Effect.gen(function* () {
+					const initFailed = yield* tmux.getUserOption(sessionName, INIT_FAILED_OPTION)
+					if (Option.isSome(initFailed) && initFailed.value === "1") {
+						const blockedMessage = quoteForShellSingleString(
+							"[azedarach] Session startup blocked because init failed. Fix the issue above and restart with Space+s.",
+						)
+						yield* tmux.sendLiteralCommand(
+							target,
+							`tmux set-option -t ${sessionName} ${INIT_FAILED_STATUS_OPTION} waiting`,
+						)
+						yield* tmux.sendLiteralCommand(target, `printf '%s\\n' ${blockedMessage}`)
+						yield* tmux.sendLiteralCommand(
+							target,
+							`printf 'Failed init command: %s\\n' "$(tmux show-option -t ${sessionName} -v ${INIT_FAILED_COMMAND_OPTION} 2>/dev/null)"`,
+						)
+						return
+					}
+
+					yield* tmux.sendLiteralCommand(target, command)
+				})
+
 			return {
 				/**
 				 * Build a tmux session from a bead ID
@@ -358,7 +371,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 												}
 
 												yield* tmux.setWindowOption(target, "remain-on-exit", "off")
-												yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, task))
+												yield* sendCommandIfInitSucceeded(sessionName, target, task)
 											}),
 										{ concurrency: "unbounded" },
 									)
@@ -387,13 +400,13 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								yield* Effect.log(`[buildTmuxSessionFromIssue] Shell ready for ${target}`)
 
-								yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, command))
+								yield* sendCommandIfInitSucceeded(sessionName, target, command)
 							} else {
 								yield* Effect.log(
 									`[buildTmuxSessionFromIssue] Window ${target} exists, sending command`,
 								)
 								yield* tmux.selectWindow(sessionName, windowName)
-								yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, command))
+								yield* sendCommandIfInitSucceeded(sessionName, target, command)
 							}
 
 							return {
@@ -489,7 +502,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
 
 											// Run the background task command
-											yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, task))
+											yield* sendCommandIfInitSucceeded(sessionName, target, task)
 										}),
 									{ concurrency: "unbounded" },
 								)
@@ -543,18 +556,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 									}
 								}
 
-								yield* tmux.sendLiteralCommand(
-									target,
-									buildRunIfInitSucceededCommand(sessionName, options.command),
-								)
+								yield* sendCommandIfInitSucceeded(sessionName, target, options.command)
 							} else {
 								// Session recovered but tool isn't running - send command to existing window
 								yield* Effect.log(`[ensureWindow] Window ${target} exists, sending command`)
 								yield* tmux.selectWindow(sessionName, windowName)
-								yield* tmux.sendLiteralCommand(
-									target,
-									buildRunIfInitSucceededCommand(sessionName, options.command),
-								)
+								yield* sendCommandIfInitSucceeded(sessionName, target, options.command)
 							}
 
 							return target
@@ -634,10 +641,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								// Send the main command last
 								yield* Effect.log(`Queuing main command: ${sessionName}:${command}`)
-								yield* tmux.sendLiteralCommand(
-									sessionName,
-									buildRunIfInitSucceededCommand(sessionName, command),
-								)
+								yield* sendCommandIfInitSucceeded(sessionName, sessionName, command)
 
 								// Spawn background tasks in separate windows
 								// Run in parallel since each window is independent
@@ -675,10 +679,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
 
 											// Run the background task command
-											yield* tmux.sendLiteralCommand(
-												target,
-												buildRunIfInitSucceededCommand(sessionName, task),
-											)
+											yield* sendCommandIfInitSucceeded(sessionName, target, task)
 										}),
 									{ concurrency: "unbounded" },
 								)
