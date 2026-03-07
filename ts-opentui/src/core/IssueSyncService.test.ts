@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
 	buildLinearIssueFilter,
+	groupLinearSyncBatchByIdentity,
 	resolveCollapsedSyncOperation,
 	shouldRetryUpsertForMissingParent,
 	shouldRunRemoteHydration,
@@ -91,6 +92,61 @@ describe("shouldRetryUpsertForMissingParent", () => {
 				parentExternalId: undefined,
 			}),
 		).toBe(false)
+	})
+})
+
+describe("groupLinearSyncBatchByIdentity", () => {
+	it("dedupes identical requests into one execution group", () => {
+		const groups = groupLinearSyncBatchByIdentity([
+			{
+				issueId: "AZE-101",
+				operation: "upsert",
+				payloadJson: '{"title":"same"}',
+				projectPath: "/tmp/project",
+			},
+			{
+				issueId: "AZE-101",
+				operation: "upsert",
+				payloadJson: '{"title":"same"}',
+				projectPath: "/tmp/project",
+			},
+			{
+				issueId: "AZE-101",
+				operation: "close",
+				payloadJson: null,
+				projectPath: "/tmp/project",
+			},
+		])
+
+		expect(groups).toHaveLength(2)
+		expect(groups[0]?.length).toBe(2)
+		expect(groups[1]?.length).toBe(1)
+	})
+
+	it("keeps requests distinct when payload or project path differs", () => {
+		const groups = groupLinearSyncBatchByIdentity([
+			{
+				issueId: "AZE-200",
+				operation: "upsert",
+				payloadJson: '{"title":"first"}',
+				projectPath: "/tmp/project-a",
+			},
+			{
+				issueId: "AZE-200",
+				operation: "upsert",
+				payloadJson: '{"title":"second"}',
+				projectPath: "/tmp/project-a",
+			},
+			{
+				issueId: "AZE-200",
+				operation: "upsert",
+				payloadJson: '{"title":"first"}',
+				projectPath: "/tmp/project-b",
+			},
+		])
+
+		expect(groups).toHaveLength(3)
+		expect(groups.every((group) => group.length === 1)).toBe(true)
 	})
 })
 

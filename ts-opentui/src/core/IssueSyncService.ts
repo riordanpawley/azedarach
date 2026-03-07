@@ -82,6 +82,13 @@ interface SyncRunStart {
 	readonly startedAt: Date
 }
 
+interface LinearSyncBatchIdentity {
+	readonly issueId: string
+	readonly operation: SyncOperation
+	readonly payloadJson: string | null
+	readonly projectPath: string
+}
+
 class LinearSyncRequest extends Request.TaggedClass("LinearSyncRequest")<
 	void,
 	IssueSyncError,
@@ -227,6 +234,25 @@ export const resolveCollapsedSyncOperation = (params: {
 		return params.latestOperation
 	}
 	return params.groupedOperations.includes("upsert") ? "upsert" : "close"
+}
+
+const linearSyncBatchIdentityKey = (request: LinearSyncBatchIdentity): string =>
+	JSON.stringify([request.projectPath, request.operation, request.issueId, request.payloadJson])
+
+export const groupLinearSyncBatchByIdentity = <T extends LinearSyncBatchIdentity>(
+	requests: readonly T[],
+): readonly (readonly T[])[] => {
+	const groupedRequests = new Map<string, T[]>()
+	for (const request of requests) {
+		const key = linearSyncBatchIdentityKey(request)
+		const grouped = groupedRequests.get(key)
+		if (grouped === undefined) {
+			groupedRequests.set(key, [request])
+			continue
+		}
+		grouped.push(request)
+	}
+	return [...groupedRequests.values()]
 }
 
 const collapsePendingItems = (items: readonly PendingSyncItem[]): readonly CollapsedSyncItem[] => {
@@ -1339,8 +1365,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					const firstRequest = requests[0]
 					const projectPath = firstRequest?.projectPath ?? "<none>"
 					const mixedProjectPaths = new Set(requests.map((request) => request.projectPath)).size > 1
+					const requestGroups = groupLinearSyncBatchByIdentity(requests)
+					const duplicateCount = requests.length - requestGroups.length
 					yield* Effect.log(
-						`Linear sync resolver batch start: size=${requests.length} projectPath=${projectPath}`,
+						`Linear sync resolver batch start: size=${requests.length} unique=${requestGroups.length} duplicates=${duplicateCount} projectPath=${projectPath}`,
 					)
 					if (mixedProjectPaths) {
 						const error = new IssueSyncError({
@@ -1353,18 +1381,30 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						return
 					}
 					yield* Effect.forEach(
-						requests,
-						(request) => {
+						requestGroups,
+						(requestGroup) => {
+							const request = requestGroup[0]
+							if (request === undefined) {
+								return Effect.succeed(undefined)
+							}
 							const runEffect =
 								request.operation === "upsert"
 									? syncUpsert(runtime, request)
 									: syncCloseOrDelete(runtime, request)
 
 							return runEffect.pipe(
-								Effect.flatMap(() => Request.succeed(request, undefined)),
+								Effect.flatMap(() =>
+									Effect.forEach(requestGroup, (pendingRequest) =>
+										Request.succeed(pendingRequest, undefined),
+									).pipe(Effect.asVoid),
+								),
 								Effect.catchAll((error) =>
 									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Request.fail(request, error)),
+										Effect.zipRight(
+											Effect.forEach(requestGroup, (pendingRequest) =>
+												Request.fail(pendingRequest, error),
+											).pipe(Effect.asVoid),
+										),
 									),
 								),
 							)
@@ -1372,7 +1412,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						{ concurrency: "unbounded", discard: true },
 					)
 					yield* Effect.log(
-						`Linear sync resolver batch complete: size=${requests.length} projectPath=${projectPath}`,
+						`Linear sync resolver batch complete: size=${requests.length} unique=${requestGroups.length} duplicates=${duplicateCount} projectPath=${projectPath}`,
 					)
 				}).pipe(Effect.asVoid),
 			)
