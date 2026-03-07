@@ -17,6 +17,21 @@ export interface TmuxSession {
 	attached: boolean
 }
 
+const TMUX_LITERAL_CHUNK_SIZE = 512
+
+const chunkLiteralCommand = (command: string): readonly string[] => {
+	const chars = [...command]
+	if (chars.length <= TMUX_LITERAL_CHUNK_SIZE) {
+		return [command]
+	}
+
+	const chunks: string[] = []
+	for (let i = 0; i < chars.length; i += TMUX_LITERAL_CHUNK_SIZE) {
+		chunks.push(chars.slice(i, i + TMUX_LITERAL_CHUNK_SIZE).join(""))
+	}
+	return chunks
+}
+
 // Helper to run tmux commands
 const runTmux = (args: string[]) =>
 	Effect.gen(function* () {
@@ -139,7 +154,10 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 
 			sendLiteralCommand: (session: string, command: string) =>
 				Effect.gen(function* () {
-					yield* runTmux(["send-keys", "-t", session, "-l", command])
+					const chunks = chunkLiteralCommand(command)
+					for (const chunk of chunks) {
+						yield* runTmux(["send-keys", "-t", session, "-l", chunk])
+					}
 					yield* runTmux(["send-keys", "-t", session, "Enter"])
 				}).pipe(
 					Effect.asVoid,
