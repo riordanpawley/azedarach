@@ -47,11 +47,9 @@ ts-build-link-run: run-sfe-ts
 
 # RuleSync helpers
 rulesync-sync:
-    rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent
     rulesync generate -c rulesync.jsonc --silent
 
 rulesync-check:
-    rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --check --silent
     rulesync generate -c rulesync.jsonc --check --silent
 
 # OpenCode plugin installer helper

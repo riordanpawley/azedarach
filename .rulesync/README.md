@@ -5,8 +5,11 @@ This repository treats RuleSync-native sources as canonical for AI tool context 
 ## Native Sources
 
 `rulesync` is configured via `rulesync.jsonc` with:
-- targets: `codexcli`, `opencode`
-- features: `subagents`, `skills`
+- targets: `agentsmd`, `codexcli`, `opencode`
+- features:
+  - `agentsmd`: `rules`
+  - `codexcli`: `subagents`, `skills`
+  - `opencode`: `subagents`, `skills`
 - baseDirs: `.`
 
 Rule sources:
@@ -14,19 +17,18 @@ Rule sources:
 - `./.rulesync/rules/ts-opentui.md` (ts-opentui context, `agentsmd.subprojectPath`)
 - `./.rulesync/rules/go-bubbletea.md` (go-bubbletea context, `agentsmd.subprojectPath`)
 
-Generation runs in two native RuleSync passes:
-- `agentsmd + rules` pass emits path-scoped `AGENTS.md` files (`AGENTS.md`,
+Generation runs in one RuleSync pass:
+- `agentsmd + rules` emits path-scoped `AGENTS.md` files (`AGENTS.md`,
   `ts-opentui/AGENTS.md`, `go-bubbletea/AGENTS.md`) using
   `agentsmd.subprojectPath`.
-- `codexcli/opencode + subagents/skills` pass emits tool-specific subagent/skill outputs.
+- `codexcli/opencode + subagents/skills` emits tool-specific subagent/skill outputs.
+- `opencode` rules are intentionally disabled to avoid `.opencode/memories` outputs.
 
 ## Commands
 
 ```bash
-rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent
 rulesync generate -c rulesync.jsonc --silent
 
-rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --check --silent
 rulesync generate -c rulesync.jsonc --check --silent
 ```
 

@@ -84,9 +84,11 @@ Canonical context sources:
 - `./.rulesync/rules/go-bubbletea.md` + `agentsmd.subprojectPath: go-bubbletea` -> `go-bubbletea/AGENTS.md`
 
 Sync behavior:
-- `post-checkout` and `post-merge` run:
-  - `rulesync generate -c rulesync.jsonc -t agentsmd -f rules -b . --delete --silent`
-  - `rulesync generate -c rulesync.jsonc --silent`
+- `post-checkout` and `post-merge` run `rulesync generate -c rulesync.jsonc --silent`
+- `rulesync.jsonc` uses per-target features:
+  - `agentsmd`: `rules` (root + nested `AGENTS.md`)
+  - `codexcli`/`opencode`: `subagents`, `skills` only
+- OpenCode rules are intentionally disabled to avoid `.opencode/memories` outputs
 - Set `RULESYNC_SKIP=1` to bypass auto-sync for one command/session
 - OpenCode plugin files are intentionally not managed by RuleSync
 

@@ -1,6 +1,10 @@
 {
-  "targets": ["codexcli", "opencode"],
-  "features": ["subagents", "skills"],
+  "targets": ["agentsmd", "codexcli", "opencode"],
+  "features": {
+    "agentsmd": ["rules"],
+    "codexcli": ["subagents", "skills"],
+    "opencode": ["subagents", "skills"]
+  },
   "baseDirs": ["."],
   "delete": true,
   "silent": true
