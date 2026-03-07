@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+	buildLinearIssueFilter,
 	resolveCollapsedSyncOperation,
 	shouldRetryUpsertForMissingParent,
 	shouldRunRemoteHydration,
@@ -90,5 +91,40 @@ describe("shouldRetryUpsertForMissingParent", () => {
 				parentExternalId: undefined,
 			}),
 		).toBe(false)
+	})
+})
+
+describe("buildLinearIssueFilter", () => {
+	it("treats non-UUID team values as key/name filters only", () => {
+		expect(buildLinearIssueFilter({ team: "AZE", project: undefined })).toEqual({
+			team: {
+				or: [{ key: { eqIgnoreCase: "AZE" } }, { name: { eqIgnoreCase: "AZE" } }],
+			},
+		})
+	})
+
+	it("treats non-UUID project values as slug/name filters only", () => {
+		expect(buildLinearIssueFilter({ team: undefined, project: "core-platform" })).toEqual({
+			project: {
+				or: [{ slugId: { eqIgnoreCase: "core-platform" } }, { name: { eqIgnoreCase: "core-platform" } }],
+			},
+		})
+	})
+
+	it("includes id filter when a UUID scope value is provided", () => {
+		expect(
+			buildLinearIssueFilter({
+				team: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c",
+				project: undefined,
+			}),
+		).toEqual({
+			team: {
+				or: [
+					{ id: { eq: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c" } },
+					{ key: { eqIgnoreCase: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c" } },
+					{ name: { eqIgnoreCase: "3f8f18b7-1c70-4374-a327-c0a5f8faec2c" } },
+				],
+			},
+		})
 	})
 })

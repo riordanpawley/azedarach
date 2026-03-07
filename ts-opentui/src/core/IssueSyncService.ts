@@ -295,6 +295,11 @@ const normalizeScopeValue = (value: string | undefined): string | undefined => {
 	return trimmed.length > 0 ? trimmed : undefined
 }
 
+const UUID_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+const isUuid = (value: string): boolean => UUID_PATTERN.test(value)
+
 interface LinearIssueScope {
 	readonly team: string | undefined
 	readonly project: string | undefined
@@ -307,31 +312,45 @@ interface LinearWorkflowState {
 	readonly type: string
 }
 
-const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | undefined => {
+export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFilter | undefined => {
 	const team = normalizeScopeValue(scope.team)
 	const project = normalizeScopeValue(scope.project)
 	const constraints: LinearIssuesFilter[] = []
 
 	if (team !== undefined) {
+		const teamOr: Array<
+			| { readonly id: { readonly eq: string } }
+			| { readonly key: { readonly eqIgnoreCase: string } }
+			| { readonly name: { readonly eqIgnoreCase: string } }
+		> = [
+			{ key: { eqIgnoreCase: team } },
+			{ name: { eqIgnoreCase: team } },
+		]
+		if (isUuid(team)) {
+			teamOr.unshift({ id: { eq: team } })
+		}
 		constraints.push({
 			team: {
-				or: [
-					{ id: { eq: team } },
-					{ key: { eqIgnoreCase: team } },
-					{ name: { eqIgnoreCase: team } },
-				],
+				or: teamOr,
 			},
 		})
 	}
 
 	if (project !== undefined) {
+		const projectOr: Array<
+			| { readonly id: { readonly eq: string } }
+			| { readonly slugId: { readonly eqIgnoreCase: string } }
+			| { readonly name: { readonly eqIgnoreCase: string } }
+		> = [
+			{ slugId: { eqIgnoreCase: project } },
+			{ name: { eqIgnoreCase: project } },
+		]
+		if (isUuid(project)) {
+			projectOr.unshift({ id: { eq: project } })
+		}
 		constraints.push({
 			project: {
-				or: [
-					{ id: { eq: project } },
-					{ slugId: { eqIgnoreCase: project } },
-					{ name: { eqIgnoreCase: project } },
-				],
+				or: projectOr,
 			},
 		})
 	}
