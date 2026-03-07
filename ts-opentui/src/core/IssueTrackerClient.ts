@@ -6,7 +6,7 @@
  */
 
 import { Command, type CommandExecutor } from "@effect/platform"
-import type { Issue as LinearSdkIssue } from "@linear/sdk"
+import type { LinearClient, Issue as LinearSdkIssue } from "@linear/sdk"
 import { Data, Effect, Fiber, SubscriptionRef } from "effect"
 import * as Schema from "effect/Schema"
 import { AppConfig } from "../config/AppConfig.js"
@@ -1177,6 +1177,15 @@ export const withIssueDbTiming = <A, E, R>(
 		)
 	})
 
+type LinearIssuesQuery = NonNullable<Parameters<LinearClient["issues"]>[0]>
+
+export const buildLinearIssuesListPageQuery = (
+	afterCursor: string | null | undefined,
+): LinearIssuesQuery => ({
+	first: 250,
+	...(afterCursor == null ? {} : { after: afterCursor }),
+})
+
 const hasNoDaemonFlag = (args: readonly string[]): boolean =>
 	args.some((arg) => arg === "--no-daemon")
 
@@ -1587,10 +1596,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						CommandExecutor.CommandExecutor
 					> =>
 						linearSdk
-							.issues({
-								first: 250,
-								after: afterCursor,
-							})
+							.issues(buildLinearIssuesListPageQuery(afterCursor))
 							.pipe(
 								Effect.mapError(
 									(error) =>

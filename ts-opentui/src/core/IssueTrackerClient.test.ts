@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
 import {
+	buildLinearIssuesListPageQuery,
 	buildLinearFallbackSnapshots,
 	collectLinearFallbackIssuesById,
 	extractJsonPayload,
@@ -124,6 +125,20 @@ describe("extractJsonPayload", () => {
 				state: { name: "Backlog" },
 			},
 		])
+	})
+})
+
+describe("buildLinearIssuesListPageQuery", () => {
+	it("omits after when cursor is undefined or null", () => {
+		expect(buildLinearIssuesListPageQuery(undefined)).toEqual({ first: 250 })
+		expect(buildLinearIssuesListPageQuery(null)).toEqual({ first: 250 })
+	})
+
+	it("includes after when cursor is present", () => {
+		expect(buildLinearIssuesListPageQuery("cursor-1")).toEqual({
+			first: 250,
+			after: "cursor-1",
+		})
 	})
 })
 
