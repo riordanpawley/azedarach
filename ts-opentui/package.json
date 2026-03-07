@@ -16,8 +16,7 @@
 		"lint": "biome lint src bin",
 		"format": "biome format --write src bin",
 		"check": "biome check --write src bin",
-		"fix": "biome check --write .",
-		"spec:migrate-docs": "bun run scripts/migrate-docs-spec-to-az-spec.ts",
+        "fix": "biome check --write .",
 		"prepare": "git config core.hooksPath .githooks",
 		"codanna:index": "cd .. && codanna --config .codanna/settings.toml index",
 		"postinstall": "if [ \"${CI:-}\" != \"true\" ]; then bun run codanna:index; fi"

@@ -6,32 +6,29 @@ targets: ["claudecode"]
 
 # Spec -> Plan Skill (`az issue` backend)
 
-**Version:** 1.0  
-**Purpose:** Translate the current Markdown spec (`docs/spec/*.md`) into an actionable `az issue` plan (epic, tasks, dependencies, and traceability notes).
+**Version:** 2.0  
+**Purpose:** Translate current `az spec` requirement/link records into an actionable `az issue` plan (epic, tasks, dependencies, and traceability notes).
 
 ## Scope
 
-- Use **current docs-based spec** as source of truth:
-  - `docs/spec/03-workflow-spec.md`
-  - `docs/spec/04-functional-requirements.md`
-  - `docs/spec/05-edge-cases-and-failure-spec.md`
-  - `docs/spec/06-acceptance-catalog.md`
-  - related cross-reference files in `docs/spec/`
+- Use `az spec` records as source of truth:
+  - `az spec req list`
+  - `az spec req get`
+  - `az spec link list` (for existing coverage/traceability context)
 - Use `az issue` for planning artifacts.
-- Do **not** assume or require future `az spec ...` commands.
 
 ## When To Use
 
 Use this skill when asked to:
 - create a plan from spec
-- break down `docs/spec` requirements into issues
+- break down `AZ-FR` / `AZ-AT` requirements into issues
 - generate epic/task structure for a feature area
-- map AZ-FR/AZ-AT contracts to implementation tasks
+- map spec contracts to implementation tasks
 
 ## Mandatory Rules
 
-- Every created task must trace to at least one `AZ-FR-*` ID.
-- Link relevant `AZ-AT-*` scenarios when they define validation scope.
+- Every created task must trace to at least one requirement reference (`local_id` and/or `external_code`).
+- Link relevant acceptance requirements when they define validation scope.
 - Use `az issue` as system of record (no markdown TODO trackers).
 - Keep tasks implementation-ready and narrowly scoped.
 - Record a plan summary in parent issue notes.
@@ -55,13 +52,13 @@ The subagent should produce:
 - dependency edges where sequencing is required
 - issue fields populated with spec trace context:
   - `description`: user-visible objective and scope
-  - `design`: implementation outline + referenced `AZ-FR-*`
-  - `acceptance`: verification expectations + referenced `AZ-AT-*`
+  - `design`: implementation outline + referenced requirement refs
+  - `acceptance`: verification expectations + referenced acceptance refs
 
 ### 3) Review Before Accepting
 
 Validate:
-- no task without `AZ-FR-*` reference
+- no task without a requirement reference
 - dependencies only where needed (avoid over-constraining graph)
 - task slices are independently completable
 - naming is clear and action-oriented
@@ -71,18 +68,22 @@ Validate:
 Update parent issue notes with:
 - created epic/task IDs
 - dependency highlights
-- FR/AT coverage summary
+- requirement/acceptance coverage summary
 - unresolved ambiguities or follow-up questions
 
 ## Command Playbook
 
 ```bash
+# Inspect in-scope requirements
+az spec req list
+az spec req get <requirement-ref>
+
 # Create epic
 az issue create "<epic title>" --type epic --priority 2 --parent <parent-id>
 
 # Create child task
 az issue create "<task title>" --type task --priority 2 --parent <epic-id> \
-  --description "..." --design "Refs: AZ-FR-...." --acceptance "Refs: AZ-AT-...."
+  --description "..." --design "Refs: fr4201 (AZ-FR-4201) ..." --acceptance "Refs: at2901 (AZ-AT-2901) ..."
 
 # Add sequencing dependency
 az issue dep add --type blocks <downstream-task-id> <upstream-task-id>
@@ -95,13 +96,13 @@ az issue update <parent-id> --notes "Plan summary ..."
 
 This skill is complete when:
 - an `az issue` plan exists for the requested scope
-- tasks are traceably linked to current Markdown spec IDs
+- tasks are traceably linked to current `az spec` requirements
 - dependencies are explicit and minimal
 - parent issue notes capture resumable plan context
 
 ## Anti-Patterns
 
-- Creating tasks from intuition without citing `AZ-FR-*`
-- Referencing planned `az spec` commands as required inputs
-- Dumping a giant single task instead of sequenced slices
-- Leaving dependency logic implicit
+- creating tasks from intuition without citing requirement refs
+- planning from stale markdown docs after spec has moved to `az spec`
+- dumping a giant single task instead of sequenced slices
+- leaving dependency logic implicit
