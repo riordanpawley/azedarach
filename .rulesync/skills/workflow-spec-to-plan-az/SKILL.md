@@ -75,8 +75,8 @@ Update parent issue notes with:
 
 ```bash
 # Inspect in-scope requirements
-az spec req list --json
-az spec req get <requirement-ref> --json
+az spec req list
+az spec req get <requirement-ref>
 
 # Create epic
 az issue create "<epic title>" --type epic --priority 2 --parent <parent-id>

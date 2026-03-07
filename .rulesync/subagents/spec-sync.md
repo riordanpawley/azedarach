@@ -69,10 +69,10 @@ Always ensure:
 Run targeted checks and resolve issues:
 
 ```bash
-az spec req list --json
-az spec req get <requirement-ref> --json
-az spec link list --issue <issue-id> --json
-az issue get <issue-id> --json
+az spec req list
+az spec req get <requirement-ref>
+az spec link list --issue <issue-id>
+az issue get <issue-id>
 ```
 
 If record conflicts or ambiguity appear, resolve before completion.

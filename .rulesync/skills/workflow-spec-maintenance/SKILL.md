@@ -79,12 +79,12 @@ Use this checklist after spec updates:
 
 ```bash
 # Inspect requirements and key refs
-az spec req list --json
-az spec req get <requirement-ref> --json
+az spec req list
+az spec req get <requirement-ref>
 
 # Inspect issue/spec trace links
-az spec link list --issue <issue-id> --json
-az issue get <issue-id> --json
+az spec link list --issue <issue-id>
+az issue get <issue-id>
 ```
 
 Expected result: changed behavior is represented by updated requirement content and issue-linked traceability.
