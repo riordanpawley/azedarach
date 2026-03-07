@@ -90,3 +90,4 @@ coverage/
 /ts-opentui/bin/az
 /.beads
 /ts-opentui/az
+/.agents/memories/overview.md

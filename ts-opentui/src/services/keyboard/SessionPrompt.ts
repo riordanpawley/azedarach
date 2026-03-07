@@ -9,7 +9,7 @@ export const buildStartWorkPrompt = (params: {
 	const safeIssueType = sanitizePromptInline(params.issueType)
 	const safeTitle = sanitizePromptInline(params.title)
 	const showCommand = `az issue get ${params.taskId}`
-	const updateCommand = `az issue update ${params.taskId} --design "..."`
+	const updateCommand = `az issue update ${params.taskId} --design '...'`
 
 	let prompt = `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
 
@@ -19,6 +19,7 @@ Only rerun \`${showCommand}\` if details are stale or missing.
 Before starting implementation:
 1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
 2. Once you understand the task, update the issue with your implementation plan using \`${updateCommand}\`
+3. For shell safety, avoid unescaped backticks in \`--design\` text; prefer plain command names or single-quoted payloads.
 
 Goal: Make this issue self-sufficient so any future session could pick it up without extra context.`
 
