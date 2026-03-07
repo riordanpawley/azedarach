@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
+import { Database } from "bun:sqlite"
 import { DateTime, Effect, Layer } from "effect"
 import {
 	allocateNextAlphaIssueId,
@@ -501,6 +502,68 @@ describe("importExternalSnapshot", () => {
 				externalId: "lin-310",
 				externalKey: "AZE-310",
 			})
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
+describe("legacy issue schema migration", () => {
+	it("adds missing issues columns before update writes notes", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-legacy-issues-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const dbDir = join(projectPath, ".azedarach")
+			const dbPath = join(dbDir, "issues.db")
+			mkdirSync(dbDir, { recursive: true })
+			const db = new Database(dbPath)
+			try {
+				db.exec(`
+					CREATE TABLE issues (
+						id TEXT PRIMARY KEY,
+						title TEXT NOT NULL,
+						description TEXT,
+						status TEXT NOT NULL,
+						priority INTEGER NOT NULL,
+						issue_type TEXT NOT NULL,
+						created_at TEXT NOT NULL,
+						updated_at TEXT NOT NULL
+					)
+				`)
+
+				db.prepare(
+					"INSERT INTO issues (id, title, description, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				).run(
+					"legacy-1",
+					"Legacy issue",
+					"Legacy description",
+					"open",
+					3,
+					"task",
+					"2026-03-01T00:00:00.000Z",
+					"2026-03-01T00:00:00.000Z",
+				)
+			} finally {
+				db.close()
+			}
+
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const updated = yield* store.update(
+						"legacy-1",
+						{ notes: "Updated from legacy schema" },
+						undefined,
+						projectPath,
+					)
+					const issue = yield* store.show("legacy-1", projectPath)
+					return { updated, issue }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.updated).toBe(true)
+			expect(result.issue?.notes).toBe("Updated from legacy schema")
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

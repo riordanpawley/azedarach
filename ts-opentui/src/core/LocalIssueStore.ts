@@ -940,6 +940,37 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					}
 				})
 
+			const ensureIssueColumns = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError> =>
+				Effect.gen(function* () {
+					const columns = yield* sql<TableInfoRow>`PRAGMA table_info(issues)`
+					if (columns.length === 0) {
+						return
+					}
+
+					const columnNames = new Set(columns.map((column) => column.name))
+					const requiredColumns: readonly {
+						readonly name: string
+						readonly definition: string
+					}[] = [
+						{ name: "closed_at", definition: "TEXT" },
+						{ name: "assignee", definition: "TEXT" },
+						{ name: "labels_json", definition: "TEXT" },
+						{ name: "design", definition: "TEXT" },
+						{ name: "notes", definition: "TEXT" },
+						{ name: "acceptance", definition: "TEXT" },
+						{ name: "estimate", definition: "INTEGER" },
+						{ name: "deleted_at", definition: "TEXT" },
+					]
+
+					for (const column of requiredColumns) {
+						if (!columnNames.has(column.name)) {
+							yield* sql.unsafe(
+								`ALTER TABLE issues ADD COLUMN ${column.name} ${column.definition}`,
+							)
+						}
+					}
+				})
+
 			const ensureSpecRequirementColumns = (
 				sql: SqlClient.SqlClient,
 			): Effect.Effect<void, SqlError | LocalIssueStoreError> =>
@@ -1460,6 +1491,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 							for (const statement of schemaStatements) {
 								yield* sql.unsafe(statement)
 							}
+							yield* ensureIssueColumns(sql)
 							yield* ensureSyncQueueColumns(sql)
 							yield* ensureSpecRequirementColumns(sql)
 							yield* maybeRunStaleOpenBackup(sql, dbPath, storageRoot, backupConfig)
