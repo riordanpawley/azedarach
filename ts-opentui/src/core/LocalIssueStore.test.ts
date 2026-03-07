@@ -14,6 +14,30 @@ import {
 } from "./LocalIssueStore.js"
 import type { SpecPublishConfig, SpecPublishOutcome } from "./specTypes.js"
 
+const LINEAR_DUPLICATE_CLEANUP_FORCE_ENV = "AZEDARACH_LINEAR_DUPLICATE_CLEANUP_FORCE"
+
+const withEnv = async <A>(
+	key: string,
+	value: string | undefined,
+	run: () => Promise<A>,
+): Promise<A> => {
+	const previous = process.env[key]
+	if (value === undefined) {
+		delete process.env[key]
+	} else {
+		process.env[key] = value
+	}
+	try {
+		return await run()
+	} finally {
+		if (previous === undefined) {
+			delete process.env[key]
+		} else {
+			process.env[key] = previous
+		}
+	}
+}
+
 describe("resolveLocalIssueStorageRoot", () => {
 	it("prefers explicit project path over current project path", () => {
 		const resolved = resolveLocalIssueStorageRoot({
@@ -165,6 +189,318 @@ describe("importExternalSnapshot", () => {
 			expect(issue?.notes).toBe("Local notes should survive import")
 			expect(issue?.acceptance).toBe("Local acceptance should survive import")
 			expect(issue?.estimate).toBe(5)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("reuses existing local issue id mapped by external id", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-external-id-map-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const created = yield* store.create({ title: "Local issue" }, undefined, projectPath)
+
+					yield* store.upsertExternalRef(
+						{
+							issueId: created.id,
+							target: "linear",
+							externalId: "lin-dup-1",
+							externalKey: "AZE-123",
+						},
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-123",
+								externalId: "lin-dup-1",
+								externalKey: "AZE-123",
+								title: "Remote title update",
+								status: created.status,
+								priority: created.priority,
+								issueType: created.issue_type,
+								createdAt: created.created_at,
+								updatedAt: created.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					const canonicalIssue = yield* store.show(created.id, projectPath)
+					const duplicateIssue = yield* store.show("AZE-123", projectPath)
+					const externalRef = yield* store.getExternalRef(created.id, "linear", projectPath)
+					return { createdId: created.id, canonicalIssue, duplicateIssue, externalRef }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.canonicalIssue?.id).toBe(result.createdId)
+			expect(result.canonicalIssue?.title).toBe("Remote title update")
+			expect(result.duplicateIssue).toBeUndefined()
+			expect(result.externalRef).toEqual({
+				externalId: "lin-dup-1",
+				externalKey: "AZE-123",
+			})
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("remaps parent dependencies to canonical local ids during import", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-parent-remap-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const parent = yield* store.create({ title: "Parent issue" }, undefined, projectPath)
+					const child = yield* store.create({ title: "Child issue" }, undefined, projectPath)
+
+					yield* store.upsertExternalRef(
+						{
+							issueId: parent.id,
+							target: "linear",
+							externalId: "lin-parent",
+							externalKey: "AZE-200",
+						},
+						projectPath,
+					)
+					yield* store.upsertExternalRef(
+						{
+							issueId: child.id,
+							target: "linear",
+							externalId: "lin-child",
+							externalKey: "AZE-201",
+						},
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-200",
+								externalId: "lin-parent",
+								externalKey: "AZE-200",
+								title: "Parent issue (remote)",
+								status: parent.status,
+								priority: parent.priority,
+								issueType: parent.issue_type,
+								createdAt: parent.created_at,
+								updatedAt: parent.updated_at,
+								labels: [],
+							},
+							{
+								localId: "AZE-201",
+								externalId: "lin-child",
+								externalKey: "AZE-201",
+								title: "Child issue (remote)",
+								status: child.status,
+								priority: child.priority,
+								issueType: child.issue_type,
+								createdAt: child.created_at,
+								updatedAt: child.updated_at,
+								labels: [],
+								parentLocalId: "AZE-200",
+							},
+						],
+						projectPath,
+					)
+
+					const childAfterImport = yield* store.show(child.id, projectPath)
+					const duplicateParentIssue = yield* store.show("AZE-200", projectPath)
+					const duplicateChildIssue = yield* store.show("AZE-201", projectPath)
+					return { parentId: parent.id, childAfterImport, duplicateParentIssue, duplicateChildIssue }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			const parentDependency = result.childAfterImport?.dependencies?.find(
+				(dependency) => dependency.dependency_type === "parent-child",
+			)
+			expect(parentDependency?.id).toBe(result.parentId)
+			expect(result.duplicateParentIssue).toBeUndefined()
+			expect(result.duplicateChildIssue).toBeUndefined()
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("skips legacy duplicate merge after the one-time cleanup marker is set", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-duplicate-cleanup-skip-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const canonical = yield* store.create({ title: "Canonical local issue" }, undefined, projectPath)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-320",
+								externalId: "lin-320",
+								externalKey: "AZE-320",
+								title: "Duplicate linear-key issue",
+								status: canonical.status,
+								priority: canonical.priority,
+								issueType: canonical.issue_type,
+								createdAt: canonical.created_at,
+								updatedAt: canonical.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					yield* store.upsertExternalRef(
+						{
+							issueId: canonical.id,
+							target: "linear",
+							externalId: "lin-320",
+							externalKey: "AZE-320",
+						},
+						projectPath,
+					)
+
+					yield* store.importExternalSnapshot(
+						"linear",
+						[
+							{
+								localId: "AZE-320",
+								externalId: "lin-320",
+								externalKey: "AZE-320",
+								title: "Canonical issue (remote refresh)",
+								status: canonical.status,
+								priority: canonical.priority,
+								issueType: canonical.issue_type,
+								createdAt: canonical.created_at,
+								updatedAt: canonical.updated_at,
+								labels: [],
+							},
+						],
+						projectPath,
+					)
+
+					const canonicalIssue = yield* store.show(canonical.id, projectPath)
+					const duplicateIssue = yield* store.show("AZE-320", projectPath)
+					const canonicalRef = yield* store.getExternalRef(canonical.id, "linear", projectPath)
+					return { canonicalId: canonical.id, canonicalIssue, duplicateIssue, canonicalRef }
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.canonicalIssue?.id).toBe(result.canonicalId)
+			expect(result.canonicalIssue?.title).toBe("Canonical issue (remote refresh)")
+			expect(result.duplicateIssue?.id).toBe("AZE-320")
+			expect(result.canonicalRef).toEqual({
+				externalId: "lin-320",
+				externalKey: "AZE-320",
+			})
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("merges preexisting duplicate linear-key issues when cleanup force env is enabled", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-duplicate-cleanup-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await withEnv(LINEAR_DUPLICATE_CLEANUP_FORCE_ENV, "1", () =>
+				Effect.runPromise(
+					Effect.gen(function* () {
+						const store = yield* LocalIssueStore
+						const canonical = yield* store.create(
+							{ title: "Canonical local issue" },
+							undefined,
+							projectPath,
+						)
+						const dependent = yield* store.create({ title: "Dependent issue" }, undefined, projectPath)
+
+						yield* store.importExternalSnapshot(
+							"linear",
+							[
+								{
+									localId: "AZE-310",
+									externalId: "lin-310",
+									externalKey: "AZE-310",
+									title: "Duplicate linear-key issue",
+									status: canonical.status,
+									priority: canonical.priority,
+									issueType: canonical.issue_type,
+									createdAt: canonical.created_at,
+									updatedAt: canonical.updated_at,
+									labels: [],
+								},
+							],
+							projectPath,
+						)
+
+						yield* store.upsertExternalRef(
+							{
+								issueId: canonical.id,
+								target: "linear",
+								externalId: "lin-310",
+								externalKey: "AZE-310",
+							},
+							projectPath,
+						)
+
+						yield* store.update(dependent.id, { parent: "AZE-310" }, undefined, projectPath)
+
+						yield* store.importExternalSnapshot(
+							"linear",
+							[
+								{
+									localId: "AZE-310",
+									externalId: "lin-310",
+									externalKey: "AZE-310",
+									title: "Canonical issue (remote refresh)",
+									status: canonical.status,
+									priority: canonical.priority,
+									issueType: canonical.issue_type,
+									createdAt: canonical.created_at,
+									updatedAt: canonical.updated_at,
+									labels: [],
+								},
+							],
+							projectPath,
+						)
+
+						const canonicalIssue = yield* store.show(canonical.id, projectPath)
+						const duplicateIssue = yield* store.show("AZE-310", projectPath)
+						const dependentIssue = yield* store.show(dependent.id, projectPath)
+						const canonicalRef = yield* store.getExternalRef(canonical.id, "linear", projectPath)
+						return {
+							canonicalId: canonical.id,
+							canonicalIssue,
+							duplicateIssue,
+							dependentIssue,
+							canonicalRef,
+						}
+					}).pipe(Effect.provide(testLayer)),
+				),
+			)
+
+			const parentDependency = result.dependentIssue?.dependencies?.find(
+				(dependency) => dependency.dependency_type === "parent-child",
+			)
+			expect(result.canonicalIssue?.id).toBe(result.canonicalId)
+			expect(result.canonicalIssue?.title).toBe("Canonical issue (remote refresh)")
+			expect(result.duplicateIssue).toBeUndefined()
+			expect(parentDependency?.id).toBe(result.canonicalId)
+			expect(result.canonicalRef).toEqual({
+				externalId: "lin-310",
+				externalKey: "AZE-310",
+			})
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

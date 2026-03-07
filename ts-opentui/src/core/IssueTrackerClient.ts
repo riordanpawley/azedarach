@@ -1011,6 +1011,16 @@ export const shouldUseLinearReadFallback = (input: LinearReadFallbackInput): boo
 	return input.syncPulledCount === 0
 }
 
+export interface ResolveSyncProjectPathInput {
+	readonly selectedPath?: string
+	readonly fallbackProjectPath: string
+}
+
+export const resolveSyncProjectPathValue = (input: ResolveSyncProjectPathInput): string => {
+	const trimmed = input.selectedPath?.trim()
+	return trimmed && trimmed.length > 0 ? trimmed : input.fallbackProjectPath
+}
+
 const getParentLocalIdFromIssue = (issue: Issue): string | undefined =>
 	issue.dependencies?.find((dependency) => dependency.dependency_type === "parent-child")?.id
 
@@ -1069,9 +1079,7 @@ export const collectLinearFallbackIssuesById = <E, R>(
 				),
 			),
 		{ concurrency: 1 },
-	).pipe(
-		Effect.map((issues) => issues.filter((issue): issue is Issue => issue !== undefined)),
-	)
+	).pipe(Effect.map((issues) => issues.filter((issue): issue is Issue => issue !== undefined)))
 
 interface IssueDbClient {
 	readonly flavor: IssueDbFlavor
@@ -1373,10 +1381,24 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		 * Get effective cwd for tracker commands:
 		 * - If explicit cwd provided, use it
 		 * - Otherwise, use current project path from ProjectService
-		 * - Falls back to undefined (process.cwd()) if no project selected
+		 * - Returns undefined when no project is selected (callers choose fallback behavior)
 		 */
 		const getEffectiveCwd = (explicitCwd?: string): Effect.Effect<string | undefined> =>
 			explicitCwd ? Effect.succeed(explicitCwd) : projectService.getCurrentPath()
+
+		/**
+		 * Resolve a stable, non-empty project path at call boundary for async sync flows.
+		 * This prevents later project switches from retargeting in-flight sync writes.
+		 */
+		const resolveSyncProjectPath = (explicitCwd?: string): Effect.Effect<string> =>
+			getEffectiveCwd(explicitCwd).pipe(
+				Effect.map((cwd) =>
+					resolveSyncProjectPathValue({
+						selectedPath: cwd,
+						fallbackProjectPath: process.cwd(),
+					}),
+				),
+			)
 
 		const executeLegacyJsonCommand = (
 			executable: LegacyIssueExecutable,
@@ -1672,9 +1694,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				CommandExecutor.CommandExecutor
 			> =>
 				fetchAllWorkflowStates().pipe(
-					Effect.map(
-						(states) => new Map(states.map((state) => [state.id, state.name] as const)),
-					),
+					Effect.map((states) => new Map(states.map((state) => [state.id, state.name] as const))),
 				)
 
 			const fetchWorkflowStates = (): Effect.Effect<
@@ -1743,9 +1763,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				CommandExecutor.CommandExecutor
 			> =>
 				fetchAllIssueLabels().pipe(
-					Effect.map(
-						(labels) => new Map(labels.map((label) => [label.id, label.name] as const)),
-					),
+					Effect.map((labels) => new Map(labels.map((label) => [label.id, label.name] as const))),
 				)
 
 			const fetchUsers = (): Effect.Effect<
@@ -2471,6 +2489,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 			configuredBackend !== "linear"
 				? Effect.succeed(DEFAULT_LINEAR_READ_SYNC_ATTEMPT)
 				: Effect.gen(function* () {
+						const projectPath = yield* resolveSyncProjectPath(cwd)
 						const backendSync = yield* backendSyncRouter.resolve()
 						if (backendSync === undefined) {
 							return DEFAULT_LINEAR_READ_SYNC_ATTEMPT
@@ -2478,7 +2497,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 						const readSyncEffect = fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSync.flushQueue(cwd),
+							backendSync.flushQueue(projectPath),
 						).pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(`Linear read sync failed: ${error.message}`).pipe(
@@ -2501,7 +2520,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						)
 						if (!completedWithinBudget) {
 							yield* Effect.log(
-								`Linear read sync timed out after ${maxSyncWaitMs}ms; returning local-first data (cwd=${cwd ?? "<none>"})`,
+								`Linear read sync timed out after ${maxSyncWaitMs}ms; returning local-first data (projectPath=${projectPath})`,
 							)
 							return {
 								completedWithinBudget: false,
@@ -2598,9 +2617,9 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 					).pipe(Effect.asVoid)
 				}),
 				Effect.catchAll((error) =>
-					Effect.logWarning(
-						`Linear fallback local-store backfill failed: ${error.message}`,
-					).pipe(Effect.asVoid),
+					Effect.logWarning(`Linear fallback local-store backfill failed: ${error.message}`).pipe(
+						Effect.asVoid,
+					),
 				),
 			)
 		}
@@ -2727,48 +2746,46 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						}
 
 						// On linear local-first backends, try refreshing the local cache from Linear once
-					// before returning not found. If refresh fails, still surface not found rather than
-					// leaking backend sync failures for missing issues.
-					let syncAttempt = DEFAULT_LINEAR_READ_SYNC_ATTEMPT
-					if (configuredBackend === "linear") {
-						syncAttempt = yield* ensureLinearReadSync(effectiveCwd, maxSyncWaitMs)
-					}
-
-					const refreshedIssue = yield* fromLocalStore(
-						"local-store show",
-						localIssueStore.show(id, effectiveCwd),
-					)
-					if (refreshedIssue !== undefined && refreshedIssue.status !== "tombstone") {
-						return refreshedIssue
-					}
-
-					if (
-						shouldUseLinearReadFallback({
-							backend: configuredBackend,
-							requestedCount: 1,
-							localResultCount: 0,
-							syncPulledCount: syncAttempt.syncResult.pulled,
-						})
-					) {
-						const fallbackIssues = yield* runLinearReadFallback(["show", id], effectiveCwd)
-						const fallbackIssue = fallbackIssues[0]
-						if (fallbackIssue !== undefined) {
-							yield* backfillLinearFallbackIssues([fallbackIssue], effectiveCwd)
-							const backfilledIssue = yield* fromLocalStore(
-								"local-store show",
-								localIssueStore.show(id, effectiveCwd),
-							).pipe(
-								Effect.catchAll(() => Effect.succeed(undefined)),
-							)
-							if (backfilledIssue !== undefined && backfilledIssue.status !== "tombstone") {
-								return backfilledIssue
-							}
-							return fallbackIssue
+						// before returning not found. If refresh fails, still surface not found rather than
+						// leaking backend sync failures for missing issues.
+						let syncAttempt = DEFAULT_LINEAR_READ_SYNC_ATTEMPT
+						if (configuredBackend === "linear") {
+							syncAttempt = yield* ensureLinearReadSync(effectiveCwd, maxSyncWaitMs)
 						}
-					}
 
-					return yield* Effect.fail(new NotFoundError({ issueId: id }))
-				}
+						const refreshedIssue = yield* fromLocalStore(
+							"local-store show",
+							localIssueStore.show(id, effectiveCwd),
+						)
+						if (refreshedIssue !== undefined && refreshedIssue.status !== "tombstone") {
+							return refreshedIssue
+						}
+
+						if (
+							shouldUseLinearReadFallback({
+								backend: configuredBackend,
+								requestedCount: 1,
+								localResultCount: 0,
+								syncPulledCount: syncAttempt.syncResult.pulled,
+							})
+						) {
+							const fallbackIssues = yield* runLinearReadFallback(["show", id], effectiveCwd)
+							const fallbackIssue = fallbackIssues[0]
+							if (fallbackIssue !== undefined) {
+								yield* backfillLinearFallbackIssues([fallbackIssue], effectiveCwd)
+								const backfilledIssue = yield* fromLocalStore(
+									"local-store show",
+									localIssueStore.show(id, effectiveCwd),
+								).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
+								if (backfilledIssue !== undefined && backfilledIssue.status !== "tombstone") {
+									return backfilledIssue
+								}
+								return fallbackIssue
+							}
+						}
+
+						return yield* Effect.fail(new NotFoundError({ issueId: id }))
+					}
 
 					const output = yield* runBd(["show", id], effectiveCwd)
 
@@ -2821,9 +2838,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 								const backfilledLocalIssues = yield* fromLocalStore(
 									"local-store showMultiple",
 									localIssueStore.showMultiple(ids, effectiveCwd),
-								).pipe(
-									Effect.catchAll(() => Effect.succeed(localIssues)),
-								)
+								).pipe(Effect.catchAll(() => Effect.succeed(localIssues)))
 								return mergeIssuesByRequestedIds(ids, backfilledLocalIssues, fallbackIssues)
 							}
 						}
@@ -2970,20 +2985,23 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (configuredBackend === "linear") {
+						const projectPath = yield* resolveSyncProjectPath(cwd)
 						const backendSync = yield* backendSyncRouter.resolve()
 						if (backendSync === undefined) {
 							yield* Effect.log(
-								`IssueTrackerClient.sync skipped: backend=linear cwd=${effectiveCwd} reason=no_backend_sync_service`,
+								`IssueTrackerClient.sync skipped: backend=linear projectPath=${projectPath} reason=no_backend_sync_service`,
 							)
 							return ZERO_SYNC_RESULT
 						}
-						yield* Effect.log(`IssueTrackerClient.sync linear flush start: cwd=${effectiveCwd}`)
+						yield* Effect.log(
+							`IssueTrackerClient.sync linear flush start: projectPath=${projectPath}`,
+						)
 						const syncResult = yield* fromIssueSync(
 							"issue-sync flushLinearQueue",
-							backendSync.flushQueue(effectiveCwd),
+							backendSync.flushQueue(projectPath),
 						)
 						yield* Effect.log(
-							`IssueTrackerClient.sync linear flush complete: cwd=${effectiveCwd} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+							`IssueTrackerClient.sync linear flush complete: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
 						)
 						return syncResult
 					}

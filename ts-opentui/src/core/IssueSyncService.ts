@@ -89,7 +89,7 @@ class LinearSyncRequest extends Request.TaggedClass("LinearSyncRequest")<
 		readonly issueId: string
 		readonly operation: SyncOperation
 		readonly payloadJson: string | null
-		readonly cwd: string | undefined
+		readonly projectPath: string
 	}
 > {}
 
@@ -295,8 +295,7 @@ const normalizeScopeValue = (value: string | undefined): string | undefined => {
 	return trimmed.length > 0 ? trimmed : undefined
 }
 
-const UUID_PATTERN =
-	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 const isUuid = (value: string): boolean => UUID_PATTERN.test(value)
 
@@ -322,10 +321,7 @@ export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFil
 			| { readonly id: { readonly eq: string } }
 			| { readonly key: { readonly eqIgnoreCase: string } }
 			| { readonly name: { readonly eqIgnoreCase: string } }
-		> = [
-			{ key: { eqIgnoreCase: team } },
-			{ name: { eqIgnoreCase: team } },
-		]
+		> = [{ key: { eqIgnoreCase: team } }, { name: { eqIgnoreCase: team } }]
 		if (isUuid(team)) {
 			teamOr.unshift({ id: { eq: team } })
 		}
@@ -341,10 +337,7 @@ export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFil
 			| { readonly id: { readonly eq: string } }
 			| { readonly slugId: { readonly eqIgnoreCase: string } }
 			| { readonly name: { readonly eqIgnoreCase: string } }
-		> = [
-			{ slugId: { eqIgnoreCase: project } },
-			{ name: { eqIgnoreCase: project } },
-		]
+		> = [{ slugId: { eqIgnoreCase: project } }, { name: { eqIgnoreCase: project } }]
 		if (isUuid(project)) {
 			projectOr.unshift({ id: { eq: project } })
 		}
@@ -358,12 +351,6 @@ export const buildLinearIssueFilter = (scope: LinearIssueScope): LinearIssuesFil
 	if (constraints.length === 0) return undefined
 	if (constraints.length === 1) return constraints[0]
 	return { and: constraints }
-}
-
-const getEffectiveProjectPath = (cwd: string | undefined): string => {
-	if (cwd === undefined) return process.cwd()
-	const trimmed = cwd.trim()
-	return trimmed.length > 0 ? trimmed : process.cwd()
 }
 
 const formatSyncQueueSummary = (summary: SyncQueueSummary): string =>
@@ -648,13 +635,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					)
 
 		const resolveLinearApiKey = (
-			cwd: string | undefined,
+			projectPath: string,
 		): Effect.Effect<
 			Readonly<{ apiKey: string | undefined; source: ApiKeySource }>,
 			IssueSyncError
 		> =>
 			Effect.gen(function* () {
-				const projectPath = getEffectiveProjectPath(cwd)
 				const now = Date.now()
 				const cached = yield* Ref.get(apiKeyCacheRef).pipe(
 					Effect.map((cache) => cache.get(projectPath)),
@@ -700,11 +686,17 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			})
 
 		const getLinearRuntime = (
-			cwd?: string,
+			projectPath: string,
 		): Effect.Effect<Option.Option<LinearRuntime>, IssueSyncError> =>
 			Effect.gen(function* () {
-				const projectPath = getEffectiveProjectPath(cwd)
-				const config = yield* appConfig.getIssueTrackerSyncConfig().pipe(
+				const config = yield* appConfig.getIssueTrackerSyncConfigForProjectPath(projectPath).pipe(
+					Effect.mapError(
+						(error) =>
+							new IssueSyncError({
+								message: `Failed to load issue tracker config for projectPath=${projectPath}: ${error.message}`,
+								cause: error,
+							}),
+					),
 					Effect.tapError(() =>
 						setRuntimeHealthUnavailable({
 							projectPath,
@@ -739,7 +731,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return Option.none()
 				}
 
-				const apiKeyResolution = yield* resolveLinearApiKey(cwd)
+				const apiKeyResolution = yield* resolveLinearApiKey(projectPath)
 				const apiKeyOption =
 					apiKeyResolution.apiKey !== undefined
 						? Option.some(apiKeyResolution.apiKey)
@@ -782,7 +774,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const resolveConfiguredProjectId = (
 			configuredProject: string | undefined,
 			issueId: string,
-			cwd: string | undefined,
+			projectPath: string,
 		): Effect.Effect<string | undefined, IssueSyncError> =>
 			Effect.gen(function* () {
 				const normalizedProject = normalizeScopeValue(configuredProject)
@@ -812,7 +804,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					return next
 				})
 				yield* Effect.log(
-					`Linear sync project resolved: issue=${issueId} configuredProject=${normalizedProject} projectId=${resolvedProjectId} projectPath=${getEffectiveProjectPath(cwd)}`,
+					`Linear sync project resolved: issue=${issueId} configuredProject=${normalizedProject} projectId=${resolvedProjectId} projectPath=${projectPath}`,
 				)
 				return resolvedProjectId
 			})
@@ -929,10 +921,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				return yield* collectPages(undefined, new Map())
 			})
 
-		const fetchWorkflowStates = (): Effect.Effect<
-			readonly LinearWorkflowState[],
-			IssueSyncError
-		> =>
+		const fetchWorkflowStates = (): Effect.Effect<readonly LinearWorkflowState[], IssueSyncError> =>
 			Effect.gen(function* () {
 				const fetchWorkflowStatesPage = (afterCursor: string | undefined) =>
 					linearSdk
@@ -976,8 +965,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const fetchStateNameById = (): Effect.Effect<ReadonlyMap<string, string>, IssueSyncError> =>
 			fetchWorkflowStates().pipe(
-				Effect.map((workflowStates) =>
-					new Map(workflowStates.map((state) => [state.id, state.name] as const)),
+				Effect.map(
+					(workflowStates) =>
+						new Map(workflowStates.map((state) => [state.id, state.name] as const)),
 				),
 			)
 
@@ -1048,12 +1038,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const ensureParentExternalId = (
 			parentLocalId: string | undefined,
-			cwd: string | undefined,
+			projectPath: string,
 		): Effect.Effect<string | undefined, IssueSyncError> =>
 			Effect.gen(function* () {
 				if (parentLocalId === undefined) return undefined
 				const parentExternalRef = yield* fromStore(
-					localStore.getExternalRef(parentLocalId, LINEAR_SYNC_TARGET, cwd),
+					localStore.getExternalRef(parentLocalId, LINEAR_SYNC_TARGET, projectPath),
 				)
 				return parentExternalRef?.externalId
 			})
@@ -1063,13 +1053,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			request: LinearSyncRequest,
 		): Effect.Effect<void, IssueSyncError> =>
 			Effect.gen(function* () {
-				const projectPath = getEffectiveProjectPath(request.cwd)
+				const projectPath = request.projectPath
 				const configuredTeam = normalizeScopeValue(runtime.defaultTeam)
 				const configuredProject = normalizeScopeValue(runtime.defaultProject)
 				yield* Effect.log(
 					`Linear sync upsert start: issue=${request.issueId} projectPath=${projectPath} configuredTeam=${configuredTeam ?? "<none>"} configuredProject=${configuredProject ?? "<none>"}`,
 				)
-				const issue = yield* fromStore(localStore.getIssueForSync(request.issueId, request.cwd))
+				const issue = yield* fromStore(localStore.getIssueForSync(request.issueId, projectPath))
 				if (issue === undefined) {
 					yield* Effect.logWarning(
 						`Linear sync upsert skipped: issue=${request.issueId} projectPath=${projectPath} reason=local_issue_missing`,
@@ -1079,16 +1069,16 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				const projectId = yield* resolveConfiguredProjectId(
 					configuredProject,
 					issue.id,
-					request.cwd,
+					projectPath,
 				)
 
 				const externalRef = yield* fromStore(
-					localStore.getExternalRef(issue.id, LINEAR_SYNC_TARGET, request.cwd),
+					localStore.getExternalRef(issue.id, LINEAR_SYNC_TARGET, projectPath),
 				)
 				const parentLocalId = issue.dependencies?.find(
 					(dependency) => dependency.dependency_type === "parent-child",
 				)?.id
-				const parentId = yield* ensureParentExternalId(parentLocalId, request.cwd)
+				const parentId = yield* ensureParentExternalId(parentLocalId, projectPath)
 				if (
 					shouldRetryUpsertForMissingParent({
 						parentLocalId,
@@ -1259,7 +1249,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							target: LINEAR_SYNC_TARGET,
 							externalId: createIssueId,
 						},
-						request.cwd,
+						projectPath,
 					),
 				)
 
@@ -1280,7 +1270,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							externalId: createdLinearIssue.id,
 							externalKey: createdLinearIssue.identifier,
 						},
-						request.cwd,
+						projectPath,
 					),
 				)
 				const createdIssueTeamId = yield* requireTeamId(
@@ -1299,12 +1289,12 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		): Effect.Effect<void, IssueSyncError> =>
 			Effect.gen(function* () {
 				void runtime
-				const projectPath = getEffectiveProjectPath(request.cwd)
+				const projectPath = request.projectPath
 				yield* Effect.log(
 					`Linear sync ${request.operation} start: issue=${request.issueId} projectPath=${projectPath}`,
 				)
 				const externalRef = yield* fromStore(
-					localStore.getExternalRef(request.issueId, LINEAR_SYNC_TARGET, request.cwd),
+					localStore.getExternalRef(request.issueId, LINEAR_SYNC_TARGET, projectPath),
 				)
 				if (externalRef === undefined) {
 					yield* Effect.log(
@@ -1347,11 +1337,21 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			RequestResolver.makeBatched<LinearSyncRequest, never>((requests) =>
 				Effect.gen(function* () {
 					const firstRequest = requests[0]
-					const projectPath =
-						firstRequest === undefined ? process.cwd() : getEffectiveProjectPath(firstRequest.cwd)
+					const projectPath = firstRequest?.projectPath ?? "<none>"
+					const mixedProjectPaths = new Set(requests.map((request) => request.projectPath)).size > 1
 					yield* Effect.log(
 						`Linear sync resolver batch start: size=${requests.length} projectPath=${projectPath}`,
 					)
+					if (mixedProjectPaths) {
+						const error = new IssueSyncError({
+							message: `Mixed project paths in sync batch are not supported (projectPath=${projectPath})`,
+						})
+						yield* Effect.logWarning(error)
+						yield* Effect.forEach(requests, (request) => Request.fail(request, error), {
+							discard: true,
+						})
+						return
+					}
 					yield* Effect.forEach(
 						requests,
 						(request) => {
@@ -1380,7 +1380,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		const markRequestFailure = (
 			item: CollapsedSyncItem,
 			error: IssueSyncError,
-			cwd: string | undefined,
+			projectPath: string,
 			runId: string,
 		): Effect.Effect<void, IssueSyncError> =>
 			Effect.gen(function* () {
@@ -1392,7 +1392,6 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					attempts: nextAttempts,
 					occurredAt: new Date(),
 				}
-				const projectPath = getEffectiveProjectPath(cwd)
 				const shouldTerminal = nextAttempts >= MAX_SYNC_ATTEMPTS
 				if (shouldTerminal) {
 					yield* Effect.logWarning(
@@ -1405,7 +1404,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 								errorMessage: error.message,
 								nextAttempts,
 							},
-							cwd,
+							projectPath,
 						),
 					).pipe(
 						Effect.tap(() =>
@@ -1432,7 +1431,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							delaySeconds,
 							nextAttempts,
 						},
-						cwd,
+						projectPath,
 					),
 				).pipe(
 					Effect.tap(() =>
@@ -1542,11 +1541,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 		const pullRemoteSnapshots = (params: {
 			readonly runtime: LinearRuntime
-			readonly cwd: string | undefined
+			readonly projectPath: string
 			readonly flushRun: SyncRunStart
 		}): Effect.Effect<number, IssueSyncError> =>
 			Effect.gen(function* () {
-				const projectPath = getEffectiveProjectPath(params.cwd)
+				const projectPath = params.projectPath
 				const nowMs = Date.now()
 				const lastHydrationAt = yield* Ref.get(lastRemoteHydrationAtRef).pipe(
 					Effect.map((entries) => entries.get(projectPath)),
@@ -1577,9 +1576,13 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					snapshots.length === 0
 						? 0
 						: yield* fromStore(
-								localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, params.cwd),
+								localStore.importExternalSnapshot(
+									LINEAR_SYNC_TARGET,
+									snapshots,
+									params.projectPath,
+								),
 							)
-				yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, params.cwd))
+				yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, params.projectPath))
 				yield* Ref.update(lastRemoteHydrationAtRef, (entries) => {
 					const next = new Map(entries)
 					next.set(projectPath, nowMs)
@@ -1611,9 +1614,8 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 		})
 
 		return {
-			bootstrapLinear: (cwd?: string): Effect.Effect<number, IssueSyncError> =>
+			bootstrapLinear: (projectPath: string): Effect.Effect<number, IssueSyncError> =>
 				Effect.gen(function* () {
-					const projectPath = getEffectiveProjectPath(cwd)
 					const inFlight = yield* Ref.get(bootstrapInFlightRef).pipe(
 						Effect.map((pending) => pending.get(projectPath)),
 					)
@@ -1656,7 +1658,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 					)
 
 					const runBootstrap: Effect.Effect<number, IssueSyncError> = Effect.gen(function* () {
-						const runtimeOption = yield* getLinearRuntime(cwd)
+						const runtimeOption = yield* getLinearRuntime(projectPath)
 						if (Option.isNone(runtimeOption)) {
 							const message = "bootstrap skipped (linear sync unavailable)"
 							yield* reportSyncHealth({
@@ -1675,7 +1677,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}
 
 						const bootstrapComplete = yield* fromStore(
-							localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, cwd),
+							localStore.isBootstrapComplete(LINEAR_SYNC_TARGET, projectPath),
 						)
 						if (bootstrapComplete) {
 							const message = "bootstrap skipped (already complete)"
@@ -1694,9 +1696,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							return 0
 						}
 
-						const existingCount = yield* fromStore(localStore.countIssues(cwd))
+						const existingCount = yield* fromStore(localStore.countIssues(projectPath))
 						if (existingCount > 0) {
-							yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
+							yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, projectPath))
 							const message = "bootstrap skipped (local issues already present)"
 							yield* reportSyncHealth({
 								status: "skipped",
@@ -1721,10 +1723,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							`Linear bootstrap imported ${snapshots.length} issues (run=${bootstrapRun.runId} team=${runtimeOption.value.defaultTeam ?? "<none>"} project=${runtimeOption.value.defaultProject ?? "<none>"})`,
 						)
 						const imported = yield* fromStore(
-							localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, cwd),
+							localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, projectPath),
 						)
-						yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, cwd))
-						const totalIssues = yield* fromStore(localStore.countIssues(cwd))
+						yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, projectPath))
+						const totalIssues = yield* fromStore(localStore.countIssues(projectPath))
 						yield* Effect.log(
 							`Linear bootstrap complete: run=${bootstrapRun.runId} projectPath=${projectPath} imported=${imported} totalIssues=${totalIssues}`,
 						)
@@ -1781,10 +1783,9 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				}),
 
 			flushLinearQueue: (
-				cwd?: string,
+				projectPath: string,
 			): Effect.Effect<{ readonly pushed: number; readonly pulled: number }, IssueSyncError> =>
 				Effect.gen(function* () {
-					const projectPath = getEffectiveProjectPath(cwd)
 					const inFlight = yield* Ref.get(flushInFlightRef).pipe(
 						Effect.map((pending) => pending.get(projectPath)),
 					)
@@ -1829,7 +1830,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						{ readonly pushed: number; readonly pulled: number },
 						IssueSyncError
 					> = Effect.gen(function* () {
-						const runtimeOption = yield* getLinearRuntime(cwd)
+						const runtimeOption = yield* getLinearRuntime(projectPath)
 						if (Option.isNone(runtimeOption)) {
 							yield* Effect.log(
 								`Linear flush skipped: run=${flushRun.runId} projectPath=${projectPath} reason=runtime_unavailable`,
@@ -1851,10 +1852,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 						}
 
 						const pendingItems = yield* fromStore(
-							localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, cwd),
+							localStore.listPendingSync(LINEAR_SYNC_TARGET, MAX_SYNC_BATCH, projectPath),
 						)
 						const queueSummaryBefore = yield* fromStore(
-							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, cwd),
+							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, projectPath),
 						)
 						yield* setQueueHealth(queueSummaryBefore)
 						const collapsed = collapsePendingItems(pendingItems)
@@ -1881,7 +1882,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 													issueId: item.issueId,
 													operation: item.operation,
 													payloadJson: item.payloadJson,
-													cwd,
+													projectPath,
 												}),
 												resolver,
 											).pipe(
@@ -1894,12 +1895,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 																maxQueueId: item.maxQueueId,
 																claims: item.claims,
 															},
-															cwd,
+															projectPath,
 														),
 													).pipe(
-														Effect.zipRight(
-															Ref.update(pushedRef, (count) => count + claimCount),
-														),
+														Effect.zipRight(Ref.update(pushedRef, (count) => count + claimCount)),
 														Effect.zipRight(
 															Effect.log(
 																`Linear sync dispatch success: run=${flushRun.runId} issue=${item.issueId} operation=${item.operation} claims=${claimCount} projectPath=${projectPath}`,
@@ -1910,7 +1909,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 												Effect.catchAll((error) =>
 													Effect.logWarning(error).pipe(
 														Effect.zipRight(
-															markRequestFailure(item, error, cwd, flushRun.runId),
+															markRequestFailure(item, error, projectPath, flushRun.runId),
 														),
 													),
 												),
@@ -1930,11 +1929,11 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 
 						const pulled = yield* pullRemoteSnapshots({
 							runtime: runtimeOption.value,
-							cwd,
+							projectPath,
 							flushRun,
 						})
 						const queueSummaryAfter = yield* fromStore(
-							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, cwd),
+							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, projectPath),
 						)
 						yield* setQueueHealth(queueSummaryAfter)
 						if (collapsed.length === 0 && pulled === 0) {
