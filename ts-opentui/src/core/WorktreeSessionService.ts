@@ -231,7 +231,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 					yield* Effect.sleep("500 millis")
 
 					const readyMarker = `tmux set-option -t ${target.split(":")[0]} ${markerKey} 1`
-					yield* tmux.sendKeys(target, readyMarker)
+					yield* tmux.sendLiteralCommand(target, readyMarker)
 
 					yield* waitForTmuxOption(
 						target.split(":")[0],
@@ -319,12 +319,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 									if (initCommands && initCommands.length > 0) {
 										for (const cmd of initCommands) {
-											yield* tmux.sendKeys(sessionName, buildGuardedInitCommand(sessionName, cmd))
+											yield* tmux.sendLiteralCommand(sessionName, buildGuardedInitCommand(sessionName, cmd))
 										}
 									}
 
 									const marker = buildInitCompletionMarkerCommand(sessionName)
-									yield* tmux.sendKeys(sessionName, marker)
+									yield* tmux.sendLiteralCommand(sessionName, marker)
 
 									// Spawn background tasks in separate windows
 									const tasks = backgroundTasks ?? []
@@ -346,11 +346,11 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 												yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
 
 												const waitCmd = buildInitWaitCommand(sessionName)
-												yield* tmux.sendKeys(target, waitCmd)
+												yield* tmux.sendLiteralCommand(target, waitCmd)
 
 												if (initCommands && initCommands.length > 0) {
 													for (const initCmd of initCommands) {
-														yield* tmux.sendKeys(
+														yield* tmux.sendLiteralCommand(
 															target,
 															buildGuardedInitCommand(sessionName, initCmd),
 														)
@@ -358,7 +358,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 												}
 
 												yield* tmux.setWindowOption(target, "remain-on-exit", "off")
-												yield* tmux.sendKeys(target, buildRunIfInitSucceededCommand(sessionName, task))
+												yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, task))
 											}),
 										{ concurrency: "unbounded" },
 									)
@@ -383,17 +383,17 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
 								const waitCmd = buildInitWaitCommand(sessionName)
-								yield* tmux.sendKeys(target, waitCmd)
+								yield* tmux.sendLiteralCommand(target, waitCmd)
 
 								yield* Effect.log(`[buildTmuxSessionFromIssue] Shell ready for ${target}`)
 
-								yield* tmux.sendKeys(target, buildRunIfInitSucceededCommand(sessionName, command))
+								yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, command))
 							} else {
 								yield* Effect.log(
 									`[buildTmuxSessionFromIssue] Window ${target} exists, sending command`,
 								)
 								yield* tmux.selectWindow(sessionName, windowName)
-								yield* tmux.sendKeys(target, buildRunIfInitSucceededCommand(sessionName, command))
+								yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, command))
 							}
 
 							return {
@@ -446,12 +446,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								if (options.initCommands && options.initCommands.length > 0) {
 									for (const cmd of options.initCommands) {
-										yield* tmux.sendKeys(sessionName, buildGuardedInitCommand(sessionName, cmd))
+										yield* tmux.sendLiteralCommand(sessionName, buildGuardedInitCommand(sessionName, cmd))
 									}
 								}
 
 								const marker = buildInitCompletionMarkerCommand(sessionName)
-								yield* tmux.sendKeys(sessionName, marker)
+								yield* tmux.sendLiteralCommand(sessionName, marker)
 
 								// Spawn background tasks in separate windows after init completes
 								// Each window waits on @az_init_done before running commands.
@@ -474,12 +474,12 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											yield* waitForShellReady(target, `@az_task_ready_${i + 1}`)
 
 											const waitCmd = buildInitWaitCommand(sessionName)
-											yield* tmux.sendKeys(target, waitCmd)
+											yield* tmux.sendLiteralCommand(target, waitCmd)
 
 											// Run initCommands in the background window (environment setup)
 											if (options.initCommands && options.initCommands.length > 0) {
 												for (const initCmd of options.initCommands) {
-													yield* tmux.sendKeys(
+													yield* tmux.sendLiteralCommand(
 														target,
 														buildGuardedInitCommand(sessionName, initCmd),
 													)
@@ -489,7 +489,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
 
 											// Run the background task command
-											yield* tmux.sendKeys(target, buildRunIfInitSucceededCommand(sessionName, task))
+											yield* tmux.sendLiteralCommand(target, buildRunIfInitSucceededCommand(sessionName, task))
 										}),
 									{ concurrency: "unbounded" },
 								)
@@ -531,7 +531,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								yield* waitForShellReady(target, `@az_window_ready_${windowName}`)
 
 								const waitCmd = buildInitWaitCommand(sessionName)
-								yield* tmux.sendKeys(target, waitCmd)
+								yield* tmux.sendLiteralCommand(target, waitCmd)
 
 								yield* Effect.log(
 									`[ensureWindow] Shell ready for ${target}, waiting for init to finish`,
@@ -539,11 +539,11 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 
 								if (options.initCommands && options.initCommands.length > 0) {
 									for (const cmd of options.initCommands) {
-										yield* tmux.sendKeys(target, buildGuardedInitCommand(sessionName, cmd))
+										yield* tmux.sendLiteralCommand(target, buildGuardedInitCommand(sessionName, cmd))
 									}
 								}
 
-								yield* tmux.sendKeys(
+								yield* tmux.sendLiteralCommand(
 									target,
 									buildRunIfInitSucceededCommand(sessionName, options.command),
 								)
@@ -551,7 +551,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								// Session recovered but tool isn't running - send command to existing window
 								yield* Effect.log(`[ensureWindow] Window ${target} exists, sending command`)
 								yield* tmux.selectWindow(sessionName, windowName)
-								yield* tmux.sendKeys(
+								yield* tmux.sendLiteralCommand(
 									target,
 									buildRunIfInitSucceededCommand(sessionName, options.command),
 								)
@@ -621,7 +621,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								// after each - this triggers direnv hooks between commands
 								for (const initCmd of initCommands) {
 									yield* Effect.log(`Queuing init command: ${sessionName}:${initCmd}`)
-									yield* tmux.sendKeys(
+									yield* tmux.sendLiteralCommand(
 										sessionName,
 										buildGuardedInitCommand(sessionName, initCmd),
 									)
@@ -630,11 +630,11 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 								// Signal init completion
 								// We send this to the shell so it runs AFTER initCommands complete
 								const marker = buildInitCompletionMarkerCommand(sessionName)
-								yield* tmux.sendKeys(sessionName, marker)
+								yield* tmux.sendLiteralCommand(sessionName, marker)
 
 								// Send the main command last
 								yield* Effect.log(`Queuing main command: ${sessionName}:${command}`)
-								yield* tmux.sendKeys(
+								yield* tmux.sendLiteralCommand(
 									sessionName,
 									buildRunIfInitSucceededCommand(sessionName, command),
 								)
@@ -662,11 +662,11 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											// Background tasks MUST wait for main session init to complete.
 											// We use a shell loop to wait for the @az_init_done option to be set.
 											const waitCmd = buildInitWaitCommand(sessionName)
-											yield* tmux.sendKeys(target, waitCmd)
+											yield* tmux.sendLiteralCommand(target, waitCmd)
 
 											// Run initCommands in the background window (environment only)
 											for (const initCmd of initCommands) {
-												yield* tmux.sendKeys(
+												yield* tmux.sendLiteralCommand(
 													target,
 													buildGuardedInitCommand(sessionName, initCmd),
 												)
@@ -675,7 +675,7 @@ export class WorktreeSessionService extends Effect.Service<WorktreeSessionServic
 											yield* tmux.setWindowOption(target, "remain-on-exit", "off")
 
 											// Run the background task command
-											yield* tmux.sendKeys(
+											yield* tmux.sendLiteralCommand(
 												target,
 												buildRunIfInitSucceededCommand(sessionName, task),
 											)
