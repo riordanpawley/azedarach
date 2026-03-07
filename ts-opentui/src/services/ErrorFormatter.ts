@@ -275,35 +275,26 @@ const ERROR_FORMATTERS: Record<
 		category: "tmux",
 	}),
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// PR Errors
-	// ─────────────────────────────────────────────────────────────────────────
-	PRError: (error) => {
-		const message = String(error.message || "")
+    // ─────────────────────────────────────────────────────────────────────────
+    // PR Errors
+    // ─────────────────────────────────────────────────────────────────────────
+    GitOperationInProgressError: (error) => {
+        const operation = String(error.operation || "git operation")
+        const continueCommand = String(error.continueCommand || "git <operation> --continue")
+        const abortCommand = String(error.abortCommand || "git <operation> --abort")
 
-		// Generic git operation in progress in target repository
-		const gitOperationInProgressMatch = message.match(/Git ([a-z-]+) in progress in/i)
-		if (gitOperationInProgressMatch) {
-			const operation = gitOperationInProgressMatch[1]?.toLowerCase() ?? "git operation"
-			return {
-				message: `Target repository has ${operation} in progress`,
-				suggestion: `Try: Continue or abort that ${operation} in the target repo, then retry Space+m`,
-				category: "pr",
-			}
-		}
+        return {
+            message: `Target repository has ${operation} in progress`,
+            suggestion: `Try: Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action`,
+            category: "pr",
+        }
+    },
 
-		// Backward-compat for older merge-only message variant
-		if (message.includes("Merge in progress in")) {
-			return {
-				message: "Merge target already has an active merge",
-				suggestion:
-					"Try: Resolve and commit that merge, or run 'git merge --abort' in that repo, then retry",
-				category: "pr",
-			}
-		}
+    PRError: (error) => {
+        const message = String(error.message || "")
 
-		// Branch protection
-		if (message.includes("protected branch") || message.includes("branch protection")) {
+        // Branch protection
+        if (message.includes("protected branch") || message.includes("branch protection")) {
 			return {
 				message: "Branch is protected",
 				suggestion: "Try: Create a PR instead of direct push, or check branch protection rules",

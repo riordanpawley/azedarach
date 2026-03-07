@@ -220,9 +220,21 @@ export interface MergeConflictCheck {
  * Error when PR operation fails
  */
 export class PRError extends Data.TaggedError("PRError")<{
-	readonly message: string
-	readonly command?: string
-	readonly issueId?: string
+    readonly message: string
+    readonly command?: string
+    readonly issueId?: string
+}> {}
+
+/**
+ * Error when a target repository already has an active git operation in progress.
+ */
+export class GitOperationInProgressError extends Data.TaggedError("GitOperationInProgressError")<{
+    readonly issueId: string
+    readonly operation: "merge" | "rebase" | "cherry-pick" | "revert"
+    readonly contextLabel: string
+    readonly continueCommand: string
+    readonly abortCommand: string
+    readonly message: string
 }> {}
 
 /**
@@ -387,14 +399,15 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly mergeToMain: (
-		options: MergeToMainOptions,
-	) => Effect.Effect<
-		void,
-		| PRError
-		| MergeConflictError
-		| TypeCheckError
-		| GitError
+    readonly mergeToMain: (
+        options: MergeToMainOptions,
+    ) => Effect.Effect<
+        void,
+        | PRError
+        | GitOperationInProgressError
+        | MergeConflictError
+        | TypeCheckError
+        | GitError
 		| NotAGitRepoError
 		| SessionError
 		| TmuxError
@@ -425,10 +438,14 @@ export interface PRWorkflowService {
 	 * }
 	 * ```
 	 */
-	readonly checkMergeConflicts: (options: {
-		issueId: string
-		projectPath: string
-	}) => Effect.Effect<MergeConflictCheck, PRError | GitError, CommandExecutor.CommandExecutor>
+    readonly checkMergeConflicts: (options: {
+        issueId: string
+        projectPath: string
+    }) => Effect.Effect<
+        MergeConflictCheck,
+        PRError | GitOperationInProgressError | GitError,
+        CommandExecutor.CommandExecutor
+    >
 
 	/**
 	 * Abort an in-progress merge in the worktree
@@ -496,13 +513,19 @@ export interface PRWorkflowService {
 	 * })
 	 * ```
 	 */
-	readonly updateFromBase: (
-		options: UpdateFromBaseOptions,
-	) => Effect.Effect<
-		void,
-		PRError | MergeConflictError | GitError | NotAGitRepoError | IssueTrackerError | NotFoundError,
-		CommandExecutor.CommandExecutor
-	>
+    readonly updateFromBase: (
+        options: UpdateFromBaseOptions,
+    ) => Effect.Effect<
+        void,
+        | PRError
+        | GitOperationInProgressError
+        | MergeConflictError
+        | GitError
+        | NotAGitRepoError
+        | IssueTrackerError
+        | NotFoundError,
+        CommandExecutor.CommandExecutor
+    >
 
 	/**
 	 * Get PR comments for a bead's branch
@@ -776,25 +799,29 @@ const getGitOperationInProgress = (
  * This prevents ambiguous failures later in merge flow and gives clear recovery guidance.
  */
 const ensureNoGitOperationInProgress = (options: {
-	cwd: string
-	issueId: string
-	contextLabel: string
-}): Effect.Effect<void, PRError, CommandExecutor.CommandExecutor> =>
-	Effect.gen(function* () {
-		const { cwd, issueId, contextLabel } = options
-		const operation = yield* getGitOperationInProgress(cwd)
-		if (!operation) return
+    cwd: string
+    issueId: string
+    contextLabel: string
+}): Effect.Effect<void, GitOperationInProgressError, CommandExecutor.CommandExecutor> =>
+    Effect.gen(function* () {
+        const { cwd, issueId, contextLabel } = options
+        const operation = yield* getGitOperationInProgress(cwd)
+        if (!operation) return
 
-		const continueCommand = `git -C ${cwd} ${operation.continueArgs.join(" ")}`
-		const abortCommand = `git -C ${cwd} ${operation.abortArgs.join(" ")}`
+        const continueCommand = `git -C ${cwd} ${operation.continueArgs.join(" ")}`
+        const abortCommand = `git -C ${cwd} ${operation.abortArgs.join(" ")}`
 
-		return yield* Effect.fail(
-			new PRError({
-				issueId,
-				message: `Git ${operation.kind} in progress in ${contextLabel}. Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry Space+m.`,
-			}),
-		)
-	})
+        return yield* Effect.fail(
+            new GitOperationInProgressError({
+                issueId,
+                operation: operation.kind,
+                contextLabel,
+                continueCommand,
+                abortCommand,
+                message: `Git ${operation.kind} in progress in ${contextLabel}. Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action.`,
+            }),
+        )
+    })
 
 /**
  * Execute a gh command and return stdout
@@ -966,10 +993,10 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 		 * Internal helper to get effective base branch for a bead.
 		 * Uses parent epic branch if child of epic, otherwise uses configured base branch.
 		 */
-		const getIssueBaseBranch = (
-			issueId: string,
-			projectPath: string,
-			explicitBaseBranch?: string,
+        const getIssueBaseBranch = (
+            issueId: string,
+            projectPath: string,
+            explicitBaseBranch?: string,
 		): Effect.Effect<
 			{ baseBranch: string; parentEpic: Issue | undefined },
 			IssueTrackerError | NotFoundError | ParseError | SyncRequiredError,
@@ -986,9 +1013,46 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					const baseBranch = yield* getIssueBranchName(parentEpic.id, projectPath)
 					return { baseBranch, parentEpic }
 				}
-				// No parent epic: use the standard base branch
-				return { baseBranch: gitConfig.baseBranch, parentEpic: undefined }
-			})
+                // No parent epic: use the standard base branch
+                return { baseBranch: gitConfig.baseBranch, parentEpic: undefined }
+            })
+
+        /**
+         * Resolve which repository context owns the effective base branch operation state.
+         *
+         * Standalone tasks use the project base-branch context.
+         * Epic children use the parent epic worktree when available.
+         */
+        const getBaseOperationContext = (
+            projectPath: string,
+            parentEpic: Issue | undefined,
+        ): Effect.Effect<
+            { cwd: string; contextLabel: string },
+            GitError | NotAGitRepoError,
+            CommandExecutor.CommandExecutor
+        > =>
+            Effect.gen(function* () {
+                if (!parentEpic) {
+                    return { cwd: projectPath, contextLabel: "project base branch" }
+                }
+
+                const epicWorktree = yield* worktreeManager.get({
+                    issueId: parentEpic.id,
+                    projectPath,
+                })
+
+                if (epicWorktree) {
+                    return {
+                        cwd: epicWorktree.path,
+                        contextLabel: `epic ${parentEpic.id} worktree`,
+                    }
+                }
+
+                return {
+                    cwd: projectPath,
+                    contextLabel: `epic ${parentEpic.id} branch context`,
+                }
+            })
 
 		return {
 			createPR: (options: CreatePROptions) =>
@@ -2009,9 +2073,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					}
 				}),
 
-			updateFromBase: (options: UpdateFromBaseOptions) =>
-				diagnostics.measure(
-					{
+            updateFromBase: (options: UpdateFromBaseOptions) =>
+                diagnostics.measure(
+                    {
 						source: "PRWorkflow",
 						name: "updateFromBase",
 						thresholdMs: 1000,
@@ -2022,11 +2086,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						const { issueId, projectPath, baseBranch: explicitBaseBranch } = options
 
 						// Determine effective base branch (epic branch for children, main for epics/standalone)
-						const { baseBranch } = yield* getIssueBaseBranch(
-							issueId,
-							projectPath,
-							explicitBaseBranch,
-						)
+                        const { baseBranch, parentEpic } = yield* getIssueBaseBranch(
+                            issueId,
+                            projectPath,
+                            explicitBaseBranch,
+                        )
 
 						// Get worktree info
 						const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
@@ -2037,11 +2101,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									issueId,
 								}),
 							)
-						}
-						const issueBranch = worktree.branch
+                        }
+                        const issueBranch = worktree.branch
 
-						// === Step 1: Update local base branch to match origin ===
-						if (gitConfig.fetchEnabled) {
+                        // Fail fast if the effective base context is already in an active git operation.
+                        // Continuing from an unresolved base state can produce misleading merge outcomes.
+                        const baseOperationContext = yield* getBaseOperationContext(projectPath, parentEpic)
+                        yield* ensureNoGitOperationInProgress({
+                            cwd: baseOperationContext.cwd,
+                            issueId,
+                            contextLabel: baseOperationContext.contextLabel,
+                        })
+
+                        // === Step 1: Update local base branch to match origin ===
+                        if (gitConfig.fetchEnabled) {
 							// Fetch latest from origin
 							yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
 								Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
@@ -2332,27 +2405,36 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 			 *
 			 * @returns Effect that succeeds if merge was clean, fails with MergeConflictError if conflicts.
 			 */
-			mergeBaseIntoBranch: (options: { issueId: string; projectPath: string }) =>
-				Effect.gen(function* () {
-					const { issueId, projectPath } = options
-					const gitConfig = yield* getGitConfig()
+            mergeBaseIntoBranch: (options: { issueId: string; projectPath: string }) =>
+                Effect.gen(function* () {
+                    const { issueId, projectPath } = options
+                    const gitConfig = yield* getGitConfig()
 
-					// Get effective base branch (parent epic for children, main for others)
-					const { baseBranch } = yield* getIssueBaseBranch(issueId, projectPath)
+                    // Get effective base branch (parent epic for children, main for others)
+                    const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, projectPath)
 
-					// Get worktree info
-					const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
+                    // Get worktree info
+                    const worktree = yield* worktreeManager.get({ issueId: issueId, projectPath })
 					if (!worktree) {
 						return yield* Effect.fail(
 							new PRError({
 								message: `No worktree found for ${issueId}`,
 								issueId,
 							}),
-						)
-					}
+                            )
+                        }
 
-					if (gitConfig.fetchEnabled) {
-						yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
+                    // Fail fast if the effective base context is already in an active git operation.
+                    // This keeps attach-time sync from mutating around unresolved base conflicts.
+                    const baseOperationContext = yield* getBaseOperationContext(projectPath, parentEpic)
+                    yield* ensureNoGitOperationInProgress({
+                        cwd: baseOperationContext.cwd,
+                        issueId,
+                        contextLabel: baseOperationContext.contextLabel,
+                    })
+
+                    if (gitConfig.fetchEnabled) {
+                        yield* runGit(["fetch", "origin", baseBranch], projectPath).pipe(
 							Effect.catchAll((e) => Effect.logWarning(`Failed to fetch: ${e.message}`)),
 						)
 						yield* runGit(["fetch", "origin", `${baseBranch}:${baseBranch}`], projectPath).pipe(

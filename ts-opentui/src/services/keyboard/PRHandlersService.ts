@@ -287,37 +287,44 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Update from base first to resolve any conflicts
 				yield* toast.show("info", `Syncing with ${effectiveBaseBranch} before PR...`)
-				const updateResult = yield* prWorkflow
-					.updateFromBase({ issueId: task.id, projectPath })
-					.pipe(
-						Effect.match({
-							onFailure: (error) => {
-								// MergeConflictError means AI is resolving - don't proceed
-								if (
-									error &&
-									typeof error === "object" &&
-									"_tag" in error &&
-									error._tag === "MergeConflictError"
-								) {
-									return { _tag: "conflict" as const, error }
-								}
-								// Other errors - log but continue
-								return { _tag: "error" as const, error }
-							},
-							onSuccess: () => ({ _tag: "success" as const }),
-						}),
+                const updateResult = yield* prWorkflow
+                    .updateFromBase({ issueId: task.id, projectPath })
+                    .pipe(
+                        Effect.match({
+                            onFailure: (error) => {
+                                switch (error._tag) {
+                                    // MergeConflictError means AI is resolving - don't proceed
+                                    case "MergeConflictError":
+                                        return { _tag: "conflict" as const, error }
+
+                                    // Base context has an in-progress git operation - block PR creation.
+                                    case "GitOperationInProgressError":
+                                        return { _tag: "blocked" as const, error }
+
+                                    default:
+                                        // Other errors - log but continue
+                                        return { _tag: "error" as const, error }
+                                }
+                            },
+                            onSuccess: () => ({ _tag: "success" as const }),
+                        }),
 					)
 
-				if (updateResult._tag === "conflict") {
-					yield* toast.show("info", "Resolving conflicts - retry PR after AI finishes")
-					return
-				}
+                if (updateResult._tag === "conflict") {
+                    yield* toast.show("info", "Resolving conflicts - retry PR after AI finishes")
+                    return
+                }
 
-				if (updateResult._tag === "error") {
-					yield* Effect.logWarning("Update from base failed, proceeding with PR creation anyway", {
-						error: updateResult.error,
-					})
-				}
+                if (updateResult._tag === "blocked") {
+                    yield* toast.show("error", formatForToast(updateResult.error))
+                    return
+                }
+
+                if (updateResult._tag === "error") {
+                    yield* Effect.logWarning("Update from base failed, proceeding with PR creation anyway", {
+                        error: updateResult.error,
+                    })
+                }
 
 				yield* helpers.withQueue(
 					task.id,

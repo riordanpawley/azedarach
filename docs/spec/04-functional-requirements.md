@@ -160,6 +160,8 @@ This section is normative.
 - AZ-FR-1001c: Title-derived slug generation MUST enforce a configurable maximum length via truncation (applies to the slug segment only).
 - AZ-FR-1001d: Existing pre-author-prefix branch mappings MUST remain supported and MUST NOT be auto-migrated during normal operations.
 - AZ-FR-1002: Update flow MUST surface merge conflicts clearly.
+- AZ-FR-1002a: Update-from-base flow MUST fail fast when the effective base-branch context already has an active git operation state (`MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD`, or `REVERT_HEAD`).
+- AZ-FR-1002b: Fail-fast update response MUST include explicit continue/abort recovery guidance before retry.
 - AZ-FR-1003: Conflict resolution path MUST be available.
 - AZ-FR-1004: `Space M` MUST abort in-progress merge.
 - AZ-FR-1005: Abort merge MUST restore pre-merge state when possible.
@@ -185,6 +187,7 @@ This section is normative.
 - AZ-FR-1101: `Space P` MUST create PR for focused issue branch.
 - AZ-FR-1102: PR creation MUST ensure branch is pushed.
 - AZ-FR-1103: PR creation SHOULD sync from configured base branch before opening PR.
+- AZ-FR-1103a: PR creation MUST stop when pre-sync detects active git-operation state in the effective base context; it MUST NOT proceed to PR creation until that state is resolved or aborted.
 - AZ-FR-1104: PR defaults (draft/ready) MUST be configurable.
 - AZ-FR-1105: PR metadata MUST be persisted to issue context.
 - AZ-FR-1106: Card SHOULD show PR state indicator.
