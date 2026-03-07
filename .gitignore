@@ -29,6 +29,12 @@ Thumbs.db
 
 # Claude artifacts are generated locally from .rulesync
 .claude/
+/AGENTS.md
+/CLAUDE.md
+/ts-opentui/AGENTS.md
+/ts-opentui/CLAUDE.md
+/go-bubbletea/AGENTS.md
+/go-bubbletea/CLAUDE.md
 
 # Environment
 .env.local
