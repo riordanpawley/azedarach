@@ -54,5 +54,5 @@
 
 ## Requirement/Acceptance IDs
 
-- `AZ-FR-####`: functional requirement identifier.
-- `AZ-AT-####`: acceptance scenario identifier.
+- `AZ-FR-####` / `AZ-FR-####a`: functional requirement identifier.
+- `AZ-AT-####` / `AZ-AT-####a`: acceptance scenario identifier.

@@ -67,9 +67,9 @@ const SpecPublishOutcomeJsonSchema = Schema.parseJson(
 	}),
 )
 const SyncQueuePayloadJsonSchema = Schema.parseJson(
-    Schema.Struct({
-        idempotencyKey: Schema.String,
-    }),
+	Schema.Struct({
+		idempotencyKey: Schema.String,
+	}),
 )
 
 export type SyncTarget = "linear"
@@ -252,7 +252,7 @@ const SPEC_PUBLISH_CONFIG_META_KEY = "spec:publish:config"
 const SPEC_PUBLISH_OUTCOME_META_KEY = "spec:publish:last_outcome"
 const RESERVED_LOCAL_ISSUE_IDS = new Set(["az"])
 const LOCAL_ISSUE_BACKUP_FILE_PATTERN = /^issues-(\d{8}T\d{6}Z)\.db$/
-const SPEC_REQUIREMENT_ID_PATTERN = /^AZ-(FR|AT)-\d{4}$/i
+const SPEC_REQUIREMENT_ID_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
 
 const DEFAULT_LOCAL_ISSUE_BACKUP_CONFIG: LocalIssueBackupConfig = {
 	enabled: true,
@@ -611,10 +611,7 @@ const inferSpecRequirementKind = (id: string): SpecRequirementKind => {
 }
 
 const normalizeSpecRequirementId = (id: string): string =>
-	id
-		.trim()
-		.toUpperCase()
-		.replace(/\s+/g, "")
+	id.trim().toUpperCase().replace(/\s+/g, "")
 
 const isValidSpecRequirementId = (id: string): boolean => SPEC_REQUIREMENT_ID_PATTERN.test(id)
 
@@ -1286,9 +1283,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			}
 		}
 
-        const decodeSpecPublishOutcomeMeta = (
-            value: string | undefined,
-        ): SpecPublishOutcome | undefined => {
+		const decodeSpecPublishOutcomeMeta = (
+			value: string | undefined,
+		): SpecPublishOutcome | undefined => {
 			if (value === undefined) {
 				return undefined
 			}
@@ -1297,45 +1294,45 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				return Schema.decodeUnknownSync(SpecPublishOutcomeJsonSchema)(value)
 			} catch {
 				return undefined
-            }
-        }
+			}
+		}
 
-        const encodeSpecPublishConfigMeta = (
-            value: SpecPublishConfig,
-        ): Effect.Effect<string, LocalIssueStoreError> =>
-            Effect.try({
-                try: () => Schema.encodeSync(SpecPublishConfigJsonSchema)(value),
-                catch: (cause) =>
-                    new LocalIssueStoreError({
-                        message: "Failed to encode spec publish config metadata",
-                        cause,
-                    }),
-            })
+		const encodeSpecPublishConfigMeta = (
+			value: SpecPublishConfig,
+		): Effect.Effect<string, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => Schema.encodeSync(SpecPublishConfigJsonSchema)(value),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to encode spec publish config metadata",
+						cause,
+					}),
+			})
 
-        const encodeSpecPublishOutcomeMeta = (
-            value: SpecPublishOutcome,
-        ): Effect.Effect<string, LocalIssueStoreError> =>
-            Effect.try({
-                try: () => Schema.encodeSync(SpecPublishOutcomeJsonSchema)(value),
-                catch: (cause) =>
-                    new LocalIssueStoreError({
-                        message: "Failed to encode spec publish outcome metadata",
-                        cause,
-                    }),
-            })
+		const encodeSpecPublishOutcomeMeta = (
+			value: SpecPublishOutcome,
+		): Effect.Effect<string, LocalIssueStoreError> =>
+			Effect.try({
+				try: () => Schema.encodeSync(SpecPublishOutcomeJsonSchema)(value),
+				catch: (cause) =>
+					new LocalIssueStoreError({
+						message: "Failed to encode spec publish outcome metadata",
+						cause,
+					}),
+			})
 
-        const buildDefaultSyncPayloadJson = (
-            issueId: string,
-            operation: SyncOperation,
-            target: SyncTarget,
-        ): string | null => {
-            if (operation !== "upsert") {
-                return null
-            }
-            return Schema.encodeSync(SyncQueuePayloadJsonSchema)({
-                idempotencyKey: `${target}:upsert:${issueId}`,
-            })
-        }
+		const buildDefaultSyncPayloadJson = (
+			issueId: string,
+			operation: SyncOperation,
+			target: SyncTarget,
+		): string | null => {
+			if (operation !== "upsert") {
+				return null
+			}
+			return Schema.encodeSync(SyncQueuePayloadJsonSchema)({
+				idempotencyKey: `${target}:upsert:${issueId}`,
+			})
+		}
 
 		const enqueueSync = (
 			sql: SqlClient.SqlClient,
@@ -1876,7 +1873,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 						if (!isValidSpecRequirementId(normalizedId)) {
 							return yield* Effect.fail(
 								new LocalIssueStoreError({
-									message: `Invalid spec requirement ID '${params.id}'. Expected AZ-FR-#### or AZ-AT-####.`,
+									message: `Invalid spec requirement ID '${params.id}'. Expected AZ-FR-####[a-z]? or AZ-AT-####[a-z]?.`,
 								}),
 							)
 						}
@@ -2275,17 +2272,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-            setSpecPublishConfig: (
-                config: SpecPublishConfig,
-                cwd?: string,
-            ): Effect.Effect<void, LocalIssueStoreError> =>
-                withSqlMutation(cwd, (sql) =>
-                    encodeSpecPublishConfigMeta(config).pipe(
-                        Effect.flatMap((encoded) =>
-                            setMetaValue(sql, SPEC_PUBLISH_CONFIG_META_KEY, encoded),
-                        ),
-                    ),
-                ),
+			setSpecPublishConfig: (
+				config: SpecPublishConfig,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					encodeSpecPublishConfigMeta(config).pipe(
+						Effect.flatMap((encoded) => setMetaValue(sql, SPEC_PUBLISH_CONFIG_META_KEY, encoded)),
+					),
+				),
 
 			getSpecPublishOutcome: (
 				cwd?: string,
@@ -2296,17 +2291,15 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-            setSpecPublishOutcome: (
-                outcome: SpecPublishOutcome,
-                cwd?: string,
-            ): Effect.Effect<void, LocalIssueStoreError> =>
-                withSqlMutation(cwd, (sql) =>
-                    encodeSpecPublishOutcomeMeta(outcome).pipe(
-                        Effect.flatMap((encoded) =>
-                            setMetaValue(sql, SPEC_PUBLISH_OUTCOME_META_KEY, encoded),
-                        ),
-                    ),
-                ),
+			setSpecPublishOutcome: (
+				outcome: SpecPublishOutcome,
+				cwd?: string,
+			): Effect.Effect<void, LocalIssueStoreError> =>
+				withSqlMutation(cwd, (sql) =>
+					encodeSpecPublishOutcomeMeta(outcome).pipe(
+						Effect.flatMap((encoded) => setMetaValue(sql, SPEC_PUBLISH_OUTCOME_META_KEY, encoded)),
+					),
+				),
 
 			countIssues: (cwd?: string): Effect.Effect<number, LocalIssueStoreError> =>
 				withSql(cwd, (sql) =>

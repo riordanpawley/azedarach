@@ -5,7 +5,7 @@ This section is normative.
 ## 4.1 Requirement ID Scheme
 
 - Prefix: `AZ-FR`
-- Format: `AZ-FR-####`
+- Format: `AZ-FR-####` with optional single-letter suffix (`AZ-FR-####a`)
 
 ## 4.2 Board and Data Requirements
 

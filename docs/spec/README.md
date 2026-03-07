@@ -118,8 +118,8 @@ Requirement IDs are in `04-functional-requirements.md` and are referenced by acc
 
 Format:
 
-- Requirement: `AZ-FR-####`
-- Acceptance scenario: `AZ-AT-####`
+- Requirement: `AZ-FR-####` (optional suffix: `AZ-FR-####a`)
+- Acceptance scenario: `AZ-AT-####` (optional suffix: `AZ-AT-####a`)
 
 ## Definition of Complete Implementation (from this spec)
 

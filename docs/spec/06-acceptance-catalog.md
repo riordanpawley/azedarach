@@ -4,7 +4,7 @@ This catalog defines validation scenarios for requirements in Section 04.
 
 ## 6.1 Scenario Format
 
-- ID: `AZ-AT-####`
+- ID: `AZ-AT-####` with optional single-letter suffix (`AZ-AT-####a`)
 - Preconditions
 - Steps
 - Expected Results
