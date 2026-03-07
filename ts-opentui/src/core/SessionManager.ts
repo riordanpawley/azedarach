@@ -128,6 +128,26 @@ const mapSessionStateToTmuxAttentionStatus = (state: SessionState): TmuxAttentio
 	}
 }
 
+export const ACTIVE_SESSION_STATES: ReadonlySet<SessionState> = new Set([
+	"initializing",
+	"busy",
+	"waiting",
+	"paused",
+	"warning",
+])
+
+export const isActiveSessionState = (state: SessionState): boolean => ACTIVE_SESSION_STATES.has(state)
+
+export const resolveDiscoveredSessionState = (
+	persistedState: SessionState | undefined,
+	hasCodeWindow: boolean,
+): SessionState => {
+	if (!hasCodeWindow && (persistedState === undefined || isActiveSessionState(persistedState))) {
+		return "crashed"
+	}
+	return persistedState ?? "busy"
+}
+
 /**
  * Schema for persisted session - matches Session interface
  * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
@@ -1373,6 +1393,7 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 
 						// Build set of running tmux session names for crash detection
 						const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
+						const activeStates = ACTIVE_SESSION_STATES
 
 						for (const tmuxSession of tmuxSessions) {
 							const parsed = parseIssueSessionName(tmuxSession.name, effectiveProjectPath)
@@ -1386,6 +1407,19 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 							{
 								const worktree = worktreeByIssueLookup.get(issueLookupKey)
 								const persisted = persistedByIssueLookup.get(issueLookupKey)
+								const hasCodeWindow = yield* tmuxService.hasWindow(
+									tmuxSession.name,
+									WINDOW_NAMES.CODE,
+								)
+								const recoveredState = resolveDiscoveredSessionState(
+									persisted?.state,
+									hasCodeWindow,
+								)
+								if (recoveredState === "crashed") {
+									yield* Effect.log(
+										`Detected recoverable orphan session for ${issueId}: code window missing in ${tmuxSession.name}`,
+									)
+								}
 
 								const orphanedSession: Session = {
 									issueId,
@@ -1394,7 +1428,7 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 										persisted?.worktreePath ??
 										getWorktreePath(effectiveProjectPath, issueId),
 									tmuxSessionName: tmuxSession.name,
-									state: persisted?.state ?? "busy",
+									state: recoveredState,
 									startedAt: persisted?.startedAt ?? DateTime.unsafeFromDate(tmuxSession.created),
 									projectPath: persisted?.projectPath ?? effectiveProjectPath,
 								}
@@ -1406,15 +1440,36 @@ export class SessionManager extends Effect.Service<SessionManager>()(
 							}
 						}
 
+						for (const [issueId, inMemorySession] of HashMap.entries(scopedInMemorySessions)) {
+							if (!activeStates.has(inMemorySession.state)) {
+								continue
+							}
+							if (!runningTmuxNames.has(inMemorySession.tmuxSessionName)) {
+								continue
+							}
+
+							const hasCodeWindow = yield* tmuxService.hasWindow(
+								inMemorySession.tmuxSessionName,
+								WINDOW_NAMES.CODE,
+							)
+							if (hasCodeWindow) {
+								continue
+							}
+
+							yield* Effect.log(
+								`Detected session ${issueId} with missing code window (${inMemorySession.tmuxSessionName}); marking crashed for recovery`,
+							)
+							yield* Ref.update(sessionsRef, (sessions) =>
+								HashMap.set(sessions, issueId, {
+									...inMemorySession,
+									state: "crashed",
+								}),
+							)
+							sessionsChanged = true
+						}
+
 						// Detect crashed sessions: persisted sessions whose tmux died
 						// States that indicate an active tmux session should exist:
-						const activeStates: Set<SessionState> = new Set([
-							"initializing",
-							"busy",
-							"waiting",
-							"paused",
-							"warning",
-						])
 
 						for (const [issueId, persisted] of HashMap.entries(scopedPersistedSessions)) {
 							const issueLookupKey = normalizeIssueIdForLookup(issueId)

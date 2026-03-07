@@ -141,6 +141,8 @@ This section is normative.
 - AZ-FR-0818: Auto-recovery retry policy MUST cap each wait duration via configurable `sessionRecovery.retryMaxDelayMs` without requiring a max-attempt cutoff for transient failures.
 - AZ-FR-0819: Auto-recovery failures MUST be logged with issue identity, error classification, and attempt context even when the flow continues retrying.
 - AZ-FR-0820: Session-recovery configuration MUST support `sessionRecovery.autoRecoveryDelayMs`, `sessionRecovery.retryBaseDelayMs`, and `sessionRecovery.retryMaxDelayMs`.
+- AZ-FR-0821: Session start init gating MUST wait for init completion and MUST block AI launch when init fails; failure metadata (including failed command identity) MUST be recorded for diagnostics/recovery and user guidance.
+- AZ-FR-0822: Session reconciliation MUST classify issue tmux sessions missing the `code` window as recoverable startup failures (`crashed`) instead of healthy running sessions.
 
 ## 4.11 Dev Server Requirements
 

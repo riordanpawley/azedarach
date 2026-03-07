@@ -41,6 +41,13 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - validate session existence after start.
   - surface mismatch and offer retry.
 
+### Case F-010a: Session init command fails before startup completes
+
+- Required behavior:
+  - block AI launch in `code` window for that startup attempt.
+  - record init-failure marker metadata including failed command identity.
+  - show actionable guidance in pane output so user can fix init and retry.
+
 ### Case F-011: Attach requested but no session found
 
 - Required behavior:
@@ -78,6 +85,12 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - stop retry loop for that issue immediately.
   - preserve recoverable crashed/manual-recovery path.
   - provide clear terminal reason guidance.
+
+### Case F-017: Session tmux container exists but `code` window is missing
+
+- Required behavior:
+  - classify session as recoverable startup failure (`crashed`) during reconciliation.
+  - route through existing recovery workflow instead of treating as healthy busy session.
 
 ## 5.5 Worktree and Git Failures
 
