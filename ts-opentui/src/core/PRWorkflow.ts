@@ -116,10 +116,22 @@ export interface MergeToMainOptions {
 	 *
 	 * Typical workflow: Space+m to merge (keep iterating), Space+d to cleanup when done
 	 */
-	readonly keepWorktree?: boolean
-	/** Optional progress callback for UX updates during merge flow. */
-	readonly onProgress?: (stage: MergeToMainProgressStage) => Effect.Effect<void, never, never>
+    readonly keepWorktree?: boolean
+    /** Optional progress callback for UX updates during merge flow. */
+    readonly onProgress?: (stage: MergeToMainProgressStage) => Effect.Effect<void, never, never>
+    /**
+     * Optional callback for async push status after local merge succeeds.
+     * Called only when push is enabled and started.
+     */
+    readonly onDeferredPushStatus?: (
+        status: MergeToMainDeferredPushStatus,
+    ) => Effect.Effect<void, never, never>
 }
+
+export type MergeToMainDeferredPushStatus =
+    | { readonly _tag: "started"; readonly branch: string }
+    | { readonly _tag: "succeeded"; readonly branch: string }
+    | { readonly _tag: "failed"; readonly branch: string; readonly error: GitError }
 
 /**
  * Progress stages emitted during mergeToMain.
@@ -1414,17 +1426,20 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 					},
 					Effect.gen(function* () {
 						const gitConfig = yield* getGitConfig()
-						const {
-							issueId,
-							projectPath,
-							pushToOrigin = gitConfig.pushEnabled,
-							closeIssue = false,
-							keepWorktree = true,
-							onProgress,
-						} = options
-						const reportProgress = (stage: MergeToMainProgressStage) =>
-							onProgress ? onProgress(stage) : Effect.void
-						yield* reportProgress("prepare")
+                        const {
+                            issueId,
+                            projectPath,
+                            pushToOrigin = gitConfig.pushEnabled,
+                            closeIssue = false,
+                            keepWorktree = true,
+                            onProgress,
+                            onDeferredPushStatus,
+                        } = options
+                        const reportProgress = (stage: MergeToMainProgressStage) =>
+                            onProgress ? onProgress(stage) : Effect.void
+                        const reportDeferredPush = (status: MergeToMainDeferredPushStatus) =>
+                            onDeferredPushStatus ? onDeferredPushStatus(status) : Effect.void
+                        yield* reportProgress("prepare")
 
 						// Determine effective base branch (epic branch for children, main for epics/standalone)
 						const { baseBranch, parentEpic } = yield* getIssueBaseBranch(issueId, projectPath)
@@ -1912,36 +1927,78 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							)
 						}
 
-						// 12. Push to origin (if enabled and online)
-						if (pushToOrigin) {
-							const pushStatus = yield* offlineService.isGitPushEnabled()
-							if (pushStatus.enabled) {
-								yield* reportProgress("push")
-								const pushCommand = `git push origin ${baseBranch}`
-								const timeoutMessage = `Push timed out after ${MERGE_PUSH_TIMEOUT_SECONDS}s. Your local merge succeeded - retry push manually.`
+                        // 12. Push to origin (if enabled and online)
+                        if (pushToOrigin) {
+                            const pushStatus = yield* offlineService.isGitPushEnabled()
+                            if (pushStatus.enabled) {
+                                yield* reportProgress("push")
+                                const pushCommand = `git push origin ${baseBranch}`
+                                const runDeferredPush = Effect.gen(function* () {
+                                    yield* reportDeferredPush({ _tag: "started", branch: baseBranch })
 
-								yield* runGit(["push", "origin", baseBranch], mergeDir).pipe(
-									Effect.timeoutFail({
-										duration: MERGE_PUSH_TIMEOUT,
-										onTimeout: () =>
-											new GitError({
-												message: timeoutMessage,
-												command: pushCommand,
-											}),
-									}),
-									Effect.mapError((e) =>
-										e.message === timeoutMessage
-											? e
-											: new GitError({
-													message: `Push failed: ${e.message}. Your local merge succeeded - retry push manually.`,
-													command: pushCommand,
-													stderr: e.stderr,
-												}),
-									),
-								)
-							}
-							// Silently skip if offline/disabled - merge already succeeded locally
-						}
+                                    const pushResult = yield* Effect.raceFirst(
+                                        runGit(["push", "origin", baseBranch], mergeDir).pipe(
+                                            Effect.match({
+                                                onFailure: (error) => ({
+                                                    _tag: "failed" as const,
+                                                    branch: baseBranch,
+                                                    error: new GitError({
+                                                        message: `Push failed: ${error.message}. Your local merge succeeded - retry push manually.`,
+                                                        command: pushCommand,
+                                                        stderr: error.stderr,
+                                                    }),
+                                                }),
+                                                onSuccess: () => ({
+                                                    _tag: "succeeded" as const,
+                                                    branch: baseBranch,
+                                                }),
+                                            }),
+                                        ),
+                                        Effect.sleep(MERGE_PUSH_TIMEOUT).pipe(
+                                            Effect.as({ _tag: "timed-out" as const, branch: baseBranch }),
+                                        ),
+                                    )
+
+                                    if (pushResult._tag === "failed") {
+                                        yield* Effect.logWarning(
+                                            `Deferred push failed for ${issueId} -> ${baseBranch}: ${pushResult.error.message}`,
+                                        )
+                                        yield* reportDeferredPush(pushResult)
+                                        return
+                                    }
+
+                                    if (pushResult._tag === "timed-out") {
+                                        const timeoutError = new GitError({
+                                            message: `Push timed out after ${MERGE_PUSH_TIMEOUT_SECONDS}s. Your local merge succeeded - retry push manually.`,
+                                            command: pushCommand,
+                                        })
+                                        yield* Effect.logWarning(
+                                            `Deferred push timed out for ${issueId} -> ${baseBranch}`,
+                                        )
+                                        yield* reportDeferredPush({
+                                            _tag: "failed",
+                                            branch: pushResult.branch,
+                                            error: timeoutError,
+                                        })
+                                        return
+                                    }
+
+                                    yield* reportDeferredPush({
+                                        _tag: "succeeded",
+                                        branch: baseBranch,
+                                    })
+                                }).pipe(
+                                    Effect.catchAll((error) =>
+                                        Effect.logWarning(
+                                            `Deferred push reporting failed for ${issueId} -> ${baseBranch}: ${String(error)}`,
+                                        ),
+                                    ),
+                                )
+
+                                yield* Effect.forkDaemon(runDeferredPush)
+                            }
+                            // Silently skip if offline/disabled - merge already succeeded locally
+                        }
 					}).pipe(Effect.withSpan("pr.mergeToMain")),
 				),
 

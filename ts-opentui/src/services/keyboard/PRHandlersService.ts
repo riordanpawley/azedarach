@@ -15,7 +15,11 @@
 import { Command } from "@effect/platform"
 import { Effect } from "effect"
 import { AppConfig } from "../../config/AppConfig.js"
-import { type MergeToMainProgressStage, PRWorkflow } from "../../core/PRWorkflow.js"
+import {
+    type MergeToMainDeferredPushStatus,
+    type MergeToMainProgressStage,
+    PRWorkflow,
+} from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { BoardService } from "../BoardService.js"
@@ -84,31 +88,55 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 								return `Merging ${issueId} into ${targetBranch}...`
 							case "validate":
 								return "Running post-merge validation..."
-							case "push":
-								return `Pushing ${targetBranch}...`
-						}
-					}
+                            case "push":
+                                return `Starting background push to ${targetBranch}...`
+                        }
+                    }
+                    const deferredPushMessage = (
+                        status: MergeToMainDeferredPushStatus,
+                    ): Effect.Effect<void, never, never> => {
+                        switch (status._tag) {
+                            case "started":
+                                return toast.show(
+                                    "info",
+                                    `Local merge complete for ${issueId}. Pushing ${status.branch} in background...`,
+                                )
+                            case "succeeded":
+                                return toast.show("success", `Background push completed for ${status.branch}`)
+                            case "failed":
+                                return toast.show(
+                                    "warning",
+                                    `Local merge succeeded, but background push failed: ${formatForToast(status.error)}`,
+                                )
+                        }
+                    }
 
-					yield* prWorkflow
-						.mergeToMain({
-							issueId,
-							projectPath,
-							onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
-						})
-						.pipe(
-							Effect.tap(() =>
-								Effect.gen(function* () {
-									yield* board.patchTaskFromMutation(issueId, {
+                    yield* prWorkflow
+                        .mergeToMain({
+                            issueId,
+                            projectPath,
+                            onProgress: (stage) => toast.show("info", progressMessage(stage)).pipe(Effect.asVoid),
+                            onDeferredPushStatus: deferredPushMessage,
+                        })
+                        .pipe(
+                            Effect.tap(() =>
+                                Effect.gen(function* () {
+                                    yield* board.patchTaskFromMutation(issueId, {
 										hasMergeConflict: false,
 										updated_at: new Date().toISOString(),
-									})
-									yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
-								}),
-							),
-							Effect.tap(() => toast.show("success", `Merged ${issueId} into ${targetBranch}`)),
-							Effect.catchAll(helpers.showErrorToast("Merge failed")),
-						)
-				}),
+                                    })
+                                    yield* board.refreshGitStats().pipe(Effect.catchAll(Effect.logError))
+                                }),
+                            ),
+                            Effect.tap(() =>
+                                toast.show(
+                                    "success",
+                                    `Merged ${issueId} into ${targetBranch} locally`,
+                                ),
+                            ),
+                            Effect.catchAll(helpers.showErrorToast("Merge failed")),
+                        )
+                }),
 				projectPath,
 			)
 
