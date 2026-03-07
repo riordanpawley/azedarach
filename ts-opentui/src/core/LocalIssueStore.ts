@@ -48,8 +48,8 @@ const SpecPublishConfigJsonSchema = Schema.parseJson(
 	}),
 )
 const SpecPublishOutcomeJsonSchema = Schema.parseJson(
-	Schema.Struct({
-		started_at: Schema.String,
+    Schema.Struct({
+        started_at: Schema.String,
 		finished_at: Schema.String,
 		status: Schema.Literal("success", "partial", "failed"),
 		total_requirements: Schema.Number,
@@ -63,8 +63,13 @@ const SpecPublishOutcomeJsonSchema = Schema.parseJson(
 				requirement_count: Schema.Number,
 				link_count: Schema.Number,
 			}),
-		),
-	}),
+        ),
+    }),
+)
+const SyncQueuePayloadJsonSchema = Schema.parseJson(
+    Schema.Struct({
+        idempotencyKey: Schema.String,
+    }),
 )
 
 export type SyncTarget = "linear"
@@ -1281,9 +1286,9 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 			}
 		}
 
-		const decodeSpecPublishOutcomeMeta = (
-			value: string | undefined,
-		): SpecPublishOutcome | undefined => {
+        const decodeSpecPublishOutcomeMeta = (
+            value: string | undefined,
+        ): SpecPublishOutcome | undefined => {
 			if (value === undefined) {
 				return undefined
 			}
@@ -1292,21 +1297,45 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 				return Schema.decodeUnknownSync(SpecPublishOutcomeJsonSchema)(value)
 			} catch {
 				return undefined
-			}
-		}
+            }
+        }
 
-		const buildDefaultSyncPayloadJson = (
-			issueId: string,
-			operation: SyncOperation,
-			target: SyncTarget,
-		): string | null => {
-			if (operation !== "upsert") {
-				return null
-			}
-			return JSON.stringify({
-				idempotencyKey: `${target}:upsert:${issueId}`,
-			})
-		}
+        const encodeSpecPublishConfigMeta = (
+            value: SpecPublishConfig,
+        ): Effect.Effect<string, LocalIssueStoreError> =>
+            Effect.try({
+                try: () => Schema.encodeSync(SpecPublishConfigJsonSchema)(value),
+                catch: (cause) =>
+                    new LocalIssueStoreError({
+                        message: "Failed to encode spec publish config metadata",
+                        cause,
+                    }),
+            })
+
+        const encodeSpecPublishOutcomeMeta = (
+            value: SpecPublishOutcome,
+        ): Effect.Effect<string, LocalIssueStoreError> =>
+            Effect.try({
+                try: () => Schema.encodeSync(SpecPublishOutcomeJsonSchema)(value),
+                catch: (cause) =>
+                    new LocalIssueStoreError({
+                        message: "Failed to encode spec publish outcome metadata",
+                        cause,
+                    }),
+            })
+
+        const buildDefaultSyncPayloadJson = (
+            issueId: string,
+            operation: SyncOperation,
+            target: SyncTarget,
+        ): string | null => {
+            if (operation !== "upsert") {
+                return null
+            }
+            return Schema.encodeSync(SyncQueuePayloadJsonSchema)({
+                idempotencyKey: `${target}:upsert:${issueId}`,
+            })
+        }
 
 		const enqueueSync = (
 			sql: SqlClient.SqlClient,
@@ -2246,13 +2275,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-			setSpecPublishConfig: (
-				config: SpecPublishConfig,
-				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				withSqlMutation(cwd, (sql) =>
-					setMetaValue(sql, SPEC_PUBLISH_CONFIG_META_KEY, JSON.stringify(config)),
-				),
+            setSpecPublishConfig: (
+                config: SpecPublishConfig,
+                cwd?: string,
+            ): Effect.Effect<void, LocalIssueStoreError> =>
+                withSqlMutation(cwd, (sql) =>
+                    encodeSpecPublishConfigMeta(config).pipe(
+                        Effect.flatMap((encoded) =>
+                            setMetaValue(sql, SPEC_PUBLISH_CONFIG_META_KEY, encoded),
+                        ),
+                    ),
+                ),
 
 			getSpecPublishOutcome: (
 				cwd?: string,
@@ -2263,13 +2296,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					),
 				),
 
-			setSpecPublishOutcome: (
-				outcome: SpecPublishOutcome,
-				cwd?: string,
-			): Effect.Effect<void, LocalIssueStoreError> =>
-				withSqlMutation(cwd, (sql) =>
-					setMetaValue(sql, SPEC_PUBLISH_OUTCOME_META_KEY, JSON.stringify(outcome)),
-				),
+            setSpecPublishOutcome: (
+                outcome: SpecPublishOutcome,
+                cwd?: string,
+            ): Effect.Effect<void, LocalIssueStoreError> =>
+                withSqlMutation(cwd, (sql) =>
+                    encodeSpecPublishOutcomeMeta(outcome).pipe(
+                        Effect.flatMap((encoded) =>
+                            setMetaValue(sql, SPEC_PUBLISH_OUTCOME_META_KEY, encoded),
+                        ),
+                    ),
+                ),
 
 			countIssues: (cwd?: string): Effect.Effect<number, LocalIssueStoreError> =>
 				withSql(cwd, (sql) =>
