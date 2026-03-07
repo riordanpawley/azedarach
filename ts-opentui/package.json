@@ -1,6 +1,6 @@
 {
 	"name": "azedarach",
-	"version": "0.2.0",
+	"version": "0.3.3",
 	"description": "TUI Kanban board for orchestrating parallel Claude Code sessions",
 	"type": "module",
 	"bin": {
@@ -16,7 +16,7 @@
 		"lint": "biome lint src bin",
 		"format": "biome format --write src bin",
 		"check": "biome check --write src bin",
-        "fix": "biome check --write .",
+		"fix": "biome check --write .",
 		"prepare": "git config core.hooksPath .githooks",
 		"codanna:index": "cd .. && codanna --config .codanna/settings.toml index",
 		"postinstall": "if [ \"${CI:-}\" != \"true\" ]; then bun run codanna:index; fi"
