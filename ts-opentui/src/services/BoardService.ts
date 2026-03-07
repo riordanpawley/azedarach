@@ -468,7 +468,7 @@ interface LinearRefreshStrategyPlan {
 	readonly start: Effect.Effect<Fiber.RuntimeFiber<unknown, never>, never, unknown>
 }
 
-type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch"
+type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch" | "pty"
 
 interface BoardRefreshOptions {
 	readonly reason?: BoardRefreshReason
@@ -1660,8 +1660,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			localRefreshOnly: boolean,
 			options: BoardRefreshOptions | undefined,
 		): boolean => {
-			if (!localRefreshOnly) return false
 			if (options?.forceRemote === true) return false
+			if (options?.reason === "pty") return true
+			if (!localRefreshOnly) return false
 			switch (options?.reason ?? "default") {
 				case "mutation":
 				case "initial-load":
@@ -1970,7 +1971,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 			Effect.gen(function* () {
 				const backgroundPollingFiber = yield* Effect.forkScoped(
 					Effect.repeat(Schedule.spaced(BOARD_BACKGROUND_POLL_INTERVAL))(
-						refreshWithPolicy({ forceRemote: true }).pipe(
+						Effect.gen(function* () {
+							const projectPath = yield* projectService.getCurrentPath()
+							if (projectPath !== null) {
+								yield* issueTrackerClient.sync(projectPath).pipe(
+									Effect.tap((syncResult) =>
+										syncResult.pushed > 0 || syncResult.pulled > 0
+											? Effect.log(
+													`Background issue sync: projectPath=${projectPath} pushed=${syncResult.pushed} pulled=${syncResult.pulled}`,
+												)
+											: Effect.void,
+									),
+									Effect.catchAll((error) =>
+										Effect.logWarning(
+											`Background issue sync failed for projectPath=${projectPath}: ${String(error)}`,
+										).pipe(Effect.asVoid),
+									),
+								)
+							}
+
+							yield* refreshWithPolicy({ forceRemote: true })
+						}).pipe(
 							Effect.catchAllCause((cause) =>
 								Effect.logWarning(cause).pipe(
 									Effect.zipRight(logAndToastRefreshFailure("background", cause)),
@@ -2342,7 +2363,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 		const ptyRefreshFiber = yield* Effect.forkScoped(
 			Stream.runForEach(ptyMonitor.metrics.changes, () =>
-				requestRefresh().pipe(
+				requestRefresh({ reason: "pty" }).pipe(
 					Effect.catchAllCause((cause) =>
 						Effect.logWarning(cause).pipe(
 							Effect.zipRight(logAndToastRefreshFailure("pty-triggered", cause)),

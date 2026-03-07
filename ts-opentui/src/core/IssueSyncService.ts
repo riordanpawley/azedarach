@@ -43,6 +43,7 @@ const LINEAR_LABELS_PAGE_SIZE = 250
 const API_KEY_CACHE_TTL_MS = 30_000
 const BOOTSTRAP_FETCH_RETRY_ATTEMPTS = 3
 const BOOTSTRAP_FETCH_RETRY_DELAY = "500 millis"
+const LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS = 5_000
 
 type IssueStatus = "open" | "in_progress" | "blocked" | "closed" | "tombstone"
 type IssueType = "bug" | "feature" | "task" | "epic" | "chore"
@@ -365,6 +366,7 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				Deferred.Deferred<{ readonly pushed: number; readonly pulled: number }, IssueSyncError>
 			>
 		>(new Map())
+		const lastRemoteHydrationAtRef = yield* Ref.make<Map<string, number>>(new Map())
 
 		const mapLocalStoreError = (error: LocalIssueStoreError): IssueSyncError =>
 			new IssueSyncError({
@@ -1481,6 +1483,58 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 				)
 			})
 
+		const pullRemoteSnapshots = (params: {
+			readonly runtime: LinearRuntime
+			readonly cwd: string | undefined
+			readonly flushRun: SyncRunStart
+			readonly pushedClaims: number
+		}): Effect.Effect<number, IssueSyncError> =>
+			Effect.gen(function* () {
+				const projectPath = getEffectiveProjectPath(params.cwd)
+				const nowMs = Date.now()
+				const lastHydrationAt = yield* Ref.get(lastRemoteHydrationAtRef).pipe(
+					Effect.map((entries) => entries.get(projectPath)),
+				)
+				const dueToPush = params.pushedClaims > 0
+				const dueToInterval =
+					lastHydrationAt === undefined ||
+					nowMs - lastHydrationAt >= LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS
+
+				if (!dueToPush && !dueToInterval) {
+					const ageMs = lastHydrationAt === undefined ? "none" : String(nowMs - lastHydrationAt)
+					yield* Effect.log(
+						`Linear remote hydration skipped: run=${params.flushRun.runId} projectPath=${projectPath} reason=cooldown ageMs=${ageMs} minIntervalMs=${LINEAR_REMOTE_HYDRATION_MIN_INTERVAL_MS}`,
+					)
+					return 0
+				}
+
+				const reason = dueToPush ? "post-push" : "interval"
+				yield* Effect.log(
+					`Linear remote hydration start: run=${params.flushRun.runId} projectPath=${projectPath} reason=${reason}`,
+				)
+
+				const snapshots = yield* buildBootstrapSnapshots({
+					team: params.runtime.defaultTeam,
+					project: params.runtime.defaultProject,
+				})
+				const pulled =
+					snapshots.length === 0
+						? 0
+						: yield* fromStore(
+								localStore.importExternalSnapshot(LINEAR_SYNC_TARGET, snapshots, params.cwd),
+							)
+				yield* fromStore(localStore.markBootstrapComplete(LINEAR_SYNC_TARGET, params.cwd))
+				yield* Ref.update(lastRemoteHydrationAtRef, (entries) => {
+					const next = new Map(entries)
+					next.set(projectPath, nowMs)
+					return next
+				})
+				yield* Effect.log(
+					`Linear remote hydration complete: run=${params.flushRun.runId} projectPath=${projectPath} pulled=${pulled} snapshots=${snapshots.length}`,
+				)
+				return pulled
+			})
+
 		interface BootstrapGate {
 			readonly join: Deferred.Deferred<number, IssueSyncError>
 			readonly shouldRun: boolean
@@ -1747,97 +1801,111 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, cwd),
 						)
 						yield* setQueueHealth(queueSummaryBefore)
-						if (pendingItems.length === 0) {
-							yield* Effect.log(
-								`Linear flush skipped: run=${flushRun.runId} projectPath=${projectPath} reason=no_pending_items ${formatSyncQueueSummary(queueSummaryBefore)}`,
-							)
-							const skippedMessage =
-								queueSummaryBefore.total === 0
-									? "flush skipped (no pending sync items)"
-									: `flush skipped (no claimable items; delayed=${queueSummaryBefore.pendingDelayed} processingActive=${queueSummaryBefore.processingActive} processingStale=${queueSummaryBefore.processingStale} failed=${queueSummaryBefore.failed})`
-							yield* reportSyncHealth({
-								status: "skipped",
-								message: skippedMessage,
-								queueDepth: queueSummaryBefore.total,
-								run: createRunHealth({
-									run: flushRun,
-									status: "skipped",
-									message: skippedMessage,
-									pushed: 0,
-									pulled: 0,
-								}),
-							})
-							return { pushed: 0, pulled: 0 }
-						}
-
 						const collapsed = collapsePendingItems(pendingItems)
-						yield* Effect.log(
-							`Linear flush dispatching: run=${flushRun.runId} projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length} ${formatSyncQueueSummary(queueSummaryBefore)}`,
-						)
-						const resolver = linearResolver(runtimeOption.value)
-						const pushedRef = yield* Ref.make(0)
+						let pushed = 0
 
-						yield* Effect.forEach(
-							collapsed,
-							(item) => {
-								const claimCount = item.claims.length
-								const attemptCount = item.attempts + 1
-								return Effect.log(
-									`Linear sync dispatch start: run=${flushRun.runId} issue=${item.issueId} operation=${item.operation} claims=${claimCount} attempt=${attemptCount}/${MAX_SYNC_ATTEMPTS} projectPath=${projectPath}`,
-								).pipe(
-									Effect.zipRight(
-										Effect.request(
-											new LinearSyncRequest({
-												issueId: item.issueId,
-												operation: item.operation,
-												payloadJson: item.payloadJson,
-												cwd,
-											}),
-											resolver,
-										).pipe(
-											Effect.flatMap(() =>
-												fromStore(
-													localStore.markSyncSucceeded(
-														{
-															issueId: item.issueId,
-															target: item.target,
-															maxQueueId: item.maxQueueId,
-															claims: item.claims,
-														},
-														cwd,
+						if (collapsed.length > 0) {
+							yield* Effect.log(
+								`Linear flush dispatching: run=${flushRun.runId} projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length} ${formatSyncQueueSummary(queueSummaryBefore)}`,
+							)
+							const resolver = linearResolver(runtimeOption.value)
+							const pushedRef = yield* Ref.make(0)
+
+							yield* Effect.forEach(
+								collapsed,
+								(item) => {
+									const claimCount = item.claims.length
+									const attemptCount = item.attempts + 1
+									return Effect.log(
+										`Linear sync dispatch start: run=${flushRun.runId} issue=${item.issueId} operation=${item.operation} claims=${claimCount} attempt=${attemptCount}/${MAX_SYNC_ATTEMPTS} projectPath=${projectPath}`,
+									).pipe(
+										Effect.zipRight(
+											Effect.request(
+												new LinearSyncRequest({
+													issueId: item.issueId,
+													operation: item.operation,
+													payloadJson: item.payloadJson,
+													cwd,
+												}),
+												resolver,
+											).pipe(
+												Effect.flatMap(() =>
+													fromStore(
+														localStore.markSyncSucceeded(
+															{
+																issueId: item.issueId,
+																target: item.target,
+																maxQueueId: item.maxQueueId,
+																claims: item.claims,
+															},
+															cwd,
+														),
+													).pipe(
+														Effect.zipRight(
+															Ref.update(pushedRef, (count) => count + claimCount),
+														),
+														Effect.zipRight(
+															Effect.log(
+																`Linear sync dispatch success: run=${flushRun.runId} issue=${item.issueId} operation=${item.operation} claims=${claimCount} projectPath=${projectPath}`,
+															),
+														),
 													),
-												).pipe(
-													Effect.zipRight(Ref.update(pushedRef, (count) => count + claimCount)),
-													Effect.zipRight(
-														Effect.log(
-															`Linear sync dispatch success: run=${flushRun.runId} issue=${item.issueId} operation=${item.operation} claims=${claimCount} projectPath=${projectPath}`,
+												),
+												Effect.catchAll((error) =>
+													Effect.logWarning(error).pipe(
+														Effect.zipRight(
+															markRequestFailure(item, error, cwd, flushRun.runId),
 														),
 													),
 												),
 											),
-											Effect.catchAll((error) =>
-												Effect.logWarning(error).pipe(
-													Effect.zipRight(
-														markRequestFailure(item, error, cwd, flushRun.runId),
-													),
-												),
-											),
 										),
-									),
-								)
-							},
-							{ concurrency: "unbounded" },
-						)
+									)
+								},
+								{ concurrency: "unbounded" },
+							)
 
-						const pushed = yield* Ref.get(pushedRef)
+							pushed = yield* Ref.get(pushedRef)
+						} else {
+							yield* Effect.log(
+								`Linear flush dispatch skipped: run=${flushRun.runId} projectPath=${projectPath} reason=no_claimable_items ${formatSyncQueueSummary(queueSummaryBefore)}`,
+							)
+						}
+
+						const pulled = yield* pullRemoteSnapshots({
+							runtime: runtimeOption.value,
+							cwd,
+							flushRun,
+							pushedClaims: pushed,
+						})
 						const queueSummaryAfter = yield* fromStore(
 							localStore.getSyncQueueSummary(LINEAR_SYNC_TARGET, cwd),
 						)
 						yield* setQueueHealth(queueSummaryAfter)
+						if (collapsed.length === 0 && pulled === 0) {
+							const skippedMessage =
+								queueSummaryAfter.total === 0
+									? "flush skipped (no pending sync items; hydration not due)"
+									: `flush skipped (no claimable items; delayed=${queueSummaryAfter.pendingDelayed} processingActive=${queueSummaryAfter.processingActive} processingStale=${queueSummaryAfter.processingStale} failed=${queueSummaryAfter.failed})`
+							yield* reportSyncHealth({
+								status: "skipped",
+								message: skippedMessage,
+								queueDepth: queueSummaryAfter.total,
+								run: createRunHealth({
+									run: flushRun,
+									status: "skipped",
+									message: skippedMessage,
+									pushed,
+									pulled,
+								}),
+							})
+							return { pushed, pulled }
+						}
+
 						yield* Effect.log(
-							`Linear flush complete: run=${flushRun.runId} projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length} pushedClaims=${pushed} ${formatSyncQueueSummary(queueSummaryAfter)}`,
+							`Linear flush complete: run=${flushRun.runId} projectPath=${projectPath} pendingClaims=${pendingItems.length} collapsedItems=${collapsed.length} pushedClaims=${pushed} pulledIssues=${pulled} ${formatSyncQueueSummary(queueSummaryAfter)}`,
 						)
-						const message = `flush processed ${collapsed.length} item(s), pushed ${pushed} claim(s), remaining=${queueSummaryAfter.total}`
+						const message = `flush processed ${collapsed.length} item(s), pushed ${pushed} claim(s), pulled ${pulled} issue snapshot(s), remaining=${queueSummaryAfter.total}`
 						yield* reportSyncHealth({
 							status: "success",
 							message,
@@ -1847,10 +1915,10 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 								status: "success",
 								message,
 								pushed,
-								pulled: 0,
+								pulled,
 							}),
 						})
-						return { pushed, pulled: 0 }
+						return { pushed, pulled }
 					})
 
 					return yield* runFlush.pipe(
