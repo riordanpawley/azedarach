@@ -405,6 +405,70 @@ const schemaStatements: readonly string[] = [
 ]
 
 const nowIso = (): string => new Date().toISOString()
+const LINEAR_KEY_LIKE_ISSUE_ID_PATTERN = /^[A-Z][A-Z0-9_]*-\d+$/
+
+const looksLikeLinearIssueKey = (value: string): boolean =>
+	LINEAR_KEY_LIKE_ISSUE_ID_PATTERN.test(value.trim())
+
+const firstSetValue = <A>(set: ReadonlySet<A> | undefined): A | undefined => {
+	if (set === undefined) {
+		return undefined
+	}
+	const iterator = set.values().next()
+	return iterator.done ? undefined : iterator.value
+}
+
+const selectCanonicalSnapshotLocalId = (params: {
+	readonly snapshot: ExternalIssueSnapshot
+	readonly candidateIds: readonly string[]
+	readonly createdAtByIssueId: ReadonlyMap<string, string>
+}): string => {
+	const candidates = Array.from(new Set(params.candidateIds))
+	if (candidates.length === 0) {
+		return params.snapshot.localId
+	}
+
+	const rank = (issueId: string): number => {
+		let score = 0
+		if (!params.createdAtByIssueId.has(issueId)) {
+			score += 100
+		}
+		if (params.snapshot.externalKey !== undefined && issueId === params.snapshot.externalKey) {
+			score += 10
+		}
+		if (looksLikeLinearIssueKey(issueId)) {
+			score += 5
+		}
+		return score
+	}
+
+	candidates.sort((left, right) => {
+		const leftScore = rank(left)
+		const rightScore = rank(right)
+		if (leftScore !== rightScore) {
+			return leftScore - rightScore
+		}
+
+		const leftCreatedAt = params.createdAtByIssueId.get(left)
+		const rightCreatedAt = params.createdAtByIssueId.get(right)
+		if (leftCreatedAt !== undefined || rightCreatedAt !== undefined) {
+			if (leftCreatedAt === undefined) {
+				return 1
+			}
+			if (rightCreatedAt === undefined) {
+				return -1
+			}
+			const createdDelta = leftCreatedAt.localeCompare(rightCreatedAt)
+			if (createdDelta !== 0) {
+				return createdDelta
+			}
+		}
+
+		return left.localeCompare(right)
+	})
+
+	return candidates[0] ?? params.snapshot.localId
+}
 
 const normalizePositiveInteger = (value: number | undefined, fallback: number): number => {
 	if (value === undefined || !Number.isFinite(value)) {
@@ -3390,6 +3454,18 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 					: withSqlMutation(cwd, (sql) =>
 							sql.withTransaction(
 								Effect.gen(function* () {
+									const activeIssueRows = yield* sql<{
+										readonly id: string
+										readonly created_at: string
+									}>`
+										SELECT id, created_at
+										FROM issues
+										WHERE deleted_at IS NULL
+									`
+									const createdAtByIssueId = new Map(
+										activeIssueRows.map((row) => [row.id, row.created_at] as const),
+									)
+
 									const existingRefs = yield* sql<ExternalRefRow>`
 										SELECT issue_id, target, external_id, external_key, last_synced_at
 										FROM issue_external_refs
@@ -3397,31 +3473,244 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 										ORDER BY last_synced_at DESC, issue_id ASC
 									`
 
-									const localIdByExternalId = new Map<string, string>()
-									const localIdByExternalKey = new Map<string, string>()
-									for (const ref of existingRefs) {
-										if (!localIdByExternalId.has(ref.external_id)) {
-											localIdByExternalId.set(ref.external_id, ref.issue_id)
+									const localIdsByExternalId = new Map<string, Set<string>>()
+									const localIdsByExternalKey = new Map<string, Set<string>>()
+									const addExternalIdCandidate = (externalId: string, issueId: string): void => {
+										const existing = localIdsByExternalId.get(externalId)
+										if (existing !== undefined) {
+											existing.add(issueId)
+											return
 										}
-										if (ref.external_key !== null && !localIdByExternalKey.has(ref.external_key)) {
-											localIdByExternalKey.set(ref.external_key, ref.issue_id)
+										localIdsByExternalId.set(externalId, new Set([issueId]))
+									}
+									const addExternalKeyCandidate = (externalKey: string, issueId: string): void => {
+										const existing = localIdsByExternalKey.get(externalKey)
+										if (existing !== undefined) {
+											existing.add(issueId)
+											return
+										}
+										localIdsByExternalKey.set(externalKey, new Set([issueId]))
+									}
+
+									for (const ref of existingRefs) {
+										addExternalIdCandidate(ref.external_id, ref.issue_id)
+										if (ref.external_key !== null) {
+											addExternalKeyCandidate(ref.external_key, ref.issue_id)
 										}
 									}
 
 									const snapshotLocalIdRemap = new Map<string, string>()
+									const duplicateIdsByCanonicalId = new Map<string, Set<string>>()
 									for (const snapshot of snapshots) {
-										const snapshotKey = snapshot.externalKey ?? snapshot.localId
-										const resolvedLocalId =
-											localIdByExternalId.get(snapshot.externalId) ??
-											localIdByExternalKey.get(snapshotKey) ??
-											snapshot.localId
-										snapshotLocalIdRemap.set(snapshot.localId, resolvedLocalId)
-										localIdByExternalId.set(snapshot.externalId, resolvedLocalId)
-										localIdByExternalKey.set(snapshot.localId, resolvedLocalId)
+										const candidates = new Set<string>()
+										const externalIdCandidates = localIdsByExternalId.get(snapshot.externalId)
+										if (externalIdCandidates !== undefined) {
+											for (const candidate of externalIdCandidates) {
+												candidates.add(candidate)
+											}
+										}
 										if (snapshot.externalKey !== undefined) {
-											localIdByExternalKey.set(snapshot.externalKey, resolvedLocalId)
+											const externalKeyCandidates = localIdsByExternalKey.get(snapshot.externalKey)
+											if (externalKeyCandidates !== undefined) {
+												for (const candidate of externalKeyCandidates) {
+													candidates.add(candidate)
+												}
+											}
+										}
+										candidates.add(snapshot.localId)
+
+										const resolvedLocalId = selectCanonicalSnapshotLocalId({
+											snapshot,
+											candidateIds: [...candidates],
+											createdAtByIssueId,
+										})
+										snapshotLocalIdRemap.set(snapshot.localId, resolvedLocalId)
+
+										const duplicatesForCanonical =
+											duplicateIdsByCanonicalId.get(resolvedLocalId) ?? new Set<string>()
+										for (const candidate of candidates) {
+											if (candidate !== resolvedLocalId) {
+												duplicatesForCanonical.add(candidate)
+											}
+										}
+										duplicateIdsByCanonicalId.set(resolvedLocalId, duplicatesForCanonical)
+
+										localIdsByExternalId.set(snapshot.externalId, new Set([resolvedLocalId]))
+										addExternalKeyCandidate(snapshot.localId, resolvedLocalId)
+										if (snapshot.externalKey !== undefined) {
+											localIdsByExternalKey.set(snapshot.externalKey, new Set([resolvedLocalId]))
 										}
 									}
+
+									const mergeDuplicateIssueIntoCanonical = (params: {
+										readonly canonicalIssueId: string
+										readonly duplicateIssueId: string
+									}): Effect.Effect<void, SqlError> =>
+										Effect.gen(function* () {
+											const duplicateIssueRows = yield* sql<{
+												readonly id: string
+												readonly description: string | null
+												readonly design: string | null
+												readonly notes: string | null
+												readonly acceptance: string | null
+												readonly estimate: number | null
+												readonly created_at: string
+											}>`
+												SELECT id, description, design, notes, acceptance, estimate, created_at
+												FROM issues
+												WHERE id = ${params.duplicateIssueId} AND deleted_at IS NULL
+												LIMIT 1
+											`
+											const duplicateIssue = duplicateIssueRows[0]
+											if (duplicateIssue === undefined) {
+												yield* sql`
+													DELETE FROM issue_external_refs
+													WHERE issue_id = ${params.duplicateIssueId}
+												`
+												return
+											}
+
+											yield* sql`
+												UPDATE issues
+												SET
+													description = COALESCE(description, ${duplicateIssue.description}),
+													design = COALESCE(design, ${duplicateIssue.design}),
+													notes = COALESCE(notes, ${duplicateIssue.notes}),
+													acceptance = COALESCE(acceptance, ${duplicateIssue.acceptance}),
+													estimate = COALESCE(estimate, ${duplicateIssue.estimate}),
+													created_at = CASE
+														WHEN created_at <= ${duplicateIssue.created_at}
+															THEN created_at
+															ELSE ${duplicateIssue.created_at}
+													END
+												WHERE id = ${params.canonicalIssueId}
+											`
+
+											yield* sql`
+												INSERT INTO issue_dependencies (
+													issue_id,
+													depends_on_id,
+													dependency_type,
+													tombstoned_at
+												)
+												SELECT
+													${params.canonicalIssueId},
+													depends_on_id,
+													dependency_type,
+													tombstoned_at
+												FROM issue_dependencies
+												WHERE
+													issue_id = ${params.duplicateIssueId}
+													AND depends_on_id <> ${params.canonicalIssueId}
+												ON CONFLICT(issue_id, depends_on_id, dependency_type)
+												DO NOTHING
+											`
+											yield* sql`
+												INSERT INTO issue_dependencies (
+													issue_id,
+													depends_on_id,
+													dependency_type,
+													tombstoned_at
+												)
+												SELECT
+													issue_id,
+													${params.canonicalIssueId},
+													dependency_type,
+													tombstoned_at
+												FROM issue_dependencies
+												WHERE
+													depends_on_id = ${params.duplicateIssueId}
+													AND issue_id <> ${params.canonicalIssueId}
+												ON CONFLICT(issue_id, depends_on_id, dependency_type)
+												DO NOTHING
+											`
+											yield* sql`
+												DELETE FROM issue_dependencies
+												WHERE issue_id = ${params.duplicateIssueId}
+													OR depends_on_id = ${params.duplicateIssueId}
+											`
+
+											yield* sql`
+												INSERT INTO issue_attachments (
+													issue_id,
+													attachment_id,
+													filename,
+													original_path,
+													mime_type,
+													size_bytes,
+													created_at,
+													content_blob
+												)
+												SELECT
+													${params.canonicalIssueId},
+													attachment_id,
+													filename,
+													original_path,
+													mime_type,
+													size_bytes,
+													created_at,
+													content_blob
+												FROM issue_attachments
+												WHERE issue_id = ${params.duplicateIssueId}
+												ON CONFLICT(issue_id, attachment_id)
+												DO NOTHING
+											`
+											yield* sql`
+												DELETE FROM issue_attachments
+												WHERE issue_id = ${params.duplicateIssueId}
+											`
+
+											yield* sql`
+												INSERT INTO spec_issue_links (
+													issue_id,
+													requirement_id,
+													link_type,
+													created_at,
+													updated_at,
+													deleted_at
+												)
+												SELECT
+													${params.canonicalIssueId},
+													requirement_id,
+													link_type,
+													created_at,
+													updated_at,
+													deleted_at
+												FROM spec_issue_links
+												WHERE issue_id = ${params.duplicateIssueId}
+												ON CONFLICT(issue_id, requirement_id, link_type)
+												DO UPDATE SET
+													deleted_at = CASE
+														WHEN excluded.deleted_at IS NULL
+															THEN NULL
+															ELSE spec_issue_links.deleted_at
+													END,
+													updated_at = CASE
+														WHEN excluded.updated_at > spec_issue_links.updated_at
+															THEN excluded.updated_at
+															ELSE spec_issue_links.updated_at
+													END
+											`
+											yield* sql`
+												DELETE FROM spec_issue_links
+												WHERE issue_id = ${params.duplicateIssueId}
+											`
+
+											yield* sql`
+												UPDATE sync_queue
+												SET issue_id = ${params.canonicalIssueId}
+												WHERE issue_id = ${params.duplicateIssueId}
+											`
+
+											yield* sql`
+												DELETE FROM issue_external_refs
+												WHERE issue_id = ${params.duplicateIssueId}
+											`
+											yield* sql`
+												DELETE FROM issues
+												WHERE id = ${params.duplicateIssueId}
+											`
+										})
 
 									for (const snapshot of snapshots) {
 										const localId =
@@ -3430,7 +3719,7 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 											snapshot.parentLocalId === undefined
 												? undefined
 												: (snapshotLocalIdRemap.get(snapshot.parentLocalId) ??
-													localIdByExternalKey.get(snapshot.parentLocalId) ??
+													firstSetValue(localIdsByExternalKey.get(snapshot.parentLocalId)) ??
 													snapshot.parentLocalId)
 
 										yield* sql`
@@ -3546,6 +3835,26 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 													${null}
 												)
 											`
+										}
+									}
+
+									const mergedDuplicateIssueIds = new Set<string>()
+									for (const [
+										canonicalIssueId,
+										duplicateIssueIds,
+									] of duplicateIdsByCanonicalId.entries()) {
+										for (const duplicateIssueId of duplicateIssueIds) {
+											if (duplicateIssueId === canonicalIssueId) {
+												continue
+											}
+											if (mergedDuplicateIssueIds.has(duplicateIssueId)) {
+												continue
+											}
+											yield* mergeDuplicateIssueIntoCanonical({
+												canonicalIssueId,
+												duplicateIssueId,
+											})
+											mergedDuplicateIssueIds.add(duplicateIssueId)
 										}
 									}
 
