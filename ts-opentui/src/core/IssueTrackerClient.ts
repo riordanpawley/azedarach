@@ -17,7 +17,12 @@ import { ProjectService } from "../services/ProjectService.js"
 import { BackendSyncRouter } from "./BackendSyncRouter.js"
 import type { IssueSyncError } from "./IssueSyncService.js"
 import { LinearSdk } from "./LinearSdk.js"
-import { LocalIssueStore, type LocalIssueStoreError, type SyncTarget } from "./LocalIssueStore.js"
+import {
+	LocalIssueStore,
+	type ExternalIssueSnapshot,
+	type LocalIssueStoreError,
+	type SyncTarget,
+} from "./LocalIssueStore.js"
 
 // ============================================================================
 // Schema Definitions
@@ -1005,6 +1010,53 @@ export const shouldUseLinearReadFallback = (input: LinearReadFallbackInput): boo
 	if (input.localResultCount >= input.requestedCount) return false
 	return input.syncPulledCount === 0
 }
+
+const getParentLocalIdFromIssue = (issue: Issue): string | undefined =>
+	issue.dependencies?.find((dependency) => dependency.dependency_type === "parent-child")?.id
+
+export const buildLinearFallbackSnapshots = (
+	issues: readonly Issue[],
+): readonly ExternalIssueSnapshot[] =>
+	issues.map((issue) => ({
+		localId: issue.id,
+		externalId: issue.id,
+		externalKey: issue.id,
+		title: issue.title,
+		description: issue.description,
+		status: issue.status,
+		priority: issue.priority,
+		issueType: issue.issue_type,
+		createdAt: issue.created_at,
+		updatedAt: issue.updated_at,
+		closedAt: issue.closed_at,
+		assignee: issue.assignee,
+		labels: issue.labels ?? [],
+		notes: issue.notes,
+		design: issue.design,
+		acceptance: issue.acceptance,
+		estimate: issue.estimate,
+		parentLocalId: getParentLocalIdFromIssue(issue),
+	}))
+
+export const collectLinearFallbackIssuesById = <E, R>(
+	issueIds: readonly string[],
+	loadFallbackIssues: (issueId: string) => Effect.Effect<readonly Issue[], E, R>,
+): Effect.Effect<readonly Issue[], never, R> =>
+	Effect.forEach(
+		issueIds,
+		(issueId) =>
+			loadFallbackIssues(issueId).pipe(
+				Effect.map((issues) => issues[0]),
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Linear direct read fallback failed for '${issueId}': ${String(error)}`,
+					).pipe(Effect.as(undefined)),
+				),
+			),
+		{ concurrency: 1 },
+	).pipe(
+		Effect.map((issues) => issues.filter((issue): issue is Issue => issue !== undefined)),
+	)
 
 interface IssueDbClient {
 	readonly flavor: IssueDbFlavor
@@ -2463,6 +2515,30 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						),
 					)
 
+		const backfillLinearFallbackIssues = (
+			issues: readonly Issue[],
+			runCwd?: string,
+		): Effect.Effect<void, never, CommandExecutor.CommandExecutor> => {
+			if (configuredBackend !== "linear" || mutationSyncTarget !== "linear") {
+				return Effect.void
+			}
+			if (issues.length === 0) {
+				return Effect.void
+			}
+
+			const snapshots = buildLinearFallbackSnapshots(issues)
+			return fromLocalStore(
+				"local-store importExternalSnapshot",
+				localIssueStore.importExternalSnapshot("linear", snapshots, runCwd),
+			).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Linear fallback local-store backfill failed: ${error.message}`,
+					).pipe(Effect.asVoid),
+				),
+			)
+		}
+
 		const mergeIssuesByRequestedIds = (
 			requestedIds: readonly string[],
 			localIssues: readonly Issue[],
@@ -2611,6 +2687,16 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						const fallbackIssues = yield* runLinearReadFallback(["show", id], effectiveCwd)
 						const fallbackIssue = fallbackIssues[0]
 						if (fallbackIssue !== undefined) {
+							yield* backfillLinearFallbackIssues([fallbackIssue], effectiveCwd)
+							const backfilledIssue = yield* fromLocalStore(
+								"local-store show",
+								localIssueStore.show(id, effectiveCwd),
+							).pipe(
+								Effect.catchAll(() => Effect.succeed(undefined)),
+							)
+							if (backfilledIssue !== undefined && backfilledIssue.status !== "tombstone") {
+								return backfilledIssue
+							}
 							return fallbackIssue
 						}
 					}
@@ -2661,11 +2747,18 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 							const localIds = new Set(localIssues.map((issue) => issue.id))
 							const missingIds = ids.filter((issueId) => !localIds.has(issueId))
 							if (missingIds.length > 0) {
-								const fallbackIssues = yield* runLinearReadFallback(
-									["show", ...missingIds],
-									effectiveCwd,
+								const fallbackIssues = yield* collectLinearFallbackIssuesById(
+									missingIds,
+									(missingId) => runLinearReadFallback(["show", missingId], effectiveCwd),
 								)
-								return mergeIssuesByRequestedIds(ids, localIssues, fallbackIssues)
+								yield* backfillLinearFallbackIssues(fallbackIssues, effectiveCwd)
+								const backfilledLocalIssues = yield* fromLocalStore(
+									"local-store showMultiple",
+									localIssueStore.showMultiple(ids, effectiveCwd),
+								).pipe(
+									Effect.catchAll(() => Effect.succeed(localIssues)),
+								)
+								return mergeIssuesByRequestedIds(ids, backfilledLocalIssues, fallbackIssues)
 							}
 						}
 
