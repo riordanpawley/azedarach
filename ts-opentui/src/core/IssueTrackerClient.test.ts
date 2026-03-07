@@ -1,11 +1,15 @@
 import { describe, expect, it } from "bun:test"
 import { Effect } from "effect"
 import {
+	buildLinearFallbackSnapshots,
+	collectLinearFallbackIssuesById,
 	extractJsonPayload,
 	getLinearCommandPerfMetadata,
 	getSyncTargetForBackend,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
+	shouldUseLinearReadFallback,
+	type Issue,
 	withIssueDbTiming,
 } from "./IssueTrackerClient.js"
 
@@ -153,5 +157,164 @@ describe("local-first backend selection", () => {
 		expect(isLocalFirstIssueBackend(brBackend)).toBe(false)
 		expect(getSyncTargetForBackend(bdBackend)).toBeUndefined()
 		expect(getSyncTargetForBackend(brBackend)).toBeUndefined()
+	})
+})
+
+describe("shouldUseLinearReadFallback", () => {
+	it("enables fallback when linear read still misses requested issues after a zero-pull sync", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 0,
+			}),
+		).toBe(true)
+	})
+
+	it("does not fallback when local already satisfies the request", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 2,
+				localResultCount: 2,
+				syncPulledCount: 0,
+			}),
+		).toBe(false)
+	})
+
+	it("does not fallback for non-linear backends", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "local",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 0,
+			}),
+		).toBe(false)
+	})
+
+	it("does not fallback when sync already pulled remote data", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 3,
+			}),
+		).toBe(false)
+	})
+})
+
+describe("buildLinearFallbackSnapshots", () => {
+	const now = "2026-03-07T02:00:00.000Z"
+
+	const makeIssue = (overrides: Partial<Issue>): Issue => ({
+		id: "AZE-1",
+		title: "Issue",
+		status: "open",
+		priority: 2,
+		issue_type: "task",
+		created_at: now,
+		updated_at: now,
+		...overrides,
+	})
+
+	it("maps fallback issues into external snapshots with external refs and parent links", () => {
+		const issue = makeIssue({
+			id: "AZE-42",
+			title: "Backfill me",
+			labels: ["type:task", "backend"],
+			dependencies: [
+				{
+					id: "AZE-1",
+					dependency_type: "parent-child",
+				},
+				{
+					id: "AZE-2",
+					dependency_type: "related",
+				},
+			],
+		})
+
+		expect(
+			buildLinearFallbackSnapshots(
+				[issue],
+				new Map([
+					[
+						"AZE-42",
+						{
+							externalId: "4f7b8f9d-2fcb-4d7e-92e2-2fbf4cedd54b",
+							externalKey: "AZE-42",
+						},
+					],
+				]),
+			),
+		).toEqual([
+			{
+				localId: "AZE-42",
+				externalId: "4f7b8f9d-2fcb-4d7e-92e2-2fbf4cedd54b",
+				externalKey: "AZE-42",
+				title: "Backfill me",
+				description: undefined,
+				status: "open",
+				priority: 2,
+				issueType: "task",
+				createdAt: now,
+				updatedAt: now,
+				closedAt: undefined,
+				assignee: undefined,
+				labels: ["type:task", "backend"],
+				notes: undefined,
+				design: undefined,
+				acceptance: undefined,
+				estimate: undefined,
+				parentLocalId: "AZE-1",
+			},
+		])
+	})
+
+	it("drops issues whose external refs cannot be resolved", () => {
+		const issue = makeIssue({ id: "AZE-999" })
+		expect(buildLinearFallbackSnapshots([issue], new Map())).toEqual([])
+	})
+})
+
+describe("collectLinearFallbackIssuesById", () => {
+	const now = "2026-03-07T02:00:00.000Z"
+
+	const makeIssue = (id: string): Issue => ({
+		id,
+		title: id,
+		status: "open",
+		priority: 2,
+		issue_type: "task",
+		created_at: now,
+		updated_at: now,
+	})
+
+	it("keeps successful fallback issues when some IDs fail and preserves requested order", async () => {
+		const calls: string[] = []
+		const fallbackById = (id: string) =>
+			Effect.gen(function* () {
+				calls.push(id)
+				switch (id) {
+					case "AZE-2":
+						return yield* Effect.fail(new Error("boom"))
+					case "AZE-1":
+						return [makeIssue("AZE-1")]
+					case "AZE-3":
+						return [makeIssue("AZE-3")]
+					default:
+						return []
+				}
+			})
+
+		const issues = await Effect.runPromise(
+			collectLinearFallbackIssuesById(["AZE-1", "AZE-2", "AZE-3"], fallbackById),
+		)
+
+		expect(calls).toEqual(["AZE-1", "AZE-2", "AZE-3"])
+		expect(issues.map((issue) => issue.id)).toEqual(["AZE-1", "AZE-3"])
 	})
 })

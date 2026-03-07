@@ -133,6 +133,56 @@ export interface IssueSyncHealth {
 	readonly lastRun?: IssueSyncRunHealth
 }
 
+const BOOTSTRAP_COMPLETENESS_SKIP_MARKERS = [
+	"bootstrap skipped (already complete)",
+	"bootstrap skipped (local issues already present)",
+]
+
+const hasObservedRemotePull = (health: IssueSyncHealth | undefined): boolean =>
+	(health?.lastRun?.pulled ?? 0) > 0
+
+const isBootstrapCompletenessSkip = (health: IssueSyncHealth): boolean => {
+	if (health.lastStatus !== "skipped") {
+		return false
+	}
+	if (health.lastRun?.operation !== "bootstrap") {
+		return false
+	}
+	const normalizedMessage = health.lastMessage.trim().toLowerCase()
+	return BOOTSTRAP_COMPLETENESS_SKIP_MARKERS.some((marker) =>
+		normalizedMessage.includes(marker),
+	)
+}
+
+const normalizeIssueSyncHealth = (
+	previous: IssueSyncHealth | undefined,
+	next: IssueSyncHealth,
+): IssueSyncHealth => {
+	if (next.backend !== "linear" || !next.syncEnabled) {
+		return next
+	}
+
+	const hasPullEvidence = hasObservedRemotePull(previous) || hasObservedRemotePull(next)
+	if (hasPullEvidence || !isBootstrapCompletenessSkip(next)) {
+		return next
+	}
+
+	const unverifiedMessage = `${next.lastMessage}; remote completeness unverified (no pull observed this session)`
+	return {
+		...next,
+		lastStatus: "failure",
+		lastMessage: unverifiedMessage,
+		lastRun:
+			next.lastRun === undefined
+				? undefined
+				: {
+						...next.lastRun,
+						status: "failure",
+						message: unverifiedMessage,
+					},
+	}
+}
+
 export type LinearWebhookStrategy =
 	| "disabled"
 	| "sdk-events"
@@ -532,7 +582,7 @@ export class DiagnosticsService extends Effect.Service<DiagnosticsService>()("Di
 		const setIssueSyncHealth = (health: IssueSyncHealth) =>
 			SubscriptionRef.update(stateRef, (s) => ({
 				...s,
-				issueSync: health,
+				issueSync: normalizeIssueSyncHealth(s.issueSync, health),
 				lastUpdated: new Date(),
 			}))
 

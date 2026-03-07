@@ -143,6 +143,91 @@ describe("DiagnosticsService issue sync health", () => {
 		expect(health?.lastMessage).toBe("flush failed")
 		expect(health?.lastFailure?.issueId).toBe("AZE-42")
 	})
+
+	it("marks bootstrap completeness skips as unverified until a remote pull is observed", async () => {
+		const health = await runWithDiagnostics(
+			Effect.gen(function* () {
+				const diagnostics = yield* DiagnosticsService
+				yield* diagnostics.setIssueSyncHealth({
+					backend: "linear",
+					syncEnabled: true,
+					queueDepth: 0,
+					failedCount: 0,
+					lastStatus: "skipped",
+					lastMessage: "bootstrap skipped (already complete)",
+					lastRun: {
+						runId: "run-1",
+						operation: "bootstrap",
+						status: "skipped",
+						startedAt: new Date("2026-03-07T00:00:00.000Z"),
+						finishedAt: new Date("2026-03-07T00:00:01.000Z"),
+						message: "bootstrap skipped (already complete)",
+						pushed: 0,
+						pulled: 0,
+					},
+				})
+				const snapshot = yield* diagnostics.getSnapshot()
+				return snapshot.issueSync
+			}),
+		)
+
+		expect(health?.lastStatus).toBe("failure")
+		expect(health?.lastMessage).toContain("remote completeness unverified")
+		expect(health?.lastRun?.status).toBe("failure")
+		expect(health?.lastRun?.message).toContain("remote completeness unverified")
+	})
+
+	it("keeps bootstrap skip status once a remote pull has been observed", async () => {
+		const health = await runWithDiagnostics(
+			Effect.gen(function* () {
+				const diagnostics = yield* DiagnosticsService
+				yield* diagnostics.setIssueSyncHealth({
+					backend: "linear",
+					syncEnabled: true,
+					queueDepth: 0,
+					failedCount: 0,
+					lastStatus: "success",
+					lastMessage: "flush processed 1 item(s), pushed 1 claim(s), pulled 3 issue snapshot(s), remaining=0",
+					lastRun: {
+						runId: "run-0",
+						operation: "flush",
+						status: "success",
+						startedAt: new Date("2026-03-07T00:00:00.000Z"),
+						finishedAt: new Date("2026-03-07T00:00:01.000Z"),
+						message:
+							"flush processed 1 item(s), pushed 1 claim(s), pulled 3 issue snapshot(s), remaining=0",
+						pushed: 1,
+						pulled: 3,
+					},
+				})
+				yield* diagnostics.setIssueSyncHealth({
+					backend: "linear",
+					syncEnabled: true,
+					queueDepth: 0,
+					failedCount: 0,
+					lastStatus: "skipped",
+					lastMessage: "bootstrap skipped (already complete)",
+					lastRun: {
+						runId: "run-1",
+						operation: "bootstrap",
+						status: "skipped",
+						startedAt: new Date("2026-03-07T00:00:02.000Z"),
+						finishedAt: new Date("2026-03-07T00:00:03.000Z"),
+						message: "bootstrap skipped (already complete)",
+						pushed: 0,
+						pulled: 0,
+					},
+				})
+				const snapshot = yield* diagnostics.getSnapshot()
+				return snapshot.issueSync
+			}),
+		)
+
+		expect(health?.lastStatus).toBe("skipped")
+		expect(health?.lastMessage).toBe("bootstrap skipped (already complete)")
+		expect(health?.lastRun?.status).toBe("skipped")
+		expect(health?.lastRun?.message).toBe("bootstrap skipped (already complete)")
+	})
 })
 
 describe("DiagnosticsService linear webhook health", () => {
