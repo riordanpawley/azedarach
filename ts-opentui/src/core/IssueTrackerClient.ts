@@ -992,6 +992,20 @@ export const isLocalFirstIssueBackend = (
 export const getSyncTargetForBackend = (backend: ConfiguredIssueBackend): SyncTarget | undefined =>
 	backend === "linear" ? "linear" : undefined
 
+export interface LinearReadFallbackInput {
+	readonly backend: ConfiguredIssueBackend
+	readonly requestedCount: number
+	readonly localResultCount: number
+	readonly syncPulledCount: number
+}
+
+export const shouldUseLinearReadFallback = (input: LinearReadFallbackInput): boolean => {
+	if (input.backend !== "linear") return false
+	if (input.requestedCount <= 0) return false
+	if (input.localResultCount >= input.requestedCount) return false
+	return input.syncPulledCount === 0
+}
+
 interface IssueDbClient {
 	readonly flavor: IssueDbFlavor
 	readonly executable: string
@@ -1086,6 +1100,17 @@ const hasNoDaemonFlag = (args: readonly string[]): boolean =>
 
 const DEFAULT_ISSUE_LIST_PAGE_SIZE = 200
 const DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS = 250
+const EMPTY_ISSUES: readonly Issue[] = []
+
+interface LinearReadSyncAttempt {
+	readonly completedWithinBudget: boolean
+	readonly syncResult: SyncResult
+}
+
+const DEFAULT_LINEAR_READ_SYNC_ATTEMPT: LinearReadSyncAttempt = {
+	completedWithinBudget: true,
+	syncResult: ZERO_SYNC_RESULT,
+}
 
 const clampPositiveInt = (value: number, fallback: number): number => {
 	if (!Number.isFinite(value)) return fallback
@@ -2303,6 +2328,8 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				: configuredBackend === "legacy"
 					? createBrIssueDbClient("legacy")
 					: undefined
+		const linearIssueDbClient: IssueDbClient | undefined =
+			configuredBackend === "linear" ? _createLinearIssueDbClient({}) : undefined
 
 		const mapLocalIssueStoreError = (
 			command: string,
@@ -2333,37 +2360,55 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 		): Effect.Effect<A, IssueTrackerError> =>
 			effect.pipe(Effect.mapError((error) => mapIssueSyncError(command, error)))
 
-		const ensureLinearBootstrapForRead = (
+		const ensureLinearReadSync = (
 			cwd?: string,
 			maxSyncWaitMs = DEFAULT_LINEAR_READ_SYNC_MAX_WAIT_MS,
-		): Effect.Effect<boolean, IssueTrackerError> =>
+		): Effect.Effect<LinearReadSyncAttempt, IssueTrackerError> =>
 			configuredBackend !== "linear"
-				? Effect.succeed(true)
+				? Effect.succeed(DEFAULT_LINEAR_READ_SYNC_ATTEMPT)
 				: Effect.gen(function* () {
 						const backendSync = yield* backendSyncRouter.resolve()
 						if (backendSync === undefined) {
-							return true
+							return DEFAULT_LINEAR_READ_SYNC_ATTEMPT
 						}
 
-						const bootstrapEffect = fromIssueSync(
-							"issue-sync bootstrapLinear",
-							backendSync.bootstrap(cwd),
+						const readSyncEffect = fromIssueSync(
+							"issue-sync flushLinearQueue",
+							backendSync.flushQueue(cwd),
 						).pipe(
-							Effect.asVoid,
 							Effect.catchAll((error) =>
-								Effect.logWarning(`Linear bootstrap failed: ${error.message}`),
+								Effect.logWarning(`Linear read sync failed: ${error.message}`).pipe(
+									Effect.as(ZERO_SYNC_RESULT),
+								),
 							),
 						)
 
-						const bootstrapFiber = yield* Effect.forkIn(bootstrapEffect, scope)
+						const syncFiber = yield* Effect.forkIn(readSyncEffect, scope)
 						if (maxSyncWaitMs <= 0) {
-							return false
+							return {
+								completedWithinBudget: false,
+								syncResult: ZERO_SYNC_RESULT,
+							}
 						}
 
-						return yield* Effect.raceFirst(
-							Fiber.await(bootstrapFiber).pipe(Effect.as(true)),
+						const completedWithinBudget = yield* Effect.raceFirst(
+							Fiber.await(syncFiber).pipe(Effect.as(true)),
 							Effect.sleep(`${maxSyncWaitMs} millis`).pipe(Effect.as(false)),
 						)
+						if (!completedWithinBudget) {
+							yield* Effect.log(
+								`Linear read sync timed out after ${maxSyncWaitMs}ms; returning local-first data (cwd=${cwd ?? "<none>"})`,
+							)
+							return {
+								completedWithinBudget: false,
+								syncResult: ZERO_SYNC_RESULT,
+							}
+						}
+						const syncResult = yield* Fiber.join(syncFiber)
+						return {
+							completedWithinBudget: true,
+							syncResult,
+						}
 					})
 
 		const runBd = (
@@ -2401,12 +2446,54 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				? legacyIssueDbClient.parseSyncResult(output)
 				: Effect.succeed(ZERO_SYNC_RESULT)
 
+		const runLinearReadFallback = (
+			args: readonly string[],
+			runCwd?: string,
+		): Effect.Effect<readonly Issue[], never, CommandExecutor.CommandExecutor> =>
+			linearIssueDbClient === undefined
+				? Effect.succeed(EMPTY_ISSUES)
+				: linearIssueDbClient.runJson(args, runCwd).pipe(
+						Effect.flatMap((output) => parseJson(Schema.Array(IssueSchema), output)),
+						Effect.map((parsed) => normalizeIssues(parsed)),
+						Effect.map((issues) => issues.filter((issue) => issue.status !== "tombstone")),
+						Effect.catchAll((error) =>
+							Effect.logWarning(
+								`Linear direct read fallback failed for '${args.join(" ")}': ${String(error)}`,
+							).pipe(Effect.as(EMPTY_ISSUES)),
+						),
+					)
+
+		const mergeIssuesByRequestedIds = (
+			requestedIds: readonly string[],
+			localIssues: readonly Issue[],
+			fallbackIssues: readonly Issue[],
+		): readonly Issue[] => {
+			const issueById = new Map<string, Issue>()
+			for (const issue of localIssues) {
+				issueById.set(issue.id, issue)
+			}
+			for (const issue of fallbackIssues) {
+				if (!issueById.has(issue.id)) {
+					issueById.set(issue.id, issue)
+				}
+			}
+
+			const ordered: Issue[] = []
+			for (const requestedId of requestedIds) {
+				const issue = issueById.get(requestedId)
+				if (issue !== undefined) {
+					ordered.push(issue)
+				}
+			}
+			return ordered
+		}
+
 		return {
 			list: (filters?: IssueListFilters, cwd?: string, options?: IssueListOptions) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const issues = yield* fromLocalStore(
 							"local-store list",
 							localIssueStore.list(filters, effectiveCwd, options),
@@ -2498,21 +2585,38 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 						}
 
 						// On linear local-first backends, try refreshing the local cache from Linear once
-						// before returning not found. If refresh fails, still surface not found rather than
-						// leaking backend sync failures for missing issues.
-						if (configuredBackend === "linear") {
-							yield* ensureLinearBootstrapForRead(effectiveCwd, maxSyncWaitMs)
-						}
+					// before returning not found. If refresh fails, still surface not found rather than
+					// leaking backend sync failures for missing issues.
+					let syncAttempt = DEFAULT_LINEAR_READ_SYNC_ATTEMPT
+					if (configuredBackend === "linear") {
+						syncAttempt = yield* ensureLinearReadSync(effectiveCwd, maxSyncWaitMs)
+					}
 
-						const refreshedIssue = yield* fromLocalStore(
-							"local-store show",
-							localIssueStore.show(id, effectiveCwd),
-						)
-						if (refreshedIssue === undefined || refreshedIssue.status === "tombstone") {
-							return yield* Effect.fail(new NotFoundError({ issueId: id }))
-						}
+					const refreshedIssue = yield* fromLocalStore(
+						"local-store show",
+						localIssueStore.show(id, effectiveCwd),
+					)
+					if (refreshedIssue !== undefined && refreshedIssue.status !== "tombstone") {
 						return refreshedIssue
 					}
+
+					if (
+						shouldUseLinearReadFallback({
+							backend: configuredBackend,
+							requestedCount: 1,
+							localResultCount: 0,
+							syncPulledCount: syncAttempt.syncResult.pulled,
+						})
+					) {
+						const fallbackIssues = yield* runLinearReadFallback(["show", id], effectiveCwd)
+						const fallbackIssue = fallbackIssues[0]
+						if (fallbackIssue !== undefined) {
+							return fallbackIssue
+						}
+					}
+
+					return yield* Effect.fail(new NotFoundError({ issueId: id }))
+				}
 
 					const output = yield* runBd(["show", id], effectiveCwd)
 
@@ -2539,12 +2643,33 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						const syncAttempt = yield* ensureLinearReadSync(effectiveCwd)
 						const issues = yield* fromLocalStore(
 							"local-store showMultiple",
 							localIssueStore.showMultiple(ids, effectiveCwd),
 						)
-						return [...issues]
+						const localIssues = [...issues]
+
+						if (
+							shouldUseLinearReadFallback({
+								backend: configuredBackend,
+								requestedCount: ids.length,
+								localResultCount: localIssues.length,
+								syncPulledCount: syncAttempt.syncResult.pulled,
+							})
+						) {
+							const localIds = new Set(localIssues.map((issue) => issue.id))
+							const missingIds = ids.filter((issueId) => !localIds.has(issueId))
+							if (missingIds.length > 0) {
+								const fallbackIssues = yield* runLinearReadFallback(
+									["show", ...missingIds],
+									effectiveCwd,
+								)
+								return mergeIssuesByRequestedIds(ids, localIssues, fallbackIssues)
+							}
+						}
+
+						return localIssues
 					}
 
 					// tracker show accepts multiple IDs: tracker show id1 id2 id3 --json
@@ -2761,7 +2886,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const issues = yield* fromLocalStore(
 							"local-store ready",
 							localIssueStore.ready(effectiveCwd),
@@ -2780,7 +2905,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const issues = yield* fromLocalStore(
 							"local-store search",
 							localIssueStore.search(query, effectiveCwd),
@@ -2899,7 +3024,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const epic = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
@@ -2938,7 +3063,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const epic = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(epicId, effectiveCwd),
@@ -3012,7 +3137,7 @@ export class IssueTrackerClient extends Effect.Service<IssueTrackerClient>()("Is
 				Effect.gen(function* () {
 					const effectiveCwd = yield* getEffectiveCwd(cwd)
 					if (useLocalFirstPath) {
-						yield* ensureLinearBootstrapForRead(effectiveCwd)
+						yield* ensureLinearReadSync(effectiveCwd)
 						const issue = yield* fromLocalStore(
 							"local-store show",
 							localIssueStore.show(issueId, effectiveCwd),

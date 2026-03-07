@@ -6,6 +6,7 @@ import {
 	getSyncTargetForBackend,
 	isLocalFirstIssueBackend,
 	resolveConfiguredIssueBackend,
+	shouldUseLinearReadFallback,
 	withIssueDbTiming,
 } from "./IssueTrackerClient.js"
 
@@ -153,5 +154,51 @@ describe("local-first backend selection", () => {
 		expect(isLocalFirstIssueBackend(brBackend)).toBe(false)
 		expect(getSyncTargetForBackend(bdBackend)).toBeUndefined()
 		expect(getSyncTargetForBackend(brBackend)).toBeUndefined()
+	})
+})
+
+describe("shouldUseLinearReadFallback", () => {
+	it("enables fallback when linear read still misses requested issues after a zero-pull sync", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 0,
+			}),
+		).toBe(true)
+	})
+
+	it("does not fallback when local already satisfies the request", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 2,
+				localResultCount: 2,
+				syncPulledCount: 0,
+			}),
+		).toBe(false)
+	})
+
+	it("does not fallback for non-linear backends", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "local",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 0,
+			}),
+		).toBe(false)
+	})
+
+	it("does not fallback when sync already pulled remote data", () => {
+		expect(
+			shouldUseLinearReadFallback({
+				backend: "linear",
+				requestedCount: 1,
+				localResultCount: 0,
+				syncPulledCount: 3,
+			}),
+		).toBe(false)
 	})
 })
