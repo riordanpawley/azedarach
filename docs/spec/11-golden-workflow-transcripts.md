@@ -83,6 +83,31 @@ End State:
 
 - PR indicator is persisted on target issue and operation result is discoverable in logs/monitor
 
-## 11.5 Rewrite Exit Criterion
+## 11.5 GW-004 Spec Workspace Coverage and Debounced Publish
 
-An implementation passes golden transcript validation when all GW-001 through GW-003 runs complete with matching checkpoints in both probe assertions and approved visual snapshots.
+- Fixture: `integration`
+- Start State: spec workflow is configured with publish targets and auto-config enabled.
+
+Input Sequence:
+
+1. from board, press `g s` to enter Spec workspace
+2. press `Tab` to cycle into `Coverage` and confirm at least one visible gap
+3. perform multiple spec mutations in quick succession (for example, requirement metadata update and issue-link add/remove)
+4. press `Tab` to `Publish` and observe publish status surfaces
+5. wait for debounced publish trigger to settle
+
+Checkpoints:
+
+- probe reports `spec.workspace.active=true` and subview transitions in deterministic `Tab` order
+- rapid mutations are coalesced by debounce policy (no publish storm behavior)
+- publish summary exposes per-target outcomes and last-run metadata
+- managed sections are updated while non-managed document regions remain unchanged
+- local spec records remain authoritative despite remote doc edits
+
+End State:
+
+- Spec workspace exits cleanly to prior board context and publish state is durable/inspectable after exit
+
+## 11.6 Rewrite Exit Criterion
+
+An implementation passes golden transcript validation when all GW-001 through GW-004 runs complete with matching checkpoints in both probe assertions and approved visual snapshots.

@@ -1079,7 +1079,7 @@ A release candidate MUST pass:
 - background operation scenarios AZ-AT-2601 through AZ-AT-2608
 - probe/harness scenarios AZ-AT-2701 through AZ-AT-2705
 - e2e meta scenarios AZ-AT-2801 through AZ-AT-2811
-- spec tool scenarios AZ-AT-2901 through AZ-AT-2912
+- spec tool scenarios AZ-AT-2901 through AZ-AT-2914
 - extended conformance scenarios AZ-AT-2812 through AZ-AT-2829 and AZ-AT-2831 through AZ-AT-2837
 
 ## 6.32 Spec Tool Acceptance
@@ -1164,3 +1164,17 @@ A release candidate MUST pass:
 - Steps: open Publish subview and inspect publish metadata.
 - Expected: target state, auto-config status, and most recent outcome summary are visible.
 - Links: AZ-FR-4308.
+
+### AZ-AT-2913 Managed-section overwrite with non-managed preservation
+
+- Preconditions: target Linear documents contain both managed-marker regions and non-managed manual notes.
+- Steps: execute publish and inspect resulting document content.
+- Expected: managed-marker regions are updated deterministically from spec data; non-managed content remains unchanged.
+- Links: AZ-FR-4207, AZ-FR-4212.
+
+### AZ-AT-2914 Partial multi-document publish failure reporting
+
+- Preconditions: one configured publish target fails while another succeeds.
+- Steps: execute publish and inspect result summary.
+- Expected: per-document outcomes and requirement/link coverage counts are reported; successful targets remain updated; local spec data remains intact with actionable retry guidance.
+- Links: AZ-FR-4209, AZ-FR-4210.
