@@ -294,6 +294,13 @@ Canonical fixture profile names:
 - Expected: conflict state surfaced with resolution/abort path.
 - Links: AZ-FR-1002, AZ-FR-1003.
 
+### AZ-AT-0902a Update from base branch while effective base context is already mid-operation
+
+- Preconditions: effective base context has active `MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`.
+- Steps: `Space u`.
+- Expected: update fails fast before fetch/merge attempt, shows explicit continue/abort guidance, repository state is unchanged.
+- Links: AZ-FR-1002a, AZ-FR-1002b.
+
 ### AZ-AT-0903 Abort merge
 
 - Steps: during active merge conflict, `Space M`.
@@ -352,6 +359,13 @@ Canonical fixture profile names:
 - Steps: `Space P` on pushed or pushable branch.
 - Expected: PR created (or existing surfaced), metadata saved, indicator updated.
 - Links: AZ-FR-1101..AZ-FR-1106.
+
+### AZ-AT-1001a Create PR blocked when base pre-sync context is already mid-operation
+
+- Preconditions: effective base context has active `MERGE_HEAD`/`REBASE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`.
+- Steps: invoke `Space P`.
+- Expected: pre-sync fails fast with continue/abort guidance; PR creation does not proceed until state is resolved.
+- Links: AZ-FR-1103a, section 05 F-022a.
 
 ### AZ-AT-1002 Open PR
 

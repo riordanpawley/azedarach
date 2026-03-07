@@ -1,6 +1,6 @@
 <!--
 File: CONTEXT.md
-Version: 2.0.0
+Version: 2.0.1
 Updated: 2026-03-07
 Purpose: Canonical root AI context source synced to AGENTS.md entrypoints
 -->
@@ -37,6 +37,7 @@ Select the implementation based on user request or current working directory.
 7. **Branch Workflow**: Use local-only git flow by default. Do not run remote sync/cleanup commands (for example pull/rebase, push, remote prune) unless explicitly requested.
 8. **Spec Sync Discipline (ts-opentui)**: Keep `docs/spec/` aligned with `ts-opentui` behavior improvements in the same task, or log `Spec impact: none` with file-specific rationale in issue notes.
 9. **Safe File Operations**: Never delete untracked files or run `git restore` without explicit permission.
+10. **No Message Parsing for Logic Gates**: Never gate behavior by parsing free-form error/message text. Use typed/tagged errors (for example `Data.TaggedError`) and `_tag`-based control flow.
 
 ## Quick Commands
 

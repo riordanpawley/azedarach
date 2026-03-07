@@ -99,6 +99,13 @@ Define mandatory behavior for degraded conditions so users can recover quickly w
   - show conflict state.
   - expose conflict resolution path and abort action.
 
+### Case F-022a: Update/PR pre-sync requested while effective base context is already mid-operation
+
+- Required behavior:
+  - detect active git operation state (`MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`) before fetch/merge execution.
+  - fail fast without mutating repository state.
+  - provide explicit continue/abort guidance and retry instruction.
+
 ### Case F-023: Abort merge invoked with no active merge
 
 - Required behavior:
