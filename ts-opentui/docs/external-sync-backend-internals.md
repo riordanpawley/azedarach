@@ -14,12 +14,12 @@ This document describes how the external sync backend works now, including all k
 
 ```mermaid
 flowchart LR
-  UI[UI + Keyboard Handlers]
+  UI[UI and Keyboard Handlers]
   BS[BoardService]
   TH[TaskHandlersService]
   MQ[MutationQueue]
   ITC[IssueTrackerClient]
-  LDB[LocalIssueStore (SQLite)]
+  LDB[LocalIssueStore SQLite]
   BSR[BackendSyncRouter]
   BSL[BackendSyncLinear]
   ISS[IssueSyncService]
@@ -30,23 +30,23 @@ flowchart LR
 
   UI --> TH
   UI --> BS
-  TH -->|optimistic move| BS
-  TH -->|queue/process mutation| MQ
-  MQ -->|update/delete/sync| ITC
+  TH --> BS
+  TH --> MQ
+  MQ --> ITC
 
-  BS -->|read refresh| ITC
-  BS -->|background sync loop| ITC
-  ITC -->|local-first CRUD + queue| LDB
-  ITC -->|sync() for linear| BSR
+  BS --> ITC
+  BS --> ITC
+  ITC --> LDB
+  ITC --> BSR
   BSR --> BSL
   BSL --> ISS
-  ISS -->|claims, refs, snapshots| LDB
-  ISS -->|create/update/close/query| LS
-  ISS -->|runtime/queue/run health| DIAG
-  BS -->|webhook health + refresh failures| DIAG
+  ISS --> LDB
+  ISS --> LS
+  ISS --> DIAG
+  BS --> DIAG
 
-  LWS -->|SDK issue events stream| BS
-  PTY -->|metrics changes| BS
+  LWS --> BS
+  PTY --> BS
 ```
 
 ## 2) Mutation Write Path (Optimistic -> Queue -> Linear)
@@ -215,4 +215,3 @@ flowchart TD
 - Parent-child mapping safety: child upsert is retried when parent local id exists but parent external ref is missing.
 - Collapse safety: grouped `upsert + close` resolves to `upsert` so create-intent is not dropped before first sync.
 - PTY-triggered board refresh is intentionally local-only (session/git state), not a remote backend sync trigger.
-
