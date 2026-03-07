@@ -462,6 +462,7 @@ This section is normative.
 - AZ-FR-3814: Explicit wait mode for reads MUST allow a higher wait budget than default non-blocking read mode.
 - AZ-FR-3815: Linear sync queue processing MUST emit lifecycle logs for start/skip/success/retry/terminal-failure with project path, operation, attempt count, issue identity, and known external Linear issue ID.
 - AZ-FR-3816: Linear metadata/list reads (including workflow states and issue labels) MUST honor provider page-size caps (current provider maximum: 250), MUST NOT issue over-cap `first` values, and MUST traverse cursor pagination until complete when full dataset coverage is required.
+- AZ-FR-3817: Linear webhook fallback diagnostics and toasts MUST preserve the concrete runtime misconfiguration/failure reason when available, and MUST NOT hard-code a missing-public-URL explanation unless that is the detected cause.
 
 ## 4.42 Background Operation Requirements
 

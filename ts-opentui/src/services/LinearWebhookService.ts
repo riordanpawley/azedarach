@@ -100,10 +100,17 @@ export const decodeLinearIssueWebhookEvent = (
 	return decoded._tag === "Right" ? Option.some(decoded.right) : Option.none()
 }
 
+export interface LinearWebhookRuntimeStatus {
+	readonly mode: LinearWebhookMode
+	readonly healthy: boolean
+	readonly reason: string | undefined
+}
+
 export interface LinearWebhookServiceApi {
 	readonly issueEvents: Stream.Stream<LinearIssueWebhookEvent>
 	readonly healthy: SubscriptionRef.SubscriptionRef<boolean>
 	readonly mode: SubscriptionRef.SubscriptionRef<LinearWebhookMode>
+	readonly status: SubscriptionRef.SubscriptionRef<LinearWebhookRuntimeStatus>
 }
 
 const parseWebhookUrl = (publicBaseUrl: string): string => {
@@ -248,6 +255,17 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const issueEventsQueue = yield* Queue.unbounded<LinearIssueWebhookEvent>()
 			const healthy = yield* SubscriptionRef.make(false)
 			const mode = yield* SubscriptionRef.make<LinearWebhookMode>("disabled")
+			const status = yield* SubscriptionRef.make<LinearWebhookRuntimeStatus>({
+				mode: "disabled",
+				healthy: false,
+				reason: undefined,
+			})
+			const setRuntimeStatus = (nextStatus: LinearWebhookRuntimeStatus) =>
+				Effect.gen(function* () {
+					yield* SubscriptionRef.set(mode, nextStatus.mode)
+					yield* SubscriptionRef.set(healthy, nextStatus.healthy)
+					yield* SubscriptionRef.set(status, nextStatus)
+				})
 
 			const config = yield* SubscriptionRef.get(appConfig.config)
 			if (!("linear" in config.issueTracker)) {
@@ -255,6 +273,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
 					mode,
+					status,
 				} satisfies LinearWebhookServiceApi
 			}
 
@@ -265,22 +284,32 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				`LinearWebhookService: init backend=linear enabled=${String(webhookConfig.enabled)} transport=${transport}`,
 			)
 			if (webhookConfig.enabled === false) {
-				yield* SubscriptionRef.set(mode, "disabled")
+				yield* setRuntimeStatus({
+					mode: "disabled",
+					healthy: false,
+					reason: "Linear webhooks disabled in config",
+				})
 				yield* Effect.logDebug("LinearWebhookService: disabled in config")
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
 					mode,
+					status,
 				} satisfies LinearWebhookServiceApi
 			}
 
 			if (transport === "cli") {
-				yield* SubscriptionRef.set(mode, "cli")
+				yield* setRuntimeStatus({
+					mode: "cli",
+					healthy: false,
+					reason: "CLI webhook transport selected",
+				})
 				yield* Effect.logDebug("LinearWebhookService: CLI transport selected; SDK runtime skipped")
 				return {
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
 					mode,
+					status,
 				} satisfies LinearWebhookServiceApi
 			}
 
@@ -427,7 +456,11 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				}),
 			)
 			if (runtimeConfigResult._tag === "Left") {
-				yield* SubscriptionRef.set(mode, "misconfigured")
+				yield* setRuntimeStatus({
+					mode: "misconfigured",
+					healthy: false,
+					reason: runtimeConfigResult.left.message,
+				})
 				yield* Effect.logDebug(
 					"LinearWebhookService: runtime config resolution failed; entering misconfigured mode",
 				)
@@ -436,6 +469,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					issueEvents: Stream.fromQueue(issueEventsQueue),
 					healthy,
 					mode,
+					status,
 				} satisfies LinearWebhookServiceApi
 			}
 
@@ -544,8 +578,11 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					webhookIdRef.id = registeredWebhookId
 				}
 
-				yield* SubscriptionRef.set(mode, "sdk")
-				yield* SubscriptionRef.set(healthy, true)
+				yield* setRuntimeStatus({
+					mode: "sdk",
+					healthy: true,
+					reason: undefined,
+				})
 				yield* Effect.log(
 					`Linear SDK webhook runtime started on :${port} (team=${runtimeConfig.teamRef} via ${runtimeConfig.teamSource}, url=${webhookUrl} via ${runtimeConfig.publicUrlSource}, secret=${runtimeConfig.webhookSecretSource})`,
 				)
@@ -564,8 +601,11 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					),
 					Effect.catchAll((error) =>
 						Effect.gen(function* () {
-							yield* SubscriptionRef.set(mode, "failed")
-							yield* SubscriptionRef.set(healthy, false)
+							yield* setRuntimeStatus({
+								mode: "failed",
+								healthy: false,
+								reason: formatErrorMessage(error),
+							})
 							yield* Effect.logWarning(
 								`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}; falling back to polling`,
 							)
@@ -577,6 +617,7 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				issueEvents: Stream.fromQueue(issueEventsQueue),
 				healthy,
 				mode,
+				status,
 			} satisfies LinearWebhookServiceApi
 		}),
 	},

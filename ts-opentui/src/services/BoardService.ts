@@ -267,6 +267,52 @@ export const resolveLinearSdkEventsTickerBehavior = (
                 defensiveReconciliationInterval: undefined,
             }
 
+const normalizeLinearWebhookReason = (reason: string | undefined): string | undefined => {
+	if (reason === undefined) return undefined
+	const trimmed = reason.trim()
+	return trimmed.length > 0 ? trimmed : undefined
+}
+
+const isMissingPublicWebhookUrlReason = (reason: string): boolean => {
+	const normalizedReason = reason.toLowerCase()
+	return (
+		normalizedReason.includes("public webhook url") ||
+		normalizedReason.includes(LINEAR_WEBHOOK_PUBLIC_URL_ENV.toLowerCase())
+	)
+}
+
+export const resolveLinearSdkPollingFallbackHealthMessage = (params: {
+	readonly mode: LinearWebhookMode
+	readonly healthy: boolean
+	readonly reason: string | undefined
+}): string => {
+	const normalizedReason = normalizeLinearWebhookReason(params.reason)
+	return normalizedReason === undefined
+		? `SDK mode=${params.mode} healthy=${String(params.healthy)} with no CLI fallback; using background polling.`
+		: `SDK mode=${params.mode} healthy=${String(params.healthy)} with no CLI fallback; reason=${normalizedReason}; using background polling.`
+}
+
+export const resolveLinearSdkPollingFallbackToastMessage = (params: {
+	readonly mode: LinearWebhookMode
+	readonly reason: string | undefined
+}): string => {
+	const normalizedReason = normalizeLinearWebhookReason(params.reason)
+	if (normalizedReason === undefined) {
+		return `Linear webhooks unavailable (mode=${params.mode}). Falling back to background polling.`
+	}
+
+	if (params.mode === "misconfigured" && isMissingPublicWebhookUrlReason(normalizedReason)) {
+		return `Linear webhooks unavailable: ${normalizedReason}. Falling back to background polling.`
+	}
+
+	return `Linear webhooks unavailable (mode=${params.mode}): ${normalizedReason}. Falling back to background polling.`
+}
+
+const linearWebhookReasonKey = (reason: string | undefined): string => {
+	const normalizedReason = normalizeLinearWebhookReason(reason)
+	return normalizedReason === undefined ? "none" : encodeURIComponent(normalizedReason)
+}
+
 export type BoardRefreshReason = "default" | "mutation" | "initial-load" | "project-switch" | "pty"
 
 interface BoardRefreshOptions {
@@ -2296,8 +2342,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					} satisfies LinearRefreshStrategyPlan
 				}
 
-				const sdkMode = yield* SubscriptionRef.get(linearWebhookService.mode)
-				const sdkHealthy = yield* SubscriptionRef.get(linearWebhookService.healthy)
+				const sdkStatus = yield* SubscriptionRef.get(linearWebhookService.status)
+				const sdkMode = sdkStatus.mode
+				const sdkHealthy = sdkStatus.healthy
+				const sdkReason = normalizeLinearWebhookReason(sdkStatus.reason)
 				const sdkTickerBehavior = resolveLinearSdkEventsTickerBehavior(sdkMode, sdkHealthy)
 				if (sdkTickerBehavior.localRefreshOnly) {
 					return {
@@ -2320,17 +2368,20 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				})
 				if (listenerConfig !== undefined) {
 					return {
-						key: `linear:sdk-cli-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookListenerConfigKey(listenerConfig)}`,
+						key: `linear:sdk-cli-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookReasonKey(sdkReason)}:${linearWebhookListenerConfigKey(listenerConfig)}`,
 						start: Effect.gen(function* () {
 							yield* Ref.set(localRefreshOnlyRef, false)
 							yield* Effect.logWarning(
-								`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}); attempting CLI webhook listener fallback`,
+								`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}${sdkReason ? ` reason=${sdkReason}` : ""}); attempting CLI webhook listener fallback`,
 							)
 							yield* reportLinearWebhookHealth({
 								mode: sdkMode,
 								strategy: "cli-fallback-listener",
 								healthy: true,
-								message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`,
+								message:
+									sdkReason === undefined
+										? `SDK mode=${sdkMode} healthy=${String(sdkHealthy)}; using CLI webhook listener fallback.`
+										: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} reason=${sdkReason}; using CLI webhook listener fallback.`,
 							})
 							return yield* startLinearSdkCliFallbackListenerFiber(listenerConfig)
 						}),
@@ -2338,22 +2389,27 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				}
 
 				return {
-					key: `linear:sdk-polling-fallback:${sdkMode}:${String(sdkHealthy)}`,
+					key: `linear:sdk-polling-fallback:${sdkMode}:${String(sdkHealthy)}:${linearWebhookReasonKey(sdkReason)}`,
 					start: Effect.gen(function* () {
 						yield* Ref.set(localRefreshOnlyRef, false)
 						yield* Effect.logWarning(
-							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}), using background polling fallback`,
+							`Linear SDK webhook mode is ${sdkMode} (healthy=${String(sdkHealthy)}${sdkReason ? ` reason=${sdkReason}` : ""}), using background polling fallback`,
 						)
 						yield* reportLinearWebhookHealth({
 							mode: sdkMode,
 							strategy: "polling-fallback",
 							healthy: false,
-							message: `SDK mode=${sdkMode} healthy=${String(sdkHealthy)} with no CLI fallback; using background polling.`,
+							message: resolveLinearSdkPollingFallbackHealthMessage({
+								mode: sdkMode,
+								healthy: sdkHealthy,
+								reason: sdkReason,
+							}),
 						})
 						yield* toastWebhookFallback(
-							sdkMode === "misconfigured"
-								? "Linear webhooks unavailable: missing public webhook URL. Falling back to background polling."
-								: `Linear webhooks unavailable (mode=${sdkMode}). Falling back to background polling.`,
+							resolveLinearSdkPollingFallbackToastMessage({
+								mode: sdkMode,
+								reason: sdkReason,
+							}),
 						)
 						return yield* startBackgroundPollingFiber()
 					}),

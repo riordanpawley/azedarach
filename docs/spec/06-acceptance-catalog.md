@@ -590,6 +590,13 @@ Canonical fixture profile names:
 - Expected: board shell is interactable immediately; startup loading indicator remains visible until first hydration attempt settles; data converges without manual relaunch/refresh.
 - Links: AZ-FR-2709, AZ-FR-2710, AZ-FR-2711, AZ-FR-3908, section 05 F-104.
 
+### AZ-AT-1605 Webhook fallback messaging reports detected cause
+
+- Preconditions: Linear backend with webhook transport in SDK mode; inject a webhook startup misconfiguration/failure reason (for example unresolved team reference) that is not a missing-public-URL condition.
+- Steps: trigger startup strategy selection until SDK polling fallback path is active and observe diagnostics + toast surfaces.
+- Expected: diagnostics and toast include the concrete detected reason; missing-public-URL phrasing is shown only when the underlying detected reason is specifically a missing public webhook URL.
+- Links: AZ-FR-3817.
+
 ## 6.19 Concurrency and Mutation Acceptance
 
 ### AZ-AT-1701 Stale edit conflict handling
