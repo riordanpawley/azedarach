@@ -182,6 +182,7 @@ Bootstrap steps:
 
 Shortcut:
 - `just release-ts-opentui-homebrew patch` runs release + formula generation and commits/pushes the tap update (default tap path: `/Users/riordan/prog/homebrew-azedarach`).
+- It automatically waits for release assets (`SHA256SUMS.txt`) before generating the formula.
 
 Coworker install (after tap is published):
 
