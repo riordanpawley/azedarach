@@ -30,6 +30,9 @@ const PORT_POLL_INTERVAL = 500
 const PORT_DETECTION_TIMEOUT = 30000
 const HEALTH_CHECK_INTERVAL = 5000
 const PORT_CHECK_TIMEOUT_MS = 1000
+const PackageScriptsSchema = Schema.Struct({
+	scripts: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+})
 
 /**
  * Check if a port is open on a specific host by attempting a TCP connection.
@@ -480,8 +483,18 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					return "npm run dev"
 				}
 				const content = yield* fs.readFileString(pkgPath)
-				const pkg = JSON.parse(content)
-				const scripts = pkg.scripts ?? {}
+				const pkg = yield* Schema.decode(Schema.parseJson(PackageScriptsSchema))(content).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(
+								Effect.succeed<{ readonly scripts?: Readonly<Record<string, unknown>> }>({
+									scripts: {},
+								}),
+							),
+						),
+					),
+				)
+				const scripts: Readonly<Record<string, unknown>> = pkg.scripts ?? {}
 				const pm = (yield* fs
 					.exists(pathService.join(worktreePath, "bun.lockb"))
 					.pipe(
@@ -493,7 +506,9 @@ export class DevServerService extends Effect.Service<DevServerService>()("DevSer
 					))
 					? "bun"
 					: "npm"
-				return scripts.dev ? `${pm} run dev` : scripts.start ? `${pm} run start` : `${pm} run dev`
+				const hasDevScript = typeof scripts["dev"] === "string"
+				const hasStartScript = typeof scripts["start"] === "string"
+				return hasDevScript ? `${pm} run dev` : hasStartScript ? `${pm} run start` : `${pm} run dev`
 			})
 
 		const healthCheckFiber = yield* Effect.scheduleForked(

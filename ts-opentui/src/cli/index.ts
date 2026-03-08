@@ -2490,10 +2490,9 @@ const hooksInstallHandler = (args: {
 						),
 					),
 				)
-			existingSettings = yield* Effect.try({
-				try: () => JSON.parse(content),
-				catch: () => ({}),
-			}).pipe(
+			existingSettings = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(content).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 						Effect.zipRight(Effect.succeed({})),
@@ -3646,14 +3645,14 @@ const opencodeInitHandler = (args: {
 		const configExists = yield* fs.exists(opencodeJsonPath)
 		if (configExists) {
 			const existingContent = yield* fs.readFileString(opencodeJsonPath)
-			const existingConfig = yield* Effect.try({
-				try: () => JSON.parse(existingContent),
-				catch: () => ({}),
-			})
+			const existingConfig: Readonly<Record<string, unknown>> = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const existingPlugins = Array.isArray(existingConfig.plugins)
-				? (existingConfig.plugins as string[])
+			const pluginsValue = existingConfig["plugins"]
+			const existingPlugins = Array.isArray(pluginsValue)
+				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []
 			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }

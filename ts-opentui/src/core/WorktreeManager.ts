@@ -535,12 +535,17 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							),
 						),
 					)
-				const parsed = yield* Effect.try({
-					try: () => JSON.parse(raw) as unknown,
-					catch: () => ({}),
-				})
+				const parsed = yield* Schema.decode(
+					Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+				)(raw).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed({})),
+						),
+					),
+				)
 
-				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				if (Array.isArray(parsed)) {
 					return {}
 				}
 
@@ -779,14 +784,11 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 								),
 							),
 						)
-					existingSettings = yield* Effect.try({
-						try: () => JSON.parse(content) as Record<string, unknown>,
-						catch: () => ({}) as Record<string, unknown>,
-					}).pipe(
+					existingSettings = yield* Schema.decode(
+						Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+					)(content).pipe(
 						Effect.catchAll((error) =>
-							Effect.logWarning(error).pipe(
-								Effect.zipRight(Effect.succeed({} as Record<string, unknown>)),
-							),
+							Effect.logWarning(error).pipe(Effect.zipRight(Effect.succeed({}))),
 						),
 					)
 				}

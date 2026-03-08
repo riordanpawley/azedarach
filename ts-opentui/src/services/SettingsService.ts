@@ -520,20 +520,11 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					),
 				)
 
-				const parsedJson = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (error) =>
-						new SettingsConfigLoadError({
-							message: "Invalid JSON in .azedarach.json",
-							cause: String(error),
-						}),
-				})
-
-				return yield* Schema.decodeUnknown(AzedarachConfigSchema)(parsedJson).pipe(
+				return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
 					Effect.mapError(
 						(error) =>
 							new SettingsConfigLoadError({
-								message: "Config validation failed for .azedarach.json",
+								message: "Config parse/validation failed for .azedarach.json",
 								cause: String(error),
 							}),
 					),

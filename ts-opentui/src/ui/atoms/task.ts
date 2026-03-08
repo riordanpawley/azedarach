@@ -7,8 +7,8 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
@@ -30,8 +30,6 @@ const AITaskResponseSchema = Schema.Struct({
 })
 
 type AITaskResponse = Schema.Schema.Type<typeof AITaskResponseSchema>
-
-const decodeAIResponse = Schema.decodeUnknown(AITaskResponseSchema)
 
 class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
@@ -340,21 +338,13 @@ Return ONLY the JSON object, no explanation or markdown.`
 			.replace(/\s*```$/i, "")
 			.trim()
 
-		// Parse JSON
-		const jsonParsed = yield* Effect.try({
-			try: () => JSON.parse(cleanOutput),
-			catch: (e) =>
-				new AITaskCreateError({
-					message: `Failed to parse AI output: ${e}\nRaw output: ${rawOutput}`,
-				}),
-		})
-
-		// Validate with Schema
-		const parsed: AITaskResponse = yield* decodeAIResponse(jsonParsed).pipe(
+		const parsed: AITaskResponse = yield* Schema.decode(Schema.parseJson(AITaskResponseSchema))(
+			cleanOutput,
+		).pipe(
 			Effect.mapError(
 				(e) =>
 					new AITaskCreateError({
-						message: `AI output did not match schema: ${e}\nRaw output: ${rawOutput}`,
+						message: `Failed to parse or validate AI output: ${e}\nRaw output: ${rawOutput}`,
 					}),
 			),
 		)
