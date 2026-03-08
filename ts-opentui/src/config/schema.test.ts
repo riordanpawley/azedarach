@@ -8,7 +8,11 @@
 import { describe, expect, it } from "bun:test"
 import { Schema } from "effect"
 import { mergeWithDefaults } from "./defaults.js"
-import { AzedarachConfigSchema, CURRENT_CONFIG_VERSION } from "./schema.js"
+import {
+	AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+	AzedarachConfigSchema,
+	CURRENT_CONFIG_VERSION,
+} from "./schema.js"
 
 /**
  * Helper to decode a raw config through the schema
@@ -38,6 +42,16 @@ describe("AzedarachConfigSchema", () => {
 
 		it("handles config with no version field (legacy)", () => {
 			const result = decodeConfig({
+				session: { command: "claude" },
+			})
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.session?.command).toBe("claude")
+		})
+
+		it("accepts editor metadata schema URI with explicit $version", () => {
+			const result = decodeConfig({
+				$schema: AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+				$version: CURRENT_CONFIG_VERSION,
 				session: { command: "claude" },
 			})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
@@ -523,7 +537,7 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("encoding", () => {
-		it("encodes current config with version", () => {
+		it("encodes current config with editor metadata and explicit version", () => {
 			const config = {
 				$schema: CURRENT_CONFIG_VERSION,
 				issueTracker: {
@@ -536,7 +550,8 @@ describe("AzedarachConfigSchema", () => {
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 			const encodedIssueTracker = encoded.issueTracker
 
-			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(encoded.$schema).toBe(AZEDARACH_CONFIG_JSON_SCHEMA_URI)
+			expect(encoded.$version).toBe(CURRENT_CONFIG_VERSION)
 			if (
 				encodedIssueTracker === undefined ||
 				typeof encodedIssueTracker !== "object" ||
