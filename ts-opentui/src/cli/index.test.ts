@@ -20,6 +20,10 @@ describe("buildPrimeOutput", () => {
 			"Missing fields (for example description/design/acceptance/notes) are valid.",
 		)
 		expect(output).toContain("Do not go on history/log hunting tangents")
+		expect(output).toContain(
+			"Before implementing behavior changes, inspect relevant `az spec` requirements/links",
+		)
+		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
