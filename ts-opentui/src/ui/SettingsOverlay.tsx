@@ -22,7 +22,7 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
 import { getVisibleSettings } from "../services/SettingsService.js"
-import { appConfigAtom, settingsStateAtom } from "./atoms.js"
+import { appConfigAtom, configLoadWarningAtom, settingsStateAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -53,6 +53,10 @@ const formatSettingValue = (value: boolean | string | number): string => {
 export const SettingsOverlay = () => {
 	const config = useAtomValue(
 		appConfigAtom,
+		Result.getOrElse(() => null),
+	)
+	const configLoadWarning = useAtomValue(
+		configLoadWarningAtom,
 		Result.getOrElse(() => null),
 	)
 	const settingsStateResult = useAtomValue(settingsStateAtom)
@@ -125,6 +129,16 @@ export const SettingsOverlay = () => {
 					{"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"}
 				</text>
 				<text> </text>
+				{configLoadWarning && (
+					<>
+						<text fg={theme.peach} attributes={ATTR_BOLD}>
+							{"Config warning: using fallback defaults"}
+						</text>
+						<text fg={theme.overlay0}>{configLoadWarning.path}</text>
+						<text fg={theme.overlay0}>{"Open in editor (e) to fix and reload."}</text>
+						<text> </text>
+					</>
+				)}
 
 				{settingsRows.map((row) => {
 					if (row._tag === "group") {

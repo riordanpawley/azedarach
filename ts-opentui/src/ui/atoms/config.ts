@@ -14,6 +14,13 @@ export const appConfigAtom = appRuntime.subscriptionRef(
 	}),
 )
 
+export const configLoadWarningAtom = appRuntime.subscriptionRef(
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		return appConfig.loadWarning
+	}),
+)
+
 export const workflowModeAtom = Atom.readable((get) => {
 	const configResult = get(appConfigAtom)
 	if (!Result.isSuccess(configResult)) return "origin" as const
