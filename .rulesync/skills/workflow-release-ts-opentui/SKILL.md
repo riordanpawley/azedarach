@@ -19,6 +19,7 @@ Use this skill when the task is "release next version" or "bump version" for `ts
   - `just release-ts-opentui <patch|minor|major>` for release-only
   - `just release-ts-opentui-homebrew <patch|minor|major>` for release + tap formula update
     (default tap path: `/Users/riordan/prog/homebrew-azedarach`, override with `AZ_HOMEBREW_TAP_DIR`)
+  - The one-step command waits for release assets (`SHA256SUMS.txt`) before generating and publishing the tap formula.
 - The release script performs pull + push. Only run the full script when remote sync is explicitly requested.
 - If remote sync is not explicitly requested, do local-only release prep (version bump, checks, commit, local tag).
 - Always include the issue ID in commit messages.
