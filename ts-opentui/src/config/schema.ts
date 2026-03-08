@@ -228,6 +228,8 @@ const GitScopedPRConfigSchema = Schema.Struct({
 	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to top-level pr.aiModel in v6 */
+	aiModel: Schema.optional(SupportedModelSchema),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
 })
@@ -1137,15 +1139,15 @@ const migrations: readonly Migration[] = [
 			const scopedMerge = git?.merge
 
 			const migratedPr =
-				config.pr ??
-				(scopedPr === undefined
-					? undefined
-					: {
-							enabled: scopedPr.enabled,
-							autoDraft: scopedPr.autoDraft,
-							autoMerge: scopedPr.autoMerge,
-							baseBranch: scopedPr.baseBranch,
-						})
+				config.pr !== undefined || scopedPr !== undefined
+					? {
+							enabled: config.pr?.enabled ?? scopedPr?.enabled,
+							autoDraft: config.pr?.autoDraft ?? scopedPr?.autoDraft,
+							autoMerge: config.pr?.autoMerge ?? scopedPr?.autoMerge,
+							aiModel: config.pr?.aiModel ?? scopedPr?.aiModel,
+							baseBranch: scopedPr?.baseBranch,
+						}
+					: undefined
 
 			const migratedMerge =
 				config.merge ??
@@ -1264,7 +1266,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					enabled: prSource.enabled,
 					autoDraft: prSource.autoDraft,
 					autoMerge: prSource.autoMerge,
-					aiModel: current.pr?.aiModel,
+					aiModel: prSource.aiModel,
 				}
 			: undefined,
 		merge: mergeSource

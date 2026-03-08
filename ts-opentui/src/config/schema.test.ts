@@ -217,6 +217,7 @@ describe("AzedarachConfigSchema", () => {
 					pr: {
 						enabled: true,
 						autoDraft: false,
+						aiModel: "gpt-5.3-codex-spark",
 					},
 					merge: {
 						maxFixAttempts: 3,
@@ -228,6 +229,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(result.pr?.enabled).toBe(true)
 			expect(result.pr?.autoDraft).toBe(false)
+			expect(result.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 			expect(result.merge?.maxFixAttempts).toBe(3)
 			expect(result.merge?.startAiSessionOnFailure).toBe(false)
 		})
@@ -244,6 +246,7 @@ describe("AzedarachConfigSchema", () => {
 				git: {
 					pr: {
 						enabled: true,
+						aiModel: "gpt-5.3-codex-spark",
 					},
 					merge: {
 						maxFixAttempts: 9,
@@ -252,7 +255,22 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.pr?.enabled).toBe(false)
+			expect(result.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 			expect(result.merge?.maxFixAttempts).toBe(1)
+		})
+
+		it("preserves git-scoped pr.aiModel when re-encoding canonical config", () => {
+			const decoded = decodeConfig({
+				$schema: 5,
+				git: {
+					pr: {
+						aiModel: "gpt-5.3-codex-spark",
+					},
+				},
+			})
+			const encoded = encodeConfig(decoded)
+
+			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 	})
 
