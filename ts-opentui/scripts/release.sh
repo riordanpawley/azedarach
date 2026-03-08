@@ -7,10 +7,11 @@ usage() {
 Cut an Azedarach ts-opentui release with version/tag sync.
 
 Usage:
-  release.sh <version|major|minor|patch> [--dry-run] [--skip-checks] [--skip-pull] [--remote <name>] [--branch <name>]
+  release.sh <version|major|minor|patch|bump=<level>> [--dry-run] [--skip-checks] [--skip-pull] [--remote <name>] [--branch <name>]
 
 Examples:
   ./ts-opentui/scripts/release.sh patch
+  ./ts-opentui/scripts/release.sh bump=patch
   ./ts-opentui/scripts/release.sh minor
   ./ts-opentui/scripts/release.sh 0.3.2
   ./ts-opentui/scripts/release.sh v0.3.2 --dry-run
@@ -50,6 +51,23 @@ fi
 
 RELEASE_TARGET="$1"
 shift
+
+if [[ "$RELEASE_TARGET" == *=* ]]; then
+    RELEASE_TARGET_KEY="${RELEASE_TARGET%%=*}"
+    RELEASE_TARGET_VALUE="${RELEASE_TARGET#*=}"
+    case "$RELEASE_TARGET_KEY" in
+    bump | version | target)
+        RELEASE_TARGET="$RELEASE_TARGET_VALUE"
+        ;;
+    *)
+        fail "Unknown release target format '$RELEASE_TARGET'. Use major|minor|patch, semver, or bump=<level>."
+        ;;
+    esac
+fi
+
+if [[ -z "$RELEASE_TARGET" ]]; then
+    fail "Release target cannot be empty."
+fi
 
 DRY_RUN=0
 RUN_CHECKS=1
