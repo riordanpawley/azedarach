@@ -26,6 +26,10 @@ describe("buildPrimeOutput", () => {
 		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
+		expect(output).toContain(
+			"Review flow policy: reviews target closed tasks, not in-progress tasks.",
+		)
+		expect(output).toContain("If review finds remaining work, move the issue back to in-progress")
 		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
 	})
 

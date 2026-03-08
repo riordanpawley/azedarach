@@ -2286,7 +2286,9 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.
-  - Then close the issue (\`az issue close <issue-id>\`).
+  - Close the issue when implementation is ready for review (\`az issue close <issue-id>\`).
+  - Review flow policy: reviews target closed tasks, not in-progress tasks.
+  - If review finds remaining work, move the issue back to in-progress and continue.
 ${issueSection}
 `
 }
