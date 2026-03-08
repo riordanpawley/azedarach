@@ -636,6 +636,33 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						Effect.orElseSucceed(() => "{}"),
 					)
 
+					// Mirror bead editor behavior: open $EDITOR in a blocking tmux popup.
+					const editor = process.env.EDITOR || "vim"
+					const channel = `az-settings-editor-${Date.now()}`
+					Bun.spawnSync(
+						[
+							"tmux",
+							"display-popup",
+							"-E",
+							"-w",
+							"90%",
+							"-h",
+							"90%",
+							"-T",
+							" Edit Config ",
+							"--",
+							"sh",
+							"-c",
+							`${editor} "${configPath}"; tmux wait-for -S ${channel}`,
+						],
+						{ stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+					)
+					Bun.spawnSync(["tmux", "wait-for", channel], {
+						stdin: "inherit",
+						stdout: "inherit",
+						stderr: "inherit",
+					})
+
 					return { configPath, backupContent }
 				}),
 
@@ -654,10 +681,12 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 
 					if (parseResult._tag === "Left") {
 						yield* fs.writeFileString(configPath, backupContent).pipe(Effect.orDie)
+						yield* appConfigService.reload()
 						yield* toast.show("error", `Invalid config, rolled back`)
 						return { valid: false, error: "Schema validation failed" }
 					}
 
+					yield* appConfigService.reload()
 					yield* toast.show("success", "Settings updated")
 					return { valid: true }
 				}),

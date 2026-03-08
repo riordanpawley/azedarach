@@ -867,9 +867,6 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 
 					if (key === "e") {
 						const { configPath, backupContent } = yield* settings.openInEditor()
-						// Use EditorService to open the file
-						yield* editor.openFile(configPath)
-
 						// After editor closes, validate the new config
 						yield* settings.validateAfterEdit(configPath, backupContent)
 						return true
