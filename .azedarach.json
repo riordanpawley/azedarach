@@ -1,5 +1,6 @@
 {
-  "$schema": 6,
+  "$schema": "./.azedarach.schema.json",
+  "$version": 6,
   "cliTool": "codex",
   "issueTracker": {
     "local": {
@@ -24,19 +25,7 @@
     "remote": "origin",
     "branchPrefix": "az-",
     "baseBranch": "main",
-    "workflowMode": "local",
-    "pr": {
-      "enabled": false,
-      "aiModel": "gpt-5.3-codex-spark"
-    },
-    "merge": {
-      "validateCommands": [
-        "cd ts-opentui && bun run type-check"
-      ],
-      "fixCommand": "cd ts-opentui && bun run fix",
-      "maxFixAttempts": 2,
-      "startAiSessionOnFailure": true
-    }
+    "workflowMode": "local"
   },
   "session": {
     "shell": "zsh",
@@ -44,6 +33,17 @@
   },
   "stateDetection": {
     "patternMatching": true
+  },
+  "pr": {
+    "enabled": false
+  },
+  "merge": {
+    "validateCommands": [
+      "cd ts-opentui && bun run type-check"
+    ],
+    "fixCommand": "cd ts-opentui && bun run fix",
+    "maxFixAttempts": 2,
+    "startAiSessionOnFailure": true
   },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
