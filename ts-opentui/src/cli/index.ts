@@ -205,7 +205,7 @@ const projectDirArg = Args.directory().pipe(
 	Args.withDescription("Project directory (default: current directory)"),
 )
 
-const TOP_LEVEL_COMMAND_ALIASES = {
+const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	a: "add",
 	ls: "list",
 	l: "list",
@@ -225,9 +225,9 @@ const TOP_LEVEL_COMMAND_ALIASES = {
 	d: "dev",
 	s: "status",
 	st: "start",
-} as const
+}
 
-const TOP_LEVEL_NESTED_COMMAND_ALIASES = {
+const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
 	issue: {
 		l: "list",
 		g: "get",
@@ -299,7 +299,7 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES = {
 		t: "status",
 		stt: "status",
 	},
-} as const satisfies Record<string, Record<string, string>>
+}
 
 // ============================================================================
 // Validation Helpers
@@ -2223,12 +2223,44 @@ const gateHandler = (args: {
 /**
  * az prime - Print session primer for AI agents
  */
+const normalizePrimeIssueId = (raw: string | undefined): string | undefined => {
+    const trimmed = (raw ?? "").trim()
+    if (trimmed.length === 0) {
+        return undefined
+    }
+    return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : undefined
+}
+
 const primeHandler = (_args: { readonly verbose: boolean }) =>
-	Effect.gen(function* () {
-		yield* Console.log(`Azedarach Session Primer
+    Effect.gen(function* () {
+        const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+        const issueContext =
+            issueId === undefined
+                ? ""
+                : yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
+                        Effect.map((output) => output.trim()),
+                        Effect.catchAll(() => Effect.succeed("")),
+                    )
+
+        const issueSection =
+            issueId === undefined
+                ? ""
+                : issueContext.length > 0
+                    ? `
+
+Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
+\`\`\`
+${issueContext.length > 4000 ? `${issueContext.slice(0, 4000)}\n...` : issueContext}
+\`\`\``
+                    : `
+
+Active issue from AZEDARACH_ISSUE_ID=${issueId}.
+Could not load issue details automatically; run \`az issue get ${issueId}\`.`
+
+        yield* Console.log(`Azedarach Session Primer
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
-- Start each session with: \`az issue get <issue-id>\`
+- Start each session with: \`az prime\`
 - Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
 - Common issue commands:
   - \`az issue list --limit 20\` (lists most recently updated issues first)
@@ -2249,8 +2281,9 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.
   - Then close the issue (\`az issue close <issue-id>\`).
+${issueSection}
 `)
-	})
+    })
 
 /**
  * Valid hook event types from Claude Code
@@ -4145,7 +4178,7 @@ const normalizeTopLevelCommandAlias = (argv: ReadonlyArray<string>): ReadonlyArr
 	const topLevelArg = argv[topLevelIndex]
 	if (topLevelArg === undefined) return argv
 
-	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg as keyof typeof TOP_LEVEL_COMMAND_ALIASES]
+	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg]
 	if (replacement === undefined) return argv
 
 	const normalized = [...argv]
@@ -4176,7 +4209,7 @@ const normalizeCliAliases = (argv: ReadonlyArray<string>): ReadonlyArray<string>
 			break
 		}
 
-		const replacement = aliasesForCommand[candidate as keyof typeof aliasesForCommand]
+		const replacement = aliasesForCommand[candidate]
 		if (replacement === undefined) {
 			break
 		}

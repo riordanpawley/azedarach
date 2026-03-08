@@ -66,11 +66,11 @@ const ModelConfigSchema = Schema.Struct({
 	 */
 	default: Schema.optional(Schema.String),
 
-	/**
-	 * Model for chat sessions (Space+c)
-	 * Typically a faster/cheaper model for quick interactions.
-	 */
-	chat: Schema.optional(Schema.String),
+    /**
+     * Model for lightweight assistant interactions.
+     * Typically a faster/cheaper model for quick interactions.
+     */
+    chat: Schema.optional(Schema.String),
 
 	/**
 	 * Tool-specific model configuration overrides.

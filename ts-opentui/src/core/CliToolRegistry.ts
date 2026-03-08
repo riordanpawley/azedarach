@@ -112,8 +112,14 @@ const claudeToolDefinition: CliToolDefinition = {
 	sessionNamePrefix: "claude",
 	hookStrategy: "hooks+pty",
 
-	buildCommand: (options) => {
-		const parts: string[] = ["claude"]
+    buildCommand: (options) => {
+        const parts: string[] = []
+
+        if (options.issueId) {
+            parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+        }
+
+        parts.push("claude")
 
 		// -c continues the most recent conversation in the current directory
 		if (options.continueConversation) {
@@ -205,8 +211,14 @@ const codexToolDefinition: CliToolDefinition = {
 	sessionNamePrefix: "codex",
 	hookStrategy: "pty",
 
-	buildCommand: (options) => {
-		const parts: string[] = ["codex"]
+    buildCommand: (options) => {
+        const parts: string[] = []
+
+        if (options.issueId) {
+            parts.push(`AZEDARACH_ISSUE_ID="${escapeForShellDoubleQuotes(options.issueId)}"`)
+        }
+
+        parts.push("codex")
 
 		if (options.model) {
 			parts.push(`--model ${options.model}`)

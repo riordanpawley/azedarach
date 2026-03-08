@@ -10,11 +10,10 @@
  * Standard window names for issue sessions
  */
 export const WINDOW_NAMES = {
-	CODE: "code",
-	DEV: "dev",
-	CHAT: "chat",
-	HX: "hx",
-	BACKGROUND: "background",
+    CODE: "code",
+    DEV: "dev",
+    HX: "hx",
+    BACKGROUND: "background",
 } as const
 
 /**

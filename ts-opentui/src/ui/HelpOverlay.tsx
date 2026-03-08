@@ -98,11 +98,10 @@ export const HelpOverlay = () => {
 				{/* Action mode section */}
 				<SectionHeader title="Action Mode (Space+):" />
 				<KeyLine keys="s / S / !" description="Start / Start+work / Yolo" />
-				<KeyLine keys="a / A" description="Attach external / Attach inline" />
-				<KeyLine keys="p / R / x" description="Pause / Resume / Stop session" />
-				<KeyLine keys="r / C-r" description="Toggle / Restart dev server" />
-				<KeyLine keys="c" description="Chat (Haiku)" />
-				<KeyLine keys="H" description="Open Helix editor" />
+                <KeyLine keys="a / A" description="Attach external / Attach inline" />
+                <KeyLine keys="p / R / x" description="Pause / Resume / Stop session" />
+                <KeyLine keys="r / C-r" description="Toggle / Restart dev server" />
+                <KeyLine keys="H" description="Open Helix editor" />
 				<KeyLine keys="h / l" description="Move task(s) left / right" />
 				<KeyLine keys="e / E" description="Edit ($EDITOR) / Edit (AI)" />
 				<KeyLine keys="i" description="Attach image" />
