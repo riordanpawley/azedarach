@@ -137,6 +137,10 @@ describe("AzedarachConfigSchema", () => {
 					syncEnabled: true,
 					command: "linear-cli",
 					team: "ENG",
+					syncThrottle: {
+						maxPerMinute: 90,
+						burst: 10,
+					},
 					webhooks: {
 						enabled: true,
 						url: "https://example.ngrok.app",
@@ -149,7 +153,28 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
 			expect(result.issueTracker?.linear?.team).toBe("ENG")
 			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+			expect(result.issueTracker?.linear?.syncThrottle?.maxPerMinute).toBe(90)
+			expect(result.issueTracker?.linear?.syncThrottle?.burst).toBe(10)
 			expect(result.issueTracker?.linear?.webhooks?.url).toBe("https://example.ngrok.app")
+		})
+
+		it("preserves nested linear syncThrottle during v2 migration path", () => {
+			const result = decodeConfig({
+				$schema: 2,
+				issueTracker: {
+					linear: {
+						syncEnabled: true,
+						syncThrottle: {
+							maxPerMinute: 120,
+							burst: 20,
+						},
+					},
+				},
+			})
+
+			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.linear?.syncThrottle?.maxPerMinute).toBe(120)
+			expect(result.issueTracker?.linear?.syncThrottle?.burst).toBe(20)
 		})
 	})
 

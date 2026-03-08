@@ -937,6 +937,7 @@ const migrations: readonly Migration[] = [
 							team: nestedIssueTracker.linear.team,
 							project: nestedIssueTracker.linear.project,
 							webhooks: nestedIssueTracker.linear.webhooks,
+							syncThrottle: nestedIssueTracker.linear.syncThrottle,
 						}
 					: undefined)
 			const localConfig =
@@ -1004,6 +1005,7 @@ const migrations: readonly Migration[] = [
 								team: linearConfig?.team,
 								project: linearConfig?.project,
 								webhooks: linearConfig?.webhooks,
+								syncThrottle: linearConfig?.syncThrottle,
 							}
 						: undefined,
 				local:
@@ -1083,6 +1085,7 @@ const migrations: readonly Migration[] = [
 										team: config.linear?.team,
 										project: config.linear?.project,
 										webhooks: config.linear?.webhooks,
+										syncThrottle: config.linear?.syncThrottle,
 									},
 								}
 							: {
