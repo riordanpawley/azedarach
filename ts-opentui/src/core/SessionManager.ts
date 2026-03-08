@@ -1437,6 +1437,12 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					// Build set of running tmux session names for crash detection
 					const runningTmuxNames = new Set(tmuxSessions.map((s) => s.name))
 					const activeStates = ACTIVE_SESSION_STATES
+					const startsInProgress = yield* Ref.get(startsInProgressRef)
+					const startsInProgressLookup = new Set(
+						Array.from(HashMap.keys(startsInProgress), normalizeIssueIdForLookup),
+					)
+					const hasStartLock = (issueId: string): boolean =>
+						startsInProgressLookup.has(normalizeIssueIdForLookup(issueId))
 
 					for (const tmuxSession of tmuxSessions) {
 						const parsed = parseIssueSessionName(tmuxSession.name, effectiveProjectPath)
@@ -1456,7 +1462,7 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							)
 							const startupInProgress = hasCodeWindow
 								? false
-								: yield* isSessionStartupInProgress(tmuxSession.name)
+								: hasStartLock(issueId) || (yield* isSessionStartupInProgress(tmuxSession.name))
 							const recoveredState = resolveDiscoveredSessionState(
 								persisted?.state,
 								hasCodeWindow,
@@ -1502,9 +1508,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						if (hasCodeWindow) {
 							continue
 						}
-						const startupInProgress = yield* isSessionStartupInProgress(
-							inMemorySession.tmuxSessionName,
-						)
+						const startupInProgress =
+							hasStartLock(issueId) ||
+							(yield* isSessionStartupInProgress(inMemorySession.tmuxSessionName))
 						if (startupInProgress) {
 							yield* Effect.log(
 								`Skipping crash classification for ${issueId}: startup still in progress in ${inMemorySession.tmuxSessionName}`,
