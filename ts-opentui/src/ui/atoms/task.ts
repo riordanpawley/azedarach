@@ -10,6 +10,7 @@ import { AppConfig } from "../../config/index.js"
 import type { CliTool } from "../../config/schema.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
 import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import { stripAnsi } from "../../lib/ansi.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
@@ -32,18 +33,11 @@ const AITaskResponseSchema = Schema.Struct({
 
 type AITaskResponse = Schema.Schema.Type<typeof AITaskResponseSchema>
 
-const decodeAIResponse = Schema.decodeUnknown(AITaskResponseSchema)
+const decodeAIResponseJson = Schema.decode(Schema.parseJson(AITaskResponseSchema))
 
 class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
 }> {}
-
-const stripAnsi = (value: string): string =>
-	value.replace(
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping for CLI output normalization.
-		/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g,
-		"",
-	)
 
 const unwrapMarkdownJson = (value: string): string => {
 	const trimmed = value.trim()
@@ -441,21 +435,12 @@ Return ONLY the JSON object, no explanation or markdown.`
 		// Parse JSON output from potentially noisy CLI output.
 		const cleanOutput = extractJsonPayload(rawOutput)
 
-		// Parse JSON
-		const jsonParsed = yield* Effect.try({
-			try: () => JSON.parse(cleanOutput),
-			catch: (e) =>
-				new AITaskCreateError({
-					message: `Failed to parse AI output: ${e}\nRaw output: ${rawOutput}`,
-				}),
-		})
-
-		// Validate with Schema
-		const parsed: AITaskResponse = yield* decodeAIResponse(jsonParsed).pipe(
+		// Parse and validate JSON with schema in one step.
+		const parsed: AITaskResponse = yield* decodeAIResponseJson(cleanOutput).pipe(
 			Effect.mapError(
 				(e) =>
 					new AITaskCreateError({
-						message: `AI output did not match schema: ${e}\nRaw output: ${rawOutput}`,
+						message: `AI output parse/schema validation failed: ${e}\nRaw output: ${rawOutput}`,
 					}),
 			),
 		)
