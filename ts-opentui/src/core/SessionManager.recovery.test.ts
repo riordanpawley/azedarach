@@ -21,6 +21,11 @@ describe("SessionManager discovered session recovery", () => {
 		expect(resolveDiscoveredSessionState(undefined, true)).toBe("busy")
 	})
 
+	it("does not mark sessions as crashed while startup is in progress", () => {
+		expect(resolveDiscoveredSessionState("initializing", false, true)).toBe("initializing")
+		expect(resolveDiscoveredSessionState(undefined, false, true)).toBe("busy")
+	})
+
 	it("tracks active states consistently", () => {
 		expect(ACTIVE_SESSION_STATES.has("waiting")).toBe(true)
 		expect(isActiveSessionState("paused")).toBe(true)

@@ -19,7 +19,7 @@
 
 import { Command, type CommandExecutor, FileSystem } from "@effect/platform"
 import { BunContext } from "@effect/platform-bun"
-import { Data, DateTime, Effect, Exit, HashMap, PubSub, Ref, Schema } from "effect"
+import { Data, DateTime, Effect, Exit, HashMap, Option, PubSub, Ref, Schema } from "effect"
 import { AppConfig } from "../config/index.js"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -93,6 +93,7 @@ interface WaitingAttentionPlan {
 
 const AZ_STATUS_OPTION = "@az_status"
 const AZ_WAITING_ALERTED_OPTION = "@az_waiting_alerted"
+const INIT_DONE_OPTION = "@az_init_done"
 const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
@@ -142,8 +143,13 @@ export const isActiveSessionState = (state: SessionState): boolean =>
 export const resolveDiscoveredSessionState = (
 	persistedState: SessionState | undefined,
 	hasCodeWindow: boolean,
+	isStartupInProgress = false,
 ): SessionState => {
-	if (!hasCodeWindow && (persistedState === undefined || isActiveSessionState(persistedState))) {
+	if (
+		!hasCodeWindow &&
+		!isStartupInProgress &&
+		(persistedState === undefined || isActiveSessionState(persistedState))
+	) {
 		return "crashed"
 	}
 	return persistedState ?? "busy"
@@ -732,6 +738,12 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 				// Non-status terminal states (done/error/etc.) should not keep waiting debounce armed.
 				yield* setTmuxSessionOption(session.tmuxSessionName, AZ_WAITING_ALERTED_OPTION, "0")
+			})
+
+		const isSessionStartupInProgress = (sessionName: string) =>
+			Effect.gen(function* () {
+				const initDoneOption = yield* tmuxService.getUserOption(sessionName, INIT_DONE_OPTION)
+				return Option.isSome(initDoneOption) && initDoneOption.value === "0"
 			})
 
 		const acquireStartLock = (issueId: string) =>
@@ -1442,7 +1454,14 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 								tmuxSession.name,
 								WINDOW_NAMES.CODE,
 							)
-							const recoveredState = resolveDiscoveredSessionState(persisted?.state, hasCodeWindow)
+							const startupInProgress = hasCodeWindow
+								? false
+								: yield* isSessionStartupInProgress(tmuxSession.name)
+							const recoveredState = resolveDiscoveredSessionState(
+								persisted?.state,
+								hasCodeWindow,
+								startupInProgress,
+							)
 							if (recoveredState === "crashed") {
 								yield* Effect.log(
 									`Detected recoverable orphan session for ${issueId}: code window missing in ${tmuxSession.name}`,
@@ -1481,6 +1500,15 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							WINDOW_NAMES.CODE,
 						)
 						if (hasCodeWindow) {
+							continue
+						}
+						const startupInProgress = yield* isSessionStartupInProgress(
+							inMemorySession.tmuxSessionName,
+						)
+						if (startupInProgress) {
+							yield* Effect.log(
+								`Skipping crash classification for ${issueId}: startup still in progress in ${inMemorySession.tmuxSessionName}`,
+							)
 							continue
 						}
 
