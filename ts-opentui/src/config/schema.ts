@@ -59,18 +59,27 @@ export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
  *
  * Allows configuring which models to use for different session types and tools.
  */
+const SupportedModelSchema = Schema.Literal(
+	"gpt-5.3-codex-spark",
+	"gpt-5.3-codex",
+	"gpt-5-mini",
+	"claude-4.5-haiku",
+	"claude-4.5-sonnet",
+)
+export type SupportedModel = Schema.Schema.Type<typeof SupportedModelSchema>
+
 const ModelConfigSchema = Schema.Struct({
 	/**
 	 * Default model for regular sessions (Space+s, Space+S)
 	 * If not set, uses the CLI tool's default model.
 	 */
-	default: Schema.optional(Schema.String),
+	default: Schema.optional(SupportedModelSchema),
 
 	/**
 	 * Model for lightweight assistant interactions.
 	 * Typically a faster/cheaper model for quick interactions.
 	 */
-	chat: Schema.optional(Schema.String),
+	chat: Schema.optional(SupportedModelSchema),
 
 	/**
 	 * Tool-specific model configuration overrides.
@@ -78,22 +87,22 @@ const ModelConfigSchema = Schema.Struct({
 	 */
 	claude: Schema.optional(
 		Schema.Struct({
-			default: Schema.optional(Schema.String),
-			chat: Schema.optional(Schema.String),
+			default: Schema.optional(SupportedModelSchema),
+			chat: Schema.optional(SupportedModelSchema),
 		}),
 	),
 
 	opencode: Schema.optional(
 		Schema.Struct({
-			default: Schema.optional(Schema.String),
-			chat: Schema.optional(Schema.String),
+			default: Schema.optional(SupportedModelSchema),
+			chat: Schema.optional(SupportedModelSchema),
 		}),
 	),
 
 	codex: Schema.optional(
 		Schema.Struct({
-			default: Schema.optional(Schema.String),
-			chat: Schema.optional(Schema.String),
+			default: Schema.optional(SupportedModelSchema),
+			chat: Schema.optional(SupportedModelSchema),
 		}),
 	),
 })
@@ -299,7 +308,7 @@ const PRConfigSchema = Schema.Struct({
 	 * Optional model override for AI invoked during PR creation.
 	 * When set, this model is used for PR-specific prompts instead of the main session default.
 	 */
-	aiModel: Schema.optional(Schema.String),
+	aiModel: Schema.optional(SupportedModelSchema),
 })
 
 /**
@@ -376,7 +385,7 @@ const LegacyPRConfigSchema = Schema.Struct({
 	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
-	aiModel: Schema.optional(Schema.String),
+	aiModel: Schema.optional(SupportedModelSchema),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
 })

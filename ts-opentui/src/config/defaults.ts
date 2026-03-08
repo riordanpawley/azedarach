@@ -12,6 +12,7 @@ import {
 	type CliTool,
 	CURRENT_CONFIG_VERSION,
 	type SessionRecoveryMode,
+	type SupportedModel,
 	type WorkflowMode,
 } from "./schema.js"
 
@@ -97,23 +98,23 @@ export const DEFAULT_CONFIG = {
 	/** Model configuration for AI sessions */
 	model: {
 		/** Default model - undefined means use CLI tool's default */
-		default: undefined as string | undefined,
+		default: undefined as SupportedModel | undefined,
 		/** Chat model - defaults based on CLI tool */
-		chat: undefined as string | undefined,
+		chat: undefined as SupportedModel | undefined,
 		/** Claude-specific overrides */
 		claude: {
-			default: undefined as string | undefined,
-			chat: undefined as string | undefined,
+			default: "claude-4.5-haiku" as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 		/** OpenCode-specific overrides */
 		opencode: {
-			default: undefined as string | undefined,
-			chat: undefined as string | undefined,
+			default: "gpt-5.3-codex-spark" as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 		/** Codex-specific overrides */
 		codex: {
-			default: "gpt-5.3-codex" as string | undefined,
-			chat: undefined as string | undefined,
+			default: "gpt-5.3-codex-spark" as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 	},
 
@@ -159,7 +160,7 @@ export const DEFAULT_CONFIG = {
 		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
-		aiModel: undefined as string | undefined,
+		aiModel: undefined as SupportedModel | undefined,
 	},
 	merge: {
 		// No validation by default - must be explicitly configured in .azedarach.json
@@ -249,19 +250,19 @@ export interface ResolvedConfig {
 
 	/** Model configuration */
 	model: {
-		default: string | undefined
-		chat: string | undefined
+		default: SupportedModel | undefined
+		chat: SupportedModel | undefined
 		claude: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 		opencode: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 		codex: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 	}
 
@@ -302,7 +303,7 @@ export interface ResolvedConfig {
 		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
-		aiModel: string | undefined
+		aiModel: SupportedModel | undefined
 	}
 	merge: {
 		validateCommands: readonly string[]

@@ -369,7 +369,7 @@ describe("AzedarachConfigSchema", () => {
 				cliTool: "codex",
 				model: {
 					codex: {
-						default: "gpt-5-codex",
+						default: "gpt-5.3-codex-spark",
 						chat: "gpt-5-mini",
 					},
 				},
@@ -377,7 +377,7 @@ describe("AzedarachConfigSchema", () => {
 			const resolved = mergeWithDefaults(result)
 
 			expect(resolved.cliTool).toBe("codex")
-			expect(resolved.model.codex.default).toBe("gpt-5-codex")
+			expect(resolved.model.codex.default).toBe("gpt-5.3-codex-spark")
 			expect(resolved.model.codex.chat).toBe("gpt-5-mini")
 		})
 
@@ -385,12 +385,12 @@ describe("AzedarachConfigSchema", () => {
 			const result = decodeConfig({
 				pr: {
 					enabled: true,
-					aiModel: "codex-spark",
+					aiModel: "gpt-5.3-codex-spark",
 				},
 			})
 			const resolved = mergeWithDefaults(result)
 
-			expect(resolved.pr.aiModel).toBe("codex-spark")
+			expect(resolved.pr.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 
 		it("preserves worktree config", () => {
