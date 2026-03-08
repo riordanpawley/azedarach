@@ -9,6 +9,7 @@ import { TmuxError } from "../core/TmuxService.js"
 import {
 	applySessionRefreshPatch,
 	classifySessionRecoveryError,
+	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
 	resolveLinearSdkEventsTickerBehavior,
 	resolveLinearSdkPollingFallbackHealthMessage,
@@ -126,7 +127,7 @@ describe("linear SDK polling fallback messaging", () => {
 			resolveLinearSdkPollingFallbackToastMessage({
 				mode: "misconfigured",
 				reason:
-					"Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run \"tailscale funnel --bg --yes 9000\"",
+					'Linear webhook SDK mode requires a public webhook URL. Set issueTracker.linear.webhooks.url, export LINEAR_WEBHOOK_PUBLIC_URL, or run "tailscale funnel --bg --yes 9000"',
 			}),
 		).toContain("public webhook URL")
 	})
@@ -135,7 +136,8 @@ describe("linear SDK polling fallback messaging", () => {
 		expect(
 			resolveLinearSdkPollingFallbackToastMessage({
 				mode: "misconfigured",
-				reason: "Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team",
+				reason:
+					"Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team",
 			}),
 		).toBe(
 			"Linear webhooks unavailable (mode=misconfigured): Linear webhook SDK mode found multiple teams (AZE, OPS); set issueTracker.linear.team. Falling back to background polling.",
@@ -209,5 +211,54 @@ describe("applySessionRefreshPatch", () => {
 		expect(updated.hasUncommittedChanges).toBe(false)
 		expect(updated.gitAdditions).toBe(0)
 		expect(updated.gitDeletions).toBe(0)
+	})
+})
+
+describe("reconcileLoadedTasksWithLocalCreateGrace", () => {
+	const localOnlyTask = {
+		id: "AZE-42",
+		title: "Created locally",
+		status: "open",
+		priority: 2,
+		issue_type: "task",
+		created_at: "2026-03-07T00:00:00.000Z",
+		updated_at: "2026-03-07T00:00:05.000Z",
+		sessionState: "idle",
+	} as const
+
+	it("retains recently created local task when refresh payload is temporarily missing it", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 5_000,
+		})
+
+		expect(result.mergedTasks.map((task) => task.id)).toEqual([localOnlyTask.id])
+		expect(result.nextLocalCreateGraceExpiries.get(localOnlyTask.id)).toBe(10_000)
+	})
+
+	it("drops local-create grace entry once backend includes the task", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [localOnlyTask],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 5_000,
+		})
+
+		expect(result.mergedTasks.map((task) => task.id)).toEqual([localOnlyTask.id])
+		expect(result.nextLocalCreateGraceExpiries.has(localOnlyTask.id)).toBe(false)
+	})
+
+	it("stops retaining task after grace window expires", () => {
+		const result = reconcileLoadedTasksWithLocalCreateGrace({
+			loadedTasks: [],
+			currentTasks: [localOnlyTask],
+			localCreateGraceExpiries: new Map([[localOnlyTask.id, 10_000]]),
+			nowMs: 10_000,
+		})
+
+		expect(result.mergedTasks).toEqual([])
+		expect(result.nextLocalCreateGraceExpiries.has(localOnlyTask.id)).toBe(false)
 	})
 })
