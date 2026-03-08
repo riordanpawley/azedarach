@@ -205,7 +205,7 @@ const projectDirArg = Args.directory().pipe(
 	Args.withDescription("Project directory (default: current directory)"),
 )
 
-const TOP_LEVEL_COMMAND_ALIASES = {
+const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	a: "add",
 	ls: "list",
 	l: "list",
@@ -225,9 +225,9 @@ const TOP_LEVEL_COMMAND_ALIASES = {
 	d: "dev",
 	s: "status",
 	st: "start",
-} as const
+}
 
-const TOP_LEVEL_NESTED_COMMAND_ALIASES = {
+const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
 	issue: {
 		l: "list",
 		g: "get",
@@ -299,7 +299,7 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES = {
 		t: "status",
 		stt: "status",
 	},
-} as const satisfies Record<string, Record<string, string>>
+}
 
 // ============================================================================
 // Validation Helpers
@@ -4178,7 +4178,7 @@ const normalizeTopLevelCommandAlias = (argv: ReadonlyArray<string>): ReadonlyArr
 	const topLevelArg = argv[topLevelIndex]
 	if (topLevelArg === undefined) return argv
 
-	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg as keyof typeof TOP_LEVEL_COMMAND_ALIASES]
+	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg]
 	if (replacement === undefined) return argv
 
 	const normalized = [...argv]
@@ -4209,7 +4209,7 @@ const normalizeCliAliases = (argv: ReadonlyArray<string>): ReadonlyArray<string>
 			break
 		}
 
-		const replacement = aliasesForCommand[candidate as keyof typeof aliasesForCommand]
+		const replacement = aliasesForCommand[candidate]
 		if (replacement === undefined) {
 			break
 		}
