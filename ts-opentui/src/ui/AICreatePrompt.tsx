@@ -31,7 +31,7 @@ export const AICreatePrompt = (props: AICreatePromptProps) => {
 	const appConfigResult = useAtomValue(appConfigAtom)
 
 	const appConfig = appConfigResult._tag === "Success" ? appConfigResult.value : null
-	const cliTool = appConfig?.cliTool ?? "claude"
+	const cliTool = appConfig?.cliTool ?? "codex"
 	const modelConfig = appConfig?.model
 	const toolModelConfig = modelConfig?.[cliTool]
 	const activeModel =

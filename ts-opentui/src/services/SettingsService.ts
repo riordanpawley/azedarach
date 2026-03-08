@@ -69,10 +69,10 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		key: "cliTool",
 		group: ["General"],
 		label: "CLI Tool",
-		getValue: (c) => c.cliTool ?? "claude",
+		getValue: (c) => c.cliTool ?? "codex",
 		nextValue: (c) => ({
 			...c,
-			cliTool: cycleStringValue(c.cliTool ?? "claude", CLI_TOOL_OPTIONS),
+			cliTool: cycleStringValue(c.cliTool ?? "codex", CLI_TOOL_OPTIONS),
 		}),
 	},
 	{
