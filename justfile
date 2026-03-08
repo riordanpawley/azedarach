@@ -59,3 +59,8 @@ install-opencode-az-plugin *repos:
 # Release helper: just release-ts-opentui [minor|patch|major]
 release-ts-opentui bump='patch' *args:
     ./ts-opentui/scripts/release.sh {{ bump }} {{ args }}
+
+# Release helper with Homebrew tap update:
+# just release-ts-opentui-homebrew ../homebrew-azedarach patch
+release-ts-opentui-homebrew tap_dir bump='patch' *args:
+    ./ts-opentui/scripts/release-with-homebrew.sh {{ bump }} --tap-dir {{ tap_dir }} -- {{ args }}

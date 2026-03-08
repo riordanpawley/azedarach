@@ -121,6 +121,12 @@ git pull --rebase
 just release-ts-opentui patch
 ```
 
+One-step release + Homebrew tap update (maintainers):
+
+```bash
+just release-ts-opentui-homebrew /path/to/homebrew-azedarach patch
+```
+
 Release script behavior:
 - validates clean working tree on `main`
 - runs `bun run type-check` in `ts-opentui`
@@ -163,6 +169,9 @@ Bootstrap steps:
    git commit -m "azedarach v0.3.1"
    git push
    ```
+
+Shortcut:
+- `just release-ts-opentui-homebrew /path/to/homebrew-azedarach patch` runs release + formula generation and commits/pushes the tap update.
 
 Coworker install (after tap is published):
 
