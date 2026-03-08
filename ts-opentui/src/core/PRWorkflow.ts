@@ -1245,15 +1245,40 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							const prPrompt = yield* buildPRCreateAIPrompt(issueId, projectPath)
 							const sessionName = getIssueSessionName(issueId, projectPath)
 							const codeTarget = `${sessionName}:${WINDOW_NAMES.CODE}`
+							const prWindowTarget = "pr-create"
+							const cliTool = yield* appConfig.getCliTool()
+							const modelConfig = yield* appConfig.getModelConfig()
+							const prConfig = yield* appConfig.getPRConfig()
+							const sessionConfig = yield* appConfig.getSessionConfig()
+							const toolDef = getToolDefinition(cliTool)
+							const toolDefaultModel = modelConfig[cliTool].default ?? modelConfig.default
+							const prAgentModel = prConfig.aiModel ?? toolDefaultModel
+							const preferDedicatedAgentWindow =
+								prConfig.aiModel !== undefined && prConfig.aiModel !== toolDefaultModel
+							const prAgentCommand = toolDef.buildCommand({
+								initialPrompt: prPrompt,
+								issueId,
+								model: prAgentModel,
+								dangerouslySkipPermissions: sessionConfig.dangerouslySkipPermissions,
+							})
 
 							const hasSession = yield* tmuxService.hasSession(sessionName)
 							if (hasSession) {
 								const hasCodeWindow = yield* tmuxService.hasWindow(sessionName, WINDOW_NAMES.CODE)
-								if (hasCodeWindow) {
+								if (hasCodeWindow && !preferDedicatedAgentWindow) {
 									yield* tmuxService.sendLiteralCommand(codeTarget, prPrompt)
 									yield* Effect.log(`Queued PR-create AI prompt in existing session ${codeTarget}`)
 									return
 								}
+
+								yield* worktreeSession.ensureWindow(sessionName, prWindowTarget, {
+									cwd: worktree.path,
+									command: prAgentCommand,
+								})
+								yield* Effect.log(
+									`Started PR-create AI agent in ${sessionName}:${prWindowTarget}${prAgentModel ? ` (model=${prAgentModel})` : ""}`,
+								)
+								return
 							}
 
 							yield* sessionManager
@@ -1261,10 +1286,13 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									issueId,
 									projectPath,
 									initialPrompt: prPrompt,
+									model: prAgentModel,
 								})
 								.pipe(Effect.asVoid)
 
-							yield* Effect.log(`Started session for PR-create AI prompt (${issueId})`)
+							yield* Effect.log(
+								`Started session for PR-create AI prompt (${issueId})${prAgentModel ? ` with model=${prAgentModel}` : ""}`,
+							)
 						}).pipe(
 							Effect.catchAll((error) =>
 								Effect.logWarning(

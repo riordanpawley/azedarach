@@ -159,6 +159,7 @@ export const DEFAULT_CONFIG = {
 		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
+		aiModel: undefined as string | undefined,
 	},
 	merge: {
 		// No validation by default - must be explicitly configured in .azedarach.json
@@ -301,6 +302,7 @@ export interface ResolvedConfig {
 		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
+		aiModel: string | undefined
 	}
 	merge: {
 		validateCommands: readonly string[]
@@ -567,6 +569,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
+			aiModel: config.pr?.aiModel ?? DEFAULT_CONFIG.pr.aiModel,
 		},
 		merge: {
 			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,

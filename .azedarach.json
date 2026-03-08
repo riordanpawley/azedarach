@@ -38,7 +38,8 @@
     "patternMatching": true
   },
   "pr": {
-    "enabled": false
+    "enabled": false,
+    "aiModel": "codex-spark"
   },
   "merge": {
     "validateCommands": [

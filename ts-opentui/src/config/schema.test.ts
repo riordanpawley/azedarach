@@ -72,7 +72,12 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.git?.baseBranch).toBe("develop")
-			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
+			expect(result.pr).toEqual({
+				autoDraft: true,
+				autoMerge: undefined,
+				enabled: undefined,
+				aiModel: undefined,
+			})
 		})
 
 		it("preserves pr.enabled while removing legacy baseBranch", () => {
@@ -374,6 +379,18 @@ describe("AzedarachConfigSchema", () => {
 			expect(resolved.cliTool).toBe("codex")
 			expect(resolved.model.codex.default).toBe("gpt-5-codex")
 			expect(resolved.model.codex.chat).toBe("gpt-5-mini")
+		})
+
+		it("accepts pr.aiModel override", () => {
+			const result = decodeConfig({
+				pr: {
+					enabled: true,
+					aiModel: "codex-spark",
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.pr.aiModel).toBe("codex-spark")
 		})
 
 		it("preserves worktree config", () => {

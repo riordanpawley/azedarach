@@ -66,11 +66,11 @@ const ModelConfigSchema = Schema.Struct({
 	 */
 	default: Schema.optional(Schema.String),
 
-    /**
-     * Model for lightweight assistant interactions.
-     * Typically a faster/cheaper model for quick interactions.
-     */
-    chat: Schema.optional(Schema.String),
+	/**
+	 * Model for lightweight assistant interactions.
+	 * Typically a faster/cheaper model for quick interactions.
+	 */
+	chat: Schema.optional(Schema.String),
 
 	/**
 	 * Tool-specific model configuration overrides.
@@ -294,6 +294,12 @@ const PRConfigSchema = Schema.Struct({
 
 	/** Auto-merge after CI passes (default: false) */
 	autoMerge: Schema.optional(Schema.Boolean),
+
+	/**
+	 * Optional model override for AI invoked during PR creation.
+	 * When set, this model is used for PR-specific prompts instead of the main session default.
+	 */
+	aiModel: Schema.optional(Schema.String),
 })
 
 /**
@@ -370,6 +376,7 @@ const LegacyPRConfigSchema = Schema.Struct({
 	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
+	aiModel: Schema.optional(Schema.String),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
 })
@@ -800,6 +807,7 @@ const migrations: readonly Migration[] = [
 							enabled: pr.enabled,
 							autoDraft: pr.autoDraft,
 							autoMerge: pr.autoMerge,
+							aiModel: pr.aiModel,
 						}
 					: undefined
 
@@ -1125,6 +1133,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					enabled: current.pr.enabled,
 					autoDraft: current.pr.autoDraft,
 					autoMerge: current.pr.autoMerge,
+					aiModel: current.pr.aiModel,
 				}
 			: undefined,
 		merge: current.merge
