@@ -10,6 +10,7 @@
  * - Version 3: Adds top-level issueTracker selector + backend-specific config blocks
  * - Version 4: Nests backend config under top-level issueTracker object
  * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
+ * - Version 6: Normalizes git.pr/git.merge aliases to canonical workflow config
  *
  * ## Adding New Versions
  * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
@@ -27,7 +28,7 @@ import * as Schema from "effect/Schema"
 // ============================================================================
 
 /** Current config schema version */
-export const CURRENT_CONFIG_VERSION = 5
+export const CURRENT_CONFIG_VERSION = 6
 
 // ============================================================================
 // CLI Tool Configuration
@@ -66,11 +67,11 @@ const ModelConfigSchema = Schema.Struct({
 	 */
 	default: Schema.optional(Schema.String),
 
-    /**
-     * Model for lightweight assistant interactions.
-     * Typically a faster/cheaper model for quick interactions.
-     */
-    chat: Schema.optional(Schema.String),
+	/**
+	 * Model for lightweight assistant interactions.
+	 * Typically a faster/cheaper model for quick interactions.
+	 */
+	chat: Schema.optional(Schema.String),
 
 	/**
 	 * Tool-specific model configuration overrides.
@@ -209,6 +210,33 @@ export const WorkflowModeSchema = Schema.Literal("local", "origin")
 export type WorkflowMode = Schema.Schema.Type<typeof WorkflowModeSchema>
 
 /**
+ * Git-scoped PR workflow alias.
+ *
+ * Supported for config organization, then normalized to canonical workflow fields.
+ */
+const GitScopedPRConfigSchema = Schema.Struct({
+	enabled: Schema.optional(Schema.Boolean),
+	autoDraft: Schema.optional(Schema.Boolean),
+	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to git.baseBranch in v2 */
+	baseBranch: Schema.optional(Schema.String),
+})
+
+/**
+ * Git-scoped merge workflow alias.
+ *
+ * Supported for config organization, then normalized to canonical workflow fields.
+ */
+const GitScopedMergeConfigSchema = Schema.Struct({
+	validateCommands: Schema.optional(Schema.Array(Schema.String)),
+	fixCommand: Schema.optional(Schema.String),
+	maxFixAttempts: Schema.optional(Schema.Number),
+	startAiSessionOnFailure: Schema.optional(Schema.Boolean),
+	/** @deprecated Renamed to startAiSessionOnFailure in v5 */
+	startClaudeOnFailure: Schema.optional(Schema.Boolean),
+})
+
+/**
  * Git configuration
  *
  * Controls git behavior for worktrees and branches.
@@ -273,6 +301,20 @@ const GitConfigSchema = Schema.Struct({
 	 * Default: 'origin'
 	 */
 	workflowMode: Schema.optional(WorkflowModeSchema),
+
+	/**
+	 * Optional git-scoped PR workflow alias.
+	 *
+	 * This is normalized to canonical workflow config at load time.
+	 */
+	pr: Schema.optional(GitScopedPRConfigSchema),
+
+	/**
+	 * Optional git-scoped merge workflow alias.
+	 *
+	 * This is normalized to canonical workflow config at load time.
+	 */
+	merge: Schema.optional(GitScopedMergeConfigSchema),
 })
 
 /**
@@ -1065,6 +1107,64 @@ const migrations: readonly Migration[] = [
 			}
 		},
 	},
+	{
+		toVersion: 6,
+		description: "Normalize git.pr/git.merge aliases to canonical workflow fields",
+		migrate: (config) => {
+			const git = config.git
+			const scopedPr = git?.pr
+			const scopedMerge = git?.merge
+
+			const migratedPr =
+				config.pr ??
+				(scopedPr === undefined
+					? undefined
+					: {
+							enabled: scopedPr.enabled,
+							autoDraft: scopedPr.autoDraft,
+							autoMerge: scopedPr.autoMerge,
+							baseBranch: scopedPr.baseBranch,
+						})
+
+			const migratedMerge =
+				config.merge ??
+				(scopedMerge === undefined
+					? undefined
+					: {
+							validateCommands: scopedMerge.validateCommands,
+							fixCommand: scopedMerge.fixCommand,
+							maxFixAttempts: scopedMerge.maxFixAttempts,
+							startAiSessionOnFailure:
+								scopedMerge.startAiSessionOnFailure ?? scopedMerge.startClaudeOnFailure,
+						})
+
+			const migratedBaseBranch =
+				git?.baseBranch === undefined ? migratedPr?.baseBranch : git.baseBranch
+
+			const migratedGit =
+				git === undefined
+					? undefined
+					: {
+							pushBranchOnCreate: git.pushBranchOnCreate,
+							remote: git.remote,
+							branchPrefix: git.branchPrefix,
+							branchSlugMaxLength: git.branchSlugMaxLength,
+							baseBranch: migratedBaseBranch,
+							pushEnabled: git.pushEnabled,
+							fetchEnabled: git.fetchEnabled,
+							showLineChanges: git.showLineChanges,
+							workflowMode: git.workflowMode,
+						}
+
+			return {
+				...config,
+				$schema: 6,
+				git: migratedGit,
+				pr: migratedPr,
+				merge: migratedMerge,
+			}
+		},
+	},
 	// ────────────────────────────────────────────────────────────────────────
 	// Future migrations go here. Example:
 	// ────────────────────────────────────────────────────────────────────────
@@ -1108,6 +1208,24 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		)
 	}
 
+	const gitConfig =
+		current.git === undefined
+			? undefined
+			: {
+					pushBranchOnCreate: current.git.pushBranchOnCreate,
+					remote: current.git.remote,
+					branchPrefix: current.git.branchPrefix,
+					branchSlugMaxLength: current.git.branchSlugMaxLength,
+					baseBranch: current.git.baseBranch,
+					pushEnabled: current.git.pushEnabled,
+					fetchEnabled: current.git.fetchEnabled,
+					showLineChanges: current.git.showLineChanges,
+					workflowMode: current.git.workflowMode,
+				}
+
+	const prSource = current.pr ?? current.git?.pr
+	const mergeSource = current.merge ?? current.git?.merge
+
 	// Ensure version is set even if no migrations were needed
 	// Strip legacy fields to match CurrentConfig
 	return {
@@ -1116,24 +1234,24 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		issueTracker: issueTrackerConfig,
 		model: current.model,
 		worktree: current.worktree,
-		git: current.git,
+		git: gitConfig,
 		session: current.session,
 		patterns: current.patterns,
 		stateDetection: current.stateDetection,
-		pr: current.pr
+		pr: prSource
 			? {
-					enabled: current.pr.enabled,
-					autoDraft: current.pr.autoDraft,
-					autoMerge: current.pr.autoMerge,
+					enabled: prSource.enabled,
+					autoDraft: prSource.autoDraft,
+					autoMerge: prSource.autoMerge,
 				}
 			: undefined,
-		merge: current.merge
+		merge: mergeSource
 			? {
-					validateCommands: current.merge.validateCommands,
-					fixCommand: current.merge.fixCommand,
-					maxFixAttempts: current.merge.maxFixAttempts,
+					validateCommands: mergeSource.validateCommands,
+					fixCommand: mergeSource.fixCommand,
+					maxFixAttempts: mergeSource.maxFixAttempts,
 					startAiSessionOnFailure:
-						current.merge.startAiSessionOnFailure ?? current.merge.startClaudeOnFailure,
+						mergeSource.startAiSessionOnFailure ?? mergeSource.startClaudeOnFailure,
 				}
 			: undefined,
 		devServer: current.devServer,
@@ -1154,7 +1272,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 /**
  * Raw input schema for Azedarach config
  *
- * Accepts both legacy (v1/v2/v3) and current (v4) formats.
+ * Accepts both legacy and current formats.
  * Used as the input side of the migration transform.
  */
 const RawConfigSchema = Schema.Struct({
@@ -1268,6 +1386,29 @@ export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, Cur
 		Effect.succeed({
 			...current,
 			$schema: CURRENT_CONFIG_VERSION,
+			git:
+				current.git === undefined && current.pr === undefined && current.merge === undefined
+					? undefined
+					: {
+							...current.git,
+							pr: current.pr
+								? {
+										enabled: current.pr.enabled,
+										autoDraft: current.pr.autoDraft,
+										autoMerge: current.pr.autoMerge,
+									}
+								: undefined,
+							merge: current.merge
+								? {
+										validateCommands: current.merge.validateCommands,
+										fixCommand: current.merge.fixCommand,
+										maxFixAttempts: current.merge.maxFixAttempts,
+										startAiSessionOnFailure: current.merge.startAiSessionOnFailure,
+									}
+								: undefined,
+						},
+			pr: undefined,
+			merge: undefined,
 		}),
 })
 
