@@ -1,13 +1,9 @@
 {
-  "$schema": 5,
+  "$schema": 6,
   "cliTool": "codex",
   "issueTracker": {
-    "linear": {
-      "syncEnabled": true,
-      "team": "AZE",
-      "webhooks": {
-        "enabled": true
-      }
+    "local": {
+      "syncEnabled": false
     }
   },
   "worktree": {
@@ -28,7 +24,18 @@
     "remote": "origin",
     "branchPrefix": "az-",
     "baseBranch": "main",
-    "workflowMode": "local"
+    "workflowMode": "local",
+    "pr": {
+      "enabled": false
+    },
+    "merge": {
+      "validateCommands": [
+        "cd ts-opentui && bun run type-check"
+      ],
+      "fixCommand": "cd ts-opentui && bun run fix",
+      "maxFixAttempts": 2,
+      "startAiSessionOnFailure": true
+    }
   },
   "session": {
     "shell": "zsh",
@@ -36,17 +43,6 @@
   },
   "stateDetection": {
     "patternMatching": true
-  },
-  "pr": {
-    "enabled": false
-  },
-  "merge": {
-    "validateCommands": [
-      "cd ts-opentui && bun run type-check"
-    ],
-    "fixCommand": "cd ts-opentui && bun run fix",
-    "maxFixAttempts": 2,
-    "startAiSessionOnFailure": true
   },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
