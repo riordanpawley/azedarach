@@ -25,7 +25,7 @@ import {
 	type ParseError,
 	type SyncRequiredError,
 } from "./IssueTrackerClient.js"
-import { getIssueSessionName } from "./paths.js"
+import { getIssueSessionName, WINDOW_NAMES } from "./paths.js"
 import { type SessionError, SessionManager } from "./SessionManager.js"
 import { type TmuxError, TmuxService } from "./TmuxService.js"
 import { GitError, type NotAGitRepoError, WorktreeManager } from "./WorktreeManager.js"
@@ -904,6 +904,35 @@ const runGH = (
 		)
 	})
 
+const buildPRCreateAIPrompt = (
+	issueId: string,
+	projectPath: string,
+): Effect.Effect<string, never, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const promptOutput = yield* Command.string(
+			Command.make("env", `AZEDARACH_ISSUE_ID=${issueId}`, "az", "prompt", "pr", "create").pipe(
+				Command.workingDirectory(projectPath),
+			),
+		).pipe(
+			Effect.catchAll((error) =>
+				Effect.logWarning(`Failed to generate PR AI prompt via az: ${String(error)}`).pipe(
+					Effect.zipRight(Effect.succeed("")),
+				),
+			),
+		)
+
+		const prompt = promptOutput.trim()
+		if (prompt.length > 0) {
+			return prompt
+		}
+
+		return `work on issue ${issueId}: create a high-quality pull request now.
+
+Start by running \`az prime\`.
+Then run \`az prompt pr create\` and follow that guidance.
+Create or update the PR with improved title/body/checklist based on the current branch diff.`
+	})
+
 /**
  * Generate PR title from bead
  */
@@ -1208,6 +1237,41 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							)
 						}
 						const issueBranch = worktree.branch
+
+						// Invoke AI at PR-create time:
+						// 1. Reuse existing issue code window when available
+						// 2. Otherwise start a new issue session with injected PR-create prompt
+						yield* Effect.gen(function* () {
+							const prPrompt = yield* buildPRCreateAIPrompt(issueId, projectPath)
+							const sessionName = getIssueSessionName(issueId, projectPath)
+							const codeTarget = `${sessionName}:${WINDOW_NAMES.CODE}`
+
+							const hasSession = yield* tmuxService.hasSession(sessionName)
+							if (hasSession) {
+								const hasCodeWindow = yield* tmuxService.hasWindow(sessionName, WINDOW_NAMES.CODE)
+								if (hasCodeWindow) {
+									yield* tmuxService.sendLiteralCommand(codeTarget, prPrompt)
+									yield* Effect.log(`Queued PR-create AI prompt in existing session ${codeTarget}`)
+									return
+								}
+							}
+
+							yield* sessionManager
+								.start({
+									issueId,
+									projectPath,
+									initialPrompt: prPrompt,
+								})
+								.pipe(Effect.asVoid)
+
+							yield* Effect.log(`Started session for PR-create AI prompt (${issueId})`)
+						}).pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Failed to invoke AI at PR creation for ${issueId}; continuing PR workflow: ${String(error)}`,
+								).pipe(Effect.asVoid),
+							),
+						)
 
 						// Sync tracker changes (with lock to prevent races)
 						yield* withSyncLock(
