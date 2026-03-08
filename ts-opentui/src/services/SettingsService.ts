@@ -1,54 +1,156 @@
 import { FileSystem, Path } from "@effect/platform"
-import { Effect, Schema, SubscriptionRef } from "effect"
+import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { type AzedarachConfig, AzedarachConfigSchema } from "../config/schema.js"
 import { ProjectService } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
+export type SettingValue = boolean | string | number
+
 export interface SettingDefinition {
 	readonly key: string
+	readonly group: readonly string[]
 	readonly label: string
-	readonly toggle: (config: AzedarachConfig) => AzedarachConfig
-	readonly getValue: (config: AzedarachConfig) => boolean | string
+	readonly getValue: (config: AzedarachConfig) => SettingValue
+	readonly nextValue: (config: AzedarachConfig) => AzedarachConfig
+	readonly isVisible?: (config: AzedarachConfig) => boolean
 }
 
 /**
- * EDITABLE_SETTINGS - Configuration options available in the settings overlay
- *
- * These settings can be toggled interactively in the TUI settings overlay (press 's').
- * Each setting defines how to display, toggle, and retrieve its value from the config.
- *
- * Display logic:
- * - Boolean values: Show "yes" or "no"
- * - String values: Show the string value directly
- *
- * Toggle logic:
- * - Booleans: Toggle true/false
- * - Strings: Cycle through predefined values (e.g., "claude" -> "opencode" -> "codex")
- *
- * All changes are immediately saved to .azedarach.json and the config is reloaded
- * so the UI reflects changes instantly.
+ * Settings config parse/validation failed while handling in-app edits.
  */
+export class SettingsConfigLoadError extends Data.TaggedError("SettingsConfigLoadError")<{
+	readonly message: string
+	readonly cause: string
+}> {}
+
+const cycleStringValue = <T extends string>(current: T, options: readonly T[]): T => {
+	const currentIndex = options.findIndex((option) => option === current)
+	if (currentIndex < 0) return options[0] ?? current
+	return options[(currentIndex + 1) % options.length] ?? current
+}
+
+const cycleNumberValue = <T extends number>(current: T, options: readonly T[]): T => {
+	const currentIndex = options.findIndex((option) => option === current)
+	if (currentIndex < 0) return options[0] ?? current
+	return options[(currentIndex + 1) % options.length] ?? current
+}
+
+const CLI_TOOL_OPTIONS: readonly ("claude" | "opencode" | "codex")[] = [
+	"claude",
+	"opencode",
+	"codex",
+]
+const WORKFLOW_MODE_OPTIONS: readonly ("origin" | "local")[] = ["origin", "local"]
+const ISSUE_BACKEND_OPTIONS: readonly ("local" | "tracker" | "legacy" | "linear")[] = [
+	"local",
+	"tracker",
+	"legacy",
+	"linear",
+]
+
+const isLinearBackend = (config: AzedarachConfig): boolean =>
+	config.issueTracker?.linear !== undefined
+
+const isLocalBackend = (config: AzedarachConfig): boolean =>
+	config.issueTracker?.local !== undefined
+
+const getIssueTrackerBackend = (
+	config: AzedarachConfig,
+): "tracker" | "legacy" | "linear" | "local" => {
+	if (config.issueTracker?.tracker !== undefined) return "tracker"
+	if (config.issueTracker?.legacy !== undefined) return "legacy"
+	if (config.issueTracker?.linear !== undefined) return "linear"
+	return "local"
+}
+
 export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	{
 		key: "cliTool",
+		group: ["General"],
 		label: "CLI Tool",
 		getValue: (c) => c.cliTool ?? "claude",
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
-			cliTool:
-				(c.cliTool ?? "claude") === "claude"
-					? "opencode"
-					: (c.cliTool ?? "claude") === "opencode"
-						? "codex"
-						: "claude",
+			cliTool: cycleStringValue(c.cliTool ?? "claude", CLI_TOOL_OPTIONS),
 		}),
 	},
 	{
+		key: "workflowMode",
+		group: ["General"],
+		label: "Workflow Mode",
+		getValue: (c) => c.git?.workflowMode ?? "origin",
+		nextValue: (c) => ({
+			...c,
+			git: {
+				...c.git,
+				workflowMode: cycleStringValue(c.git?.workflowMode ?? "origin", WORKFLOW_MODE_OPTIONS),
+			},
+		}),
+	},
+	{
+		key: "issueTrackerBackend",
+		group: ["Issue Tracker"],
+		label: "Backend",
+		getValue: getIssueTrackerBackend,
+		nextValue: (c) => {
+			const nextBackend = cycleStringValue(getIssueTrackerBackend(c), ISSUE_BACKEND_OPTIONS)
+
+			if (nextBackend === "local") {
+				return {
+					...c,
+					issueTracker: {
+						local: {
+							syncEnabled: c.issueTracker?.local?.syncEnabled ?? false,
+							backups: c.issueTracker?.local?.backups,
+						},
+					},
+				}
+			}
+
+			if (nextBackend === "tracker") {
+				return {
+					...c,
+					issueTracker: {
+						tracker: {
+							syncEnabled: c.issueTracker?.tracker?.syncEnabled ?? true,
+						},
+					},
+				}
+			}
+
+			if (nextBackend === "legacy") {
+				return {
+					...c,
+					issueTracker: {
+						legacy: {
+							syncEnabled: c.issueTracker?.legacy?.syncEnabled ?? true,
+						},
+					},
+				}
+			}
+
+			return {
+				...c,
+				issueTracker: {
+					linear: {
+						syncEnabled: c.issueTracker?.linear?.syncEnabled ?? true,
+						command: c.issueTracker?.linear?.command,
+						team: c.issueTracker?.linear?.team,
+						project: c.issueTracker?.linear?.project,
+						webhooks: c.issueTracker?.linear?.webhooks,
+						syncThrottle: c.issueTracker?.linear?.syncThrottle,
+					},
+				},
+			}
+		},
+	},
+	{
 		key: "dangerouslySkipPermissions",
+		group: ["Session"],
 		label: "Skip Permissions",
 		getValue: (c) => c.session?.dangerouslySkipPermissions ?? false,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			session: {
 				...c.session,
@@ -57,88 +159,140 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		}),
 	},
 	{
+		key: "sessionMaxSessions",
+		group: ["Session"],
+		label: "Max Sessions",
+		getValue: (c) => c.session?.maxSessions ?? 10,
+		nextValue: (c) => ({
+			...c,
+			session: {
+				...c.session,
+				maxSessions: cycleNumberValue(c.session?.maxSessions ?? 10, [5, 10, 15, 20]),
+			},
+		}),
+	},
+	{
 		key: "pushBranchOnCreate",
+		group: ["Git"],
 		label: "Push on Create",
 		getValue: (c) => c.git?.pushBranchOnCreate ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			git: { ...c.git, pushBranchOnCreate: !(c.git?.pushBranchOnCreate ?? true) },
 		}),
 	},
 	{
 		key: "pushEnabled",
+		group: ["Git"],
 		label: "Git Push",
 		getValue: (c) => c.git?.pushEnabled ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			git: { ...c.git, pushEnabled: !(c.git?.pushEnabled ?? true) },
 		}),
 	},
 	{
 		key: "fetchEnabled",
+		group: ["Git"],
 		label: "Git Fetch",
 		getValue: (c) => c.git?.fetchEnabled ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			git: { ...c.git, fetchEnabled: !(c.git?.fetchEnabled ?? true) },
 		}),
 	},
 	{
 		key: "showLineChanges",
+		group: ["Git"],
 		label: "Line Changes",
 		getValue: (c) => c.git?.showLineChanges ?? false,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			git: { ...c.git, showLineChanges: !(c.git?.showLineChanges ?? false) },
 		}),
 	},
 	{
+		key: "prEnabled",
+		group: ["Pull Requests"],
+		label: "PR Enabled",
+		getValue: (c) => c.pr?.enabled ?? true,
+		nextValue: (c) => ({
+			...c,
+			pr: { ...c.pr, enabled: !(c.pr?.enabled ?? true) },
+		}),
+	},
+	{
 		key: "autoDraft",
+		group: ["Pull Requests", "Defaults"],
 		label: "Auto Draft PR",
 		getValue: (c) => c.pr?.autoDraft ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			pr: { ...c.pr, autoDraft: !(c.pr?.autoDraft ?? true) },
 		}),
+		isVisible: (c) => c.pr?.enabled ?? true,
 	},
 	{
 		key: "autoMerge",
+		group: ["Pull Requests", "Defaults"],
 		label: "Auto Merge PR",
 		getValue: (c) => c.pr?.autoMerge ?? false,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			pr: { ...c.pr, autoMerge: !(c.pr?.autoMerge ?? false) },
 		}),
+		isVisible: (c) => c.pr?.enabled ?? true,
 	},
 	{
 		key: "bell",
+		group: ["Notifications"],
 		label: "Bell Notify",
 		getValue: (c) => c.notifications?.bell ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			notifications: { ...c.notifications, bell: !(c.notifications?.bell ?? true) },
 		}),
 	},
 	{
 		key: "systemNotify",
+		group: ["Notifications"],
 		label: "System Notify",
 		getValue: (c) => c.notifications?.system ?? false,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			notifications: { ...c.notifications, system: !(c.notifications?.system ?? false) },
 		}),
 	},
 	{
 		key: "networkAutoDetect",
+		group: ["Network"],
 		label: "Auto Detect Network",
 		getValue: (c) => c.network?.autoDetect ?? true,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			network: { ...c.network, autoDetect: !(c.network?.autoDetect ?? true) },
 		}),
 	},
 	{
+		key: "networkCheckIntervalSeconds",
+		group: ["Network", "Checks"],
+		label: "Check Interval (s)",
+		getValue: (c) => c.network?.checkIntervalSeconds ?? 30,
+		nextValue: (c) => ({
+			...c,
+			network: {
+				...c.network,
+				checkIntervalSeconds: cycleNumberValue(
+					c.network?.checkIntervalSeconds ?? 30,
+					[15, 30, 60, 120],
+				),
+			},
+		}),
+		isVisible: (c) => c.network?.autoDetect ?? true,
+	},
+	{
 		key: "issueSyncEnabled",
+		group: ["Issue Tracker"],
 		label: "Issue Sync",
 		getValue: (c) => {
 			if (c.issueTracker?.tracker !== undefined) return c.issueTracker.tracker.syncEnabled ?? true
@@ -147,7 +301,7 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 			if (c.issueTracker?.local !== undefined) return c.issueTracker.local.syncEnabled ?? false
 			return false
 		},
-		toggle: (c) => {
+		nextValue: (c) => {
 			if (c.issueTracker?.tracker !== undefined) {
 				return {
 					...c,
@@ -204,13 +358,14 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	},
 	{
 		key: "linearWebhooksEnabled",
+		group: ["Issue Tracker", "Linear"],
 		label: "Linear Webhooks",
 		getValue: (c) => {
 			if (c.issueTracker?.linear !== undefined)
 				return c.issueTracker.linear.webhooks?.enabled ?? true
 			return false
 		},
-		toggle: (c) => {
+		nextValue: (c) => {
 			if (c.issueTracker?.linear === undefined) return c
 			return {
 				...c,
@@ -225,12 +380,62 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 				},
 			}
 		},
+		isVisible: isLinearBackend,
+	},
+	{
+		key: "localBackupsEnabled",
+		group: ["Issue Tracker", "Local"],
+		label: "SQLite Backups",
+		getValue: (c) => c.issueTracker?.local?.backups?.enabled ?? true,
+		nextValue: (c) => {
+			if (c.issueTracker?.local === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					local: {
+						...c.issueTracker.local,
+						backups: {
+							...c.issueTracker.local.backups,
+							enabled: !(c.issueTracker.local.backups?.enabled ?? true),
+						},
+					},
+				},
+			}
+		},
+		isVisible: isLocalBackend,
+	},
+	{
+		key: "localBackupsIntervalMinutes",
+		group: ["Issue Tracker", "Local", "Backups"],
+		label: "Backup Interval (m)",
+		getValue: (c) => c.issueTracker?.local?.backups?.intervalMinutes ?? 60,
+		nextValue: (c) => {
+			if (c.issueTracker?.local === undefined) return c
+			return {
+				...c,
+				issueTracker: {
+					local: {
+						...c.issueTracker.local,
+						backups: {
+							...c.issueTracker.local.backups,
+							intervalMinutes: cycleNumberValue(
+								c.issueTracker.local.backups?.intervalMinutes ?? 60,
+								[15, 30, 60, 120],
+							),
+						},
+					},
+				},
+			}
+		},
+		isVisible: (c) =>
+			c.issueTracker?.local !== undefined && (c.issueTracker.local.backups?.enabled ?? true),
 	},
 	{
 		key: "patternMatching",
+		group: ["State Detection"],
 		label: "Pattern Matching",
 		getValue: (c) => c.stateDetection?.patternMatching ?? false,
-		toggle: (c) => ({
+		nextValue: (c) => ({
 			...c,
 			stateDetection: {
 				...c.stateDetection,
@@ -240,6 +445,9 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 	},
 ]
 
+export const getVisibleSettings = (config: AzedarachConfig): readonly SettingDefinition[] =>
+	EDITABLE_SETTINGS.filter((setting) => (setting.isVisible ? setting.isVisible(config) : true))
+
 export interface SettingsState {
 	readonly focusIndex: number
 	readonly isOpen: boolean
@@ -248,7 +456,7 @@ export interface SettingsState {
 export class SettingsService extends Effect.Service<SettingsService>()("SettingsService", {
 	dependencies: [AppConfig.Default, ProjectService.Default, ToastService.Default],
 	effect: Effect.gen(function* () {
-		const appConfig = yield* AppConfig
+		const appConfigService = yield* AppConfig
 		const projectService = yield* ProjectService
 		const toast = yield* ToastService
 		const fs = yield* FileSystem.FileSystem
@@ -265,7 +473,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 				return pathService.join(projectPath ?? process.cwd(), ".azedarach.json")
 			})
 
-		const loadRawConfig = () =>
+		const loadRawConfig = (): Effect.Effect<AzedarachConfig, SettingsConfigLoadError> =>
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
 				const exists = yield* fs.exists(configPath).pipe(
@@ -274,29 +482,47 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					),
 					Effect.orElseSucceed(() => false),
 				)
-				if (!exists) return yield* Schema.decodeUnknown(AzedarachConfigSchema)({})
+				if (!exists) {
+					return yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+						Effect.mapError(
+							(error) =>
+								new SettingsConfigLoadError({
+									message: "Failed to create default config snapshot",
+									cause: String(error),
+								}),
+						),
+					)
+				}
 
 				const content = yield* fs.readFileString(configPath).pipe(
-					Effect.tapError((error) =>
-						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
-					),
-					Effect.orElseSucceed(() => "{}"),
-				)
-				const parsed = yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
-					Effect.catchAll((error) =>
-						Effect.logWarning(error).pipe(
-							Effect.zipRight(Schema.decodeUnknown(AzedarachConfigSchema)({})),
-						),
+					Effect.mapError(
+						(error) =>
+							new SettingsConfigLoadError({
+								message: "Failed to read .azedarach.json",
+								cause: String(error),
+							}),
 					),
 				)
-				return parsed
-			}).pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(error).pipe(
-						Effect.zipRight(Schema.decodeUnknown(AzedarachConfigSchema)({})),
+
+				const parsedJson = yield* Effect.try({
+					try: () => JSON.parse(content),
+					catch: (error) =>
+						new SettingsConfigLoadError({
+							message: "Invalid JSON in .azedarach.json",
+							cause: String(error),
+						}),
+				})
+
+				return yield* Schema.decodeUnknown(AzedarachConfigSchema)(parsedJson).pipe(
+					Effect.mapError(
+						(error) =>
+							new SettingsConfigLoadError({
+								message: "Config validation failed for .azedarach.json",
+								cause: String(error),
+							}),
 					),
-				),
-			)
+				)
+			})
 
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
@@ -314,38 +540,58 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 			close: () => SubscriptionRef.set(state, { focusIndex: 0, isOpen: false }),
 
 			moveUp: () =>
-				SubscriptionRef.update(state, (s) => ({
-					...s,
-					focusIndex: Math.max(0, s.focusIndex - 1),
-				})),
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(appConfigService.config)
+					const visibleSettings = getVisibleSettings(config)
+					const maxIndex = Math.max(0, visibleSettings.length - 1)
+					yield* SubscriptionRef.update(state, (s) => ({
+						...s,
+						focusIndex: Math.min(maxIndex, Math.max(0, s.focusIndex - 1)),
+					}))
+				}),
 
 			moveDown: () =>
-				SubscriptionRef.update(state, (s) => ({
-					...s,
-					focusIndex: Math.min(EDITABLE_SETTINGS.length - 1, s.focusIndex + 1),
-				})),
-
-			getCurrentValue: (setting: SettingDefinition): Effect.Effect<boolean | string> =>
 				Effect.gen(function* () {
-					const config = yield* SubscriptionRef.get(appConfig.config)
+					const config = yield* SubscriptionRef.get(appConfigService.config)
+					const visibleSettings = getVisibleSettings(config)
+					const maxIndex = Math.max(0, visibleSettings.length - 1)
+					yield* SubscriptionRef.update(state, (s) => ({
+						...s,
+						focusIndex: Math.min(maxIndex, s.focusIndex + 1),
+					}))
+				}),
+
+			getCurrentValue: (setting: SettingDefinition): Effect.Effect<SettingValue> =>
+				Effect.gen(function* () {
+					const config = yield* SubscriptionRef.get(appConfigService.config)
 					return setting.getValue(config)
 				}),
 
 			toggleCurrent: () =>
 				Effect.gen(function* () {
 					const { focusIndex } = yield* SubscriptionRef.get(state)
-					const setting = EDITABLE_SETTINGS[focusIndex]
+					const currentConfig = yield* SubscriptionRef.get(appConfigService.config)
+					const visibleSettings = getVisibleSettings(currentConfig)
+					const setting = visibleSettings[focusIndex]
 					if (!setting) return
 
 					const config = yield* loadRawConfig()
-					const newConfig = setting.toggle(config)
+					const newConfig = setting.nextValue(config)
+					const nextVisibleSettings = getVisibleSettings(newConfig)
+					const maxIndex = Math.max(0, nextVisibleSettings.length - 1)
+					yield* SubscriptionRef.update(state, (s) => ({
+						...s,
+						focusIndex: Math.min(s.focusIndex, maxIndex),
+					}))
 
 					yield* saveConfig(newConfig)
 					// Reload the config in AppConfig service so the UI updates immediately
-					const appConfig = yield* AppConfig
-					yield* appConfig.reload()
+					yield* appConfigService.reload()
 					yield* toast.show("success", `${setting.label}: ${String(setting.getValue(newConfig))}`)
 				}).pipe(
+					Effect.catchTag("SettingsConfigLoadError", (error) =>
+						toast.show("error", `${error.message}. Open in editor (e) to fix JSON first.`),
+					),
 					Effect.catchAllDefect((e) =>
 						toast.show("error", `Failed to update: ${e instanceof Error ? e.message : String(e)}`),
 					),
