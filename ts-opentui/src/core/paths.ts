@@ -269,30 +269,3 @@ export function getWorktreePath(projectPath: string, issueId: string): string {
 	const projectName = projectPath.slice(lastSlash + 1)
 	return `${parentDir}/${projectName}-${issueId}`
 }
-
-/**
- * Format a worktree path for compact UI display.
- *
- * Returns the last path segment (directory name), which is the most
- * identifiable part (e.g. "project-az-123" from "/Users/user/project-az-123").
- * Falls back to the full path if the input is empty or has no separator.
- *
- * Inspired by t3code's formatWorktreePathForDisplay.
- *
- * @example
- * formatWorktreePathForDisplay("/Users/user/myapp-az-123")
- * // → "myapp-az-123"
- *
- * formatWorktreePathForDisplay("C:\\Users\\user\\myapp-az-123")
- * // → "myapp-az-123"
- */
-export function formatWorktreePathForDisplay(worktreePath: string): string {
-	const trimmed = worktreePath.trim()
-	if (!trimmed) return ""
-
-	// Normalise Windows backslashes and strip trailing separators
-	const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "")
-	const sep = normalized.lastIndexOf("/")
-	const last = sep === -1 ? normalized : normalized.slice(sep + 1)
-	return last.length > 0 ? last : trimmed
-}

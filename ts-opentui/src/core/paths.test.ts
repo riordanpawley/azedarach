@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
 	decodeIssueSessionName,
-	formatWorktreePathForDisplay,
 	getIssueSessionName,
 	getProjectSessionPrefix,
 	issueIdsEqualForLookup,
@@ -172,37 +171,5 @@ describe("paths lookup normalization", () => {
 		expect(issueIdsEqualForLookup("AZE-123", "aze-123")).toBe(true)
 		expect(issueIdsEqualForLookup("AZE-123", "AZE-124")).toBe(false)
 		expect(issueIdsEqualForLookup("az-05y", "AZ-05Y")).toBe(false)
-	})
-})
-
-describe("formatWorktreePathForDisplay", () => {
-	it("returns just the directory name for a POSIX absolute path", () => {
-		expect(formatWorktreePathForDisplay("/Users/user/myapp-az-123")).toBe("myapp-az-123")
-	})
-
-	it("returns just the directory name for a nested POSIX path", () => {
-		expect(formatWorktreePathForDisplay("/home/runner/work/project-AZE-456")).toBe(
-			"project-AZE-456",
-		)
-	})
-
-	it("strips trailing slashes before computing the display name", () => {
-		expect(formatWorktreePathForDisplay("/Users/user/myapp-az-123/")).toBe("myapp-az-123")
-	})
-
-	it("handles Windows drive-letter paths", () => {
-		expect(formatWorktreePathForDisplay("C:\\Users\\user\\myapp-az-123")).toBe("myapp-az-123")
-	})
-
-	it("returns the path unchanged when there is no separator", () => {
-		expect(formatWorktreePathForDisplay("myapp-az-123")).toBe("myapp-az-123")
-	})
-
-	it("returns empty string for an empty string", () => {
-		expect(formatWorktreePathForDisplay("")).toBe("")
-	})
-
-	it("returns empty string for a whitespace-only string", () => {
-		expect(formatWorktreePathForDisplay("   ")).toBe("")
 	})
 })

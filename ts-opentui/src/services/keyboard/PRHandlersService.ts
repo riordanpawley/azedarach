@@ -608,6 +608,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						yield* board.patchTaskFromMutation(task.id, {
 							sessionState: "idle",
 							hasWorktree: undefined,
+							worktreeBranch: undefined,
 							hasMergeConflict: false,
 							gitBehindCount: undefined,
 							hasUncommittedChanges: undefined,
@@ -646,6 +647,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							status: "closed",
 							sessionState: "idle",
 							hasWorktree: undefined,
+							worktreeBranch: undefined,
 							hasMergeConflict: false,
 							updated_at: new Date().toISOString(),
 							gitBehindCount: undefined,
