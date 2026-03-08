@@ -376,11 +376,6 @@ Delete the duplicate worktree and retry?`
                         hasWorktree: task.hasWorktree ?? false,
                         attachmentPaths: cliTool === "codex" ? [] : imagePaths,
                         localMode: localModePromptGuardrails,
-                        issueContextInjected: cliTool === "opencode",
-                        issueDescription: task.description,
-                        issueDesign: task.design,
-                        issueAcceptance: task.acceptance,
-                        issueNotes: task.notes,
                     })
 
 					yield* runStartWithClashRecovery({
@@ -438,11 +433,6 @@ Delete the duplicate worktree and retry?`
                         hasWorktree: task.hasWorktree ?? false,
                         attachmentPaths: cliTool === "codex" ? [] : imagePaths,
                         localMode: localModePromptGuardrails,
-                        issueContextInjected: cliTool === "opencode",
-                        issueDescription: task.description,
-                        issueDesign: task.design,
-                        issueAcceptance: task.acceptance,
-                        issueNotes: task.notes,
                     })
 
 					yield* runStartWithClashRecovery({
@@ -495,11 +485,6 @@ Delete the duplicate worktree and retry?`
                         taskId: task.id,
                         title: task.title,
                         chatModel,
-                        issueContextInjected: cliTool === "opencode",
-                        issueDescription: task.description,
-                        issueDesign: task.design,
-                        issueAcceptance: task.acceptance,
-                        issueNotes: task.notes,
                     })
 					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
 					const projectPath = yield* helpers

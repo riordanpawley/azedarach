@@ -5,43 +5,19 @@ export const buildStartWorkPrompt = (params: {
     readonly hasWorktree: boolean
     readonly attachmentPaths: readonly string[]
     readonly localMode: boolean
-    readonly issueContextInjected: boolean
-    readonly issueDescription?: string
-    readonly issueDesign?: string
-    readonly issueAcceptance?: string
-    readonly issueNotes?: string
 }): string => {
     const safeIssueType = sanitizePromptInline(params.issueType)
     const safeTitle = sanitizePromptInline(params.title)
-    const updateCommand = `az issue update ${params.taskId} --design '...'`
-    const issueDetailsSnapshot = buildIssueDetailsSnapshot({
-        description: params.issueDescription,
-        design: params.issueDesign,
-        acceptance: params.issueAcceptance,
-        notes: params.issueNotes,
-    })
+    const showCommand = `az issue get ${params.taskId}`
 
     let prompt = `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
 
-${buildIssueContextInstructions(params.taskId, params.issueContextInjected)}
-${issueDetailsSnapshot}
+Start by running \`az prime\`.
+\`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
+If context looks stale, refresh with \`${showCommand}\`.`
 
-Before starting implementation:
-1. If ANYTHING is unclear or underspecified, ASK ME questions before proceeding
-2. Once you understand the task, update the issue with your implementation plan using \`${updateCommand}\`
-3. For shell safety, avoid unescaped backticks in \`--design\` text; prefer plain command names or single-quoted payloads.
-
-Goal: Make this issue self-sufficient so any future session could pick it up without extra context.`
-
-	prompt += `
-
-Issue nesting rule:
-- If additional work must be completed before closing \`${params.taskId}\`, create it as a child of \`${params.taskId}\` (for example, \`az issue update [new-id] --parent ${params.taskId}\`).
-- If additional work is intentionally deferred to a later session (not required to close \`${params.taskId}\`), do NOT make it a child; link it with a discovered-from edge instead (for example, \`az issue dep add --type discovered-from [new-id] ${params.taskId}\`).
-- Close \`${params.taskId}\` only after its child issues are completed.`
-
-	if (params.localMode) {
-		prompt += `
+    if (params.localMode) {
+        prompt += `
 
 Local workflow mode guardrails:
 - Use plain \`git\` commands in this worktree.
@@ -69,24 +45,15 @@ export const buildChatPrompt = (params: {
     readonly taskId: string
     readonly title: string
     readonly chatModel: string
-    readonly issueContextInjected: boolean
-    readonly issueDescription?: string
-    readonly issueDesign?: string
-    readonly issueAcceptance?: string
-    readonly issueNotes?: string
 }): string => {
     const safeTitle = sanitizePromptInline(params.title)
-    const issueDetailsSnapshot = buildIssueDetailsSnapshot({
-        description: params.issueDescription,
-        design: params.issueDesign,
-        acceptance: params.issueAcceptance,
-        notes: params.issueNotes,
-    })
+    const showCommand = `az issue get ${params.taskId}`
 
     return `Let's chat about issue ${params.taskId}: ${safeTitle}
 
-${buildIssueContextInstructions(params.taskId, params.issueContextInjected)}
-${issueDetailsSnapshot}
+Run \`az prime\` first.
+\`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
+If context looks stale, refresh with \`${showCommand}\`.
 
 Help me with one of:
 - Clarifying requirements or scope
@@ -100,59 +67,7 @@ Note: You're running with ${params.chatModel} for fast, cheap discussion. When r
 What would you like to discuss?`
 }
 
-const buildIssueContextInstructions = (taskId: string, issueContextInjected: boolean): string => {
-    const showCommand = `az issue get ${taskId}`
-    if (issueContextInjected) {
-        return `Context for this session is already injected (\`az prime\` + \`${showCommand}\`).
-Only rerun \`${showCommand}\` if details are stale or missing.`
-    }
-    return `Issue context is not auto-injected for this tool.
-Run \`az prime\` then \`${showCommand}\` before implementation if details are missing or stale.`
-}
-
-const buildIssueDetailsSnapshot = (details: {
-    readonly description?: string
-    readonly design?: string
-    readonly acceptance?: string
-    readonly notes?: string
-}): string => {
-    const sections = [
-        formatIssueDetailSection("Description", details.description),
-        formatIssueDetailSection("Design", details.design),
-        formatIssueDetailSection("Acceptance", details.acceptance),
-        formatIssueDetailSection("Notes", details.notes),
-    ].filter((section): section is string => section !== undefined)
-
-    if (sections.length === 0) {
-        return "Issue details snapshot: unavailable in board cache."
-    }
-
-    return `Issue details snapshot (cached):\n${sections.join("\n")}`
-}
-
-const formatIssueDetailSection = (label: string, content?: string): string | undefined => {
-    if (!content) {
-        return undefined
-    }
-
-    const normalized = sanitizePromptBlock(content)
-    if (!normalized) {
-        return undefined
-    }
-
-    const clipped = normalized.length > 700 ? `${normalized.slice(0, 700)}...` : normalized
-    return `- ${label}: ${clipped}`
-}
-
 const sanitizePromptInline = (value: string): string => {
     const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()
     return normalized.replace(/</g, "[").replace(/>/g, "]")
 }
-
-const sanitizePromptBlock = (value: string): string =>
-    value
-        .replace(/[\u0000-\u001f\u007f]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .replace(/</g, "[")
-        .replace(/>/g, "]")
