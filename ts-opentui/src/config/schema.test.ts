@@ -393,6 +393,17 @@ describe("AzedarachConfigSchema", () => {
 			expect(resolved.pr.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 
+		it("accepts gpt-5.4 model literal", () => {
+			const result = decodeConfig({
+				model: {
+					default: "gpt-5.4",
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.model.default).toBe("gpt-5.4")
+		})
+
 		it("preserves worktree config", () => {
 			const result = decodeConfig({
 				worktree: {

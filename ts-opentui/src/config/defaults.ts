@@ -103,17 +103,17 @@ export const DEFAULT_CONFIG = {
 		chat: undefined as SupportedModel | undefined,
 		/** Claude-specific overrides */
 		claude: {
-			default: "claude-4.5-haiku" as SupportedModel | undefined,
+			default: undefined as SupportedModel | undefined,
 			chat: undefined as SupportedModel | undefined,
 		},
 		/** OpenCode-specific overrides */
 		opencode: {
-			default: "gpt-5.3-codex-spark" as SupportedModel | undefined,
+			default: undefined as SupportedModel | undefined,
 			chat: undefined as SupportedModel | undefined,
 		},
 		/** Codex-specific overrides */
 		codex: {
-			default: "gpt-5.3-codex-spark" as SupportedModel | undefined,
+			default: undefined as SupportedModel | undefined,
 			chat: undefined as SupportedModel | undefined,
 		},
 	},

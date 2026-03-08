@@ -62,6 +62,7 @@ export type IssueTracker = Schema.Schema.Type<typeof IssueTrackerSchema>
 const SupportedModelSchema = Schema.Literal(
 	"gpt-5.3-codex-spark",
 	"gpt-5.3-codex",
+	"gpt-5.4",
 	"gpt-5-mini",
 	"claude-4.5-haiku",
 	"claude-4.5-sonnet",
