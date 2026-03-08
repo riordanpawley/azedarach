@@ -2172,6 +2172,68 @@ const specPublishConfigSetHandler = (args: {
 		yield* Console.log("Updated spec publish config.")
 	})
 
+const specPublishConfigHandler = (args: {
+	readonly action: Option.Option<string>
+	readonly enabled: Option.Option<boolean>
+	readonly debounceMs: Option.Option<number>
+	readonly project: Option.Option<string>
+	readonly overview: Option.Option<string>
+	readonly requirements: Option.Option<string>
+	readonly acceptance: Option.Option<string>
+	readonly changeLog: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const hasSetOptions =
+			Option.getOrElse(args.enabled, () => false) ||
+			Option.isSome(args.debounceMs) ||
+			Option.isSome(args.project) ||
+			Option.isSome(args.overview) ||
+			Option.isSome(args.requirements) ||
+			Option.isSome(args.acceptance) ||
+			Option.isSome(args.changeLog)
+
+		const requestedAction = Option.match(args.action, {
+			onNone: () => (hasSetOptions ? "set" : "get"),
+			onSome: (value) => value.toLowerCase(),
+		})
+
+		if (requestedAction !== "get" && requestedAction !== "set") {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid config action '${requestedAction}'. Use 'get' or 'set' (for example: az spec publish config get).`,
+				),
+			)
+		}
+
+		if (requestedAction === "get") {
+			if (hasSetOptions) {
+				return yield* Effect.fail(
+					new Error(
+						"Config update flags cannot be used with 'get'. Use `az spec publish config` or `az spec publish config set ...`.",
+					),
+				)
+			}
+			return yield* specPublishConfigGetHandler({
+				projectDir: args.projectDir,
+				json: args.json,
+			})
+		}
+
+		return yield* specPublishConfigSetHandler({
+			enabled: args.enabled,
+			debounceMs: args.debounceMs,
+			project: args.project,
+			overview: args.overview,
+			requirements: args.requirements,
+			acceptance: args.acceptance,
+			changeLog: args.changeLog,
+			projectDir: args.projectDir,
+			json: args.json,
+		})
+	})
+
 /**
  * Run quality gates for a task's worktree
  */
@@ -3809,20 +3871,8 @@ const specPublishRunCommand = Command.make(
 	specPublishRunHandler,
 ).pipe(Command.withDescription("Run one-way spec publish to Linear project documents"))
 
-const specPublishConfigGetCommand = Command.make(
-	"get",
-	{
-		projectDir: projectDirOption,
-		json: Options.boolean("json").pipe(
-			Options.withAlias("j"),
-			Options.withDescription("Output JSON"),
-		),
-	},
-	specPublishConfigGetHandler,
-).pipe(Command.withDescription("Inspect spec publish config and last outcome"))
-
-const specPublishConfigSetCommand = Command.make(
-	"set",
+const specPublishConfigCommand = Command.make(
+	"config",
 	{
 		enabled: Options.boolean("enabled").pipe(
 			Options.withAlias("e"),
@@ -3864,16 +3914,13 @@ const specPublishConfigSetCommand = Command.make(
 			Options.withAlias("j"),
 			Options.withDescription("Output JSON"),
 		),
+		action: Args.text({ name: "action" }).pipe(
+			Args.optional,
+			Args.withDescription("Optional action: get | set"),
+		),
 	},
-	specPublishConfigSetHandler,
-).pipe(Command.withDescription("Update spec publish config"))
-
-const specPublishConfigCommand = Command.make("config", {}, () =>
-	Console.log("Usage: az spec publish config [get|set] ..."),
-).pipe(
-	Command.withDescription("Manage spec publish configuration"),
-	Command.withSubcommands([specPublishConfigGetCommand, specPublishConfigSetCommand]),
-)
+	specPublishConfigHandler,
+).pipe(Command.withDescription("Inspect or update spec publish configuration"))
 
 const specPublishCommand = Command.make("publish", {}, () =>
 	Console.log("Usage: az spec publish [run|config] ..."),
