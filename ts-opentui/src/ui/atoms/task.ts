@@ -7,8 +7,9 @@
 import { Command } from "@effect/platform"
 import { Data, Effect, Schema } from "effect"
 import { AppConfig } from "../../config/index.js"
-import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
+import type { CliTool } from "../../config/schema.js"
 import { IssueEditorService } from "../../core/IssueEditorService.js"
+import { IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import { BoardService } from "../../services/BoardService.js"
 import { formatForToast } from "../../services/ErrorFormatter.js"
 import { NavigationService } from "../../services/NavigationService.js"
@@ -36,6 +37,106 @@ const decodeAIResponse = Schema.decodeUnknown(AITaskResponseSchema)
 class AITaskCreateError extends Data.TaggedError("AITaskCreateError")<{
 	readonly message: string
 }> {}
+
+const stripAnsi = (value: string): string =>
+	value.replace(
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping for CLI output normalization.
+		/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g,
+		"",
+	)
+
+const unwrapMarkdownJson = (value: string): string => {
+	const trimmed = value.trim()
+	const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed)
+	return (match?.[1] ?? trimmed).trim()
+}
+
+const findBalancedJsonObject = (value: string): string | undefined => {
+	for (let start = 0; start < value.length; start++) {
+		if (value[start] !== "{") continue
+		let depth = 0
+		let inString = false
+		let escaped = false
+		for (let cursor = start; cursor < value.length; cursor++) {
+			const char = value[cursor]
+			if (inString) {
+				if (escaped) {
+					escaped = false
+					continue
+				}
+				if (char === "\\") {
+					escaped = true
+					continue
+				}
+				if (char === '"') {
+					inString = false
+				}
+				continue
+			}
+			if (char === '"') {
+				inString = true
+				continue
+			}
+			if (char === "{") {
+				depth += 1
+				continue
+			}
+			if (char === "}") {
+				depth -= 1
+				if (depth === 0) {
+					const candidate = value.slice(start, cursor + 1)
+					try {
+						JSON.parse(candidate)
+						return candidate
+					} catch {
+						break
+					}
+				}
+			}
+		}
+	}
+	return undefined
+}
+
+export const extractJsonPayload = (rawOutput: string): string => {
+	const normalized = unwrapMarkdownJson(stripAnsi(rawOutput))
+	try {
+		JSON.parse(normalized)
+		return normalized
+	} catch {
+		const balanced = findBalancedJsonObject(normalized)
+		if (balanced !== undefined) {
+			return balanced
+		}
+		throw new AITaskCreateError({
+			message: `Failed to find JSON object in AI output\nRaw output: ${rawOutput}`,
+		})
+	}
+}
+
+export const buildAiCreateCommand = (params: {
+	readonly cliTool: CliTool
+	readonly prompt: string
+	readonly model: string
+}): Readonly<{ executable: string; args: ReadonlyArray<string> }> => {
+	switch (params.cliTool) {
+		case "claude":
+			return {
+				executable: "claude",
+				args: ["-p", params.prompt, "--model", params.model, "--output-format", "text"],
+			}
+		case "opencode":
+			return {
+				executable: "opencode",
+				args: ["run", "--model", params.model, params.prompt],
+			}
+		case "codex":
+			return {
+				executable: "codex",
+				args: ["exec", "--model", params.model, "--color", "never", params.prompt],
+			}
+	}
+}
 
 // ============================================================================
 // Task Movement Atoms
@@ -323,22 +424,22 @@ Return ONLY the JSON object, no explanation or markdown.`
 			toolModelConfig.default ??
 			"haiku"
 
-		const args = ["-p", prompt, "--model", chatModel, "--output-format", "text"]
-
-		const aiCmd = Command.make(cliTool, ...args).pipe(Command.workingDirectory(projectPath))
+		const aiCommand = buildAiCreateCommand({
+			cliTool,
+			prompt,
+			model: chatModel,
+		})
+		const aiCmd = Command.make(aiCommand.executable, ...aiCommand.args).pipe(
+			Command.workingDirectory(projectPath),
+		)
 
 		const rawOutput = yield* Command.string(aiCmd).pipe(
 			Effect.timeout("15 seconds"),
 			Effect.mapError((e) => new AITaskCreateError({ message: `AI CLI failed: ${e}` })),
 		)
 
-		// Parse the JSON output from the AI CLI
-		// Handle potential markdown code blocks or extra whitespace
-		const cleanOutput = rawOutput
-			.trim()
-			.replace(/^```json?\s*/i, "")
-			.replace(/\s*```$/i, "")
-			.trim()
+		// Parse JSON output from potentially noisy CLI output.
+		const cleanOutput = extractJsonPayload(rawOutput)
 
 		// Parse JSON
 		const jsonParsed = yield* Effect.try({
