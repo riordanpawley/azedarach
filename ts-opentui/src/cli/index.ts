@@ -647,6 +647,68 @@ const resolveSpecRequirementLookupInput = (args: {
 		}
 	})
 
+const resolveOptionalAliasedTextInput = (args: {
+	readonly positional: Option.Option<string>
+	readonly optionValue: Option.Option<string>
+	readonly positionalName: string
+	readonly optionName: string
+}): Effect.Effect<Option.Option<string>, Error> =>
+	Effect.gen(function* () {
+		const positional = Option.getOrUndefined(args.positional)?.trim()
+		const optionValue = Option.getOrUndefined(args.optionValue)?.trim()
+
+		const hasPositional = positional !== undefined && positional.length > 0
+		const hasOptionValue = optionValue !== undefined && optionValue.length > 0
+
+		if (!hasPositional && !hasOptionValue) {
+			return Option.none<string>()
+		}
+		if (!hasPositional && hasOptionValue) {
+			if (optionValue === undefined) {
+				return Option.none<string>()
+			}
+			return Option.some(optionValue)
+		}
+		if (hasPositional && !hasOptionValue) {
+			if (positional === undefined) {
+				return Option.none<string>()
+			}
+			return Option.some(positional)
+		}
+
+		if (positional?.toLowerCase() !== optionValue?.toLowerCase()) {
+			return yield* Effect.fail(
+				new Error(
+					`Conflicting values for ${args.positionalName} and ${args.optionName}. Provide one source or matching values.`,
+				),
+			)
+		}
+
+		if (positional === undefined) {
+			return Option.none<string>()
+		}
+		return Option.some(positional)
+	})
+
+const resolveRequiredAliasedTextInput = (args: {
+	readonly positional: Option.Option<string>
+	readonly optionValue: Option.Option<string>
+	readonly positionalName: string
+	readonly optionName: string
+}): Effect.Effect<string, Error> =>
+	Effect.gen(function* () {
+		const merged = yield* resolveOptionalAliasedTextInput(args)
+		const value = Option.getOrUndefined(merged)
+		if (value === undefined || value.length === 0) {
+			return yield* Effect.fail(
+				new Error(
+					`Missing ${args.positionalName}. Provide ${args.optionName} or positional input.`,
+				),
+			)
+		}
+		return value
+	})
+
 const parseRelationshipDependencyType = (
 	value: string | undefined,
 ): RelationshipDependencyType | undefined => {
@@ -1669,6 +1731,7 @@ const specSyncHandler = (args: {
  */
 const specReqGetHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1680,8 +1743,14 @@ const specReqGetHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1739,6 +1808,7 @@ const specReqGetHandler = (args: {
  */
 const specReqCreateHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly localId: Option.Option<string>
 	readonly externalCode: Option.Option<string>
 	readonly title: string
@@ -1753,7 +1823,13 @@ const specReqCreateHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
-		const positionalRef = Option.getOrUndefined(args.requirementRef)?.trim()
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const positionalRef = Option.getOrUndefined(mergedRequirementRef)?.trim()
 		const optionLocalId = Option.getOrUndefined(args.localId)?.trim()
 		const optionExternalCodeRaw = Option.getOrUndefined(args.externalCode)?.trim()
 		const optionExternalCode =
@@ -1842,6 +1918,7 @@ const specReqCreateHandler = (args: {
  */
 const specReqUpdateHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1857,8 +1934,14 @@ const specReqUpdateHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -1929,6 +2012,7 @@ const specReqUpdateHandler = (args: {
  */
 const specReqDeleteHandler = (args: {
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -1939,8 +2023,14 @@ const specReqDeleteHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -2048,8 +2138,10 @@ const specLinkListHandler = (args: {
  * Add spec link
  */
 const specLinkAddHandler = (args: {
-	readonly issueId: string
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -2062,9 +2154,21 @@ const specLinkAddHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -2115,8 +2219,10 @@ const specLinkAddHandler = (args: {
  * Remove spec link
  */
 const specLinkRemoveHandler = (args: {
-	readonly issueId: string
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
 	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
@@ -2129,9 +2235,21 @@ const specLinkRemoveHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
 
-		const issueId = yield* resolveCliIssueId(args.issueId, resolverCwd)
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
 		const lookup = yield* resolveSpecRequirementLookupInput({
-			reference: args.requirementRef,
+			reference: mergedRequirementRef,
 			id: args.requirementId,
 			localId: args.requirementLocalId,
 			externalCode: args.requirementExternalCode,
@@ -3682,6 +3800,25 @@ const requirementRefArg = Args.text({ name: "requirement-ref" }).pipe(
 	),
 )
 
+const requirementRefOption = Options.text("req").pipe(
+	Options.withAlias("r"),
+	Options.optional,
+	Options.withDescription(
+		"Spec requirement reference (alias for positional requirement-ref; auto selector)",
+	),
+)
+
+const specLinkIssueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.optional,
+	Args.withDescription("Issue ID (optional when --issue is provided)"),
+)
+
+const specLinkIssueIdOption = Options.text("issue").pipe(
+	Options.withAlias("i"),
+	Options.optional,
+	Options.withDescription("Issue ID (alias for positional issue-id)"),
+)
+
 const requirementByIdOption = Options.text("id").pipe(
 	Options.withAlias("I"),
 	Options.optional,
@@ -3775,6 +3912,7 @@ const specReqGetCommand = Command.make(
 	"get",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3792,6 +3930,7 @@ const specReqCreateCommand = Command.make(
 	"create",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		localId: requirementByLocalIdOption,
 		externalCode: requirementByExternalCodeOption,
 		title: Options.text("title").pipe(
@@ -3830,6 +3969,7 @@ const specReqUpdateCommand = Command.make(
 	"update",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3871,6 +4011,7 @@ const specReqDeleteCommand = Command.make(
 	"delete",
 	{
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3885,7 +4026,7 @@ const specReqDeleteCommand = Command.make(
 
 const specReqCommand = Command.make("req", {}, () =>
 	Console.log(
-		"Usage: az spec req [list|search|get|create|update|delete] [<requirement-ref>] [--id|--local-id|--external-code] ...",
+		"Usage: az spec req [list|search|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage spec requirement records"),
@@ -3939,8 +4080,10 @@ const specLinkListCommand = Command.make(
 const specLinkAddCommand = Command.make(
 	"add",
 	{
-		issueId: issueIdArg,
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3961,8 +4104,10 @@ const specLinkAddCommand = Command.make(
 const specLinkRemoveCommand = Command.make(
 	"remove",
 	{
-		issueId: issueIdArg,
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
 		requirementRef: requirementRefArg,
+		requirementRefOption,
 		requirementId: requirementByIdOption,
 		requirementLocalId: requirementByLocalIdOption,
 		requirementExternalCode: requirementByExternalCodeOption,
@@ -3981,7 +4126,9 @@ const specLinkRemoveCommand = Command.make(
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
 
 const specLinkCommand = Command.make("link", {}, () =>
-	Console.log("Usage: az spec link [list|add|remove] ..."),
+	Console.log(
+		"Usage: az spec link [list|add|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
+	),
 ).pipe(
 	Command.withDescription("Manage typed issue/spec links"),
 	Command.withSubcommands([specLinkListCommand, specLinkAddCommand, specLinkRemoveCommand]),
