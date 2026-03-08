@@ -12,7 +12,7 @@
 
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
-import { ProjectService } from "../services/ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ToastService } from "../services/ToastService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
 import { type AzedarachConfig, AzedarachConfigSchema } from "./schema.js"
@@ -449,11 +449,29 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					return mergeWithDefaults(validated)
 				}
 
+				const cwdPath = process.cwd()
+				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+				const cwdHasConfig = yield* fs
+					.exists(cwdConfigPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
+				const configBasePath = resolveConfigBasePath({
+					cwdPath,
+					projectPath,
+					pathOps: pathService,
+					cwdHasConfig,
+				})
+
 				// Try .azedarach.json first
-				const jsonConfig = yield* loadJsonConfig(projectPath).pipe(
+				const jsonConfig = yield* loadJsonConfig(configBasePath).pipe(
 					Effect.catchAll((warning) =>
 						Effect.logWarning(
-							`[DEBUG] Failed to load .azedarach.json for projectPath=${projectPath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
+							`[DEBUG] Failed to load .azedarach.json for projectPath=${configBasePath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
 						).pipe(
 							Effect.zipRight(SubscriptionRef.set(loadWarningRef, warning)),
 							Effect.zipRight(showConfigFallbackToast(warning)),
@@ -472,10 +490,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				}
 
 				// Try package.json "azedarach" key
-				const pkgConfig = yield* loadPackageJsonConfig(projectPath).pipe(
+				const pkgConfig = yield* loadPackageJsonConfig(configBasePath).pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
-							`[DEBUG] Failed to load package.json azedarach config for projectPath=${projectPath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
+							`[DEBUG] Failed to load package.json azedarach config for projectPath=${configBasePath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
 						).pipe(Effect.as(null)),
 					),
 				)
