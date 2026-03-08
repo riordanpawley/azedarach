@@ -15,7 +15,11 @@
 import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Ref, Schedule, Schema, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
-import { extractGitRecoveryHint, type GitRecoveryHint } from "./gitRecovery.js"
+import {
+	createStaleLockRecoveryHint,
+	extractGitRecoveryHint,
+	type GitRecoveryHint,
+} from "./gitRecovery.js"
 import {
 	deepMerge,
 	deepMergeWithDedup,
@@ -273,6 +277,31 @@ const runGit = (
 	cwd: string,
 ): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
+		const indexLockPath = yield* Command.string(
+			Command.make("git", "rev-parse", "--git-path", "index.lock").pipe(
+				Command.workingDirectory(cwd),
+			),
+		).pipe(
+			Effect.map((output) => output.trim()),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
+		if (indexLockPath) {
+			const lockExists = yield* Command.exitCode(Command.make("test", "-e", indexLockPath)).pipe(
+				Effect.map((code) => code === 0),
+				Effect.catchAll(() => Effect.succeed(false)),
+			)
+			if (lockExists) {
+				return yield* Effect.fail(
+					new GitError({
+						message: `git command blocked by existing lock file: ${indexLockPath}`,
+						command: `git ${args.join(" ")}`,
+						stderr: `lock file exists: ${indexLockPath}`,
+						recovery: createStaleLockRecoveryHint(indexLockPath),
+					}),
+				)
+			}
+		}
+
 		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 
 		const result = yield* Command.string(command).pipe(

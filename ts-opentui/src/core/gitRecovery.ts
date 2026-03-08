@@ -8,6 +8,11 @@ export type GitRecoveryHint = {
 
 const LOCK_FILE_ERROR_PATTERN = /Unable to create ['"]([^'"]+\.lock)['"]/
 
+export const createStaleLockRecoveryHint = (lockFilePath: string): GitRecoveryHint => ({
+	_tag: "stale-lock-file",
+	lockFilePath,
+})
+
 /**
  * Extract a stale lock-file recovery hint from git stderr output.
  *
@@ -21,8 +26,5 @@ export const extractGitRecoveryHint = (stderr: string): GitRecoveryHint | undefi
 		return undefined
 	}
 
-	return {
-		_tag: "stale-lock-file",
-		lockFilePath,
-	}
+	return createStaleLockRecoveryHint(lockFilePath)
 }
