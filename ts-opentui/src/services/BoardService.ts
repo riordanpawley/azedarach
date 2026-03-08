@@ -346,7 +346,6 @@ export const applySessionRefreshPatch = (params: {
     readonly estimatedTokens: number | undefined
     readonly recentOutput: string | undefined
     readonly agentPhase: TaskWithSession["agentPhase"]
-    readonly checklistProgress?: TaskWithSession["checklistProgress"]
     readonly gitStatusPatch: GitStatus | undefined
 }): TaskWithSession => ({
     ...params.task,
@@ -356,7 +355,6 @@ export const applySessionRefreshPatch = (params: {
     estimatedTokens: params.estimatedTokens,
     recentOutput: params.recentOutput,
     agentPhase: params.agentPhase,
-    checklistProgress: params.checklistProgress,
 })
 
 // ============================================================================
@@ -1312,9 +1310,15 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {}
 							const isVisible = currentVisibleTaskIds.has(issue.id)
+							// Compute worktree path only when needed: for git status checks or UI display
+							const needsWorktreePath =
+								hasWorktree || (isVisible && sessionState !== "idle")
+							const worktreePath =
+								needsWorktreePath && projectPath
+									? getWorktreePath(projectPath, issue.id)
+									: undefined
 							// Fetch git status only for visible tasks with active sessions or worktrees
-							if (isVisible && (sessionState !== "idle" || hasWorktree) && projectPath) {
-								const worktreePath = getWorktreePath(projectPath, issue.id)
+							if (isVisible && (sessionState !== "idle" || hasWorktree) && worktreePath) {
 								// Use parent epic branch as base for children, otherwise use config baseBranch
 								// This ensures children show line changes relative to epic, not main
 								const effectiveBaseBranch = parentEpicId ?? baseBranch
@@ -1340,6 +1344,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								...issue,
 								sessionState,
 								hasWorktree: hasWorktree || undefined,
+								worktreePath: hasWorktree ? worktreePath : undefined,
 								hasMergeConflict,
 								parentEpicId,
 								...gitStatus,
@@ -1350,7 +1355,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								estimatedTokens: metrics?.estimatedTokens,
 								recentOutput: metrics?.recentOutput,
 								agentPhase: metrics?.agentPhase,
-								checklistProgress: metrics?.checklistProgress,
 							}
 
 							// Apply optimistic updates
@@ -1759,7 +1763,6 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
                                 estimatedTokens: metrics?.estimatedTokens,
                                 recentOutput: metrics?.recentOutput,
                                 agentPhase: metrics?.agentPhase,
-                                checklistProgress: metrics?.checklistProgress,
                                 gitStatusPatch,
                             })
                         }),

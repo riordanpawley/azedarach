@@ -55,12 +55,6 @@ export interface SessionMetrics {
 	recentOutput?: string
 	/** Current agent workflow phase (planning/action/verification) */
 	agentPhase?: AgentPhase
-	/**
-	 * Checklist progress extracted from terminal output: [completedCount, totalCount].
-	 * Derived from markdown-style task lists (e.g. "- [x] step 1 / - [ ] step 2")
-	 * that the agent prints as it works through a plan.
-	 */
-	checklistProgress?: readonly [number, number]
 }
 
 /**
@@ -142,6 +136,14 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Parti
 	sessionState: SessionState
 	/** Whether a git worktree exists for this task (even if no session is running) */
 	hasWorktree?: boolean
+	/**
+	 * Absolute path to the git worktree directory for this task.
+	 * Populated whenever `hasWorktree` is true. Useful for showing the
+	 * worktree name in the UI and for constructing git commands.
+	 *
+	 * @example "/Users/user/project-az-123"
+	 */
+	worktreePath?: string
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean
 	/**

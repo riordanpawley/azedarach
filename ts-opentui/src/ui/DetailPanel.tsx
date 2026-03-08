@@ -10,6 +10,7 @@ import { useAtomSet, useAtomValue } from "@effect-atom/atom-react"
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { DependencyRef } from "../core/IssueTrackerClient.js"
+import { formatWorktreePathForDisplay } from "../core/paths.js"
 import { formatElapsedMs } from "../services/ClockService.js"
 import {
 	currentAttachmentsAtom,
@@ -249,15 +250,6 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		return tokens.toString()
 	}
 
-	// Format checklist progress as a compact bar + fraction: "[████░░] 4/6"
-	const formatChecklistProgress = (completed: number, total: number): string => {
-		if (total === 0) return "Progress: [░░░░░░░░] 0/0"
-		const BAR_WIDTH = 8
-		const filled = Math.round((completed / total) * BAR_WIDTH)
-		const bar = "█".repeat(filled) + "░".repeat(BAR_WIDTH - filled)
-		return `Progress: [${bar}] ${completed}/${total}`
-	}
-
 	// Check if session is active (not idle)
 	const isSessionActive = props.task.sessionState !== "idle"
 
@@ -267,9 +259,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 		(props.task.contextPercent !== undefined ||
 			props.task.sessionStartedAt !== undefined ||
 			props.task.estimatedTokens !== undefined ||
-			props.task.agentPhase !== undefined ||
-			props.task.recentOutput !== undefined ||
-			props.task.checklistProgress !== undefined)
+			props.task.agentPhase !== undefined)
 
 	// Available actions based on task state
 	const availableActions = useMemo(() => {
@@ -472,7 +462,11 @@ export const DetailPanel = (props: DetailPanelProps) => {
 								{"Worktree:"}
 							</text>
 							<box flexDirection={metadataDirection} gap={2}>
-								<text fg={theme.text}>{"📁 Exists"}</text>
+								<text fg={theme.text}>
+									{props.task.worktreePath
+										? `📁 ${formatWorktreePathForDisplay(props.task.worktreePath)}`
+										: "📁 Exists"}
+								</text>
 								{props.task.hasUncommittedChanges && (
 									<text fg={theme.red}>{"● Uncommitted changes"}</text>
 								)}
@@ -516,15 +510,6 @@ export const DetailPanel = (props: DetailPanelProps) => {
 									{`Phase: ${PHASE_INDICATORS[props.task.agentPhase]} ${PHASE_LABELS[props.task.agentPhase]}`}
 								</text>
 							)}
-							{/* Checklist progress bar when agent is working through a plan */}
-							{props.task.checklistProgress && props.task.checklistProgress[1] > 0 && (
-								<text fg={theme.teal}>
-									{formatChecklistProgress(
-										props.task.checklistProgress[0],
-										props.task.checklistProgress[1],
-									)}
-								</text>
-							)}
 							<box flexDirection={metadataDirection} gap={2}>
 								{props.task.contextPercent !== undefined && (
 									<text fg={getContextColor(props.task.contextPercent)}>
@@ -545,12 +530,6 @@ export const DetailPanel = (props: DetailPanelProps) => {
 									>{`Tokens: ${formatTokens(props.task.estimatedTokens)}`}</text>
 								)}
 							</box>
-							{/* Recent output snippet - last meaningful line from the PTY */}
-							{props.task.recentOutput && (
-								<text fg={theme.subtext0}>
-									{`↳ ${props.task.recentOutput}`}
-								</text>
-							)}
 							<text> </text>
 						</box>
 					)}
