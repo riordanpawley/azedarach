@@ -243,15 +243,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				const json = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (e) =>
-						new ConfigParseError({
-							message: "Invalid JSON in config file",
-							path: targetConfigPath,
-							details: String(e),
-						}),
-				})
+				const json = yield* Schema.decode(Schema.parseJson(Schema.Unknown))(content).pipe(
+					Effect.mapError(
+						(e) =>
+							new ConfigParseError({
+								message: "Invalid JSON in config file",
+								path: targetConfigPath,
+								details: String(e),
+							}),
+					),
+				)
 
 				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
@@ -332,14 +333,15 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				const pkg = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: () =>
-						new ConfigParseError({
-							message: "Invalid JSON in package.json",
-							path: pkgPath,
-						}),
-				})
+				const pkg = yield* Schema.decode(Schema.parseJson(Schema.Unknown))(content).pipe(
+					Effect.mapError(
+						() =>
+							new ConfigParseError({
+								message: "Invalid JSON in package.json",
+								path: pkgPath,
+							}),
+					),
+				)
 
 				// Check if azedarach key exists using schema validation
 				const PackageJsonSchema = Schema.Struct({

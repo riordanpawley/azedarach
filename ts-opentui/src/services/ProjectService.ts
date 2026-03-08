@@ -176,19 +176,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 					),
 				)
 
-				const json = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (e) =>
-						new ProjectError({
-							message: `Invalid JSON in projects config: ${e}`,
-						}),
-				})
-
-				return yield* Schema.decodeUnknown(ProjectsConfigSchema)(json).pipe(
+				return yield* Schema.decode(Schema.parseJson(ProjectsConfigSchema))(content).pipe(
 					Effect.mapError(
 						(e) =>
 							new ProjectError({
-								message: `Projects config validation failed: ${e}`,
+								message: `Projects config parse/validation failed: ${e}`,
 							}),
 					),
 				)
