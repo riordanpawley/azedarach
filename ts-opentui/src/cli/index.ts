@@ -37,7 +37,6 @@ import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
 import { AzedarachConfigSchema } from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
-import { SessionManager } from "../core/SessionManager.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
@@ -45,13 +44,14 @@ import { IssueTrackerClient, type Issue as TrackedIssue } from "../core/IssueTra
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
-import { SpecService } from "../core/SpecService.js"
-import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
 import {
 	getIssueSessionName,
 	issueIdsEqualForLookup,
 	parseIssueSessionName,
 } from "../core/paths.js"
+import { SessionManager } from "../core/SessionManager.js"
+import { SpecService } from "../core/SpecService.js"
+import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -227,79 +227,80 @@ const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	st: "start",
 }
 
-const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-	issue: {
-		l: "list",
-		g: "get",
-		c: "create",
-		u: "update",
-		d: "dep",
-		x: "close",
-		t: "close",
-		rm: "delete",
-		del: "delete",
-	},
-	"issue/dep": {
-		a: "add",
-	},
-	spec: {
-		r: "req",
-		l: "link",
-		p: "publish",
-		c: "req",
-	},
-	"spec/req": {
-		l: "list",
-		g: "get",
-		c: "create",
-		u: "update",
-		d: "delete",
-		del: "delete",
-		ls: "list",
-		rm: "delete",
-	},
-	"spec/link": {
-		l: "list",
-		a: "add",
-		r: "remove",
-		rm: "remove",
-	},
-	"spec/publish": {
-		r: "run",
-		c: "config",
-	},
-	project: {
-		a: "add",
-		l: "list",
-		r: "remove",
-		rm: "remove",
-		s: "switch",
-		sw: "switch",
-	},
-	opencode: {
-		i: "init",
-		p: "plugin",
-		pl: "plugin",
-	},
-	hooks: {
-		i: "install",
-		in: "install",
-		ins: "install",
-	},
-	dev: {
-		s: "start",
-		st: "start",
-		r: "restart",
-		re: "restart",
-		x: "stop",
-		stp: "stop",
-		sto: "stop",
-		l: "list",
-		ls: "list",
-		t: "status",
-		stt: "status",
-	},
-}
+const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> =
+	{
+		issue: {
+			l: "list",
+			g: "get",
+			c: "create",
+			u: "update",
+			d: "dep",
+			x: "close",
+			t: "close",
+			rm: "delete",
+			del: "delete",
+		},
+		"issue/dep": {
+			a: "add",
+		},
+		spec: {
+			r: "req",
+			l: "link",
+			p: "publish",
+			c: "req",
+		},
+		"spec/req": {
+			l: "list",
+			g: "get",
+			c: "create",
+			u: "update",
+			d: "delete",
+			del: "delete",
+			ls: "list",
+			rm: "delete",
+		},
+		"spec/link": {
+			l: "list",
+			a: "add",
+			r: "remove",
+			rm: "remove",
+		},
+		"spec/publish": {
+			r: "run",
+			c: "config",
+		},
+		project: {
+			a: "add",
+			l: "list",
+			r: "remove",
+			rm: "remove",
+			s: "switch",
+			sw: "switch",
+		},
+		opencode: {
+			i: "init",
+			p: "plugin",
+			pl: "plugin",
+		},
+		hooks: {
+			i: "install",
+			in: "install",
+			ins: "install",
+		},
+		dev: {
+			s: "start",
+			st: "start",
+			r: "restart",
+			re: "restart",
+			x: "stop",
+			stp: "stop",
+			sto: "stop",
+			l: "list",
+			ls: "list",
+			t: "status",
+			stt: "status",
+		},
+	}
 
 // ============================================================================
 // Validation Helpers
@@ -909,15 +910,15 @@ const formatIssueLinkedSpecSection = (
 
 const formatIssueDetailSections = (
 	issue: TrackedIssue,
-		options?: {
-			readonly linkedSpecRequirements?:
-				| readonly {
-						readonly id: string
-						readonly local_id: string
-						readonly external_code: string | null
-						readonly title: string
-						readonly kind: string
-						readonly link_type: string
+	options?: {
+		readonly linkedSpecRequirements?:
+			| readonly {
+					readonly id: string
+					readonly local_id: string
+					readonly external_code: string | null
+					readonly title: string
+					readonly kind: string
+					readonly link_type: string
 			  }[]
 			| undefined
 	},
@@ -1028,9 +1029,9 @@ const issueGetHandler = (args: {
 			.listIssueRequirements(issue.id, explicitProjectDir ?? resolverCwd)
 			.pipe(
 				Effect.catchAll((error) =>
-					Effect.logWarning(`Unable to load linked spec requirements for ${issue.id}: ${error.message}`).pipe(
-						Effect.zipRight(Effect.succeed<readonly never[]>([])),
-					),
+					Effect.logWarning(
+						`Unable to load linked spec requirements for ${issue.id}: ${error.message}`,
+					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
 				),
 			)
 
@@ -1593,26 +1594,26 @@ const specReqCreateHandler = (args: {
 			)
 		}
 
-			const specService = yield* SpecService
-			const created = yield* specService.createRequirement(
-				{
-					local_id: localId,
-					external_code: externalCode,
-					title: args.title,
-					body: args.body,
-					kind,
+		const specService = yield* SpecService
+		const created = yield* specService.createRequirement(
+			{
+				local_id: localId,
+				external_code: externalCode,
+				title: args.title,
+				body: args.body,
+				kind,
 				status: Option.getOrUndefined(args.status),
 				priority: Option.getOrUndefined(args.priority),
 			},
 			explicitProjectDir,
 		)
 
-			if (args.json) {
-				yield* Console.log(JSON.stringify(created, null, 2))
-				return
-			}
-			yield* Console.log(`Created spec requirement ${formatSpecRequirementReference(created)}`)
-		})
+		if (args.json) {
+			yield* Console.log(JSON.stringify(created, null, 2))
+			return
+		}
+		yield* Console.log(`Created spec requirement ${formatSpecRequirementReference(created)}`)
+	})
 
 /**
  * Update spec requirement
@@ -1667,37 +1668,39 @@ const specReqUpdateHandler = (args: {
 		const hasChanges = Object.values(fields).some((value) => value !== undefined)
 		if (!hasChanges) {
 			return yield* Effect.fail(
-				new Error("No fields provided. Use at least one --title/--body/--kind/--status/--priority."),
+				new Error(
+					"No fields provided. Use at least one --title/--body/--kind/--status/--priority.",
+				),
 			)
 		}
 
-			const specService = yield* SpecService
-			const updated = yield* specService.updateRequirement(
-				lookup.reference,
-				fields,
-				explicitProjectDir,
-				lookup.selector,
-			)
-			if (!updated) {
-				return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
-			}
+		const specService = yield* SpecService
+		const updated = yield* specService.updateRequirement(
+			lookup.reference,
+			fields,
+			explicitProjectDir,
+			lookup.selector,
+		)
+		if (!updated) {
+			return yield* Effect.fail(new Error(`Spec requirement not found: ${lookup.reference}`))
+		}
 
-			if (args.json) {
-				yield* Console.log(
-					JSON.stringify(
-						{
-							reference: lookup.reference,
-							selector: lookup.selector,
-							updated: true,
-						},
-						null,
-						2,
-					),
-				)
-				return
-			}
-			yield* Console.log(`Updated spec requirement ${lookup.reference}`)
-		})
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						reference: lookup.reference,
+						selector: lookup.selector,
+						updated: true,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+		yield* Console.log(`Updated spec requirement ${lookup.reference}`)
+	})
 
 /**
  * Delete spec requirement
@@ -1767,7 +1770,8 @@ const specLinkListHandler = (args: {
 
 		const issueId = yield* Option.match(args.issueId, {
 			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (value) => resolveCliIssueId(value, resolverCwd).pipe(Effect.map((resolved) => resolved)),
+			onSome: (value) =>
+				resolveCliIssueId(value, resolverCwd).pipe(Effect.map((resolved) => resolved)),
 		})
 		const requirementLookup = yield* Option.match(args.requirementRef, {
 			onNone: () =>
@@ -2224,40 +2228,35 @@ const gateHandler = (args: {
  * az prime - Print session primer for AI agents
  */
 const normalizePrimeIssueId = (raw: string | undefined): string | undefined => {
-    const trimmed = (raw ?? "").trim()
-    if (trimmed.length === 0) {
-        return undefined
-    }
-    return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : undefined
+	const trimmed = (raw ?? "").trim()
+	if (trimmed.length === 0) {
+		return undefined
+	}
+	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : undefined
 }
 
-const primeHandler = (_args: { readonly verbose: boolean }) =>
-    Effect.gen(function* () {
-        const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
-        const issueContext =
-            issueId === undefined
-                ? ""
-                : yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
-                        Effect.map((output) => output.trim()),
-                        Effect.catchAll(() => Effect.succeed("")),
-                    )
-
-        const issueSection =
-            issueId === undefined
-                ? ""
-                : issueContext.length > 0
-                    ? `
+const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
+	const issueSection =
+		issueId === undefined
+			? ""
+			: issueContext.length > 0
+				? `
 
 Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
 \`\`\`
 ${issueContext.length > 4000 ? `${issueContext.slice(0, 4000)}\n...` : issueContext}
 \`\`\``
-                    : `
+				: `
 
 Active issue from AZEDARACH_ISSUE_ID=${issueId}.
 Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 
-        yield* Console.log(`Azedarach Session Primer
+	const contextGuardrail =
+		issueId === undefined
+			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
+
+	return `Azedarach Session Primer
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az prime\`
@@ -2272,6 +2271,10 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - \`az issue create "Child task" --parent <epic-id>\`
   - \`az issue close <issue-id> --reason "..."\`
   - \`az issue --help\`
+- Issue-context guardrails:
+  ${contextGuardrail}
+  - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
+  - Do not go on history/log hunting tangents to backfill missing fields unless the user explicitly asks for that research.
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
@@ -2282,8 +2285,22 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - Always include the issue ID in the commit message.
   - Then close the issue (\`az issue close <issue-id>\`).
 ${issueSection}
-`)
-    })
+`
+}
+
+const primeHandler = (_args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const issueContext =
+			issueId === undefined
+				? ""
+				: yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
+						Effect.map((output) => output.trim()),
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+
+		yield* Console.log(buildPrimeOutput(issueId, issueContext))
+	})
 
 /**
  * Valid hook event types from Claude Code
@@ -3172,18 +3189,18 @@ const issueDepCommand = Command.make("dep", {}, () =>
 /**
  * az issue close <issue-id> - Close issue
  */
-	const issueCloseCommand = Command.make(
-		"close",
-		{
-			issueId: issueIdArg,
-			reason: Options.text("reason").pipe(
-				Options.withAlias("r"),
-				Options.optional,
-				Options.withDescription("Close reason"),
-			),
-			projectDir: projectDirOption,
-			verbose: verboseOption,
-			json: Options.boolean("json").pipe(
+const issueCloseCommand = Command.make(
+	"close",
+	{
+		issueId: issueIdArg,
+		reason: Options.text("reason").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Close reason"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
 			Options.withDescription("Output JSON confirmation"),
 		),
@@ -4336,6 +4353,7 @@ export { cliLayer, commandCliLayer }
  * Export the raw runner for ManagedRuntime pattern
  */
 export {
+	buildPrimeOutput,
 	cliRunner,
 	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
