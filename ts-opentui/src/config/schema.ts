@@ -1261,7 +1261,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					enabled: prSource.enabled,
 					autoDraft: prSource.autoDraft,
 					autoMerge: prSource.autoMerge,
-					aiModel: current.pr.aiModel,
+					aiModel: current.pr?.aiModel,
 				}
 			: undefined,
 		merge: mergeSource

@@ -1,6 +1,6 @@
-import path from "node:path"
 import { describe, expect, it } from "bun:test"
-import { isWorktreePathForProject } from "./ProjectService.js"
+import path from "node:path"
+import { isWorktreePathForProject, resolveConfigBasePath } from "./ProjectService.js"
 
 describe("isWorktreePathForProject", () => {
 	it("matches a sibling worktree root", () => {
@@ -41,5 +41,29 @@ describe("isWorktreePathForProject", () => {
 				path,
 			),
 		).toBe(false)
+	})
+})
+
+describe("resolveConfigBasePath", () => {
+	it("uses worktree path when cwd is a worktree and has config", () => {
+		expect(
+			resolveConfigBasePath({
+				cwdPath: "/Users/riordan/prog/azedarach-az-1e6cc1",
+				projectPath: "/Users/riordan/prog/azedarach",
+				pathOps: path,
+				cwdHasConfig: true,
+			}),
+		).toBe("/Users/riordan/prog/azedarach-az-1e6cc1")
+	})
+
+	it("uses project path when cwd is a worktree but has no config", () => {
+		expect(
+			resolveConfigBasePath({
+				cwdPath: "/Users/riordan/prog/azedarach-az-1e6cc1",
+				projectPath: "/Users/riordan/prog/azedarach",
+				pathOps: path,
+				cwdHasConfig: false,
+			}),
+		).toBe("/Users/riordan/prog/azedarach")
 	})
 })

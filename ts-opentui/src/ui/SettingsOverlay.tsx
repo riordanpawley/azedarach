@@ -22,7 +22,12 @@
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
 import { getVisibleSettings } from "../services/SettingsService.js"
-import { appConfigAtom, configLoadWarningAtom, settingsStateAtom } from "./atoms.js"
+import {
+	appConfigAtom,
+	configLoadWarningAtom,
+	loadedConfigPathAtom,
+	settingsStateAtom,
+} from "./atoms.js"
 import { theme } from "./theme.js"
 
 const ATTR_BOLD = 1
@@ -57,6 +62,10 @@ export const SettingsOverlay = () => {
 	)
 	const configLoadWarning = useAtomValue(
 		configLoadWarningAtom,
+		Result.getOrElse(() => null),
+	)
+	const loadedConfigPath = useAtomValue(
+		loadedConfigPathAtom,
 		Result.getOrElse(() => null),
 	)
 	const settingsStateResult = useAtomValue(settingsStateAtom)
@@ -139,6 +148,10 @@ export const SettingsOverlay = () => {
 						<text> </text>
 					</>
 				)}
+				<text fg={theme.overlay0}>
+					{`Config source: ${loadedConfigPath ?? "(env/default fallback)"}`}
+				</text>
+				<text> </text>
 
 				{settingsRows.map((row) => {
 					if (row._tag === "group") {
