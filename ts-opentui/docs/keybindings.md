@@ -141,7 +141,6 @@ The settings overlay shows all editable configuration options:
 - **Line Changes**: Show line-by-line changes in diffs instead of file-level summaries
 
 #### PR Settings
-- **PR Enabled**: Enable/disable PR workflow automation
 - **Auto Draft PR**: Create PRs as drafts by default
 - **Auto Merge PR**: Automatically merge approved PRs
 
@@ -197,12 +196,20 @@ Settings are stored in `.azedarach.json` in your project root:
     "pushBranchOnCreate": true,
     "pushEnabled": true,
     "fetchEnabled": true,
-    "showLineChanges": false
-  },
-  "pr": {
-    "enabled": true,
-    "autoDraft": true,
-    "autoMerge": false
+    "showLineChanges": false,
+    "pr": {
+      "enabled": true,
+      "autoDraft": true,
+      "autoMerge": false
+    },
+    "merge": {
+      "validateCommands": [
+        "bun run type-check"
+      ],
+      "fixCommand": "bun run fix",
+      "maxFixAttempts": 2,
+      "startAiSessionOnFailure": true
+    }
   },
   "notifications": {
     "bell": true,

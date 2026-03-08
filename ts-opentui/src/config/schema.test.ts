@@ -165,11 +165,9 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.merge?.startAiSessionOnFailure).toBe(false)
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(result)
-			const encodedMerge = encoded.merge
+			const encodedMerge = encoded.git?.merge
 			expect(encodedMerge?.startAiSessionOnFailure).toBe(false)
-			if (encodedMerge !== undefined) {
-				expect("startClaudeOnFailure" in encodedMerge).toBe(false)
-			}
+			expect(encoded.merge).toBeUndefined()
 		})
 
 		it("prefers merge.startAiSessionOnFailure when both keys are present", () => {
@@ -182,6 +180,54 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.merge?.startAiSessionOnFailure).toBe(true)
+		})
+	})
+
+	describe("v5 → v6 migration: git-scoped workflow aliases", () => {
+		it("migrates git.pr and git.merge to canonical workflow config", () => {
+			const result = decodeConfig({
+				$schema: 5,
+				git: {
+					baseBranch: "main",
+					pr: {
+						enabled: true,
+						autoDraft: false,
+					},
+					merge: {
+						maxFixAttempts: 3,
+						startClaudeOnFailure: false,
+					},
+				},
+			})
+
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.pr?.enabled).toBe(true)
+			expect(result.pr?.autoDraft).toBe(false)
+			expect(result.merge?.maxFixAttempts).toBe(3)
+			expect(result.merge?.startAiSessionOnFailure).toBe(false)
+		})
+
+		it("preserves top-level pr/merge when both top-level and git-scoped values exist", () => {
+			const result = decodeConfig({
+				$schema: 5,
+				pr: {
+					enabled: false,
+				},
+				merge: {
+					maxFixAttempts: 1,
+				},
+				git: {
+					pr: {
+						enabled: true,
+					},
+					merge: {
+						maxFixAttempts: 9,
+					},
+				},
+			})
+
+			expect(result.pr?.enabled).toBe(false)
+			expect(result.merge?.maxFixAttempts).toBe(1)
 		})
 	})
 
@@ -451,6 +497,7 @@ describe("AzedarachConfigSchema", () => {
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 			const encodedIssueTracker = encoded.issueTracker
+			const encodedGit = encoded.git
 
 			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
 			if (
@@ -462,6 +509,11 @@ describe("AzedarachConfigSchema", () => {
 			}
 			expect(encodedIssueTracker.legacy?.syncEnabled).toBe(true)
 			expect(encoded.git?.baseBranch).toBe("main")
+			if (encodedGit === undefined || typeof encodedGit !== "object" || encodedGit === null) {
+				throw new Error("Expected encoded git object")
+			}
+			expect(encodedGit.pr?.autoDraft).toBe(true)
+			expect(encoded.pr).toBeUndefined()
 		})
 	})
 })
