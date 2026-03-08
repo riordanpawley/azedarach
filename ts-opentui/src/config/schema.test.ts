@@ -286,6 +286,35 @@ describe("AzedarachConfigSchema", () => {
 
 			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 		})
+
+		it("preserves git-scoped fallback fields when schema is already v6", () => {
+			const decoded = decodeConfig({
+				$schema: "./.azedarach.schema.json",
+				$version: CURRENT_CONFIG_VERSION,
+				pr: {
+					enabled: true,
+				},
+				merge: {
+					validateCommands: ["bun run type-check"],
+				},
+				git: {
+					pr: {
+						aiModel: "gpt-5.3-codex-spark",
+					},
+					merge: {
+						startAiSessionOnFailure: false,
+					},
+				},
+			})
+			const encoded = encodeConfig(decoded)
+
+			expect(decoded.pr?.enabled).toBe(true)
+			expect(decoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
+			expect(decoded.merge?.startAiSessionOnFailure).toBe(false)
+			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
+			expect(encoded.git?.pr).toBeUndefined()
+			expect(encoded.git?.merge).toBeUndefined()
+		})
 	})
 
 	describe("v4 issueTracker shape", () => {
