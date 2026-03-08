@@ -374,7 +374,7 @@ export const reconcileLoadedTasksWithLocalCreateGrace = (params: {
 	})
 
 	const mergedTasks = [...params.loadedTasks, ...retainedTasks].sort(
-		(left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime(),
+		(left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
 	)
 
 	const nextLocalCreateGraceExpiries = new Map<string, number>()
@@ -1444,7 +1444,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 					return prState ? { ...task, prState } : task
 				})
 
-				const nowMs = Date.now()
+				const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
 				const currentTasks = yield* SubscriptionRef.get(tasks)
 				const localCreateGraceExpiries = yield* Ref.get(localCreateGraceExpiriesRef)
 				const { mergedTasks, nextLocalCreateGraceExpiries } =
@@ -1612,9 +1612,10 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 				const nextTask = toTaskFromMutationIssue(issue, existingTask, options)
 				yield* upsertTaskInMemory(nextTask)
 				if (existingTask === undefined) {
+					const nowMs = DateTime.toEpochMillis(yield* DateTime.now)
 					yield* Ref.update(localCreateGraceExpiriesRef, (current) => {
 						const next = new Map(current)
-						next.set(issue.id, Date.now() + LOCAL_CREATE_VISIBILITY_GRACE_MS)
+						next.set(issue.id, nowMs + LOCAL_CREATE_VISIBILITY_GRACE_MS)
 						return next
 					})
 				}
