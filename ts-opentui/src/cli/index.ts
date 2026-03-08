@@ -233,6 +233,7 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 			l: "list",
 			g: "get",
 			c: "create",
+			ch: "child",
 			u: "update",
 			d: "dep",
 			x: "close",
@@ -1139,6 +1140,8 @@ const issueCreateHandler = (args: {
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
 	readonly parent: Option.Option<string>
+	readonly deferred: boolean
+	readonly noDefaultParent: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
@@ -1147,9 +1150,24 @@ const issueCreateHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
-		const resolvedParent = yield* Option.match(args.parent, {
-			onNone: () => Effect.succeed<string | undefined>(undefined),
-			onSome: (parentIssueId) => resolveCliIssueId(parentIssueId, resolverCwd),
+		const parentContext = yield* Option.match(args.parent, {
+			onSome: (parentIssueId) =>
+				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+					Effect.map((issueId) =>
+						Option.some<ActiveParentContext>({
+							issueId,
+							source: "explicit-arg",
+						}),
+					),
+				),
+			onNone: () =>
+				args.deferred || args.noDefaultParent
+					? Effect.succeed(Option.none<ActiveParentContext>())
+					: resolveActiveParentContext(resolverCwd),
+		})
+		const resolvedParent = Option.match(parentContext, {
+			onNone: () => undefined,
+			onSome: (value) => value.issueId,
 		})
 
 		const issueTrackerClient = yield* IssueTrackerClient
@@ -1162,14 +1180,7 @@ const issueCreateHandler = (args: {
 			acceptance: Option.getOrUndefined(args.acceptance),
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
-			labels: Option.match(args.labels, {
-				onNone: () => undefined,
-				onSome: (value) =>
-					value
-						.split(",")
-						.map((label) => label.trim())
-						.filter((label) => label.length > 0),
-			}),
+			labels: parseLabelsOption(args.labels),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -1180,6 +1191,83 @@ const issueCreateHandler = (args: {
 		}
 
 		yield* Console.log(`Created issue ${issue.id}`)
+		if (resolvedParent !== undefined) {
+			yield* Console.log(`Parent: ${resolvedParent}`)
+		}
+		if (args.verbose) {
+			yield* Console.error(
+				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
+			)
+			const sourceDescription = Option.match(parentContext, {
+				onNone: () => "none",
+				onSome: (context) => context.source,
+			})
+			yield* Console.error(`parent_source=${sourceDescription}`)
+		}
+	})
+
+const issueChildHandler = (args: {
+	readonly title: string
+	readonly issueType: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly description: Option.Option<string>
+	readonly design: Option.Option<string>
+	readonly acceptance: Option.Option<string>
+	readonly assignee: Option.Option<string>
+	readonly estimate: Option.Option<number>
+	readonly labels: Option.Option<string>
+	readonly parent: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const parentContext = yield* Option.match(args.parent, {
+			onSome: (parentIssueId) =>
+				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+					Effect.map((issueId) =>
+						Option.some<ActiveParentContext>({
+							issueId,
+							source: "explicit-arg",
+						}),
+					),
+				),
+			onNone: () => resolveActiveParentContext(resolverCwd),
+		})
+		if (Option.isNone(parentContext)) {
+			return yield* Effect.fail(
+				new Error(
+					"No active parent context found. Provide --parent <issue-id> or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
+				),
+			)
+		}
+		const resolvedParent = parentContext.value.issueId
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const issue = yield* issueTrackerClient.create({
+			title: args.title,
+			type: Option.getOrUndefined(args.issueType),
+			priority: Option.getOrUndefined(args.priority),
+			description: Option.getOrUndefined(args.description),
+			design: Option.getOrUndefined(args.design),
+			acceptance: Option.getOrUndefined(args.acceptance),
+			assignee: Option.getOrUndefined(args.assignee),
+			estimate: Option.getOrUndefined(args.estimate),
+			labels: parseLabelsOption(args.labels),
+			parent: resolvedParent,
+			cwd: explicitProjectDir,
+		})
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(issue, null, 2))
+			return
+		}
+
+		yield* Console.log(`Created child issue ${issue.id} under ${resolvedParent}`)
 		if (args.verbose) {
 			yield* Console.error(
 				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
@@ -1344,6 +1432,35 @@ const issueCloseHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueTrackerClient = yield* IssueTrackerClient
+		const issue = yield* issueTrackerClient.show(issueId, explicitProjectDir)
+		const childIds = Array.from(
+			new Set(
+				(issue.dependents ?? []).flatMap((dependent) => {
+					const childId = dependent.id.trim()
+					if (dependent.dependency_type !== "parent-child" || childId.length === 0) {
+						return []
+					}
+					return [childId]
+				}),
+			),
+		)
+		const openChildren: TrackedIssue[] = []
+		for (const childId of childIds) {
+			const child = yield* issueTrackerClient
+				.show(childId, explicitProjectDir)
+				.pipe(Effect.catchAll(() => Effect.succeed<TrackedIssue | undefined>(undefined)))
+			if (child !== undefined && isOpenChildForCloseGuard(child)) {
+				openChildren.push(child)
+			}
+		}
+		if (openChildren.length > 0) {
+			return yield* Effect.fail(
+				new Error(
+					formatCloseGuardMessage(issueId, openChildren, Option.getOrUndefined(args.reason)),
+				),
+			)
+		}
+
 		yield* issueTrackerClient.close(issueId, Option.getOrUndefined(args.reason), explicitProjectDir)
 		if (args.json) {
 			yield* Console.log(
@@ -2235,6 +2352,112 @@ const normalizePrimeIssueId = (raw: string | undefined): string | undefined => {
 	return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(trimmed) ? trimmed : undefined
 }
 
+const BRANCH_ISSUE_ID_PATTERN = /([A-Za-z][A-Za-z0-9]*-[0-9]+)/
+
+const normalizeBranchIssueId = (candidate: string): string => {
+	const [prefix, ...suffixParts] = candidate.split("-")
+	const suffix = suffixParts.join("-")
+	return `${prefix.toUpperCase()}-${suffix}`
+}
+
+const extractIssueIdFromBranchName = (branchName: string): string | undefined => {
+	const normalizedBranchName = branchName.trim()
+	if (normalizedBranchName.length === 0 || normalizedBranchName === "HEAD") {
+		return undefined
+	}
+
+	const match = BRANCH_ISSUE_ID_PATTERN.exec(normalizedBranchName)
+	if (!match || match[1] === undefined) {
+		return undefined
+	}
+
+	return normalizeBranchIssueId(match[1])
+}
+
+type ParentContextSource =
+	| "explicit-arg"
+	| "explicit-parent-env"
+	| "session-issue-env"
+	| "branch-name"
+
+interface ActiveParentContext {
+	readonly issueId: string
+	readonly source: ParentContextSource
+}
+
+const resolveActiveParentContext = (resolverCwd: string) =>
+	Effect.gen(function* () {
+		const explicitParentFromEnv = normalizePrimeIssueId(process.env.AZEDARACH_PARENT_ISSUE_ID)
+		if (explicitParentFromEnv !== undefined) {
+			const issueId = yield* resolveCliIssueId(explicitParentFromEnv, resolverCwd)
+			return Option.some<ActiveParentContext>({
+				issueId,
+				source: "explicit-parent-env",
+			})
+		}
+
+		const issueIdFromSessionEnv = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		if (issueIdFromSessionEnv !== undefined) {
+			const issueId = yield* resolveCliIssueId(issueIdFromSessionEnv, resolverCwd)
+			return Option.some<ActiveParentContext>({
+				issueId,
+				source: "session-issue-env",
+			})
+		}
+
+		const currentBranch = yield* PlatformCommand.string(
+			PlatformCommand.make("git", "branch", "--show-current"),
+		).pipe(
+			Effect.map((output) => output.trim()),
+			Effect.catchAll(() => Effect.succeed("")),
+		)
+		const issueIdFromBranch = extractIssueIdFromBranchName(currentBranch)
+		if (issueIdFromBranch === undefined) {
+			return Option.none<ActiveParentContext>()
+		}
+
+		const issueId = yield* resolveCliIssueId(issueIdFromBranch, resolverCwd)
+		return Option.some<ActiveParentContext>({
+			issueId,
+			source: "branch-name",
+		})
+	})
+
+const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined =>
+	Option.match(labels, {
+		onNone: () => undefined,
+		onSome: (value) =>
+			value
+				.split(",")
+				.map((label) => label.trim())
+				.filter((label) => label.length > 0),
+	})
+
+const isOpenChildForCloseGuard = (issue: TrackedIssue): boolean =>
+	issue.status !== "closed" && issue.status !== "tombstone"
+
+const formatCloseGuardMessage = (
+	parentIssueId: string,
+	openChildren: ReadonlyArray<TrackedIssue>,
+	requestedReason: string | undefined,
+): string => {
+	const childIds = openChildren.map((child) => child.id)
+	const nextReason =
+		requestedReason === undefined || requestedReason.trim().length === 0
+			? "Parent has no open children"
+			: requestedReason
+	return [
+		`Refusing to close ${parentIssueId}: ${childIds.length} child issue(s) are still open (${childIds.join(", ")}).`,
+		"Close or reparent children first, then retry:",
+		`  az issue get ${parentIssueId}`,
+		...childIds.map((childId) => `  az issue get ${childId}`),
+		...childIds.map(
+			(childId) => `  az issue close ${childId} --reason "Parent ${parentIssueId} is closing"`,
+		),
+		`  az issue close ${parentIssueId} --reason "${nextReason.replaceAll('"', '\\"')}"`,
+	].join("\n")
+}
+
 const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
 	const issueSection =
 		issueId === undefined
@@ -2260,16 +2483,18 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az prime\`
+- Mandatory parenting rule: when working under a parent issue, create follow-up work with \`az issue child "Title"\` (or \`az issue create "Title"\`, which now defaults to active parent context unless \`--deferred\` is set).
 - Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
 - Common issue commands:
   - \`az issue list --limit 20\` (lists most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
+  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
   - \`az issue update <issue-id> --status in_progress|blocked|open\`
   - \`az issue create "Title" --type task|bug|epic|chore --priority 1-5\`
   - \`az issue create "Child task" --parent <epic-id>\`
-  - \`az issue close <issue-id> --reason "..."\`
+  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
   - \`az issue --help\`
 - Issue-context guardrails:
   ${contextGuardrail}
@@ -3064,6 +3289,12 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		deferred: Options.boolean("deferred").pipe(
+			Options.withDescription("Create issue without inheriting active parent context"),
+		),
+		noDefaultParent: Options.boolean("no-default-parent").pipe(
+			Options.withDescription("Deprecated alias for --deferred"),
+		),
 		parent: Options.text("parent").pipe(
 			Options.withAlias("r"),
 			Options.optional,
@@ -3078,6 +3309,65 @@ const issueCreateCommand = Command.make(
 	},
 	issueCreateHandler,
 ).pipe(Command.withDescription("Create a new issue"))
+
+const issueChildCommand = Command.make(
+	"child",
+	{
+		title: issueTitleArg,
+		issueType: Options.text("type").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Issue type (task, bug, epic, chore)"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Priority (1-5)"),
+		),
+		description: Options.text("description").pipe(
+			Options.optional,
+			Options.withAlias("d"),
+			Options.withDescription("Issue description"),
+		),
+		design: Options.text("design").pipe(
+			Options.withAlias("D"),
+			Options.optional,
+			Options.withDescription("Design/implementation notes"),
+		),
+		acceptance: Options.text("acceptance").pipe(
+			Options.withAlias("a"),
+			Options.optional,
+			Options.withDescription("Acceptance criteria"),
+		),
+		assignee: Options.text("assignee").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Assignee value"),
+		),
+		estimate: Options.integer("estimate").pipe(
+			Options.withAlias("e"),
+			Options.optional,
+			Options.withDescription("Estimate points/minutes (backend-specific)"),
+		),
+		labels: Options.text("labels").pipe(
+			Options.withAlias("l"),
+			Options.optional,
+			Options.withDescription("Comma-separated labels"),
+		),
+		parent: Options.text("parent").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Parent issue ID (defaults to active parent context)"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output raw JSON"),
+		),
+	},
+	issueChildHandler,
+).pipe(Command.withDescription("Create a child issue under active parent context"))
 
 /**
  * az issue update <issue-id> - Update issue fields
@@ -3244,6 +3534,7 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueListCommand,
 		issueGetCommand,
 		issueCreateCommand,
+		issueChildCommand,
 		issueUpdateCommand,
 		issueDepCommand,
 		issueCloseCommand,
@@ -4145,6 +4436,7 @@ const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<s
 	if (
 		subcommand !== "get" &&
 		subcommand !== "create" &&
+		subcommand !== "child" &&
 		subcommand !== "update" &&
 		subcommand !== "close" &&
 		subcommand !== "delete"

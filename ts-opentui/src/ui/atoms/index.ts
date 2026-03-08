@@ -19,8 +19,8 @@ export {
 	maxVisibleTasksAtom,
 	refreshBoardAtom,
 	refreshGitStatsAtom,
-	setVisibleTaskIdsAtom,
 	selectedTaskIdAtom,
+	setVisibleTaskIdsAtom,
 	totalTasksCountAtom,
 	viewModeAtom,
 } from "./board.js"
@@ -35,15 +35,15 @@ export {
 	taskRunningOperationAtom,
 } from "./commandQueue.js"
 // Config atoms
-export { appConfigAtom, workflowModeAtom } from "./config.js"
+export { appConfigAtom, configLoadWarningAtom, workflowModeAtom } from "./config.js"
 export type { DevServerView } from "./devServer.js"
 // Dev server atoms
 export {
 	attachDevServerAtom,
-	issueDevServerViewsAtom,
 	devServersAtom,
 	focusedIssueDevServerViewsAtom,
 	focusedIssuePrimaryDevServerAtom,
+	issueDevServerViewsAtom,
 	stopDevServerAtom,
 	syncDevServerStateAtom,
 	toggleDevServerAtom,
@@ -169,13 +169,6 @@ export { planningStateAtom, resetPlanningAtom, runPlanningAtom } from "./plannin
 export { cleanupAtom, createPRAtom, ghCLIAvailableAtom, mergeToMainAtom } from "./pr.js"
 // Project service atoms
 export { currentProjectAtom, projectsAtom, switchProjectAtom } from "./project.js"
-// Spec workspace atoms
-export {
-    DEFAULT_SPEC_WORKSPACE_STATE,
-    refreshSpecWorkspaceAtom,
-    specWorkspaceStateAtom,
-    type SpecWorkspaceState,
-} from "./spec.js"
 // Runtime (foundation for all other atoms)
 export { appRuntime } from "./runtime.js"
 // Session management atoms
@@ -189,6 +182,13 @@ export {
 	startSessionAtom,
 	stopSessionAtom,
 } from "./session.js"
+// Spec workspace atoms
+export {
+	DEFAULT_SPEC_WORKSPACE_STATE,
+	refreshSpecWorkspaceAtom,
+	type SpecWorkspaceState,
+	specWorkspaceStateAtom,
+} from "./spec.js"
 // Task CRUD atoms
 export {
 	aiCreateTaskAtom,

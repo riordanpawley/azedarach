@@ -97,6 +97,21 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		])
 	})
 
+	it("moves issue child options ahead of title when title is first", () => {
+		const argv = ["bun", "az", "issue", "child", "Follow-up task", "--parent", "AZE-200"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"child",
+			"--parent",
+			"AZE-200",
+			"Follow-up task",
+		])
+	})
+
 	it("keeps issue list options unchanged", () => {
 		const argv = ["bun", "az", "issue", "list", "--limit", "5", "--status", "open"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
@@ -235,6 +250,13 @@ describe("normalizeCliAliases", () => {
 			"issue",
 			"create",
 			"Fix typo",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "ch", "Follow-up"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"child",
+			"Follow-up",
 		])
 		expect(normalizeCliAliases(["bun", "az", "issue", "d", "add", "AZE-1", "AZE-2"])).toEqual([
 			"bun",
