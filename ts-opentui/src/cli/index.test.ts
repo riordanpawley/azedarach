@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+	buildPrimeOutput,
 	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
@@ -7,6 +8,46 @@ import {
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
 } from "./index.js"
+
+describe("buildPrimeOutput", () => {
+	it("includes issue-context guardrails and refresh instructions for active issues", () => {
+		const output = buildPrimeOutput("gq", "gq: Improve az prime")
+
+		expect(output).toContain("Issue-context guardrails:")
+		expect(output).toContain("AZEDARACH_ISSUE_ID` is set to `gq`")
+		expect(output).toContain("refresh stale context with `az issue get gq`")
+		expect(output).toContain(
+			"Missing fields (for example description/design/acceptance/notes) are valid.",
+		)
+		expect(output).toContain("Do not go on history/log hunting tangents")
+		expect(output).toContain(
+			"Before implementing behavior changes, inspect relevant `az spec` requirements/links",
+		)
+		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
+		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
+		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
+		expect(output).toContain(
+			"Review flow policy: reviews target closed tasks, not in-progress tasks.",
+		)
+		expect(output).toContain("If review finds remaining work, move the issue back to in-progress")
+		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
+	})
+
+	it("guides users to fetch an issue when no issue id is configured", () => {
+		const output = buildPrimeOutput(undefined, "")
+
+		expect(output).toContain("No active issue is preselected")
+		expect(output).toContain("run `az issue get <issue-id>`")
+		expect(output).not.toContain("Active issue context (AZEDARACH_ISSUE_ID=")
+	})
+
+	it("falls back to explicit refresh command when issue details fail to load", () => {
+		const output = buildPrimeOutput("gq", "")
+
+		expect(output).toContain("Active issue from AZEDARACH_ISSUE_ID=gq.")
+		expect(output).toContain("Could not load issue details automatically; run `az issue get gq`.")
+	})
+})
 
 describe("normalizeIssueJsonFlagOrder", () => {
 	it("moves --json to the issue subcommand options position", () => {

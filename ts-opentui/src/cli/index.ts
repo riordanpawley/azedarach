@@ -2458,33 +2458,28 @@ const formatCloseGuardMessage = (
 	].join("\n")
 }
 
-const primeHandler = (_args: { readonly verbose: boolean }) =>
-	Effect.gen(function* () {
-		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
-		const issueContext =
-			issueId === undefined
-				? ""
-				: yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
-						Effect.map((output) => output.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
-					)
-
-		const issueSection =
-			issueId === undefined
-				? ""
-				: issueContext.length > 0
-					? `
+const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
+	const issueSection =
+		issueId === undefined
+			? ""
+			: issueContext.length > 0
+				? `
 
 Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
 \`\`\`
 ${issueContext.length > 4000 ? `${issueContext.slice(0, 4000)}\n...` : issueContext}
 \`\`\``
-					: `
+				: `
 
 Active issue from AZEDARACH_ISSUE_ID=${issueId}.
 Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 
-		yield* Console.log(`Azedarach Session Primer
+	const contextGuardrail =
+		issueId === undefined
+			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
+			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
+
+	return `Azedarach Session Primer
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az prime\`
@@ -2501,17 +2496,40 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - \`az issue create "Child task" --parent <epic-id>\`
   - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
   - \`az issue --help\`
+- Issue-context guardrails:
+  ${contextGuardrail}
+  - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
+  - Do not go on history/log hunting tangents to backfill missing fields unless the user explicitly asks for that research.
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
+  - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
+  - After implementing behavior changes, run a spec compliance pass: verify behavior vs linked requirements and update requirement/link records if scope changed.
+  - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.
-  - Then close the issue (\`az issue close <issue-id>\`).
+  - Close the issue when implementation is ready for review (\`az issue close <issue-id>\`).
+  - Review flow policy: reviews target closed tasks, not in-progress tasks.
+  - If review finds remaining work, move the issue back to in-progress and continue.
 ${issueSection}
-`)
+`
+}
+
+const primeHandler = (_args: { readonly verbose: boolean }) =>
+	Effect.gen(function* () {
+		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const issueContext =
+			issueId === undefined
+				? ""
+				: yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
+						Effect.map((output) => output.trim()),
+						Effect.catchAll(() => Effect.succeed("")),
+					)
+
+		yield* Console.log(buildPrimeOutput(issueId, issueContext))
 	})
 
 /**
@@ -4632,6 +4650,7 @@ export { cliLayer, commandCliLayer }
  * Export the raw runner for ManagedRuntime pattern
  */
 export {
+	buildPrimeOutput,
 	cliRunner,
 	deriveWaitingAttentionPlan,
 	formatIssueDetailSections,
