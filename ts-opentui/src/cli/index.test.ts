@@ -28,6 +28,7 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("After implementing behavior changes, run a spec compliance pass")
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
+		expect(output).toContain("For `az spec` commands, keep canonical Effect CLI ordering")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain(
 			"Review flow policy: reviews target closed tasks, not in-progress tasks.",

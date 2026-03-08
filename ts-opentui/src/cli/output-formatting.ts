@@ -245,6 +245,7 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
   - After implementing behavior changes, run a spec compliance pass: verify behavior vs linked requirements and update requirement/link records if scope changed.
   - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
+  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
 - Create follow-up/child work in the tracker instead of local TODOs.
 - Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
 - When work is complete:
