@@ -34,6 +34,37 @@ export interface FormattedError {
 
 export type ErrorCategory = "git" | "tracker" | "tmux" | "pr" | "session" | "system" | "unknown"
 
+type StaleGitLockRecoveryHint = {
+	readonly _tag: "stale-lock-file"
+	readonly lockFilePath: string
+}
+
+const getStaleGitLockRecoveryHint = (value: unknown): StaleGitLockRecoveryHint | undefined => {
+	if (!value || typeof value !== "object") {
+		return undefined
+	}
+
+	const tag = Reflect.get(value, "_tag")
+	if (tag !== "stale-lock-file") {
+		return undefined
+	}
+
+	const lockFilePathValue = Reflect.get(value, "lockFilePath")
+	if (typeof lockFilePathValue !== "string") {
+		return undefined
+	}
+
+	const lockFilePath = lockFilePathValue.trim()
+	if (!lockFilePath) {
+		return undefined
+	}
+
+	return {
+		_tag: "stale-lock-file",
+		lockFilePath,
+	}
+}
+
 // ============================================================================
 // Error Tag Registry
 // ============================================================================
@@ -52,6 +83,15 @@ const ERROR_FORMATTERS: Record<
 	GitError: (error) => {
 		const stderr = String(error.stderr || "")
 		const command = String(error.command || "git")
+		const recoveryHint = getStaleGitLockRecoveryHint(error.recovery)
+
+		if (recoveryHint) {
+			return {
+				message: "Git lock file blocked the operation",
+				suggestion: `Try: Ensure no other git command is running, then run 'rm ${recoveryHint.lockFilePath}' and retry`,
+				category: "git",
+			}
+		}
 
 		// Merge conflict detection
 		if (stderr.includes("CONFLICT") || stderr.includes("merge conflict")) {
@@ -216,7 +256,8 @@ const ERROR_FORMATTERS: Record<
 
 	ParseError: (_error) => ({
 		message: "Failed to parse tracker output",
-		suggestion: "Try: Re-run with `az issue --help` to confirm the active command surface, then retry.",
+		suggestion:
+			"Try: Re-run with `az issue --help` to confirm the active command surface, then retry.",
 		category: "tracker",
 	}),
 
@@ -275,62 +316,62 @@ const ERROR_FORMATTERS: Record<
 		category: "tmux",
 	}),
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PR Errors
-    // ─────────────────────────────────────────────────────────────────────────
-    GitOperationInProgressError: (error) => {
-        const operation = String(error.operation || "git operation")
-        const continueCommand = String(error.continueCommand || "git <operation> --continue")
-        const abortCommand = String(error.abortCommand || "git <operation> --abort")
+	// ─────────────────────────────────────────────────────────────────────────
+	// PR Errors
+	// ─────────────────────────────────────────────────────────────────────────
+	GitOperationInProgressError: (error) => {
+		const operation = String(error.operation || "git operation")
+		const continueCommand = String(error.continueCommand || "git <operation> --continue")
+		const abortCommand = String(error.abortCommand || "git <operation> --abort")
 
-        return {
-            message: `Target repository has ${operation} in progress`,
-            suggestion: `Try: Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action`,
-            category: "pr",
-        }
-    },
+		return {
+			message: `Target repository has ${operation} in progress`,
+			suggestion: `Try: Continue with '${continueCommand}' after resolving conflicts, or abort with '${abortCommand}', then retry the action`,
+			category: "pr",
+		}
+	},
 
-    PRAlreadyExistsError: (error) => {
-        const branch = String(error.branch || "")
-        const baseBranch = String(error.baseBranch || "")
+	PRAlreadyExistsError: (error) => {
+		const branch = String(error.branch || "")
+		const baseBranch = String(error.baseBranch || "")
 
-        return {
-            message: "PR already exists for this branch",
-            suggestion:
-                branch && baseBranch
-                    ? `Try: Open the existing PR for '${branch}' into '${baseBranch}' (Space+O), or continue updating that PR`
-                    : "Try: Open the existing PR (Space+O) or continue updating it",
-            category: "pr",
-        }
-    },
+		return {
+			message: "PR already exists for this branch",
+			suggestion:
+				branch && baseBranch
+					? `Try: Open the existing PR for '${branch}' into '${baseBranch}' (Space+O), or continue updating that PR`
+					: "Try: Open the existing PR (Space+O) or continue updating it",
+			category: "pr",
+		}
+	},
 
-    PRBranchProtectionError: (error) => {
-        const operation = String(error.operation || "")
-        const branch = String(error.branch || "")
+	PRBranchProtectionError: (error) => {
+		const operation = String(error.operation || "")
+		const branch = String(error.branch || "")
 
-        if (operation === "push") {
-            return {
-                message: `Push blocked by branch protection${branch ? ` on '${branch}'` : ""}`,
-                suggestion:
-                    "Try: Push to a feature branch allowed by repository rules, then retry PR creation",
-                category: "pr",
-            }
-        }
+		if (operation === "push") {
+			return {
+				message: `Push blocked by branch protection${branch ? ` on '${branch}'` : ""}`,
+				suggestion:
+					"Try: Push to a feature branch allowed by repository rules, then retry PR creation",
+				category: "pr",
+			}
+		}
 
-        return {
-            message: "PR creation blocked by branch protection policy",
-            suggestion: "Try: Follow repository branch rules, then retry PR creation",
-            category: "pr",
-        }
-    },
+		return {
+			message: "PR creation blocked by branch protection policy",
+			suggestion: "Try: Follow repository branch rules, then retry PR creation",
+			category: "pr",
+		}
+	},
 
-    PRError: (error) => {
-        const message = String(error.message || "")
+	PRError: (error) => {
+		const message = String(error.message || "")
 
-        return {
-            message: `PR operation failed: ${message}`,
-            category: "pr",
-        }
+		return {
+			message: `PR operation failed: ${message}`,
+			category: "pr",
+		}
 	},
 
 	GHCLIError: (error) => {

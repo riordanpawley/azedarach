@@ -16,6 +16,11 @@ import { Command, type CommandExecutor, FileSystem, Path } from "@effect/platfor
 import { Data, Effect, Ref, Schedule, Schema, type Scope } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import {
+	createStaleLockRecoveryHint,
+	extractGitRecoveryHint,
+	type GitRecoveryHint,
+} from "./gitRecovery.js"
+import {
 	deepMerge,
 	deepMergeWithDedup,
 	extractMergeableSettings,
@@ -99,6 +104,7 @@ export class GitError extends Data.TaggedError("GitError")<{
 	readonly message: string
 	readonly command: string
 	readonly stderr?: string
+	readonly recovery?: GitRecoveryHint
 }> {}
 
 /**
@@ -271,6 +277,31 @@ const runGit = (
 	cwd: string,
 ): Effect.Effect<string, GitError, CommandExecutor.CommandExecutor> =>
 	Effect.gen(function* () {
+		const indexLockPath = yield* Command.string(
+			Command.make("git", "rev-parse", "--git-path", "index.lock").pipe(
+				Command.workingDirectory(cwd),
+			),
+		).pipe(
+			Effect.map((output) => output.trim()),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
+		if (indexLockPath) {
+			const lockExists = yield* Command.exitCode(Command.make("test", "-e", indexLockPath)).pipe(
+				Effect.map((code) => code === 0),
+				Effect.catchAll(() => Effect.succeed(false)),
+			)
+			if (lockExists) {
+				return yield* Effect.fail(
+					new GitError({
+						message: `git command blocked by existing lock file: ${indexLockPath}`,
+						command: `git ${args.join(" ")}`,
+						stderr: `lock file exists: ${indexLockPath}`,
+						recovery: createStaleLockRecoveryHint(indexLockPath),
+					}),
+				)
+			}
+		}
+
 		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 
 		const result = yield* Command.string(command).pipe(
@@ -280,6 +311,7 @@ const runGit = (
 					message: `git command failed: ${stderr}`,
 					command: `git ${args.join(" ")}`,
 					stderr,
+					recovery: extractGitRecoveryHint(stderr),
 				})
 			}),
 		)
@@ -610,10 +642,10 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		 * Missing paths are silently skipped. Errors are logged but don't fail
 		 * worktree creation.
 		 */
-        const copyUntrackedFiles = (
-            sourceWorktreePath: string,
-            targetWorktreePath: string,
-            copyPaths: readonly string[],
+		const copyUntrackedFiles = (
+			sourceWorktreePath: string,
+			targetWorktreePath: string,
+			copyPaths: readonly string[],
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
 				if (copyPaths.length === 0) {
@@ -655,54 +687,54 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						),
 					{ concurrency: "unbounded" },
 				)
-            }).pipe(
-                // Don't fail worktree creation if copy fails
-                Effect.catchAll((error) => Effect.logWarning(`Failed to copy untracked files: ${error}`)),
-            )
+			}).pipe(
+				// Don't fail worktree creation if copy fails
+				Effect.catchAll((error) => Effect.logWarning(`Failed to copy untracked files: ${error}`)),
+			)
 
-        const injectIssueIdIntoEnvLocal = (
-            targetWorktreePath: string,
-            issueId: string,
-        ): Effect.Effect<void, never, never> =>
-            Effect.gen(function* () {
-                const envLocalPath = pathService.join(targetWorktreePath, ".env.local")
-                const existingContent = yield* fs
-                    .exists(envLocalPath)
-                    .pipe(
-                        Effect.flatMap((exists) =>
-                            exists ? fs.readFileString(envLocalPath) : Effect.succeed(""),
-                        ),
-                    )
-                const normalizedIssueId = issueId.trim()
-                if (normalizedIssueId.length === 0) {
-                    return
-                }
+		const injectIssueIdIntoEnvLocal = (
+			targetWorktreePath: string,
+			issueId: string,
+		): Effect.Effect<void, never, never> =>
+			Effect.gen(function* () {
+				const envLocalPath = pathService.join(targetWorktreePath, ".env.local")
+				const existingContent = yield* fs
+					.exists(envLocalPath)
+					.pipe(
+						Effect.flatMap((exists) =>
+							exists ? fs.readFileString(envLocalPath) : Effect.succeed(""),
+						),
+					)
+				const normalizedIssueId = issueId.trim()
+				if (normalizedIssueId.length === 0) {
+					return
+				}
 
-                const issueLine = `AZEDARACH_ISSUE_ID=${normalizedIssueId}`
-                const lines = existingContent.length > 0 ? existingContent.split(/\r?\n/) : []
-                let replaced = false
-                const updatedLines = lines.map((line) => {
-                    if (!replaced && line.startsWith("AZEDARACH_ISSUE_ID=")) {
-                        replaced = true
-                        return issueLine
-                    }
-                    return line
-                })
-                if (!replaced) {
-                    updatedLines.push(issueLine)
-                }
+				const issueLine = `AZEDARACH_ISSUE_ID=${normalizedIssueId}`
+				const lines = existingContent.length > 0 ? existingContent.split(/\r?\n/) : []
+				let replaced = false
+				const updatedLines = lines.map((line) => {
+					if (!replaced && line.startsWith("AZEDARACH_ISSUE_ID=")) {
+						replaced = true
+						return issueLine
+					}
+					return line
+				})
+				if (!replaced) {
+					updatedLines.push(issueLine)
+				}
 
-                const compacted = updatedLines.filter(
-                    (line, index, all) => !(index === all.length - 1 && line.length === 0),
-                )
-                const nextContent = `${compacted.join("\n")}\n`
-                yield* fs.writeFileString(envLocalPath, nextContent)
-                yield* Effect.logDebug(`Injected AZEDARACH_ISSUE_ID into ${envLocalPath}`)
-            }).pipe(
-                Effect.catchAll((error) =>
-                    Effect.logWarning(`Failed to inject AZEDARACH_ISSUE_ID into .env.local: ${error}`),
-                ),
-            )
+				const compacted = updatedLines.filter(
+					(line, index, all) => !(index === all.length - 1 && line.length === 0),
+				)
+				const nextContent = `${compacted.join("\n")}\n`
+				yield* fs.writeFileString(envLocalPath, nextContent)
+				yield* Effect.logDebug(`Injected AZEDARACH_ISSUE_ID into ${envLocalPath}`)
+			}).pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Failed to inject AZEDARACH_ISSUE_ID into .env.local: ${error}`),
+				),
+			)
 
 		/**
 		 * Copy Claude's local settings to a new worktree and inject hook configuration
@@ -1164,14 +1196,13 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 							return yield* Effect.fail(clashError)
 						}
 
-						const conflictingByCaseVariantIssueId =
-							!caseInsensitivePathLookup
-								? undefined
-								: worktreesBeforeCreate.find(
-										(worktree) =>
-											worktree.issueId !== issueId &&
-											worktree.issueId.toLowerCase() === issueId.toLowerCase(),
-									)
+						const conflictingByCaseVariantIssueId = !caseInsensitivePathLookup
+							? undefined
+							: worktreesBeforeCreate.find(
+									(worktree) =>
+										worktree.issueId !== issueId &&
+										worktree.issueId.toLowerCase() === issueId.toLowerCase(),
+								)
 
 						if (conflictingByCaseVariantIssueId) {
 							const comparisonBaseBranch = yield* resolveComparisonBaseBranch()
@@ -1255,31 +1286,31 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Copy configured untracked files from source to new worktree
 						// Default copyPaths includes [".direnv"] for Nix flake cache
 						// When copyPaths is provided, it overrides the default (caller should include .direnv if needed)
-                        const effectiveCopyPaths = copyPaths ?? [".direnv"]
-                        yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
-                        yield* injectIssueIdIntoEnvLocal(worktreePath, issueId)
+						const effectiveCopyPaths = copyPaths ?? [".direnv"]
+						yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
+						yield* injectIssueIdIntoEnvLocal(worktreePath, issueId)
 
 						// Refresh cache and look for the new worktree with retry logic.
 						// Git worktree list can sometimes miss newly created worktrees due to
 						// filesystem sync timing issues, especially on macOS APFS. We retry
 						// a few times with short delays to handle this race condition.
-							const findNewWorktree = Effect.gen(function* () {
-								yield* forceRefreshWorktrees(projectPath)
-								const allUpdated = yield* Ref.get(worktreesRef)
-								const projectUpdated = allUpdated.get(projectPath) ?? new Map()
-								const newWorktree = projectUpdated.get(issueId)
+						const findNewWorktree = Effect.gen(function* () {
+							yield* forceRefreshWorktrees(projectPath)
+							const allUpdated = yield* Ref.get(worktreesRef)
+							const projectUpdated = allUpdated.get(projectPath) ?? new Map()
+							const newWorktree = projectUpdated.get(issueId)
 
-								if (!newWorktree) {
-									const foundIssueIds = Array.from(projectUpdated.keys())
-									return yield* Effect.fail(
-										new WorktreeCacheMissAfterCreateError({
-											foundIssueIds,
-											cacheSize: projectUpdated.size,
-										}),
-									)
-								}
-								return newWorktree
-							})
+							if (!newWorktree) {
+								const foundIssueIds = Array.from(projectUpdated.keys())
+								return yield* Effect.fail(
+									new WorktreeCacheMissAfterCreateError({
+										foundIssueIds,
+										cacheSize: projectUpdated.size,
+									}),
+								)
+							}
+							return newWorktree
+						})
 
 						// Retry up to 5 times with 100ms delay between attempts (500ms total max wait)
 						const retrySchedule = Schedule.recurs(4).pipe(Schedule.addDelay(() => "100 millis"))
@@ -1387,35 +1418,35 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 					const projectWorktrees = allWorktrees.get(projectPath) ?? new Map()
 					const worktree = projectWorktrees.get(issueId)
 
-						if (!worktree) {
-							const expectedWorktreePath = getWorktreePath(projectPath, issueId)
-							const stalePathExists = yield* fs
-								.exists(expectedWorktreePath)
-								.pipe(Effect.catchAll(() => Effect.succeed(false)))
-							if (!stalePathExists) {
-								// Safe no-op if doesn't exist
-								return
-							}
-
-							yield* Effect.logWarning("Removing stale derived worktree directory", {
-								issueId,
-								projectPath,
-								worktreePath: expectedWorktreePath,
-							})
-
-							yield* fs.remove(expectedWorktreePath, { recursive: true }).pipe(
-								Effect.mapError(
-									(error) =>
-										new GitError({
-											message: `Failed to remove stale worktree path: ${String(error)}`,
-											command: `rm -rf ${expectedWorktreePath}`,
-										}),
-								),
-							)
-
-							yield* forceRefreshWorktrees(projectPath)
+					if (!worktree) {
+						const expectedWorktreePath = getWorktreePath(projectPath, issueId)
+						const stalePathExists = yield* fs
+							.exists(expectedWorktreePath)
+							.pipe(Effect.catchAll(() => Effect.succeed(false)))
+						if (!stalePathExists) {
+							// Safe no-op if doesn't exist
 							return
 						}
+
+						yield* Effect.logWarning("Removing stale derived worktree directory", {
+							issueId,
+							projectPath,
+							worktreePath: expectedWorktreePath,
+						})
+
+						yield* fs.remove(expectedWorktreePath, { recursive: true }).pipe(
+							Effect.mapError(
+								(error) =>
+									new GitError({
+										message: `Failed to remove stale worktree path: ${String(error)}`,
+										command: `rm -rf ${expectedWorktreePath}`,
+									}),
+							),
+						)
+
+						yield* forceRefreshWorktrees(projectPath)
+						return
+					}
 
 					// Remove worktree
 					yield* runGit(["worktree", "remove", worktree.path, "--force"], projectPath)
