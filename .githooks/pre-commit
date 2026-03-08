@@ -22,7 +22,7 @@ $staged_ts_opentui_files
 EOF
 
 echo "pre-commit: running biome check --write on staged ts-opentui files"
-(cd ts-opentui && bunx biome check --write --files-ignore-unknown=true "$@")
+(cd ts-opentui && bunx biome check --write --files-ignore-unknown=true --no-errors-on-unmatched "$@")
 
 echo "pre-commit: re-staging biome-updated files"
 while IFS= read -r file_path; do
