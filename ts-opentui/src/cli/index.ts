@@ -236,6 +236,8 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 			ch: "child",
 			u: "update",
 			d: "dep",
+			ck: "check",
+			dr: "doctor",
 			x: "close",
 			t: "close",
 			rm: "delete",
@@ -1482,6 +1484,195 @@ const issueCloseHandler = (args: {
 		}
 	})
 
+interface ParentChildTrackingMiss {
+	readonly issue: TrackedIssue
+	readonly reason: string
+	readonly inspectCommand: string
+	readonly remediateCommand: string
+}
+
+const hasParentChildDependency = (issue: TrackedIssue): boolean =>
+	(issue.dependencies ?? []).some((dependency) => dependency.dependency_type === "parent-child")
+
+const findDependencyToIssue = (issue: TrackedIssue, targetIssueId: string) =>
+	(issue.dependencies ?? []).find((dependency) =>
+		issueIdsEqualForLookup(dependency.id, targetIssueId),
+	)
+
+const issueMentionsParentId = (issue: TrackedIssue, parentIssueId: string): boolean => {
+	const needle = parentIssueId.trim().toLowerCase()
+	if (needle.length === 0) {
+		return false
+	}
+
+	const haystack = [
+		issue.title,
+		issue.description ?? "",
+		issue.design ?? "",
+		issue.acceptance ?? "",
+		issue.notes ?? "",
+	]
+		.join(" ")
+		.toLowerCase()
+	return haystack.includes(needle)
+}
+
+const buildParentChildTrackingMiss = (
+	issue: TrackedIssue,
+	parentIssueId: string,
+	reason: string,
+): ParentChildTrackingMiss => ({
+	issue,
+	reason,
+	inspectCommand: `az issue get ${issue.id}`,
+	remediateCommand: `az issue update ${issue.id} --parent ${parentIssueId}`,
+})
+
+const findLikelyParentChildTrackingMisses = (
+	parentIssueId: string,
+	issues: ReadonlyArray<TrackedIssue>,
+): ReadonlyArray<ParentChildTrackingMiss> => {
+	const misses: ParentChildTrackingMiss[] = []
+	for (const issue of issues) {
+		if (issueIdsEqualForLookup(issue.id, parentIssueId)) {
+			continue
+		}
+		if (!isOpenChildForCloseGuard(issue)) {
+			continue
+		}
+
+		const dependencyToParent = findDependencyToIssue(issue, parentIssueId)
+		if (dependencyToParent !== undefined) {
+			if (dependencyToParent.dependency_type !== "parent-child") {
+				misses.push(
+					buildParentChildTrackingMiss(
+						issue,
+						parentIssueId,
+						`Dependency to ${parentIssueId} is typed '${dependencyToParent.dependency_type}' instead of 'parent-child'.`,
+					),
+				)
+			}
+			continue
+		}
+
+		if (hasParentChildDependency(issue)) {
+			continue
+		}
+
+		if (issueMentionsParentId(issue, parentIssueId)) {
+			misses.push(
+				buildParentChildTrackingMiss(
+					issue,
+					parentIssueId,
+					`Issue text references ${parentIssueId} but no parent-child link exists.`,
+				),
+			)
+		}
+	}
+	return misses
+}
+
+const formatParentChildCheckOutput = (
+	parentIssueId: string,
+	misses: ReadonlyArray<ParentChildTrackingMiss>,
+): string => {
+	if (misses.length === 0) {
+		return `No likely parent-child tracking misses found for ${parentIssueId}.`
+	}
+
+	const lines: string[] = [
+		`Parent-child tracking check for ${parentIssueId}: ${misses.length} likely miss(es) found.`,
+		"Suggested remediation commands:",
+	]
+	for (const miss of misses) {
+		lines.push(
+			`- ${miss.issue.id}: ${compactSingleLineText(miss.issue.title)} [status=${miss.issue.status}]`,
+		)
+		lines.push(`  reason: ${miss.reason}`)
+		lines.push(`  inspect: ${miss.inspectCommand}`)
+		lines.push(`  remediate: ${miss.remediateCommand}`)
+	}
+	return lines.join("\n")
+}
+
+const issueCheckHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly limit: Option.Option<number>
+	readonly includeClosed: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const parentContext = yield* Option.match(args.issueId, {
+			onSome: (parentIssueId) =>
+				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+					Effect.map((issueId) =>
+						Option.some<ActiveParentContext>({
+							issueId,
+							source: "explicit-arg",
+						}),
+					),
+				),
+			onNone: () => resolveActiveParentContext(resolverCwd),
+		})
+
+		if (Option.isNone(parentContext)) {
+			return yield* Effect.fail(
+				new Error(
+					"No active parent context found. Provide [issue-id] or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
+				),
+			)
+		}
+
+		const parentIssueId = parentContext.value.issueId
+		const issueTrackerClient = yield* IssueTrackerClient
+		const parentIssue = yield* issueTrackerClient.show(parentIssueId, explicitProjectDir)
+
+		const issues = yield* issueTrackerClient.list(undefined, explicitProjectDir, {
+			limit: Option.getOrElse(args.limit, () => 200),
+			includeClosed: args.includeClosed,
+			sortBy: "updated_at",
+			sortDirection: "desc",
+		})
+		const misses = findLikelyParentChildTrackingMisses(parentIssueId, issues)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						parent_issue_id: parentIssueId,
+						parent_issue_title: parentIssue.title,
+						checked_count: issues.length,
+						miss_count: misses.length,
+						misses: misses.map((miss) => ({
+							issue_id: miss.issue.id,
+							title: miss.issue.title,
+							status: miss.issue.status,
+							reason: miss.reason,
+							inspect_command: miss.inspectCommand,
+							remediate_command: miss.remediateCommand,
+						})),
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(formatParentChildCheckOutput(parentIssueId, misses))
+		if (args.verbose) {
+			yield* Console.error(
+				`checked=${issues.length} misses=${misses.length} parent=${parentIssueId}`,
+			)
+		}
+	})
+
 /**
  * Delete an issue
  */
@@ -2489,6 +2680,7 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - \`az issue list --limit 20\` (lists most recently updated issues first)
   - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
   - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
+  - \`az issue check [<issue-id>]\` (flags likely parent-child tracking misses and suggests remediation commands)
   - \`az issue update <issue-id> --design "..."\`
   - \`az issue update <issue-id> --notes "..."\`
   - \`az issue update <issue-id> --status in_progress|blocked|open\`
@@ -3523,6 +3715,53 @@ const issueDeleteCommand = Command.make(
 	issueDeleteHandler,
 ).pipe(Command.withDescription("Delete an issue (requires --force)"))
 
+const issueCheckIssueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.optional,
+	Args.withDescription("Parent issue ID (defaults to active parent context)"),
+)
+
+const issueCheckCommand = Command.make(
+	"check",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Check for likely parent-child tracking misses"))
+
+const issueDoctorCommand = Command.make(
+	"doctor",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Alias of `az issue check`"))
+
 /**
  * az issue - Parent command for issue operations
  */
@@ -3537,6 +3776,8 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueChildCommand,
 		issueUpdateCommand,
 		issueDepCommand,
+		issueCheckCommand,
+		issueDoctorCommand,
 		issueCloseCommand,
 		issueDeleteCommand,
 	]),
@@ -4438,6 +4679,8 @@ const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<s
 		subcommand !== "create" &&
 		subcommand !== "child" &&
 		subcommand !== "update" &&
+		subcommand !== "check" &&
+		subcommand !== "doctor" &&
 		subcommand !== "close" &&
 		subcommand !== "delete"
 	) {
@@ -4653,7 +4896,9 @@ export {
 	buildPrimeOutput,
 	cliRunner,
 	deriveWaitingAttentionPlan,
+	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
+	formatParentChildCheckOutput,
 	formatIssueSummaryLine,
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,
