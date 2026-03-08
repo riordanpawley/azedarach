@@ -451,14 +451,6 @@ done
 		),
 	},
 	{
-		key: "c",
-		mode: "action",
-		description: "Chat (Haiku)",
-		action: Effect.suspend(() =>
-			bc.editor.exitToNormal().pipe(Effect.tap(() => bc.sessionHandlers.chatAboutTask())),
-		),
-	},
-	{
 		key: "a",
 		mode: "action",
 		description: "Attach to session",

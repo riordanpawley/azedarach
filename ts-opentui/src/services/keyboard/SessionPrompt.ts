@@ -38,33 +38,7 @@ NOTE: This worktree has existing work. Check:
 		prompt += `\n\nAttached images (use Read tool to view):\n${params.attachmentPaths.join("\n")}`
 	}
 
-	return prompt
-}
-
-export const buildChatPrompt = (params: {
-    readonly taskId: string
-    readonly title: string
-    readonly chatModel: string
-}): string => {
-    const safeTitle = sanitizePromptInline(params.title)
-    const showCommand = `az issue get ${params.taskId}`
-
-    return `Let's chat about issue ${params.taskId}: ${safeTitle}
-
-Run \`az prime\` first.
-\`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
-If context looks stale, refresh with \`${showCommand}\`.
-
-Help me with one of:
-- Clarifying requirements or scope
-- Improving the description so any coding session could pick it up
-- Breaking down into subtasks if too large
-- Adding acceptance criteria
-- Just chatting about the task or exploring ideas
-
-Note: You're running with ${params.chatModel} for fast, cheap discussion. When ready to implement, use \`/model [model]\` to switch models.
-
-What would you like to discuss?`
+    return prompt
 }
 
 const sanitizePromptInline = (value: string): string => {

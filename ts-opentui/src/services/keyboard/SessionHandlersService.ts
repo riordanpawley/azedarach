@@ -3,7 +3,6 @@
  *
  * Handles Claude session lifecycle:
  * - Start session (s) / Start with prompt (S)
- * - Chat about task (c)
  * - Attach external (a) / Attach inline (A)
  * - Pause (p) / Resume (r)
  * - Stop (x)
@@ -20,13 +19,12 @@ import { SessionManager } from "../../core/SessionManager.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
 import { PRWorkflow } from "../../core/PRWorkflow.js"
 import {
-	getIssueSessionName,
-	getWorktreePath,
-	issueIdsEqualForLookup,
-	parseIssueSessionName,
-	WINDOW_NAMES,
+    getIssueSessionName,
+    getWorktreePath,
+    issueIdsEqualForLookup,
+    parseIssueSessionName,
+    WINDOW_NAMES,
 } from "../../core/paths.js"
-import { escapeForShellDoubleQuotes } from "../../core/shell.js"
 import { TmuxService } from "../../core/TmuxService.js"
 import { type WorktreeNameClashError, WorktreeManager } from "../../core/WorktreeManager.js"
 import { WorktreeSessionService } from "../../core/WorktreeSessionService.js"
@@ -34,7 +32,7 @@ import { BoardService } from "../BoardService.js"
 import { OverlayService } from "../OverlayService.js"
 import { ToastService } from "../ToastService.js"
 import { KeyboardHelpersService } from "./KeyboardHelpersService.js"
-import { buildChatPrompt, buildStartWorkPrompt } from "./SessionPrompt.js"
+import { buildStartWorkPrompt } from "./SessionPrompt.js"
 
 // ============================================================================
 // Service Definition
@@ -451,77 +449,8 @@ Delete the duplicate worktree and retry?`
 					})
 				})
 
-			/**
-			 * Chat about task (Space+c)
-			 *
-			 * Spawns a Haiku chat in a dedicated tmux session to discuss/understand the task.
-			 * Unlike startSession, this runs in the current project directory (not a worktree).
-			 * Session is created in the background - user remains in Azedarach TUI.
-			 * Uses Haiku model for faster, cheaper responses.
-			 *
-			 * The session name is `chat-<issueId>` to distinguish from work sessions.
-			 * User can attach to the chat session via Space+a (attach external).
-			 */
-			const chatAboutTask = () =>
-				Effect.gen(function* () {
-					const task = yield* helpers.getActionTargetTask()
-					if (!task) return
-
-					// Build the Claude command with specified chat model and initial prompt
-					const sessionConfig = yield* appConfig.getSessionConfig()
-					const cliTool = yield* appConfig.getCliTool()
-					const modelConfig = yield* appConfig.getModelConfig()
-					const { command: cliCommand, shell } = sessionConfig
-
-					const toolModelConfig = modelConfig[cliTool]
-					const chatModel =
-						modelConfig.chat ??
-						toolModelConfig.chat ??
-						modelConfig.default ??
-						toolModelConfig.default ??
-						"haiku"
-
-                    const prompt = buildChatPrompt({
-                        taskId: task.id,
-                        title: task.title,
-                        chatModel,
-                    })
-					const fullCommand = `${cliCommand} --model ${chatModel} "${escapeForShellDoubleQuotes(prompt)}"`
-					const projectPath = yield* helpers
-						.getProjectPath()
-						.pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.succeed(undefined)),
-								),
-							),
-						)
-
-					const sessionName = yield* findAiSession(task.id, projectPath)
-
-					if (!sessionName) {
-						yield* toast.show(
-							"error",
-							`No session for ${task.id} - press Space+s to start a session first`,
-						)
-						return
-					}
-
-					yield* worktreeSession
-						.ensureWindow(sessionName, WINDOW_NAMES.CHAT, {
-							command: `${shell} -i -c '${fullCommand}; exec ${shell}'`,
-							initCommands: [],
-						})
-						.pipe(
-							Effect.tap(() =>
-								toast.show("success", `Chat window ready for ${task.id} - press Space+a to attach`),
-							),
-							Effect.catchAll(helpers.showErrorToast("Failed to create chat window")),
-						)
-				})
-
-			const findAiSession = (issueId: string, projectPath?: string) =>
-				Effect.gen(function* () {
+            const findAiSession = (issueId: string, projectPath?: string) =>
+                Effect.gen(function* () {
 					const canonicalSessionName = getIssueSessionName(issueId, projectPath)
 					const hasCanonicalSession = yield* tmux.hasSession(canonicalSessionName)
 					if (hasCanonicalSession) {
@@ -925,14 +854,13 @@ Delete the duplicate worktree and retry?`
 			// Public API
 			// ================================================================
 
-			return {
-				startSession,
-				startSessionWithPrompt,
-				startSessionDangerous,
-				chatAboutTask,
-				attachExternal,
-				attachInline,
-				pauseSession,
+            return {
+                startSession,
+                startSessionWithPrompt,
+                startSessionDangerous,
+                attachExternal,
+                attachInline,
+                pauseSession,
 				resumeSession,
 				stopSession,
 				startHelixSession,

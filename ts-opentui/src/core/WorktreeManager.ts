@@ -610,10 +610,10 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 		 * Missing paths are silently skipped. Errors are logged but don't fail
 		 * worktree creation.
 		 */
-		const copyUntrackedFiles = (
-			sourceWorktreePath: string,
-			targetWorktreePath: string,
-			copyPaths: readonly string[],
+        const copyUntrackedFiles = (
+            sourceWorktreePath: string,
+            targetWorktreePath: string,
+            copyPaths: readonly string[],
 		): Effect.Effect<void, never, never> =>
 			Effect.gen(function* () {
 				if (copyPaths.length === 0) {
@@ -655,10 +655,54 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						),
 					{ concurrency: "unbounded" },
 				)
-			}).pipe(
-				// Don't fail worktree creation if copy fails
-				Effect.catchAll((error) => Effect.logWarning(`Failed to copy untracked files: ${error}`)),
-			)
+            }).pipe(
+                // Don't fail worktree creation if copy fails
+                Effect.catchAll((error) => Effect.logWarning(`Failed to copy untracked files: ${error}`)),
+            )
+
+        const injectIssueIdIntoEnvLocal = (
+            targetWorktreePath: string,
+            issueId: string,
+        ): Effect.Effect<void, never, never> =>
+            Effect.gen(function* () {
+                const envLocalPath = pathService.join(targetWorktreePath, ".env.local")
+                const existingContent = yield* fs
+                    .exists(envLocalPath)
+                    .pipe(
+                        Effect.flatMap((exists) =>
+                            exists ? fs.readFileString(envLocalPath) : Effect.succeed(""),
+                        ),
+                    )
+                const normalizedIssueId = issueId.trim()
+                if (normalizedIssueId.length === 0) {
+                    return
+                }
+
+                const issueLine = `AZEDARACH_ISSUE_ID=${normalizedIssueId}`
+                const lines = existingContent.length > 0 ? existingContent.split(/\r?\n/) : []
+                let replaced = false
+                const updatedLines = lines.map((line) => {
+                    if (!replaced && line.startsWith("AZEDARACH_ISSUE_ID=")) {
+                        replaced = true
+                        return issueLine
+                    }
+                    return line
+                })
+                if (!replaced) {
+                    updatedLines.push(issueLine)
+                }
+
+                const compacted = updatedLines.filter(
+                    (line, index, all) => !(index === all.length - 1 && line.length === 0),
+                )
+                const nextContent = `${compacted.join("\n")}\n`
+                yield* fs.writeFileString(envLocalPath, nextContent)
+                yield* Effect.logDebug(`Injected AZEDARACH_ISSUE_ID into ${envLocalPath}`)
+            }).pipe(
+                Effect.catchAll((error) =>
+                    Effect.logWarning(`Failed to inject AZEDARACH_ISSUE_ID into .env.local: ${error}`),
+                ),
+            )
 
 		/**
 		 * Copy Claude's local settings to a new worktree and inject hook configuration
@@ -1211,8 +1255,9 @@ export class WorktreeManager extends Effect.Service<WorktreeManager>()("Worktree
 						// Copy configured untracked files from source to new worktree
 						// Default copyPaths includes [".direnv"] for Nix flake cache
 						// When copyPaths is provided, it overrides the default (caller should include .direnv if needed)
-						const effectiveCopyPaths = copyPaths ?? [".direnv"]
-						yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
+                        const effectiveCopyPaths = copyPaths ?? [".direnv"]
+                        yield* copyUntrackedFiles(effectiveSourcePath, worktreePath, effectiveCopyPaths)
+                        yield* injectIssueIdIntoEnvLocal(worktreePath, issueId)
 
 						// Refresh cache and look for the new worktree with retry logic.
 						// Git worktree list can sometimes miss newly created worktrees due to

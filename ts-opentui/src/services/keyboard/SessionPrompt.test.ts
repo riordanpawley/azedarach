@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { buildChatPrompt, buildStartWorkPrompt } from "./SessionPrompt.js"
+import { buildStartWorkPrompt } from "./SessionPrompt.js"
 
 describe("session prompts", () => {
     it("uses az prime bootstrap in start prompt", () => {
@@ -33,22 +33,6 @@ describe("session prompts", () => {
         expect(prompt).toContain("Local workflow mode guardrails:")
         expect(prompt).toContain("Do not use `git -C [path]` unless intentionally targeting")
         expect(prompt).toContain("Do not run remote cleanup/sync commands unless explicitly asked.")
-    })
-
-    it("uses az prime bootstrap in chat prompt", () => {
-        const prompt = buildChatPrompt({
-            taskId: "az-f4625d",
-            title: "Discuss scope",
-            chatModel: "haiku",
-        })
-
-        expect(prompt).toContain("Let's chat about issue az-f4625d")
-        expect(prompt).toContain("Run `az prime` first.")
-        expect(prompt).toContain("`AZEDARACH_ISSUE_ID` is already set for this session")
-        expect(prompt).toContain("`az issue get az-f4625d`")
-        expect(prompt).toContain("`/model [model]`")
-        expect(prompt).not.toContain("tracker show")
-        expect(prompt).not.toContain("linear-cli")
     })
 
     it("sanitizes tag-like and control-character input in prompt titles", () => {
