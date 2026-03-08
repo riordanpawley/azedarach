@@ -1,3 +1,4 @@
+import { FileSystem, Path } from "@effect/platform"
 import { Data, DateTime, Effect, Fiber, Ref, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { ProjectService } from "../services/ProjectService.js"
@@ -8,10 +9,14 @@ import type {
 	SpecIssueLink,
 	SpecIssueRef,
 	SpecLinkType,
+	SpecLintResult,
+	SpecMarkdownSyncDocumentResult,
+	SpecMarkdownSyncResult,
 	SpecPublishConfig,
 	SpecPublishDocumentOutcome,
 	SpecPublishOutcome,
 	SpecRequirement,
+	SpecRequirementListFilters,
 	SpecRequirementLookupSelector,
 	SpecRequirementRef,
 	SpecRequirementWithStats,
@@ -26,9 +31,9 @@ const managedMarkerStart = (key: string): string => `<!-- AZ-SPEC:${key}:START -
 const managedMarkerEnd = (key: string): string => `<!-- AZ-SPEC:${key}:END -->`
 
 export const upsertManagedSection = (
-    existingContent: string | null | undefined,
-    key: string,
-    renderedContent: string,
+	existingContent: string | null | undefined,
+	key: string,
+	renderedContent: string,
 ): string => {
 	const start = managedMarkerStart(key)
 	const end = managedMarkerEnd(key)
@@ -56,13 +61,13 @@ export const upsertManagedSection = (
 }
 
 const toErrorMessage = (error: unknown): string => {
-    if (error instanceof SpecServiceError) {
-        return error.message
-    }
-    if (error instanceof Error) {
-        return error.message
-    }
-    return String(error)
+	if (error instanceof SpecServiceError) {
+		return error.message
+	}
+	if (error instanceof Error) {
+		return error.message
+	}
+	return String(error)
 }
 
 const formatLinkSummary = (
@@ -85,7 +90,10 @@ const requirementPublishIdentifier = (requirement: SpecRequirement): string =>
 	requirement.external_code ?? requirement.local_id
 
 export interface SpecServiceApi {
-	readonly listRequirements: (cwd?: string) => Effect.Effect<readonly SpecRequirement[], SpecServiceError>
+	readonly listRequirements: (
+		cwd?: string,
+		filters?: SpecRequirementListFilters,
+	) => Effect.Effect<readonly SpecRequirement[], SpecServiceError>
 	readonly listRequirementsWithStats: (
 		cwd?: string,
 	) => Effect.Effect<readonly SpecRequirementWithStats[], SpecServiceError>
@@ -156,6 +164,14 @@ export interface SpecServiceApi {
 		selector?: SpecRequirementLookupSelector,
 	) => Effect.Effect<readonly SpecIssueRef[], SpecServiceError>
 	readonly getCoverageReport: (cwd?: string) => Effect.Effect<SpecCoverageReport, SpecServiceError>
+	readonly lint: (cwd?: string) => Effect.Effect<SpecLintResult, SpecServiceError>
+	readonly syncMarkdown: (
+		options?: {
+			outDir?: string
+			check?: boolean
+		},
+		cwd?: string,
+	) => Effect.Effect<SpecMarkdownSyncResult, SpecServiceError>
 	readonly getPublishConfig: (cwd?: string) => Effect.Effect<SpecPublishConfig, SpecServiceError>
 	readonly setPublishConfig: (
 		config: SpecPublishConfig,
@@ -172,12 +188,19 @@ export interface SpecServiceApi {
 }
 
 export class SpecService extends Effect.Service<SpecService>()("SpecService", {
-	dependencies: [LocalIssueStore.Default, LinearSdk.Default, AppConfig.Default, ProjectService.Default],
+	dependencies: [
+		LocalIssueStore.Default,
+		LinearSdk.Default,
+		AppConfig.Default,
+		ProjectService.Default,
+	],
 	effect: Effect.gen(function* () {
 		const localIssueStore = yield* LocalIssueStore
 		const linearSdk = yield* LinearSdk
 		const appConfig = yield* AppConfig
 		const projectService = yield* ProjectService
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
 		const pendingPublishFibers = yield* Ref.make(
 			new Map<string, Fiber.RuntimeFiber<void, SpecServiceError>>(),
 		)
@@ -185,7 +208,9 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 		const resolveEffectiveCwd = (cwd?: string): Effect.Effect<string> =>
 			cwd
 				? Effect.succeed(cwd)
-				: projectService.getCurrentPath().pipe(Effect.map((projectPath) => projectPath ?? process.cwd()))
+				: projectService
+						.getCurrentPath()
+						.pipe(Effect.map((projectPath) => projectPath ?? process.cwd()))
 
 		const fromStore = <A>(
 			operation: string,
@@ -196,6 +221,20 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					(error) =>
 						new SpecServiceError({
 							message: `Spec store ${operation} failed: ${error.message}`,
+							cause: error,
+						}),
+				),
+			)
+
+		const fromFileSystem = <A>(
+			operation: string,
+			effect: Effect.Effect<A, unknown>,
+		): Effect.Effect<A, SpecServiceError> =>
+			effect.pipe(
+				Effect.mapError(
+					(error) =>
+						new SpecServiceError({
+							message: `Spec markdown ${operation} failed: ${toErrorMessage(error)}`,
 							cause: error,
 						}),
 				),
@@ -250,15 +289,15 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 				"# Requirements Index",
 				"",
 				...requirements
-						.filter((requirement) => requirement.kind !== "acceptance")
-						.flatMap((requirement) => {
-							const summary = formatLinkSummary(links, requirement.id)
-							const identifier = requirementPublishIdentifier(requirement)
-							return [
-								`## ${identifier} ${requirement.title}`,
-								`- Status: ${requirement.status}`,
-								`- Priority: ${requirement.priority}`,
-								`- Linked issues: ${summary.total}`,
+					.filter((requirement) => requirement.kind !== "acceptance")
+					.flatMap((requirement) => {
+						const summary = formatLinkSummary(links, requirement.id)
+						const identifier = requirementPublishIdentifier(requirement)
+						return [
+							`## ${identifier} ${requirement.title}`,
+							`- Status: ${requirement.status}`,
+							`- Priority: ${requirement.priority}`,
+							`- Linked issues: ${summary.total}`,
 							`- Implements links: ${summary.implementsCount}`,
 							`- Tests links: ${summary.testsCount}`,
 							"",
@@ -272,15 +311,15 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 				"# Acceptance Index",
 				"",
 				...requirements
-						.filter((requirement) => requirement.kind === "acceptance")
-						.flatMap((requirement) => {
-							const summary = formatLinkSummary(links, requirement.id)
-							const identifier = requirementPublishIdentifier(requirement)
-							return [
-								`## ${identifier} ${requirement.title}`,
-								`- Linked issues: ${summary.total}`,
-								"",
-								requirement.body,
+					.filter((requirement) => requirement.kind === "acceptance")
+					.flatMap((requirement) => {
+						const summary = formatLinkSummary(links, requirement.id)
+						const identifier = requirementPublishIdentifier(requirement)
+						return [
+							`## ${identifier} ${requirement.title}`,
+							`- Linked issues: ${summary.total}`,
+							"",
+							requirement.body,
 							"",
 						]
 					}),
@@ -300,12 +339,36 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 			]
 		}
 
+		const markdownFilenameByKey: Readonly<
+			Record<"overview" | "requirements" | "acceptance" | "change_log", string>
+		> = {
+			overview: "overview.md",
+			requirements: "requirements.md",
+			acceptance: "acceptance.md",
+			change_log: "change-log.md",
+		}
+
+		const renderSyncedMarkdown = (
+			key: "overview" | "requirements" | "acceptance" | "change_log",
+			content: string,
+		): string => {
+			const metadata = [
+				"<!-- az-spec-sync:source=az-db -->",
+				"<!-- az-spec-sync:mode=generated-readonly -->",
+				`<!-- az-spec-sync:document-key=${key} -->`,
+			].join("\n")
+			return `${metadata}\n\n${content.trimEnd()}\n`
+		}
+
 		const runPublish = (cwd?: string): Effect.Effect<SpecPublishOutcome, SpecServiceError> =>
 			Effect.gen(function* () {
 				const effectiveCwd = yield* resolveEffectiveCwd(cwd)
 				const [requirements, links, config] = yield* Effect.all([
 					fromStore("listSpecRequirements", localIssueStore.listSpecRequirements(effectiveCwd)),
-					fromStore("listSpecIssueLinks", localIssueStore.listSpecIssueLinks(undefined, effectiveCwd)),
+					fromStore(
+						"listSpecIssueLinks",
+						localIssueStore.listSpecIssueLinks(undefined, effectiveCwd),
+					),
 					fromStore("getSpecPublishConfig", localIssueStore.getSpecPublishConfig(effectiveCwd)),
 				])
 
@@ -376,29 +439,25 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 								requirement_count: requirementCount,
 								link_count: linkCount,
 							} satisfies SpecPublishDocumentOutcome
-                        }).pipe(
-                            Effect.catchAll((error: unknown) =>
-                                Effect.succeed({
-                                    document_key: document.key,
-                                    title: document.title,
-                                    status: "failed",
-                                    message: toErrorMessage(error),
-                                    requirement_count: requirementCount,
-                                    link_count: linkCount,
-                                } satisfies SpecPublishDocumentOutcome),
-                            ),
-                        ),
+						}).pipe(
+							Effect.catchAll((error: unknown) =>
+								Effect.succeed({
+									document_key: document.key,
+									title: document.title,
+									status: "failed",
+									message: toErrorMessage(error),
+									requirement_count: requirementCount,
+									link_count: linkCount,
+								} satisfies SpecPublishDocumentOutcome),
+							),
+						),
 					),
 					{ concurrency: 1 },
 				)
 
 				const successCount = outcomes.filter((outcome) => outcome.status === "success").length
 				const status: SpecPublishOutcome["status"] =
-					successCount === outcomes.length
-						? "success"
-						: successCount === 0
-							? "failed"
-							: "partial"
+					successCount === outcomes.length ? "success" : successCount === 0 ? "failed" : "partial"
 				const finishedAt = yield* DateTime.now
 				const outcome: SpecPublishOutcome = {
 					started_at: startedAt,
@@ -457,12 +516,12 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 			})
 
 		return {
-			listRequirements: (cwd?: string) =>
+			listRequirements: (cwd?: string, filters?: SpecRequirementListFilters) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
 					return yield* fromStore(
 						"listSpecRequirements",
-						localIssueStore.listSpecRequirements(effectiveCwd),
+						localIssueStore.listSpecRequirements(effectiveCwd, filters),
 					)
 				}),
 			listRequirementsWithStats: (cwd?: string) =>
@@ -473,26 +532,26 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					)
 					return report.requirements
 				}),
-				getRequirement: (
-					reference: string,
-					cwd?: string,
-					selector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						return yield* fromStore(
-							"getSpecRequirement",
-							localIssueStore.getSpecRequirement(reference, effectiveCwd, selector),
-						)
-					}),
-				createRequirement: (
-					params: {
-						id?: string
-						local_id?: string
-						external_code?: string
-						title: string
-						body: string
-						kind?: "functional" | "acceptance" | "other"
+			getRequirement: (
+				reference: string,
+				cwd?: string,
+				selector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					return yield* fromStore(
+						"getSpecRequirement",
+						localIssueStore.getSpecRequirement(reference, effectiveCwd, selector),
+					)
+				}),
+			createRequirement: (
+				params: {
+					id?: string
+					local_id?: string
+					external_code?: string
+					title: string
+					body: string
+					kind?: "functional" | "acceptance" | "other"
 					status?: string
 					priority?: number
 				},
@@ -507,53 +566,53 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					yield* scheduleAutoPublishInternal("requirement_created", effectiveCwd)
 					return created
 				}),
-				updateRequirement: (
-					reference: string,
-					fields: {
-						title?: string
-						body?: string
+			updateRequirement: (
+				reference: string,
+				fields: {
+					title?: string
+					body?: string
 					kind?: "functional" | "acceptance" | "other"
-						status?: string
-						priority?: number
-					},
-					cwd?: string,
-					selector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						const updated = yield* fromStore(
-							"updateSpecRequirement",
-							localIssueStore.updateSpecRequirement(reference, fields, effectiveCwd, selector),
-						)
-						if (updated) {
-							yield* scheduleAutoPublishInternal("requirement_updated", effectiveCwd)
-						}
-						return updated
-					}),
-				deleteRequirement: (
-					reference: string,
-					cwd?: string,
-					selector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						const deleted = yield* fromStore(
-							"deleteSpecRequirement",
-							localIssueStore.deleteSpecRequirement(reference, effectiveCwd, selector),
-						)
-						if (deleted) {
-							yield* scheduleAutoPublishInternal("requirement_deleted", effectiveCwd)
+					status?: string
+					priority?: number
+				},
+				cwd?: string,
+				selector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const updated = yield* fromStore(
+						"updateSpecRequirement",
+						localIssueStore.updateSpecRequirement(reference, fields, effectiveCwd, selector),
+					)
+					if (updated) {
+						yield* scheduleAutoPublishInternal("requirement_updated", effectiveCwd)
+					}
+					return updated
+				}),
+			deleteRequirement: (
+				reference: string,
+				cwd?: string,
+				selector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const deleted = yield* fromStore(
+						"deleteSpecRequirement",
+						localIssueStore.deleteSpecRequirement(reference, effectiveCwd, selector),
+					)
+					if (deleted) {
+						yield* scheduleAutoPublishInternal("requirement_deleted", effectiveCwd)
 					}
 					return deleted
 				}),
-				listLinks: (
-					filters?: {
-						issueId?: string
-						requirementId?: string
-						requirementSelector?: SpecRequirementLookupSelector
-					},
-					cwd?: string,
-				) =>
+			listLinks: (
+				filters?: {
+					issueId?: string
+					requirementId?: string
+					requirementSelector?: SpecRequirementLookupSelector
+				},
+				cwd?: string,
+			) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
 					return yield* fromStore(
@@ -561,48 +620,48 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 						localIssueStore.listSpecIssueLinks(filters, effectiveCwd),
 					)
 				}),
-				addIssueLink: (
-					issueId: string,
-					requirementReference: string,
-					linkType: SpecLinkType,
-					cwd?: string,
-					requirementSelector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						yield* fromStore(
-							"addSpecIssueLink",
-							localIssueStore.addSpecIssueLink(
-								issueId,
-								requirementReference,
-								linkType,
-								effectiveCwd,
-								requirementSelector,
-							),
-						)
-						yield* scheduleAutoPublishInternal("link_added", effectiveCwd)
-					}),
-				removeIssueLink: (
-					issueId: string,
-					requirementReference: string,
-					linkType?: SpecLinkType,
-					cwd?: string,
-					requirementSelector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						const removed = yield* fromStore(
-							"removeSpecIssueLink",
-							localIssueStore.removeSpecIssueLink(
-								issueId,
-								requirementReference,
-								linkType,
-								effectiveCwd,
-								requirementSelector,
-							),
-						)
-						if (removed > 0) {
-							yield* scheduleAutoPublishInternal("link_removed", effectiveCwd)
+			addIssueLink: (
+				issueId: string,
+				requirementReference: string,
+				linkType: SpecLinkType,
+				cwd?: string,
+				requirementSelector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					yield* fromStore(
+						"addSpecIssueLink",
+						localIssueStore.addSpecIssueLink(
+							issueId,
+							requirementReference,
+							linkType,
+							effectiveCwd,
+							requirementSelector,
+						),
+					)
+					yield* scheduleAutoPublishInternal("link_added", effectiveCwd)
+				}),
+			removeIssueLink: (
+				issueId: string,
+				requirementReference: string,
+				linkType?: SpecLinkType,
+				cwd?: string,
+				requirementSelector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const removed = yield* fromStore(
+						"removeSpecIssueLink",
+						localIssueStore.removeSpecIssueLink(
+							issueId,
+							requirementReference,
+							linkType,
+							effectiveCwd,
+							requirementSelector,
+						),
+					)
+					if (removed > 0) {
+						yield* scheduleAutoPublishInternal("link_removed", effectiveCwd)
 					}
 					return removed
 				}),
@@ -614,22 +673,22 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 						localIssueStore.listIssueSpecRequirements(issueId, effectiveCwd),
 					)
 				}),
-				listRequirementIssues: (
-					requirementReference: string,
-					cwd?: string,
-					selector: SpecRequirementLookupSelector = "auto",
-				) =>
-					Effect.gen(function* () {
-						const effectiveCwd = yield* resolveEffectiveCwd(cwd)
-						return yield* fromStore(
-							"listRequirementLinkedIssues",
-							localIssueStore.listRequirementLinkedIssues(
-								requirementReference,
-								effectiveCwd,
-								selector,
-							),
-						)
-					}),
+			listRequirementIssues: (
+				requirementReference: string,
+				cwd?: string,
+				selector: SpecRequirementLookupSelector = "auto",
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					return yield* fromStore(
+						"listRequirementLinkedIssues",
+						localIssueStore.listRequirementLinkedIssues(
+							requirementReference,
+							effectiveCwd,
+							selector,
+						),
+					)
+				}),
 			getCoverageReport: (cwd?: string) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
@@ -637,6 +696,126 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 						"getSpecCoverageReport",
 						localIssueStore.getSpecCoverageReport(effectiveCwd),
 					)
+				}),
+			lint: (cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const report = yield* fromStore(
+						"getSpecCoverageReport",
+						localIssueStore.getSpecCoverageReport(effectiveCwd),
+					)
+					const gapCounts = report.integrity_gaps.reduce(
+						(accumulator, gap) => {
+							if (gap.kind === "missing_issue") {
+								return {
+									...accumulator,
+									missing_issue: accumulator.missing_issue + 1,
+								}
+							}
+							if (gap.kind === "missing_requirement") {
+								return {
+									...accumulator,
+									missing_requirement: accumulator.missing_requirement + 1,
+								}
+							}
+							return {
+								...accumulator,
+								unlinked_requirement: accumulator.unlinked_requirement + 1,
+							}
+						},
+						{
+							unlinked_requirement: 0,
+							missing_issue: 0,
+							missing_requirement: 0,
+						},
+					)
+					const unlinkedRequirementCount = report.unlinked_requirement_ids.length
+					const integrityGapCount = report.integrity_gaps.length
+					const requirementCount = report.requirements.length
+					const linkedRequirementCount = Math.max(0, requirementCount - unlinkedRequirementCount)
+					return {
+						ok: unlinkedRequirementCount === 0 && integrityGapCount === 0,
+						requirement_count: requirementCount,
+						linked_requirement_count: linkedRequirementCount,
+						unlinked_requirement_count: unlinkedRequirementCount,
+						integrity_gap_count: integrityGapCount,
+						gap_counts: gapCounts,
+						report,
+					} satisfies SpecLintResult
+				}),
+			syncMarkdown: (
+				options?: {
+					outDir?: string
+					check?: boolean
+				},
+				cwd?: string,
+			) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					const check = options?.check === true
+					const outDirInput = options?.outDir?.trim()
+					const outDir =
+						outDirInput === undefined || outDirInput.length === 0
+							? pathService.join(effectiveCwd, "docs", "spec")
+							: outDirInput.startsWith("/")
+								? outDirInput
+								: pathService.join(effectiveCwd, outDirInput)
+
+					const [requirements, links] = yield* Effect.all([
+						fromStore("listSpecRequirements", localIssueStore.listSpecRequirements(effectiveCwd)),
+						fromStore(
+							"listSpecIssueLinks",
+							localIssueStore.listSpecIssueLinks(undefined, effectiveCwd),
+						),
+					])
+					const rendered = renderPublishDocuments(requirements, links)
+					if (!check) {
+						yield* fromFileSystem(
+							`makeDirectory(${outDir})`,
+							fs.makeDirectory(outDir, { recursive: true }),
+						)
+					}
+
+					const documents = yield* Effect.all(
+						rendered.map((document) =>
+							Effect.gen(function* () {
+								const filename = markdownFilenameByKey[document.key]
+								const targetPath = pathService.join(outDir, filename)
+								const nextContent = renderSyncedMarkdown(document.key, document.content)
+								const exists = yield* fromFileSystem(`exists(${targetPath})`, fs.exists(targetPath))
+								const previousContent = exists
+									? yield* fromFileSystem(
+											`readFileString(${targetPath})`,
+											fs.readFileString(targetPath),
+										)
+									: undefined
+								const changed = previousContent !== nextContent
+								if (changed && !check) {
+									yield* fromFileSystem(
+										`writeFileString(${targetPath})`,
+										fs.writeFileString(targetPath, nextContent),
+									)
+								}
+								return {
+									key: document.key,
+									path: targetPath,
+									status: changed ? "updated" : "unchanged",
+									changed,
+								} satisfies SpecMarkdownSyncDocumentResult
+							}),
+						),
+						{ concurrency: 1 },
+					)
+
+					const changedDocuments = documents.filter((document) => document.changed).length
+					return {
+						out_dir: outDir,
+						check,
+						ok: check ? changedDocuments === 0 : true,
+						total_documents: documents.length,
+						changed_documents: changedDocuments,
+						documents,
+					} satisfies SpecMarkdownSyncResult
 				}),
 			getPublishConfig: (cwd?: string) =>
 				Effect.gen(function* () {

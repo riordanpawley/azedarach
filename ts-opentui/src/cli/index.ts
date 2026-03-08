@@ -248,10 +248,14 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 			r: "req",
 			l: "link",
 			p: "publish",
+			rd: "read",
+			li: "lint",
+			sy: "sync",
 			c: "req",
 		},
 		"spec/req": {
 			l: "list",
+			s: "search",
 			g: "get",
 			c: "create",
 			u: "update",
@@ -1524,11 +1528,47 @@ const formatSpecRequirementSummaryLine = (requirement: {
 }): string =>
 	`${formatSpecRequirementReference(requirement)}: ${compactSingleLineText(requirement.title)} [id=${requirement.id} kind=${requirement.kind} status=${requirement.status} priority=${requirement.priority} updated_at=${requirement.updated_at}]`
 
+type SpecRequirementViewMode = "compact" | "verbose"
+
+const parseSpecRequirementKindOption = (
+	value: Option.Option<string>,
+): Effect.Effect<"functional" | "acceptance" | "other" | undefined, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(undefined),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "functional") return Effect.succeed("functional")
+			if (normalized === "acceptance") return Effect.succeed("acceptance")
+			if (normalized === "other") return Effect.succeed("other")
+			return Effect.fail(
+				new Error(`Invalid kind '${raw}'. Expected: functional, acceptance, other.`),
+			)
+		},
+	})
+
+const parseSpecRequirementViewMode = (
+	value: Option.Option<string>,
+): Effect.Effect<SpecRequirementViewMode, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed("compact"),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "compact") return Effect.succeed("compact")
+			if (normalized === "verbose") return Effect.succeed("verbose")
+			return Effect.fail(new Error(`Invalid view '${raw}'. Expected: compact, verbose.`))
+		},
+	})
+
 /**
  * List spec requirements
  */
 const specReqListHandler = (args: {
 	readonly projectDir: Option.Option<string>
+	readonly query: Option.Option<string>
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
@@ -1536,9 +1576,18 @@ const specReqListHandler = (args: {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* validateIssueTrackerStore(resolverCwd)
+		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+		const query = Option.getOrUndefined(args.query)?.trim()
+		const status = Option.getOrUndefined(args.status)?.trim()
 
 		const specService = yield* SpecService
-		const requirements = yield* specService.listRequirements(explicitProjectDir)
+		const requirements = yield* specService.listRequirements(explicitProjectDir, {
+			query,
+			kind: parsedKind,
+			status,
+			priority: Option.getOrUndefined(args.priority),
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(requirements, null, 2))
@@ -1552,10 +1601,166 @@ const specReqListHandler = (args: {
 
 		for (const requirement of requirements) {
 			yield* Console.log(formatSpecRequirementSummaryLine(requirement))
+			if (viewMode === "verbose") {
+				yield* Console.log(`Body:\n${requirement.body}`)
+				yield* Console.log("")
+			}
 		}
 
 		if (args.verbose) {
 			yield* Console.error(`Listed ${requirements.length} requirement(s).`)
+		}
+	})
+
+const specReqSearchHandler = (args: {
+	readonly query: string
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	specReqListHandler({
+		projectDir: args.projectDir,
+		query: Option.some(args.query),
+		kind: args.kind,
+		status: args.status,
+		priority: args.priority,
+		view: args.view,
+		verbose: args.verbose,
+		json: args.json,
+	})
+
+const specReadHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly view: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+
+		const specService = yield* SpecService
+		const [requirements, links, coverage, publishConfig, lastOutcome] = yield* Effect.all([
+			specService.listRequirements(explicitProjectDir),
+			specService.listLinks(undefined, explicitProjectDir),
+			specService.getCoverageReport(explicitProjectDir),
+			specService.getPublishConfig(explicitProjectDir),
+			specService.getLastPublishOutcome(explicitProjectDir),
+		])
+
+		const payload = {
+			summary: {
+				requirement_count: requirements.length,
+				link_count: links.length,
+				unlinked_requirement_count: coverage.unlinked_requirement_ids.length,
+				integrity_gap_count: coverage.integrity_gaps.length,
+			},
+			requirements,
+			links,
+			coverage,
+			publish_config: publishConfig,
+			last_publish_outcome: lastOutcome,
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(payload, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Spec summary: requirements=${requirements.length} links=${links.length} unlinked=${coverage.unlinked_requirement_ids.length} gaps=${coverage.integrity_gaps.length}`,
+		)
+		yield* Console.log("")
+
+		for (const kind of ["functional", "acceptance", "other"] as const) {
+			const subset = requirements.filter((requirement) => requirement.kind === kind)
+			if (subset.length === 0) continue
+			yield* Console.log(`${kind.toUpperCase()} (${subset.length})`)
+			for (const requirement of subset) {
+				yield* Console.log(`- ${formatSpecRequirementSummaryLine(requirement)}`)
+				if (viewMode === "verbose") {
+					yield* Console.log(`  ${compactSingleLineText(requirement.body)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		yield* Console.log(
+			`Publish config: enabled=${publishConfig.enabled} debounce_ms=${publishConfig.debounce_ms} target_project=${publishConfig.target_project ?? "<unset>"}`,
+		)
+		if (lastOutcome !== undefined) {
+			yield* Console.log(
+				`Last publish: status=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)}`,
+			)
+		}
+	})
+
+const specLintHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly strict: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const specService = yield* SpecService
+		const lintResult = yield* specService.lint(explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(lintResult, null, 2))
+		} else {
+			yield* Console.log(
+				`Lint ${lintResult.ok ? "ok" : "issues"}: requirements=${lintResult.requirement_count} linked=${lintResult.linked_requirement_count} unlinked=${lintResult.unlinked_requirement_count} gaps=${lintResult.integrity_gap_count}`,
+			)
+			for (const gap of lintResult.report.integrity_gaps) {
+				yield* Console.log(`- [${gap.kind}] ${gap.message}`)
+			}
+		}
+
+		if (args.strict && !lintResult.ok) {
+			return yield* Effect.fail(new Error("Spec lint failed in strict mode."))
+		}
+	})
+
+const specSyncHandler = (args: {
+	readonly outDir: Option.Option<string>
+	readonly check: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const specService = yield* SpecService
+		const syncResult = yield* specService.syncMarkdown(
+			{
+				outDir: Option.getOrUndefined(args.outDir),
+				check: args.check,
+			},
+			explicitProjectDir,
+		)
+		if (args.json) {
+			yield* Console.log(JSON.stringify(syncResult, null, 2))
+		} else {
+			yield* Console.log(
+				`Spec sync ${syncResult.check ? "check" : "write"}: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+			)
+			for (const document of syncResult.documents) {
+				yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+			}
+		}
+
+		if (syncResult.check && !syncResult.ok) {
+			return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
 		}
 	})
 
@@ -3631,9 +3836,35 @@ const requirementByExternalCodeOption = Options.text("external-code").pipe(
 	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
 
+const specRequirementViewOption = Options.text("view").pipe(
+	Options.optional,
+	Options.withDescription("Display mode: compact|verbose"),
+)
+
 const specReqListCommand = Command.make(
 	"list",
 	{
+		query: Options.text("query").pipe(
+			Options.withAlias("q"),
+			Options.optional,
+			Options.withDescription("Filter by query against local_id/external_code/title/body"),
+		),
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(
@@ -3643,6 +3874,36 @@ const specReqListCommand = Command.make(
 	},
 	specReqListHandler,
 ).pipe(Command.withDescription("List spec requirements"))
+
+const specReqSearchCommand = Command.make(
+	"search",
+	{
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+		query: Args.text({ name: "query" }).pipe(Args.withDescription("Search query text")),
+	},
+	specReqSearchHandler,
+).pipe(Command.withDescription("Search spec requirements"))
 
 const specReqGetCommand = Command.make(
 	"get",
@@ -3758,12 +4019,13 @@ const specReqDeleteCommand = Command.make(
 
 const specReqCommand = Command.make("req", {}, () =>
 	Console.log(
-		"Usage: az spec req [list|get|create|update|delete] [<requirement-ref>] [--id|--local-id|--external-code] ...",
+		"Usage: az spec req [list|search|get|create|update|delete] [<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage spec requirement records"),
 	Command.withSubcommands([
 		specReqListCommand,
+		specReqSearchCommand,
 		specReqGetCommand,
 		specReqCreateCommand,
 		specReqUpdateCommand,
@@ -3929,11 +4191,68 @@ const specPublishCommand = Command.make("publish", {}, () =>
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
 )
 
+const specReadCommand = Command.make(
+	"read",
+	{
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specReadHandler,
+).pipe(Command.withDescription("Show full spec in terminal-friendly form"))
+
+const specLintCommand = Command.make(
+	"lint",
+	{
+		strict: Options.boolean("strict").pipe(
+			Options.withAlias("s"),
+			Options.withDescription("Fail with non-zero exit when issues are found"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLintHandler,
+).pipe(Command.withDescription("Validate spec coverage and integrity"))
+
+const specSyncCommand = Command.make(
+	"sync",
+	{
+		outDir: Options.text("out-dir").pipe(
+			Options.withAlias("o"),
+			Options.optional,
+			Options.withDescription("Output directory for markdown snapshots (default: docs/spec)"),
+		),
+		check: Options.boolean("check").pipe(
+			Options.withAlias("c"),
+			Options.withDescription("Check for drift without writing files"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specSyncHandler,
+).pipe(Command.withDescription("Sync canonical markdown snapshots from spec store"))
+
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|publish] ..."),
+	Console.log("Usage: az spec [req|link|publish|read|lint|sync] ..."),
 ).pipe(
-	Command.withDescription("Spec requirement/link/publish operations"),
-	Command.withSubcommands([specReqCommand, specLinkCommand, specPublishCommand]),
+	Command.withDescription("Spec requirement/link/lint/sync/publish operations"),
+	Command.withSubcommands([
+		specReqCommand,
+		specLinkCommand,
+		specPublishCommand,
+		specReadCommand,
+		specLintCommand,
+		specSyncCommand,
+	]),
 )
 
 /**

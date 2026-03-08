@@ -1,9 +1,9 @@
+import { Database } from "bun:sqlite"
 import { describe, expect, it } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
-import { Database } from "bun:sqlite"
 import { DateTime, Effect, Layer } from "effect"
 import {
 	allocateNextAlphaIssueId,
@@ -318,7 +318,12 @@ describe("importExternalSnapshot", () => {
 					const childAfterImport = yield* store.show(child.id, projectPath)
 					const duplicateParentIssue = yield* store.show("AZE-200", projectPath)
 					const duplicateChildIssue = yield* store.show("AZE-201", projectPath)
-					return { parentId: parent.id, childAfterImport, duplicateParentIssue, duplicateChildIssue }
+					return {
+						parentId: parent.id,
+						childAfterImport,
+						duplicateParentIssue,
+						duplicateChildIssue,
+					}
 				}).pipe(Effect.provide(testLayer)),
 			)
 
@@ -341,7 +346,11 @@ describe("importExternalSnapshot", () => {
 			const result = await Effect.runPromise(
 				Effect.gen(function* () {
 					const store = yield* LocalIssueStore
-					const canonical = yield* store.create({ title: "Canonical local issue" }, undefined, projectPath)
+					const canonical = yield* store.create(
+						{ title: "Canonical local issue" },
+						undefined,
+						projectPath,
+					)
 
 					yield* store.importExternalSnapshot(
 						"linear",
@@ -424,7 +433,11 @@ describe("importExternalSnapshot", () => {
 							undefined,
 							projectPath,
 						)
-						const dependent = yield* store.create({ title: "Dependent issue" }, undefined, projectPath)
+						const dependent = yield* store.create(
+							{ title: "Dependent issue" },
+							undefined,
+							projectPath,
+						)
 
 						yield* store.importExternalSnapshot(
 							"linear",
@@ -571,31 +584,31 @@ describe("legacy issue schema migration", () => {
 })
 
 describe("spec requirements and links", () => {
-		it("accepts suffixed spec requirement external codes", async () => {
+	it("accepts suffixed spec requirement external codes", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-suffix-"))
 		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
 
 		try {
-				const requirement = await Effect.runPromise(
-					Effect.gen(function* () {
-						const store = yield* LocalIssueStore
-						return yield* store.createSpecRequirement(
-							{
-								external_code: "AZ-FR-0802a",
-								title: "Suffixed requirement ID support",
-								body: "Allow optional single-letter suffix in requirement IDs.",
-							},
-							projectPath,
-						)
-					}).pipe(Effect.provide(testLayer)),
-				)
+			const requirement = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					return yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-0802a",
+							title: "Suffixed requirement ID support",
+							body: "Allow optional single-letter suffix in requirement IDs.",
+						},
+						projectPath,
+					)
+				}).pipe(Effect.provide(testLayer)),
+			)
 
-				expect(requirement.id.startsWith("sr_")).toBe(true)
-				expect(requirement.local_id).toBe("fr0802a")
-				expect(requirement.external_code).toBe("AZ-FR-0802A")
-				expect(requirement.kind).toBe("functional")
-			} finally {
-				rmSync(projectPath, { recursive: true, force: true })
+			expect(requirement.id.startsWith("sr_")).toBe(true)
+			expect(requirement.local_id).toBe("fr0802a")
+			expect(requirement.external_code).toBe("AZ-FR-0802A")
+			expect(requirement.kind).toBe("functional")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
 		}
 	})
 
@@ -609,21 +622,21 @@ describe("spec requirements and links", () => {
 					const store = yield* LocalIssueStore
 
 					const issue = yield* store.create({ title: "Implement feature" }, undefined, projectPath)
-						const requirement = yield* store.createSpecRequirement(
-							{
-								external_code: "AZ-FR-4201",
-								title: "Track requirement records",
-								body: "The store must persist requirements.",
-							},
-							projectPath,
-						)
-						const acceptanceRequirement = yield* store.createSpecRequirement(
-							{
-								external_code: "AZ-AT-2901",
-								title: "Acceptance coverage",
-								body: "Acceptance requirement with no links yet.",
-							},
-							projectPath,
+					const requirement = yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-4201",
+							title: "Track requirement records",
+							body: "The store must persist requirements.",
+						},
+						projectPath,
+					)
+					const acceptanceRequirement = yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-AT-2901",
+							title: "Acceptance coverage",
+							body: "Acceptance requirement with no links yet.",
+						},
+						projectPath,
 					)
 
 					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
@@ -635,36 +648,117 @@ describe("spec requirements and links", () => {
 					)
 					const coverage = yield* store.getSpecCoverageReport(projectPath)
 
-						return {
-							requirement,
-							acceptanceRequirement,
-							issueRequirements,
-							requirementIssues,
-							coverage,
-						}
+					return {
+						requirement,
+						acceptanceRequirement,
+						issueRequirements,
+						requirementIssues,
+						coverage,
+					}
 				}).pipe(Effect.provide(testLayer)),
 			)
 
-				expect(result.issueRequirements).toHaveLength(1)
-				expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
-				expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
-				expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
-				expect(result.issueRequirements[0]?.link_type).toBe("implements")
+			expect(result.issueRequirements).toHaveLength(1)
+			expect(result.issueRequirements[0]?.id).toBe(result.requirement.id)
+			expect(result.issueRequirements[0]?.local_id).toBe("fr4201")
+			expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
+			expect(result.issueRequirements[0]?.link_type).toBe("implements")
 
-				expect(result.requirementIssues).toHaveLength(1)
-				expect(result.requirementIssues[0]?.link_type).toBe("implements")
+			expect(result.requirementIssues).toHaveLength(1)
+			expect(result.requirementIssues[0]?.link_type).toBe("implements")
 
-				expect(result.coverage.requirements).toHaveLength(2)
-				expect(result.coverage.unlinked_requirement_ids).toContain(
-					result.acceptanceRequirement.local_id,
-				)
-				expect(
-					result.coverage.integrity_gaps.some(
-						(gap) =>
-							gap.kind === "unlinked_requirement" &&
-							gap.requirement_id === result.acceptanceRequirement.local_id,
-					),
-				).toBe(true)
+			expect(result.coverage.requirements).toHaveLength(2)
+			expect(result.coverage.unlinked_requirement_ids).toContain(
+				result.acceptanceRequirement.local_id,
+			)
+			expect(
+				result.coverage.integrity_gaps.some(
+					(gap) =>
+						gap.kind === "unlinked_requirement" &&
+						gap.requirement_id === result.acceptanceRequirement.local_id,
+				),
+			).toBe(true)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("filters spec requirements by query, kind, status, and priority with deterministic ordering", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-filter-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-5101",
+							title: "Sync metadata for markdown snapshots",
+							body: "Generates read-only markdown outputs for review.",
+							status: "active",
+							priority: 1,
+						},
+						projectPath,
+					)
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-AT-5101",
+							title: "Search CLI output remains deterministic",
+							body: "Query includes local_id and external_code matches.",
+							status: "draft",
+							priority: 3,
+						},
+						projectPath,
+					)
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-5102",
+							title: "Publish config handling",
+							body: "Ensure config updates remain stable.",
+							status: "active",
+							priority: 3,
+						},
+						projectPath,
+					)
+
+					const queryFiltered = yield* store.listSpecRequirements(projectPath, {
+						query: "markdown",
+					})
+					const kindFiltered = yield* store.listSpecRequirements(projectPath, {
+						kind: "acceptance",
+					})
+					const statusPriorityFiltered = yield* store.listSpecRequirements(projectPath, {
+						status: "active",
+						priority: 3,
+					})
+					const externalCodeQuery = yield* store.listSpecRequirements(projectPath, {
+						query: "AZ-FR-5102",
+					})
+					const noMatches = yield* store.listSpecRequirements(projectPath, {
+						query: "does-not-exist",
+					})
+
+					return {
+						queryFiltered,
+						kindFiltered,
+						statusPriorityFiltered,
+						externalCodeQuery,
+						noMatches,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.queryFiltered.map((requirement) => requirement.local_id)).toEqual(["fr5101"])
+			expect(result.kindFiltered.map((requirement) => requirement.local_id)).toEqual(["at5101"])
+			expect(result.statusPriorityFiltered.map((requirement) => requirement.local_id)).toEqual([
+				"fr5102",
+			])
+			expect(result.externalCodeQuery.map((requirement) => requirement.local_id)).toEqual([
+				"fr5102",
+			])
+			expect(result.noMatches).toEqual([])
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

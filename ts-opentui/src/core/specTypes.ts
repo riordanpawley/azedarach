@@ -48,6 +48,13 @@ export interface SpecRequirementWithStats extends SpecRequirement {
 	readonly linked_issue_count: number
 }
 
+export interface SpecRequirementListFilters {
+	readonly query?: string
+	readonly kind?: SpecRequirementKind
+	readonly status?: string
+	readonly priority?: number
+}
+
 export interface SpecCoverageGap {
 	readonly kind: "unlinked_requirement" | "missing_issue" | "missing_requirement"
 	readonly requirement_id?: string
@@ -59,6 +66,38 @@ export interface SpecCoverageReport {
 	readonly requirements: readonly SpecRequirementWithStats[]
 	readonly unlinked_requirement_ids: readonly string[]
 	readonly integrity_gaps: readonly SpecCoverageGap[]
+}
+
+export interface SpecLintResult {
+	readonly ok: boolean
+	readonly requirement_count: number
+	readonly linked_requirement_count: number
+	readonly unlinked_requirement_count: number
+	readonly integrity_gap_count: number
+	readonly gap_counts: {
+		readonly unlinked_requirement: number
+		readonly missing_issue: number
+		readonly missing_requirement: number
+	}
+	readonly report: SpecCoverageReport
+}
+
+export type SpecSnapshotDocumentKey = "overview" | "requirements" | "acceptance" | "change_log"
+
+export interface SpecMarkdownSyncDocumentResult {
+	readonly key: SpecSnapshotDocumentKey
+	readonly path: string
+	readonly status: "unchanged" | "updated"
+	readonly changed: boolean
+}
+
+export interface SpecMarkdownSyncResult {
+	readonly out_dir: string
+	readonly check: boolean
+	readonly ok: boolean
+	readonly total_documents: number
+	readonly changed_documents: number
+	readonly documents: readonly SpecMarkdownSyncDocumentResult[]
 }
 
 export interface SpecPublishConfig {
@@ -74,7 +113,7 @@ export interface SpecPublishConfig {
 }
 
 export interface SpecPublishDocumentOutcome {
-	readonly document_key: "overview" | "requirements" | "acceptance" | "change_log"
+	readonly document_key: SpecSnapshotDocumentKey
 	readonly title: string
 	readonly status: "success" | "failed" | "skipped"
 	readonly message: string
