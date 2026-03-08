@@ -2,9 +2,35 @@
 set -eu
 
 if [ ! -d "ts-opentui" ]; then
-	echo "pre-commit: ts-opentui directory not found; skipping type-check"
-	exit 0
+    echo "pre-commit: ts-opentui directory not found; skipping checks"
+    exit 0
 fi
+
+staged_ts_opentui_files="$(git diff --cached --name-only --diff-filter=ACMR -- ts-opentui)"
+if [ -z "$staged_ts_opentui_files" ]; then
+    echo "pre-commit: no staged ts-opentui files; skipping checks"
+    exit 0
+fi
+
+set --
+while IFS= read -r file_path; do
+    [ -n "$file_path" ] || continue
+    relative_path="${file_path#ts-opentui/}"
+    set -- "$@" "$relative_path"
+done <<EOF
+$staged_ts_opentui_files
+EOF
+
+echo "pre-commit: running biome check --write on staged ts-opentui files"
+(cd ts-opentui && bunx biome check --write --files-ignore-unknown=true "$@")
+
+echo "pre-commit: re-staging biome-updated files"
+while IFS= read -r file_path; do
+    [ -n "$file_path" ] || continue
+    git add -- "$file_path"
+done <<EOF
+$staged_ts_opentui_files
+EOF
 
 echo "pre-commit: running ts-opentui type-check"
 (cd ts-opentui && bun run type-check)
