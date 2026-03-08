@@ -26,7 +26,8 @@
     "baseBranch": "main",
     "workflowMode": "local",
     "pr": {
-      "enabled": false
+      "enabled": false,
+      "aiModel": "gpt-5.3-codex-spark"
     },
     "merge": {
       "validateCommands": [

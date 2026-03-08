@@ -72,7 +72,12 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.git?.baseBranch).toBe("develop")
-			expect(result.pr).toEqual({ autoDraft: true, autoMerge: undefined, enabled: undefined })
+			expect(result.pr).toEqual({
+				autoDraft: true,
+				autoMerge: undefined,
+				enabled: undefined,
+				aiModel: undefined,
+			})
 		})
 
 		it("preserves pr.enabled while removing legacy baseBranch", () => {
@@ -410,7 +415,7 @@ describe("AzedarachConfigSchema", () => {
 				cliTool: "codex",
 				model: {
 					codex: {
-						default: "gpt-5-codex",
+						default: "gpt-5.3-codex-spark",
 						chat: "gpt-5-mini",
 					},
 				},
@@ -418,8 +423,31 @@ describe("AzedarachConfigSchema", () => {
 			const resolved = mergeWithDefaults(result)
 
 			expect(resolved.cliTool).toBe("codex")
-			expect(resolved.model.codex.default).toBe("gpt-5-codex")
+			expect(resolved.model.codex.default).toBe("gpt-5.3-codex-spark")
 			expect(resolved.model.codex.chat).toBe("gpt-5-mini")
+		})
+
+		it("accepts pr.aiModel override", () => {
+			const result = decodeConfig({
+				pr: {
+					enabled: true,
+					aiModel: "gpt-5.3-codex-spark",
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.pr.aiModel).toBe("gpt-5.3-codex-spark")
+		})
+
+		it("accepts gpt-5.4 model literal", () => {
+			const result = decodeConfig({
+				model: {
+					default: "gpt-5.4",
+				},
+			})
+			const resolved = mergeWithDefaults(result)
+
+			expect(resolved.model.default).toBe("gpt-5.4")
 		})
 
 		it("preserves worktree config", () => {

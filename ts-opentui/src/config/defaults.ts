@@ -12,6 +12,7 @@ import {
 	type CliTool,
 	CURRENT_CONFIG_VERSION,
 	type SessionRecoveryMode,
+	type SupportedModel,
 	type WorkflowMode,
 } from "./schema.js"
 
@@ -97,23 +98,23 @@ export const DEFAULT_CONFIG = {
 	/** Model configuration for AI sessions */
 	model: {
 		/** Default model - undefined means use CLI tool's default */
-		default: undefined as string | undefined,
+		default: undefined as SupportedModel | undefined,
 		/** Chat model - defaults based on CLI tool */
-		chat: undefined as string | undefined,
+		chat: undefined as SupportedModel | undefined,
 		/** Claude-specific overrides */
 		claude: {
-			default: undefined as string | undefined,
-			chat: undefined as string | undefined,
+			default: undefined as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 		/** OpenCode-specific overrides */
 		opencode: {
-			default: undefined as string | undefined,
-			chat: undefined as string | undefined,
+			default: undefined as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 		/** Codex-specific overrides */
 		codex: {
-			default: "gpt-5.3-codex" as string | undefined,
-			chat: undefined as string | undefined,
+			default: undefined as SupportedModel | undefined,
+			chat: undefined as SupportedModel | undefined,
 		},
 	},
 
@@ -159,6 +160,7 @@ export const DEFAULT_CONFIG = {
 		enabled: true,
 		autoDraft: true,
 		autoMerge: false,
+		aiModel: undefined as SupportedModel | undefined,
 	},
 	merge: {
 		// No validation by default - must be explicitly configured in .azedarach.json
@@ -248,19 +250,19 @@ export interface ResolvedConfig {
 
 	/** Model configuration */
 	model: {
-		default: string | undefined
-		chat: string | undefined
+		default: SupportedModel | undefined
+		chat: SupportedModel | undefined
 		claude: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 		opencode: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 		codex: {
-			default: string | undefined
-			chat: string | undefined
+			default: SupportedModel | undefined
+			chat: SupportedModel | undefined
 		}
 	}
 
@@ -301,6 +303,7 @@ export interface ResolvedConfig {
 		enabled: boolean
 		autoDraft: boolean
 		autoMerge: boolean
+		aiModel: SupportedModel | undefined
 	}
 	merge: {
 		validateCommands: readonly string[]
@@ -567,6 +570,7 @@ export function mergeWithDefaults(config: AzedarachConfig): ResolvedConfig {
 			enabled: config.pr?.enabled ?? DEFAULT_CONFIG.pr.enabled,
 			autoDraft: config.pr?.autoDraft ?? DEFAULT_CONFIG.pr.autoDraft,
 			autoMerge: config.pr?.autoMerge ?? DEFAULT_CONFIG.pr.autoMerge,
+			aiModel: config.pr?.aiModel ?? DEFAULT_CONFIG.pr.aiModel,
 		},
 		merge: {
 			validateCommands: config.merge?.validateCommands ?? DEFAULT_CONFIG.merge.validateCommands,
