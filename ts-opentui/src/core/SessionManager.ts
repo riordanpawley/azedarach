@@ -98,6 +98,32 @@ const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
 
+const getCommandErrorField = (
+	error: unknown,
+	fieldName: "stdout" | "stderr",
+): string | undefined => {
+	if (typeof error !== "object" || error === null || !(fieldName in error)) {
+		return undefined
+	}
+	const value = Reflect.get(error, fieldName)
+	if (typeof value === "string") {
+		return value
+	}
+	if (value === undefined || value === null) {
+		return undefined
+	}
+	return String(value)
+}
+
+const getCommandErrorOutput = (error: unknown): string => {
+	const stderr = getCommandErrorField(error, "stderr")
+	const stdout = getCommandErrorField(error, "stdout")
+	return [stderr, stdout]
+		.filter((part): part is string => part !== undefined && part.length > 0)
+		.join("\n")
+		.trim()
+}
+
 const deriveWaitingAttentionPlan = (
 	status: TmuxAttentionStatus,
 	currentFlagRaw: string | null,
@@ -1155,38 +1181,57 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 
 					// Create WIP commit in worktree
 					// Git add all changes (including synced .azedarach/ directory)
-					const addCmd = Command.make("git", "add", "-A").pipe(
-						Command.workingDirectory(session.worktreePath),
-					)
-					yield* Command.exitCode(addCmd).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to stage changes: ${e}`,
-									command: "git add -A",
-								}),
-						),
+					yield* Command.string(
+						Command.make("git", "add", "-A").pipe(Command.workingDirectory(session.worktreePath)),
+					).pipe(
+						Effect.mapError((error) => {
+							const output = getCommandErrorOutput(error)
+							return new GitError({
+								message: `Failed to stage changes: ${output.length > 0 ? output : String(error)}`,
+								command: "git add -A",
+							})
+						}),
 					)
 
+					const hasStagedChangesExitCode = yield* Command.exitCode(
+						Command.make("git", "diff", "--cached", "--quiet").pipe(
+							Command.workingDirectory(session.worktreePath),
+						),
+					).pipe(
+						Effect.mapError((error) => {
+							const output = getCommandErrorOutput(error)
+							return new GitError({
+								message: `Failed to inspect staged changes: ${output.length > 0 ? output : String(error)}`,
+								command: "git diff --cached --quiet",
+							})
+						}),
+					)
+					if (hasStagedChangesExitCode !== 0 && hasStagedChangesExitCode !== 1) {
+						return yield* Effect.fail(
+							new GitError({
+								message: `git diff --cached --quiet returned unexpected exit code: ${hasStagedChangesExitCode}`,
+								command: "git diff --cached --quiet",
+							}),
+						)
+					}
+					const hasStagedChanges = hasStagedChangesExitCode === 1
+
 					// Git commit with WIP message
-					const commitCmd = Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
-						Command.workingDirectory(session.worktreePath),
-					)
-					yield* Command.exitCode(commitCmd).pipe(
-						Effect.mapError(
-							(e) =>
-								new GitError({
-									message: `Failed to create WIP commit: ${e}`,
-									command: "git commit -m 'WIP: Paused session'",
-								}),
-						),
-						// Ignore error if nothing to commit
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed(0)),
+					if (hasStagedChanges) {
+						yield* Command.string(
+							Command.make("git", "commit", "-m", "WIP: Paused session").pipe(
+								Command.workingDirectory(session.worktreePath),
 							),
-						),
-					)
+						).pipe(
+							Effect.mapError((error) => {
+								const output = getCommandErrorOutput(error)
+								return new GitError({
+									message: `Failed to create WIP commit: ${output.length > 0 ? output : String(error)}`,
+									command: "git commit -m 'WIP: Paused session'",
+								})
+							}),
+						)
+					}
 
 					// Update session state to paused
 					const oldState = session.state

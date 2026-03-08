@@ -706,30 +706,65 @@ const runShellCommand = (
 		return yield* Command.string(shellCommand).pipe(
 			Effect.map((output) => ({ success: true, output })),
 			Effect.catchAll((error) => {
-				let stdout = ""
-				if (typeof error === "object" && error !== null && "stdout" in error) {
-					const stdoutCandidate = error.stdout
-					stdout =
-						typeof stdoutCandidate === "string" ? stdoutCandidate : String(stdoutCandidate ?? "")
-				}
-
-				let stderr = ""
-				if (typeof error === "object" && error !== null && "stderr" in error) {
-					const stderrCandidate = error.stderr
-					stderr =
-						typeof stderrCandidate === "string" ? stderrCandidate : String(stderrCandidate ?? "")
-				}
-
 				const fallback = String(error)
-				const output = [stdout, stderr]
-					.filter((part) => part.length > 0)
-					.join("\n")
-					.trim()
+				const output = getCommandErrorOutput(error)
 
 				return Effect.succeed({
 					success: false,
-					output: output || fallback,
+					output: output.length > 0 ? output : fallback,
 				})
+			}),
+		)
+	})
+
+const getCommandErrorField = (
+	error: unknown,
+	fieldName: "stdout" | "stderr",
+): string | undefined => {
+	if (typeof error !== "object" || error === null || !(fieldName in error)) {
+		return undefined
+	}
+	const value = Reflect.get(error, fieldName)
+	if (typeof value === "string") {
+		return value
+	}
+	if (value === undefined || value === null) {
+		return undefined
+	}
+	return String(value)
+}
+
+const getCommandErrorOutput = (error: unknown): string => {
+	const stderr = getCommandErrorField(error, "stderr")
+	const stdout = getCommandErrorField(error, "stdout")
+	return [stderr, stdout]
+		.filter((part): part is string => part !== undefined && part.length > 0)
+		.join("\n")
+		.trim()
+}
+
+const hasStagedChanges = (
+	cwd: string,
+): Effect.Effect<boolean, GitError, CommandExecutor.CommandExecutor> =>
+	Effect.gen(function* () {
+		const command = Command.make("git", "diff", "--cached", "--quiet").pipe(
+			Command.workingDirectory(cwd),
+		)
+		const exitCode = yield* Command.exitCode(command).pipe(
+			Effect.mapError(
+				(error) =>
+					new GitError({
+						message: `git diff --cached --quiet failed: ${String(error)}`,
+						command: "git diff --cached --quiet",
+					}),
+			),
+		)
+		if (exitCode === 0) return false
+		if (exitCode === 1) return true
+		return yield* Effect.fail(
+			new GitError({
+				message: `git diff --cached --quiet returned unexpected exit code: ${exitCode}`,
+				command: "git diff --cached --quiet",
 			}),
 		)
 	})
@@ -770,9 +805,7 @@ const runGit = (
 		const command = Command.make("git", ...args).pipe(Command.workingDirectory(cwd))
 		return yield* Command.string(command).pipe(
 			Effect.mapError((error) => {
-				// Extract stderr from platform error (like IssueTrackerClient does)
-				// This is critical for conflict detection which checks stderr for "CONFLICT"
-				const stderr = "stderr" in error ? String(error.stderr) : String(error)
+				const stderr = getCommandErrorOutput(error) || String(error)
 				return new GitError({
 					message: `git ${args.join(" ")} failed: ${stderr}`,
 					command: `git ${args.join(" ")}`,
@@ -1363,24 +1396,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						)
 
 						// Stage and commit any changes
-						yield* runGit(["add", "-A"], worktree.path).pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.void),
-								),
-							),
-						)
-
-						yield* runGit(
-							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
-							worktree.path,
-						).pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.void),
-								),
-							),
-						) // Ignore if nothing to commit
+						yield* runGit(["add", "-A"], worktree.path)
+						const shouldCommit = yield* hasStagedChanges(worktree.path)
+						if (shouldCommit) {
+							yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path)
+						}
 
 						// Push branch to origin
 						yield* runGit(["push", "-u", "origin", issueBranch], worktree.path).pipe(
@@ -1742,19 +1762,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 
 						// 2. Stage and commit any uncommitted changes in worktree
 						yield* reportProgress("commit")
-						yield* runGit(["add", "-A"], worktree.path).pipe(
-							Effect.catchAll((e) => Effect.logWarning(`Failed to stage changes: ${e.message}`)),
-						)
-						yield* runGit(
-							["commit", "-m", `Complete ${issueId}: ${issue.title}`],
-							worktree.path,
-						).pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.void),
-								),
-							), // Ignore if nothing to commit
-						)
+						yield* runGit(["add", "-A"], worktree.path)
+						const shouldCommit = yield* hasStagedChanges(worktree.path)
+						if (shouldCommit) {
+							yield* runGit(["commit", "-m", `Complete ${issueId}: ${issue.title}`], worktree.path)
+						}
 
 						// 3. Check for non-tracker conflicts using merge-tree (safe, in-memory)
 						// We only care about conflicts in actual code files, not .azedarach/
@@ -1979,23 +1991,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 											yield* Effect.log(`Validation passed after fix attempt ${attempt}`)
 
 											// Commit the fixes
-											yield* runGit(["add", "-A"], mergeDir).pipe(
-												Effect.catchAll((error) =>
-													Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-														Effect.zipRight(Effect.void),
-													),
-												),
-											)
-											yield* runGit(
-												["commit", "-m", `fix: auto-fix after merging ${issueId}`],
-												mergeDir,
-											).pipe(
-												Effect.catchAll((error) =>
-													Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-														Effect.zipRight(Effect.void),
-													),
-												),
-											)
+											yield* runGit(["add", "-A"], mergeDir)
+											const shouldCommitFix = yield* hasStagedChanges(mergeDir)
+											if (shouldCommitFix) {
+												yield* runGit(
+													["commit", "-m", `fix: auto-fix after merging ${issueId}`],
+													mergeDir,
+												)
+											}
 
 											return
 										}
@@ -2006,23 +2009,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								yield* Effect.log("Validation still failing after auto-fix attempts")
 
 								// Commit any partial fixes
-								yield* runGit(["add", "-A"], mergeDir).pipe(
-									Effect.catchAll((error) =>
-										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-											Effect.zipRight(Effect.void),
-										),
-									),
-								)
-								yield* runGit(
-									["commit", "-m", `wip: partial fix after merging ${issueId}`],
-									mergeDir,
-								).pipe(
-									Effect.catchAll((error) =>
-										Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-											Effect.zipRight(Effect.void),
-										),
-									),
-								)
+								yield* runGit(["add", "-A"], mergeDir)
+								const shouldCommitPartialFix = yield* hasStagedChanges(mergeDir)
+								if (shouldCommitPartialFix) {
+									yield* runGit(
+										["commit", "-m", `wip: partial fix after merging ${issueId}`],
+										mergeDir,
+									)
+								}
 
 								// Start an AI session if configured
 								if (startAiSessionOnFailure) {
@@ -3000,21 +2994,14 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						}
 
 						// Commit any uncommitted changes in source worktree
-						yield* runGit(["add", "-A"], sourceWorktree.path).pipe(
-							Effect.catchAll((e) =>
-								Effect.logWarning(`Failed to stage changes in source: ${e.message}`),
-							),
-						)
-						yield* runGit(
-							["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
-							sourceWorktree.path,
-						).pipe(
-							Effect.catchAll((error) =>
-								Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-									Effect.zipRight(Effect.void),
-								),
-							),
-						) // Ignore if nothing to commit
+						yield* runGit(["add", "-A"], sourceWorktree.path)
+						const shouldCommitSource = yield* hasStagedChanges(sourceWorktree.path)
+						if (shouldCommitSource) {
+							yield* runGit(
+								["commit", "-m", `Work in progress: ${sourceIssueId}: ${sourceIssue.title}`],
+								sourceWorktree.path,
+							)
+						}
 
 						// Ensure target has a worktree (create if needed)
 						let targetWorktree = yield* worktreeManager.get({
