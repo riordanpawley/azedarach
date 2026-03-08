@@ -10,6 +10,7 @@ const issueTrackerBackendSetting = EDITABLE_SETTINGS.find(
 	(setting) => setting.key === "issueTrackerBackend",
 )
 const prEnabledSetting = EDITABLE_SETTINGS.find((setting) => setting.key === "prEnabled")
+const cliToolSetting = EDITABLE_SETTINGS.find((setting) => setting.key === "cliTool")
 
 if (issueSyncSetting === undefined) {
 	throw new Error("Issue Sync setting definition is missing")
@@ -29,6 +30,10 @@ if (issueTrackerBackendSetting === undefined) {
 
 if (prEnabledSetting === undefined) {
 	throw new Error("PR enabled setting definition is missing")
+}
+
+if (cliToolSetting === undefined) {
+	throw new Error("CLI tool setting definition is missing")
 }
 
 describe("SettingsService issue sync setting", () => {
@@ -91,6 +96,10 @@ describe("SettingsService linear webhooks setting", () => {
 })
 
 describe("SettingsService non-boolean selectors", () => {
+	it("defaults missing cliTool display value to codex", () => {
+		expect(cliToolSetting.getValue({})).toBe("codex")
+	})
+
 	it("cycles workflow mode origin -> local -> origin", () => {
 		const local = workflowModeSetting.nextValue({
 			git: { workflowMode: "origin" },

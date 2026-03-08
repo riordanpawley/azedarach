@@ -2,7 +2,7 @@ import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { type AzedarachConfig, AzedarachConfigSchema } from "../config/schema.js"
-import { ProjectService } from "./ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
 export type SettingValue = boolean | string | number
@@ -69,10 +69,10 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		key: "cliTool",
 		group: ["General"],
 		label: "CLI Tool",
-		getValue: (c) => c.cliTool ?? "claude",
+		getValue: (c) => c.cliTool ?? "codex",
 		nextValue: (c) => ({
 			...c,
-			cliTool: cycleStringValue(c.cliTool ?? "claude", CLI_TOOL_OPTIONS),
+			cliTool: cycleStringValue(c.cliTool ?? "codex", CLI_TOOL_OPTIONS),
 		}),
 	},
 	{
@@ -470,7 +470,23 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 		const getConfigPath = (): Effect.Effect<string> =>
 			Effect.gen(function* () {
 				const projectPath = yield* projectService.getCurrentPath()
-				return pathService.join(projectPath ?? process.cwd(), ".azedarach.json")
+				const effectiveProjectPath = projectPath ?? process.cwd()
+				const cwdPath = process.cwd()
+				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+				const cwdHasConfig = yield* fs.exists(cwdConfigPath).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => false),
+				)
+				const configBasePath = resolveConfigBasePath({
+					cwdPath,
+					projectPath: effectiveProjectPath,
+					pathOps: pathService,
+					cwdHasConfig,
+				})
+
+				return pathService.join(configBasePath, ".azedarach.json")
 			})
 
 		const loadRawConfig = (): Effect.Effect<AzedarachConfig, SettingsConfigLoadError> =>

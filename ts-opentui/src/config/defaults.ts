@@ -93,7 +93,7 @@ export const DEFAULT_CONFIG = {
 	$schema: CURRENT_CONFIG_VERSION,
 
 	/** CLI tool to use for AI sessions */
-	cliTool: "claude" as const,
+	cliTool: "codex" as const,
 
 	/** Model configuration for AI sessions */
 	model: {
