@@ -93,15 +93,6 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		}),
 	},
 	{
-		key: "prEnabled",
-		label: "PR Enabled",
-		getValue: (c) => c.pr?.enabled ?? true,
-		toggle: (c) => ({
-			...c,
-			pr: { ...c.pr, enabled: !(c.pr?.enabled ?? true) },
-		}),
-	},
-	{
 		key: "autoDraft",
 		label: "Auto Draft PR",
 		getValue: (c) => c.pr?.autoDraft ?? true,
@@ -215,7 +206,8 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		key: "linearWebhooksEnabled",
 		label: "Linear Webhooks",
 		getValue: (c) => {
-			if (c.issueTracker?.linear !== undefined) return c.issueTracker.linear.webhooks?.enabled ?? true
+			if (c.issueTracker?.linear !== undefined)
+				return c.issueTracker.linear.webhooks?.enabled ?? true
 			return false
 		},
 		toggle: (c) => {
