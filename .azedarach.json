@@ -1,5 +1,6 @@
 {
-  "$schema": 6,
+  "$schema": "./.azedarach.schema.json",
+  "$version": 6,
   "cliTool": "codex",
   "issueTracker": {
     "local": {
