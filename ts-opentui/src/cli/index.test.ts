@@ -56,6 +56,21 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		])
 	})
 
+	it("moves issue child options ahead of title when title is first", () => {
+		const argv = ["bun", "az", "issue", "child", "Follow-up task", "--parent", "AZE-200"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"child",
+			"--parent",
+			"AZE-200",
+			"Follow-up task",
+		])
+	})
+
 	it("keeps issue list options unchanged", () => {
 		const argv = ["bun", "az", "issue", "list", "--limit", "5", "--status", "open"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
@@ -141,23 +156,49 @@ describe("resolveCliExecutionMode", () => {
 describe("normalizeCliAliases", () => {
 	it("normalizes top-level `i` to `issue`", () => {
 		const argv = ["bun", "az", "i", "create", "Title", "--type", "task"]
-		expect(normalizeCliAliases(argv)).toEqual(["bun", "az", "issue", "create", "Title", "--type", "task"])
+		expect(normalizeCliAliases(argv)).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"create",
+			"Title",
+			"--type",
+			"task",
+		])
 	})
 
 	it("normalizes common top-level shorthands to canonical commands", () => {
 		expect(normalizeCliAliases(["bun", "az", "a", "list"])).toEqual(["bun", "az", "add", "list"])
 		expect(normalizeCliAliases(["bun", "az", "ls", "list"])).toEqual(["bun", "az", "list"])
 		expect(normalizeCliAliases(["bun", "az", "st", "a1"])).toEqual(["bun", "az", "start", "a1"])
-		expect(normalizeCliAliases(["bun", "az", "p", "list"])).toEqual(["bun", "az", "project", "list"])
+		expect(normalizeCliAliases(["bun", "az", "p", "list"])).toEqual([
+			"bun",
+			"az",
+			"project",
+			"list",
+		])
 		expect(normalizeCliAliases(["bun", "az", "pr", "list"])).toEqual(["bun", "az", "prime", "list"])
 		expect(normalizeCliAliases(["bun", "az", "at", "a1"])).toEqual(["bun", "az", "attach", "a1"])
 		expect(normalizeCliAliases(["bun", "az", "pa", "a1"])).toEqual(["bun", "az", "pause", "a1"])
 		expect(normalizeCliAliases(["bun", "az", "k", "a1"])).toEqual(["bun", "az", "kill", "a1"])
-		expect(normalizeCliAliases(["bun", "az", "se", "status"])).toEqual(["bun", "az", "status", "status"])
+		expect(normalizeCliAliases(["bun", "az", "se", "status"])).toEqual([
+			"bun",
+			"az",
+			"status",
+			"status",
+		])
 	})
 
 	it("does not rewrite short option aliases for issue operations", () => {
-		const argv = ["bun", "az", "issue", "create", "-d", "Add missing alias support", "Create alias coverage"]
+		const argv = [
+			"bun",
+			"az",
+			"issue",
+			"create",
+			"-d",
+			"Add missing alias support",
+			"Create alias coverage",
+		]
 		expect(normalizeCliAliases(argv)).toEqual(argv)
 	})
 
@@ -168,6 +209,13 @@ describe("normalizeCliAliases", () => {
 			"issue",
 			"create",
 			"Fix typo",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "ch", "Follow-up"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"child",
+			"Follow-up",
 		])
 		expect(normalizeCliAliases(["bun", "az", "issue", "d", "add", "AZE-1", "AZE-2"])).toEqual([
 			"bun",
@@ -460,8 +508,8 @@ describe("formatIssueDetailSections", () => {
 		expect(sections).toEqual(["Dependencies: 2", "Dependents: 1"])
 	})
 
-    it("formats directional counts for blocks and parent-child relationships", () => {
-        const sections = formatIssueDetailSections({
+	it("formats directional counts for blocks and parent-child relationships", () => {
+		const sections = formatIssueDetailSections({
 			id: "az-123",
 			title: "Title",
 			status: "open",
@@ -481,48 +529,48 @@ describe("formatIssueDetailSections", () => {
 			],
 		})
 
-        expect(sections).toEqual([
-            "Dependency Counts: blocking: 1, blockedBy: 2, children: 2, parent: 1",
-            "Dependencies:\nAZE-11, AZE-12, AZE-10",
-            "Dependents:\nAZE-90, AZE-91, AZE-92",
-        ])
-    })
+		expect(sections).toEqual([
+			"Dependency Counts: blocking: 1, blockedBy: 2, children: 2, parent: 1",
+			"Dependencies:\nAZE-11, AZE-12, AZE-10",
+			"Dependents:\nAZE-90, AZE-91, AZE-92",
+		])
+	})
 
-    it("includes linked spec requirements when provided", () => {
-        const sections = formatIssueDetailSections(
-            {
-                id: "az-123",
-                title: "Title",
-                status: "open",
-                priority: 2,
-                issue_type: "task",
-                created_at: "2026-03-05T10:00:00.000Z",
-                updated_at: "2026-03-05T11:00:00.000Z",
-            },
-	            {
-	                linkedSpecRequirements: [
-	                    {
-	                        id: "AZ-FR-4201",
-	                        local_id: "fr4201",
-	                        external_code: "AZ-FR-4201",
-	                        title: "Persist requirements and links",
-	                        kind: "functional",
-	                        link_type: "implements",
-	                    },
-	                    {
-	                        id: "AZ-AT-2901",
-	                        local_id: "at2901",
-	                        external_code: "AZ-AT-2901",
-	                        title: "Acceptance path is covered",
-	                        kind: "acceptance",
-	                        link_type: "tests",
-	                    },
-	                ],
-	            },
-	        )
+	it("includes linked spec requirements when provided", () => {
+		const sections = formatIssueDetailSections(
+			{
+				id: "az-123",
+				title: "Title",
+				status: "open",
+				priority: 2,
+				issue_type: "task",
+				created_at: "2026-03-05T10:00:00.000Z",
+				updated_at: "2026-03-05T11:00:00.000Z",
+			},
+			{
+				linkedSpecRequirements: [
+					{
+						id: "AZ-FR-4201",
+						local_id: "fr4201",
+						external_code: "AZ-FR-4201",
+						title: "Persist requirements and links",
+						kind: "functional",
+						link_type: "implements",
+					},
+					{
+						id: "AZ-AT-2901",
+						local_id: "at2901",
+						external_code: "AZ-AT-2901",
+						title: "Acceptance path is covered",
+						kind: "acceptance",
+						link_type: "tests",
+					},
+				],
+			},
+		)
 
-	        expect(sections).toEqual([
-	            "Linked Spec Requirements:\nfr4201 (AZ-FR-4201) [functional] (implements) Persist requirements and links\nat2901 (AZ-AT-2901) [acceptance] (tests) Acceptance path is covered",
-	        ])
-	    })
+		expect(sections).toEqual([
+			"Linked Spec Requirements:\nfr4201 (AZ-FR-4201) [functional] (implements) Persist requirements and links\nat2901 (AZ-AT-2901) [acceptance] (tests) Acceptance path is covered",
+		])
+	})
 })
