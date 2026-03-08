@@ -1,7 +1,11 @@
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { type AzedarachConfig, AzedarachConfigSchema } from "../config/schema.js"
+import {
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "../config/schema.js"
 import { ProjectService, resolveConfigBasePath } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
@@ -531,11 +535,26 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 				)
 			})
 
+		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+		const writeConfigJsonSchema = (configPath: string): Effect.Effect<void> => {
+			const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
+			return fs
+				.writeFileString(schemaPath, configJsonSchemaString)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(
+							`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
+						),
+					),
+				)
+		}
+
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
 				const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config)
 				yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
+				yield* writeConfigJsonSchema(configPath)
 			})
 
 		return {
@@ -617,7 +636,9 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						Effect.orElseSucceed(() => false),
 					)
 					if (!exists) {
-						yield* fs.writeFileString(configPath, "{}\n").pipe(Effect.orDie)
+						const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})
+						yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
+						yield* writeConfigJsonSchema(configPath)
 					}
 
 					const backupContent = yield* fs.readFileString(configPath).pipe(
@@ -677,6 +698,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						return { valid: false, error: "Schema validation failed" }
 					}
 
+					yield* writeConfigJsonSchema(configPath)
 					yield* appConfigService.reload()
 					yield* toast.show("success", "Settings updated")
 					return { valid: true }

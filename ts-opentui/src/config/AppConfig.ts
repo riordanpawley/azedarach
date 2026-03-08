@@ -15,7 +15,7 @@ import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effe
 import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ToastService } from "../services/ToastService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
-import { type AzedarachConfig, AzedarachConfigSchema } from "./schema.js"
+import { type AzedarachConfig, AzedarachConfigJsonSchema, AzedarachConfigSchema } from "./schema.js"
 
 // ============================================================================
 // Error Types
@@ -190,6 +190,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			JSON.stringify(canonicalizeJson(migratedConfig))
 
 		const formatConfigJson = (config: unknown): string => `${JSON.stringify(config, null, 2)}\n`
+		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
 
 		const loadWarningRef = yield* SubscriptionRef.make<ConfigParseError | null>(null)
 		const loadedConfigPathRef = yield* SubscriptionRef.make<string | null>(null)
@@ -295,6 +296,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 							),
 						),
 					)
+					const schemaPath = pathService.join(targetPath, ".azedarach.schema.json")
+					yield* fs
+						.writeFileString(schemaPath, configJsonSchemaString)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Failed to persist config JSON schema at ${schemaPath}: ${String(error)}`,
+								),
+							),
+						)
 				}
 
 				return validated
