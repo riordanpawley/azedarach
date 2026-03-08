@@ -21,7 +21,7 @@
  */
 import { Result } from "@effect-atom/atom"
 import { useAtomValue } from "@effect-atom/atom-react"
-import { EDITABLE_SETTINGS } from "../services/SettingsService.js"
+import { getVisibleSettings } from "../services/SettingsService.js"
 import { appConfigAtom, settingsStateAtom } from "./atoms.js"
 import { theme } from "./theme.js"
 
@@ -37,9 +37,10 @@ const formatBool = (value: boolean): string => {
 /**
  * Format a setting value for display based on value type
  */
-const formatSettingValue = (value: boolean | string): string => {
+const formatSettingValue = (value: boolean | string | number): string => {
 	if (typeof value === "boolean") return formatBool(value)
 	if (typeof value === "string") return value
+	if (typeof value === "number") return String(value)
 	return String(value)
 }
 
@@ -61,6 +62,35 @@ export const SettingsOverlay = () => {
 
 	const settingsState = settingsStateResult.value
 	if (!settingsState.isOpen) return null
+
+	const visibleSettings = getVisibleSettings(config)
+	const settingsRows: Array<
+		| {
+				readonly _tag: "group"
+				readonly key: string
+				readonly label: string
+				readonly depth: number
+		  }
+		| { readonly _tag: "setting"; readonly settingIndex: number }
+	> = []
+
+	const renderedGroupPath: string[] = []
+	for (let settingIndex = 0; settingIndex < visibleSettings.length; settingIndex++) {
+		const setting = visibleSettings[settingIndex]
+		for (let depth = 0; depth < setting.group.length; depth++) {
+			const label = setting.group[depth]
+			if (renderedGroupPath[depth] === label) continue
+			renderedGroupPath.splice(depth)
+			renderedGroupPath[depth] = label
+			settingsRows.push({
+				_tag: "group",
+				key: `${setting.key}-group-${depth}`,
+				label,
+				depth,
+			})
+		}
+		settingsRows.push({ _tag: "setting", settingIndex })
+	}
 
 	return (
 		<box
@@ -96,11 +126,24 @@ export const SettingsOverlay = () => {
 				</text>
 				<text> </text>
 
-				{EDITABLE_SETTINGS.map((setting, index) => {
+				{settingsRows.map((row) => {
+					if (row._tag === "group") {
+						return (
+							<text key={row.key} fg={theme.blue} attributes={ATTR_BOLD}>
+								{`${"  ".repeat(row.depth)}${row.label}`}
+							</text>
+						)
+					}
+
+					const setting = visibleSettings[row.settingIndex]
+					if (!setting) return null
+
 					const value = setting.getValue(config)
-					const isFocused = index === settingsState.focusIndex
+					const isFocused = row.settingIndex === settingsState.focusIndex
 					const fg = isFocused ? theme.mauve : theme.subtext0
 					const prefix = isFocused ? "▶ " : "  "
+					const indent = "  ".repeat(setting.group.length)
+					const label = `${indent}${setting.label}`
 
 					return (
 						<box key={setting.key} flexDirection="row">
@@ -108,9 +151,9 @@ export const SettingsOverlay = () => {
 								{prefix}
 							</text>
 							<text fg={fg} attributes={isFocused ? ATTR_BOLD : 0}>
-								{setting.label}
+								{label}
 							</text>
-							<text fg={theme.overlay0}>{".".repeat(Math.max(1, 35 - setting.label.length))}</text>
+							<text fg={theme.overlay0}>{".".repeat(Math.max(1, 35 - label.length))}</text>
 							<text fg={theme.green}>{formatSettingValue(value)}</text>
 						</box>
 					)
@@ -119,7 +162,7 @@ export const SettingsOverlay = () => {
 				<text> </text>
 
 				<text fg={theme.subtext0}>
-					{"j/k: move • Enter/Space: toggle • e: edit in editor • Esc: close"}
+					{"j/k: move • Enter/Space: cycle/toggle • e: edit in editor • Esc: close"}
 				</text>
 			</box>
 		</box>
