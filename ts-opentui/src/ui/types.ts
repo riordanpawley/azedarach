@@ -55,6 +55,12 @@ export interface SessionMetrics {
 	recentOutput?: string
 	/** Current agent workflow phase (planning/action/verification) */
 	agentPhase?: AgentPhase
+	/**
+	 * Checklist progress extracted from terminal output: [completedCount, totalCount].
+	 * Derived from markdown-style task lists (e.g. "- [x] step 1 / - [ ] step 2")
+	 * that the agent prints as it works through a plan.
+	 */
+	checklistProgress?: readonly [number, number]
 }
 
 /**
@@ -136,6 +142,14 @@ export interface TaskWithSession extends Issue, SessionMetrics, GitStatus, Parti
 	sessionState: SessionState
 	/** Whether a git worktree exists for this task (even if no session is running) */
 	hasWorktree?: boolean
+	/**
+	 * Git branch name for this task's worktree (e.g. "alice/az-123/fix-login").
+	 * Populated whenever `hasWorktree` is true. Useful for manual git operations,
+	 * PR reviews, and knowing where to push.
+	 *
+	 * Inspired by t3code's Thread.branch field which is always exposed to the UI.
+	 */
+	worktreeBranch?: string
 	/** Whether the worktree has an active merge conflict (MERGE_HEAD exists) */
 	hasMergeConflict?: boolean
 	/**

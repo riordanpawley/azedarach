@@ -346,6 +346,7 @@ export const applySessionRefreshPatch = (params: {
     readonly estimatedTokens: number | undefined
     readonly recentOutput: string | undefined
     readonly agentPhase: TaskWithSession["agentPhase"]
+    readonly checklistProgress?: TaskWithSession["checklistProgress"]
     readonly gitStatusPatch: GitStatus | undefined
 }): TaskWithSession => ({
     ...params.task,
@@ -355,6 +356,7 @@ export const applySessionRefreshPatch = (params: {
     estimatedTokens: params.estimatedTokens,
     recentOutput: params.recentOutput,
     agentPhase: params.agentPhase,
+    checklistProgress: params.checklistProgress,
 })
 
 // ============================================================================
@@ -1292,6 +1294,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 						)
 					: []
 				const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
+				// Build branch map from the same list — branch is fetched for free via
+				// `git worktree list --porcelain` but was previously discarded here.
+				// Inspired by t3code: Thread.branch is always exposed to the UI.
+				const worktreeBranchMap = new Map(
+					worktreeList
+						.filter((wt) => wt.branch.length > 0)
+						.map((wt) => [wt.issueId, wt.branch]),
+				)
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -1338,6 +1348,9 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								...issue,
 								sessionState,
 								hasWorktree: hasWorktree || undefined,
+								worktreeBranch: hasWorktree
+									? worktreeBranchMap.get(issue.id)
+									: undefined,
 								hasMergeConflict,
 								parentEpicId,
 								...gitStatus,
@@ -1348,6 +1361,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								estimatedTokens: metrics?.estimatedTokens,
 								recentOutput: metrics?.recentOutput,
 								agentPhase: metrics?.agentPhase,
+								checklistProgress: metrics?.checklistProgress,
 							}
 
 							// Apply optimistic updates
@@ -1756,6 +1770,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
                                 estimatedTokens: metrics?.estimatedTokens,
                                 recentOutput: metrics?.recentOutput,
                                 agentPhase: metrics?.agentPhase,
+                                checklistProgress: metrics?.checklistProgress,
                                 gitStatusPatch,
                             })
                         }),

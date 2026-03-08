@@ -6,6 +6,10 @@ if [ "${RULESYNC_SKIP:-0}" = "1" ]; then
   exit 0
 fi
 
+if ! command -v rulesync >/dev/null 2>&1; then
+  exit 0
+fi
+
 repo_root="$(git rev-parse --show-toplevel)"
 (
   cd "$repo_root" && \
