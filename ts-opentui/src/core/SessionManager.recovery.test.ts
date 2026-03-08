@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test"
 import {
 	ACTIVE_SESSION_STATES,
+	classifySessionStateForMissingCodeWindow,
 	isActiveSessionState,
 	resolveDiscoveredSessionState,
 } from "./SessionManager.js"
@@ -24,6 +25,23 @@ describe("SessionManager discovered session recovery", () => {
 	it("does not mark sessions as crashed while startup is in progress", () => {
 		expect(resolveDiscoveredSessionState("initializing", false, true)).toBe("initializing")
 		expect(resolveDiscoveredSessionState(undefined, false, true)).toBe("busy")
+	})
+
+	it("uses shared missing-window classifier for startup lock cases", () => {
+		expect(
+			classifySessionStateForMissingCodeWindow("initializing", {
+				hasCodeWindow: false,
+				hasStartLock: true,
+				tmuxStartupInProgress: false,
+			}),
+		).toBe("initializing")
+		expect(
+			classifySessionStateForMissingCodeWindow(undefined, {
+				hasCodeWindow: false,
+				hasStartLock: true,
+				tmuxStartupInProgress: false,
+			}),
+		).toBe("busy")
 	})
 
 	it("tracks active states consistently", () => {
