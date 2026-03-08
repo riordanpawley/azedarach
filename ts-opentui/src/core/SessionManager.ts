@@ -155,6 +155,28 @@ export const resolveDiscoveredSessionState = (
 	return persistedState ?? "busy"
 }
 
+export interface MissingCodeWindowClassificationOptions {
+	readonly hasCodeWindow: boolean
+	readonly hasStartLock: boolean
+	readonly tmuxStartupInProgress: boolean
+}
+
+export const classifySessionStateForMissingCodeWindow = (
+	state: SessionState | undefined,
+	options: MissingCodeWindowClassificationOptions,
+): SessionState =>
+	resolveDiscoveredSessionState(
+		state,
+		options.hasCodeWindow,
+		options.hasCodeWindow ? false : options.hasStartLock || options.tmuxStartupInProgress,
+	)
+
+interface SessionMissingWindowClassification {
+	readonly state: SessionState
+	readonly hasCodeWindow: boolean
+	readonly startupInProgress: boolean
+}
+
 /**
  * Schema for persisted session - matches Session interface
  * Schema.DateTimeUtc handles ISO string ↔ DateTime at JSON boundary
@@ -1443,6 +1465,33 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 					)
 					const hasStartLock = (issueId: string): boolean =>
 						startsInProgressLookup.has(normalizeIssueIdForLookup(issueId))
+					const classifyStateForSession = (
+						issueId: string,
+						sessionName: string,
+						state: SessionState | undefined,
+					): Effect.Effect<
+						SessionMissingWindowClassification,
+						TmuxError | SessionNotFoundError,
+						CommandExecutor.CommandExecutor
+					> =>
+						Effect.gen(function* () {
+							const hasCodeWindow = yield* tmuxService.hasWindow(sessionName, WINDOW_NAMES.CODE)
+							const tmuxStartupInProgress = hasCodeWindow
+								? false
+								: yield* isSessionStartupInProgress(sessionName)
+							const startupInProgress = hasCodeWindow
+								? false
+								: hasStartLock(issueId) || tmuxStartupInProgress
+							return {
+								state: classifySessionStateForMissingCodeWindow(state, {
+									hasCodeWindow,
+									hasStartLock: hasStartLock(issueId),
+									tmuxStartupInProgress,
+								}),
+								hasCodeWindow,
+								startupInProgress,
+							}
+						})
 
 					for (const tmuxSession of tmuxSessions) {
 						const parsed = parseIssueSessionName(tmuxSession.name, effectiveProjectPath)
@@ -1456,18 +1505,12 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 						{
 							const worktree = worktreeByIssueLookup.get(issueLookupKey)
 							const persisted = persistedByIssueLookup.get(issueLookupKey)
-							const hasCodeWindow = yield* tmuxService.hasWindow(
+							const classifiedState = yield* classifyStateForSession(
+								issueId,
 								tmuxSession.name,
-								WINDOW_NAMES.CODE,
-							)
-							const startupInProgress = hasCodeWindow
-								? false
-								: hasStartLock(issueId) || (yield* isSessionStartupInProgress(tmuxSession.name))
-							const recoveredState = resolveDiscoveredSessionState(
 								persisted?.state,
-								hasCodeWindow,
-								startupInProgress,
 							)
+							const recoveredState = classifiedState.state
 							if (recoveredState === "crashed") {
 								yield* Effect.log(
 									`Detected recoverable orphan session for ${issueId}: code window missing in ${tmuxSession.name}`,
@@ -1501,33 +1544,33 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 							continue
 						}
 
-						const hasCodeWindow = yield* tmuxService.hasWindow(
+						const classifiedState = yield* classifyStateForSession(
+							issueId,
 							inMemorySession.tmuxSessionName,
-							WINDOW_NAMES.CODE,
+							inMemorySession.state,
 						)
-						if (hasCodeWindow) {
+						if (classifiedState.hasCodeWindow) {
 							continue
 						}
-						const startupInProgress =
-							hasStartLock(issueId) ||
-							(yield* isSessionStartupInProgress(inMemorySession.tmuxSessionName))
-						if (startupInProgress) {
+						const nextState = classifiedState.state
+						if (nextState === inMemorySession.state && classifiedState.startupInProgress) {
 							yield* Effect.log(
 								`Skipping crash classification for ${issueId}: startup still in progress in ${inMemorySession.tmuxSessionName}`,
 							)
 							continue
 						}
-
-						yield* Effect.log(
-							`Detected session ${issueId} with missing code window (${inMemorySession.tmuxSessionName}); marking crashed for recovery`,
-						)
-						yield* Ref.update(sessionsRef, (sessions) =>
-							HashMap.set(sessions, issueId, {
-								...inMemorySession,
-								state: "crashed",
-							}),
-						)
-						sessionsChanged = true
+						if (nextState === "crashed") {
+							yield* Effect.log(
+								`Detected session ${issueId} with missing code window (${inMemorySession.tmuxSessionName}); marking crashed for recovery`,
+							)
+							yield* Ref.update(sessionsRef, (sessions) =>
+								HashMap.set(sessions, issueId, {
+									...inMemorySession,
+									state: "crashed",
+								}),
+							)
+							sessionsChanged = true
+						}
 					}
 
 					// Detect crashed sessions: persisted sessions whose tmux died
