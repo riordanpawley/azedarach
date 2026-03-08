@@ -121,6 +121,22 @@ git pull --rebase
 just release-ts-opentui patch
 ```
 
+One-step release + Homebrew tap update (maintainers):
+
+```bash
+just release-ts-opentui-homebrew patch
+```
+
+By default this uses:
+- `/Users/riordan/prog/homebrew-azedarach`
+
+Override if needed:
+
+```bash
+AZ_HOMEBREW_TAP_DIR=/path/to/homebrew-azedarach \
+  just release-ts-opentui-homebrew patch
+```
+
 Release script behavior:
 - validates clean working tree on `main`
 - runs `bun run type-check` in `ts-opentui`
@@ -163,6 +179,9 @@ Bootstrap steps:
    git commit -m "azedarach v0.3.1"
    git push
    ```
+
+Shortcut:
+- `just release-ts-opentui-homebrew patch` runs release + formula generation and commits/pushes the tap update (default tap path: `/Users/riordan/prog/homebrew-azedarach`).
 
 Coworker install (after tap is published):
 
