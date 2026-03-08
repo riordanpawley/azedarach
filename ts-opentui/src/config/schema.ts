@@ -1405,29 +1405,10 @@ export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, Cur
 		Effect.succeed({
 			...current,
 			$schema: CURRENT_CONFIG_VERSION,
-			git:
-				current.git === undefined && current.pr === undefined && current.merge === undefined
-					? undefined
-					: {
-							...current.git,
-							pr: current.pr
-								? {
-										enabled: current.pr.enabled,
-										autoDraft: current.pr.autoDraft,
-										autoMerge: current.pr.autoMerge,
-									}
-								: undefined,
-							merge: current.merge
-								? {
-										validateCommands: current.merge.validateCommands,
-										fixCommand: current.merge.fixCommand,
-										maxFixAttempts: current.merge.maxFixAttempts,
-										startAiSessionOnFailure: current.merge.startAiSessionOnFailure,
-									}
-								: undefined,
-						},
-			pr: undefined,
-			merge: undefined,
+			// Persist canonical v6 layout: top-level `pr`/`merge`, git aliases stripped.
+			git: current.git,
+			pr: current.pr,
+			merge: current.merge,
 		}),
 })
 

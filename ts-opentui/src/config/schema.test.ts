@@ -14,6 +14,8 @@ import { AzedarachConfigSchema, CURRENT_CONFIG_VERSION } from "./schema.js"
  * Helper to decode a raw config through the schema
  */
 const decodeConfig = (raw: unknown) => Schema.decodeUnknownSync(AzedarachConfigSchema)(raw)
+const encodeConfig = (decoded: ReturnType<typeof decodeConfig>) =>
+	Schema.encodeSync(AzedarachConfigSchema)(decoded)
 
 describe("AzedarachConfigSchema", () => {
 	describe("version handling", () => {
@@ -165,9 +167,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.merge?.startAiSessionOnFailure).toBe(false)
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(result)
-			const encodedMerge = encoded.git?.merge
-			expect(encodedMerge?.startAiSessionOnFailure).toBe(false)
-			expect(encoded.merge).toBeUndefined()
+			expect(encoded.merge?.startAiSessionOnFailure).toBe(false)
 		})
 
 		it("prefers merge.startAiSessionOnFailure when both keys are present", () => {
@@ -439,6 +439,19 @@ describe("AzedarachConfigSchema", () => {
 			expect(resolved.pr.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 
+		it("preserves pr.aiModel when re-encoding config for disk", () => {
+			const decoded = decodeConfig({
+				pr: {
+					enabled: true,
+					aiModel: "gpt-5.3-codex-spark",
+				},
+			})
+			const encoded = encodeConfig(decoded)
+
+			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
+			expect(encoded.pr?.enabled).toBe(true)
+		})
+
 		it("accepts gpt-5.4 model literal", () => {
 			const result = decodeConfig({
 				model: {
@@ -497,7 +510,6 @@ describe("AzedarachConfigSchema", () => {
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 			const encodedIssueTracker = encoded.issueTracker
-			const encodedGit = encoded.git
 
 			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
 			if (
@@ -509,11 +521,7 @@ describe("AzedarachConfigSchema", () => {
 			}
 			expect(encodedIssueTracker.legacy?.syncEnabled).toBe(true)
 			expect(encoded.git?.baseBranch).toBe("main")
-			if (encodedGit === undefined || typeof encodedGit !== "object" || encodedGit === null) {
-				throw new Error("Expected encoded git object")
-			}
-			expect(encodedGit.pr?.autoDraft).toBe(true)
-			expect(encoded.pr).toBeUndefined()
+			expect(encoded.pr?.autoDraft).toBe(true)
 		})
 	})
 })
