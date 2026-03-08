@@ -1140,6 +1140,7 @@ const issueCreateHandler = (args: {
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
 	readonly parent: Option.Option<string>
+	readonly deferred: boolean
 	readonly noDefaultParent: boolean
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1160,7 +1161,7 @@ const issueCreateHandler = (args: {
 					),
 				),
 			onNone: () =>
-				args.noDefaultParent
+				args.deferred || args.noDefaultParent
 					? Effect.succeed(Option.none<ActiveParentContext>())
 					: resolveActiveParentContext(resolverCwd),
 		})
@@ -2487,7 +2488,7 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
 - Start each session with: \`az prime\`
-- Mandatory parenting rule: when working under a parent issue, create follow-up work with \`az issue child "Title"\` (or \`az issue create "Title"\`, which now defaults to active parent context unless \`--no-default-parent\` is set).
+- Mandatory parenting rule: when working under a parent issue, create follow-up work with \`az issue child "Title"\` (or \`az issue create "Title"\`, which now defaults to active parent context unless \`--deferred\` is set).
 - Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
 - Common issue commands:
   - \`az issue list --limit 20\` (lists most recently updated issues first)
@@ -3270,8 +3271,11 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		deferred: Options.boolean("deferred").pipe(
+			Options.withDescription("Create issue without inheriting active parent context"),
+		),
 		noDefaultParent: Options.boolean("no-default-parent").pipe(
-			Options.withDescription("Disable active parent context fallback when --parent is omitted"),
+			Options.withDescription("Deprecated alias for --deferred"),
 		),
 		parent: Options.text("parent").pipe(
 			Options.withAlias("r"),
