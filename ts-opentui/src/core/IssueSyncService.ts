@@ -12,16 +12,17 @@ import {
 	Request,
 	RequestResolver,
 	Schedule,
+	Schema,
 } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import {
 	DiagnosticsService,
 	type IssueSyncFailure,
+	type IssueSyncHealth,
 	type IssueSyncQueueHealth,
 	type IssueSyncRunHealth,
 	type IssueSyncRuntimeHealth,
 	type IssueSyncRuntimeReason,
-	type IssueSyncHealth,
 } from "../services/DiagnosticsService.js"
 import { LinearSdk } from "./LinearSdk.js"
 import {
@@ -29,9 +30,9 @@ import {
 	LocalIssueStore,
 	type LocalIssueStoreError,
 	type PendingSyncItem,
-	type SyncQueueSummary,
 	type SyncOperation,
 	type SyncQueueClaim,
+	type SyncQueueSummary,
 } from "./LocalIssueStore.js"
 
 const LINEAR_SYNC_TARGET: "linear" = "linear"
@@ -186,28 +187,22 @@ const buildMergedDescription = (issue: {
 	return sections.join("\n\n")
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-	typeof value === "object" && value !== null
+const SyncPayloadSchema = Schema.Struct({
+	idempotencyKey: Schema.optional(Schema.String),
+})
 
 const parseSyncPayload = (payloadJson: string | null): { readonly idempotencyKey?: string } => {
 	if (payloadJson === null) {
 		return {}
 	}
 
-	try {
-		const parsed = JSON.parse(payloadJson)
-		if (!isRecord(parsed)) {
-			return {}
-		}
-		const candidate = parsed.idempotencyKey
-		if (typeof candidate !== "string") {
-			return {}
-		}
-		const idempotencyKey = candidate.trim()
-		return idempotencyKey.length > 0 ? { idempotencyKey } : {}
-	} catch {
+	const decoded = Schema.decodeUnknownEither(Schema.parseJson(SyncPayloadSchema))(payloadJson)
+	if (decoded._tag === "Left") {
 		return {}
 	}
+
+	const idempotencyKey = decoded.right.idempotencyKey?.trim()
+	return idempotencyKey && idempotencyKey.length > 0 ? { idempotencyKey } : {}
 }
 
 const formatUuidFromBytes = (bytes: Uint8Array): string => {
@@ -886,16 +881,14 @@ export class IssueSyncService extends Effect.Service<IssueSyncService>()("IssueS
 			Effect.gen(function* () {
 				const filter = buildLinearIssueFilter(scope)
 				const fetchIssuesPage = (afterCursor: string | undefined) =>
-					linearSdk
-						.issues(buildLinearIssuesPageQuery({ afterCursor, filter }))
-						.pipe(
-							Effect.mapError(
-								(error) =>
-									new IssueSyncError({
-										message: error.message,
-									}),
-							),
-						)
+					linearSdk.issues(buildLinearIssuesPageQuery({ afterCursor, filter })).pipe(
+						Effect.mapError(
+							(error) =>
+								new IssueSyncError({
+									message: error.message,
+								}),
+						),
+					)
 
 				const collectPages = (
 					afterCursor: string | undefined,

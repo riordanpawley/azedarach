@@ -15,7 +15,7 @@
 
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "@effect/platform"
 import { Data, Effect, Schema, SubscriptionRef } from "effect"
-import { IssueTrackerClient, type Issue } from "./IssueTrackerClient.js"
+import { type Issue, IssueTrackerClient } from "./IssueTrackerClient.js"
 
 // ============================================================================
 // Schema Definitions
@@ -121,6 +121,15 @@ export class AIResponseError extends Data.TaggedError("AIResponseError")<{
 	readonly statusCode?: number
 	readonly response?: string
 }> {}
+
+const ClaudeResponseSchema = Schema.Struct({
+	content: Schema.Array(
+		Schema.Struct({
+			type: Schema.String,
+			text: Schema.optional(Schema.String),
+		}),
+	),
+})
 
 // ============================================================================
 // Prompts
@@ -282,9 +291,15 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					),
 				)
 
-				// Extract text from Claude response
-				const content = (response as { content?: Array<{ type: string; text?: string }> }).content
-				if (!content || content.length === 0) {
+				const decodedResponse = yield* Schema.decodeUnknown(ClaudeResponseSchema)(response).pipe(
+					Effect.mapError(
+						(e) =>
+							new AIResponseError({
+								message: `Invalid Claude response structure: ${e}`,
+							}),
+					),
+				)
+				if (decodedResponse.content.length === 0) {
 					return yield* Effect.fail(
 						new AIResponseError({
 							message: "Empty response from Claude API",
@@ -292,8 +307,11 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					)
 				}
 
-				const textBlock = content.find((block) => block.type === "text")
-				if (!textBlock || !textBlock.text) {
+				const textBlock = decodedResponse.content.find(
+					(block): block is { readonly type: "text"; readonly text: string } =>
+						block.type === "text" && typeof block.text === "string",
+				)
+				if (!textBlock) {
 					return yield* Effect.fail(
 						new AIResponseError({
 							message: "No text content in Claude response",
@@ -322,22 +340,11 @@ export class PlanningService extends Effect.Service<PlanningService>()("Planning
 					jsonStr = jsonMatch[1]?.trim() ?? jsonStr
 				}
 
-				// Parse and validate
-				const parsed = yield* Effect.try({
-					try: () => JSON.parse(jsonStr),
-					catch: (e) =>
-						new PlanningError({
-							message: `Failed to parse JSON response: ${e}`,
-							phase,
-							cause: e,
-						}),
-				})
-
-				return yield* Schema.decodeUnknown(schema)(parsed).pipe(
+				return yield* Schema.decode(Schema.parseJson(schema))(jsonStr).pipe(
 					Effect.mapError(
 						(e) =>
 							new PlanningError({
-								message: `Invalid response structure: ${e}`,
+								message: `Failed to parse or validate JSON response: ${e}`,
 								phase,
 								cause: e,
 							}),

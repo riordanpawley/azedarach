@@ -1057,12 +1057,33 @@ const generateIssuePRBody = (issue: Issue, draftContext?: PRDraftContext): strin
  * Parse gh pr view JSON output to PR type
  */
 const parsePRJson = (json: string): PR => {
-	const data = JSON.parse(json)
+	const data = Schema.decodeUnknownSync(
+		Schema.parseJson(
+			Schema.Struct({
+				number: Schema.Number,
+				url: Schema.String,
+				title: Schema.String,
+				state: Schema.Literal("OPEN", "CLOSED", "MERGED"),
+				isDraft: Schema.optional(Schema.Boolean),
+				headRefName: Schema.String,
+			}),
+		),
+	)(json)
+	const prState = (state: "OPEN" | "CLOSED" | "MERGED"): PR["state"] => {
+		switch (state) {
+			case "OPEN":
+				return "open"
+			case "CLOSED":
+				return "closed"
+			case "MERGED":
+				return "merged"
+		}
+	}
 	return {
 		number: data.number,
 		url: data.url,
 		title: data.title,
-		state: data.state.toLowerCase() as "open" | "closed" | "merged",
+		state: prState(data.state),
 		draft: data.isDraft ?? false,
 		branch: data.headRefName,
 	}
@@ -2628,20 +2649,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 						),
 					)
 
-					// Parse JSON using Effect.try
-					const parsed = yield* Effect.try({
-						try: () => JSON.parse(commentsJson) as unknown,
-						catch: () => new PRError({ message: "Failed to parse PR comments JSON" }),
-					}).pipe(
-						Effect.catchAll((error) =>
-							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-								Effect.zipRight(Effect.succeed({} as unknown)),
-							),
-						),
-					)
-
-					// Decode using Schema
-					const data = yield* Schema.decodeUnknown(GHPRCommentsResponseSchema)(parsed).pipe(
+					const data = yield* Schema.decode(Schema.parseJson(GHPRCommentsResponseSchema))(
+						commentsJson,
+					).pipe(
 						Effect.catchAll((error) =>
 							Effect.logWarning(error).pipe(
 								Effect.zipRight(Effect.succeed({ comments: [], reviews: [] })),

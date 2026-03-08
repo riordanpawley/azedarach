@@ -110,6 +110,28 @@ export const isWorktreePathForProject = (
 	}
 }
 
+/**
+ * Resolve which base path should be used for loading `.azedarach.json`.
+ *
+ * When running from a sibling worktree, prefer the worktree path if it has its
+ * own config file; otherwise keep using the registered project root.
+ */
+export const resolveConfigBasePath = (options: {
+	readonly cwdPath: string
+	readonly projectPath: string
+	readonly pathOps: WorktreePathOps
+	readonly cwdHasConfig: boolean
+}): string => {
+	if (
+		options.cwdHasConfig &&
+		isWorktreePathForProject(options.cwdPath, options.projectPath, options.pathOps)
+	) {
+		return options.cwdPath
+	}
+
+	return options.projectPath
+}
+
 // ============================================================================
 // Service Implementation
 // ============================================================================
@@ -154,19 +176,11 @@ export class ProjectService extends Effect.Service<ProjectService>()("ProjectSer
 					),
 				)
 
-				const json = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (e) =>
-						new ProjectError({
-							message: `Invalid JSON in projects config: ${e}`,
-						}),
-				})
-
-				return yield* Schema.decodeUnknown(ProjectsConfigSchema)(json).pipe(
+				return yield* Schema.decode(Schema.parseJson(ProjectsConfigSchema))(content).pipe(
 					Effect.mapError(
 						(e) =>
 							new ProjectError({
-								message: `Projects config validation failed: ${e}`,
+								message: `Projects config parse/validation failed: ${e}`,
 							}),
 					),
 				)

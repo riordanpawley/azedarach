@@ -5,12 +5,12 @@
  * webhook at startup, and emits typed Issue webhook events for consumers.
  */
 
+import { Command } from "@effect/platform"
 import {
 	LINEAR_WEBHOOK_SIGNATURE_HEADER,
 	LINEAR_WEBHOOK_TS_HEADER,
 	LinearWebhookClient,
 } from "@linear/sdk/webhooks"
-import { Command } from "@effect/platform"
 import { Config, Data, Effect, Option, Queue, Schema, Stream, SubscriptionRef } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { LinearSdk } from "../core/LinearSdk.js"
@@ -143,14 +143,9 @@ const TailscaleStatusSchema = Schema.Struct({
 })
 
 export const parseTailscaleDnsName = (statusJson: string): Option.Option<string> => {
-	let parsed: unknown
-	try {
-		parsed = JSON.parse(statusJson)
-	} catch {
-		return Option.none()
-	}
-
-	const decodedStatus = Schema.decodeUnknownEither(TailscaleStatusSchema)(parsed)
+	const decodedStatus = Schema.decodeUnknownEither(Schema.parseJson(TailscaleStatusSchema))(
+		statusJson,
+	)
 	if (decodedStatus._tag === "Left") {
 		return Option.none()
 	}
@@ -188,9 +183,7 @@ const tryResolveTailscaleFunnelPublicUrl = (port: number) =>
 
 		const dnsNameOption = parseTailscaleDnsName(tailscaleStatus)
 		if (Option.isNone(dnsNameOption)) {
-			yield* Effect.logDebug(
-				"LinearWebhookService: tailscale status has no usable DNS name",
-			)
+			yield* Effect.logDebug("LinearWebhookService: tailscale status has no usable DNS name")
 			return undefined
 		}
 
@@ -316,31 +309,31 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const resolveWebhookTeamRef = (): Effect.Effect<
 				ResolvedWebhookTeamRef,
 				LinearWebhookRuntimeError
-				> =>
-					Effect.gen(function* () {
-						const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
-						if (configuredTeamRef !== undefined) {
-							yield* Effect.logDebug(
-								`LinearWebhookService: using configured team reference ${configuredTeamRef}`,
-							)
-							return {
-								teamRef: configuredTeamRef,
-								source: "config",
-							} satisfies ResolvedWebhookTeamRef
-						}
-
+			> =>
+				Effect.gen(function* () {
+					const configuredTeamRef = normalizeNonEmpty(linearConfig.team)
+					if (configuredTeamRef !== undefined) {
 						yield* Effect.logDebug(
-							"LinearWebhookService: no configured team, discovering via Linear API",
+							`LinearWebhookService: using configured team reference ${configuredTeamRef}`,
 						)
-						const teams = yield* failOnTimeout({
-							effect: linearSdk.teams({ first: 50 }),
-							timeoutMs: LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS,
-							timeoutMessage: `Timed out discovering Linear teams after ${LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS}ms; set issueTracker.linear.team explicitly`,
-							mapError: (error) =>
-								new LinearWebhookRuntimeError({
-									message: `${error.message}; set issueTracker.linear.team explicitly`,
-								}),
-						})
+						return {
+							teamRef: configuredTeamRef,
+							source: "config",
+						} satisfies ResolvedWebhookTeamRef
+					}
+
+					yield* Effect.logDebug(
+						"LinearWebhookService: no configured team, discovering via Linear API",
+					)
+					const teams = yield* failOnTimeout({
+						effect: linearSdk.teams({ first: 50 }),
+						timeoutMs: LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS,
+						timeoutMessage: `Timed out discovering Linear teams after ${LINEAR_WEBHOOK_TEAM_DISCOVERY_TIMEOUT_MS}ms; set issueTracker.linear.team explicitly`,
+						mapError: (error) =>
+							new LinearWebhookRuntimeError({
+								message: `${error.message}; set issueTracker.linear.team explicitly`,
+							}),
+					})
 
 					const discoveredTeamRefs = teams.nodes
 						.map((team) => normalizeNonEmpty(team.key) ?? normalizeNonEmpty(team.id))
@@ -403,15 +396,15 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 						} satisfies ResolvedWebhookPublicUrl
 					}
 
-						const tailscalePublicBaseUrlResult = yield* tryResolveTailscaleFunnelPublicUrl(port).pipe(
-							Effect.timeout(`${TAILSCALE_RESOLUTION_TIMEOUT_MS} millis`),
+					const tailscalePublicBaseUrlResult = yield* tryResolveTailscaleFunnelPublicUrl(port).pipe(
+						Effect.timeout(`${TAILSCALE_RESOLUTION_TIMEOUT_MS} millis`),
+					)
+					if (tailscalePublicBaseUrlResult === undefined) {
+						yield* Effect.logDebug(
+							`LinearWebhookService: tailscale URL resolution timed out after ${TAILSCALE_RESOLUTION_TIMEOUT_MS}ms`,
 						)
-						if (tailscalePublicBaseUrlResult === undefined) {
-							yield* Effect.logDebug(
-								`LinearWebhookService: tailscale URL resolution timed out after ${TAILSCALE_RESOLUTION_TIMEOUT_MS}ms`,
-							)
-						}
-						const tailscalePublicBaseUrl = tailscalePublicBaseUrlResult
+					}
+					const tailscalePublicBaseUrl = tailscalePublicBaseUrlResult
 					if (tailscalePublicBaseUrl !== undefined) {
 						yield* Effect.logDebug(
 							`LinearWebhookService: using tailscale funnel URL ${tailscalePublicBaseUrl}`,
@@ -476,16 +469,16 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 			const runtimeConfig = runtimeConfigResult.right
 			const webhookClient = new LinearWebhookClient(runtimeConfig.webhookSecret)
 
-				const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
-					failOnTimeout({
-						effect: linearSdk.resolveTeamId(reference),
-						timeoutMs: LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS,
-						timeoutMessage: `Timed out resolving Linear team '${reference}' after ${LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS}ms`,
-						mapError: (error) =>
-							new LinearWebhookRuntimeError({
-								message: error.message,
-							}),
-					})
+			const resolveTeamId = (reference: string): Effect.Effect<string, LinearWebhookRuntimeError> =>
+				failOnTimeout({
+					effect: linearSdk.resolveTeamId(reference),
+					timeoutMs: LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS,
+					timeoutMessage: `Timed out resolving Linear team '${reference}' after ${LINEAR_WEBHOOK_RESOLVE_TEAM_TIMEOUT_MS}ms`,
+					mapError: (error) =>
+						new LinearWebhookRuntimeError({
+							message: error.message,
+						}),
+				})
 
 			const startSdkWebhookRuntime = Effect.gen(function* () {
 				yield* Effect.logDebug(
@@ -557,21 +550,21 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 					}),
 				)
 
-					const registrationPayload = yield* failOnTimeout({
-						effect: linearSdk.createWebhook({
-							teamId,
-							url: webhookUrl,
-							resourceTypes: [...eventTypes],
-							secret: runtimeConfig.webhookSecret,
-							enabled: true,
+				const registrationPayload = yield* failOnTimeout({
+					effect: linearSdk.createWebhook({
+						teamId,
+						url: webhookUrl,
+						resourceTypes: [...eventTypes],
+						secret: runtimeConfig.webhookSecret,
+						enabled: true,
+					}),
+					timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
+					timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
+					mapError: (error) =>
+						new LinearWebhookRuntimeError({
+							message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
 						}),
-						timeoutMs: LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS,
-						timeoutMessage: `Timed out registering Linear webhook after ${LINEAR_WEBHOOK_REGISTER_TIMEOUT_MS}ms`,
-						mapError: (error) =>
-							new LinearWebhookRuntimeError({
-								message: `Failed to register Linear webhook: ${formatErrorMessage(error)}`,
-							}),
-					})
+				})
 
 				const registeredWebhookId = registrationPayload.webhookId
 				if (registeredWebhookId) {
@@ -588,30 +581,30 @@ export class LinearWebhookService extends Effect.Service<LinearWebhookService>()
 				)
 			})
 
-				yield* startSdkWebhookRuntime.pipe(
-					Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
-					Effect.flatMap((result) =>
-						result !== undefined
-							? Effect.void
-							: Effect.fail(
-									new LinearWebhookRuntimeError({
-										message: `Linear SDK webhook startup timed out after ${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS}ms`,
-									}),
-								),
-					),
-					Effect.catchAll((error) =>
-						Effect.gen(function* () {
-							yield* setRuntimeStatus({
-								mode: "failed",
-								healthy: false,
-								reason: formatErrorMessage(error),
-							})
-							yield* Effect.logWarning(
-								`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}; falling back to polling`,
-							)
-						}),
-					),
-				)
+			yield* startSdkWebhookRuntime.pipe(
+				Effect.timeout(`${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS} millis`),
+				Effect.flatMap((result) =>
+					result !== undefined
+						? Effect.void
+						: Effect.fail(
+								new LinearWebhookRuntimeError({
+									message: `Linear SDK webhook startup timed out after ${LINEAR_WEBHOOK_STARTUP_TIMEOUT_MS}ms`,
+								}),
+							),
+				),
+				Effect.catchAll((error) =>
+					Effect.gen(function* () {
+						yield* setRuntimeStatus({
+							mode: "failed",
+							healthy: false,
+							reason: formatErrorMessage(error),
+						})
+						yield* Effect.logWarning(
+							`Linear SDK webhook runtime failed: ${formatErrorMessage(error)}; falling back to polling`,
+						)
+					}),
+				),
+			)
 
 			return {
 				issueEvents: Stream.fromQueue(issueEventsQueue),

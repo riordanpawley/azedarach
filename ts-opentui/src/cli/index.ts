@@ -78,9 +78,25 @@ import { SettingsService } from "../services/SettingsService.js"
 import { ToastService } from "../services/ToastService.js"
 import { ViewService } from "../services/ViewService.js"
 import { launchTUI } from "../ui/launch.js"
+import {
+	hasVerboseFlag,
+	normalizeCliAliases,
+	normalizeIssueJsonFlagOrder,
+	normalizeIssueOptionOrder,
+	parseConfigPathFromArgv,
+	resolveCliExecutionMode,
+} from "./argv-normalization.js"
 import { devCommand } from "./dev-server.js"
 import { resolveCliIssueId } from "./issueIdResolver.js"
 import { OPENCODE_AZ_PLUGIN_FILENAME, OPENCODE_AZ_PLUGIN_SOURCE } from "./opencodePluginSource.js"
+import {
+	buildPrimeOutput,
+	compactSingleLineText,
+	deriveWaitingAttentionPlan,
+	formatIssueDetailSections,
+	formatIssueSummaryLine,
+	formatSpecRequirementReference,
+} from "./output-formatting.js"
 import { ensureProjectAzedarachGitignore } from "./projectGitignore.js"
 
 // ============================================================================
@@ -204,108 +220,6 @@ const projectDirArg = Args.directory().pipe(
 	Args.optional,
 	Args.withDescription("Project directory (default: current directory)"),
 )
-
-const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
-	a: "add",
-	ls: "list",
-	l: "list",
-	at: "attach",
-	pa: "pause",
-	k: "kill",
-	i: "issue",
-	pr: "prime",
-	g: "gate",
-	sy: "sync",
-	se: "status",
-	p: "project",
-	sp: "spec",
-	n: "notify",
-	h: "hooks",
-	o: "opencode",
-	d: "dev",
-	s: "status",
-	st: "start",
-}
-
-const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> =
-	{
-		issue: {
-			l: "list",
-			g: "get",
-			c: "create",
-			ch: "child",
-			u: "update",
-			d: "dep",
-			x: "close",
-			t: "close",
-			rm: "delete",
-			del: "delete",
-		},
-		"issue/dep": {
-			a: "add",
-		},
-		spec: {
-			r: "req",
-			l: "link",
-			p: "publish",
-			rd: "read",
-			li: "lint",
-			sy: "sync",
-			c: "req",
-		},
-		"spec/req": {
-			l: "list",
-			s: "search",
-			g: "get",
-			c: "create",
-			u: "update",
-			d: "delete",
-			del: "delete",
-			ls: "list",
-			rm: "delete",
-		},
-		"spec/link": {
-			l: "list",
-			a: "add",
-			r: "remove",
-			rm: "remove",
-		},
-		"spec/publish": {
-			r: "run",
-			c: "config",
-		},
-		project: {
-			a: "add",
-			l: "list",
-			r: "remove",
-			rm: "remove",
-			s: "switch",
-			sw: "switch",
-		},
-		opencode: {
-			i: "init",
-			p: "plugin",
-			pl: "plugin",
-		},
-		hooks: {
-			i: "install",
-			in: "install",
-			ins: "install",
-		},
-		dev: {
-			s: "start",
-			st: "start",
-			r: "restart",
-			re: "restart",
-			x: "stop",
-			stp: "stop",
-			sto: "stop",
-			l: "list",
-			ls: "list",
-			t: "status",
-			stt: "status",
-		},
-	}
 
 // ============================================================================
 // Validation Helpers
@@ -647,24 +561,6 @@ const syncHandler = (args: {
 		}
 	})
 
-const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
-
-const formatIssueSummaryLine = (issue: TrackedIssue): string =>
-	`${issue.id}: ${compactSingleLineText(issue.title)} [status=${issue.status} priority=${issue.priority} type=${issue.issue_type} updated_at=${issue.updated_at}]`
-
-const normalizeIssueTextField = (value: string | undefined): string | undefined => {
-	const normalized = value?.trim()
-	return normalized && normalized.length > 0 ? normalized : undefined
-}
-
-type DependencyCountLabel =
-	| "blocking"
-	| "blockedBy"
-	| "children"
-	| "parent"
-	| "related"
-	| "discoveredFrom"
-	| "discoveredBy"
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 type RelationshipSpecLinkType = "implements" | "tests" | "blocks" | "relates"
 type SpecRequirementLookupInput = {
@@ -688,14 +584,6 @@ const inferSpecRequirementKindFromExternalCodeForCli = (
 	}
 	return "other"
 }
-
-const formatSpecRequirementReference = (requirement: {
-	readonly local_id: string
-	readonly external_code: string | null
-}): string =>
-	requirement.external_code === null
-		? requirement.local_id
-		: `${requirement.local_id} (${requirement.external_code})`
 
 const resolveSpecRequirementLookupInput = (args: {
 	readonly reference: Option.Option<string>
@@ -795,183 +683,6 @@ const parseRelationshipSpecLinkType = (
 		default:
 			return undefined
 	}
-}
-
-const DEPENDENCY_COUNT_LABEL_ORDER: readonly DependencyCountLabel[] = [
-	"blocking",
-	"blockedBy",
-	"children",
-	"parent",
-	"related",
-	"discoveredFrom",
-	"discoveredBy",
-]
-
-const normalizeDependencyIds = (
-	refs: ReadonlyArray<{ readonly id: string }> | undefined,
-): readonly string[] => {
-	if (!refs || refs.length === 0) {
-		return []
-	}
-	const seen = new Set<string>()
-	const ids: string[] = []
-	for (const ref of refs) {
-		const normalized = ref.id.trim()
-		if (normalized.length === 0 || seen.has(normalized)) continue
-		seen.add(normalized)
-		ids.push(normalized)
-	}
-	return ids
-}
-
-const formatIssueRelationshipSection = (
-	label: "Dependencies" | "Dependents",
-	refs: ReadonlyArray<{ readonly id: string }> | undefined,
-	count: number | undefined,
-): string | undefined => {
-	const ids = normalizeDependencyIds(refs)
-	if (ids.length > 0) {
-		return `${label}:\n${ids.join(", ")}`
-	}
-	if (count !== undefined && count > 0) {
-		return `${label}: ${count}`
-	}
-	return undefined
-}
-
-const dependencyCountLabelFromDependency = (
-	dependencyType: RelationshipDependencyType,
-): DependencyCountLabel => {
-	switch (dependencyType) {
-		case "blocks":
-			return "blockedBy"
-		case "parent-child":
-			return "parent"
-		case "discovered-from":
-			return "discoveredFrom"
-		default:
-			return "related"
-	}
-}
-
-const dependencyCountLabelFromDependent = (
-	dependencyType: RelationshipDependencyType,
-): DependencyCountLabel => {
-	switch (dependencyType) {
-		case "blocks":
-			return "blocking"
-		case "parent-child":
-			return "children"
-		case "discovered-from":
-			return "discoveredBy"
-		default:
-			return "related"
-	}
-}
-
-const formatIssueDependencyTypeCountsSection = (issue: TrackedIssue): string | undefined => {
-	const counts = new Map<DependencyCountLabel, number>()
-	for (const dependency of issue.dependencies ?? []) {
-		const label = dependencyCountLabelFromDependency(dependency.dependency_type)
-		counts.set(label, (counts.get(label) ?? 0) + 1)
-	}
-	for (const dependent of issue.dependents ?? []) {
-		const label = dependencyCountLabelFromDependent(dependent.dependency_type)
-		counts.set(label, (counts.get(label) ?? 0) + 1)
-	}
-
-	const parts = DEPENDENCY_COUNT_LABEL_ORDER.flatMap((label) => {
-		const count = counts.get(label)
-		return count && count > 0 ? `${label}: ${count}` : []
-	})
-	if (parts.length === 0) {
-		return undefined
-	}
-	return `Dependency Counts: ${parts.join(", ")}`
-}
-
-const formatIssueLinkedSpecSection = (
-	linkedSpecRequirements:
-		| readonly {
-				readonly id: string
-				readonly local_id: string
-				readonly external_code: string | null
-				readonly title: string
-				readonly kind: string
-				readonly link_type: string
-		  }[]
-		| undefined,
-): string | undefined => {
-	if (!linkedSpecRequirements || linkedSpecRequirements.length === 0) {
-		return undefined
-	}
-
-	const lines = linkedSpecRequirements.map(
-		(requirement) =>
-			`${formatSpecRequirementReference(requirement)} [${requirement.kind}] (${requirement.link_type}) ${compactSingleLineText(requirement.title)}`,
-	)
-	return `Linked Spec Requirements:\n${lines.join("\n")}`
-}
-
-const formatIssueDetailSections = (
-	issue: TrackedIssue,
-	options?: {
-		readonly linkedSpecRequirements?:
-			| readonly {
-					readonly id: string
-					readonly local_id: string
-					readonly external_code: string | null
-					readonly title: string
-					readonly kind: string
-					readonly link_type: string
-			  }[]
-			| undefined
-	},
-): readonly string[] => {
-	const sections: string[] = []
-	const description = normalizeIssueTextField(issue.description)
-	const design = normalizeIssueTextField(issue.design)
-	const acceptance = normalizeIssueTextField(issue.acceptance)
-	const notes = normalizeIssueTextField(issue.notes)
-	const dependencyTypeCounts = formatIssueDependencyTypeCountsSection(issue)
-	const dependencies = formatIssueRelationshipSection(
-		"Dependencies",
-		issue.dependencies,
-		issue.dependency_count,
-	)
-	const dependents = formatIssueRelationshipSection(
-		"Dependents",
-		issue.dependents,
-		issue.dependent_count,
-	)
-	const linkedSpecs = formatIssueLinkedSpecSection(options?.linkedSpecRequirements)
-
-	if (description) {
-		sections.push(`Description:\n${description}`)
-	}
-	if (design) {
-		sections.push(`Design:\n${design}`)
-	}
-	if (acceptance) {
-		sections.push(`Acceptance:\n${acceptance}`)
-	}
-	if (notes) {
-		sections.push(`Notes:\n${notes}`)
-	}
-	if (dependencyTypeCounts) {
-		sections.push(dependencyTypeCounts)
-	}
-	if (dependencies) {
-		sections.push(dependencies)
-	}
-	if (dependents) {
-		sections.push(dependents)
-	}
-	if (linkedSpecs) {
-		sections.push(linkedSpecs)
-	}
-
-	return sections
 }
 
 const DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS = 250
@@ -1483,6 +1194,195 @@ const issueCloseHandler = (args: {
 		yield* Console.log(`Closed issue ${issueId}`)
 		if (args.verbose && Option.isSome(args.reason)) {
 			yield* Console.error(`reason=${args.reason.value}`)
+		}
+	})
+
+interface ParentChildTrackingMiss {
+	readonly issue: TrackedIssue
+	readonly reason: string
+	readonly inspectCommand: string
+	readonly remediateCommand: string
+}
+
+const hasParentChildDependency = (issue: TrackedIssue): boolean =>
+	(issue.dependencies ?? []).some((dependency) => dependency.dependency_type === "parent-child")
+
+const findDependencyToIssue = (issue: TrackedIssue, targetIssueId: string) =>
+	(issue.dependencies ?? []).find((dependency) =>
+		issueIdsEqualForLookup(dependency.id, targetIssueId),
+	)
+
+const issueMentionsParentId = (issue: TrackedIssue, parentIssueId: string): boolean => {
+	const needle = parentIssueId.trim().toLowerCase()
+	if (needle.length === 0) {
+		return false
+	}
+
+	const haystack = [
+		issue.title,
+		issue.description ?? "",
+		issue.design ?? "",
+		issue.acceptance ?? "",
+		issue.notes ?? "",
+	]
+		.join(" ")
+		.toLowerCase()
+	return haystack.includes(needle)
+}
+
+const buildParentChildTrackingMiss = (
+	issue: TrackedIssue,
+	parentIssueId: string,
+	reason: string,
+): ParentChildTrackingMiss => ({
+	issue,
+	reason,
+	inspectCommand: `az issue get ${issue.id}`,
+	remediateCommand: `az issue update ${issue.id} --parent ${parentIssueId}`,
+})
+
+const findLikelyParentChildTrackingMisses = (
+	parentIssueId: string,
+	issues: ReadonlyArray<TrackedIssue>,
+): ReadonlyArray<ParentChildTrackingMiss> => {
+	const misses: ParentChildTrackingMiss[] = []
+	for (const issue of issues) {
+		if (issueIdsEqualForLookup(issue.id, parentIssueId)) {
+			continue
+		}
+		if (!isOpenChildForCloseGuard(issue)) {
+			continue
+		}
+
+		const dependencyToParent = findDependencyToIssue(issue, parentIssueId)
+		if (dependencyToParent !== undefined) {
+			if (dependencyToParent.dependency_type !== "parent-child") {
+				misses.push(
+					buildParentChildTrackingMiss(
+						issue,
+						parentIssueId,
+						`Dependency to ${parentIssueId} is typed '${dependencyToParent.dependency_type}' instead of 'parent-child'.`,
+					),
+				)
+			}
+			continue
+		}
+
+		if (hasParentChildDependency(issue)) {
+			continue
+		}
+
+		if (issueMentionsParentId(issue, parentIssueId)) {
+			misses.push(
+				buildParentChildTrackingMiss(
+					issue,
+					parentIssueId,
+					`Issue text references ${parentIssueId} but no parent-child link exists.`,
+				),
+			)
+		}
+	}
+	return misses
+}
+
+const formatParentChildCheckOutput = (
+	parentIssueId: string,
+	misses: ReadonlyArray<ParentChildTrackingMiss>,
+): string => {
+	if (misses.length === 0) {
+		return `No likely parent-child tracking misses found for ${parentIssueId}.`
+	}
+
+	const lines: string[] = [
+		`Parent-child tracking check for ${parentIssueId}: ${misses.length} likely miss(es) found.`,
+		"Suggested remediation commands:",
+	]
+	for (const miss of misses) {
+		lines.push(
+			`- ${miss.issue.id}: ${compactSingleLineText(miss.issue.title)} [status=${miss.issue.status}]`,
+		)
+		lines.push(`  reason: ${miss.reason}`)
+		lines.push(`  inspect: ${miss.inspectCommand}`)
+		lines.push(`  remediate: ${miss.remediateCommand}`)
+	}
+	return lines.join("\n")
+}
+
+const issueCheckHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly limit: Option.Option<number>
+	readonly includeClosed: boolean
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const parentContext = yield* Option.match(args.issueId, {
+			onSome: (parentIssueId) =>
+				resolveCliIssueId(parentIssueId, resolverCwd).pipe(
+					Effect.map((issueId) =>
+						Option.some<ActiveParentContext>({
+							issueId,
+							source: "explicit-arg",
+						}),
+					),
+				),
+			onNone: () => resolveActiveParentContext(resolverCwd),
+		})
+
+		if (Option.isNone(parentContext)) {
+			return yield* Effect.fail(
+				new Error(
+					"No active parent context found. Provide [issue-id] or set AZEDARACH_PARENT_ISSUE_ID/AZEDARACH_ISSUE_ID.",
+				),
+			)
+		}
+
+		const parentIssueId = parentContext.value.issueId
+		const issueTrackerClient = yield* IssueTrackerClient
+		const parentIssue = yield* issueTrackerClient.show(parentIssueId, explicitProjectDir)
+
+		const issues = yield* issueTrackerClient.list(undefined, explicitProjectDir, {
+			limit: Option.getOrElse(args.limit, () => 200),
+			includeClosed: args.includeClosed,
+			sortBy: "updated_at",
+			sortDirection: "desc",
+		})
+		const misses = findLikelyParentChildTrackingMisses(parentIssueId, issues)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						parent_issue_id: parentIssueId,
+						parent_issue_title: parentIssue.title,
+						checked_count: issues.length,
+						miss_count: misses.length,
+						misses: misses.map((miss) => ({
+							issue_id: miss.issue.id,
+							title: miss.issue.title,
+							status: miss.issue.status,
+							reason: miss.reason,
+							inspect_command: miss.inspectCommand,
+							remediate_command: miss.remediateCommand,
+						})),
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+
+		yield* Console.log(formatParentChildCheckOutput(parentIssueId, misses))
+		if (args.verbose) {
+			yield* Console.error(
+				`checked=${issues.length} misses=${misses.length} parent=${parentIssueId}`,
+			)
 		}
 	})
 
@@ -2725,66 +2625,6 @@ const formatCloseGuardMessage = (
 	].join("\n")
 }
 
-const buildPrimeOutput = (issueId: string | undefined, issueContext: string): string => {
-	const issueSection =
-		issueId === undefined
-			? ""
-			: issueContext.length > 0
-				? `
-
-Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
-\`\`\`
-${issueContext.length > 4000 ? `${issueContext.slice(0, 4000)}\n...` : issueContext}
-\`\`\``
-				: `
-
-Active issue from AZEDARACH_ISSUE_ID=${issueId}.
-Could not load issue details automatically; run \`az issue get ${issueId}\`.`
-
-	const contextGuardrail =
-		issueId === undefined
-			? "- No active issue is preselected. When work starts, set `AZEDARACH_ISSUE_ID` or run `az issue get <issue-id>`."
-			: `- \`AZEDARACH_ISSUE_ID\` is set to \`${issueId}\`; use it as the default issue scope and refresh stale context with \`az issue get ${issueId}\`.`
-
-	return `Azedarach Session Primer
-
-- Use \`az issue\` commands as the task-tracker interface for this repo.
-- Start each session with: \`az prime\`
-- Mandatory parenting rule: when working under a parent issue, create follow-up work with \`az issue child "Title"\` (or \`az issue create "Title"\`, which now defaults to active parent context unless \`--deferred\` is set).
-- Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
-- Common issue commands:
-  - \`az issue list --limit 20\` (lists most recently updated issues first)
-  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
-  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
-  - \`az issue update <issue-id> --design "..."\`
-  - \`az issue update <issue-id> --notes "..."\`
-  - \`az issue update <issue-id> --status in_progress|blocked|open\`
-  - \`az issue create "Title" --type task|bug|epic|chore --priority 1-5\`
-  - \`az issue create "Child task" --parent <epic-id>\`
-  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
-  - \`az issue --help\`
-- Issue-context guardrails:
-  ${contextGuardrail}
-  - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
-  - Do not go on history/log hunting tangents to backfill missing fields unless the user explicitly asks for that research.
-- Keep issue context current as you work:
-  - Update design/notes as implementation decisions change.
-  - Use status/priority/labels flags when state changes materially.
-  - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
-  - After implementing behavior changes, run a spec compliance pass: verify behavior vs linked requirements and update requirement/link records if scope changed.
-  - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
-- Create follow-up/child work in the tracker instead of local TODOs.
-- Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
-- When work is complete:
-  - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
-  - Always include the issue ID in the commit message.
-  - Close the issue when implementation is ready for review (\`az issue close <issue-id>\`).
-  - Review flow policy: reviews target closed tasks, not in-progress tasks.
-  - If review finds remaining work, move the issue back to in-progress and continue.
-${issueSection}
-`
-}
-
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
@@ -2818,11 +2658,6 @@ const BELL_CHAR = "\u0007"
 const WAITING_WINDOW_BELL_STYLE = "fg=colour226,bg=colour237,bold"
 const WAITING_WINDOW_ACTIVITY_STYLE = "fg=colour220,bg=colour237,bold"
 
-interface WaitingAttentionPlan {
-	readonly ringBell: boolean
-	readonly nextFlag: "0" | "1"
-}
-
 /**
  * Type guard to check if a string is a valid hook event
  */
@@ -2848,23 +2683,6 @@ const mapEventToStatus = (event: HookEvent): TmuxStatus => {
 			return "waiting"
 		case "session_end":
 			return "idle"
-	}
-}
-
-const deriveWaitingAttentionPlan = (
-	status: TmuxStatus,
-	currentFlagRaw: string | null,
-): WaitingAttentionPlan => {
-	const normalizedFlag = currentFlagRaw?.trim() === "1" ? "1" : "0"
-	if (status === "waiting") {
-		return {
-			ringBell: normalizedFlag !== "1",
-			nextFlag: "1",
-		}
-	}
-	return {
-		ringBell: false,
-		nextFlag: "0",
 	}
 }
 
@@ -3124,10 +2942,9 @@ const hooksInstallHandler = (args: {
 						),
 					),
 				)
-			existingSettings = yield* Effect.try({
-				try: () => JSON.parse(content),
-				catch: () => ({}),
-			}).pipe(
+			existingSettings = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(content).pipe(
 				Effect.catchAll((error) =>
 					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 						Effect.zipRight(Effect.succeed({})),
@@ -3790,6 +3607,53 @@ const issueDeleteCommand = Command.make(
 	issueDeleteHandler,
 ).pipe(Command.withDescription("Delete an issue (requires --force)"))
 
+const issueCheckIssueIdArg = Args.text({ name: "issue-id" }).pipe(
+	Args.optional,
+	Args.withDescription("Parent issue ID (defaults to active parent context)"),
+)
+
+const issueCheckCommand = Command.make(
+	"check",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Check for likely parent-child tracking misses"))
+
+const issueDoctorCommand = Command.make(
+	"doctor",
+	{
+		issueId: issueCheckIssueIdArg,
+		limit: Options.integer("limit").pipe(
+			Options.optional,
+			Options.withDescription("Maximum issues to scan (default: 200)"),
+		),
+		includeClosed: Options.boolean("include-closed").pipe(
+			Options.withDescription("Include closed/tombstone issues in scan"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON diagnostics"),
+		),
+	},
+	issueCheckHandler,
+).pipe(Command.withDescription("Alias of `az issue check`"))
+
 /**
  * az issue - Parent command for issue operations
  */
@@ -3804,6 +3668,8 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueChildCommand,
 		issueUpdateCommand,
 		issueDepCommand,
+		issueCheckCommand,
+		issueDoctorCommand,
 		issueCloseCommand,
 		issueDeleteCommand,
 	]),
@@ -4379,14 +4245,14 @@ const opencodeInitHandler = (args: {
 		const configExists = yield* fs.exists(opencodeJsonPath)
 		if (configExists) {
 			const existingContent = yield* fs.readFileString(opencodeJsonPath)
-			const existingConfig = yield* Effect.try({
-				try: () => JSON.parse(existingContent),
-				catch: () => ({}),
-			})
+			const existingConfig: Readonly<Record<string, unknown>> = yield* Schema.decode(
+				Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const existingPlugins = Array.isArray(existingConfig.plugins)
-				? (existingConfig.plugins as string[])
+			const pluginsValue = existingConfig["plugins"]
+			const existingPlugins = Array.isArray(pluginsValue)
+				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []
 			const newPlugins = [...new Set([...existingPlugins, "opencode-tracker"])]
 			config = { ...existingConfig, ...config, plugins: newPlugins }
@@ -4734,220 +4600,6 @@ const commandCli = az.pipe(
 // ============================================================================
 // CLI Runner
 // ============================================================================
-
-const parseConfigPathFromArgv = (argv: ReadonlyArray<string>): string | null => {
-	for (let index = 2; index < argv.length; index++) {
-		const arg = argv[index]
-		if (arg === "--") return null
-		if (arg.startsWith("--config=")) {
-			const value = arg.slice("--config=".length)
-			return value.length > 0 ? value : null
-		}
-		if (arg.startsWith("-c=")) {
-			const value = arg.slice("-c=".length)
-			return value.length > 0 ? value : null
-		}
-		if ((arg === "--config" || arg === "-c") && index + 1 < argv.length) {
-			const value = argv[index + 1]
-			return value.length > 0 ? value : null
-		}
-	}
-	return null
-}
-
-/**
- * @effect/cli expects options before positional args.
- * Normalize common user ordering like:
- *   az issue update <issue-id> --description "..."
- * into:
- *   az issue update --description "..." <issue-id>
- */
-const normalizeIssueOptionOrder = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
-	const issueCommandIndex = argv.indexOf("issue")
-	if (issueCommandIndex === -1) return argv
-
-	const subcommand = argv[issueCommandIndex + 1]
-	if (subcommand === "dep") {
-		const depSubcommand = argv[issueCommandIndex + 2]
-		if (depSubcommand !== "add") {
-			return argv
-		}
-
-		const issueIdIndex = issueCommandIndex + 3
-		const dependsOnIdIndex = issueCommandIndex + 4
-		if (dependsOnIdIndex >= argv.length) return argv
-
-		const issueId = argv[issueIdIndex]
-		const dependsOnId = argv[dependsOnIdIndex]
-		if (
-			issueId === undefined ||
-			dependsOnId === undefined ||
-			issueId.startsWith("-") ||
-			dependsOnId.startsWith("-")
-		) {
-			return argv
-		}
-
-		const hasOptionAfterPositionalIds = argv
-			.slice(dependsOnIdIndex + 1)
-			.some((token) => token.startsWith("-"))
-		if (!hasOptionAfterPositionalIds) return argv
-
-		const reordered = [...argv]
-		reordered.splice(issueIdIndex, 2)
-		reordered.push(issueId, dependsOnId)
-		return reordered
-	}
-
-	if (
-		subcommand !== "get" &&
-		subcommand !== "create" &&
-		subcommand !== "child" &&
-		subcommand !== "update" &&
-		subcommand !== "close" &&
-		subcommand !== "delete"
-	) {
-		return argv
-	}
-
-	const positionalArgIndex = issueCommandIndex + 2
-	if (positionalArgIndex >= argv.length) return argv
-
-	const positionalArg = argv[positionalArgIndex]
-	if (positionalArg === undefined || positionalArg.startsWith("-")) {
-		return argv
-	}
-
-	const hasOptionAfterPositional = argv
-		.slice(positionalArgIndex + 1)
-		.some((token) => token.startsWith("-"))
-	if (!hasOptionAfterPositional) return argv
-
-	const reordered = [...argv]
-	reordered.splice(positionalArgIndex, 1)
-	reordered.push(positionalArg)
-	return reordered
-}
-
-// Backward-compatible name used by existing tests and imports.
-const normalizeIssueJsonFlagOrder = normalizeIssueOptionOrder
-
-const hasVerboseFlag = (argv: ReadonlyArray<string>): boolean =>
-	argv.includes("--verbose") || argv.includes("-v")
-
-const findTopLevelSubcommandIndex = (argv: ReadonlyArray<string>): number | null => {
-	for (let index = 2; index < argv.length; index++) {
-		const arg = argv[index]
-		if (arg === "--") return null
-		if (arg === "--config" || arg === "-c") {
-			index += 1
-			continue
-		}
-		if (arg.startsWith("--config=") || arg.startsWith("-c=") || arg.startsWith("-")) {
-			continue
-		}
-		return index
-	}
-	return null
-}
-
-const normalizeTopLevelCommandAlias = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
-	const topLevelIndex = findTopLevelSubcommandIndex(argv)
-	if (topLevelIndex === null) return argv
-
-	const topLevelArg = argv[topLevelIndex]
-	if (topLevelArg === undefined) return argv
-
-	const replacement = TOP_LEVEL_COMMAND_ALIASES[topLevelArg]
-	if (replacement === undefined) return argv
-
-	const normalized = [...argv]
-	normalized[topLevelIndex] = replacement
-	return normalized
-}
-
-const normalizeCliAliases = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
-	const withTopLevelAlias = normalizeTopLevelCommandAlias(argv)
-	const topLevelIndex = findTopLevelSubcommandIndex(withTopLevelAlias)
-	if (topLevelIndex === null) return withTopLevelAlias
-
-	const topLevelArg = withTopLevelAlias[topLevelIndex]
-	if (topLevelArg === undefined) return withTopLevelAlias
-
-	const normalized = [...withTopLevelAlias]
-	let commandPath = topLevelArg
-	let currentIndex = topLevelIndex + 1
-
-	while (currentIndex < normalized.length) {
-		const candidate = normalized[currentIndex]
-		if (candidate.startsWith("-")) {
-			break
-		}
-
-		const aliasesForCommand = TOP_LEVEL_NESTED_COMMAND_ALIASES[commandPath]
-		if (aliasesForCommand === undefined) {
-			break
-		}
-
-		const replacement = aliasesForCommand[candidate]
-		if (replacement === undefined) {
-			break
-		}
-
-		normalized[currentIndex] = replacement
-		commandPath = `${commandPath}/${replacement}`
-		currentIndex += 1
-	}
-
-	return normalized
-}
-
-const TOP_LEVEL_SUBCOMMANDS = new Set([
-	"add",
-	"list",
-	"i",
-	"prime",
-	"start",
-	"attach",
-	"pause",
-	"kill",
-	"status",
-	"sync",
-	"issue",
-	"spec",
-	"gate",
-	"dev",
-	"notify",
-	"hooks",
-	"project",
-	"opencode",
-])
-
-type CliExecutionMode = "tui" | "command" | "dev-command"
-
-const parseTopLevelSubcommand = (argv: ReadonlyArray<string>): string | null => {
-	const topLevelArgIndex = findTopLevelSubcommandIndex(argv)
-	if (topLevelArgIndex === null) return null
-
-	const arg = argv[topLevelArgIndex]
-	return arg !== undefined && TOP_LEVEL_SUBCOMMANDS.has(arg) ? arg : null
-}
-
-const hasGlobalHelpOrVersionFlag = (argv: ReadonlyArray<string>): boolean =>
-	argv.includes("--help") || argv.includes("-h") || argv.includes("--version")
-
-const resolveCliExecutionMode = (argv: ReadonlyArray<string>): CliExecutionMode => {
-	const normalizedArgv = normalizeCliAliases(argv)
-	const subcommand = parseTopLevelSubcommand(normalizedArgv)
-	if (subcommand === null) {
-		return hasGlobalHelpOrVersionFlag(normalizedArgv) ? "command" : "tui"
-	}
-	if (subcommand === "dev") {
-		return "dev-command"
-	}
-	return "command"
-}
-
 const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
 	if (configPath === null) return fullCliLayer
@@ -5019,7 +4671,9 @@ export {
 	buildPrimeOutput,
 	cliRunner,
 	deriveWaitingAttentionPlan,
+	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
+	formatParentChildCheckOutput,
 	formatIssueSummaryLine,
 	normalizeCliAliases,
 	normalizeIssueOptionOrder,

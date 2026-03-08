@@ -5,21 +5,22 @@
  * migration. Old config formats are automatically upgraded to the current version.
  *
  * ## Version History
- * - Version 1: Original schema (no $schema field) - legacy format
- * - Version 2: Adds $schema field, moves pr.baseBranch → git.baseBranch
+ * - Version 1: Original schema (no version field) - legacy format
+ * - Version 2: Adds numeric schema-version field (legacy `$schema`), moves pr.baseBranch → git.baseBranch
  * - Version 3: Adds top-level issueTracker selector + backend-specific config blocks
  * - Version 4: Nests backend config under top-level issueTracker object
  * - Version 5: Renames merge.startClaudeOnFailure → merge.startAiSessionOnFailure
  * - Version 6: Normalizes git.pr/git.merge aliases to canonical workflow config
  *
  * ## Adding New Versions
- * 1. Define ConfigVNSchema with `$schema: Schema.Literal(N)`
+ * 1. Define ConfigVNSchema with numeric schema-version field
  * 2. Add VN-1ToVNTransform migration
  * 3. Update MigratingConfigSchema union
  * 4. Update CURRENT_CONFIG_VERSION
  */
 
 import { Effect } from "effect"
+import * as JSONSchema from "effect/JSONSchema"
 import * as ParseResult from "effect/ParseResult"
 import * as Schema from "effect/Schema"
 
@@ -29,6 +30,8 @@ import * as Schema from "effect/Schema"
 
 /** Current config schema version */
 export const CURRENT_CONFIG_VERSION = 6
+/** Relative schema URI used in `.azedarach.json` for JSON-LSP tooling */
+export const AZEDARACH_CONFIG_JSON_SCHEMA_URI = "./.azedarach.schema.json"
 
 // ============================================================================
 // CLI Tool Configuration
@@ -228,6 +231,8 @@ const GitScopedPRConfigSchema = Schema.Struct({
 	enabled: Schema.optional(Schema.Boolean),
 	autoDraft: Schema.optional(Schema.Boolean),
 	autoMerge: Schema.optional(Schema.Boolean),
+	/** @deprecated Moved to top-level pr.aiModel in v6 */
+	aiModel: Schema.optional(SupportedModelSchema),
 	/** @deprecated Moved to git.baseBranch in v2 */
 	baseBranch: Schema.optional(Schema.String),
 })
@@ -937,6 +942,7 @@ const migrations: readonly Migration[] = [
 							team: nestedIssueTracker.linear.team,
 							project: nestedIssueTracker.linear.project,
 							webhooks: nestedIssueTracker.linear.webhooks,
+							syncThrottle: nestedIssueTracker.linear.syncThrottle,
 						}
 					: undefined)
 			const localConfig =
@@ -1004,6 +1010,7 @@ const migrations: readonly Migration[] = [
 								team: linearConfig?.team,
 								project: linearConfig?.project,
 								webhooks: linearConfig?.webhooks,
+								syncThrottle: linearConfig?.syncThrottle,
 							}
 						: undefined,
 				local:
@@ -1083,6 +1090,7 @@ const migrations: readonly Migration[] = [
 										team: config.linear?.team,
 										project: config.linear?.project,
 										webhooks: config.linear?.webhooks,
+										syncThrottle: config.linear?.syncThrottle,
 									},
 								}
 							: {
@@ -1134,15 +1142,15 @@ const migrations: readonly Migration[] = [
 			const scopedMerge = git?.merge
 
 			const migratedPr =
-				config.pr ??
-				(scopedPr === undefined
-					? undefined
-					: {
-							enabled: scopedPr.enabled,
-							autoDraft: scopedPr.autoDraft,
-							autoMerge: scopedPr.autoMerge,
-							baseBranch: scopedPr.baseBranch,
-						})
+				config.pr !== undefined || scopedPr !== undefined
+					? {
+							enabled: config.pr?.enabled ?? scopedPr?.enabled,
+							autoDraft: config.pr?.autoDraft ?? scopedPr?.autoDraft,
+							autoMerge: config.pr?.autoMerge ?? scopedPr?.autoMerge,
+							aiModel: config.pr?.aiModel ?? scopedPr?.aiModel,
+							baseBranch: scopedPr?.baseBranch,
+						}
+					: undefined
 
 			const migratedMerge =
 				config.merge ??
@@ -1205,7 +1213,8 @@ const migrations: readonly Migration[] = [
  */
 const applyMigrations = (config: RawConfig): CurrentConfig => {
 	let current = config
-	const startVersion = current.$schema ?? 1
+	const startVersion =
+		current.$version ?? (typeof current.$schema === "number" ? current.$schema : undefined) ?? 1
 
 	for (const migration of migrations) {
 		if (startVersion < migration.toVersion) {
@@ -1261,7 +1270,7 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					enabled: prSource.enabled,
 					autoDraft: prSource.autoDraft,
 					autoMerge: prSource.autoMerge,
-					aiModel: current.pr?.aiModel,
+					aiModel: prSource.aiModel,
 				}
 			: undefined,
 		merge: mergeSource
@@ -1295,8 +1304,10 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
  * Used as the input side of the migration transform.
  */
 const RawConfigSchema = Schema.Struct({
-	/** Config version - undefined/1 for legacy, 2+ for current */
-	$schema: Schema.optional(Schema.Number),
+	/** Config schema metadata URI for editors, or legacy numeric version in older files */
+	$schema: Schema.optional(Schema.Union(Schema.String, Schema.Number)),
+	/** Canonical config version used for migration sequencing */
+	$version: Schema.optional(Schema.Number),
 
 	/**
 	 * CLI tool to use for AI sessions (default: "claude")
@@ -1404,31 +1415,17 @@ export const AzedarachConfigSchema = Schema.transformOrFail(RawConfigSchema, Cur
 	encode: (current) =>
 		Effect.succeed({
 			...current,
-			$schema: CURRENT_CONFIG_VERSION,
-			git:
-				current.git === undefined && current.pr === undefined && current.merge === undefined
-					? undefined
-					: {
-							...current.git,
-							pr: current.pr
-								? {
-										enabled: current.pr.enabled,
-										autoDraft: current.pr.autoDraft,
-										autoMerge: current.pr.autoMerge,
-									}
-								: undefined,
-							merge: current.merge
-								? {
-										validateCommands: current.merge.validateCommands,
-										fixCommand: current.merge.fixCommand,
-										maxFixAttempts: current.merge.maxFixAttempts,
-										startAiSessionOnFailure: current.merge.startAiSessionOnFailure,
-									}
-								: undefined,
-						},
-			pr: undefined,
-			merge: undefined,
+			$schema: AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+			$version: CURRENT_CONFIG_VERSION,
+			// Persist canonical v6 layout: top-level `pr`/`merge`, git aliases stripped.
+			git: current.git,
+			pr: current.pr,
+			merge: current.merge,
 		}),
+})
+
+export const AzedarachConfigJsonSchema = JSONSchema.make(AzedarachConfigSchema, {
+	target: "jsonSchema2020-12",
 })
 
 // ============================================================================

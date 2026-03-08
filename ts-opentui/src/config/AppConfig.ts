@@ -12,10 +12,10 @@
 
 import { FileSystem, Path } from "@effect/platform"
 import { Data, Effect, Option, Ref, Schema, Stream, SubscriptionRef } from "effect"
-import { ProjectService } from "../services/ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ToastService } from "../services/ToastService.js"
 import { mergeWithDefaults, type ResolvedConfig } from "./defaults.js"
-import { type AzedarachConfig, AzedarachConfigSchema } from "./schema.js"
+import { type AzedarachConfig, AzedarachConfigJsonSchema, AzedarachConfigSchema } from "./schema.js"
 
 // ============================================================================
 // Error Types
@@ -55,6 +55,9 @@ export interface AppConfigService {
 
 	/** Most recent config parse/validation warning when fallback defaults are active */
 	readonly loadWarning: SubscriptionRef.SubscriptionRef<ConfigParseError | null>
+
+	/** Path of config source currently loaded into `config` (null means env/default fallback) */
+	readonly loadedConfigPath: SubscriptionRef.SubscriptionRef<string | null>
 
 	/** Reload config from disk for current project */
 	readonly reload: () => Effect.Effect<void, ConfigParseError>
@@ -187,8 +190,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			JSON.stringify(canonicalizeJson(migratedConfig))
 
 		const formatConfigJson = (config: unknown): string => `${JSON.stringify(config, null, 2)}\n`
+		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
 
 		const loadWarningRef = yield* SubscriptionRef.make<ConfigParseError | null>(null)
+		const loadedConfigPathRef = yield* SubscriptionRef.make<string | null>(null)
 		const lastToastWarningRef = yield* Ref.make<string | null>(null)
 
 		const configWarningKey = (warning: ConfigParseError): string =>
@@ -239,15 +244,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				const json = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: (e) =>
-						new ConfigParseError({
-							message: "Invalid JSON in config file",
-							path: targetConfigPath,
-							details: String(e),
-						}),
-				})
+				const json = yield* Schema.decode(Schema.parseJson(Schema.Unknown))(content).pipe(
+					Effect.mapError(
+						(e) =>
+							new ConfigParseError({
+								message: "Invalid JSON in config file",
+								path: targetConfigPath,
+								details: String(e),
+							}),
+					),
+				)
 
 				// Schema.transform in AzedarachConfigSchema handles migration automatically
 				const validated = yield* Schema.decodeUnknown(AzedarachConfigSchema)(json).pipe(
@@ -290,6 +296,16 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 							),
 						),
 					)
+					const schemaPath = pathService.join(targetPath, ".azedarach.schema.json")
+					yield* fs
+						.writeFileString(schemaPath, configJsonSchemaString)
+						.pipe(
+							Effect.catchAll((error) =>
+								Effect.logWarning(
+									`Failed to persist config JSON schema at ${schemaPath}: ${String(error)}`,
+								),
+							),
+						)
 				}
 
 				return validated
@@ -328,14 +344,15 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				const pkg = yield* Effect.try({
-					try: () => JSON.parse(content),
-					catch: () =>
-						new ConfigParseError({
-							message: "Invalid JSON in package.json",
-							path: pkgPath,
-						}),
-				})
+				const pkg = yield* Schema.decode(Schema.parseJson(Schema.Unknown))(content).pipe(
+					Effect.mapError(
+						() =>
+							new ConfigParseError({
+								message: "Invalid JSON in package.json",
+								path: pkgPath,
+							}),
+					),
+				)
 
 				// Check if azedarach key exists using schema validation
 				const PackageJsonSchema = Schema.Struct({
@@ -418,7 +435,10 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		 */
 		const loadConfigForPath = (
 			projectPath: string,
-		): Effect.Effect<ResolvedConfig, ConfigParseError> =>
+		): Effect.Effect<
+			{ readonly config: ResolvedConfig; readonly loadedConfigPath: string | null },
+			ConfigParseError
+		> =>
 			Effect.gen(function* () {
 				// If explicit config path provided, use only that
 				if (configPath) {
@@ -446,14 +466,32 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						),
 					)
 
-					return mergeWithDefaults(validated)
+					return { config: mergeWithDefaults(validated), loadedConfigPath: configPath }
 				}
 
+				const cwdPath = process.cwd()
+				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+				const cwdHasConfig = yield* fs
+					.exists(cwdConfigPath)
+					.pipe(
+						Effect.catchAll((error) =>
+							Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+								Effect.zipRight(Effect.succeed(false)),
+							),
+						),
+					)
+				const configBasePath = resolveConfigBasePath({
+					cwdPath,
+					projectPath,
+					pathOps: pathService,
+					cwdHasConfig,
+				})
+
 				// Try .azedarach.json first
-				const jsonConfig = yield* loadJsonConfig(projectPath).pipe(
+				const jsonConfig = yield* loadJsonConfig(configBasePath).pipe(
 					Effect.catchAll((warning) =>
 						Effect.logWarning(
-							`[DEBUG] Failed to load .azedarach.json for projectPath=${projectPath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
+							`[DEBUG] Failed to load .azedarach.json for projectPath=${configBasePath}: ${warning.message} (path=${warning.path}${warning.details ? ` details=${warning.details}` : ""})`,
 						).pipe(
 							Effect.zipRight(SubscriptionRef.set(loadWarningRef, warning)),
 							Effect.zipRight(showConfigFallbackToast(warning)),
@@ -468,27 +506,33 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					yield* Effect.log(
 						`[DEBUG] After mergeWithDefaults: cliTool=${resolved.cliTool} (input was: ${jsonConfig.cliTool})`,
 					)
-					return resolved
+					return {
+						config: resolved,
+						loadedConfigPath: pathService.join(configBasePath, ".azedarach.json"),
+					}
 				}
 
 				// Try package.json "azedarach" key
-				const pkgConfig = yield* loadPackageJsonConfig(projectPath).pipe(
+				const pkgConfig = yield* loadPackageJsonConfig(configBasePath).pipe(
 					Effect.catchAll((error) =>
 						Effect.logWarning(
-							`[DEBUG] Failed to load package.json azedarach config for projectPath=${projectPath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
+							`[DEBUG] Failed to load package.json azedarach config for projectPath=${configBasePath}: ${error.message} (path=${error.path}${error.details ? ` details=${error.details}` : ""})`,
 						).pipe(Effect.as(null)),
 					),
 				)
 
 				if (pkgConfig) {
 					yield* SubscriptionRef.set(loadWarningRef, null)
-					return mergeWithDefaults(pkgConfig)
+					return {
+						config: mergeWithDefaults(pkgConfig),
+						loadedConfigPath: pathService.join(configBasePath, "package.json"),
+					}
 				}
 
 				// Fall back to env vars + defaults
 				const envConfig = loadEnvConfig()
 				yield* SubscriptionRef.set(loadWarningRef, null)
-				return mergeWithDefaults(envConfig)
+				return { config: mergeWithDefaults(envConfig), loadedConfigPath: null }
 			})
 
 		// ============================================================================
@@ -514,21 +558,25 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 		// Load initial config
 		yield* Effect.log(`[DEBUG] Loading initial config from: ${effectiveProjectPath}`)
-		const initialConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
-			Effect.tap((c) => Effect.log(`[DEBUG] Initial config loaded: cliTool=${c.cliTool}`)),
+		const initialLoaded = yield* loadConfigForPath(effectiveProjectPath).pipe(
+			Effect.tap((loaded) =>
+				Effect.log(`[DEBUG] Initial config loaded: cliTool=${loaded.config.cliTool}`),
+			),
 			Effect.catchAll((e) => {
 				if (e._tag === "ConfigParseError") {
 					return SubscriptionRef.set(loadWarningRef, e).pipe(
 						Effect.zipRight(showConfigFallbackToast(e)),
 						Effect.zipRight(Effect.log(`[DEBUG] Initial config load failed: ${e}`)),
-						Effect.map(() => mergeWithDefaults({})),
+						Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 					)
 				}
 				return Effect.log(`[DEBUG] Initial config load failed: ${e}`).pipe(
-					Effect.map(() => mergeWithDefaults({})),
+					Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 				)
 			}),
 		)
+		const initialConfig = initialLoaded.config
+		yield* SubscriptionRef.set(loadedConfigPathRef, initialLoaded.loadedConfigPath)
 		yield* Effect.log(`[DEBUG] Creating configRef with cliTool=${initialConfig.cliTool}`)
 
 		// Create reactive config ref
@@ -541,22 +589,26 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					Effect.gen(function* () {
 						const newProjectPath = project?.path ?? process.cwd()
 						yield* Effect.log(`[DEBUG] Project watcher triggered: path=${newProjectPath}`)
-						const newConfig = yield* loadConfigForPath(newProjectPath).pipe(
-							Effect.tap((c) => Effect.log(`[DEBUG] Watcher loaded config: cliTool=${c.cliTool}`)),
+						const loaded = yield* loadConfigForPath(newProjectPath).pipe(
+							Effect.tap((v) =>
+								Effect.log(`[DEBUG] Watcher loaded config: cliTool=${v.config.cliTool}`),
+							),
 							Effect.catchAll((e) => {
 								if (e._tag === "ConfigParseError") {
 									return SubscriptionRef.set(loadWarningRef, e).pipe(
 										Effect.zipRight(showConfigFallbackToast(e)),
 										Effect.zipRight(Effect.log(`[DEBUG] Watcher config load failed: ${e}`)),
-										Effect.map(() => mergeWithDefaults({})),
+										Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 									)
 								}
 								return Effect.log(`[DEBUG] Watcher config load failed: ${e}`).pipe(
-									Effect.map(() => mergeWithDefaults({})),
+									Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 								)
 							}),
 						)
+						const newConfig = loaded.config
 						yield* Effect.log(`[DEBUG] Watcher setting configRef: cliTool=${newConfig.cliTool}`)
+						yield* SubscriptionRef.set(loadedConfigPathRef, loaded.loadedConfigPath)
 						yield* SubscriptionRef.set(configRef, newConfig)
 					}),
 				),
@@ -566,6 +618,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		return {
 			config: configRef,
 			loadWarning: loadWarningRef,
+			loadedConfigPath: loadedConfigPathRef,
 			/**
 			 * Reload config from disk for current project
 			 *
@@ -578,20 +631,22 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 				Effect.gen(function* () {
 					const currentProjectPath = yield* projectService.getCurrentPath()
 					const effectiveProjectPath = currentProjectPath ?? process.cwd()
-					const newConfig = yield* loadConfigForPath(effectiveProjectPath).pipe(
+					const loaded = yield* loadConfigForPath(effectiveProjectPath).pipe(
 						Effect.catchAll((e) => {
 							if (e._tag === "ConfigParseError") {
 								return SubscriptionRef.set(loadWarningRef, e).pipe(
 									Effect.zipRight(showConfigFallbackToast(e)),
 									Effect.zipRight(Effect.log(`[DEBUG] Config reload failed: ${e}`)),
-									Effect.map(() => mergeWithDefaults({})),
+									Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 								)
 							}
 							return Effect.log(`[DEBUG] Config reload failed: ${e}`).pipe(
-								Effect.map(() => mergeWithDefaults({})),
+								Effect.map(() => ({ config: mergeWithDefaults({}), loadedConfigPath: null })),
 							)
 						}),
 					)
+					const newConfig = loaded.config
+					yield* SubscriptionRef.set(loadedConfigPathRef, loaded.loadedConfigPath)
 					yield* SubscriptionRef.set(configRef, newConfig)
 				}),
 			getCliTool: () =>
@@ -615,9 +670,9 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					syncEnabled: getIssueBackendSyncEnabled(c),
 				})),
 			getIssueTrackerSyncConfigForProjectPath: (projectPath: string) =>
-				Effect.map(loadConfigForPath(projectPath), (c) => ({
-					issueTracker: c.issueTracker,
-					syncEnabled: getIssueBackendSyncEnabled(c),
+				Effect.map(loadConfigForPath(projectPath), ({ config }) => ({
+					issueTracker: config.issueTracker,
+					syncEnabled: getIssueBackendSyncEnabled(config),
 				})),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),

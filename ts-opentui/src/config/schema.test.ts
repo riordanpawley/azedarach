@@ -8,12 +8,18 @@
 import { describe, expect, it } from "bun:test"
 import { Schema } from "effect"
 import { mergeWithDefaults } from "./defaults.js"
-import { AzedarachConfigSchema, CURRENT_CONFIG_VERSION } from "./schema.js"
+import {
+	AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+	AzedarachConfigSchema,
+	CURRENT_CONFIG_VERSION,
+} from "./schema.js"
 
 /**
  * Helper to decode a raw config through the schema
  */
 const decodeConfig = (raw: unknown) => Schema.decodeUnknownSync(AzedarachConfigSchema)(raw)
+const encodeConfig = (decoded: ReturnType<typeof decodeConfig>) =>
+	Schema.encodeSync(AzedarachConfigSchema)(decoded)
 
 describe("AzedarachConfigSchema", () => {
 	describe("version handling", () => {
@@ -36,6 +42,16 @@ describe("AzedarachConfigSchema", () => {
 
 		it("handles config with no version field (legacy)", () => {
 			const result = decodeConfig({
+				session: { command: "claude" },
+			})
+			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(result.session?.command).toBe("claude")
+		})
+
+		it("accepts editor metadata schema URI with explicit $version", () => {
+			const result = decodeConfig({
+				$schema: AZEDARACH_CONFIG_JSON_SCHEMA_URI,
+				$version: CURRENT_CONFIG_VERSION,
 				session: { command: "claude" },
 			})
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
@@ -135,6 +151,10 @@ describe("AzedarachConfigSchema", () => {
 					syncEnabled: true,
 					command: "linear-cli",
 					team: "ENG",
+					syncThrottle: {
+						maxPerMinute: 90,
+						burst: 10,
+					},
 					webhooks: {
 						enabled: true,
 						url: "https://example.ngrok.app",
@@ -147,7 +167,28 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
 			expect(result.issueTracker?.linear?.team).toBe("ENG")
 			expect(result.issueTracker?.linear?.command).toBe("linear-cli")
+			expect(result.issueTracker?.linear?.syncThrottle?.maxPerMinute).toBe(90)
+			expect(result.issueTracker?.linear?.syncThrottle?.burst).toBe(10)
 			expect(result.issueTracker?.linear?.webhooks?.url).toBe("https://example.ngrok.app")
+		})
+
+		it("preserves nested linear syncThrottle during v2 migration path", () => {
+			const result = decodeConfig({
+				$schema: 2,
+				issueTracker: {
+					linear: {
+						syncEnabled: true,
+						syncThrottle: {
+							maxPerMinute: 120,
+							burst: 20,
+						},
+					},
+				},
+			})
+
+			expect(result.issueTracker?.linear?.syncEnabled).toBe(true)
+			expect(result.issueTracker?.linear?.syncThrottle?.maxPerMinute).toBe(120)
+			expect(result.issueTracker?.linear?.syncThrottle?.burst).toBe(20)
 		})
 	})
 
@@ -165,9 +206,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.merge?.startAiSessionOnFailure).toBe(false)
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(result)
-			const encodedMerge = encoded.git?.merge
-			expect(encodedMerge?.startAiSessionOnFailure).toBe(false)
-			expect(encoded.merge).toBeUndefined()
+			expect(encoded.merge?.startAiSessionOnFailure).toBe(false)
 		})
 
 		it("prefers merge.startAiSessionOnFailure when both keys are present", () => {
@@ -192,6 +231,7 @@ describe("AzedarachConfigSchema", () => {
 					pr: {
 						enabled: true,
 						autoDraft: false,
+						aiModel: "gpt-5.3-codex-spark",
 					},
 					merge: {
 						maxFixAttempts: 3,
@@ -203,6 +243,7 @@ describe("AzedarachConfigSchema", () => {
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
 			expect(result.pr?.enabled).toBe(true)
 			expect(result.pr?.autoDraft).toBe(false)
+			expect(result.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 			expect(result.merge?.maxFixAttempts).toBe(3)
 			expect(result.merge?.startAiSessionOnFailure).toBe(false)
 		})
@@ -219,6 +260,7 @@ describe("AzedarachConfigSchema", () => {
 				git: {
 					pr: {
 						enabled: true,
+						aiModel: "gpt-5.3-codex-spark",
 					},
 					merge: {
 						maxFixAttempts: 9,
@@ -227,7 +269,22 @@ describe("AzedarachConfigSchema", () => {
 			})
 
 			expect(result.pr?.enabled).toBe(false)
+			expect(result.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 			expect(result.merge?.maxFixAttempts).toBe(1)
+		})
+
+		it("preserves git-scoped pr.aiModel when re-encoding canonical config", () => {
+			const decoded = decodeConfig({
+				$schema: 5,
+				git: {
+					pr: {
+						aiModel: "gpt-5.3-codex-spark",
+					},
+				},
+			})
+			const encoded = encodeConfig(decoded)
+
+			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 	})
 
@@ -439,6 +496,19 @@ describe("AzedarachConfigSchema", () => {
 			expect(resolved.pr.aiModel).toBe("gpt-5.3-codex-spark")
 		})
 
+		it("preserves pr.aiModel when re-encoding config for disk", () => {
+			const decoded = decodeConfig({
+				pr: {
+					enabled: true,
+					aiModel: "gpt-5.3-codex-spark",
+				},
+			})
+			const encoded = encodeConfig(decoded)
+
+			expect(encoded.pr?.aiModel).toBe("gpt-5.3-codex-spark")
+			expect(encoded.pr?.enabled).toBe(true)
+		})
+
 		it("accepts gpt-5.4 model literal", () => {
 			const result = decodeConfig({
 				model: {
@@ -485,7 +555,7 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("encoding", () => {
-		it("encodes current config with version", () => {
+		it("encodes current config with editor metadata and explicit version", () => {
 			const config = {
 				$schema: CURRENT_CONFIG_VERSION,
 				issueTracker: {
@@ -497,9 +567,9 @@ describe("AzedarachConfigSchema", () => {
 
 			const encoded = Schema.encodeSync(AzedarachConfigSchema)(config)
 			const encodedIssueTracker = encoded.issueTracker
-			const encodedGit = encoded.git
 
-			expect(encoded.$schema).toBe(CURRENT_CONFIG_VERSION)
+			expect(encoded.$schema).toBe(AZEDARACH_CONFIG_JSON_SCHEMA_URI)
+			expect(encoded.$version).toBe(CURRENT_CONFIG_VERSION)
 			if (
 				encodedIssueTracker === undefined ||
 				typeof encodedIssueTracker !== "object" ||
@@ -509,11 +579,7 @@ describe("AzedarachConfigSchema", () => {
 			}
 			expect(encodedIssueTracker.legacy?.syncEnabled).toBe(true)
 			expect(encoded.git?.baseBranch).toBe("main")
-			if (encodedGit === undefined || typeof encodedGit !== "object" || encodedGit === null) {
-				throw new Error("Expected encoded git object")
-			}
-			expect(encodedGit.pr?.autoDraft).toBe(true)
-			expect(encoded.pr).toBeUndefined()
+			expect(encoded.pr?.autoDraft).toBe(true)
 		})
 	})
 })

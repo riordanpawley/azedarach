@@ -50,7 +50,9 @@ This file is intentionally an overlay with ts-opentui-specific rules only.
 7. **tmux Session Startup**:
    - Use interactive shell form `${shell} -i -c '<cmd>; exec ${shell}'` to ensure direnv/env loading.
 8. **Spec Sync Discipline**:
-   - For behavior changes in `ts-opentui`, update `docs/spec/` in the same task, or record `Spec impact: none` with file-specific rationale in issue notes.
+   - For behavior changes in `ts-opentui`, inspect relevant linked `az spec` requirements before implementation.
+   - Update `az spec` requirement/link records in the same task when behavior scope changes.
+   - If no spec record updates are needed, record `Spec impact: none` with file-specific rationale in issue notes.
 
 ## Quick Commands
 

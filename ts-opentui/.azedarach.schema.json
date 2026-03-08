@@ -1,0 +1,750 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"type": "object",
+	"required": [],
+	"properties": {
+		"$schema": {
+			"anyOf": [
+				{
+					"type": "string"
+				},
+				{
+					"type": "number"
+				}
+			]
+		},
+		"$version": {
+			"type": "number"
+		},
+		"cliTool": {
+			"type": "string",
+			"enum": ["claude", "opencode", "codex"]
+		},
+		"issueTracker": {
+			"anyOf": [
+				{
+					"type": "string",
+					"enum": ["tracker", "legacy", "linear", "local"]
+				},
+				{
+					"type": "object",
+					"required": [],
+					"properties": {
+						"tracker": {
+							"type": "object",
+							"required": [],
+							"properties": {
+								"syncEnabled": {
+									"type": "boolean"
+								}
+							},
+							"additionalProperties": false
+						},
+						"legacy": {
+							"type": "object",
+							"required": [],
+							"properties": {
+								"syncEnabled": {
+									"type": "boolean"
+								}
+							},
+							"additionalProperties": false
+						},
+						"linear": {
+							"type": "object",
+							"required": [],
+							"properties": {
+								"syncEnabled": {
+									"type": "boolean"
+								},
+								"command": {
+									"type": "string"
+								},
+								"team": {
+									"type": "string"
+								},
+								"project": {
+									"type": "string"
+								},
+								"webhooks": {
+									"type": "object",
+									"required": [],
+									"properties": {
+										"enabled": {
+											"type": "boolean"
+										},
+										"transport": {
+											"type": "string",
+											"enum": ["sdk", "cli"]
+										},
+										"url": {
+											"type": "string"
+										},
+										"port": {
+											"type": "number"
+										},
+										"events": {
+											"type": "array",
+											"items": {
+												"type": "string"
+											}
+										},
+										"secret": {
+											"type": "string"
+										}
+									},
+									"additionalProperties": false
+								},
+								"syncThrottle": {
+									"type": "object",
+									"required": [],
+									"properties": {
+										"maxPerMinute": {
+											"type": "number"
+										},
+										"burst": {
+											"type": "number"
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						"local": {
+							"type": "object",
+							"required": [],
+							"properties": {
+								"syncEnabled": {
+									"type": "boolean"
+								},
+								"backups": {
+									"type": "object",
+									"required": [],
+									"properties": {
+										"enabled": {
+											"type": "boolean"
+										},
+										"intervalMinutes": {
+											"type": "number"
+										},
+										"writeCooldownSeconds": {
+											"type": "number"
+										},
+										"maxBackups": {
+											"type": "number"
+										},
+										"directory": {
+											"type": "string"
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"model": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"default": {
+					"type": "string",
+					"enum": [
+						"gpt-5.3-codex-spark",
+						"gpt-5.3-codex",
+						"gpt-5.4",
+						"gpt-5-mini",
+						"claude-4.5-haiku",
+						"claude-4.5-sonnet"
+					]
+				},
+				"chat": {
+					"type": "string",
+					"enum": [
+						"gpt-5.3-codex-spark",
+						"gpt-5.3-codex",
+						"gpt-5.4",
+						"gpt-5-mini",
+						"claude-4.5-haiku",
+						"claude-4.5-sonnet"
+					]
+				},
+				"claude": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"default": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						},
+						"chat": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				"opencode": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"default": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						},
+						"chat": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				"codex": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"default": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						},
+						"chat": {
+							"type": "string",
+							"enum": [
+								"gpt-5.3-codex-spark",
+								"gpt-5.3-codex",
+								"gpt-5.4",
+								"gpt-5-mini",
+								"claude-4.5-haiku",
+								"claude-4.5-sonnet"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"worktree": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"initCommands": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"env": {
+					"type": "object",
+					"required": [],
+					"properties": {},
+					"additionalProperties": {
+						"type": "string"
+					}
+				},
+				"continueOnFailure": {
+					"type": "boolean"
+				},
+				"parallel": {
+					"type": "boolean"
+				},
+				"copyPaths": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"git": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"pushBranchOnCreate": {
+					"type": "boolean"
+				},
+				"remote": {
+					"type": "string"
+				},
+				"branchPrefix": {
+					"type": "string"
+				},
+				"branchSlugMaxLength": {
+					"type": "number"
+				},
+				"baseBranch": {
+					"type": "string"
+				},
+				"pushEnabled": {
+					"type": "boolean"
+				},
+				"fetchEnabled": {
+					"type": "boolean"
+				},
+				"showLineChanges": {
+					"type": "boolean"
+				},
+				"workflowMode": {
+					"type": "string",
+					"enum": ["local", "origin"]
+				},
+				"pr": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"enabled": {
+							"type": "boolean"
+						},
+						"autoDraft": {
+							"type": "boolean"
+						},
+						"autoMerge": {
+							"type": "boolean"
+						},
+						"baseBranch": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"merge": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"validateCommands": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"fixCommand": {
+							"type": "string"
+						},
+						"maxFixAttempts": {
+							"type": "number"
+						},
+						"startAiSessionOnFailure": {
+							"type": "boolean"
+						},
+						"startClaudeOnFailure": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"session": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"command": {
+					"type": "string"
+				},
+				"shell": {
+					"type": "string"
+				},
+				"tmuxPrefix": {
+					"type": "string"
+				},
+				"dangerouslySkipPermissions": {
+					"type": "boolean"
+				},
+				"backgroundTasks": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"maxSessions": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"patterns": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"waiting": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"done": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"error": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"stateDetection": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"patternMatching": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"pr": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"autoDraft": {
+					"type": "boolean"
+				},
+				"autoMerge": {
+					"type": "boolean"
+				},
+				"aiModel": {
+					"type": "string",
+					"enum": [
+						"gpt-5.3-codex-spark",
+						"gpt-5.3-codex",
+						"gpt-5.4",
+						"gpt-5-mini",
+						"claude-4.5-haiku",
+						"claude-4.5-sonnet"
+					]
+				},
+				"baseBranch": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"merge": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"validateCommands": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"fixCommand": {
+					"type": "string"
+				},
+				"maxFixAttempts": {
+					"type": "number"
+				},
+				"startAiSessionOnFailure": {
+					"type": "boolean"
+				},
+				"startClaudeOnFailure": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"devServer": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"portPattern": {
+					"type": "string"
+				},
+				"servers": {
+					"type": "object",
+					"required": [],
+					"properties": {},
+					"additionalProperties": {
+						"type": "object",
+						"required": ["command"],
+						"properties": {
+							"command": {
+								"type": "string"
+							},
+							"cwd": {
+								"type": "string"
+							},
+							"ports": {
+								"type": "object",
+								"required": [],
+								"properties": {},
+								"additionalProperties": {
+									"type": "number"
+								}
+							}
+						},
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"notifications": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"bell": {
+					"type": "boolean"
+				},
+				"system": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"tracker": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"syncEnabled": {
+					"type": "boolean"
+				},
+				"issueTracker": {
+					"type": "string",
+					"enum": ["tracker", "legacy", "linear", "local"]
+				}
+			},
+			"additionalProperties": false
+		},
+		"legacy": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"syncEnabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"linear": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"syncEnabled": {
+					"type": "boolean"
+				},
+				"command": {
+					"type": "string"
+				},
+				"team": {
+					"type": "string"
+				},
+				"project": {
+					"type": "string"
+				},
+				"webhooks": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"enabled": {
+							"type": "boolean"
+						},
+						"transport": {
+							"type": "string",
+							"enum": ["sdk", "cli"]
+						},
+						"url": {
+							"type": "string"
+						},
+						"port": {
+							"type": "number"
+						},
+						"events": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"secret": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"syncThrottle": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"maxPerMinute": {
+							"type": "number"
+						},
+						"burst": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"local": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"syncEnabled": {
+					"type": "boolean"
+				},
+				"backups": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"enabled": {
+							"type": "boolean"
+						},
+						"intervalMinutes": {
+							"type": "number"
+						},
+						"writeCooldownSeconds": {
+							"type": "number"
+						},
+						"maxBackups": {
+							"type": "number"
+						},
+						"directory": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"network": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"autoDetect": {
+					"type": "boolean"
+				},
+				"checkIntervalSeconds": {
+					"type": "number"
+				},
+				"checkHost": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"keyboard": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"jumpLabelChars": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"sessionRecovery": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"mode": {
+					"type": "string",
+					"enum": ["auto", "manual"]
+				},
+				"autoRecoveryDelayMs": {
+					"type": "number"
+				},
+				"retryBaseDelayMs": {
+					"type": "number"
+				},
+				"retryMaxDelayMs": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"hooks": {
+			"type": "object",
+			"required": [],
+			"properties": {
+				"preCompact": {
+					"type": "object",
+					"required": [],
+					"properties": {
+						"enabled": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"projects": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"required": ["name", "path"],
+				"properties": {
+					"name": {
+						"type": "string"
+					},
+					"path": {
+						"type": "string"
+					},
+					"issueStorePath": {
+						"type": "string"
+					}
+				},
+				"additionalProperties": false
+			}
+		},
+		"defaultProject": {
+			"type": "string"
+		}
+	},
+	"additionalProperties": false
+}

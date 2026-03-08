@@ -8,7 +8,7 @@
  */
 
 import { Command } from "@effect/platform"
-import { Effect, Ref } from "effect"
+import { Effect, Ref, Schema } from "effect"
 import type { PRState } from "../ui/types.js"
 import { DiagnosticsService } from "./DiagnosticsService.js"
 
@@ -25,11 +25,10 @@ interface PRStateCacheEntry {
 	readonly timestamp: number
 }
 
-/** gh pr view JSON output structure */
-interface GHPRView {
-	state: "OPEN" | "CLOSED" | "MERGED"
-	isDraft: boolean
-}
+const GHPRViewSchema = Schema.Struct({
+	state: Schema.Literal("OPEN", "CLOSED", "MERGED"),
+	isDraft: Schema.Boolean,
+})
 
 // ============================================================================
 // Service Definition
@@ -106,8 +105,8 @@ export class PRStateService extends Effect.Service<PRStateService>()("PRStateSer
 				)
 
 				const result = yield* command.pipe(
-					Effect.map((output): PRState => {
-						const data = JSON.parse(output) as GHPRView
+					Effect.flatMap((output) => Schema.decode(Schema.parseJson(GHPRViewSchema))(output)),
+					Effect.map((data): PRState => {
 						// Map gh CLI state to our PRState type
 						if (data.isDraft) return "draft"
 						switch (data.state) {

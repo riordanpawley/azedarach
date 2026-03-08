@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test"
+import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
 	buildPrimeOutput,
 	deriveWaitingAttentionPlan,
+	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
 	formatIssueSummaryLine,
+	formatParentChildCheckOutput,
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
@@ -115,6 +118,13 @@ describe("normalizeIssueJsonFlagOrder", () => {
 	it("keeps issue list options unchanged", () => {
 		const argv = ["bun", "az", "issue", "list", "--limit", "5", "--status", "open"]
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
+
+	it("moves issue check options ahead of issue-id when issue-id is first", () => {
+		const argv = ["bun", "az", "issue", "check", "AZE-200", "--limit", "50"]
+		const normalized = normalizeIssueJsonFlagOrder(argv)
+
+		expect(normalized).toEqual(["bun", "az", "issue", "check", "--limit", "50", "AZE-200"])
 	})
 
 	it("moves issue dep add options ahead of positional ids when ids are first", () => {
@@ -257,6 +267,20 @@ describe("normalizeCliAliases", () => {
 			"issue",
 			"child",
 			"Follow-up",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "ck", "AZE-10"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"check",
+			"AZE-10",
+		])
+		expect(normalizeCliAliases(["bun", "az", "i", "dr", "AZE-10"])).toEqual([
+			"bun",
+			"az",
+			"issue",
+			"doctor",
+			"AZE-10",
 		])
 		expect(normalizeCliAliases(["bun", "az", "issue", "d", "add", "AZE-1", "AZE-2"])).toEqual([
 			"bun",
@@ -613,5 +637,68 @@ describe("formatIssueDetailSections", () => {
 		expect(sections).toEqual([
 			"Linked Spec Requirements:\nfr4201 (AZ-FR-4201) [functional] (implements) Persist requirements and links\nat2901 (AZ-AT-2901) [acceptance] (tests) Acceptance path is covered",
 		])
+	})
+})
+
+const makeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIssue => ({
+	id,
+	title: `Issue ${id}`,
+	status: "open",
+	priority: 3,
+	issue_type: "task",
+	created_at: "2026-03-08T00:00:00.000Z",
+	updated_at: "2026-03-08T00:00:00.000Z",
+	...overrides,
+})
+
+describe("findLikelyParentChildTrackingMisses", () => {
+	it("flags non-parent-child dependencies to the target parent", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-2", {
+				dependencies: [{ id: "GX-1", dependency_type: "blocks" }],
+			}),
+			makeIssue("GX-3", {
+				dependencies: [{ id: "GX-1", dependency_type: "parent-child" }],
+			}),
+		])
+
+		expect(misses).toHaveLength(1)
+		expect(misses[0]?.issue.id).toBe("GX-2")
+		expect(misses[0]?.reason).toContain("typed 'blocks' instead of 'parent-child'")
+		expect(misses[0]?.remediateCommand).toBe("az issue update GX-2 --parent GX-1")
+	})
+
+	it("flags issue text references to parent when no parent-child link exists", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-4", {
+				title: "Follow-up for GX-1 parity fix",
+			}),
+		])
+
+		expect(misses).toHaveLength(1)
+		expect(misses[0]?.issue.id).toBe("GX-4")
+		expect(misses[0]?.reason).toContain("references GX-1")
+	})
+
+	it("ignores closed candidates and unrelated issues", () => {
+		const misses = findLikelyParentChildTrackingMisses("GX-1", [
+			makeIssue("GX-5", {
+				status: "closed",
+				dependencies: [{ id: "GX-1", dependency_type: "blocks" }],
+			}),
+			makeIssue("GX-6", {
+				title: "No mention",
+			}),
+		])
+
+		expect(misses).toHaveLength(0)
+	})
+})
+
+describe("formatParentChildCheckOutput", () => {
+	it("formats no-miss output", () => {
+		expect(formatParentChildCheckOutput("GX-1", [])).toBe(
+			"No likely parent-child tracking misses found for GX-1.",
+		)
 	})
 })
