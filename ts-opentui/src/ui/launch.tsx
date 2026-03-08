@@ -6,6 +6,7 @@ import { createRoot } from "@opentui/react"
 import { killActivePopup } from "../core/IssueEditorService.js"
 import { AZ_SESSION_NAME } from "../lib/tmux-wrap.js"
 import { App } from "./App.js"
+import { truncateAzLogOnStartup } from "./logMaintenance.js"
 
 const AZ_RETURN_KEY = process.env.AZ_RETURN_KEY?.trim() || "g"
 
@@ -47,6 +48,8 @@ async function registerReturnBinding(): Promise<void> {
  * Uses React's createRoot pattern for rendering.
  */
 export async function launchTUI(): Promise<void> {
+	await truncateAzLogOnStartup()
+
 	// Register SIGINT handler to clean up any active tmux popup
 	// This prevents orphaned popups when user presses Ctrl-C during editor operations
 	process.on("SIGINT", () => {
