@@ -17,7 +17,8 @@ Use this skill when the task is "release next version" or "bump version" for `ts
 
 - Prefer release automation entrypoints:
   - `just release-ts-opentui <patch|minor|major>` for release-only
-  - `just release-ts-opentui-homebrew <tap-dir> <patch|minor|major>` for release + tap formula update
+  - `just release-ts-opentui-homebrew <patch|minor|major>` for release + tap formula update
+    (default tap path: `/Users/riordan/prog/homebrew-azedarach`, override with `AZ_HOMEBREW_TAP_DIR`)
 - The release script performs pull + push. Only run the full script when remote sync is explicitly requested.
 - If remote sync is not explicitly requested, do local-only release prep (version bump, checks, commit, local tag).
 - Always include the issue ID in commit messages.
@@ -39,7 +40,10 @@ git log --oneline -5
 ```bash
 git checkout main
 git status --short --branch
-just release-ts-opentui-homebrew /path/to/homebrew-azedarach patch
+just release-ts-opentui-homebrew patch
+
+# Optional override:
+AZ_HOMEBREW_TAP_DIR=/path/to/homebrew-azedarach just release-ts-opentui-homebrew patch
 ```
 
 Use `minor` or `major` as needed.

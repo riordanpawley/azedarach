@@ -18,8 +18,8 @@ Options:
   -h, --help               Show this help
 
 Examples:
-  ./ts-opentui/scripts/release-with-homebrew.sh patch --tap-dir ../homebrew-azedarach
-  ./ts-opentui/scripts/release-with-homebrew.sh 0.3.4 --tap-dir ../homebrew-azedarach -- --skip-checks
+  ./ts-opentui/scripts/release-with-homebrew.sh patch --tap-dir /Users/riordan/prog/homebrew-azedarach
+  ./ts-opentui/scripts/release-with-homebrew.sh 0.3.4 --tap-dir /Users/riordan/prog/homebrew-azedarach -- --skip-checks
 EOF
 }
 

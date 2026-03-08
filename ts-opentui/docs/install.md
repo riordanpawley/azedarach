@@ -124,7 +124,17 @@ just release-ts-opentui patch
 One-step release + Homebrew tap update (maintainers):
 
 ```bash
-just release-ts-opentui-homebrew /path/to/homebrew-azedarach patch
+just release-ts-opentui-homebrew patch
+```
+
+By default this uses:
+- `/Users/riordan/prog/homebrew-azedarach`
+
+Override if needed:
+
+```bash
+AZ_HOMEBREW_TAP_DIR=/path/to/homebrew-azedarach \
+  just release-ts-opentui-homebrew patch
 ```
 
 Release script behavior:
@@ -171,7 +181,7 @@ Bootstrap steps:
    ```
 
 Shortcut:
-- `just release-ts-opentui-homebrew /path/to/homebrew-azedarach patch` runs release + formula generation and commits/pushes the tap update.
+- `just release-ts-opentui-homebrew patch` runs release + formula generation and commits/pushes the tap update (default tap path: `/Users/riordan/prog/homebrew-azedarach`).
 
 Coworker install (after tap is published):
 
