@@ -1250,8 +1250,30 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 					workflowMode: current.git.workflowMode,
 				}
 
-	const prSource = current.pr ?? current.git?.pr
-	const mergeSource = current.merge ?? current.git?.merge
+	const scopedPr = current.git?.pr
+	const scopedMerge = current.git?.merge
+	const prSource =
+		current.pr !== undefined || scopedPr !== undefined
+			? {
+					enabled: current.pr?.enabled ?? scopedPr?.enabled,
+					autoDraft: current.pr?.autoDraft ?? scopedPr?.autoDraft,
+					autoMerge: current.pr?.autoMerge ?? scopedPr?.autoMerge,
+					aiModel: current.pr?.aiModel ?? scopedPr?.aiModel,
+				}
+			: undefined
+	const mergeSource =
+		current.merge !== undefined || scopedMerge !== undefined
+			? {
+					validateCommands: current.merge?.validateCommands ?? scopedMerge?.validateCommands,
+					fixCommand: current.merge?.fixCommand ?? scopedMerge?.fixCommand,
+					maxFixAttempts: current.merge?.maxFixAttempts ?? scopedMerge?.maxFixAttempts,
+					startAiSessionOnFailure:
+						current.merge?.startAiSessionOnFailure ??
+						scopedMerge?.startAiSessionOnFailure ??
+						current.merge?.startClaudeOnFailure ??
+						scopedMerge?.startClaudeOnFailure,
+				}
+			: undefined
 
 	// Ensure version is set even if no migrations were needed
 	// Strip legacy fields to match CurrentConfig
@@ -1265,23 +1287,8 @@ const applyMigrations = (config: RawConfig): CurrentConfig => {
 		session: current.session,
 		patterns: current.patterns,
 		stateDetection: current.stateDetection,
-		pr: prSource
-			? {
-					enabled: prSource.enabled,
-					autoDraft: prSource.autoDraft,
-					autoMerge: prSource.autoMerge,
-					aiModel: prSource.aiModel,
-				}
-			: undefined,
-		merge: mergeSource
-			? {
-					validateCommands: mergeSource.validateCommands,
-					fixCommand: mergeSource.fixCommand,
-					maxFixAttempts: mergeSource.maxFixAttempts,
-					startAiSessionOnFailure:
-						mergeSource.startAiSessionOnFailure ?? mergeSource.startClaudeOnFailure,
-				}
-			: undefined,
+		pr: prSource,
+		merge: mergeSource,
 		devServer: current.devServer,
 		notifications: current.notifications,
 		network: current.network,
