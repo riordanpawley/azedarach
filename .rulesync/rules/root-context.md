@@ -66,6 +66,9 @@ fd "filename" -t f                # Find files (NOT find)
 
 # Issue Tracking
 az prime                          # Session primer + AI workflow guide
+az impl list                      # Show project implementations/default
+az issue create "Title" --impl ts-opentui
+az issue create "Shared task" --impl ts-opentui --impl go-bubbletea
 
 # RuleSync
 just rulesync-sync                # Sync managed files from .rulesync/
@@ -128,6 +131,13 @@ When user requests work, use this matrix to decide which implementation to work 
 | "Go", "Bubbletea" | go-bubbletea/ | Tech-specific match |
 | "Gleam", "Erlang", "BEAM" | gleam/ | Experimental match |
 | Explicit app folder mentioned | That folder | User-specified |
+
+## Implementation Registry
+
+- This project registers `ts-opentui` and `go-bubbletea` in `az impl`.
+- Treat `ts-opentui` as the project default implementation when a single default is needed.
+- Once multiple implementations are configured, new `az issue` and `az spec link` writes MUST include one or more explicit `--impl <impl>` selections.
+- Repeat `--impl` flags only for intentionally shared work spanning both implementations.
 
 ## Task Management
 
