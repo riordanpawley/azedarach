@@ -121,6 +121,11 @@ describe("normalizeIssueJsonFlagOrder", () => {
 		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
 	})
 
+	it("keeps issue list parent filter order unchanged", () => {
+		const argv = ["bun", "az", "issue", "list", "--parent", "AZE-200", "--limit", "5"]
+		expect(normalizeIssueJsonFlagOrder(argv)).toEqual(argv)
+	})
+
 	it("moves issue check options ahead of issue-id when issue-id is first", () => {
 		const argv = ["bun", "az", "issue", "check", "AZE-200", "--limit", "50"]
 		const normalized = normalizeIssueJsonFlagOrder(argv)
