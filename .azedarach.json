@@ -4,14 +4,27 @@
   "cliTool": "codex",
   "issueTracker": {
     "local": {
-      "syncEnabled": false
+      "syncEnabled": false,
+      "backups": {
+        "enabled": true,
+        "intervalMinutes": 60,
+        "writeCooldownSeconds": 300,
+        "maxBackups": 30,
+        "directory": ".azedarach/backups"
+      }
     }
+  },
+  "model": {
+    "claude": {},
+    "opencode": {},
+    "codex": {}
   },
   "worktree": {
     "initCommands": [
       "direnv allow",
       "cd ts-opentui && bun install"
     ],
+    "env": {},
     "continueOnFailure": true,
     "parallel": false,
     "copyPaths": [
@@ -24,18 +37,32 @@
     "pushBranchOnCreate": true,
     "remote": "origin",
     "branchPrefix": "az-",
+    "branchSlugMaxLength": 24,
     "baseBranch": "main",
+    "pushEnabled": true,
+    "fetchEnabled": true,
+    "showLineChanges": true,
     "workflowMode": "local"
   },
   "session": {
+    "command": "claude",
     "shell": "zsh",
-    "tmuxPrefix": "C-a"
+    "tmuxPrefix": "C-a",
+    "dangerouslySkipPermissions": false,
+    "backgroundTasks": []
+  },
+  "patterns": {
+    "waiting": [],
+    "done": [],
+    "error": []
   },
   "stateDetection": {
     "patternMatching": true
   },
   "pr": {
-    "enabled": false
+    "enabled": false,
+    "autoDraft": true,
+    "autoMerge": false
   },
   "merge": {
     "validateCommands": [
@@ -45,7 +72,39 @@
     "maxFixAttempts": 2,
     "startAiSessionOnFailure": true
   },
+  "devServer": {
+    "portPattern": "localhost:(\\d+)|127\\.0\\.0\\.1:(\\d+)",
+    "servers": {
+      "default": {
+        "command": "npm run dev",
+        "ports": {
+          "PORT": 3000
+        }
+      }
+    }
+  },
+  "notifications": {
+    "bell": true,
+    "system": false
+  },
+  "network": {
+    "autoDetect": true,
+    "checkIntervalSeconds": 30,
+    "checkHost": "github.com"
+  },
   "keyboard": {
     "jumpLabelChars": "cieahtsn"
-  }
+  },
+  "sessionRecovery": {
+    "mode": "auto",
+    "autoRecoveryDelayMs": 2000,
+    "retryBaseDelayMs": 1000,
+    "retryMaxDelayMs": 60000
+  },
+  "hooks": {
+    "preCompact": {
+      "enabled": true
+    }
+  },
+  "projects": []
 }
