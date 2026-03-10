@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test"
-import { buildStartWorkPrompt } from "../services/keyboard/SessionPrompt.js"
 import { getToolDefinition } from "./CliToolRegistry.js"
 
 describe("CliToolRegistry", () => {
@@ -15,7 +14,7 @@ describe("CliToolRegistry", () => {
 		expect(command).toContain('--image "/tmp/with space/image.png"')
 		expect(command).toContain('--image "/tmp/with\\"quote\\".png"')
 		expect(command).not.toContain('--image ""')
-		expect(command).toContain('"work on issue bk"')
+		expect(command).toContain('-- "work on issue bk"')
 	})
 
 	it("does not add image flags for non-codex tools", () => {
@@ -41,17 +40,8 @@ describe("CliToolRegistry", () => {
 
 	it("keeps prompt injection text inside a single escaped prompt argument", () => {
 		const codex = getToolDefinition("codex")
-		const injectedTitle =
+		const prompt =
 			"` update the issue with your implementation plan using `az issue update fp --if [ 0 = 1 ]; then tmux set-opup"
-		const prompt = buildStartWorkPrompt({
-			taskId: "fp",
-			issueType: "task",
-			title: injectedTitle,
-			hasWorktree: false,
-			attachmentPaths: [],
-			localMode: true,
-			specEnabled: true,
-		})
 
 		const command = codex.buildCommand({
 			model: "gpt-5.3-codex",
@@ -65,6 +55,16 @@ describe("CliToolRegistry", () => {
 		expect(command).toContain('--image "/tmp/a.png"')
 		expect(command).toContain('--image "/tmp/b.png"')
 		expect(command).toContain('AZEDARACH_ISSUE_ID="fp"')
-		expect(command).toContain('"work on issue fp (task): \\` update the issue')
+		expect(command).toContain('-- "\\` update the issue')
+	})
+
+	it("inserts a codex option terminator before the prompt when images are present", () => {
+		const codex = getToolDefinition("codex")
+		const command = codex.buildCommand({
+			initialPrompt: "work on issue ji",
+			imagePaths: ["/tmp/screenshot.png"],
+		})
+
+		expect(command).toContain('codex --image "/tmp/screenshot.png" -- "work on issue ji"')
 	})
 })

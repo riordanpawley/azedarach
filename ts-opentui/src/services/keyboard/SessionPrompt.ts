@@ -1,58 +1,27 @@
+const MAX_PROMPT_TITLE_LENGTH = 160
+
 export const buildStartWorkPrompt = (params: {
 	readonly taskId: string
 	readonly issueType: string
 	readonly title: string
-	readonly hasWorktree: boolean
-	readonly attachmentPaths: readonly string[]
-	readonly localMode: boolean
-	readonly specEnabled: boolean
 }): string => {
 	const safeIssueType = sanitizePromptInline(params.issueType)
-	const safeTitle = sanitizePromptInline(params.title)
-	const showCommand = `az issue get ${params.taskId}`
+	const safeTitle = sanitizePromptInline(params.title, MAX_PROMPT_TITLE_LENGTH)
 
-	let prompt = `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
+	return `work on issue ${params.taskId} (${safeIssueType}): ${safeTitle}
 
-Start by running \`az prime\`.
-\`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
-If context looks stale, refresh with \`${showCommand}\`.`
-
-	if (params.specEnabled) {
-		prompt += `
-In this repo, when a prompt says "spec", it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
-Before implementing behavior changes, inspect relevant \`az spec\` requirements/links.
-After implementing behavior changes, verify compliance against linked \`az spec\` requirements and update \`az spec\` requirement/link records when scope changes.`
-	}
-
-	if (params.localMode) {
-		prompt += `
-
-Local workflow mode guardrails:
-- Use plain \`git\` commands in this worktree.
-- Do not use \`git -C [path]\` unless intentionally targeting a different repository/path.
-- Do not run remote cleanup/sync commands unless explicitly asked.`
-	}
-
-	if (params.hasWorktree) {
-		prompt += `
-
-NOTE: This worktree has existing work. Check:
-- \`git status\` to see uncommitted changes
-- \`git log --oneline -5\` to see recent commits
-- Read the design notes on the issue for context from previous sessions`
-	}
-
-	if (params.attachmentPaths.length > 0) {
-		prompt += `\n\nAttached images (use Read tool to view):\n${params.attachmentPaths.join("\n")}`
-	}
-
-	return prompt
+Start by running \`az prime\`. Then continue the task using the context it prints without waiting for further instruction.`
 }
 
-const sanitizePromptInline = (value: string): string => {
+const sanitizePromptInline = (value: string, maxLength?: number): string => {
 	const normalized = value
 		.replace(/\p{Cc}/gu, " ")
 		.replace(/\s+/g, " ")
 		.trim()
-	return normalized.replace(/</g, "[").replace(/>/g, "]")
+	const safe = normalized.replace(/</g, "[").replace(/>/g, "]")
+	if (maxLength === undefined || safe.length <= maxLength) {
+		return safe
+	}
+
+	return `${safe.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`
 }
