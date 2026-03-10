@@ -1711,6 +1711,9 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 									projectPath,
 								})
 							}
+							if (!epicWorktree) {
+								return yield* Effect.die(`Failed to resolve worktree for epic ${parentEpic.id}`)
+							}
 							mergeDir = epicWorktree.path
 							yield* Effect.log(`Merging ${issueId} in epic worktree ${mergeDir}`)
 						}
@@ -3016,6 +3019,11 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 								branchSlugMaxLength: gitConfig.branchSlugMaxLength,
 								projectPath,
 							})
+						}
+						if (!targetWorktree) {
+							return yield* Effect.die(
+								`Failed to resolve worktree for target bead ${targetIssueId}`,
+							)
 						}
 						const sourceBranch = sourceWorktree.branch
 

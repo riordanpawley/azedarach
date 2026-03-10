@@ -22,7 +22,6 @@ import {
 } from "../../core/PRWorkflow.js"
 import { getWorktreePath } from "../../core/paths.js"
 import { TmuxService } from "../../core/TmuxService.js"
-import { createWorktreeOnlyCleanupOptions } from "../../lib/cleanupPolicy.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService } from "../EditorService.js"
 import { formatForToast } from "../ErrorFormatter.js"
@@ -153,7 +152,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 					yield* Effect.log(`[cleanup:execute] Running cleanup for issueId=${issueId}`)
 					yield* toast.show("info", `Cleaning up ${issueId}...`)
 
-					yield* prWorkflow.cleanup(createWorktreeOnlyCleanupOptions(issueId, projectPath)).pipe(
+					yield* prWorkflow.cleanup({ issueId, projectPath, closeIssue: true }).pipe(
 						Effect.tap(() => toast.show("success", `Cleaned up ${issueId}`)),
 						Effect.catchAll(helpers.showErrorToast("Failed to cleanup")),
 					)
@@ -595,7 +594,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 						}
 					}
 					message += "\n\nAll uncommitted changes will be lost."
-					message += "\nThe issue will stay open."
+					message += "\nThe issue will be closed."
 
 					yield* overlay.push({
 						_tag: "confirm",

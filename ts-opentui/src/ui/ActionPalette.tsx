@@ -4,7 +4,6 @@
 import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useMemo, useState } from "react"
 import type { WorkflowMode } from "../config/schema.js"
-import { isActionPaletteNetworkAction } from "../lib/cleanupPolicy.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
@@ -13,7 +12,7 @@ export interface ActionPaletteProps {
 	task?: TaskWithSession
 	/** Running operation label (e.g., "merge", "cleanup") - dims queued actions */
 	runningOperation?: string | null
-	/** Whether network is available for remote-dependent actions */
+	/** Whether network is available (affects PR/merge/cleanup actions) */
 	isOnline?: boolean
 	/** Dev server status for the current task */
 	devServerStatus?: DevServerStatus
@@ -47,6 +46,9 @@ const QUEUED_ACTIONS = new Set(["s", "S", "!", "x", "P", "m", "d", "u"])
  * When an operation is in progress (runningOperation is set), queued actions
  * are dimmed and will show an error toast if pressed.
  */
+/** Actions that require network connectivity */
+const NETWORK_ACTIONS = new Set(["P", "m", "d", "O"])
+
 const ACTION_KEY_SEQUENCE_MAP: Readonly<Record<string, string>> = {
 	h: "h",
 	l: "l",
@@ -165,7 +167,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			return false
 		}
 		// Network actions unavailable when offline
-		if (!isOnline && isActionPaletteNetworkAction(action)) {
+		if (!isOnline && NETWORK_ACTIONS.has(action)) {
 			return false
 		}
 		return isAvailableByState(action)
@@ -173,7 +175,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 	// Check if action is disabled due to offline
 	const isOfflineBlocked = (action: string): boolean => {
-		return !isOnline && isActionPaletteNetworkAction(action)
+		return !isOnline && NETWORK_ACTIONS.has(action)
 	}
 
 	const compactActions = useMemo<ReadonlyArray<ActionLineSpec>>(() => {
