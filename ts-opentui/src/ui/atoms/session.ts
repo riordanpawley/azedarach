@@ -7,8 +7,8 @@
 
 import { Effect } from "effect"
 import { AttachmentService } from "../../core/AttachmentService.js"
-import { SessionManager } from "../../core/SessionManager.js"
 import { PTYMonitor } from "../../core/PTYMonitor.js"
+import { SessionManager } from "../../core/SessionManager.js"
 import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
 import { ProjectService } from "../../services/ProjectService.js"
 import { appRuntime } from "./runtime.js"
@@ -32,6 +32,11 @@ const mapTmuxStatusToSessionState = (status: "busy" | "waiting" | "idle") => {
 	return "busy" as const
 }
 
+const isSyntheticTmuxDisappearance = (update: {
+	status: "busy" | "waiting" | "idle"
+	createdAt: number
+}) => update.status === "idle" && update.createdAt === 0
+
 export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 	Effect.gen(function* () {
 		const monitor = yield* TmuxSessionMonitor
@@ -43,11 +48,13 @@ export const sessionMonitorStarterAtom = appRuntime.fn(() =>
 				// Ensure PTY monitor tracks sessions discovered via tmux (orphan recovery/startup).
 				yield* ptyMonitor.registerSession(update.issueId, update.sessionName)
 
-				// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
-				yield* ptyMonitor.recordHookSignal(
-					update.issueId,
-					mapTmuxStatusToSessionState(update.status),
-				)
+				if (!isSyntheticTmuxDisappearance(update)) {
+					// Hook/tmux status is authoritative; stamp hook recency for PTY priority window.
+					yield* ptyMonitor.recordHookSignal(
+						update.issueId,
+						mapTmuxStatusToSessionState(update.status),
+					)
+				}
 
 				// Pass full session metadata for orphan recovery.
 				yield* manager.updateStateFromTmux(update.issueId, update.status, {

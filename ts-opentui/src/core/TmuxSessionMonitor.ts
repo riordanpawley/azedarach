@@ -38,7 +38,10 @@ export interface SessionStateUpdate {
 	readonly issueId: string
 	readonly status: TmuxStatus
 	readonly sessionName: string
-	/** Unix timestamp when the tmux session was created */
+	/**
+	 * Unix timestamp when the tmux session was created.
+	 * `0` means this update was synthesized because the session disappeared.
+	 */
 	readonly createdAt: number
 	/** Path to the worktree directory (from @az_worktree option) */
 	readonly worktreePath: string | null
