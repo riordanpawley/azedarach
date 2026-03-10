@@ -64,3 +64,21 @@ export const deriveWaitingSessionOptions = (
 			return left.sessionName.localeCompare(right.sessionName)
 		})
 }
+
+export const deriveCurrentProjectWaitingIssueIds = (
+	waitingSessions: readonly WaitingSessionOption[],
+): readonly string[] => {
+	const issueIds = new Set<string>()
+	const orderedIssueIds: string[] = []
+
+	for (const session of waitingSessions) {
+		if (!session.isCurrentProject || issueIds.has(session.issueId)) {
+			continue
+		}
+
+		issueIds.add(session.issueId)
+		orderedIssueIds.push(session.issueId)
+	}
+
+	return orderedIssueIds
+}
