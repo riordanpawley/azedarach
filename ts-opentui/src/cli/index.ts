@@ -1486,6 +1486,89 @@ const issueUpdateHandler = (args: {
 		}
 	})
 
+const issueBulkUpdateHandler = (args: {
+	readonly input: string
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const inputContent = yield* readIssueBulkUpdateInput(args.input)
+		const updates = yield* decodeIssueBulkUpdatePayload(inputContent).pipe(
+			Effect.mapError(
+				(error) =>
+					new Error(
+						`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`,
+					),
+			),
+		)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const results = yield* Effect.forEach(updates, (entry, index) =>
+			Effect.gen(function* () {
+				const fields = mapIssueBulkUpdateFields(entry)
+				if (!hasIssueBulkUpdateChanges(fields)) {
+					return {
+						index,
+						requestedId: entry.id,
+						issueId: entry.id,
+						updated: false,
+						error: "No fields provided for bulk update item.",
+					} satisfies IssueBulkUpdateResult
+				}
+
+				return yield* resolveCliIssueId(entry.id, resolverCwd).pipe(
+					Effect.flatMap((issueId) =>
+						issueTrackerClient.update(issueId, fields, explicitProjectDir).pipe(
+							Effect.as<IssueBulkUpdateResult>({
+								index,
+								requestedId: entry.id,
+								issueId,
+								updated: true,
+							}),
+						),
+					),
+					Effect.catchAll((error) =>
+						Effect.succeed<IssueBulkUpdateResult>({
+							index,
+							requestedId: entry.id,
+							issueId: entry.id,
+							updated: false,
+							error: formatIssueBulkUpdateError(error),
+						}),
+					),
+				)
+			}),
+		)
+
+		const summary = summarizeIssueBulkUpdateResults(results)
+		if (args.json) {
+			yield* Console.log(JSON.stringify(summary, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Bulk update finished: ${summary.updatedCount} succeeded, ${summary.failedCount} failed.`,
+		)
+		if (summary.failedCount > 0 || args.verbose) {
+			for (const result of summary.results) {
+				const issueLabel =
+					result.issueId === result.requestedId
+						? result.issueId
+						: `${result.requestedId} -> ${result.issueId}`
+				if (result.updated) {
+					yield* Console.log(`- ${issueLabel}: updated`)
+					continue
+				}
+				yield* Console.log(`- ${issueLabel}: failed (${result.error ?? "unknown error"})`)
+			}
+		}
+	})
+
 const implListHandler = (args: {
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -3679,6 +3762,159 @@ const parseLabelsOption = (labels: Option.Option<string>): string[] | undefined 
 				.filter((label) => label.length > 0),
 	})
 
+interface IssueBulkUpdateFields {
+	readonly status?: string
+	readonly notes?: string
+	readonly priority?: number
+	readonly title?: string
+	readonly type?: string
+	readonly description?: string
+	readonly design?: string
+	readonly acceptance?: string
+	readonly assignee?: string
+	readonly estimate?: number
+	readonly labels?: string[]
+	readonly implementations?: readonly string[]
+	readonly parent?: string
+}
+
+const IssueBulkUpdateEntrySchema = Schema.Struct({
+	id: Schema.String,
+	status: Schema.String.pipe(Schema.optional),
+	notes: Schema.String.pipe(Schema.optional),
+	priority: Schema.Number.pipe(Schema.optional),
+	title: Schema.String.pipe(Schema.optional),
+	type: Schema.String.pipe(Schema.optional),
+	description: Schema.String.pipe(Schema.optional),
+	design: Schema.String.pipe(Schema.optional),
+	acceptance: Schema.String.pipe(Schema.optional),
+	assignee: Schema.String.pipe(Schema.optional),
+	estimate: Schema.Number.pipe(Schema.optional),
+	labels: Schema.Array(Schema.String).pipe(Schema.optional),
+	implementations: Schema.Array(Schema.String).pipe(Schema.optional),
+	parent: Schema.String.pipe(Schema.optional),
+})
+
+const IssueBulkUpdatePayloadSchema = Schema.Union(
+	Schema.Array(IssueBulkUpdateEntrySchema),
+	Schema.Struct({
+		updates: Schema.Array(IssueBulkUpdateEntrySchema),
+	}),
+)
+
+type IssueBulkUpdateEntry = Schema.Schema.Type<typeof IssueBulkUpdateEntrySchema>
+type IssueBulkUpdatePayload = Schema.Schema.Type<typeof IssueBulkUpdatePayloadSchema>
+
+interface IssueBulkUpdateResult {
+	readonly index: number
+	readonly requestedId: string
+	readonly issueId: string
+	readonly updated: boolean
+	readonly error?: string
+}
+
+interface IssueBulkUpdateSummary {
+	readonly requestCount: number
+	readonly updatedCount: number
+	readonly failedCount: number
+	readonly results: readonly IssueBulkUpdateResult[]
+}
+
+const decodeIssueBulkUpdatePayload = (content: string) =>
+	Schema.decode(Schema.parseJson(IssueBulkUpdatePayloadSchema))(content).pipe(
+		Effect.flatMap((payload: IssueBulkUpdatePayload) => {
+			if (isIssueBulkUpdateEntryArray(payload)) {
+				return payload.length > 0
+					? Effect.succeed(payload)
+					: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+			}
+
+			return payload.updates.length > 0
+				? Effect.succeed(payload.updates)
+				: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+		}),
+	)
+
+const isIssueBulkUpdateEntryArray = (
+	payload: IssueBulkUpdatePayload,
+): payload is readonly IssueBulkUpdateEntry[] => Array.isArray(payload)
+
+const mapIssueBulkUpdateFields = (entry: IssueBulkUpdateEntry): IssueBulkUpdateFields => ({
+	status: entry.status,
+	notes: entry.notes,
+	priority: entry.priority,
+	title: entry.title,
+	type: entry.type,
+	description: entry.description,
+	design: entry.design,
+	acceptance: entry.acceptance,
+	assignee: entry.assignee,
+	estimate: entry.estimate,
+	labels: entry.labels === undefined ? undefined : [...entry.labels],
+	implementations:
+		entry.implementations !== undefined && entry.implementations.length > 0
+			? [...entry.implementations]
+			: undefined,
+	parent: entry.parent,
+})
+
+const hasIssueBulkUpdateChanges = (fields: IssueBulkUpdateFields): boolean =>
+	fields.status !== undefined ||
+	fields.notes !== undefined ||
+	fields.priority !== undefined ||
+	fields.title !== undefined ||
+	fields.type !== undefined ||
+	fields.description !== undefined ||
+	fields.design !== undefined ||
+	fields.acceptance !== undefined ||
+	fields.assignee !== undefined ||
+	fields.estimate !== undefined ||
+	fields.labels !== undefined ||
+	fields.implementations !== undefined ||
+	fields.parent !== undefined
+
+const summarizeIssueBulkUpdateResults = (
+	results: readonly IssueBulkUpdateResult[],
+): IssueBulkUpdateSummary => {
+	const updatedCount = results.filter((result) => result.updated).length
+	return {
+		requestCount: results.length,
+		updatedCount,
+		failedCount: results.length - updatedCount,
+		results,
+	}
+}
+
+const formatIssueBulkUpdateError = (error: unknown): string =>
+	error instanceof Error ? error.message : String(error)
+
+const readIssueBulkUpdateInput = (inputPath: string) =>
+	Effect.gen(function* () {
+		if (inputPath === "-") {
+			return yield* Effect.tryPromise({
+				try: () => Bun.file("/dev/stdin").text(),
+				catch: (error) =>
+					new Error(
+						`Failed to read bulk update JSON from stdin: ${formatIssueBulkUpdateError(error)}`,
+					),
+			})
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const resolvedInputPath = pathService.resolve(inputPath)
+		return yield* fs
+			.readFileString(resolvedInputPath)
+			.pipe(
+				Effect.mapError(
+					(error) =>
+						new Error(
+							`Failed to read bulk update JSON from ${resolvedInputPath}: ${String(error)}`,
+						),
+				),
+			)
+	})
+
 const isOpenChildForCloseGuard = (issue: TrackedIssue): boolean =>
 	issue.status !== "closed" && issue.status !== "tombstone"
 
@@ -4668,6 +4904,23 @@ const issueUpdateCommand = Command.make(
 	issueUpdateHandler,
 ).pipe(Command.withDescription("Update issue fields"))
 
+const issueBulkUpdateCommand = Command.make(
+	"bulk-update",
+	{
+		input: Options.text("input").pipe(
+			Options.withAlias("i"),
+			Options.withDescription("Path to bulk-update JSON payload, or - to read from stdin"),
+		),
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON summary"),
+		),
+	},
+	issueBulkUpdateHandler,
+).pipe(Command.withDescription("Update multiple issues from a JSON payload"))
+
 /**
  * az issue dep add <issue-id> <depends-on-id> - Add dependency edge
  */
@@ -4805,6 +5058,7 @@ const issueCommand = Command.make("issue", {}, () =>
 		issueCreateCommand,
 		issueChildCommand,
 		issueUpdateCommand,
+		issueBulkUpdateCommand,
 		issueDepCommand,
 		issueCheckCommand,
 		issueDoctorCommand,
@@ -6095,6 +6349,7 @@ export {
 	buildPrimeOutput,
 	buildCommandCliLayerForArgv,
 	cliRunner,
+	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
@@ -6104,4 +6359,5 @@ export {
 	normalizeIssueOptionOrder,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkUpdateResults,
 }
