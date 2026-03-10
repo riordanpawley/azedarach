@@ -1943,7 +1943,7 @@ export class PRWorkflow extends Effect.Service<PRWorkflow>()("PRWorkflow", {
 							}),
 						)
 
-						// 7.5. Run post-merge validation (configurable via .azedarach.json)
+						// 7.5. Run post-merge validation (configurable via project config)
 						// Only runs if merge.validateCommands is configured
 						const mergeConfig = yield* getMergeConfig()
 						if (mergeConfig.validateCommands.length > 0) {

@@ -4,8 +4,7 @@
 
 import { useAtomValue } from "@effect-atom/atom-react"
 import type { MouseEvent } from "@opentui/core"
-import type { DevServerView } from "./atoms.js"
-import { issueDevServerViewsAtom, taskRunningOperationAtom } from "./atoms.js"
+import { taskRunningOperationAtom } from "./atoms.js"
 import { ElapsedTimer } from "./ElapsedTimer.js"
 import { isSmallScreen } from "./responsive.js"
 import { getPriorityColor, theme } from "./theme.js"
@@ -99,9 +98,6 @@ export const TaskCard = (props: TaskCardProps) => {
 	const operationIndicator = runningOperation
 		? (OPERATION_INDICATORS[runningOperation] ?? "⏳")
 		: ""
-
-	const devServers = useAtomValue(issueDevServerViewsAtom(props.task.id)) as DevServerView[]
-	const hasDevServer = devServers.some((s) => s.status === "running" || s.status === "starting")
 
 	// Get context health border color based on contextPercent
 	// Only applies when session is active (not idle) and has context data
@@ -234,7 +230,7 @@ export const TaskCard = (props: TaskCardProps) => {
 			line += ` ${phaseIndicator}`
 		}
 		// Show dev server indicator when a dev server is running (e.g., "🔵 🖥️" = busy + dev server)
-		if (hasDevServer) {
+		if (props.task.hasDevServer) {
 			line += ` ${DEV_SERVER_INDICATOR}`
 		}
 		// Show operation indicator when an async operation is running (e.g., merge, cleanup)

@@ -166,7 +166,7 @@ export const DEFAULT_CONFIG = {
 		aiModel: undefined as SupportedModel | undefined,
 	},
 	merge: {
-		// No validation by default - must be explicitly configured in .azedarach.json
+		// No validation by default - must be explicitly configured in project config
 		validateCommands: [] satisfies string[],
 		fixCommand: "",
 		maxFixAttempts: 2,

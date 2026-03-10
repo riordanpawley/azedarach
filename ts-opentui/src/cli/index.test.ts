@@ -288,7 +288,14 @@ describe("resolveCliExecutionMode", () => {
 	it("uses command mode for non-dev subcommands", () => {
 		expect(resolveCliExecutionMode(["bun", "az", "issue", "create", "Title"])).toBe("command")
 		expect(
-			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
+			resolveCliExecutionMode([
+				"bun",
+				"az",
+				"--config",
+				"./.azedarach/config.json",
+				"project",
+				"list",
+			]),
 		).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "config", "set", "spec.enabled", "false"])).toBe(
 			"command",

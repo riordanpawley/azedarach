@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, it } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunContext } from "@effect/platform-bun"
@@ -129,6 +129,33 @@ describe("allocateNextAlphaIssueId", () => {
 
 	it("skips reserved issue ID az", () => {
 		expect(allocateNextAlphaIssueId(51, new Set())).toEqual({ issueId: "ba", nextIndex: 53 })
+	})
+})
+
+describe("sqlite storage path resolution", () => {
+	it("creates new project databases at .azedarach/azedarach.db", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-db-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			await Effect.runPromise(
+				Effect.gen(function* () {
+					const localIssueStore = yield* LocalIssueStore
+					yield* localIssueStore.create(
+						{
+							title: "SQLite source of truth",
+						},
+						undefined,
+						projectPath,
+					)
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(existsSync(join(projectPath, ".azedarach", "azedarach.db"))).toBe(true)
+			expect(existsSync(join(projectPath, ".azedarach", "issues.db"))).toBe(false)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
 	})
 })
 

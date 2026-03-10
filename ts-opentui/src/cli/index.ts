@@ -61,6 +61,7 @@ import {
 import { SessionManager } from "../core/SessionManager.js"
 import { SpecService } from "../core/SpecService.js"
 import type { SpecLinkFulfillmentStatus, SpecRequirementLookupSelector } from "../core/specTypes.js"
+import { getProjectStoragePaths } from "../core/storagePaths.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -233,7 +234,7 @@ const verboseOption = Options.boolean("verbose").pipe(
 const configOption = Options.file("config").pipe(
 	Options.withAlias("c"),
 	Options.optional,
-	Options.withDescription("Path to config file (default: .azedarach.json)"),
+	Options.withDescription("Path to config file (default: .azedarach/config.json)"),
 )
 
 /**
@@ -3981,17 +3982,28 @@ const projectAddHandler = (args: {
 		}
 
 		let tracker: "tracker" | "legacy" | "linear" | "local" = "local"
-		const localConfigPath = pathService.join(absolutePath, ".azedarach.json")
-		const hasLocalConfig = yield* fs
-			.exists(localConfigPath)
-			.pipe(
-				Effect.catchAll((error) =>
-					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-						Effect.zipRight(Effect.succeed(false)),
+		const storagePaths = getProjectStoragePaths(absolutePath, pathService)
+		const configPathCandidates = [
+			storagePaths.canonicalConfigPath,
+			storagePaths.legacyConfigPath,
+		] as const
+		let localConfigPath: string | null = null
+		for (const candidatePath of configPathCandidates) {
+			const existsForCandidate = yield* fs
+				.exists(candidatePath)
+				.pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(Effect.succeed(false)),
+						),
 					),
-				),
-			)
-		if (hasLocalConfig) {
+				)
+			if (existsForCandidate) {
+				localConfigPath = candidatePath
+				break
+			}
+		}
+		if (localConfigPath !== null) {
 			const localConfigRaw = yield* fs
 				.readFileString(localConfigPath)
 				.pipe(

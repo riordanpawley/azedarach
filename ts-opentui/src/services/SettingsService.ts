@@ -6,6 +6,7 @@ import {
 	AzedarachConfigJsonSchema,
 	AzedarachConfigSchema,
 } from "../config/schema.js"
+import { getProjectStoragePaths, resolveConfigSchemaPath } from "../core/storagePaths.js"
 import { ProjectService, resolveConfigBasePath } from "./ProjectService.js"
 import { ToastService } from "./ToastService.js"
 
@@ -484,32 +485,68 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 			isOpen: false,
 		})
 
-		const getConfigPath = (): Effect.Effect<string> =>
+		const getConfigPaths = (): Effect.Effect<{
+			readonly canonicalPath: string
+			readonly existingPath: string
+		}> =>
 			Effect.gen(function* () {
 				const projectPath = yield* projectService.getCurrentPath()
 				const effectiveProjectPath = projectPath ?? process.cwd()
 				const cwdPath = process.cwd()
-				const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
-				const cwdHasConfig = yield* fs.exists(cwdConfigPath).pipe(
+				const cwdStoragePaths = getProjectStoragePaths(cwdPath, pathService)
+				const cwdHasCanonicalConfig = yield* fs.exists(cwdStoragePaths.canonicalConfigPath).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
 					),
 					Effect.orElseSucceed(() => false),
 				)
+				const cwdHasLegacyConfig = cwdHasCanonicalConfig
+					? false
+					: yield* fs.exists(cwdStoragePaths.legacyConfigPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => false),
+						)
 				const configBasePath = resolveConfigBasePath({
 					cwdPath,
 					projectPath: effectiveProjectPath,
 					pathOps: pathService,
-					cwdHasConfig,
+					cwdHasConfig: cwdHasCanonicalConfig || cwdHasLegacyConfig,
 				})
+				const storagePaths = getProjectStoragePaths(configBasePath, pathService)
+				const canonicalExists = yield* fs.exists(storagePaths.canonicalConfigPath).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => false),
+				)
+				const legacyExists = canonicalExists
+					? false
+					: yield* fs.exists(storagePaths.legacyConfigPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => false),
+						)
 
-				return pathService.join(configBasePath, ".azedarach.json")
+				return {
+					canonicalPath: storagePaths.canonicalConfigPath,
+					existingPath: canonicalExists
+						? storagePaths.canonicalConfigPath
+						: legacyExists
+							? storagePaths.legacyConfigPath
+							: storagePaths.canonicalConfigPath,
+				}
 			})
+
+		const getConfigPath = (): Effect.Effect<string> =>
+			getConfigPaths().pipe(Effect.map((paths) => paths.canonicalPath))
 
 		const loadRawConfig = (): Effect.Effect<AzedarachConfig, SettingsConfigLoadError> =>
 			Effect.gen(function* () {
-				const configPath = yield* getConfigPath()
-				const exists = yield* fs.exists(configPath).pipe(
+				const configPaths = yield* getConfigPaths()
+				const exists = yield* fs.exists(configPaths.existingPath).pipe(
 					Effect.tapError((error) =>
 						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
 					),
@@ -527,11 +564,11 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					)
 				}
 
-				const content = yield* fs.readFileString(configPath).pipe(
+				const content = yield* fs.readFileString(configPaths.existingPath).pipe(
 					Effect.mapError(
 						(error) =>
 							new SettingsConfigLoadError({
-								message: "Failed to read .azedarach.json",
+								message: "Failed to read project config",
 								cause: String(error),
 							}),
 					),
@@ -541,7 +578,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 					Effect.mapError(
 						(error) =>
 							new SettingsConfigLoadError({
-								message: "Config parse/validation failed for .azedarach.json",
+								message: "Config parse/validation failed for project config",
 								cause: String(error),
 							}),
 					),
@@ -550,7 +587,7 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 
 		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
 		const writeConfigJsonSchema = (configPath: string): Effect.Effect<void> => {
-			const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
+			const schemaPath = resolveConfigSchemaPath(configPath, pathService)
 			return fs
 				.writeFileString(schemaPath, configJsonSchemaString)
 				.pipe(
@@ -565,6 +602,12 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 		const saveConfig = (config: AzedarachConfig) =>
 			Effect.gen(function* () {
 				const configPath = yield* getConfigPath()
+				yield* fs.makeDirectory(pathService.dirname(configPath), { recursive: true }).pipe(
+					Effect.tapError((error) =>
+						Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+					),
+					Effect.orElseSucceed(() => undefined),
+				)
 				const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config)
 				yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
 				yield* writeConfigJsonSchema(configPath)
@@ -640,7 +683,8 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 
 			openInEditor: () =>
 				Effect.gen(function* () {
-					const configPath = yield* getConfigPath()
+					const configPaths = yield* getConfigPaths()
+					const configPath = configPaths.canonicalPath
 
 					const exists = yield* fs.exists(configPath).pipe(
 						Effect.tapError((error) =>
@@ -649,7 +693,29 @@ export class SettingsService extends Effect.Service<SettingsService>()("Settings
 						Effect.orElseSucceed(() => false),
 					)
 					if (!exists) {
-						const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})
+						yield* fs.makeDirectory(pathService.dirname(configPath), { recursive: true }).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => undefined),
+						)
+						const existingContent = yield* fs.readFileString(configPaths.existingPath).pipe(
+							Effect.tapError((error) =>
+								Effect.logWarning(`Recovering from error before fallback: ${String(error)}`),
+							),
+							Effect.orElseSucceed(() => ""),
+						)
+						const json =
+							existingContent.length > 0
+								? yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(
+										existingContent,
+									).pipe(
+										Effect.flatMap((decoded) =>
+											Schema.encode(Schema.parseJson(AzedarachConfigSchema))(decoded),
+										),
+										Effect.orElse(() => Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})),
+									)
+								: yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))({})
 						yield* fs.writeFileString(configPath, json).pipe(Effect.orDie)
 						yield* writeConfigJsonSchema(configPath)
 					}
