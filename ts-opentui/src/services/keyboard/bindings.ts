@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect"
-import type { IssueTrackerClient, Issue } from "../../core/IssueTrackerClient.js"
+import type { Issue, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
@@ -538,7 +538,9 @@ done
 			bc.editor
 				.exitToNormal()
 				.pipe(
-					Effect.tap(() => bc.toast.show("error", "AI edit not yet implemented - use 'e' for $EDITOR")),
+					Effect.tap(() =>
+						bc.toast.show("error", "AI edit not yet implemented - use 'e' for $EDITOR"),
+					),
 				),
 		),
 	},
@@ -689,6 +691,14 @@ done
 		description: "Open project selector",
 		action: bc.overlay
 			.push({ _tag: "projectSelector" })
+			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
+	},
+	{
+		key: "S-w",
+		mode: "goto-pending",
+		description: "Open waiting session picker",
+		action: bc.overlay
+			.push({ _tag: "waitingSessionPicker" })
 			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 

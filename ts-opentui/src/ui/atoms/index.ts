@@ -215,3 +215,5 @@ export {
 	vcStatusPollerAtom,
 	vcStatusRefAtom,
 } from "./vc.js"
+// Cross-project waiting session atoms
+export { tmuxSessionsAtom, waitingSessionOptionsAtom } from "./waitingSessions.js"

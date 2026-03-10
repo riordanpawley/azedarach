@@ -71,6 +71,7 @@ export type OverlayType =
 	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
+	| { readonly _tag: "waitingSessionPicker" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 	| { readonly _tag: "devServerMenu"; readonly issueId: string }
 	| { readonly _tag: "planning" }
@@ -141,6 +142,10 @@ export function useOverlays() {
 				push({ _tag: "projectSelector" })
 			},
 
+			showWaitingSessionPicker: () => {
+				push({ _tag: "waitingSessionPicker" })
+			},
+
 			showDiffViewer: (worktreePath: string, baseBranch: string) => {
 				push({ _tag: "diffViewer", worktreePath, baseBranch })
 			},
@@ -177,6 +182,7 @@ export function useOverlays() {
 			showingImagePreview: currentOverlay?._tag === "imagePreview",
 			showingDiagnostics: currentOverlay?._tag === "diagnostics",
 			showingProjectSelector: currentOverlay?._tag === "projectSelector",
+			showingWaitingSessionPicker: currentOverlay?._tag === "waitingSessionPicker",
 			showingDiffViewer: currentOverlay?._tag === "diffViewer",
 			showingDevServerMenu: currentOverlay?._tag === "devServerMenu",
 			showingPlanning: currentOverlay?._tag === "planning",

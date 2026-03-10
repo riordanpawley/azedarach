@@ -3138,6 +3138,9 @@ const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
 		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
 		// in native tmux pickers without changing the user's global theme.
 		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "monitor-activity", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "bell-action", "any", verbose)
+		yield* setTmuxSessionOption(sessionName, "activity-action", "any", verbose)
 		yield* setTmuxSessionOption(
 			sessionName,
 			"window-status-bell-style",
@@ -4738,7 +4741,7 @@ const opencodeInitHandler = (args: {
 			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const pluginsValue = existingConfig["plugins"]
+			const pluginsValue = existingConfig.plugins
 			const existingPlugins = Array.isArray(pluginsValue)
 				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []

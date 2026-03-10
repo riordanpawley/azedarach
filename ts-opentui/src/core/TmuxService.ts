@@ -17,6 +17,11 @@ export interface TmuxSession {
 	attached: boolean
 }
 
+export interface TmuxSessionAlertState {
+	readonly bell: boolean
+	readonly activity: boolean
+}
+
 const TMUX_LITERAL_CHUNK_SIZE = 512
 
 // Helper to run tmux commands
@@ -435,6 +440,36 @@ export class TmuxService extends Effect.Service<TmuxService>()("TmuxService", {
 					Effect.catchAll((error) =>
 						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
 							Effect.zipRight(Effect.succeed(null as string | null)),
+						),
+					),
+				),
+
+			/**
+			 * Get session-level tmux alert flags.
+			 */
+			getSessionAlertState: (session: string) =>
+				Effect.gen(function* () {
+					const output = yield* runTmux([
+						"display-message",
+						"-t",
+						session,
+						"-p",
+						"#{session_bell_flag}|#{session_activity_flag}",
+					])
+					const [bellFlag, activityFlag] = output.trim().split("|")
+					return {
+						bell: bellFlag === "1",
+						activity: activityFlag === "1",
+					} satisfies TmuxSessionAlertState
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+							Effect.zipRight(
+								Effect.succeed({
+									bell: false,
+									activity: false,
+								} satisfies TmuxSessionAlertState),
+							),
 						),
 					),
 				),
