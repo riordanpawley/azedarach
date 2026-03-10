@@ -136,6 +136,7 @@ export const pushOverlayAtom = appRuntime.fn(
 			  }
 			| { readonly _tag: "diagnostics" }
 			| { readonly _tag: "projectSelector" }
+			| { readonly _tag: "waitingSessionPicker" }
 			| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 			| {
 					readonly _tag: "devServerMenu"

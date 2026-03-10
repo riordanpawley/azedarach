@@ -200,6 +200,12 @@ export class KeyboardService extends Effect.Service<KeyboardService>()("Keyboard
 						if (handledAsProjectSelector) return
 					}
 
+					if (currentOverlay?._tag === "waitingSessionPicker") {
+						const handledAsWaitingSessionPicker =
+							yield* inputHandlers.handleWaitingSessionPickerInput(key)
+						if (handledAsWaitingSessionPicker) return
+					}
+
 					// Check for settings overlay
 					if (currentOverlay?._tag === "settings") {
 						const handledAsSettings = yield* inputHandlers.handleSettingsInput(key)

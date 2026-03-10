@@ -13,6 +13,7 @@ import type {
 	SpecLintResult,
 	SpecMarkdownSyncDocumentResult,
 	SpecMarkdownSyncResult,
+	SpecParityReport,
 	SpecPublishConfig,
 	SpecPublishDocumentOutcome,
 	SpecPublishOutcome,
@@ -138,6 +139,7 @@ export interface SpecServiceApi {
 			issueId?: string
 			requirementId?: string
 			requirementSelector?: SpecRequirementLookupSelector
+			implementation?: string
 		},
 		cwd?: string,
 	) => Effect.Effect<readonly SpecIssueLink[], SpecServiceError>
@@ -147,6 +149,7 @@ export interface SpecServiceApi {
 		linkType: SpecLinkType,
 		cwd?: string,
 		requirementSelector?: SpecRequirementLookupSelector,
+		implementations?: readonly string[],
 		fulfillment?: {
 			status?: SpecLinkFulfillmentStatus
 			percent?: number | null
@@ -159,6 +162,7 @@ export interface SpecServiceApi {
 		linkType?: SpecLinkType,
 		cwd?: string,
 		requirementSelector?: SpecRequirementLookupSelector,
+		implementations?: readonly string[],
 	) => Effect.Effect<number, SpecServiceError>
 	readonly updateIssueLink: (
 		issueId: string,
@@ -171,6 +175,7 @@ export interface SpecServiceApi {
 		linkType?: SpecLinkType,
 		cwd?: string,
 		requirementSelector?: SpecRequirementLookupSelector,
+		implementations?: readonly string[],
 	) => Effect.Effect<number, SpecServiceError>
 	readonly listIssueRequirements: (
 		issueId: string,
@@ -182,6 +187,10 @@ export interface SpecServiceApi {
 		selector?: SpecRequirementLookupSelector,
 	) => Effect.Effect<readonly SpecIssueRef[], SpecServiceError>
 	readonly getCoverageReport: (cwd?: string) => Effect.Effect<SpecCoverageReport, SpecServiceError>
+	readonly getParityReport: (
+		implementation?: string,
+		cwd?: string,
+	) => Effect.Effect<SpecParityReport, SpecServiceError>
 	readonly lint: (cwd?: string) => Effect.Effect<SpecLintResult, SpecServiceError>
 	readonly syncMarkdown: (
 		options?: {
@@ -628,6 +637,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					issueId?: string
 					requirementId?: string
 					requirementSelector?: SpecRequirementLookupSelector
+					implementation?: string
 				},
 				cwd?: string,
 			) =>
@@ -644,6 +654,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 				linkType: SpecLinkType,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations?: readonly string[],
 				fulfillment?: {
 					status?: SpecLinkFulfillmentStatus
 					percent?: number | null
@@ -663,6 +674,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 							fulfillment?.evidenceNote ?? null,
 							effectiveCwd,
 							requirementSelector,
+							implementations,
 						),
 					)
 					yield* scheduleAutoPublishInternal("link_added", effectiveCwd)
@@ -673,6 +685,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 				linkType?: SpecLinkType,
 				cwd?: string,
 				requirementSelector: SpecRequirementLookupSelector = "auto",
+				implementations?: readonly string[],
 			) =>
 				Effect.gen(function* () {
 					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
@@ -684,6 +697,7 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 							linkType,
 							effectiveCwd,
 							requirementSelector,
+							implementations,
 						),
 					)
 					if (removed > 0) {
@@ -755,6 +769,14 @@ export class SpecService extends Effect.Service<SpecService>()("SpecService", {
 					return yield* fromStore(
 						"getSpecCoverageReport",
 						localIssueStore.getSpecCoverageReport(effectiveCwd),
+					)
+				}),
+			getParityReport: (implementation = "default", cwd?: string) =>
+				Effect.gen(function* () {
+					const effectiveCwd = yield* resolveEffectiveCwd(cwd)
+					return yield* fromStore(
+						"getSpecParityReport",
+						localIssueStore.getSpecParityReport(implementation, effectiveCwd),
 					)
 				}),
 			lint: (cwd?: string) =>

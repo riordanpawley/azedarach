@@ -90,6 +90,7 @@ export interface TaskCardProps {
  */
 export const TaskCard = (props: TaskCardProps) => {
 	const indicator = SESSION_INDICATORS[props.task.sessionState]
+	const isWaiting = props.task.sessionState === "waiting"
 	const maxTitleWidth = getTitleMaxWidth()
 
 	// Subscribe to running operation state for this task
@@ -122,6 +123,7 @@ export const TaskCard = (props: TaskCardProps) => {
 		// This ensures cursor is always visible even on selected tasks
 		if (props.isSelected) return theme.lavender
 		if (props.isMultiSelected) return theme.mauve
+		if (isWaiting) return theme.yellow
 		const healthColor = getContextHealthColor()
 		if (healthColor) return healthColor
 		return theme.surface1
@@ -270,6 +272,11 @@ export const TaskCard = (props: TaskCardProps) => {
 			<box flexDirection="row" gap={1}>
 				<text fg={getPriorityColor(props.task.priority)}>{priorityLabel}</text>
 				<text fg={theme.overlay0}>{getHeaderLine()}</text>
+				{isWaiting && (
+					<text fg={theme.yellow} attributes={ATTR_BOLD}>
+						WAIT
+					</text>
+				)}
 				{hasGitStatus && (
 					<box flexDirection="row">
 						{gitStatus.statusString && <text fg={getStatusColor()}>{gitStatus.statusString} </text>}
@@ -295,3 +302,5 @@ export const TaskCard = (props: TaskCardProps) => {
 		</box>
 	)
 }
+
+const ATTR_BOLD = 1

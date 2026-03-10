@@ -10,19 +10,24 @@ import { MouseButton, type MouseEvent } from "@opentui/core"
 import { useKeyboard, useRenderer } from "@opentui/react"
 import { useEffect, useMemo } from "react"
 import { killActivePopup } from "../core/IssueEditorService.js"
+import { deriveCurrentProjectWaitingIssueIds } from "../lib/waitingSessions.js"
 import { ActionPalette } from "./ActionPalette.js"
+import { AICreatePrompt } from "./AICreatePrompt.js"
 import {
-    activeSessionsCountAtom,
-    boardIsLoadingAtom,
-    aiCreateTaskAtom,
-    createTaskAtom,
-    currentProjectAtom,
-    DEFAULT_SPEC_WORKSPACE_STATE,
-    drillDownEpicAtom,
-    drillDownFilteredTasksAtom,
-    drillDownPhasesAtom,
-    focusedIssuePrimaryDevServerAtom,
-    focusedTaskRunningOperationAtom,
+	activeSessionsCountAtom,
+	aiCreateTaskAtom,
+	appConfigAtom,
+	boardIsLoadingAtom,
+	boardTasksAtom,
+	createTaskAtom,
+	currentProjectAtom,
+	DEFAULT_SPEC_WORKSPACE_STATE,
+	drillDownEpicAtom,
+	drillDownFilteredTasksAtom,
+	drillDownPhasesAtom,
+	exitToNormalAtom,
+	focusedIssuePrimaryDevServerAtom,
+	focusedTaskRunningOperationAtom,
 	forkCreateChildAtom,
 	forkCreateEpicAtom,
 	handleColumnPagerMouseInteractionAtom,
@@ -30,18 +35,18 @@ import {
 	handleTaskMouseInteractionAtom,
 	isOnlineAtom,
 	isRefreshingGitStatsAtom,
-    jumpToAtom,
-    refreshSpecWorkspaceAtom,
-    sessionMonitorStarterAtom,
-    setVisibleTaskIdsAtom,
-    specWorkspaceStateAtom,
-    totalTasksCountAtom,
-    viewModeAtom,
-    workflowModeAtom,
+	jumpToAtom,
+	refreshSpecWorkspaceAtom,
+	sessionMonitorStarterAtom,
+	setVisibleTaskIdsAtom,
+	specWorkspaceStateAtom,
+	totalTasksCountAtom,
+	viewModeAtom,
+	waitingSessionOptionsAtom,
+	workflowModeAtom,
 } from "./atoms.js"
 import { Board } from "./Board.js"
 import { BulkCleanupOverlay } from "./BulkCleanupOverlay.js"
-import { AICreatePrompt } from "./AICreatePrompt.js"
 import { ConfirmOverlay } from "./ConfirmOverlay.js"
 import { CreateTaskPrompt } from "./CreateTaskPrompt.js"
 import { DetailPanel } from "./DetailPanel.js"
@@ -59,17 +64,18 @@ import { MergeChoiceOverlay } from "./MergeChoiceOverlay.js"
 import { OrchestrationOverlay } from "./OrchestrationOverlay.js"
 import { PlanningOverlay } from "./PlanningOverlay.js"
 import { ProjectSelector } from "./ProjectSelector.js"
+import { isSmallScreen } from "./responsive.js"
 import { SearchInput } from "./SearchInput.js"
 import { SettingsOverlay } from "./SettingsOverlay.js"
 import { SortMenu } from "./SortMenu.js"
 import { SpecWorkspace } from "./SpecWorkspace.js"
 import { StatusBar } from "./StatusBar.js"
-import { isSmallScreen } from "./responsive.js"
 import { TASK_CARD_HEIGHT } from "./TaskCard.js"
 import { ToastContainer } from "./Toast.js"
 import { theme } from "./theme.js"
 import type { TaskWithSession } from "./types.js"
 import { COLUMNS } from "./types.js"
+import { WaitingSessionPicker } from "./WaitingSessionPicker.js"
 
 // ============================================================================
 // App Component
@@ -172,6 +178,7 @@ export const App = () => {
 		showingFork,
 		showingDiagnostics,
 		showingProjectSelector,
+		showingWaitingSessionPicker,
 		showingDiffViewer,
 		showingDevServerMenu,
 		showingPlanning,
@@ -201,6 +208,15 @@ export const App = () => {
 	// Use derived atom that handles both normal and drill-down filtering
 	// All computation happens in atoms - React just renders
 	const tasksByColumn = useAtomValue(drillDownFilteredTasksAtom)
+	const boardTasks = useAtomValue(
+		boardTasksAtom,
+		Result.getOrElse(() => []),
+	)
+	const waitingSessions = useAtomValue(waitingSessionOptionsAtom)
+	const waitingIssueIds = useMemo(
+		() => deriveCurrentProjectWaitingIssueIds(waitingSessions),
+		[waitingSessions],
+	)
 
 	const projectName = useAtomValue(
 		currentProjectAtom,
@@ -213,6 +229,7 @@ export const App = () => {
 		mode: "promise",
 	})
 	const jumpTo = useAtomSet(jumpToAtom, { mode: "promise" })
+	const exitToNormal = useAtomSet(exitToNormalAtom, { mode: "promise" })
 
 	const startSessionMonitor = useAtomSet(sessionMonitorStarterAtom, { mode: "promise" })
 	useEffect(() => {
@@ -241,6 +258,8 @@ export const App = () => {
 	)
 
 	const workflowMode = useAtomValue(workflowModeAtom)
+	const appConfigResult = useAtomValue(appConfigAtom)
+	const specEnabled = Result.isSuccess(appConfigResult) ? appConfigResult.value.spec.enabled : false
 
 	// Board loading state for status bar indicator
 	const isLoading = useAtomValue(
@@ -253,11 +272,11 @@ export const App = () => {
 		isRefreshingGitStatsAtom,
 		Result.getOrElse(() => false),
 	)
-    const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
-    const refreshSpecWorkspace = useAtomSet(refreshSpecWorkspaceAtom, { mode: "promise" })
+	const setVisibleTaskIds = useAtomSet(setVisibleTaskIdsAtom, { mode: "promise" })
+	const refreshSpecWorkspace = useAtomSet(refreshSpecWorkspaceAtom, { mode: "promise" })
 
-    // Navigation hook (needs tasksByColumn)
-    const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
+	// Navigation hook (needs tasksByColumn)
+	const { columnIndex, taskIndex, selectedTask } = useNavigation(tasksByColumn)
 
 	// Dependency phases for drill-down mode
 	const phases = useAtomValue(drillDownPhasesAtom)
@@ -281,36 +300,42 @@ export const App = () => {
 	const maxVisibleTasks = drillDownEpicId ? baseMaxVisibleTasks - 1 : baseMaxVisibleTasks
 	const useSingleKanbanColumn = viewMode === "kanban" && isSmallScreen(terminalColumns)
 
-    const visibleTaskIds = useMemo(() => {
+	const visibleTaskIds = useMemo(() => {
 		if (viewMode === "compact") {
 			return computeCompactVisibleTaskIds(tasksByColumn.flat(), selectedTask?.id, maxVisibleTasks)
 		}
 		return computeKanbanVisibleTaskIds(tasksByColumn, columnIndex, taskIndex, maxVisibleTasks)
 	}, [viewMode, tasksByColumn, selectedTask?.id, columnIndex, taskIndex, maxVisibleTasks])
 
-    useEffect(() => {
-        setVisibleTaskIds(visibleTaskIds)
-    }, [setVisibleTaskIds, visibleTaskIds])
+	useEffect(() => {
+		setVisibleTaskIds(visibleTaskIds)
+	}, [setVisibleTaskIds, visibleTaskIds])
 
-    const specWorkspaceState = useAtomValue(
-        specWorkspaceStateAtom,
-        Result.getOrElse(() => DEFAULT_SPEC_WORKSPACE_STATE),
-    )
+	const specWorkspaceState = useAtomValue(
+		specWorkspaceStateAtom,
+		Result.getOrElse(() => DEFAULT_SPEC_WORKSPACE_STATE),
+	)
 
-    useEffect(() => {
-        if (mode._tag !== "spec") {
-            return
-        }
+	useEffect(() => {
+		if (mode._tag !== "spec" || !specEnabled) {
+			return
+		}
 
-        refreshSpecWorkspace(undefined)
-        const interval = setInterval(() => {
-            refreshSpecWorkspace(undefined)
-        }, 4000)
+		refreshSpecWorkspace(undefined)
+		const interval = setInterval(() => {
+			refreshSpecWorkspace(undefined)
+		}, 4000)
 
-        return () => {
-            clearInterval(interval)
-        }
-    }, [mode, refreshSpecWorkspace])
+		return () => {
+			clearInterval(interval)
+		}
+	}, [mode, refreshSpecWorkspace, specEnabled])
+
+	useEffect(() => {
+		if (mode._tag === "spec" && !specEnabled) {
+			exitToNormal(undefined)
+		}
+	}, [exitToNormal, mode, specEnabled])
 
 	// Renderer access for manual redraw
 	const renderer = useRenderer()
@@ -446,6 +471,10 @@ export const App = () => {
 
 	const totalTasks = useAtomValue(totalTasksCountAtom)
 	const activeSessions = useAtomValue(activeSessionsCountAtom)
+	const detailTask =
+		currentOverlay?._tag === "detail"
+			? boardTasks.find((task) => task.id === currentOverlay.taskId)
+			: undefined
 
 	// Mode display text
 	const modeDisplay = useMemo(() => {
@@ -467,82 +496,82 @@ export const App = () => {
 				return "sort"
 			case "filter":
 				return mode.activeField ? `filter: ${mode.activeField}` : "filter"
-            case "orchestrate":
-                return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
-            case "mergeSelect":
-                return `merge ${mode.sourceIssueId} into...`
-            case "spec":
-                return `spec: ${mode.subview}`
-        }
-    }, [mode, searchQuery, selectedIds])
+			case "orchestrate":
+				return `orchestrate (${mode.selectedIds.length}/${mode.childTasks.length})`
+			case "mergeSelect":
+				return `merge ${mode.sourceIssueId} into...`
+			case "spec":
+				return `spec: ${mode.subview}`
+		}
+	}, [mode, searchQuery, selectedIds])
 
 	// ═══════════════════════════════════════════════════════════════════════════
 	// Render
 	// ═══════════════════════════════════════════════════════════════════════════
 
 	const renderContent = () => {
-        if (mode._tag === "spec") {
-            return (
-                <box flexGrow={1} flexDirection="column">
-                    <SpecWorkspace subview={mode.subview} state={specWorkspaceState} />
-                </box>
-            )
-        }
+		if (mode._tag === "spec" && specEnabled) {
+			return (
+				<box flexGrow={1} flexDirection="column">
+					<SpecWorkspace subview={mode.subview} state={specWorkspaceState} />
+				</box>
+			)
+		}
 
-        // The derived atom returns an empty array if sources are loading/failed
-        // This is handled gracefully - the board just shows empty columns
-        const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
-        const canPageLeft = columnIndex > 0
-        const canPageRight = columnIndex < COLUMNS.length - 1
+		// The derived atom returns an empty array if sources are loading/failed
+		// This is handled gracefully - the board just shows empty columns
+		const activeColumn = COLUMNS[columnIndex] ?? COLUMNS[0]
+		const canPageLeft = columnIndex > 0
+		const canPageRight = columnIndex < COLUMNS.length - 1
 
-        return (
-            <box flexGrow={1} flexDirection="column">
-                {/* Epic header when in drill-down mode */}
-                {/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
+		return (
+			<box flexGrow={1} flexDirection="column">
+				{/* Epic header when in drill-down mode */}
+				{/* drillDownEpicId && epicInfo && <EpicHeader epic={epicInfo} epicChildren={epicChildren} /> */}
 
-                {useSingleKanbanColumn && activeColumn && (
-                    <box
-                        flexDirection="row"
-                        justifyContent="space-between"
-                        paddingLeft={1}
-                        paddingRight={1}
-                        paddingBottom={1}
-                    >
-                        {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
-                        <box onMouseDown={(event) => handleColumnPagerMouseDown(-1, event)}>
-                            <text fg={canPageLeft ? theme.lavender : theme.overlay0}>{"← Prev"}</text>
-                        </box>
-                        <text fg={theme.text} attributes={ATTR_BOLD}>
-                            {`${activeColumn.title} (${columnIndex + 1}/${COLUMNS.length})`}
-                        </text>
-                        {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
-                        <box onMouseDown={(event) => handleColumnPagerMouseDown(1, event)}>
-                            <text fg={canPageRight ? theme.lavender : theme.overlay0}>{"Next →"}</text>
-                        </box>
-                    </box>
-                )}
+				{useSingleKanbanColumn && activeColumn && (
+					<box
+						flexDirection="row"
+						justifyContent="space-between"
+						paddingLeft={1}
+						paddingRight={1}
+						paddingBottom={1}
+					>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(-1, event)}>
+							<text fg={canPageLeft ? theme.lavender : theme.overlay0}>{"← Prev"}</text>
+						</box>
+						<text fg={theme.text} attributes={ATTR_BOLD}>
+							{`${activeColumn.title} (${columnIndex + 1}/${COLUMNS.length})`}
+						</text>
+						{/* biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI uses <box> as the interactive mouse hit target. */}
+						<box onMouseDown={(event) => handleColumnPagerMouseDown(1, event)}>
+							<text fg={canPageRight ? theme.lavender : theme.overlay0}>{"Next →"}</text>
+						</box>
+					</box>
+				)}
 
-                <Board
-                    tasks={tasksByColumn.flat()}
-                    selectedTaskId={selectedTask?.id}
-                    activeColumnIndex={columnIndex}
-                    activeTaskIndex={taskIndex}
-                    selectedIds={new Set(selectedIds)}
-                    jumpLabels={isJump ? jumpLabels : null}
-                    pendingJumpKey={pendingJumpKey ?? null}
-                    // terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
-                    terminalHeight={maxVisibleTasks}
-                    viewMode={viewMode}
-                    singleColumnMode={useSingleKanbanColumn}
-                    isActionMode={isAction}
-                    mergeSelectSourceId={mergeSelectSourceId}
-                    phases={phases}
-                    onTaskMouseDown={handleTaskMouseDown}
-                    onColumnMouseScroll={handleColumnMouseScroll}
-                />
-            </box>
-        )
-    }
+				<Board
+					tasks={tasksByColumn.flat()}
+					selectedTaskId={selectedTask?.id}
+					activeColumnIndex={columnIndex}
+					activeTaskIndex={taskIndex}
+					selectedIds={new Set(selectedIds)}
+					jumpLabels={isJump ? jumpLabels : null}
+					pendingJumpKey={pendingJumpKey ?? null}
+					// terminalHeight={drillDownEpicId ? maxVisibleTasks - 1 : maxVisibleTasks}
+					terminalHeight={maxVisibleTasks}
+					viewMode={viewMode}
+					singleColumnMode={useSingleKanbanColumn}
+					isActionMode={isAction}
+					mergeSelectSourceId={mergeSelectSourceId}
+					phases={phases}
+					onTaskMouseDown={handleTaskMouseDown}
+					onColumnMouseScroll={handleColumnMouseScroll}
+				/>
+			</box>
+		)
+	}
 
 	return (
 		<box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
@@ -552,6 +581,7 @@ export const App = () => {
 			<StatusBar
 				totalTasks={totalTasks}
 				activeSessions={activeSessions}
+				waitingIssueIds={waitingIssueIds}
 				mode={mode._tag}
 				modeDisplay={modeDisplay}
 				selectedCount={selectedIds.length}
@@ -572,6 +602,8 @@ export const App = () => {
 			{showingSettings && <SettingsOverlay />}
 
 			{showingProjectSelector && <ProjectSelector />}
+
+			{showingWaitingSessionPicker && <WaitingSessionPicker />}
 
 			{showingDevServerMenu && currentOverlay?._tag === "devServerMenu" && (
 				<DevServerMenu issueId={currentOverlay.issueId} />
@@ -616,8 +648,8 @@ export const App = () => {
 			{isSearch && <SearchInput query={searchQuery} />}
 
 			{/* Detail panel */}
-			{showingDetail && selectedTask && (
-				<DetailPanel task={selectedTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
+			{showingDetail && detailTask && (
+				<DetailPanel task={detailTask} forceSmallScreenLayout={isSmallScreen(terminalColumns)} />
 			)}
 
 			{/* Create task prompt */}

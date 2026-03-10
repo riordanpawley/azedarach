@@ -98,6 +98,9 @@ export interface AppConfigService {
 	/** Get git configuration section */
 	readonly getGitConfig: () => Effect.Effect<ResolvedConfig["git"]>
 
+	/** Get spec configuration section */
+	readonly getSpecConfig: () => Effect.Effect<ResolvedConfig["spec"]>
+
 	/** Get session configuration section */
 	readonly getSessionConfig: () => Effect.Effect<ResolvedConfig["session"]>
 
@@ -127,6 +130,11 @@ export interface AppConfigService {
 		},
 		ConfigParseError
 	>
+
+	/** Get spec configuration for an explicit project path (non-reactive, path-scoped load) */
+	readonly getSpecConfigForProjectPath: (
+		projectPath: string,
+	) => Effect.Effect<ResolvedConfig["spec"], ConfigParseError>
 
 	/** Get network configuration section */
 	readonly getNetworkConfig: () => Effect.Effect<ResolvedConfig["network"]>
@@ -725,6 +733,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 			getModelConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.model),
 			getWorktreeConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.worktree),
 			getGitConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.git),
+			getSpecConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.spec),
 			getSessionConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.session),
 			getPatternsConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.patterns),
 			getPRConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.pr),
@@ -741,6 +750,8 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					issueTracker: config.issueTracker,
 					syncEnabled: getIssueBackendSyncEnabled(config),
 				})),
+			getSpecConfigForProjectPath: (projectPath: string) =>
+				Effect.map(loadConfigForPath(projectPath), ({ config }) => config.spec),
 			getNetworkConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.network),
 			getDevServerConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.devServer),
 			getKeyboardConfig: () => Effect.map(SubscriptionRef.get(configRef), (c) => c.keyboard),

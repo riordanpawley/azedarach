@@ -15,6 +15,7 @@ const TOP_LEVEL_COMMAND_ALIASES: Readonly<Record<string, string>> = {
 	n: "notify",
 	h: "hooks",
 	o: "opencode",
+	cfg: "config",
 	d: "dev",
 	s: "status",
 	st: "start",
@@ -66,6 +67,9 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 		"spec/publish": {
 			r: "run",
 			c: "config",
+		},
+		config: {
+			s: "set",
 		},
 		project: {
 			a: "add",
@@ -122,6 +126,7 @@ const TOP_LEVEL_SUBCOMMANDS = new Set([
 	"notify",
 	"hooks",
 	"project",
+	"config",
 	"opencode",
 ])
 

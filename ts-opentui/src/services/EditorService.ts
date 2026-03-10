@@ -33,7 +33,7 @@ export interface OrchestrationTask {
  */
 export type GotoSubMode = "pending" | "jump"
 
-export type SpecSubview = "requirements" | "coverage" | "publish"
+export type SpecSubview = "requirements" | "coverage" | "parity" | "publish"
 
 /**
  * Sort criteria for tasks
@@ -144,7 +144,12 @@ export type EditorMode =
 	| { readonly _tag: "search"; readonly query: string }
 	| { readonly _tag: "sort" }
 	| { readonly _tag: "filter"; readonly activeField: FilterField | null }
-	| { readonly _tag: "spec"; readonly subview: SpecSubview }
+	| {
+			readonly _tag: "spec"
+			readonly subview: SpecSubview
+			readonly availableImplementations: ReadonlyArray<string>
+			readonly selectedImplementation: string | null
+	  }
 	| {
 			readonly _tag: "orchestrate"
 			readonly epicId: string
@@ -718,6 +723,8 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					Data.struct({
 						_tag: "spec" as const,
 						subview: "requirements" as const,
+						availableImplementations: [],
+						selectedImplementation: null,
 					}),
 				),
 
@@ -727,6 +734,68 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 					return current._tag === "spec" ? current.subview : null
 				}),
 
+			getSpecSelectedImplementation: (): Effect.Effect<string | null> =>
+				Effect.gen(function* () {
+					const current = yield* SubscriptionRef.get(mode)
+					return current._tag === "spec" ? current.selectedImplementation : null
+				}),
+
+			getSpecAvailableImplementations: (): Effect.Effect<ReadonlyArray<string>> =>
+				Effect.gen(function* () {
+					const current = yield* SubscriptionRef.get(mode)
+					return current._tag === "spec" ? current.availableImplementations : []
+				}),
+
+			syncSpecImplementations: (
+				implementations: ReadonlyArray<string>,
+				preferredSelection: string | null = null,
+			) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "spec") return m
+					const normalized = [
+						...new Set(implementations.map((implementation) => implementation.trim())),
+					].filter((implementation) => implementation.length > 0)
+					const nextSelection =
+						preferredSelection !== null && normalized.includes(preferredSelection)
+							? preferredSelection
+							: m.selectedImplementation !== null && normalized.includes(m.selectedImplementation)
+								? m.selectedImplementation
+								: (normalized[0] ?? null)
+					const implementationsUnchanged =
+						m.availableImplementations.length === normalized.length &&
+						m.availableImplementations.every(
+							(implementation, index) => implementation === normalized[index],
+						)
+					if (implementationsUnchanged && m.selectedImplementation === nextSelection) {
+						return m
+					}
+
+					return Data.struct({
+						_tag: "spec" as const,
+						subview: m.subview,
+						availableImplementations: normalized,
+						selectedImplementation: nextSelection,
+					})
+				}),
+
+			setSpecSelectedImplementation: (implementation: string | null) =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "spec") return m
+					const nextSelection =
+						implementation === null || m.availableImplementations.includes(implementation)
+							? implementation
+							: m.selectedImplementation
+					if (nextSelection === m.selectedImplementation) {
+						return m
+					}
+					return Data.struct({
+						_tag: "spec" as const,
+						subview: m.subview,
+						availableImplementations: m.availableImplementations,
+						selectedImplementation: nextSelection,
+					})
+				}),
+
 			cycleSpecSubview: () =>
 				SubscriptionRef.update(mode, (m): EditorMode => {
 					if (m._tag !== "spec") return m
@@ -734,11 +803,45 @@ export class EditorService extends Effect.Service<EditorService>()("EditorServic
 						m.subview === "requirements"
 							? "coverage"
 							: m.subview === "coverage"
-								? "publish"
-								: "requirements"
+								? "parity"
+								: m.subview === "parity"
+									? "publish"
+									: "requirements"
 					return Data.struct({
 						_tag: "spec" as const,
 						subview: nextSubview,
+						availableImplementations: m.availableImplementations,
+						selectedImplementation: m.selectedImplementation,
+					})
+				}),
+
+			cycleSpecImplementation: (direction: "previous" | "next") =>
+				SubscriptionRef.update(mode, (m): EditorMode => {
+					if (m._tag !== "spec") return m
+
+					if (m.availableImplementations.length === 0) {
+						return m
+					}
+
+					const currentIndex =
+						m.selectedImplementation === null
+							? -1
+							: m.availableImplementations.indexOf(m.selectedImplementation)
+					const nextIndex =
+						currentIndex < 0
+							? direction === "next"
+								? 0
+								: m.availableImplementations.length - 1
+							: direction === "next"
+								? (currentIndex + 1) % m.availableImplementations.length
+								: (currentIndex - 1 + m.availableImplementations.length) %
+									m.availableImplementations.length
+
+					return Data.struct({
+						_tag: "spec" as const,
+						subview: m.subview,
+						availableImplementations: m.availableImplementations,
+						selectedImplementation: m.availableImplementations[nextIndex] ?? null,
 					})
 				}),
 

@@ -18,6 +18,8 @@
 import { Effect, Record, SubscriptionRef } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
+import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
+import { deriveWaitingSessionOptions } from "../../lib/waitingSessions.js"
 import { generateJumpLabels } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService, type JumpTarget } from "../EditorService.js"
@@ -51,6 +53,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			SettingsService.Default,
 			AppConfig.Default,
 			TaskHandlersService.Default,
+			TmuxSessionMonitor.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -67,6 +70,82 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const settings = yield* SettingsService
 			const appConfig = yield* AppConfig
 			const taskHandlers = yield* TaskHandlersService
+			const tmuxSessionMonitor = yield* TmuxSessionMonitor
+
+			const MAX_WAITING_SESSION_SELECTIONS = 9
+
+			const switchToProject = (
+				projectName: string,
+				options?: {
+					readonly focusTaskId?: string
+					readonly openDetailTaskId?: string
+				},
+			) =>
+				Effect.gen(function* () {
+					const projects = yield* projectService.getProjects()
+					const project = projects.find((candidate) => candidate.name === projectName)
+					if (!project) {
+						yield* toast.show("error", `Project not found: ${projectName}`)
+						return false
+					}
+
+					const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+					if (currentProject?.path === project.path) {
+						yield* overlay.pop()
+						if (options?.focusTaskId) {
+							yield* nav.setFocusedTask(options.focusTaskId)
+						}
+						if (options?.openDetailTaskId) {
+							yield* overlay.push({ _tag: "detail", taskId: options.openDetailTaskId })
+						}
+						return true
+					}
+
+					// Save current project state to disk (for cross-session persistence)
+					if (currentProject) {
+						yield* projectState.saveCurrentProjectState(currentProject.path)
+						yield* board.saveToCache(currentProject.path)
+					}
+
+					yield* projectState.withPersistenceSuspended(
+						Effect.gen(function* () {
+							yield* projectService.switchProject(project.name)
+							yield* projectState.restoreProjectState(project.path)
+							if (options?.focusTaskId) {
+								yield* nav.setFocusedTask(options.focusTaskId)
+							}
+						}),
+					)
+
+					yield* overlay.pop()
+
+					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
+					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
+					yield* projectState.saveCurrentProjectState(project.path)
+
+					if (cacheHit) {
+						yield* toast.show("success", `Loaded: ${project.name}`)
+					} else {
+						yield* toast.show("info", `Loading: ${project.name}...`)
+					}
+					if (options?.openDetailTaskId) {
+						yield* overlay.push({ _tag: "detail", taskId: options.openDetailTaskId })
+					}
+
+					return true
+				})
+
+			const getSelectableWaitingSessions = () =>
+				Effect.gen(function* () {
+					const sessions = yield* SubscriptionRef.get(tmuxSessionMonitor.sessions)
+					const projects = yield* projectService.getProjects()
+					const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+
+					return deriveWaitingSessionOptions(sessions, projects, currentProject?.path).slice(
+						0,
+						MAX_WAITING_SESSION_SELECTIONS,
+					)
+				})
 
 			// ================================================================
 			// Input Handler Methods
@@ -654,33 +733,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
-								// Save current project state to disk (for cross-session persistence)
-								const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
-								if (currentProject) {
-									yield* projectState.saveCurrentProjectState(currentProject.path)
-									yield* board.saveToCache(currentProject.path)
-								}
-
-								yield* projectState.withPersistenceSuspended(
-									Effect.gen(function* () {
-										yield* projectService.switchProject(project.name)
-										yield* projectState.restoreProjectState(project.path)
-									}),
-								)
-
-								// Close overlay
-								yield* overlay.pop()
-
-								// Switch board with toast callback
-								const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
-								const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
-								yield* projectState.saveCurrentProjectState(project.path)
-
-								if (cacheHit) {
-									yield* toast.show("success", `Loaded: ${project.name}`)
-								} else {
-									yield* toast.show("info", `Loading: ${project.name}...`)
-								}
+								yield* switchToProject(project.name)
 							}
 						} else {
 							yield* toast.show("error", `No project at position ${num}`)
@@ -709,6 +762,64 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 											? String(error.message)
 											: String(error)
 									yield* toast.show("error", `Project switch failed: ${msg}`)
+									return true
+								}),
+							),
+						),
+					),
+				)
+
+			const handleWaitingSessionPickerInput = (key: string) =>
+				Effect.gen(function* () {
+					const num = Number.parseInt(key, 10)
+					if (num >= 1 && num <= 9) {
+						const waitingSessions = yield* getSelectableWaitingSessions()
+						if (num > waitingSessions.length) {
+							yield* toast.show("error", `No waiting session at position ${num}`)
+							return true
+						}
+
+						const waitingSession = waitingSessions[num - 1]
+						if (!waitingSession) {
+							yield* toast.show("error", `No waiting session at position ${num}`)
+							return true
+						}
+
+						if (!waitingSession.isRegisteredProject) {
+							yield* toast.show(
+								"warning",
+								`Project is not registered: ${waitingSession.projectName}`,
+							)
+							return true
+						}
+
+						yield* switchToProject(waitingSession.projectName, {
+							focusTaskId: waitingSession.issueId,
+							openDetailTaskId: waitingSession.issueId,
+						})
+						return true
+					}
+
+					if (key === "q") {
+						yield* overlay.pop()
+						return true
+					}
+
+					if (key === "escape") {
+						return false
+					}
+
+					return true
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.gen(function* () {
+									const msg =
+										error && typeof error === "object" && "message" in error
+											? String(error.message)
+											: String(error)
+									yield* toast.show("error", `Waiting session switch failed: ${msg}`)
 									return true
 								}),
 							),
@@ -981,6 +1092,20 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					}
 				})
 
+			const enterSpecWorkspace = () =>
+				Effect.gen(function* () {
+					const specConfig = yield* appConfig.getSpecConfig()
+					if (!specConfig.enabled) {
+						yield* toast.show(
+							"error",
+							"Spec workspace is disabled. Run `az config set spec.enabled true` or enable `spec.enabled` in `.azedarach.json` to use it.",
+						)
+						return
+					}
+
+					yield* editor.enterSpecWorkspace()
+				})
+
 			// ================================================================
 			// Public API
 			// ================================================================
@@ -997,9 +1122,11 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleDiagnosticsOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,
+				handleWaitingSessionPickerInput,
 				handleImagePreviewInput,
 				handleSettingsInput,
 				computeJumpLabels,
+				enterSpecWorkspace,
 				getEffectiveMode,
 			}
 		}),

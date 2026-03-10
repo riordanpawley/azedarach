@@ -73,6 +73,9 @@ fi
 # Keep alert styling session-local so waiting states are easy to notice in tmux
 # without forcing a global theme change.
 tmux set-option -t "$SESSION_NAME" monitor-bell on 2>/dev/null || true
+tmux set-option -t "$SESSION_NAME" monitor-activity on 2>/dev/null || true
+tmux set-option -t "$SESSION_NAME" bell-action any 2>/dev/null || true
+tmux set-option -t "$SESSION_NAME" activity-action any 2>/dev/null || true
 tmux set-option -t "$SESSION_NAME" window-status-bell-style "$WAITING_WINDOW_BELL_STYLE" 2>/dev/null || true
 tmux set-option -t "$SESSION_NAME" window-status-activity-style "$WAITING_WINDOW_ACTIVITY_STYLE" 2>/dev/null || true
 

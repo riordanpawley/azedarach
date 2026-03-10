@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect"
-import type { IssueTrackerClient, Issue } from "../../core/IssueTrackerClient.js"
+import type { Issue, IssueTrackerClient } from "../../core/IssueTrackerClient.js"
 import type { TmuxService } from "../../core/TmuxService.js"
 import type { BoardService } from "../BoardService.js"
 import type { EditorService } from "../EditorService.js"
@@ -538,7 +538,9 @@ done
 			bc.editor
 				.exitToNormal()
 				.pipe(
-					Effect.tap(() => bc.toast.show("error", "AI edit not yet implemented - use 'e' for $EDITOR")),
+					Effect.tap(() =>
+						bc.toast.show("error", "AI edit not yet implemented - use 'e' for $EDITOR"),
+					),
 				),
 		),
 	},
@@ -681,7 +683,7 @@ done
 		key: "s",
 		mode: "goto-pending",
 		description: "Enter spec workspace",
-		action: bc.editor.enterSpecWorkspace(),
+		action: Effect.suspend(() => bc.inputHandlers.enterSpecWorkspace()),
 	},
 	{
 		key: "p",
@@ -689,6 +691,14 @@ done
 		description: "Open project selector",
 		action: bc.overlay
 			.push({ _tag: "projectSelector" })
+			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
+	},
+	{
+		key: "S-w",
+		mode: "goto-pending",
+		description: "Open waiting session picker",
+		action: bc.overlay
+			.push({ _tag: "waitingSessionPicker" })
 			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
 
@@ -1021,6 +1031,28 @@ done
 		mode: "spec",
 		description: "Cycle spec subview",
 		action: bc.editor.cycleSpecSubview(),
+	},
+	{
+		key: "[",
+		mode: "spec",
+		description: "Previous parity implementation",
+		action: Effect.gen(function* () {
+			const subview = yield* bc.editor.getSpecSubview()
+			if (subview === "parity") {
+				yield* bc.editor.cycleSpecImplementation("previous")
+			}
+		}),
+	},
+	{
+		key: "]",
+		mode: "spec",
+		description: "Next parity implementation",
+		action: Effect.gen(function* () {
+			const subview = yield* bc.editor.getSpecSubview()
+			if (subview === "parity") {
+				yield* bc.editor.cycleSpecImplementation("next")
+			}
+		}),
 	},
 
 	// ========================================================================

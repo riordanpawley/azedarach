@@ -35,12 +35,21 @@ import {
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
 import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
-import { AzedarachConfigSchema } from "../config/schema.js"
+import {
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
 import { IssueEditorService } from "../core/IssueEditorService.js"
-import { IssueTrackerClient, type Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import {
+	type ImplementationRecord,
+	type ImplementationRegistry,
+	IssueTrackerClient,
+	type Issue as TrackedIssue,
+} from "../core/IssueTrackerClient.js"
 import { PlanningService } from "../core/PlanningService.js"
 import { PRWorkflow } from "../core/PRWorkflow.js"
 import { PTYMonitor } from "../core/PTYMonitor.js"
@@ -72,7 +81,7 @@ import { NavigationService } from "../services/NavigationService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
-import { ProjectService } from "../services/ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ProjectStateService } from "../services/ProjectStateService.js"
 import { SessionService } from "../services/SessionService.js"
 import { SettingsService } from "../services/SettingsService.js"
@@ -122,67 +131,90 @@ const telemetryLayer =
 
 const CLI_VERSION = packageJson.version
 
+const buildAppConfigLayer = (configPath: string | null) => {
+	if (configPath === null) {
+		return AppConfig.Default
+	}
+
+	return AppConfig.Default.pipe(
+		Layer.provide(
+			Layer.succeed(
+				AppConfigConfig,
+				AppConfigConfig.make({
+					configPath,
+					projectPath: process.cwd(),
+				}),
+			),
+		),
+	)
+}
+
 /**
  * Full CLI layer used for TUI launch and commands that still depend on
  * TUI-coupled services (for now, `az dev`).
  */
-const fullCliLayer = Layer.mergeAll(
-	MutationQueue.Default,
-	SessionService.Default,
-	AttachmentService.Default,
-	OverlayService.Default,
-	ImageAttachmentService.Default,
-	BoardService.Default,
-	ClockService.Default,
-	TmuxService.Default,
-	IssueEditorService.Default,
-	PRWorkflow.Default,
-	TerminalService.Default,
-	EditorService.Default,
-	KeyboardService.Default,
-	ToastService.Default,
-	NavigationService.Default,
-	SessionManager.Default,
-	IssueTrackerClient.Default,
-	AppConfig.Default,
-	VCService.Default,
-	ViewService.Default,
-	TmuxSessionMonitor.Default,
-	CommandQueueService.Default,
-	PTYMonitor.Default,
-	DiagnosticsService.Default,
-	ProjectService.Default,
-	ProjectStateService.Default,
-	SettingsService.Default,
-	TemplateService.Default,
-	NetworkService.Default,
-	OfflineService.Default,
-	DevServerService.Default,
-	DiffService.Default,
-	PlanningService.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createFullCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		MutationQueue.Default,
+		SessionService.Default,
+		AttachmentService.Default,
+		OverlayService.Default,
+		ImageAttachmentService.Default,
+		BoardService.Default,
+		ClockService.Default,
+		TmuxService.Default,
+		IssueEditorService.Default,
+		PRWorkflow.Default,
+		TerminalService.Default,
+		EditorService.Default,
+		KeyboardService.Default,
+		ToastService.Default,
+		NavigationService.Default,
+		SessionManager.Default,
+		IssueTrackerClient.Default,
+		buildAppConfigLayer(configPath),
+		VCService.Default,
+		ViewService.Default,
+		TmuxSessionMonitor.Default,
+		CommandQueueService.Default,
+		PTYMonitor.Default,
+		DiagnosticsService.Default,
+		ProjectService.Default,
+		ProjectStateService.Default,
+		SettingsService.Default,
+		TemplateService.Default,
+		NetworkService.Default,
+		OfflineService.Default,
+		DevServerService.Default,
+		DiffService.Default,
+		PlanningService.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
 
 /**
  * Lean command layer for non-TUI CLI commands.
  * Intentionally excludes board/navigation/overlay/view services so command
  * invocations don't start board refresh polling or webhook listeners.
  */
-const commandCliLayer = Layer.mergeAll(
-	AppConfig.Default,
-	ProjectService.Default,
-	IssueTrackerClient.Default,
-	SessionManager.Default,
-	SpecService.Default,
-).pipe(
-	Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
-	Layer.provideMerge(telemetryLayer),
-	Layer.provideMerge(BunContext.layer),
-)
+const createCommandCliLayer = (configPath: string | null) =>
+	Layer.mergeAll(
+		buildAppConfigLayer(configPath),
+		ProjectService.Default,
+		IssueTrackerClient.Default,
+		SessionManager.Default,
+		SpecService.Default,
+	).pipe(
+		Layer.provide(Logger.replaceScoped(Logger.defaultLogger, fileLogger)),
+		Layer.provideMerge(telemetryLayer),
+		Layer.provideMerge(BunContext.layer),
+	)
+
+const fullCliLayer = createFullCliLayer(null)
+const commandCliLayer = createCommandCliLayer(null)
 
 // ============================================================================
 // Shared Options
@@ -250,6 +282,170 @@ const validateIssueTrackerStore = (projectDir: string) =>
 			)
 		}
 	})
+
+/**
+ * Validate that spec workflows are enabled for the project before using az spec surfaces.
+ */
+const ensureSpecEnabled = (projectDir: string) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfigForProjectPath(projectDir)
+		if (specConfig.enabled) {
+			return
+		}
+
+		return yield* Effect.fail(
+			new Error(
+				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
+			),
+		)
+	})
+
+const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+
+const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const loadedConfigPath = yield* SubscriptionRef.get(appConfig.loadedConfigPath)
+		if (loadedConfigPath !== null && !loadedConfigPath.endsWith("package.json")) {
+			return loadedConfigPath
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const projectService = yield* ProjectService
+		const projectPath =
+			explicitProjectDir ?? (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const cwdPath = explicitProjectDir ?? process.cwd()
+		const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+		const cwdHasConfig = yield* fs
+			.exists(cwdConfigPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		const configBasePath = resolveConfigBasePath({
+			cwdPath,
+			projectPath,
+			pathOps: pathService,
+			cwdHasConfig,
+		})
+		return pathService.join(configBasePath, ".azedarach.json")
+	})
+
+const loadWritableConfig = (configPath: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const exists = yield* fs
+			.exists(configPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		if (!exists) {
+			return yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to create default config snapshot: ${String(error)}`),
+				),
+			)
+		}
+
+		const content = yield* fs
+			.readFileString(configPath)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to read config file ${configPath}: ${String(error)}`),
+				),
+			)
+
+		return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
+			Effect.mapError(
+				(error) => new Error(`Config parse/validation failed for ${configPath}: ${String(error)}`),
+			),
+		)
+	})
+
+const saveWritableConfig = (configPath: string, config: AzedarachConfig) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
+			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+		)
+		yield* fs
+			.writeFileString(configPath, json)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
+				),
+			)
+		const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
+		yield* fs
+			.writeFileString(schemaPath, configJsonSchemaString)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
+					),
+				),
+			)
+	})
+
+const parseBooleanConfigValue = (value: string): boolean | undefined => {
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "true":
+		case "1":
+		case "yes":
+		case "on":
+			return true
+		case "false":
+		case "0":
+		case "no":
+		case "off":
+			return false
+		default:
+			return undefined
+	}
+}
+
+const setConfigValue = (
+	config: AzedarachConfig,
+	key: string,
+	value: string,
+): Effect.Effect<
+	{ readonly nextConfig: AzedarachConfig; readonly renderedValue: string },
+	Error
+> => {
+	if (key === "spec.enabled") {
+		const parsed = parseBooleanConfigValue(value)
+		if (parsed === undefined) {
+			return Effect.fail(
+				new Error(
+					`Invalid boolean value '${value}' for spec.enabled. Use true/false, on/off, yes/no, or 1/0.`,
+				),
+			)
+		}
+		return Effect.succeed({
+			nextConfig: {
+				...config,
+				spec: {
+					...config.spec,
+					enabled: parsed,
+				},
+			},
+			renderedValue: String(parsed),
+		})
+	}
+
+	return Effect.fail(new Error(`Unsupported config key '${key}'. Supported keys: spec.enabled`))
+}
 
 // ============================================================================
 // Command Handlers
@@ -570,9 +766,81 @@ type SpecRequirementLookupInput = {
 }
 
 const SPEC_EXTERNAL_CODE_PATTERN = /^AZ-(FR|AT)-\d{4}[A-Z]?$/i
+const SPEC_IMPLEMENTATION_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
+const DEFAULT_SPEC_IMPLEMENTATION = "default"
 
 const normalizeSpecExternalCodeForCli = (value: string): string =>
 	value.trim().toUpperCase().replace(/\s+/g, "")
+
+const normalizeSpecImplementationForCli = (value: string): string => value.trim().toLowerCase()
+
+const parseSpecImplementationForCli = (value: string): Effect.Effect<string, Error> => {
+	const normalized = normalizeSpecImplementationForCli(value)
+	if (!SPEC_IMPLEMENTATION_PATTERN.test(normalized)) {
+		return Effect.fail(
+			new Error(
+				`Invalid implementation '${value}'. Expected lowercase letters, digits, and hyphens, starting with a letter.`,
+			),
+		)
+	}
+	return Effect.succeed(normalized)
+}
+
+const parseSpecImplementationsForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[], Error> =>
+	Effect.gen(function* () {
+		if (values.length === 0) {
+			return [DEFAULT_SPEC_IMPLEMENTATION] as const
+		}
+
+		const parsed = yield* Effect.all(values.map((value) => parseSpecImplementationForCli(value)))
+		return [...new Set(parsed)].sort((left, right) => left.localeCompare(right))
+	})
+
+const parseOptionalImplementationListForCli = (
+	values: readonly string[],
+): Effect.Effect<readonly string[] | undefined, Error> =>
+	values.length === 0 ? Effect.succeed(undefined) : parseSpecImplementationsForCli(values)
+
+const resolveParityImplementationForCli = (
+	value: Option.Option<string>,
+	registry: ImplementationRegistry,
+): Effect.Effect<string, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(registry.default_implementation),
+		onSome: (implementation) => parseSpecImplementationForCli(implementation),
+	})
+
+const formatImplementationSummaryLine = (implementation: ImplementationRecord): string => {
+	const flags = [
+		implementation.is_default ? "default" : undefined,
+		implementation.is_builtin ? "builtin" : undefined,
+	].filter((flag): flag is string => flag !== undefined)
+	const description =
+		implementation.description === undefined
+			? ""
+			: ` - ${compactSingleLineText(implementation.description)}`
+	return `${implementation.name}${flags.length === 0 ? "" : ` [${flags.join(",")}]`}${description}`
+}
+
+const logImplementationDetails = (
+	implementation: ImplementationRecord,
+	registry: ImplementationRegistry,
+): Effect.Effect<void> =>
+	Effect.gen(function* () {
+		yield* Console.log(`Implementation: ${implementation.name}`)
+		yield* Console.log(`Default: ${implementation.is_default ? "yes" : "no"}`)
+		yield* Console.log(`Built-in: ${implementation.is_builtin ? "yes" : "no"}`)
+		yield* Console.log(
+			`Implicit default allowed: ${registry.implicit_default_allowed ? "yes" : "no"}`,
+		)
+		if (implementation.description !== undefined) {
+			yield* Console.log(`Description: ${implementation.description}`)
+		}
+		yield* Console.log(`Created: ${implementation.created_at}`)
+		yield* Console.log(`Updated: ${implementation.updated_at}`)
+	})
 
 const inferSpecRequirementKindFromExternalCodeForCli = (
 	externalCode: string,
@@ -855,6 +1123,8 @@ const issueGetHandler = (args: {
 					).pipe(Effect.zipRight(Effect.succeed<readonly never[]>([]))),
 				),
 			)
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (args.json) {
 			yield* Console.log(
@@ -870,8 +1140,11 @@ const issueGetHandler = (args: {
 			return
 		}
 
-		yield* Console.log(formatIssueSummaryLine(issue))
-		const detailSections = formatIssueDetailSections(issue, { linkedSpecRequirements })
+		yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
+		const detailSections = formatIssueDetailSections(issue, {
+			linkedSpecRequirements,
+			showImplementations,
+		})
 		if (detailSections.length > 0) {
 			yield* Console.log("")
 			yield* Console.log(detailSections.join("\n\n"))
@@ -895,6 +1168,7 @@ const issueListHandler = (args: {
 	readonly priority: Option.Option<number>
 	readonly issueType: Option.Option<string>
 	readonly parent: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly limit: Option.Option<number>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -915,6 +1189,7 @@ const issueListHandler = (args: {
 			priority: Option.getOrUndefined(args.priority),
 			type: Option.getOrUndefined(args.issueType),
 			parent: Option.getOrUndefined(args.parent),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 		}
 		const hasFilters = Object.values(filters).some((value) => value !== undefined)
 
@@ -933,6 +1208,8 @@ const issueListHandler = (args: {
 			yield* Console.log(JSON.stringify(issues, null, 2))
 			return
 		}
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const showImplementations = registry.implementations.length > 1
 
 		if (issues.length === 0) {
 			yield* Console.log("No issues found.")
@@ -940,7 +1217,7 @@ const issueListHandler = (args: {
 		}
 
 		for (const issue of issues) {
-			yield* Console.log(formatIssueSummaryLine(issue))
+			yield* Console.log(formatIssueSummaryLine(issue, { showImplementations }))
 		}
 
 		if (args.verbose) {
@@ -961,6 +1238,7 @@ const issueCreateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly deferred: boolean
 	readonly noDefaultParent: boolean
@@ -1003,6 +1281,7 @@ const issueCreateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -1015,6 +1294,12 @@ const issueCreateHandler = (args: {
 		yield* Console.log(`Created issue ${issue.id}`)
 		if (resolvedParent !== undefined) {
 			yield* Console.log(`Parent: ${resolvedParent}`)
+		}
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
 		}
 		if (args.verbose) {
 			yield* Console.error(
@@ -1038,6 +1323,7 @@ const issueChildHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1080,6 +1366,7 @@ const issueChildHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels: parseLabelsOption(args.labels),
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 			cwd: explicitProjectDir,
 		})
@@ -1090,6 +1377,12 @@ const issueChildHandler = (args: {
 		}
 
 		yield* Console.log(`Created child issue ${issue.id} under ${resolvedParent}`)
+		if (
+			issue.implementations.length > 1 ||
+			issue.implementations.some((implementation) => implementation !== "default")
+		) {
+			yield* Console.log(`Implementations: ${issue.implementations.join(", ")}`)
+		}
 		if (args.verbose) {
 			yield* Console.error(
 				`status=${issue.status} priority=${issue.priority} type=${issue.issue_type}`,
@@ -1113,6 +1406,7 @@ const issueUpdateHandler = (args: {
 	readonly assignee: Option.Option<string>
 	readonly estimate: Option.Option<number>
 	readonly labels: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly parent: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly verbose: boolean
@@ -1150,6 +1444,7 @@ const issueUpdateHandler = (args: {
 			assignee: Option.getOrUndefined(args.assignee),
 			estimate: Option.getOrUndefined(args.estimate),
 			labels,
+			implementations: yield* parseOptionalImplementationListForCli(args.implementations),
 			parent: resolvedParent,
 		}
 
@@ -1172,6 +1467,196 @@ const issueUpdateHandler = (args: {
 		if (args.verbose) {
 			yield* Console.error("Use `az issue get <issue-id>` to inspect the updated issue.")
 		}
+	})
+
+const implListHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(registry, null, 2))
+			return
+		}
+
+		for (const implementation of registry.implementations) {
+			yield* Console.log(formatImplementationSummaryLine(implementation))
+		}
+		if (args.verbose) {
+			yield* Console.error(`default=${registry.default_implementation}`)
+			yield* Console.error(`implicit_default_allowed=${registry.implicit_default_allowed}`)
+		}
+	})
+
+const implGetHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = registry.implementations.find(
+			(entry) => entry.name === implementationName,
+		)
+		if (implementation === undefined) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* logImplementationDetails(implementation, registry)
+	})
+
+const implAddHandler = (args: {
+	readonly implementation: string
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.createImplementation({
+			name: implementationName,
+			description: Option.getOrUndefined(args.description),
+			setDefault: args.setDefault,
+			cwd: explicitProjectDir,
+		})
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Added implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implUpdateHandler = (args: {
+	readonly implementation: string
+	readonly rename: Option.Option<string>
+	readonly description: Option.Option<string>
+	readonly setDefault: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const nextName = yield* Option.match(args.rename, {
+			onNone: () => Effect.succeed<string | undefined>(undefined),
+			onSome: (value) => parseSpecImplementationForCli(value).pipe(Effect.map((parsed) => parsed)),
+		})
+		const description = Option.match(args.description, {
+			onNone: () => undefined,
+			onSome: (value) => value,
+		})
+		if (nextName === undefined && description === undefined && !args.setDefault) {
+			return yield* Effect.fail(
+				new Error("No changes provided. Use --rename, --description, or --default."),
+			)
+		}
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const implementation = yield* issueTrackerClient.updateImplementation(
+			implementationName,
+			{
+				name: nextName,
+				description,
+				setDefault: args.setDefault ? true : undefined,
+			},
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(implementation, null, 2))
+			return
+		}
+
+		yield* Console.log(`Updated implementation ${implementation.name}`)
+		if (implementation.is_default) {
+			yield* Console.log(`Default: ${implementation.name}`)
+		}
+	})
+
+const implDeleteHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const deleted = yield* issueTrackerClient.deleteImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+		if (!deleted) {
+			return yield* Effect.fail(new Error(`Implementation not found: ${implementationName}`))
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify({ name: implementationName, deleted: true }, null, 2))
+			return
+		}
+
+		yield* Console.log(`Deleted implementation ${implementationName}`)
+	})
+
+const implSetDefaultHandler = (args: {
+	readonly implementation: string
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const implementationName = yield* parseSpecImplementationForCli(args.implementation)
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.setDefaultImplementation(
+			implementationName,
+			explicitProjectDir,
+		)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(registry, null, 2))
+			return
+		}
+
+		yield* Console.log(`Default implementation: ${registry.default_implementation}`)
 	})
 
 /**
@@ -1582,6 +2067,7 @@ const specReqListHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
 		const viewMode = yield* parseSpecRequirementViewMode(args.view)
@@ -1879,6 +2365,7 @@ const specReqGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -1959,6 +2446,7 @@ const specReqCreateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2070,6 +2558,7 @@ const specReqUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2159,6 +2648,7 @@ const specReqDeleteHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
 			positional: args.requirementRef,
@@ -2209,12 +2699,14 @@ const specLinkListHandler = (args: {
 	readonly requirementId: Option.Option<string>
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const issueId = yield* Option.match(args.issueId, {
@@ -2243,6 +2735,10 @@ const specLinkListHandler = (args: {
 				}).pipe(Effect.map((lookup) => lookup)),
 		})
 		const specService = yield* SpecService
+		const hasImplementationFilter = args.implementations.length > 0
+		const implementationFilter = hasImplementationFilter
+			? yield* parseSpecImplementationsForCli(args.implementations)
+			: undefined
 		const links = yield* specService.listLinks(
 			{
 				issueId,
@@ -2251,22 +2747,30 @@ const specLinkListHandler = (args: {
 			},
 			explicitProjectDir,
 		)
+		const filteredLinks =
+			implementationFilter === undefined
+				? links
+				: links.filter((link) =>
+						implementationFilter.some((implementation) =>
+							link.implementations.includes(implementation),
+						),
+					)
 
 		if (args.json) {
-			yield* Console.log(JSON.stringify(links, null, 2))
+			yield* Console.log(JSON.stringify(filteredLinks, null, 2))
 			return
 		}
-		if (links.length === 0) {
+		if (filteredLinks.length === 0) {
 			yield* Console.log("No spec links found.")
 			return
 		}
-		for (const link of links) {
+		for (const link of filteredLinks) {
 			const requirementRef =
 				link.requirement_external_code === null
 					? link.requirement_local_id
 					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${requirementRef} [type=${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}] id=${link.requirement_id} updated_at=${link.updated_at}${link.evidence_note === null ? "" : ` note=${link.evidence_note}`}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}] impl=${link.implementations.join(",")} id=${link.requirement_id} updated_at=${link.updated_at}${link.evidence_note === null ? "" : ` note=${link.evidence_note}`}`,
 			)
 		}
 	})
@@ -2283,6 +2787,7 @@ const specLinkAddHandler = (args: {
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly fulfillmentStatus: Option.Option<string>
 	readonly fulfillmentPercent: Option.Option<number>
 	readonly evidenceNote: Option.Option<string>
@@ -2292,6 +2797,7 @@ const specLinkAddHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
@@ -2327,6 +2833,7 @@ const specLinkAddHandler = (args: {
 				return Effect.succeed(parsed)
 			},
 		})
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
 		const fulfillmentStatus = yield* Option.match(args.fulfillmentStatus, {
 			onNone: () => Effect.succeed<SpecLinkFulfillmentStatus>("planned"),
 			onSome: (value) => {
@@ -2343,7 +2850,6 @@ const specLinkAddHandler = (args: {
 		})
 		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
 		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
-
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
 			issueId,
@@ -2351,12 +2857,23 @@ const specLinkAddHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			implementations,
 			{
 				status: fulfillmentStatus,
 				percent: fulfillmentPercent,
 				evidenceNote,
 			},
 		)
+		const matchingLinks = yield* specService.listLinks(
+			{
+				issueId,
+				requirementId: lookup.reference,
+				requirementSelector: lookup.selector,
+			},
+			explicitProjectDir,
+		)
+		const matchingLink = matchingLinks.find((link) => link.link_type === linkType)
+		const effectiveImplementations = matchingLink?.implementations ?? implementations ?? []
 
 		if (args.json) {
 			yield* Console.log(
@@ -2368,6 +2885,7 @@ const specLinkAddHandler = (args: {
 						fulfillment_status: fulfillmentStatus,
 						fulfillment_percent: fulfillmentPercent ?? null,
 						evidence_note: evidenceNote ?? null,
+						implementations: effectiveImplementations,
 						updated: true,
 					},
 					null,
@@ -2379,6 +2897,9 @@ const specLinkAddHandler = (args: {
 		yield* Console.log(
 			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}, fulfillment=${fulfillmentStatus}${fulfillmentPercent === undefined || fulfillmentPercent === null ? "" : `:${fulfillmentPercent}%`})`,
 		)
+		if (effectiveImplementations.length > 0) {
+			yield* Console.log(`Implementations: ${effectiveImplementations.join(",")}`)
+		}
 	})
 
 /**
@@ -2393,12 +2914,14 @@ const specLinkRemoveHandler = (args: {
 	readonly requirementLocalId: Option.Option<string>
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
+	readonly implementations: readonly string[]
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
@@ -2431,7 +2954,7 @@ const specLinkRemoveHandler = (args: {
 				),
 			)
 		}
-
+		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
 		const specService = yield* SpecService
 		const removed = yield* specService.removeIssueLink(
 			issueId,
@@ -2439,6 +2962,7 @@ const specLinkRemoveHandler = (args: {
 			linkType,
 			explicitProjectDir,
 			lookup.selector,
+			implementations,
 		)
 
 		if (args.json) {
@@ -2446,6 +2970,37 @@ const specLinkRemoveHandler = (args: {
 			return
 		}
 		yield* Console.log(`Removed ${removed} spec link(s).`)
+	})
+
+const specParityHandler = (args: {
+	readonly implementation: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const issueTrackerClient = yield* IssueTrackerClient
+		const registry = yield* issueTrackerClient.getImplementationRegistry(explicitProjectDir)
+		const implementation = yield* resolveParityImplementationForCli(args.implementation, registry)
+		const specService = yield* SpecService
+		const report = yield* specService.getParityReport(implementation, explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(report, null, 2))
+			return
+		}
+
+		yield* Console.log(`implementation=${report.implementation}`)
+		yield* Console.log(`total=${report.total_requirements}`)
+		yield* Console.log(`implemented=${report.implemented_requirement_ids.length}`)
+		yield* Console.log(`partial=${report.partially_implemented_requirement_ids.length}`)
+		yield* Console.log(`tested=${report.tested_requirement_ids.length}`)
+		yield* Console.log(`uncovered=${report.uncovered_requirement_ids.length}`)
+		yield* Console.log(`related_only=${report.related_only_requirement_ids.length}`)
 	})
 
 /**
@@ -2469,6 +3024,7 @@ const specLinkUpdateHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
@@ -2592,6 +3148,7 @@ const specPublishConfigGetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -2637,6 +3194,7 @@ const specPublishConfigSetHandler = (args: {
 	Effect.gen(function* () {
 		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const specService = yield* SpecService
@@ -2727,6 +3285,31 @@ const specPublishConfigHandler = (args: {
 			json: args.json,
 		})
 	})
+
+const configSetHandler = (args: {
+	readonly key: string
+	readonly value: string
+	readonly projectDir: Option.Option<string>
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const { nextConfig, renderedValue } = yield* setConfigValue(currentConfig, args.key, args.value)
+
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		yield* Console.log(`Updated ${configPath}: ${args.key}=${renderedValue}`)
+		if (args.key === "spec.enabled") {
+			yield* Console.log(
+				renderedValue === "true"
+					? "Spec workflows are enabled."
+					: "Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.",
+			)
+		}
+	})
+
+const configUsageHandler = (usage: string) => Console.log(usage)
 
 /**
  * Run quality gates for a task's worktree
@@ -3017,6 +3600,8 @@ const formatCloseGuardMessage = (
 const primeHandler = (_args: { readonly verbose: boolean }) =>
 	Effect.gen(function* () {
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
+		const appConfig = yield* AppConfig
+		const specConfig = yield* appConfig.getSpecConfig()
 		const issueContext =
 			issueId === undefined
 				? ""
@@ -3024,8 +3609,17 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 						Effect.map((output) => output.trim()),
 						Effect.catchAll(() => Effect.succeed("")),
 					)
+		const implementationContext = yield* IssueTrackerClient.pipe(
+			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
+			Effect.map((registry) => ({
+				implementations: registry.implementations.map((implementation) => implementation.name),
+			})),
+			Effect.catchAll(() => Effect.succeed(undefined)),
+		)
 
-		yield* Console.log(buildPrimeOutput(issueId, issueContext))
+		yield* Console.log(
+			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled),
+		)
 	})
 
 /**
@@ -3139,6 +3733,9 @@ const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
 		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
 		// in native tmux pickers without changing the user's global theme.
 		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "monitor-activity", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "bell-action", "any", verbose)
+		yield* setTmuxSessionOption(sessionName, "activity-action", "any", verbose)
 		yield* setTmuxSessionOption(
 			sessionName,
 			"window-status-bell-style",
@@ -3664,6 +4261,12 @@ const primeCommand = Command.make(
 
 const issueTitleArg = Args.text({ name: "title" }).pipe(Args.withDescription("Issue title"))
 
+const issueImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withAlias("I"),
+	Options.withDescription("Implementation assignment (repeatable)"),
+)
+
 /**
  * az issue list - List issues
  */
@@ -3690,6 +4293,7 @@ const issueListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by parent issue ID"),
 		),
+		implementations: issueImplementationOption,
 		limit: Options.integer("limit").pipe(
 			Options.withAlias("l"),
 			Options.optional,
@@ -3778,6 +4382,7 @@ const issueCreateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		deferred: Options.boolean("deferred").pipe(
 			Options.withDescription("Create issue without inheriting active parent context"),
 		),
@@ -3843,6 +4448,7 @@ const issueChildCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("r"),
 			Options.optional,
@@ -3920,6 +4526,7 @@ const issueUpdateCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Comma-separated labels (replaces labels)"),
 		),
+		implementations: issueImplementationOption,
 		parent: Options.text("parent").pipe(
 			Options.withAlias("P"),
 			Options.optional,
@@ -4080,6 +4687,123 @@ const issueCommand = Command.make("issue", {}, () =>
 	]),
 )
 
+const implementationArg = Args.text({ name: "implementation" }).pipe(
+	Args.withDescription("Implementation name (for example default or ts-opentui)"),
+)
+
+const implListCommand = Command.make(
+	"list",
+	{
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implListHandler,
+).pipe(Command.withDescription("List registered implementations"))
+
+const implGetCommand = Command.make(
+	"get",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implGetHandler,
+).pipe(Command.withDescription("Show implementation details"))
+
+const implAddCommand = Command.make(
+	"add",
+	{
+		implementation: implementationArg,
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Optional implementation description"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set the new implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implAddHandler,
+).pipe(Command.withDescription("Add a named implementation"))
+
+const implUpdateCommand = Command.make(
+	"update",
+	{
+		implementation: implementationArg,
+		rename: Options.text("rename").pipe(
+			Options.withAlias("r"),
+			Options.optional,
+			Options.withDescription("Rename the implementation"),
+		),
+		description: Options.text("description").pipe(
+			Options.withAlias("d"),
+			Options.optional,
+			Options.withDescription("Update the implementation description (pass empty string to clear)"),
+		),
+		setDefault: Options.boolean("default").pipe(
+			Options.withDescription("Set this implementation as the registry default"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implUpdateHandler,
+).pipe(Command.withDescription("Update implementation metadata"))
+
+const implDeleteCommand = Command.make(
+	"delete",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implDeleteHandler,
+).pipe(Command.withDescription("Delete a named implementation"))
+
+const implSetDefaultCommand = Command.make(
+	"set-default",
+	{
+		implementation: implementationArg,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	implSetDefaultHandler,
+).pipe(Command.withDescription("Set the registry default implementation"))
+
+const implCommand = Command.make("impl", {}, () =>
+	Console.log("Usage: az impl [list|get|add|update|delete|set-default] ..."),
+).pipe(
+	Command.withDescription("Manage implementation registry metadata"),
+	Command.withSubcommands([
+		implListCommand,
+		implGetCommand,
+		implAddCommand,
+		implUpdateCommand,
+		implDeleteCommand,
+		implSetDefaultCommand,
+	]),
+)
+
 const requirementRefArg = Args.text({ name: "requirement-ref" }).pipe(
 	Args.optional,
 	Args.withDescription(
@@ -4125,6 +4849,22 @@ const requirementByExternalCodeOption = Options.text("external-code").pipe(
 	Options.optional,
 	Options.withDescription("Lookup by requirement external code (for example AZ-FR-4201)"),
 )
+
+const specImplementationOption = Options.text("impl").pipe(
+	Options.repeated,
+	Options.withDescription("Implementation scope (repeatable). Default: default"),
+)
+
+const optionalSpecImplementationOption = Options.text("impl").pipe(
+	Options.optional,
+	Options.withDescription("Implementation scope. Default: default"),
+)
+
+const specUsageHandler = (usage: string) =>
+	Effect.gen(function* () {
+		yield* ensureSpecEnabled(process.cwd())
+		yield* Console.log(usage)
+	})
 
 const specRequirementViewOption = Options.text("view").pipe(
 	Options.optional,
@@ -4312,7 +5052,7 @@ const specReqDeleteCommand = Command.make(
 ).pipe(Command.withDescription("Delete a spec requirement"))
 
 const specReqCommand = Command.make("req", {}, () =>
-	Console.log(
+	specUsageHandler(
 		"Usage: az spec req [list|search|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
@@ -4355,6 +5095,7 @@ const specLinkListCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Filter by requirement external code"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -4379,6 +5120,7 @@ const specLinkAddCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
 		),
+		implementations: specImplementationOption,
 		fulfillmentStatus: Options.text("fulfillment-status").pipe(
 			Options.withAlias("f"),
 			Options.optional,
@@ -4418,6 +5160,7 @@ const specLinkRemoveCommand = Command.make(
 			Options.optional,
 			Options.withDescription("Optional link type filter"),
 		),
+		implementations: specImplementationOption,
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -4467,7 +5210,7 @@ const specLinkUpdateCommand = Command.make(
 ).pipe(Command.withDescription("Update typed issue<->requirement link fulfillment metadata"))
 
 const specLinkCommand = Command.make("link", {}, () =>
-	Console.log(
+	specUsageHandler(
 		"Usage: az spec link [list|add|update|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
 	),
 ).pipe(
@@ -4479,6 +5222,19 @@ const specLinkCommand = Command.make("link", {}, () =>
 		specLinkRemoveCommand,
 	]),
 )
+
+const specParityCommand = Command.make(
+	"parity",
+	{
+		implementation: optionalSpecImplementationOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specParityHandler,
+).pipe(Command.withDescription("Report spec parity for a selected implementation"))
 
 const specPublishRunCommand = Command.make(
 	"run",
@@ -4544,7 +5300,7 @@ const specPublishConfigCommand = Command.make(
 ).pipe(Command.withDescription("Inspect or update spec publish configuration"))
 
 const specPublishCommand = Command.make("publish", {}, () =>
-	Console.log("Usage: az spec publish [run|config] ..."),
+	specUsageHandler("Usage: az spec publish [run|config] ..."),
 ).pipe(
 	Command.withDescription("Spec publish operations (deprecated export alias; use `az spec sync`)"),
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
@@ -4606,7 +5362,7 @@ const specSyncCommand = Command.make(
 ).pipe(Command.withDescription("Sync spec exports to markdown and/or Linear"))
 
 const specCommand = Command.make("spec", {}, () =>
-	Console.log("Usage: az spec [req|link|read|lint|sync] ..."),
+	specUsageHandler("Usage: az spec [req|link|parity|read|lint|sync|publish] ..."),
 ).pipe(
 	Command.withDescription(
 		"Spec requirement/link/read/lint/sync operations (`publish` remains as deprecated alias)",
@@ -4614,6 +5370,8 @@ const specCommand = Command.make("spec", {}, () =>
 	Command.withSubcommands([
 		specReqCommand,
 		specLinkCommand,
+		specLinkCommand,
+		specParityCommand,
 		specReadCommand,
 		specLintCommand,
 		specSyncCommand,
@@ -4750,7 +5508,7 @@ const opencodeInitHandler = (args: {
 			)(existingContent).pipe(Effect.catchAll(() => Effect.succeed({})))
 
 			// Merge plugins - existingConfig.plugins could be undefined or an array
-			const pluginsValue = existingConfig["plugins"]
+			const pluginsValue = existingConfig.plugins
 			const existingPlugins = Array.isArray(pluginsValue)
 				? pluginsValue.filter((plugin): plugin is string => typeof plugin === "string")
 				: []
@@ -4985,6 +5743,35 @@ const projectCommand = Command.make("project", {}, () =>
 	Command.withDescription("Manage multiple projects"),
 )
 
+const configKeyArg = Args.text({ name: "key" }).pipe(
+	Args.withDescription("Config key (currently: spec.enabled)"),
+)
+
+const configValueArg = Args.text({ name: "value" }).pipe(Args.withDescription("Config value"))
+
+const configSetCommand = Command.make(
+	"set",
+	{
+		key: configKeyArg,
+		value: configValueArg,
+		projectDir: projectDirArg,
+	},
+	configSetHandler,
+).pipe(
+	Command.withDescription(
+		"Set a supported project config key (for example: az config set spec.enabled false)",
+	),
+)
+
+const configCommand = Command.make("config", {}, () =>
+	configUsageHandler("Usage: az config set spec.enabled <true|false>"),
+).pipe(
+	Command.withDescription(
+		"Inspect or update project config (for example, disable spec with 'az config set spec.enabled false')",
+	),
+	Command.withSubcommands([configSetCommand]),
+)
+
 // ============================================================================
 // Top-level Shortcut Commands
 // ============================================================================
@@ -5046,6 +5833,7 @@ const cli = az.pipe(
 		// Top-level shortcuts (most commonly used)
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		// Session management
 		startCommand,
@@ -5055,6 +5843,7 @@ const cli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommand,
@@ -5079,6 +5868,7 @@ const commandCli = az.pipe(
 	Command.withSubcommands([
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		startCommand,
 		attachCommand,
@@ -5087,6 +5877,7 @@ const commandCli = az.pipe(
 		statusCommand,
 		syncCommand,
 		issueCommand,
+		implCommand,
 		specCommand,
 		gateCommand,
 		devCommandPlaceholder,
@@ -5102,34 +5893,12 @@ const commandCli = az.pipe(
 // ============================================================================
 const buildFullCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return fullCliLayer
-
-	return Layer.mergeAll(
-		fullCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createFullCliLayer(configPath)
 }
 
 const buildCommandCliLayerForArgv = (argv: ReadonlyArray<string>) => {
 	const configPath = parseConfigPathFromArgv(argv)
-	if (configPath === null) return commandCliLayer
-
-	return Layer.mergeAll(
-		commandCliLayer,
-		Layer.succeed(
-			AppConfigConfig,
-			AppConfigConfig.make({
-				configPath,
-				projectPath: process.cwd(),
-			}),
-		),
-	)
+	return createCommandCliLayer(configPath)
 }
 
 /**
@@ -5169,6 +5938,7 @@ export { cliLayer, commandCliLayer }
  */
 export {
 	buildPrimeOutput,
+	buildCommandCliLayerForArgv,
 	cliRunner,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,

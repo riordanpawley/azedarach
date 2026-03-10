@@ -166,6 +166,7 @@ describe("applySessionRefreshPatch", () => {
 		issue_type: "task",
 		created_at: "2026-03-07T00:00:00.000Z",
 		updated_at: "2026-03-07T00:00:00.000Z",
+		implementations: ["default"],
 		sessionState: "busy",
 		gitBehindCount: 3,
 		hasUncommittedChanges: true,
@@ -223,6 +224,7 @@ describe("reconcileLoadedTasksWithLocalCreateGrace", () => {
 		issue_type: "task",
 		created_at: "2026-03-07T00:00:00.000Z",
 		updated_at: "2026-03-07T00:00:05.000Z",
+		implementations: ["default"],
 		sessionState: "idle",
 	} as const
 
