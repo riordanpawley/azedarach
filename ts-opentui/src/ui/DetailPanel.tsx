@@ -287,7 +287,7 @@ export const DetailPanel = (props: DetailPanelProps) => {
 
 		// Add worktree-specific actions when worktree exists but no session
 		if (props.task.hasWorktree && props.task.sessionState === "idle") {
-			actions.push("d - Cleanup worktree (remove orphaned worktree)")
+			actions.push("d - Cleanup worktree + branch (remove orphaned worktree)")
 		}
 
 		return actions

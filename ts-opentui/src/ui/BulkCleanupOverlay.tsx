@@ -1,10 +1,10 @@
 /**
- * BulkCleanupOverlay - Modal dialog for bulk worktree cleanup
+ * BulkCleanupOverlay - Modal dialog for bulk worktree + branch cleanup
  *
  * Displays when multiple tasks are selected and cleanup is requested.
  * Offers two choices:
- * - w: Worktree only - delete worktrees/sessions but keep tracker open
- * - f: Full cleanup - delete worktrees AND close tracker
+ * - w: Worktrees + branches - delete worktrees/branches/sessions but keep tracker open
+ * - f: Full cleanup - delete worktrees/branches AND close tracker
  * - Esc: Cancel
  *
  * Note: Keyboard handling is in InputHandlersService, this component just renders.
@@ -20,8 +20,8 @@ const ATTR_BOLD = 1
  * BulkCleanupOverlay component
  *
  * Two-option dialog for bulk cleanup decision. Press:
- * - 'w' to delete worktrees only (keep tracker open)
- * - 'f' to do full cleanup (delete worktrees and close tracker)
+ * - 'w' to delete worktrees + branches only (keep tracker open)
+ * - 'f' to do full cleanup (delete worktrees + branches and close tracker)
  * - 'Esc' to cancel
  *
  * All keyboard handling is in the Effect layer (InputHandlersService).
@@ -66,7 +66,7 @@ export const BulkCleanupOverlay = () => {
 				{/* Title */}
 				<box>
 					<text fg={theme.peach} attributes={ATTR_BOLD}>
-						Cleanup {count} Worktree{count === 1 ? "" : "s"}?{"\n"}
+						{`Cleanup ${count} Worktree${count === 1 ? "" : "s"} + Branch${count === 1 ? "" : "es"}?\n`}
 					</text>
 				</box>
 
@@ -76,21 +76,22 @@ export const BulkCleanupOverlay = () => {
 				</box>
 
 				{/* Warning */}
-				<box marginTop={1}>
+				<box marginTop={1} flexDirection="column">
 					<text fg={theme.yellow}>All uncommitted changes will be lost.</text>
+					<text fg={theme.subtext0}>Worktree branches will also be deleted.</text>
 				</box>
 
 				{/* Options */}
 				<box marginTop={2} flexDirection="column">
 					<box>
 						<text fg={theme.green}>w</text>
-						<text fg={theme.overlay0}>: Worktrees only </text>
+						<text fg={theme.overlay0}>: Worktrees + branches </text>
 						<text fg={theme.subtext0}>(keep tracker open)</text>
 					</box>
 					<box marginTop={0}>
 						<text fg={theme.blue}>f</text>
 						<text fg={theme.overlay0}>: Full cleanup </text>
-						<text fg={theme.subtext0}>(close tracker too)</text>
+						<text fg={theme.subtext0}>(delete worktrees + branches, close tracker)</text>
 					</box>
 					<box marginTop={0}>
 						<text fg={theme.red}>Esc</text>

@@ -117,7 +117,7 @@ export const HelpOverlay = () => {
 				<KeyLine keys="m / M" description="Merge / Abort merge" />
 				<KeyLine keys="b" description="Merge bead into another bead" />
 				<KeyLine keys="u" description="Update from main" />
-				<KeyLine keys="d / D" description="Delete worktree / Delete bead" />
+				<KeyLine keys="d / D" description="Cleanup worktree + branch / Delete bead" />
 				<text> </text>
 
 				{/* Create/Edit section */}

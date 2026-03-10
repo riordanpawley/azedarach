@@ -571,7 +571,7 @@ done
 	{
 		key: "d",
 		mode: "action",
-		description: "Cleanup worktree",
+		description: "Cleanup worktree + branch",
 		action: Effect.suspend(() =>
 			bc.prHandlers.cleanup().pipe(Effect.ensuring(bc.editor.exitToNormal())),
 		),

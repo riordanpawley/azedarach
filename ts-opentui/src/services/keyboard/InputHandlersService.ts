@@ -375,8 +375,8 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			 * @param key - The key that was pressed
 			 * @returns true if the key was handled.
 			 *
-			 * w → execute onWorktreeOnly effect (cleanup worktrees, keep tracker open)
-			 * f → execute onFullCleanup effect (cleanup worktrees AND close tracker)
+			 * w → execute onWorktreeOnly effect (cleanup worktrees + branches, keep tracker open)
+			 * f → execute onFullCleanup effect (cleanup worktrees + branches AND close tracker)
 			 * Escape/q → just pop overlay (cancel)
 			 */
 			const handleBulkCleanupInput = (key: string) =>
@@ -386,14 +386,14 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						return false
 					}
 
-					// w for worktree-only cleanup
+					// w for worktree + branch cleanup only
 					if (key === "w") {
 						yield* overlay.pop()
 						yield* currentOverlay.onWorktreeOnly
 						return true
 					}
 
-					// f for full cleanup (worktree + close bead)
+					// f for full cleanup (worktree + branch cleanup, then close tracker)
 					if (key === "f") {
 						yield* overlay.pop()
 						yield* currentOverlay.onFullCleanup

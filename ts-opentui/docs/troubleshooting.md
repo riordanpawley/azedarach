@@ -54,7 +54,7 @@ useKeyboard((event) => {
 
 ### Problem
 
-Pressing Shift+D (to delete a bead) was triggering the lowercase `d` action (cleanup worktree) instead.
+Pressing Shift+D (to delete a bead) was triggering the lowercase `d` action (cleanup worktree + branch) instead.
 
 ### Root Cause
 

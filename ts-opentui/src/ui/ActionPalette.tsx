@@ -116,7 +116,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "m": // Merge - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
-			case "d": // Cleanup/Delete worktree - session exists OR orphaned worktree
+			case "d": // Cleanup/Delete worktree + branch - session exists OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
 			case "f": // Diff vs main - only if session has worktree (not idle) OR orphaned worktree
 				return sessionState !== "idle" || isOrphanedWorktree
@@ -200,7 +200,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 
 		actions.push({ keyName: "i", description: "image" })
 		actions.push({ keyName: "f", description: "diff" })
-		actions.push({ keyName: "d", description: "cleanup" })
+		actions.push({ keyName: "d", description: "cleanup+branch" })
 		return actions
 	}, [sessionState])
 
@@ -285,7 +285,7 @@ export const ActionPalette = (props: ActionPaletteProps) => {
 			<ActionLine keyName="P" description="PR" />
 			<ActionLine keyName="O" description="open PR" />
 			<ActionLine keyName="m" description="merge" />
-			<ActionLine keyName="d" description="cleanup" />
+			<ActionLine keyName="d" description="cleanup+branch" />
 			<ActionLine keyName="D" description="delete" />
 		</>
 	)

@@ -6,7 +6,7 @@
  * - Update from base (u)
  * - Merge to main (m)
  * - Abort merge (M)
- * - Cleanup worktree (d)
+ * - Cleanup worktree + branch (d)
  * - Show diff (f)
  *
  * Converted from factory pattern to Effect.Service layer.
@@ -552,7 +552,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 			})
 
 		/**
-		 * Cleanup worktree action (Space+d)
+		 * Cleanup worktree + branch action (Space+d)
 		 *
 		 * Shows confirmation dialog, then deletes the worktree and branch for
 		 * the current task(s). Supports bulk operations when multiple tasks are selected.
@@ -609,7 +609,7 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 
 				// Define worktree-only cleanup (keep tracker open)
 				const onWorktreeOnly = Effect.gen(function* () {
-					yield* toast.show("info", `Cleaning up ${taskIds.length} worktrees...`)
+					yield* toast.show("info", `Cleaning up ${taskIds.length} worktrees and branches...`)
 
 					yield* Effect.all(
 						tasksWithWorktrees.map((task) =>
@@ -641,12 +641,15 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							gitDeletions: undefined,
 						})
 					}
-					yield* toast.show("success", `Cleaned up ${taskIds.length} worktrees`)
+					yield* toast.show("success", `Cleaned up ${taskIds.length} worktrees and branches`)
 				}).pipe(Effect.catchAll(Effect.logError))
 
 				// Define full cleanup (close tracker too)
 				const onFullCleanup = Effect.gen(function* () {
-					yield* toast.show("info", `Full cleanup of ${taskIds.length} tracker...`)
+					yield* toast.show(
+						"info",
+						`Full cleanup of ${taskIds.length} worktrees, branches, and tracker entries...`,
+					)
 
 					yield* Effect.all(
 						tasksWithWorktrees.map((task) =>
@@ -680,7 +683,10 @@ export class PRHandlersService extends Effect.Service<PRHandlersService>()("PRHa
 							gitDeletions: undefined,
 						})
 					}
-					yield* toast.show("success", `Full cleanup of ${taskIds.length} tracker completed`)
+					yield* toast.show(
+						"success",
+						`Full cleanup of ${taskIds.length} worktrees, branches, and tracker entries completed`,
+					)
 				}).pipe(Effect.catchAll(Effect.logError))
 
 				// Show bulk cleanup dialog
