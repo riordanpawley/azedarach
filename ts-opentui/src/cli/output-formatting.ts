@@ -1,4 +1,5 @@
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
+import type { SpecRequirementRef } from "../core/specTypes.js"
 import type { TmuxStatus } from "../core/TmuxSessionMonitor.js"
 
 type DependencyCountLabel =
@@ -11,18 +12,14 @@ type DependencyCountLabel =
 	| "discoveredBy"
 type RelationshipDependencyType = "blocks" | "related" | "parent-child" | "discovered-from"
 
-type LinkedSpecRequirement = {
-	readonly id: string
-	readonly local_id: string
-	readonly external_code: string | null
-	readonly title: string
-	readonly kind: string
-	readonly link_type: string
+export interface PrimeImplementationContext {
 	readonly implementations: readonly string[]
 }
 
-export interface PrimeImplementationContext {
-	readonly implementations: readonly string[]
+export interface PrimeIssueContext {
+	readonly issue: TrackedIssue
+	readonly linkedSpecRequirements?: ReadonlyArray<SpecRequirementRef>
+	readonly showImplementations?: boolean
 }
 
 export const compactSingleLineText = (value: string): string => value.replace(/\s+/g, " ").trim()
@@ -156,7 +153,7 @@ const formatIssueDependencyTypeCountsSection = (issue: TrackedIssue): string | u
 }
 
 const formatIssueLinkedSpecSection = (
-	linkedSpecRequirements: ReadonlyArray<LinkedSpecRequirement> | undefined,
+	linkedSpecRequirements: ReadonlyArray<SpecRequirementRef> | undefined,
 ): string | undefined => {
 	if (!linkedSpecRequirements || linkedSpecRequirements.length === 0) {
 		return undefined
@@ -180,7 +177,7 @@ const formatIssueImplementationsSection = (
 export const formatIssueDetailSections = (
 	issue: TrackedIssue,
 	options?: {
-		readonly linkedSpecRequirements?: ReadonlyArray<LinkedSpecRequirement> | undefined
+		readonly linkedSpecRequirements?: ReadonlyArray<SpecRequirementRef> | undefined
 		readonly showImplementations?: boolean
 	},
 ): readonly string[] => {
@@ -274,26 +271,49 @@ const formatPrimeImplementationGuardrails = (
 	].join("\n")
 }
 
+const PRIME_ISSUE_CONTEXT_MAX_LENGTH = 3200
+
+const clipPrimeIssueContext = (value: string): string =>
+	value.length > PRIME_ISSUE_CONTEXT_MAX_LENGTH
+		? `${value.slice(0, PRIME_ISSUE_CONTEXT_MAX_LENGTH)}\n...`
+		: value
+
+const formatPrimeIssueSection = (
+	issueId: string,
+	issueContext: PrimeIssueContext | undefined,
+): string =>
+	issueContext === undefined
+		? `
+
+Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
+Could not load issue details automatically; run \`az issue get ${issueId}\`.`
+		: (() => {
+				const renderedIssueContext = [
+					formatIssueSummaryLine(issueContext.issue, {
+						showImplementations: issueContext.showImplementations,
+					}),
+					...formatIssueDetailSections(issueContext.issue, {
+						linkedSpecRequirements: issueContext.linkedSpecRequirements,
+						showImplementations: issueContext.showImplementations,
+					}),
+				].join("\n\n")
+
+				return `
+
+Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
+Refresh with \`az issue get ${issueId}\` if this looks stale.
+\`\`\`
+${clipPrimeIssueContext(renderedIssueContext)}
+\`\`\``
+			})()
+
 export const buildPrimeOutput = (
 	issueId: string | undefined,
-	issueContext: string,
+	issueContext: PrimeIssueContext | undefined,
 	implementationContext?: PrimeImplementationContext,
 	specEnabled = false,
 ): string => {
-	const issueSection =
-		issueId === undefined
-			? ""
-			: issueContext.length > 0
-				? `
-
-Active issue context (AZEDARACH_ISSUE_ID=${issueId}):
-\`\`\`
-${issueContext.length > 4000 ? `${issueContext.slice(0, 4000)}\n...` : issueContext}
-\`\`\``
-				: `
-
-Active issue from AZEDARACH_ISSUE_ID=${issueId}.
-Could not load issue details automatically; run \`az issue get ${issueId}\`.`
+	const issueSection = issueId === undefined ? "" : formatPrimeIssueSection(issueId, issueContext)
 
 	const contextGuardrail =
 		issueId === undefined
@@ -321,20 +341,13 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
 	return `Azedarach Session Primer
 
 - Use \`az issue\` commands as the task-tracker interface for this repo.
-- Start each session with: \`az prime\`
-- Mandatory parenting rule: when working under a parent issue, create follow-up work with \`az issue child "Title"\` (or \`az issue create "Title"\`, which now defaults to active parent context unless \`--deferred\` is set).
-- Dependency helpers: \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` (defaults to \`blocks\`)
-- Common issue commands:
-  - \`az issue list --limit 20\` (lists most recently updated issues first)
-  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
-  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
-  - \`az issue update <issue-id> --design "..."\`
-  - \`az issue update <issue-id> --notes "..."\`
-  - \`az issue update <issue-id> --status in_progress|blocked|open\`
-  - \`az issue create "Title" --type task|bug|epic|chore --priority 1-5\`
-  - \`az issue create "Child task" --parent <epic-id>\`
-  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
-  - \`az issue --help\`
+- Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
+- Create follow-up/child work in the tracker instead of local TODOs.
+${issueSection}
+- Follow-up and dependency rules:
+  - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
+  - \`az issue create "Title"\` also defaults to active parent context unless \`--deferred\` is set.
+  - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
 - Issue-context guardrails:
   ${contextGuardrail}
   - Missing fields (for example description/design/acceptance/notes) are valid. Treat absent or empty fields as intentional and continue execution.
@@ -343,16 +356,22 @@ ${implementationGuardrails === undefined ? "" : `${implementationGuardrails}\n`}
 - Keep issue context current as you work:
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
-${specGuardrails === undefined ? "" : `${specGuardrails}\n`}
-- Create follow-up/child work in the tracker instead of local TODOs.
-- Prefer \`az issue\` operations over direct backend issue CLI commands in sessions.
+- High-signal issue commands:
+  - \`az issue list --limit 20\` (lists the most recently updated issues first)
+  - \`az issue get <issue-id>\` (use \`--json\` when you need full structured output)
+  - \`az issue child "Child task"\` (uses active parent context, or \`--parent <issue-id>\`)
+  - \`az issue update <issue-id> --design "..."\`
+  - \`az issue update <issue-id> --notes "..."\`
+  - \`az issue update <issue-id> --status in_progress|blocked|open\`
+  - \`az issue close <issue-id> --reason "..."\` (guards against closing parents with open children)
+  - \`az issue --help\`
+${specGuardrails === undefined ? "" : `- Spec workflow:\n${specGuardrails}\n`}
 - When work is complete:
   - Commit your changes first (\`git add -A && git commit -m "<issue-id>: ..."\`).
   - Always include the issue ID in the commit message.
   - Close the issue when implementation is ready for review (\`az issue close <issue-id>\`).
   - Review flow policy: reviews target closed tasks, not in-progress tasks.
   - If review finds remaining work, move the issue back to in-progress and continue.
-${issueSection}
 `
 }
 

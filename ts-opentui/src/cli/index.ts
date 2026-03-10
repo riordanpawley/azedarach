@@ -3837,13 +3837,6 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 		const issueId = normalizePrimeIssueId(process.env.AZEDARACH_ISSUE_ID)
 		const appConfig = yield* AppConfig
 		const specConfig = yield* appConfig.getSpecConfig()
-		const issueContext =
-			issueId === undefined
-				? ""
-				: yield* PlatformCommand.string(PlatformCommand.make("az", "issue", "get", issueId)).pipe(
-						Effect.map((output) => output.trim()),
-						Effect.catchAll(() => Effect.succeed("")),
-					)
 		const implementationContext = yield* IssueTrackerClient.pipe(
 			Effect.flatMap((issueTrackerClient) => issueTrackerClient.getImplementationRegistry()),
 			Effect.map((registry) => ({
@@ -3851,6 +3844,32 @@ const primeHandler = (_args: { readonly verbose: boolean }) =>
 			})),
 			Effect.catchAll(() => Effect.succeed(undefined)),
 		)
+		const showImplementations =
+			implementationContext !== undefined && implementationContext.implementations.length > 1
+		const issueContext =
+			issueId === undefined
+				? undefined
+				: yield* IssueTrackerClient.pipe(
+						Effect.flatMap((issueTrackerClient) => issueTrackerClient.show(issueId)),
+						Effect.flatMap((issue) =>
+							(specConfig.enabled
+								? SpecService.pipe(
+										Effect.flatMap((specService) =>
+											specService.listIssueRequirements(issue.id, process.cwd()),
+										),
+										Effect.catchAll(() => Effect.succeed([])),
+									)
+								: Effect.succeed([])
+							).pipe(
+								Effect.map((linkedSpecRequirements) => ({
+									issue,
+									linkedSpecRequirements,
+									showImplementations,
+								})),
+							),
+						),
+						Effect.catchAll(() => Effect.succeed(undefined)),
+					)
 
 		yield* Console.log(
 			buildPrimeOutput(issueId, issueContext, implementationContext, specConfig.enabled),

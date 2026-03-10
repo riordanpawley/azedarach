@@ -19,9 +19,34 @@ import {
 	summarizeIssueBulkUpdateResults,
 } from "./index.js"
 
+const makePrimeIssue = (id: string, overrides: Partial<TrackedIssue> = {}): TrackedIssue => ({
+	id,
+	title: `Issue ${id}`,
+	status: "open",
+	priority: 3,
+	issue_type: "task",
+	created_at: "2026-03-08T00:00:00.000Z",
+	updated_at: "2026-03-08T00:00:00.000Z",
+	implementations: ["default"],
+	...overrides,
+})
+
 describe("buildPrimeOutput", () => {
 	it("includes issue-context guardrails and refresh instructions for active issues", () => {
-		const output = buildPrimeOutput("gq", "gq: Improve az prime", undefined, true)
+		const output = buildPrimeOutput(
+			"gq",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					status: "in_progress",
+					priority: 2,
+					description: "Trim noisy guidance and keep the active issue block concise.",
+				}),
+				showImplementations: false,
+			},
+			undefined,
+			true,
+		)
 
 		expect(output).toContain("Issue-context guardrails:")
 		expect(output).toContain("AZEDARACH_ISSUE_ID` is set to `gq`")
@@ -52,11 +77,17 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("If review finds remaining work, move the issue back to in-progress")
 		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
+		expect(output).toContain("Refresh with `az issue get gq` if this looks stale.")
+		expect(output).toContain("gq: Improve az prime [status=in_progress priority=2 type=task")
+		expect(output).toContain(
+			"Description:\nTrim noisy guidance and keep the active issue block concise.",
+		)
+		expect(output).not.toContain("Start each session with: `az prime`")
 		expect(output).not.toContain("Implementation guardrails:")
 	})
 
 	it("guides users to fetch an issue when no issue id is configured", () => {
-		const output = buildPrimeOutput(undefined, "", undefined, true)
+		const output = buildPrimeOutput(undefined, undefined, undefined, true)
 
 		expect(output).toContain("No active issue is preselected")
 		expect(output).toContain("run `az issue get <issue-id>`")
@@ -64,16 +95,20 @@ describe("buildPrimeOutput", () => {
 	})
 
 	it("falls back to explicit refresh command when issue details fail to load", () => {
-		const output = buildPrimeOutput("gq", "", undefined, true)
+		const output = buildPrimeOutput("gq", undefined, undefined, true)
 
-		expect(output).toContain("Active issue from AZEDARACH_ISSUE_ID=gq.")
+		expect(output).toContain("Active issue context (AZEDARACH_ISSUE_ID=gq):")
 		expect(output).toContain("Could not load issue details automatically; run `az issue get gq`.")
 	})
 
 	it("keeps implementation guidance invisible while only one implementation exists", () => {
 		const output = buildPrimeOutput(
 			"gq",
-			"gq: Improve az prime",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+				}),
+			},
 			{
 				implementations: ["default"],
 			},
@@ -87,7 +122,13 @@ describe("buildPrimeOutput", () => {
 	it("warns explicitly when multiple implementations are configured", () => {
 		const output = buildPrimeOutput(
 			"gq",
-			"gq: Improve az prime",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					implementations: ["default", "ts-opentui", "go-bubbletea"],
+				}),
+				showImplementations: true,
+			},
 			{
 				implementations: ["default", "ts-opentui", "go-bubbletea"],
 			},
@@ -112,7 +153,13 @@ describe("buildPrimeOutput", () => {
 	it("omits all spec guidance when spec workflows are disabled", () => {
 		const output = buildPrimeOutput(
 			"gq",
-			"gq: Improve az prime",
+			{
+				issue: makePrimeIssue("gq", {
+					title: "Improve az prime",
+					implementations: ["default", "ts-opentui"],
+				}),
+				showImplementations: true,
+			},
 			{
 				implementations: ["default", "ts-opentui"],
 			},
@@ -874,6 +921,9 @@ describe("formatIssueDetailSections", () => {
 						kind: "functional",
 						link_type: "implements",
 						implementations: ["default"],
+						fulfillment_status: "complete",
+						fulfillment_percent: 100,
+						evidence_note: null,
 					},
 					{
 						id: "AZ-AT-2901",
@@ -883,6 +933,9 @@ describe("formatIssueDetailSections", () => {
 						kind: "acceptance",
 						link_type: "tests",
 						implementations: ["default"],
+						fulfillment_status: "verified",
+						fulfillment_percent: 100,
+						evidence_note: null,
 					},
 				],
 			},
