@@ -50,6 +50,7 @@ describe("SessionManager discovered session recovery", () => {
 				hasCodeWindow: false,
 				hasStartLock: true,
 				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: false,
 			}),
 		).toBe("initializing")
 		expect(
@@ -57,6 +58,26 @@ describe("SessionManager discovered session recovery", () => {
 				hasCodeWindow: false,
 				hasStartLock: true,
 				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: false,
+			}),
+		).toBe("busy")
+	})
+
+	it("uses shared missing-window classifier for startup grace cases", () => {
+		expect(
+			classifySessionStateForMissingCodeWindow("initializing", {
+				hasCodeWindow: false,
+				hasStartLock: false,
+				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: true,
+			}),
+		).toBe("initializing")
+		expect(
+			classifySessionStateForMissingCodeWindow(undefined, {
+				hasCodeWindow: false,
+				hasStartLock: false,
+				tmuxStartupInProgress: false,
+				withinStartupGracePeriod: true,
 			}),
 		).toBe("busy")
 	})
