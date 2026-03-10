@@ -56,6 +56,12 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("Do not go on history/log hunting tangents")
 		expect(output).toContain(
+			"When fanning out to subagents, tell each subagent to use `az issue` and create/maintain its own child issue under the active parent; reserve `az prime` for the orchestrator unless a subagent explicitly needs a fresh primer.",
+		)
+		expect(output).toContain(
+			'`az issue create "Title"` defaults to the active parent context (including `AZEDARACH_ISSUE_ID`) unless `--deferred` is set.',
+		)
+		expect(output).toContain(
 			"In this repo, when guidance says `spec`, it means `az spec` requirement/link records",
 		)
 		expect(output).toContain(

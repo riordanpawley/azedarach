@@ -346,7 +346,8 @@ export const buildPrimeOutput = (
 ${issueSection}
 - Follow-up and dependency rules:
   - When working under a parent issue, create follow-up work with \`az issue child "Title"\`.
-  - \`az issue create "Title"\` also defaults to active parent context unless \`--deferred\` is set.
+  - When fanning out to subagents, tell each subagent to use \`az issue\` and create/maintain its own child issue under the active parent; reserve \`az prime\` for the orchestrator unless a subagent explicitly needs a fresh primer.
+  - \`az issue create "Title"\` defaults to the active parent context (including \`AZEDARACH_ISSUE_ID\`) unless \`--deferred\` is set.
   - Use \`az issue dep add <issue-id> <depends-on-id> [--type blocks|related|parent-child|discovered-from]\` to record dependency relationships (\`blocks\` is the default type).
 - Issue-context guardrails:
   ${contextGuardrail}
