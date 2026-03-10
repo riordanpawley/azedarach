@@ -17,10 +17,13 @@ describe("session prompts", () => {
 		expect(prompt).toContain("`AZEDARACH_ISSUE_ID` is already set for this session")
 		expect(prompt).toContain("`az issue get az-f4625d`")
 		expect(prompt).toContain(
+			'when a prompt says "spec", it means `az spec` requirement/link records',
+		)
+		expect(prompt).toContain(
 			"Before implementing behavior changes, inspect relevant `az spec` requirements/links.",
 		)
 		expect(prompt).toContain(
-			"After implementing behavior changes, verify compliance against linked spec and update requirement/link records when scope changes.",
+			"After implementing behavior changes, verify compliance against linked `az spec` requirements and update `az spec` requirement/link records when scope changes.",
 		)
 		expect(prompt).not.toContain("tracker show")
 		expect(prompt).not.toContain("linear-cli")
