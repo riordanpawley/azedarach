@@ -7,6 +7,7 @@ import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
 	cliRunner,
+	decodeIssueBulkUpdatePayload,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
@@ -15,6 +16,7 @@ import {
 	normalizeCliAliases,
 	normalizeIssueJsonFlagOrder,
 	resolveCliExecutionMode,
+	summarizeIssueBulkUpdateResults,
 } from "./index.js"
 
 describe("buildPrimeOutput", () => {
@@ -277,6 +279,87 @@ describe("normalizeIssueJsonFlagOrder", () => {
 			"AZE-200",
 			"AZE-123",
 		])
+	})
+})
+
+describe("decodeIssueBulkUpdatePayload", () => {
+	it("accepts a bare array payload", () => {
+		const decoded = decodeIssueBulkUpdatePayload(
+			JSON.stringify([
+				{
+					id: "dg",
+					status: "blocked",
+					labels: ["agent", "bulk"],
+				},
+			]),
+		)
+
+		expect(decoded).toEqual([
+			{
+				id: "dg",
+				status: "blocked",
+				labels: ["agent", "bulk"],
+			},
+		])
+	})
+
+	it("accepts an object payload with updates", () => {
+		const decoded = decodeIssueBulkUpdatePayload(
+			JSON.stringify({
+				updates: [
+					{
+						id: "dg",
+						notes: "bulk edit",
+					},
+					{
+						id: "dh",
+						parent: "dg",
+					},
+				],
+			}),
+		)
+
+		expect(decoded).toEqual([
+			{
+				id: "dg",
+				notes: "bulk edit",
+			},
+			{
+				id: "dh",
+				parent: "dg",
+			},
+		])
+	})
+
+	it("rejects an empty payload", () => {
+		expect(() => decodeIssueBulkUpdatePayload(JSON.stringify([]))).toThrow(
+			"Bulk update input must contain at least one update item.",
+		)
+	})
+})
+
+describe("summarizeIssueBulkUpdateResults", () => {
+	it("computes updated and failed counts from per-item results", () => {
+		const summary = summarizeIssueBulkUpdateResults([
+			{
+				index: 0,
+				requestedId: "dg",
+				issueId: "dg",
+				updated: true,
+			},
+			{
+				index: 1,
+				requestedId: "missing",
+				issueId: "missing",
+				updated: false,
+				error: "Issue not found: missing",
+			},
+		])
+
+		expect(summary.requestCount).toBe(2)
+		expect(summary.updatedCount).toBe(1)
+		expect(summary.failedCount).toBe(1)
+		expect(summary.results[1]?.error).toBe("Issue not found: missing")
 	})
 })
 
