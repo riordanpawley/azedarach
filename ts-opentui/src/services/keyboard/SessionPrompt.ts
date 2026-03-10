@@ -15,8 +15,9 @@ export const buildStartWorkPrompt = (params: {
 Start by running \`az prime\`.
 \`AZEDARACH_ISSUE_ID\` is already set for this session, so \`az prime\` should include issue-specific context.
 If context looks stale, refresh with \`${showCommand}\`.
+In this repo, when a prompt says "spec", it means \`az spec\` requirement/link records, not README.md, AGENTS.md, or other internal docs.
 Before implementing behavior changes, inspect relevant \`az spec\` requirements/links.
-After implementing behavior changes, verify compliance against linked spec and update requirement/link records when scope changes.`
+After implementing behavior changes, verify compliance against linked \`az spec\` requirements and update \`az spec\` requirement/link records when scope changes.`
 
 	if (params.localMode) {
 		prompt += `
