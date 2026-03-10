@@ -64,6 +64,11 @@ import { PRStateService } from "./PRStateService.js"
 import { ProjectService } from "./ProjectService.js"
 import { makeSessionRecoveryRetrySchedule } from "./sessionRecoveryRetrySchedule.js"
 import { ToastService } from "./ToastService.js"
+import {
+	isTransientOperationalError,
+	isTransientOperationalErrorMessage,
+} from "./transientError.js"
+import { makeTransientRetrySchedule } from "./transientRetrySchedule.js"
 
 const BOARD_ISSUE_LIST_PAGE_SIZE = 200
 const BOARD_BACKGROUND_POLL_INTERVAL = "5 seconds"
@@ -77,66 +82,31 @@ const LINEAR_WEBHOOK_TAILSCALE_STATUS_TIMEOUT_MS = 2000
 const LINEAR_WEBHOOK_TAILSCALE_FUNNEL_TIMEOUT_MS = 2000
 const LINEAR_SDK_DEFENSIVE_RECONCILIATION_INTERVAL = "2 minutes"
 const LOCAL_CREATE_VISIBILITY_GRACE_MS = 15000
-const SQLITE_LOCK_RETRY_ATTEMPTS = 3
-const SQLITE_LOCK_RETRY_DELAY = "120 millis"
+const TRANSIENT_RETRY_ATTEMPTS = 4
+const TRANSIENT_RETRY_BASE_DELAY_MS = 120
+const TRANSIENT_RETRY_MAX_DELAY_MS = 1000
 const SESSION_RECOVERY_RETRY_BASE_DELAY_MS_MIN = 100
 const SESSION_RECOVERY_RETRY_MAX_DELAY_MS_MIN = 1000
 
-const isSqliteLockMessage = (value: string): boolean => {
-	const normalized = value.toLowerCase()
-	return (
-		normalized.includes("database is locked") ||
-		normalized.includes("sqlite_busy") ||
-		normalized.includes("sqlite busy")
-	)
-}
-
-const isSqliteLockError = (error: unknown): boolean => {
-	if (typeof error === "string") {
-		return isSqliteLockMessage(error)
-	}
-
-	if (error instanceof Error) {
-		return isSqliteLockMessage(error.message)
-	}
-
-	if (typeof error === "object" && error !== null) {
-		if (
-			"message" in error &&
-			typeof error.message === "string" &&
-			isSqliteLockMessage(error.message)
-		) {
-			return true
-		}
-		if (
-			"stderr" in error &&
-			typeof error.stderr === "string" &&
-			isSqliteLockMessage(error.stderr)
-		) {
-			return true
-		}
-	}
-
-	return isSqliteLockMessage(String(error))
-}
-
-const withSqliteLockRetry = <A, E, R>(
+const withTransientRetry = <A, E, R>(
 	context: string,
 	effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R> =>
 	effect.pipe(
 		Effect.tapError((error) =>
-			isSqliteLockError(error)
+			isTransientOperationalError(error)
 				? Effect.logWarning(
-						`SQLite lock detected during ${context}; retrying (max ${SQLITE_LOCK_RETRY_ATTEMPTS} attempts)`,
+						`Transient error detected during ${context}; retrying (max ${TRANSIENT_RETRY_ATTEMPTS} attempts)`,
 					)
 				: Effect.void,
 		),
 		Effect.retry({
-			schedule: Schedule.recurs(SQLITE_LOCK_RETRY_ATTEMPTS - 1).pipe(
-				Schedule.addDelay(() => SQLITE_LOCK_RETRY_DELAY),
-			),
-			while: (error) => isSqliteLockError(error),
+			schedule: makeTransientRetrySchedule({
+				retryBaseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
+				retryMaxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
+				retryMaxAttempts: TRANSIENT_RETRY_ATTEMPTS,
+				while: isTransientOperationalError,
+			}),
 		}),
 	)
 
@@ -150,18 +120,6 @@ type SessionRecoveryError =
 	| SessionLimitError
 
 export type SessionRecoveryRetryability = "transient" | "terminal"
-
-const isTransientSessionErrorMessage = (message: string): boolean => {
-	const normalized = message.toLowerCase()
-	return (
-		normalized.includes("temporarily unavailable") ||
-		normalized.includes("timed out") ||
-		normalized.includes("timeout") ||
-		normalized.includes("resource busy") ||
-		normalized.includes("connection reset") ||
-		normalized.includes("broken pipe")
-	)
-}
 
 const normalizeRecoveryRetryBaseDelayMs = (value: number): number =>
 	Number.isFinite(value)
@@ -186,7 +144,7 @@ export const classifySessionRecoveryError = (
 		case "SessionLimitError":
 			return "transient"
 		case "SessionError":
-			return isTransientSessionErrorMessage(error.message) ? "transient" : "terminal"
+			return isTransientOperationalErrorMessage(error.message) ? "transient" : "terminal"
 		case "InvalidStateError":
 			return "terminal"
 	}
@@ -1224,7 +1182,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 								thresholdMs: 200,
 								details: projectPath ?? "default",
 							},
-							withSqliteLockRetry(
+							withTransientRetry(
 								"tracker.list",
 								issueTrackerClient
 									.list(undefined, projectPath ?? undefined, {

@@ -34,8 +34,13 @@ describe("BoardService session recovery classification", () => {
 			message: "tmux resource temporarily unavailable",
 			issueId: "AZE-101",
 		})
+		const sqliteLockError = new SessionError({
+			message: "SQLite operation failed: database is locked",
+			issueId: "AZE-101",
+		})
 
 		expect(classifySessionRecoveryError(sessionError)).toBe("transient")
+		expect(classifySessionRecoveryError(sqliteLockError)).toBe("transient")
 	})
 
 	it("marks not-found, invalid-state, and terminal SessionError failures as terminal", () => {
