@@ -96,12 +96,12 @@ export const EDITABLE_SETTINGS: readonly SettingDefinition[] = [
 		key: "specEnabled",
 		group: ["Features"],
 		label: "Spec Enabled",
-		getValue: (c) => c.spec?.enabled ?? false,
+		getValue: (c) => c.spec?.enabled ?? true,
 		nextValue: (c) => ({
 			...c,
 			spec: {
 				...c.spec,
-				enabled: !(c.spec?.enabled ?? false),
+				enabled: !(c.spec?.enabled ?? true),
 			},
 		}),
 	},

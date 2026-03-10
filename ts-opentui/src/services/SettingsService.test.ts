@@ -128,13 +128,13 @@ describe("SettingsService non-boolean selectors", () => {
 })
 
 describe("SettingsService spec feature setting", () => {
-	it("defaults missing spec config to disabled", () => {
-		expect(specEnabledSetting.getValue({})).toBe(false)
+	it("defaults missing spec config to enabled", () => {
+		expect(specEnabledSetting.getValue({})).toBe(true)
 	})
 
-	it("toggles spec feature from disabled to enabled", () => {
+	it("toggles spec feature from enabled to disabled", () => {
 		const toggled = specEnabledSetting.nextValue({})
-		expect(toggled.spec?.enabled).toBe(true)
+		expect(toggled.spec?.enabled).toBe(false)
 	})
 })
 

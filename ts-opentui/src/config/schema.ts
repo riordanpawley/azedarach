@@ -753,7 +753,7 @@ const HooksConfigSchema = Schema.Struct({
  */
 const SpecConfigSchema = Schema.Struct({
 	/**
-	 * Enable az spec commands, guidance, and UI affordances (default: false)
+	 * Enable az spec commands, guidance, and UI affordances (default: true)
 	 */
 	enabled: Schema.optional(Schema.Boolean),
 })

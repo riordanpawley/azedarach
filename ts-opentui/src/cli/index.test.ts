@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test"
+import { BunContext } from "@effect/platform-bun"
 import { Effect } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Issue as TrackedIssue } from "../core/IssueTrackerClient.js"
 import {
 	buildCommandCliLayerForArgv,
 	buildPrimeOutput,
+	cliRunner,
 	deriveWaitingAttentionPlan,
 	findLikelyParentChildTrackingMisses,
 	formatIssueDetailSections,
@@ -41,6 +43,7 @@ describe("buildPrimeOutput", () => {
 		)
 		expect(output).toContain("Spec sync discipline (ts-opentui behavior changes)")
 		expect(output).toContain("For `az spec` commands, keep canonical Effect CLI ordering")
+		expect(output).toContain("az config set spec.enabled false")
 		expect(output).toContain('record "Spec impact: none" with concrete file-based rationale')
 		expect(output).toContain(
 			"Review flow policy: reviews target closed tasks, not in-progress tasks.",
@@ -127,7 +130,7 @@ describe("buildPrimeOutput", () => {
 		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-${crypto.randomUUID()}.json`
 		await Bun.write(
 			configPath,
-			`${JSON.stringify({ $version: 7, spec: { enabled: true } }, null, 2)}\n`,
+			`${JSON.stringify({ $version: 7, spec: { enabled: false } }, null, 2)}\n`,
 		)
 
 		const specEnabled = await Effect.runPromise(
@@ -140,7 +143,33 @@ describe("buildPrimeOutput", () => {
 			),
 		)
 
-		expect(specEnabled).toBe(true)
+		expect(specEnabled).toBe(false)
+	})
+
+	it("writes spec.enabled through az config set", async () => {
+		const configPath = `${process.env.TMPDIR ?? "/tmp"}/az-config-set-${crypto.randomUUID()}.json`
+		await Bun.write(
+			configPath,
+			`${JSON.stringify({ $version: 7, spec: { enabled: true } }, null, 2)}\n`,
+		)
+
+		await Effect.runPromise(
+			cliRunner([
+				"bun",
+				"az",
+				"--config",
+				configPath,
+				"config",
+				"set",
+				"spec.enabled",
+				"false",
+			]).pipe(Effect.provide(BunContext.layer)),
+		)
+
+		const updated = JSON.parse(await Bun.file(configPath).text()) as {
+			spec?: { enabled?: boolean }
+		}
+		expect(updated.spec?.enabled).toBe(false)
 	})
 })
 
@@ -261,6 +290,9 @@ describe("resolveCliExecutionMode", () => {
 		expect(
 			resolveCliExecutionMode(["bun", "az", "--config", "./.azedarach.json", "project", "list"]),
 		).toBe("command")
+		expect(resolveCliExecutionMode(["bun", "az", "config", "set", "spec.enabled", "false"])).toBe(
+			"command",
+		)
 		expect(resolveCliExecutionMode(["bun", "az", "prime"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "spec", "req", "list"])).toBe("command")
 		expect(resolveCliExecutionMode(["bun", "az", "opencode", "plugin", "install"])).toBe("command")

@@ -35,7 +35,11 @@ import {
 // biome-ignore lint/correctness/useImportExtensions: <stupid biome>
 import packageJson from "../../package.json" with { type: "json" }
 import { AppConfig, AppConfigConfig } from "../config/AppConfig.js"
-import { AzedarachConfigSchema } from "../config/schema.js"
+import {
+	type AzedarachConfig,
+	AzedarachConfigJsonSchema,
+	AzedarachConfigSchema,
+} from "../config/schema.js"
 import { AttachmentService } from "../core/AttachmentService.js"
 import { deepMerge, generateHookConfig } from "../core/hooks.js"
 import { ImageAttachmentService } from "../core/ImageAttachmentService.js"
@@ -76,7 +80,7 @@ import { NavigationService } from "../services/NavigationService.js"
 import { NetworkService } from "../services/NetworkService.js"
 import { OfflineService } from "../services/OfflineService.js"
 import { OverlayService } from "../services/OverlayService.js"
-import { ProjectService } from "../services/ProjectService.js"
+import { ProjectService, resolveConfigBasePath } from "../services/ProjectService.js"
 import { ProjectStateService } from "../services/ProjectStateService.js"
 import { SessionService } from "../services/SessionService.js"
 import { SettingsService } from "../services/SettingsService.js"
@@ -291,10 +295,156 @@ const ensureSpecEnabled = (projectDir: string) =>
 
 		return yield* Effect.fail(
 			new Error(
-				"Spec workflows are disabled for this project. Set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
+				"Spec workflows are disabled for this project. Run `az config set spec.enabled true` or set `spec.enabled` to true in `.azedarach.json` to use `az spec` and spec-aware guidance.",
 			),
 		)
 	})
+
+const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
+
+const resolveWritableConfigPath = (explicitProjectDir: string | undefined) =>
+	Effect.gen(function* () {
+		const appConfig = yield* AppConfig
+		const loadedConfigPath = yield* SubscriptionRef.get(appConfig.loadedConfigPath)
+		if (loadedConfigPath !== null && !loadedConfigPath.endsWith("package.json")) {
+			return loadedConfigPath
+		}
+
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const projectService = yield* ProjectService
+		const projectPath =
+			explicitProjectDir ?? (yield* projectService.getCurrentPath()) ?? process.cwd()
+		const cwdPath = explicitProjectDir ?? process.cwd()
+		const cwdConfigPath = pathService.join(cwdPath, ".azedarach.json")
+		const cwdHasConfig = yield* fs
+			.exists(cwdConfigPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		const configBasePath = resolveConfigBasePath({
+			cwdPath,
+			projectPath,
+			pathOps: pathService,
+			cwdHasConfig,
+		})
+		return pathService.join(configBasePath, ".azedarach.json")
+	})
+
+const loadWritableConfig = (configPath: string) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const exists = yield* fs
+			.exists(configPath)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
+						Effect.zipRight(Effect.succeed(false)),
+					),
+				),
+			)
+		if (!exists) {
+			return yield* Schema.decodeUnknown(AzedarachConfigSchema)({}).pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to create default config snapshot: ${String(error)}`),
+				),
+			)
+		}
+
+		const content = yield* fs
+			.readFileString(configPath)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to read config file ${configPath}: ${String(error)}`),
+				),
+			)
+
+		return yield* Schema.decode(Schema.parseJson(AzedarachConfigSchema))(content).pipe(
+			Effect.mapError(
+				(error) => new Error(`Config parse/validation failed for ${configPath}: ${String(error)}`),
+			),
+		)
+	})
+
+const saveWritableConfig = (configPath: string, config: AzedarachConfig) =>
+	Effect.gen(function* () {
+		const fs = yield* FileSystem.FileSystem
+		const pathService = yield* Path.Path
+		const json = yield* Schema.encode(Schema.parseJson(AzedarachConfigSchema))(config).pipe(
+			Effect.mapError((error) => new Error(`Failed to encode config: ${String(error)}`)),
+		)
+		yield* fs
+			.writeFileString(configPath, json)
+			.pipe(
+				Effect.mapError(
+					(error) => new Error(`Failed to write config file ${configPath}: ${String(error)}`),
+				),
+			)
+		const schemaPath = pathService.join(pathService.dirname(configPath), ".azedarach.schema.json")
+		yield* fs
+			.writeFileString(schemaPath, configJsonSchemaString)
+			.pipe(
+				Effect.catchAll((error) =>
+					Effect.logWarning(
+						`Failed to write config JSON schema at ${schemaPath}: ${String(error)}`,
+					),
+				),
+			)
+	})
+
+const parseBooleanConfigValue = (value: string): boolean | undefined => {
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "true":
+		case "1":
+		case "yes":
+		case "on":
+			return true
+		case "false":
+		case "0":
+		case "no":
+		case "off":
+			return false
+		default:
+			return undefined
+	}
+}
+
+const setConfigValue = (
+	config: AzedarachConfig,
+	key: string,
+	value: string,
+): Effect.Effect<
+	{ readonly nextConfig: AzedarachConfig; readonly renderedValue: string },
+	Error
+> => {
+	if (key === "spec.enabled") {
+		const parsed = parseBooleanConfigValue(value)
+		if (parsed === undefined) {
+			return Effect.fail(
+				new Error(
+					`Invalid boolean value '${value}' for spec.enabled. Use true/false, on/off, yes/no, or 1/0.`,
+				),
+			)
+		}
+		return Effect.succeed({
+			nextConfig: {
+				...config,
+				spec: {
+					...config.spec,
+					enabled: parsed,
+				},
+			},
+			renderedValue: String(parsed),
+		})
+	}
+
+	return Effect.fail(new Error(`Unsupported config key '${key}'. Supported keys: spec.enabled`))
+}
 
 // ============================================================================
 // Command Handlers
@@ -2665,6 +2815,31 @@ const specPublishConfigHandler = (args: {
 		})
 	})
 
+const configSetHandler = (args: {
+	readonly key: string
+	readonly value: string
+	readonly projectDir: Option.Option<string>
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const configPath = yield* resolveWritableConfigPath(explicitProjectDir)
+		const currentConfig = yield* loadWritableConfig(configPath)
+		const { nextConfig, renderedValue } = yield* setConfigValue(currentConfig, args.key, args.value)
+
+		yield* saveWritableConfig(configPath, nextConfig)
+
+		yield* Console.log(`Updated ${configPath}: ${args.key}=${renderedValue}`)
+		if (args.key === "spec.enabled") {
+			yield* Console.log(
+				renderedValue === "true"
+					? "Spec workflows are enabled."
+					: "Spec workflows are disabled. `az prime` will stop mentioning spec and `az spec` commands will fail until re-enabled.",
+			)
+		}
+	})
+
+const configUsageHandler = (usage: string) => Console.log(usage)
+
 /**
  * Run quality gates for a task's worktree
  */
@@ -4901,6 +5076,35 @@ const projectCommand = Command.make("project", {}, () =>
 	Command.withDescription("Manage multiple projects"),
 )
 
+const configKeyArg = Args.text({ name: "key" }).pipe(
+	Args.withDescription("Config key (currently: spec.enabled)"),
+)
+
+const configValueArg = Args.text({ name: "value" }).pipe(Args.withDescription("Config value"))
+
+const configSetCommand = Command.make(
+	"set",
+	{
+		key: configKeyArg,
+		value: configValueArg,
+		projectDir: projectDirArg,
+	},
+	configSetHandler,
+).pipe(
+	Command.withDescription(
+		"Set a supported project config key (for example: az config set spec.enabled false)",
+	),
+)
+
+const configCommand = Command.make("config", {}, () =>
+	configUsageHandler("Usage: az config set spec.enabled <true|false>"),
+).pipe(
+	Command.withDescription(
+		"Inspect or update project config (for example, disable spec with 'az config set spec.enabled false')",
+	),
+	Command.withSubcommands([configSetCommand]),
+)
+
 // ============================================================================
 // Top-level Shortcut Commands
 // ============================================================================
@@ -4962,6 +5166,7 @@ const cli = az.pipe(
 		// Top-level shortcuts (most commonly used)
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		// Session management
 		startCommand,
@@ -4996,6 +5201,7 @@ const commandCli = az.pipe(
 	Command.withSubcommands([
 		addCommand,
 		listCommand,
+		configCommand,
 		primeCommand,
 		startCommand,
 		attachCommand,

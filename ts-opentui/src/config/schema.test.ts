@@ -318,7 +318,7 @@ describe("AzedarachConfigSchema", () => {
 	})
 
 	describe("v6 → v7 migration: optional spec feature gating", () => {
-		it("migrates v6 config forward and defaults spec to disabled", () => {
+		it("migrates v6 config forward and defaults spec to enabled", () => {
 			const result = decodeConfig({
 				$schema: 6,
 				git: {
@@ -328,7 +328,7 @@ describe("AzedarachConfigSchema", () => {
 			const resolved = mergeWithDefaults(result)
 
 			expect(result.$schema).toBe(CURRENT_CONFIG_VERSION)
-			expect(resolved.spec.enabled).toBe(false)
+			expect(resolved.spec.enabled).toBe(true)
 		})
 
 		it("accepts explicit spec.enabled false and preserves it when encoding", () => {

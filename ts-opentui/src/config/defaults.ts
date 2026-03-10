@@ -137,7 +137,7 @@ export const DEFAULT_CONFIG = {
 		workflowMode: "origin" as WorkflowMode,
 	},
 	spec: {
-		enabled: false,
+		enabled: true,
 	},
 	session: {
 		command: "claude",

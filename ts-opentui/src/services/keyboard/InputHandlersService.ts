@@ -1018,7 +1018,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 					if (!specConfig.enabled) {
 						yield* toast.show(
 							"error",
-							"Spec workspace is disabled. Enable `spec.enabled` in `.azedarach.json` to use it.",
+							"Spec workspace is disabled. Run `az config set spec.enabled true` or enable `spec.enabled` in `.azedarach.json` to use it.",
 						)
 						return
 					}

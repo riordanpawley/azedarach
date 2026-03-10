@@ -314,7 +314,8 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
     - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
   - After implementing behavior changes, run an \`az spec\` compliance pass: verify behavior vs linked \`az spec\` requirements and update requirement/link records if scope changed.
   - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
-  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).`
+  - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
+  - If this project should not use spec workflows, disable them with \`az config set spec.enabled false\` (or set \`spec.enabled\` to false in \`.azedarach.json\`).`
 		: undefined
 
 	return `Azedarach Session Primer
