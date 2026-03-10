@@ -19,6 +19,7 @@ import type {
 	IssueStatus,
 	IssueType,
 } from "./IssueTrackerClient.js"
+import { issueIdsEqualForLookup } from "./paths.js"
 import type {
 	SpecCoverageGap,
 	SpecCoverageReport,
@@ -1919,6 +1920,17 @@ export class LocalIssueStore extends Effect.Service<LocalIssueStore>()("LocalIss
 								if (filters?.priority !== undefined && issue.priority !== filters.priority)
 									return false
 								if (filters?.type && issue.issue_type !== filters.type) return false
+								if (filters?.parent) {
+									const parentDependency = issue.dependencies?.find(
+										(dependency) => dependency.dependency_type === "parent-child",
+									)
+									if (
+										parentDependency === undefined ||
+										!issueIdsEqualForLookup(parentDependency.id, filters.parent)
+									) {
+										return false
+									}
+								}
 								return true
 							})
 

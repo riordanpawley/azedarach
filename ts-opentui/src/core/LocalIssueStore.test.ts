@@ -521,6 +521,41 @@ describe("importExternalSnapshot", () => {
 	})
 })
 
+describe("list", () => {
+	it("filters issues by parent dependency id", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-list-parent-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const parent = yield* store.create({ title: "Parent issue" }, undefined, projectPath)
+					const matchingChild = yield* store.create(
+						{ title: "Matching child" },
+						undefined,
+						projectPath,
+					)
+					const otherParent = yield* store.create({ title: "Other parent" }, undefined, projectPath)
+					const otherChild = yield* store.create({ title: "Other child" }, undefined, projectPath)
+
+					yield* store.update(matchingChild.id, { parent: parent.id }, undefined, projectPath)
+					yield* store.update(otherChild.id, { parent: otherParent.id }, undefined, projectPath)
+
+					return yield* store.list({ parent: parent.id.toLowerCase() }, projectPath, {
+						limit: 10,
+						pageSize: 10,
+					})
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.map((issue) => issue.id)).toEqual(["b"])
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+})
+
 describe("legacy issue schema migration", () => {
 	it("adds missing issues columns before update writes notes", async () => {
 		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-legacy-issues-"))

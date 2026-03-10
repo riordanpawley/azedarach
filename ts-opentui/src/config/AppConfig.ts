@@ -38,6 +38,29 @@ export class ConfigParseError extends Data.TaggedError("ConfigParseError")<{
 	readonly details?: string
 }> {}
 
+const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
+	typeof value === "object" && value !== null && !Array.isArray(value)
+
+const canonicalizeJson = (value: unknown): unknown => {
+	if (Array.isArray(value)) {
+		return value.map((item) => canonicalizeJson(item))
+	}
+
+	if (isJsonObject(value)) {
+		const sortedEntries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+		const normalized: Record<string, unknown> = {}
+		for (const [key, entryValue] of sortedEntries) {
+			normalized[key] = canonicalizeJson(entryValue)
+		}
+		return normalized
+	}
+
+	return value
+}
+
+const shouldPersistMigratedConfig = (rawConfig: unknown, migratedConfig: unknown): boolean =>
+	JSON.stringify(canonicalizeJson(rawConfig)) !== JSON.stringify(canonicalizeJson(migratedConfig))
+
 // ============================================================================
 // Service Definition
 // ============================================================================
@@ -163,32 +186,6 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		// which uses Schema.transform to migrate legacy formats (e.g., pr.baseBranch → git.baseBranch)
 		//
 
-		const isJsonObject = (value: unknown): value is Readonly<Record<string, unknown>> =>
-			typeof value === "object" && value !== null && !Array.isArray(value)
-
-		const canonicalizeJson = (value: unknown): unknown => {
-			if (Array.isArray(value)) {
-				return value.map((item) => canonicalizeJson(item))
-			}
-
-			if (isJsonObject(value)) {
-				const sortedEntries = Object.entries(value).sort(([left], [right]) =>
-					left.localeCompare(right),
-				)
-				const normalized: Record<string, unknown> = {}
-				for (const [key, entryValue] of sortedEntries) {
-					normalized[key] = canonicalizeJson(entryValue)
-				}
-				return normalized
-			}
-
-			return value
-		}
-
-		const shouldPersistMigratedConfig = (rawConfig: unknown, migratedConfig: unknown): boolean =>
-			JSON.stringify(canonicalizeJson(rawConfig)) !==
-			JSON.stringify(canonicalizeJson(migratedConfig))
-
 		const formatConfigJson = (config: unknown): string => `${JSON.stringify(config, null, 2)}\n`
 		const configJsonSchemaString = `${JSON.stringify(AzedarachConfigJsonSchema, null, 2)}\n`
 
@@ -216,7 +213,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 		 */
 		const loadJsonConfig = (
 			targetPath: string,
-		): Effect.Effect<AzedarachConfig | null, ConfigParseError> =>
+		): Effect.Effect<ResolvedConfig | null, ConfigParseError> =>
 			Effect.gen(function* () {
 				const targetConfigPath = pathService.join(targetPath, ".azedarach.json")
 
@@ -272,7 +269,21 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 					),
 				)
 
-				const encoded = yield* Schema.encode(AzedarachConfigSchema)(validated).pipe(
+				const resolved = mergeWithDefaults(validated)
+				const normalizedForEncode = yield* Schema.decodeUnknown(AzedarachConfigSchema)(
+					resolved,
+				).pipe(
+					Effect.mapError(
+						(e) =>
+							new ConfigParseError({
+								message: "Config normalization failed",
+								path: targetConfigPath,
+								details: String(e),
+							}),
+					),
+				)
+
+				const encoded = yield* Schema.encode(AzedarachConfigSchema)(normalizedForEncode).pipe(
 					Effect.mapError(
 						(e) =>
 							new ConfigParseError({
@@ -308,7 +319,7 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 						)
 				}
 
-				return validated
+				return resolved
 			})
 
 		/**
@@ -502,12 +513,11 @@ export class AppConfig extends Effect.Service<AppConfig>()("AppConfig", {
 
 				if (jsonConfig) {
 					yield* SubscriptionRef.set(loadWarningRef, null)
-					const resolved = mergeWithDefaults(jsonConfig)
 					yield* Effect.log(
-						`[DEBUG] After mergeWithDefaults: cliTool=${resolved.cliTool} (input was: ${jsonConfig.cliTool})`,
+						`[DEBUG] Loaded resolved .azedarach.json config: cliTool=${jsonConfig.cliTool}`,
 					)
 					return {
-						config: resolved,
+						config: jsonConfig,
 						loadedConfigPath: pathService.join(configBasePath, ".azedarach.json"),
 					}
 				}

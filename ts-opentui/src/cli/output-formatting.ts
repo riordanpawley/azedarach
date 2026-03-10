@@ -243,6 +243,12 @@ Could not load issue details automatically; run \`az issue get ${issueId}\`.`
   - Update design/notes as implementation decisions change.
   - Use status/priority/labels flags when state changes materially.
   - Before implementing behavior changes, inspect relevant \`az spec\` requirements/links and align the plan to avoid spec drift.
+  - Spec boundary for \`az spec\` usage:
+    - Use \`az spec\` only for product behavior changes (user flows, API contracts, state rules, acceptance criteria).
+    - Do NOT use \`az spec\` for infra-only work (hosting/VPS, DNS, TLS, CI/CD, cron host, vendor migration) when behavior is unchanged.
+    - Track infra-only tasks in \`az issue\` only.
+    - If unsure, default to no spec link and note: "Spec impact: none (infra-only)."
+    - Example: Vercel -> Vultr with unchanged behavior => issue only, no spec link.
   - After implementing behavior changes, run a spec compliance pass: verify behavior vs linked requirements and update requirement/link records if scope changed.
   - Spec sync discipline (ts-opentui behavior changes): update az spec requirement/link records in the same task, or record "Spec impact: none" with concrete file-based rationale.
   - For \`az spec\` commands, keep canonical Effect CLI ordering: options/flags before positional refs (for example \`az spec req get -j fr4203\`).
