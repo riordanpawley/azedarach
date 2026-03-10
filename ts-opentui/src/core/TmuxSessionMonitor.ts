@@ -18,7 +18,7 @@
  */
 
 import { Command } from "@effect/platform"
-import { Data, Effect, type Fiber, Ref, Schedule, type Scope } from "effect"
+import { Data, Effect, type Fiber, Ref, Schedule, type Scope, SubscriptionRef } from "effect"
 import { DiagnosticsService } from "../services/DiagnosticsService.js"
 import { issueIdsEqualForLookup, resolveIssueIdFromSessionName } from "./paths.js"
 
@@ -83,6 +83,11 @@ const POLL_INTERVAL_MS = 1000
  * from Claude Code sessions running in worktrees.
  */
 export interface TmuxSessionMonitorService {
+	/**
+	 * Reactive snapshot of all tmux sessions discovered by the poller.
+	 */
+	readonly sessions: SubscriptionRef.SubscriptionRef<readonly SessionStateUpdate[]>
+
 	/**
 	 * Start watching for session state changes
 	 *
@@ -155,6 +160,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 
 		// Track previous state to detect changes (sessionName → session state snapshot)
 		const previousStateRef = yield* Ref.make<Map<string, PreviousSessionState>>(new Map())
+		const sessionsRef = yield* SubscriptionRef.make<readonly SessionStateUpdate[]>([])
 
 		const listIssueSessions = () =>
 			diagnostics.measure(
@@ -346,6 +352,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					})
 				}
 				yield* Ref.set(previousStateRef, initialMap)
+				yield* SubscriptionRef.set(sessionsRef, initialSessions)
 
 				// Log initial state
 				if (initialSessions.length > 0) {
@@ -356,11 +363,11 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 
 				// Start polling fiber
 				const pollerFiber = yield* Effect.gen(function* () {
-					const sessions = yield* listSessions()
+					const polledSessions = yield* listSessions()
 					const previousState = yield* Ref.get(previousStateRef)
 					const newState = new Map<string, PreviousSessionState>()
 
-					for (const session of sessions) {
+					for (const session of polledSessions) {
 						newState.set(session.sessionName, {
 							issueId: session.issueId,
 							status: session.status,
@@ -396,6 +403,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 					}
 
 					yield* Ref.set(previousStateRef, newState)
+					yield* SubscriptionRef.set(sessionsRef, polledSessions)
 				}).pipe(
 					// Catch errors to prevent stopping
 					Effect.catchAll((e) =>
@@ -418,6 +426,7 @@ export class TmuxSessionMonitor extends Effect.Service<TmuxSessionMonitor>()("Tm
 			})
 
 		return {
+			sessions: sessionsRef,
 			start,
 			getSessionStatus,
 			getSessionCreatedAt,

@@ -60,7 +60,7 @@ import {
 } from "../core/paths.js"
 import { SessionManager } from "../core/SessionManager.js"
 import { SpecService } from "../core/SpecService.js"
-import type { SpecRequirementLookupSelector } from "../core/specTypes.js"
+import type { SpecLinkFulfillmentStatus, SpecRequirementLookupSelector } from "../core/specTypes.js"
 import { TemplateService } from "../core/TemplateService.js"
 import { TerminalService } from "../core/TerminalService.js"
 import { TmuxService } from "../core/TmuxService.js"
@@ -1013,6 +1013,48 @@ const parseRelationshipSpecLinkType = (
 		default:
 			return undefined
 	}
+}
+
+const parseSpecLinkFulfillmentStatus = (
+	value: string | undefined,
+): SpecLinkFulfillmentStatus | undefined => {
+	if (value === undefined) {
+		return undefined
+	}
+	const normalized = value.trim().toLowerCase()
+	switch (normalized) {
+		case "planned":
+		case "partial":
+		case "complete":
+		case "verified":
+			return normalized
+		default:
+			return undefined
+	}
+}
+
+const parseSpecLinkFulfillmentPercent = (
+	value: Option.Option<number>,
+): Effect.Effect<number | null | undefined, Error> =>
+	Effect.gen(function* () {
+		if (Option.isNone(value)) {
+			return undefined
+		}
+		const rounded = Math.round(value.value)
+		if (!Number.isFinite(rounded) || rounded < 0 || rounded > 100) {
+			return yield* Effect.fail(
+				new Error("Invalid --fulfillment-percent. Expected an integer 0-100."),
+			)
+		}
+		return rounded
+	})
+
+const parseSpecLinkEvidenceNote = (value: Option.Option<string>): string | null | undefined => {
+	if (Option.isNone(value)) {
+		return undefined
+	}
+	const trimmed = value.value.trim()
+	return trimmed.length > 0 ? trimmed : null
 }
 
 const DEFAULT_ISSUE_GET_SYNC_MAX_WAIT_MS = 250
@@ -1977,11 +2019,47 @@ const formatSpecRequirementSummaryLine = (requirement: {
 }): string =>
 	`${formatSpecRequirementReference(requirement)}: ${compactSingleLineText(requirement.title)} [id=${requirement.id} kind=${requirement.kind} status=${requirement.status} priority=${requirement.priority} updated_at=${requirement.updated_at}]`
 
+type SpecRequirementViewMode = "compact" | "verbose"
+
+const parseSpecRequirementKindOption = (
+	value: Option.Option<string>,
+): Effect.Effect<"functional" | "acceptance" | "other" | undefined, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed(undefined),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "functional") return Effect.succeed("functional")
+			if (normalized === "acceptance") return Effect.succeed("acceptance")
+			if (normalized === "other") return Effect.succeed("other")
+			return Effect.fail(
+				new Error(`Invalid kind '${raw}'. Expected: functional, acceptance, other.`),
+			)
+		},
+	})
+
+const parseSpecRequirementViewMode = (
+	value: Option.Option<string>,
+): Effect.Effect<SpecRequirementViewMode, Error> =>
+	Option.match(value, {
+		onNone: () => Effect.succeed("compact"),
+		onSome: (raw) => {
+			const normalized = raw.trim().toLowerCase()
+			if (normalized === "compact") return Effect.succeed("compact")
+			if (normalized === "verbose") return Effect.succeed("verbose")
+			return Effect.fail(new Error(`Invalid view '${raw}'. Expected: compact, verbose.`))
+		},
+	})
+
 /**
  * List spec requirements
  */
 const specReqListHandler = (args: {
 	readonly projectDir: Option.Option<string>
+	readonly query: Option.Option<string>
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
 	readonly verbose: boolean
 	readonly json: boolean
 }) =>
@@ -1990,9 +2068,18 @@ const specReqListHandler = (args: {
 		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
 		yield* ensureSpecEnabled(resolverCwd)
 		yield* validateIssueTrackerStore(resolverCwd)
+		const parsedKind = yield* parseSpecRequirementKindOption(args.kind)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+		const query = Option.getOrUndefined(args.query)?.trim()
+		const status = Option.getOrUndefined(args.status)?.trim()
 
 		const specService = yield* SpecService
-		const requirements = yield* specService.listRequirements(explicitProjectDir)
+		const requirements = yield* specService.listRequirements(explicitProjectDir, {
+			query,
+			kind: parsedKind,
+			status,
+			priority: Option.getOrUndefined(args.priority),
+		})
 
 		if (args.json) {
 			yield* Console.log(JSON.stringify(requirements, null, 2))
@@ -2006,10 +2093,258 @@ const specReqListHandler = (args: {
 
 		for (const requirement of requirements) {
 			yield* Console.log(formatSpecRequirementSummaryLine(requirement))
+			if (viewMode === "verbose") {
+				yield* Console.log(`Body:\n${requirement.body}`)
+				yield* Console.log("")
+			}
 		}
 
 		if (args.verbose) {
 			yield* Console.error(`Listed ${requirements.length} requirement(s).`)
+		}
+	})
+
+const specReqSearchHandler = (args: {
+	readonly query: string
+	readonly kind: Option.Option<string>
+	readonly status: Option.Option<string>
+	readonly priority: Option.Option<number>
+	readonly view: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly verbose: boolean
+	readonly json: boolean
+}) =>
+	specReqListHandler({
+		projectDir: args.projectDir,
+		query: Option.some(args.query),
+		kind: args.kind,
+		status: args.status,
+		priority: args.priority,
+		view: args.view,
+		verbose: args.verbose,
+		json: args.json,
+	})
+
+const specReadHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly view: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const viewMode = yield* parseSpecRequirementViewMode(args.view)
+
+		const specService = yield* SpecService
+		const [requirements, links, coverage, publishConfig, lastOutcome] = yield* Effect.all([
+			specService.listRequirements(explicitProjectDir),
+			specService.listLinks(undefined, explicitProjectDir),
+			specService.getCoverageReport(explicitProjectDir),
+			specService.getPublishConfig(explicitProjectDir),
+			specService.getLastPublishOutcome(explicitProjectDir),
+		])
+
+		const payload = {
+			summary: {
+				requirement_count: requirements.length,
+				link_count: links.length,
+				unlinked_requirement_count: coverage.unlinked_requirement_ids.length,
+				fully_implemented_requirement_count: coverage.fully_implemented_requirement_ids.length,
+				partially_implemented_requirement_count:
+					coverage.partially_implemented_requirement_ids.length,
+				integrity_gap_count: coverage.integrity_gaps.length,
+			},
+			requirements,
+			links,
+			coverage,
+			publish_config: publishConfig,
+			last_publish_outcome: lastOutcome,
+		}
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(payload, null, 2))
+			return
+		}
+
+		yield* Console.log(
+			`Spec summary: requirements=${requirements.length} links=${links.length} fully_implemented=${coverage.fully_implemented_requirement_ids.length} partial=${coverage.partially_implemented_requirement_ids.length} unlinked=${coverage.unlinked_requirement_ids.length} gaps=${coverage.integrity_gaps.length}`,
+		)
+		yield* Console.log("")
+
+		for (const kind of ["functional", "acceptance", "other"] as const) {
+			const subset = requirements.filter((requirement) => requirement.kind === kind)
+			if (subset.length === 0) continue
+			yield* Console.log(`${kind.toUpperCase()} (${subset.length})`)
+			for (const requirement of subset) {
+				yield* Console.log(`- ${formatSpecRequirementSummaryLine(requirement)}`)
+				if (viewMode === "verbose") {
+					yield* Console.log(`  ${compactSingleLineText(requirement.body)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		if (links.length > 0) {
+			yield* Console.log(`LINKS (${links.length})`)
+			for (const link of links) {
+				const requirementRef =
+					link.requirement_external_code === null
+						? link.requirement_local_id
+						: `${link.requirement_local_id} (${link.requirement_external_code})`
+				yield* Console.log(
+					`- ${link.issue_id} -> ${requirementRef} [${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}]`,
+				)
+				if (viewMode === "verbose" && link.evidence_note !== null) {
+					yield* Console.log(`  note: ${compactSingleLineText(link.evidence_note)}`)
+				}
+			}
+			yield* Console.log("")
+		}
+
+		yield* Console.log(
+			`Publish config: enabled=${publishConfig.enabled} debounce_ms=${publishConfig.debounce_ms} target_project=${publishConfig.target_project ?? "<unset>"}`,
+		)
+		if (lastOutcome !== undefined) {
+			yield* Console.log(
+				`Last publish: status=${lastOutcome.status} finished_at=${DateTime.formatIso(lastOutcome.finished_at)}`,
+			)
+		}
+	})
+
+const specLintHandler = (args: {
+	readonly projectDir: Option.Option<string>
+	readonly strict: boolean
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const specService = yield* SpecService
+		const lintResult = yield* specService.lint(explicitProjectDir)
+
+		if (args.json) {
+			yield* Console.log(JSON.stringify(lintResult, null, 2))
+		} else {
+			yield* Console.log(
+				`Lint ${lintResult.ok ? "ok" : "issues"}: requirements=${lintResult.requirement_count} linked=${lintResult.linked_requirement_count} unlinked=${lintResult.unlinked_requirement_count} gaps=${lintResult.integrity_gap_count}`,
+			)
+			for (const gap of lintResult.report.integrity_gaps) {
+				yield* Console.log(`- [${gap.kind}] ${gap.message}`)
+			}
+		}
+
+		if (args.strict && !lintResult.ok) {
+			return yield* Effect.fail(new Error("Spec lint failed in strict mode."))
+		}
+	})
+
+const parseSpecSyncTarget = (target: Option.Option<string>) =>
+	Effect.gen(function* () {
+		const normalized = Option.match(target, {
+			onNone: () => "md",
+			onSome: (value) => value.trim().toLowerCase(),
+		})
+		if (normalized === "md" || normalized === "markdown") return "md" as const
+		if (normalized === "linear") return "linear" as const
+		if (normalized === "all") return "all" as const
+		return yield* Effect.fail(
+			new Error(`Invalid sync target '${normalized}'. Expected one of: md, linear, all.`),
+		)
+	})
+
+const specSyncHandler = (args: {
+	readonly target: Option.Option<string>
+	readonly outDir: Option.Option<string>
+	readonly check: boolean
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* validateIssueTrackerStore(resolverCwd)
+		const target = yield* parseSpecSyncTarget(args.target)
+
+		const specService = yield* SpecService
+		if (args.check && target !== "md") {
+			return yield* Effect.fail(
+				new Error("--check is supported only for --target md (or default target)."),
+			)
+		}
+
+		if (target === "linear") {
+			const outcome = yield* specService.publish(explicitProjectDir)
+			if (args.json) {
+				yield* Console.log(JSON.stringify(outcome, null, 2))
+				return
+			}
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
+			return
+		}
+
+		const syncResult = yield* specService.syncMarkdown(
+			{
+				outDir: Option.getOrUndefined(args.outDir),
+				check: args.check,
+			},
+			explicitProjectDir,
+		)
+		if (target === "md") {
+			if (args.json) {
+				yield* Console.log(JSON.stringify(syncResult, null, 2))
+			} else {
+				yield* Console.log(
+					`Spec sync md ${syncResult.check ? "check" : "write"}: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+				)
+				for (const document of syncResult.documents) {
+					yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+				}
+			}
+
+			if (syncResult.check && !syncResult.ok) {
+				return yield* Effect.fail(new Error("Spec markdown snapshots are out of sync."))
+			}
+			return
+		}
+
+		const outcome = yield* specService.publish(explicitProjectDir)
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						target: "all",
+						markdown: syncResult,
+						linear: outcome,
+					},
+					null,
+					2,
+				),
+			)
+		} else {
+			yield* Console.log(
+				`Spec sync md write: changed=${syncResult.changed_documents}/${syncResult.total_documents} out_dir=${syncResult.out_dir}`,
+			)
+			for (const document of syncResult.documents) {
+				yield* Console.log(`- ${document.key}: ${document.status} ${document.path}`)
+			}
+			yield* Console.log(
+				`Spec sync linear ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
+			)
+			for (const documentOutcome of outcome.outcomes) {
+				yield* Console.log(
+					`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
+				)
+			}
 		}
 	})
 
@@ -2081,7 +2416,7 @@ const specReqGetHandler = (args: {
 			yield* Console.log("Linked Issues:")
 			for (const issue of linkedIssues) {
 				yield* Console.log(
-					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type}) ${issue.title ?? ""}`.trimEnd(),
+					`${issue.id} [${issue.status ?? "unknown"} ${issue.issue_type ?? "task"}] (${issue.link_type} fulfillment=${issue.fulfillment_status}${issue.fulfillment_percent === null ? "" : `:${issue.fulfillment_percent}%`}) ${issue.title ?? ""}`.trimEnd(),
 				)
 			}
 		}
@@ -2434,7 +2769,7 @@ const specLinkListHandler = (args: {
 					? link.requirement_local_id
 					: `${link.requirement_local_id} (${link.requirement_external_code})`
 			yield* Console.log(
-				`${link.issue_id} -> ${requirementRef} [type=${link.link_type}] impl=${link.implementations.join(",")} id=${link.requirement_id} updated_at=${link.updated_at}`,
+				`${link.issue_id} -> ${requirementRef} [type=${link.link_type} fulfillment=${link.fulfillment_status}${link.fulfillment_percent === null ? "" : `:${link.fulfillment_percent}%`}] impl=${link.implementations.join(",")} id=${link.requirement_id} updated_at=${link.updated_at}${link.evidence_note === null ? "" : ` note=${link.evidence_note}`}`,
 			)
 		}
 	})
@@ -2452,6 +2787,9 @@ const specLinkAddHandler = (args: {
 	readonly requirementExternalCode: Option.Option<string>
 	readonly linkType: Option.Option<string>
 	readonly implementations: readonly string[]
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
 	readonly projectDir: Option.Option<string>
 	readonly json: boolean
 }) =>
@@ -2495,6 +2833,22 @@ const specLinkAddHandler = (args: {
 			},
 		})
 		const implementations = yield* parseOptionalImplementationListForCli(args.implementations)
+		const fulfillmentStatus = yield* Option.match(args.fulfillmentStatus, {
+			onNone: () => Effect.succeed<SpecLinkFulfillmentStatus>("planned"),
+			onSome: (value) => {
+				const parsed = parseSpecLinkFulfillmentStatus(value)
+				if (parsed === undefined) {
+					return Effect.fail(
+						new Error(
+							`Invalid fulfillment status '${value}'. Expected one of: planned, partial, complete, verified.`,
+						),
+					)
+				}
+				return Effect.succeed(parsed)
+			},
+		})
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
 		const specService = yield* SpecService
 		yield* specService.addIssueLink(
 			issueId,
@@ -2503,6 +2857,11 @@ const specLinkAddHandler = (args: {
 			explicitProjectDir,
 			lookup.selector,
 			implementations,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
 		)
 		const matchingLinks = yield* specService.listLinks(
 			{
@@ -2522,6 +2881,9 @@ const specLinkAddHandler = (args: {
 						issueId,
 						requirement: lookup,
 						type: linkType,
+						fulfillment_status: fulfillmentStatus,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
 						implementations: effectiveImplementations,
 						updated: true,
 					},
@@ -2531,7 +2893,9 @@ const specLinkAddHandler = (args: {
 			)
 			return
 		}
-		yield* Console.log(`Added spec link: ${issueId} -> ${lookup.reference} (${linkType})`)
+		yield* Console.log(
+			`Added spec link: ${issueId} -> ${lookup.reference} (${linkType}, fulfillment=${fulfillmentStatus}${fulfillmentPercent === undefined || fulfillmentPercent === null ? "" : `:${fulfillmentPercent}%`})`,
+		)
 		if (effectiveImplementations.length > 0) {
 			yield* Console.log(`Implementations: ${effectiveImplementations.join(",")}`)
 		}
@@ -2632,9 +2996,125 @@ const specParityHandler = (args: {
 		yield* Console.log(`implementation=${report.implementation}`)
 		yield* Console.log(`total=${report.total_requirements}`)
 		yield* Console.log(`implemented=${report.implemented_requirement_ids.length}`)
+		yield* Console.log(`partial=${report.partially_implemented_requirement_ids.length}`)
 		yield* Console.log(`tested=${report.tested_requirement_ids.length}`)
 		yield* Console.log(`uncovered=${report.uncovered_requirement_ids.length}`)
 		yield* Console.log(`related_only=${report.related_only_requirement_ids.length}`)
+	})
+
+/**
+ * Update spec link fulfillment metadata
+ */
+const specLinkUpdateHandler = (args: {
+	readonly issueId: Option.Option<string>
+	readonly issueIdOption: Option.Option<string>
+	readonly requirementRef: Option.Option<string>
+	readonly requirementRefOption: Option.Option<string>
+	readonly requirementId: Option.Option<string>
+	readonly requirementLocalId: Option.Option<string>
+	readonly requirementExternalCode: Option.Option<string>
+	readonly linkType: Option.Option<string>
+	readonly fulfillmentStatus: Option.Option<string>
+	readonly fulfillmentPercent: Option.Option<number>
+	readonly evidenceNote: Option.Option<string>
+	readonly projectDir: Option.Option<string>
+	readonly json: boolean
+}) =>
+	Effect.gen(function* () {
+		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
+		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
+		yield* ensureSpecEnabled(resolverCwd)
+		yield* validateIssueTrackerStore(resolverCwd)
+
+		const mergedIssueId = yield* resolveRequiredAliasedTextInput({
+			positional: args.issueId,
+			optionValue: args.issueIdOption,
+			positionalName: "issue-id",
+			optionName: "--issue",
+		})
+		const mergedRequirementRef = yield* resolveOptionalAliasedTextInput({
+			positional: args.requirementRef,
+			optionValue: args.requirementRefOption,
+			positionalName: "requirement-ref",
+			optionName: "--req",
+		})
+		const issueId = yield* resolveCliIssueId(mergedIssueId, resolverCwd)
+		const lookup = yield* resolveSpecRequirementLookupInput({
+			reference: mergedRequirementRef,
+			id: args.requirementId,
+			localId: args.requirementLocalId,
+			externalCode: args.requirementExternalCode,
+		})
+		const linkType = Option.match(args.linkType, {
+			onNone: () => undefined,
+			onSome: (value) => parseRelationshipSpecLinkType(value),
+		})
+		if (Option.isSome(args.linkType) && linkType === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid link type '${args.linkType.value}'. Expected one of: implements, tests, blocks, relates.`,
+				),
+			)
+		}
+
+		const fulfillmentStatus = Option.match(args.fulfillmentStatus, {
+			onNone: () => undefined,
+			onSome: (value) => parseSpecLinkFulfillmentStatus(value),
+		})
+		if (Option.isSome(args.fulfillmentStatus) && fulfillmentStatus === undefined) {
+			return yield* Effect.fail(
+				new Error(
+					`Invalid fulfillment status '${args.fulfillmentStatus.value}'. Expected one of: planned, partial, complete, verified.`,
+				),
+			)
+		}
+		const fulfillmentPercent = yield* parseSpecLinkFulfillmentPercent(args.fulfillmentPercent)
+		const evidenceNote = parseSpecLinkEvidenceNote(args.evidenceNote)
+		if (
+			fulfillmentStatus === undefined &&
+			fulfillmentPercent === undefined &&
+			evidenceNote === undefined
+		) {
+			return yield* Effect.fail(
+				new Error(
+					"No fields provided. Use at least one --fulfillment-status/--fulfillment-percent/--evidence-note.",
+				),
+			)
+		}
+
+		const specService = yield* SpecService
+		const updated = yield* specService.updateIssueLink(
+			issueId,
+			lookup.reference,
+			{
+				status: fulfillmentStatus,
+				percent: fulfillmentPercent,
+				evidenceNote,
+			},
+			linkType,
+			explicitProjectDir,
+			lookup.selector,
+		)
+
+		if (args.json) {
+			yield* Console.log(
+				JSON.stringify(
+					{
+						issueId,
+						requirement: lookup,
+						type: linkType ?? null,
+						fulfillment_status: fulfillmentStatus ?? null,
+						fulfillment_percent: fulfillmentPercent ?? null,
+						evidence_note: evidenceNote ?? null,
+						updated,
+					},
+					null,
+					2,
+				),
+			)
+			return
+		}
+		yield* Console.log(`Updated ${updated} spec link(s).`)
 	})
 
 /**
@@ -2645,26 +3125,16 @@ const specPublishRunHandler = (args: {
 	readonly json: boolean
 }) =>
 	Effect.gen(function* () {
-		const explicitProjectDir = Option.getOrUndefined(args.projectDir)
-		const resolverCwd = Option.getOrElse(args.projectDir, () => process.cwd())
-		yield* ensureSpecEnabled(resolverCwd)
-		yield* validateIssueTrackerStore(resolverCwd)
-
-		const specService = yield* SpecService
-		const outcome = yield* specService.publish(explicitProjectDir)
-		if (args.json) {
-			yield* Console.log(JSON.stringify(outcome, null, 2))
-			return
+		if (!args.json) {
+			yield* Console.log("Deprecated: use `az spec sync --target linear`.")
 		}
-
-		yield* Console.log(
-			`Publish ${outcome.status}: requirements=${outcome.total_requirements} links=${outcome.total_links}`,
-		)
-		for (const documentOutcome of outcome.outcomes) {
-			yield* Console.log(
-				`- ${documentOutcome.document_key} [${documentOutcome.status}] ${documentOutcome.message}`,
-			)
-		}
+		return yield* specSyncHandler({
+			target: Option.some("linear"),
+			outDir: Option.none(),
+			check: false,
+			projectDir: args.projectDir,
+			json: args.json,
+		})
 	})
 
 /**
@@ -3262,6 +3732,9 @@ const applyTmuxAttentionStyles = (sessionName: string, verbose: boolean) =>
 		// Keep bell monitoring + alert styles session-local so Az sessions stay readable
 		// in native tmux pickers without changing the user's global theme.
 		yield* setTmuxSessionOption(sessionName, "monitor-bell", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "monitor-activity", "on", verbose)
+		yield* setTmuxSessionOption(sessionName, "bell-action", "any", verbose)
+		yield* setTmuxSessionOption(sessionName, "activity-action", "any", verbose)
 		yield* setTmuxSessionOption(
 			sessionName,
 			"window-status-bell-style",
@@ -4381,9 +4854,35 @@ const specUsageHandler = (usage: string) =>
 		yield* Console.log(usage)
 	})
 
+const specRequirementViewOption = Options.text("view").pipe(
+	Options.optional,
+	Options.withDescription("Display mode: compact|verbose"),
+)
+
 const specReqListCommand = Command.make(
 	"list",
 	{
+		query: Options.text("query").pipe(
+			Options.withAlias("q"),
+			Options.optional,
+			Options.withDescription("Filter by query against local_id/external_code/title/body"),
+		),
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
 		projectDir: projectDirOption,
 		verbose: verboseOption,
 		json: Options.boolean("json").pipe(
@@ -4393,6 +4892,36 @@ const specReqListCommand = Command.make(
 	},
 	specReqListHandler,
 ).pipe(Command.withDescription("List spec requirements"))
+
+const specReqSearchCommand = Command.make(
+	"search",
+	{
+		kind: Options.text("kind").pipe(
+			Options.withAlias("k"),
+			Options.optional,
+			Options.withDescription("Filter by kind (functional|acceptance|other)"),
+		),
+		status: Options.text("status").pipe(
+			Options.withAlias("s"),
+			Options.optional,
+			Options.withDescription("Filter by requirement status"),
+		),
+		priority: Options.integer("priority").pipe(
+			Options.withAlias("p"),
+			Options.optional,
+			Options.withDescription("Filter by requirement priority"),
+		),
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		verbose: verboseOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+		query: Args.text({ name: "query" }).pipe(Args.withDescription("Search query text")),
+	},
+	specReqSearchHandler,
+).pipe(Command.withDescription("Search spec requirements"))
 
 const specReqGetCommand = Command.make(
 	"get",
@@ -4512,12 +5041,13 @@ const specReqDeleteCommand = Command.make(
 
 const specReqCommand = Command.make("req", {}, () =>
 	specUsageHandler(
-		"Usage: az spec req [list|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
+		"Usage: az spec req [list|search|get|create|update|delete] [--req <requirement-ref>|<requirement-ref>] [--id|--local-id|--external-code] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage spec requirement records"),
 	Command.withSubcommands([
 		specReqListCommand,
+		specReqSearchCommand,
 		specReqGetCommand,
 		specReqCreateCommand,
 		specReqUpdateCommand,
@@ -4579,6 +5109,21 @@ const specLinkAddCommand = Command.make(
 			Options.withDescription("Link type (implements|tests|blocks|relates). Default: relates"),
 		),
 		implementations: specImplementationOption,
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Optional fulfillment evidence note"),
+		),
 		projectDir: projectDirOption,
 		json: Options.boolean("json").pipe(
 			Options.withAlias("j"),
@@ -4613,13 +5158,57 @@ const specLinkRemoveCommand = Command.make(
 	specLinkRemoveHandler,
 ).pipe(Command.withDescription("Remove typed issue<->requirement link"))
 
+const specLinkUpdateCommand = Command.make(
+	"update",
+	{
+		issueId: specLinkIssueIdArg,
+		issueIdOption: specLinkIssueIdOption,
+		requirementRef: requirementRefArg,
+		requirementRefOption,
+		requirementId: requirementByIdOption,
+		requirementLocalId: requirementByLocalIdOption,
+		requirementExternalCode: requirementByExternalCodeOption,
+		linkType: Options.text("type").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Optional link type filter"),
+		),
+		fulfillmentStatus: Options.text("fulfillment-status").pipe(
+			Options.withAlias("f"),
+			Options.optional,
+			Options.withDescription("Set fulfillment status (planned|partial|complete|verified)"),
+		),
+		fulfillmentPercent: Options.integer("fulfillment-percent").pipe(
+			Options.withAlias("F"),
+			Options.optional,
+			Options.withDescription("Set fulfillment percentage (0-100)"),
+		),
+		evidenceNote: Options.text("evidence-note").pipe(
+			Options.withAlias("N"),
+			Options.optional,
+			Options.withDescription("Set fulfillment evidence note"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLinkUpdateHandler,
+).pipe(Command.withDescription("Update typed issue<->requirement link fulfillment metadata"))
+
 const specLinkCommand = Command.make("link", {}, () =>
 	specUsageHandler(
-		"Usage: az spec link [list|add|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
+		"Usage: az spec link [list|add|update|remove] [--issue <issue-id>|<issue-id>] [--req <requirement-ref>|<requirement-ref>] ...",
 	),
 ).pipe(
 	Command.withDescription("Manage typed issue/spec links"),
-	Command.withSubcommands([specLinkListCommand, specLinkAddCommand, specLinkRemoveCommand]),
+	Command.withSubcommands([
+		specLinkListCommand,
+		specLinkAddCommand,
+		specLinkUpdateCommand,
+		specLinkRemoveCommand,
+	]),
 )
 
 const specParityCommand = Command.make(
@@ -4645,7 +5234,7 @@ const specPublishRunCommand = Command.make(
 		),
 	},
 	specPublishRunHandler,
-).pipe(Command.withDescription("Run one-way spec publish to Linear project documents"))
+).pipe(Command.withDescription("Deprecated alias for `az spec sync --target linear`"))
 
 const specPublishConfigCommand = Command.make(
 	"config",
@@ -4701,15 +5290,81 @@ const specPublishConfigCommand = Command.make(
 const specPublishCommand = Command.make("publish", {}, () =>
 	specUsageHandler("Usage: az spec publish [run|config] ..."),
 ).pipe(
-	Command.withDescription("Spec publish operations"),
+	Command.withDescription("Spec publish operations (deprecated export alias; use `az spec sync`)"),
 	Command.withSubcommands([specPublishRunCommand, specPublishConfigCommand]),
 )
 
+const specReadCommand = Command.make(
+	"read",
+	{
+		view: specRequirementViewOption,
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specReadHandler,
+).pipe(Command.withDescription("Show full spec in terminal-friendly form"))
+
+const specLintCommand = Command.make(
+	"lint",
+	{
+		strict: Options.boolean("strict").pipe(
+			Options.withAlias("s"),
+			Options.withDescription("Fail with non-zero exit when issues are found"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specLintHandler,
+).pipe(Command.withDescription("Validate spec coverage and integrity"))
+
+const specSyncCommand = Command.make(
+	"sync",
+	{
+		target: Options.text("target").pipe(
+			Options.withAlias("t"),
+			Options.optional,
+			Options.withDescription("Sync target: md|linear|all (default: md)"),
+		),
+		outDir: Options.text("out-dir").pipe(
+			Options.withAlias("o"),
+			Options.optional,
+			Options.withDescription("Output directory for markdown snapshots (default: docs/spec)"),
+		),
+		check: Options.boolean("check").pipe(
+			Options.withAlias("c"),
+			Options.withDescription("Check for drift without writing files"),
+		),
+		projectDir: projectDirOption,
+		json: Options.boolean("json").pipe(
+			Options.withAlias("j"),
+			Options.withDescription("Output JSON"),
+		),
+	},
+	specSyncHandler,
+).pipe(Command.withDescription("Sync spec exports to markdown and/or Linear"))
+
 const specCommand = Command.make("spec", {}, () =>
-	specUsageHandler("Usage: az spec [req|link|parity|publish] ..."),
+	specUsageHandler("Usage: az spec [req|link|parity|read|lint|sync|publish] ..."),
 ).pipe(
-	Command.withDescription("Spec requirement/link/publish operations"),
-	Command.withSubcommands([specReqCommand, specLinkCommand, specParityCommand, specPublishCommand]),
+	Command.withDescription(
+		"Spec requirement/link/read/lint/sync operations (`publish` remains as deprecated alias)",
+	),
+	Command.withSubcommands([
+		specReqCommand,
+		specLinkCommand,
+		specLinkCommand,
+		specParityCommand,
+		specReadCommand,
+		specLintCommand,
+		specSyncCommand,
+		specPublishCommand,
+	]),
 )
 
 /**

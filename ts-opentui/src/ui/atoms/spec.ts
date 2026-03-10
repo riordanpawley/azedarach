@@ -20,6 +20,8 @@ import { appRuntime } from "./runtime.js"
 const EMPTY_COVERAGE_REPORT: SpecCoverageReport = {
 	requirements: [],
 	unlinked_requirement_ids: [],
+	fully_implemented_requirement_ids: [],
+	partially_implemented_requirement_ids: [],
 	integrity_gaps: [],
 }
 

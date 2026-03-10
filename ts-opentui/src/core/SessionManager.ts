@@ -745,6 +745,9 @@ export class SessionManager extends Effect.Service<SessionManager>()("SessionMan
 		const applyTmuxAttentionStyles = (sessionName: string) =>
 			Effect.gen(function* () {
 				yield* setTmuxSessionOption(sessionName, "monitor-bell", "on")
+				yield* setTmuxSessionOption(sessionName, "monitor-activity", "on")
+				yield* setTmuxSessionOption(sessionName, "bell-action", "any")
+				yield* setTmuxSessionOption(sessionName, "activity-action", "any")
 				yield* setTmuxSessionOption(
 					sessionName,
 					"window-status-bell-style",

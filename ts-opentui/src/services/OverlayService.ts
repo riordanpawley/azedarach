@@ -74,6 +74,7 @@ export type Overlay =
 	  }
 	| { readonly _tag: "diagnostics" }
 	| { readonly _tag: "projectSelector" }
+	| { readonly _tag: "waitingSessionPicker" }
 	| { readonly _tag: "diffViewer"; readonly worktreePath: string; readonly baseBranch: string }
 	| { readonly _tag: "devServerMenu"; readonly issueId: string }
 	| { readonly _tag: "planning" }

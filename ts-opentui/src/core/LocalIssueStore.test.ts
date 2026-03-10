@@ -831,24 +831,52 @@ describe("spec requirements and links", () => {
 						},
 						projectPath,
 					)
-
-					yield* store.addSpecIssueLink(issue.id, requirement.id, "implements", projectPath)
 					yield* store.createImplementation({ name: "ts-opentui" }, projectPath)
 					yield* store.createImplementation({ name: "go-bubbletea" }, projectPath)
 					yield* store.addSpecIssueLink(
 						issue.id,
 						requirement.id,
 						"implements",
+						"complete",
+						100,
+						"Shipped in default",
+						projectPath,
+						"auto",
+						["default"],
+					)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"implements",
+						"complete",
+						100,
+						"Shipped in ts-opentui",
 						projectPath,
 						"auto",
 						["ts-opentui"],
 					)
-					yield* store.addSpecIssueLink(issue.id, requirement.id, "tests", projectPath, "auto", [
-						"ts-opentui",
-					])
-					yield* store.addSpecIssueLink(issue.id, requirement.id, "relates", projectPath, "auto", [
-						"go-bubbletea",
-					])
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"tests",
+						"verified",
+						100,
+						"Tested in ts-opentui",
+						projectPath,
+						"auto",
+						["ts-opentui"],
+					)
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"relates",
+						"planned",
+						null,
+						null,
+						projectPath,
+						"auto",
+						["go-bubbletea"],
+					)
 
 					const links = yield* store.listSpecIssueLinks(undefined, projectPath)
 					const tsOpenTuiLinks = yield* store.listSpecIssueLinks(
@@ -892,9 +920,23 @@ describe("spec requirements and links", () => {
 			expect(result.issueRequirements[0]?.external_code).toBe("AZ-FR-4201")
 			expect(result.issueRequirements[0]?.link_type).toBe("implements")
 			expect(result.issueRequirements[0]?.implementations).toEqual(["default", "ts-opentui"])
+			expect(result.issueRequirements[0]?.implementations).toEqual(["default", "ts-opentui"])
+			expect(result.issueRequirements[0]?.fulfillment_status).toBe("complete")
+			expect(result.issueRequirements[0]?.fulfillment_percent).toBe(100)
+			expect(result.issueRequirements[0]?.evidence_note).toBe("Shipped in ts-opentui")
 
 			expect(result.requirementIssues).toHaveLength(3)
-			expect(result.requirementIssues[0]?.implementations.length).toBeGreaterThan(0)
+			const implementsLink = result.requirementIssues.find(
+				(item) => item.link_type === "implements",
+			)
+			const testsLink = result.requirementIssues.find((item) => item.link_type === "tests")
+			const relatesLink = result.requirementIssues.find((item) => item.link_type === "relates")
+			expect(implementsLink?.implementations).toEqual(["default", "ts-opentui"])
+			expect(implementsLink?.fulfillment_status).toBe("complete")
+			expect(testsLink?.implementations).toEqual(["ts-opentui"])
+			expect(testsLink?.fulfillment_status).toBe("verified")
+			expect(relatesLink?.implementations).toEqual(["go-bubbletea"])
+			expect(relatesLink?.fulfillment_status).toBe("planned")
 
 			expect(result.coverage.requirements).toHaveLength(2)
 			expect(result.coverage.unlinked_requirement_ids).toContain(
@@ -930,6 +972,153 @@ describe("spec requirements and links", () => {
 			expect(result.goBubbleteaParity.related_only_requirement_ids).toContain(
 				result.requirement.local_id,
 			)
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("stores and lists explicit link fulfillment metadata", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-link-fulfillment-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+					const issue = yield* store.create(
+						{ title: "Implement part of feature" },
+						undefined,
+						projectPath,
+					)
+					const requirement = yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-4202",
+							title: "Partial delivery support",
+							body: "Link metadata should carry progress context.",
+						},
+						projectPath,
+					)
+
+					yield* store.addSpecIssueLink(
+						issue.id,
+						requirement.id,
+						"implements",
+						"partial",
+						45,
+						"Backend complete; UI pending",
+						projectPath,
+					)
+
+					const links = yield* store.listSpecIssueLinks(undefined, projectPath)
+					const linkedRequirements = yield* store.listIssueSpecRequirements(issue.id, projectPath)
+					const linkedIssues = yield* store.listRequirementLinkedIssues(requirement.id, projectPath)
+					const parity = yield* store.getSpecParityReport("default", projectPath)
+
+					return {
+						links,
+						linkedRequirements,
+						linkedIssues,
+						parity,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.links).toHaveLength(1)
+			expect(result.links[0]?.fulfillment_status).toBe("partial")
+			expect(result.links[0]?.fulfillment_percent).toBe(45)
+			expect(result.links[0]?.evidence_note).toBe("Backend complete; UI pending")
+
+			expect(result.linkedRequirements[0]?.fulfillment_status).toBe("partial")
+			expect(result.linkedRequirements[0]?.fulfillment_percent).toBe(45)
+			expect(result.linkedRequirements[0]?.evidence_note).toBe("Backend complete; UI pending")
+
+			expect(result.linkedIssues[0]?.fulfillment_status).toBe("partial")
+			expect(result.linkedIssues[0]?.fulfillment_percent).toBe(45)
+			expect(result.linkedIssues[0]?.evidence_note).toBe("Backend complete; UI pending")
+
+			expect(result.parity.partially_implemented_requirement_ids).toContain("fr4202")
+			expect(result.parity.implemented_requirement_ids).not.toContain("fr4202")
+		} finally {
+			rmSync(projectPath, { recursive: true, force: true })
+		}
+	})
+
+	it("filters spec requirements by query, kind, status, and priority with deterministic ordering", async () => {
+		const projectPath = mkdtempSync(join(tmpdir(), "az-local-store-spec-filter-"))
+		const testLayer = Layer.provide(LocalIssueStore.Default, BunContext.layer)
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const store = yield* LocalIssueStore
+
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-5101",
+							title: "Sync metadata for markdown snapshots",
+							body: "Generates read-only markdown outputs for review.",
+							status: "active",
+							priority: 1,
+						},
+						projectPath,
+					)
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-AT-5101",
+							title: "Search CLI output remains deterministic",
+							body: "Query includes local_id and external_code matches.",
+							status: "draft",
+							priority: 3,
+						},
+						projectPath,
+					)
+					yield* store.createSpecRequirement(
+						{
+							external_code: "AZ-FR-5102",
+							title: "Publish config handling",
+							body: "Ensure config updates remain stable.",
+							status: "active",
+							priority: 3,
+						},
+						projectPath,
+					)
+
+					const queryFiltered = yield* store.listSpecRequirements(projectPath, {
+						query: "markdown",
+					})
+					const kindFiltered = yield* store.listSpecRequirements(projectPath, {
+						kind: "acceptance",
+					})
+					const statusPriorityFiltered = yield* store.listSpecRequirements(projectPath, {
+						status: "active",
+						priority: 3,
+					})
+					const externalCodeQuery = yield* store.listSpecRequirements(projectPath, {
+						query: "AZ-FR-5102",
+					})
+					const noMatches = yield* store.listSpecRequirements(projectPath, {
+						query: "does-not-exist",
+					})
+
+					return {
+						queryFiltered,
+						kindFiltered,
+						statusPriorityFiltered,
+						externalCodeQuery,
+						noMatches,
+					}
+				}).pipe(Effect.provide(testLayer)),
+			)
+
+			expect(result.queryFiltered.map((requirement) => requirement.local_id)).toEqual(["fr5101"])
+			expect(result.kindFiltered.map((requirement) => requirement.local_id)).toEqual(["at5101"])
+			expect(result.statusPriorityFiltered.map((requirement) => requirement.local_id)).toEqual([
+				"fr5102",
+			])
+			expect(result.externalCodeQuery.map((requirement) => requirement.local_id)).toEqual([
+				"fr5102",
+			])
+			expect(result.noMatches).toEqual([])
 		} finally {
 			rmSync(projectPath, { recursive: true, force: true })
 		}

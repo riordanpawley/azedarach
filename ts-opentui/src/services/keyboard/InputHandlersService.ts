@@ -18,6 +18,8 @@
 import { Effect, Record, SubscriptionRef } from "effect"
 import { AppConfig } from "../../config/index.js"
 import { ImageAttachmentService } from "../../core/ImageAttachmentService.js"
+import { TmuxSessionMonitor } from "../../core/TmuxSessionMonitor.js"
+import { deriveWaitingSessionOptions } from "../../lib/waitingSessions.js"
 import { generateJumpLabels } from "../../ui/types.js"
 import { BoardService } from "../BoardService.js"
 import { EditorService, type JumpTarget } from "../EditorService.js"
@@ -58,6 +60,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			SettingsService.Default,
 			AppConfig.Default,
 			TaskHandlersService.Default,
+			TmuxSessionMonitor.Default,
 		],
 
 		effect: Effect.gen(function* () {
@@ -74,6 +77,97 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 			const settings = yield* SettingsService
 			const appConfig = yield* AppConfig
 			const taskHandlers = yield* TaskHandlersService
+			const tmuxSessionMonitor = yield* TmuxSessionMonitor
+
+			const MAX_WAITING_SESSION_SELECTIONS = 9
+
+			const switchToProject = (
+				projectName: string,
+				options?: {
+					readonly focusTaskId?: string
+					readonly openDetailTaskId?: string
+				},
+			) =>
+				Effect.gen(function* () {
+					const projects = yield* projectService.getProjects()
+					const project = projects.find((candidate) => candidate.name === projectName)
+					if (!project) {
+						yield* toast.show("error", `Project not found: ${projectName}`)
+						return false
+					}
+
+					const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+					if (currentProject?.path === project.path) {
+						yield* overlay.pop()
+						if (options?.focusTaskId) {
+							yield* nav.setFocusedTask(options.focusTaskId)
+						}
+						if (options?.openDetailTaskId) {
+							yield* overlay.push({ _tag: "detail", taskId: options.openDetailTaskId })
+						}
+						return true
+					}
+
+					// Save current project state to disk (for cross-session persistence)
+					if (currentProject) {
+						const navState = yield* nav.getStateForSave()
+						const editorState = yield* editor.getStateForSave()
+						const viewMode = yield* SubscriptionRef.get(view.viewMode)
+
+						const state = buildProjectUIState(
+							navState.focusedTaskId,
+							editorState.filterConfig,
+							editorState.sortConfig,
+							viewMode,
+						)
+						yield* projectState.saveState(currentProject.path, state)
+						yield* board.saveToCache(currentProject.path)
+					}
+
+					// Load saved state for new project (from disk)
+					const savedState = yield* projectState.loadState(project.path)
+
+					// Switch each service to the new project (uses internal per-project state maps)
+					yield* editor.switchProject(project.path)
+					yield* editor.restoreState(extractSortConfig(savedState), extractFilterConfig(savedState))
+
+					yield* nav.switchProject(project.path)
+					const requestedFocusTaskId = options?.focusTaskId ?? extractFocusedTaskId(savedState)
+					if (requestedFocusTaskId) {
+						yield* nav.setFocusedTask(requestedFocusTaskId)
+					}
+
+					yield* projectService.switchProject(project.name)
+					yield* view.setViewMode(extractViewMode(savedState))
+
+					yield* overlay.pop()
+
+					const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
+					const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
+
+					if (cacheHit) {
+						yield* toast.show("success", `Loaded: ${project.name}`)
+					} else {
+						yield* toast.show("info", `Loading: ${project.name}...`)
+					}
+					if (options?.openDetailTaskId) {
+						yield* overlay.push({ _tag: "detail", taskId: options.openDetailTaskId })
+					}
+
+					return true
+				})
+
+			const getSelectableWaitingSessions = () =>
+				Effect.gen(function* () {
+					const sessions = yield* SubscriptionRef.get(tmuxSessionMonitor.sessions)
+					const projects = yield* projectService.getProjects()
+					const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
+
+					return deriveWaitingSessionOptions(sessions, projects, currentProject?.path).slice(
+						0,
+						MAX_WAITING_SESSION_SELECTIONS,
+					)
+				})
 
 			// ================================================================
 			// Input Handler Methods
@@ -661,57 +755,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 						if (num <= projects.length) {
 							const project = projects[num - 1]
 							if (project) {
-								// Save current project state to disk (for cross-session persistence)
-								const currentProject = yield* SubscriptionRef.get(projectService.currentProject)
-								if (currentProject) {
-									const navState = yield* nav.getStateForSave()
-									const editorState = yield* editor.getStateForSave()
-									const viewMode = yield* SubscriptionRef.get(view.viewMode)
-
-									const state = buildProjectUIState(
-										navState.focusedTaskId,
-										editorState.filterConfig,
-										editorState.sortConfig,
-										viewMode,
-									)
-									yield* projectState.saveState(currentProject.path, state)
-									yield* board.saveToCache(currentProject.path)
-								}
-
-								// Load saved state for new project (from disk)
-								const savedState = yield* projectState.loadState(project.path)
-
-								// Switch each service to the new project (uses internal per-project state maps)
-								yield* editor.switchProject(project.path)
-								yield* editor.restoreState(
-									extractSortConfig(savedState),
-									extractFilterConfig(savedState),
-								)
-
-								yield* nav.switchProject(project.path)
-								const savedFocusId = extractFocusedTaskId(savedState)
-								if (savedFocusId) {
-									yield* nav.setFocusedTask(savedFocusId)
-								}
-
-								// Switch ProjectService
-								yield* projectService.switchProject(project.name)
-
-								// Restore view mode
-								yield* view.setViewMode(extractViewMode(savedState))
-
-								// Close overlay
-								yield* overlay.pop()
-
-								// Switch board with toast callback
-								const onRefreshComplete = toast.show("success", `Loaded: ${project.name}`)
-								const { cacheHit } = yield* board.switchToProject(project.path, onRefreshComplete)
-
-								if (cacheHit) {
-									yield* toast.show("success", `Loaded: ${project.name}`)
-								} else {
-									yield* toast.show("info", `Loading: ${project.name}...`)
-								}
+								yield* switchToProject(project.name)
 							}
 						} else {
 							yield* toast.show("error", `No project at position ${num}`)
@@ -740,6 +784,64 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 											? String(error.message)
 											: String(error)
 									yield* toast.show("error", `Project switch failed: ${msg}`)
+									return true
+								}),
+							),
+						),
+					),
+				)
+
+			const handleWaitingSessionPickerInput = (key: string) =>
+				Effect.gen(function* () {
+					const num = Number.parseInt(key, 10)
+					if (num >= 1 && num <= 9) {
+						const waitingSessions = yield* getSelectableWaitingSessions()
+						if (num > waitingSessions.length) {
+							yield* toast.show("error", `No waiting session at position ${num}`)
+							return true
+						}
+
+						const waitingSession = waitingSessions[num - 1]
+						if (!waitingSession) {
+							yield* toast.show("error", `No waiting session at position ${num}`)
+							return true
+						}
+
+						if (!waitingSession.isRegisteredProject) {
+							yield* toast.show(
+								"warning",
+								`Project is not registered: ${waitingSession.projectName}`,
+							)
+							return true
+						}
+
+						yield* switchToProject(waitingSession.projectName, {
+							focusTaskId: waitingSession.issueId,
+							openDetailTaskId: waitingSession.issueId,
+						})
+						return true
+					}
+
+					if (key === "q") {
+						yield* overlay.pop()
+						return true
+					}
+
+					if (key === "escape") {
+						return false
+					}
+
+					return true
+				}).pipe(
+					Effect.catchAll((error) =>
+						Effect.logWarning(error).pipe(
+							Effect.zipRight(
+								Effect.gen(function* () {
+									const msg =
+										error && typeof error === "object" && "message" in error
+											? String(error.message)
+											: String(error)
+									yield* toast.show("error", `Waiting session switch failed: ${msg}`)
 									return true
 								}),
 							),
@@ -1042,6 +1144,7 @@ export class InputHandlersService extends Effect.Service<InputHandlersService>()
 				handleDiagnosticsOverlayInput,
 				handleImageAttachInput,
 				handleProjectSelectorInput,
+				handleWaitingSessionPickerInput,
 				handleImagePreviewInput,
 				handleSettingsInput,
 				computeJumpLabels,

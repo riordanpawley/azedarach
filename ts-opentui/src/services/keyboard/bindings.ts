@@ -693,6 +693,14 @@ done
 			.push({ _tag: "projectSelector" })
 			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
 	},
+	{
+		key: "S-w",
+		mode: "goto-pending",
+		description: "Open waiting session picker",
+		action: bc.overlay
+			.push({ _tag: "waitingSessionPicker" })
+			.pipe(Effect.tap(() => bc.editor.exitToNormal())),
+	},
 
 	// ========================================================================
 	// Select Mode (navigation handled by BOARD_NAV_MODES)

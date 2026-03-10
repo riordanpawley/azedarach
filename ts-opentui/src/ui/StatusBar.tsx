@@ -5,12 +5,14 @@
 import type { VCStatus } from "../core/VCService.js"
 import type { DevServerStatus } from "../services/DevServerService.js"
 import type { EditorMode } from "../services/EditorService.js"
+import { formatWaitingSummary } from "./statusBarFormatting.js"
 import { theme } from "./theme.js"
 import type { ViewMode } from "./types.js"
 
 export interface StatusBarProps {
 	totalTasks: number
 	activeSessions: number
+	waitingIssueIds?: ReadonlyArray<string>
 	mode: EditorMode["_tag"]
 	modeDisplay: string
 	selectedCount: number
@@ -233,13 +235,15 @@ export const StatusBar = (props: StatusBarProps) => {
 	const connIndicator = getConnectionIndicator()
 	const modeColor = getModeColor()
 	const modeLabel = getModeLabel()
+	const waitingSummary = formatWaitingSummary(props.waitingIssueIds ?? [], terminalWidth)
 
 	// Calculate available width for keybindings
 	// Fixed elements: border(2) + padding(2) + project name(~10) + gap(2) + conn(1) + gap(2) + mode(5) + gap(2)
-	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12)
+	// Right side: gap(2) + "Tasks: X"(~10) + gap(2) + "Active: X"(~10) + VC status(~12) + waiting summary
 	const projectNameWidth = (props.projectName ?? "azedarach").length
 	const fixedLeftWidth = 16 + projectNameWidth
-	const fixedRightWidth = 40 // Approximate, includes stats and potential VC status
+	const waitingSummaryWidth = waitingSummary ? waitingSummary.length + 2 : 0
+	const fixedRightWidth = 40 + waitingSummaryWidth
 	const modeDisplayWidth =
 		shouldShowModeDisplay && props.modeDisplay ? props.modeDisplay.length + 2 : 0
 	const availableWidth = terminalWidth - fixedLeftWidth - fixedRightWidth - modeDisplayWidth
@@ -323,6 +327,11 @@ export const StatusBar = (props: StatusBarProps) => {
 				{/* Stats - right aligned */}
 				<box flexGrow={1} />
 				<box flexDirection="row" gap={2}>
+					{waitingSummary && (
+						<text fg={theme.yellow} attributes={ATTR_BOLD}>
+							{waitingSummary}
+						</text>
+					)}
 					{shouldShowSelectedCount && props.selectedCount > 0 && (
 						<text fg={theme.mauve}>Selected: {props.selectedCount}</text>
 					)}

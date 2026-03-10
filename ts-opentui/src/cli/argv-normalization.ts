@@ -43,8 +43,10 @@ const TOP_LEVEL_NESTED_COMMAND_ALIASES: Readonly<Record<string, Readonly<Record<
 		spec: {
 			r: "req",
 			l: "link",
-			p: "publish",
+			p: "sync",
 			c: "req",
+			sy: "sync",
+			publish: "publish",
 		},
 		"spec/req": {
 			l: "list",

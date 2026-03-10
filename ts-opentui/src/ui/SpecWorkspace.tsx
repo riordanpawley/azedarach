@@ -67,6 +67,7 @@ const getParityRequirementStatus = (
 	readonly rank: number
 } => {
 	const hasImplements = requirement.implements_issue_ids.length > 0
+	const hasPartial = requirement.partial_issue_ids.length > 0
 	const hasTests = requirement.tests_issue_ids.length > 0
 	const hasRelated = requirement.other_issue_ids.length > 0
 
@@ -84,24 +85,31 @@ const getParityRequirementStatus = (
 			rank: 3,
 		}
 	}
+	if (hasPartial) {
+		return {
+			label: "partial",
+			color: theme.peach,
+			rank: 2,
+		}
+	}
 	if (hasImplements) {
 		return {
 			label: "implemented",
 			color: theme.sapphire,
-			rank: 2,
+			rank: 1,
 		}
 	}
 	if (hasRelated) {
 		return {
 			label: "related-only",
 			color: theme.yellow,
-			rank: 1,
+			rank: 0,
 		}
 	}
 	return {
 		label: "uncovered",
 		color: theme.red,
-		rank: 0,
+		rank: -1,
 	}
 }
 
@@ -257,6 +265,9 @@ export const SpecWorkspace = ({ subview, state }: SpecWorkspaceProps) => {
 										<text fg={theme.sapphire}>
 											implemented={parityReport.implemented_requirement_ids.length}
 										</text>
+										<text fg={theme.peach}>
+											partial={parityReport.partially_implemented_requirement_ids.length}
+										</text>
 										<text fg={theme.teal}>tested={parityReport.tested_requirement_ids.length}</text>
 										<text fg={theme.yellow}>
 											related-only={parityReport.related_only_requirement_ids.length}
@@ -274,6 +285,7 @@ export const SpecWorkspace = ({ subview, state }: SpecWorkspaceProps) => {
 										const status = getParityRequirementStatus(requirement)
 										const issueSummary = [
 											formatIssueGroup("implements", requirement.implements_issue_ids),
+											formatIssueGroup("partial", requirement.partial_issue_ids),
 											formatIssueGroup("tests", requirement.tests_issue_ids),
 											formatIssueGroup("related", requirement.other_issue_ids),
 										]
