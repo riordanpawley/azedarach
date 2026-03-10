@@ -1481,11 +1481,14 @@ const issueBulkUpdateHandler = (args: {
 		yield* validateIssueTrackerStore(resolverCwd)
 
 		const inputContent = yield* readIssueBulkUpdateInput(args.input)
-		const updates = yield* Effect.try({
-			try: () => decodeIssueBulkUpdatePayload(inputContent),
-			catch: (error) =>
-				new Error(`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`),
-		})
+		const updates = yield* decodeIssueBulkUpdatePayload(inputContent).pipe(
+			Effect.mapError(
+				(error) =>
+					new Error(
+						`Bulk update JSON parse/validation failed: ${formatIssueBulkUpdateError(error)}`,
+					),
+			),
+		)
 
 		const issueTrackerClient = yield* IssueTrackerClient
 		const results = yield* Effect.forEach(updates, (entry, index) =>
@@ -3710,22 +3713,20 @@ interface IssueBulkUpdateSummary {
 	readonly results: readonly IssueBulkUpdateResult[]
 }
 
-const decodeIssueBulkUpdatePayload = (content: string): readonly IssueBulkUpdateEntry[] => {
-	const payload: IssueBulkUpdatePayload = Schema.decodeUnknownSync(
-		Schema.parseJson(IssueBulkUpdatePayloadSchema),
-	)(content)
-	if (isIssueBulkUpdateEntryArray(payload)) {
-		if (payload.length === 0) {
-			throw new Error("Bulk update input must contain at least one update item.")
-		}
-		return payload
-	}
-	const updates = payload.updates
-	if (updates.length === 0) {
-		throw new Error("Bulk update input must contain at least one update item.")
-	}
-	return updates
-}
+const decodeIssueBulkUpdatePayload = (content: string) =>
+	Schema.decode(Schema.parseJson(IssueBulkUpdatePayloadSchema))(content).pipe(
+		Effect.flatMap((payload: IssueBulkUpdatePayload) => {
+			if (isIssueBulkUpdateEntryArray(payload)) {
+				return payload.length > 0
+					? Effect.succeed(payload)
+					: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+			}
+
+			return payload.updates.length > 0
+				? Effect.succeed(payload.updates)
+				: Effect.fail(new Error("Bulk update input must contain at least one update item."))
+		}),
+	)
 
 const isIssueBulkUpdateEntryArray = (
 	payload: IssueBulkUpdatePayload,

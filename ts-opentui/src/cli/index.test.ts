@@ -330,15 +330,17 @@ describe("normalizeIssueJsonFlagOrder", () => {
 })
 
 describe("decodeIssueBulkUpdatePayload", () => {
-	it("accepts a bare array payload", () => {
-		const decoded = decodeIssueBulkUpdatePayload(
-			JSON.stringify([
-				{
-					id: "dg",
-					status: "blocked",
-					labels: ["agent", "bulk"],
-				},
-			]),
+	it("accepts a bare array payload", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkUpdatePayload(
+				JSON.stringify([
+					{
+						id: "dg",
+						status: "blocked",
+						labels: ["agent", "bulk"],
+					},
+				]),
+			),
 		)
 
 		expect(decoded).toEqual([
@@ -350,20 +352,22 @@ describe("decodeIssueBulkUpdatePayload", () => {
 		])
 	})
 
-	it("accepts an object payload with updates", () => {
-		const decoded = decodeIssueBulkUpdatePayload(
-			JSON.stringify({
-				updates: [
-					{
-						id: "dg",
-						notes: "bulk edit",
-					},
-					{
-						id: "dh",
-						parent: "dg",
-					},
-				],
-			}),
+	it("accepts an object payload with updates", async () => {
+		const decoded = await Effect.runPromise(
+			decodeIssueBulkUpdatePayload(
+				JSON.stringify({
+					updates: [
+						{
+							id: "dg",
+							notes: "bulk edit",
+						},
+						{
+							id: "dh",
+							parent: "dg",
+						},
+					],
+				}),
+			),
 		)
 
 		expect(decoded).toEqual([
@@ -378,10 +382,10 @@ describe("decodeIssueBulkUpdatePayload", () => {
 		])
 	})
 
-	it("rejects an empty payload", () => {
-		expect(() => decodeIssueBulkUpdatePayload(JSON.stringify([]))).toThrow(
-			"Bulk update input must contain at least one update item.",
-		)
+	it("rejects an empty payload", async () => {
+		await expect(
+			Effect.runPromise(decodeIssueBulkUpdatePayload(JSON.stringify([]))),
+		).rejects.toThrow("Bulk update input must contain at least one update item.")
 	})
 })
 
