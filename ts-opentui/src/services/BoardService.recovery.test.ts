@@ -11,6 +11,7 @@ import {
 	classifySessionRecoveryError,
 	reconcileLoadedTasksWithLocalCreateGrace,
 	resolveBoardRefreshExecutionMode,
+	resolveHasWorktreeFlag,
 	resolveLinearSdkEventsTickerBehavior,
 	resolveLinearSdkPollingFallbackHealthMessage,
 	resolveLinearSdkPollingFallbackToastMessage,
@@ -267,5 +268,40 @@ describe("reconcileLoadedTasksWithLocalCreateGrace", () => {
 
 		expect(result.mergedTasks).toEqual([])
 		expect(result.nextLocalCreateGraceExpiries.has(localOnlyTask.id)).toBe(false)
+	})
+})
+
+describe("resolveHasWorktreeFlag", () => {
+	it("prefers fresh worktree inventory over stale persisted state", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: true,
+				worktreeIssueIds: new Set<string>(),
+				worktreeInventoryLoaded: true,
+			}),
+		).toBeUndefined()
+	})
+
+	it("keeps the folder indicator when fresh inventory confirms the worktree exists", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: undefined,
+				worktreeIssueIds: new Set(["jt"]),
+				worktreeInventoryLoaded: true,
+			}),
+		).toBe(true)
+	})
+
+	it("falls back to persisted state when worktree inventory is unavailable", () => {
+		expect(
+			resolveHasWorktreeFlag({
+				issueId: "jt",
+				persistedHasWorktree: true,
+				worktreeIssueIds: new Set<string>(),
+				worktreeInventoryLoaded: false,
+			}),
+		).toBe(true)
 	})
 })

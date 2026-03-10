@@ -353,6 +353,19 @@ export const reconcileLoadedTasksWithLocalCreateGrace = (params: {
 	}
 }
 
+export const resolveHasWorktreeFlag = (params: {
+	readonly issueId: string
+	readonly persistedHasWorktree: boolean | undefined
+	readonly worktreeIssueIds: ReadonlySet<string>
+	readonly worktreeInventoryLoaded: boolean
+}): boolean | undefined => {
+	if (params.worktreeInventoryLoaded) {
+		return params.worktreeIssueIds.has(params.issueId) ? true : undefined
+	}
+
+	return params.persistedHasWorktree === true ? true : undefined
+}
+
 // ============================================================================
 // Sort Orders using Effect's composable Order module
 // ============================================================================
@@ -1326,7 +1339,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 
 				// Get all worktrees ONCE upfront instead of per-issue exists() calls
 				// This eliminates 331 Effect operations → 1 operation
-				const worktreeList = projectPath
+				const worktreeInventory = projectPath
 					? yield* diagnostics.measure(
 							{
 								source: "BoardService",
@@ -1336,15 +1349,26 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							},
 							worktreeManager.list(projectPath).pipe(
 								Effect.withSpan("worktrees.list"),
+								Effect.map((worktreeList) => ({
+									loaded: true as const,
+									issueIds: new Set(worktreeList.map((wt) => wt.issueId)),
+								})),
 								Effect.catchAll((error) =>
 									Effect.logWarning(`Recovering after caught error: ${String(error)}`).pipe(
-										Effect.zipRight(Effect.succeed([])),
+										Effect.zipRight(
+											Effect.succeed({
+												loaded: false as const,
+												issueIds: new Set<string>(),
+											}),
+										),
 									),
 								),
 							),
 						)
-					: []
-				const worktreeIssueIds = new Set(worktreeList.map((wt) => wt.issueId))
+					: {
+							loaded: false as const,
+							issueIds: new Set<string>(),
+						}
 
 				const tasksWithNullable = yield* Effect.all(
 					issues.map((issue) =>
@@ -1358,8 +1382,14 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							// Get parent epic ID (if this is an epic child)
 							const parentEpicId = parentEpicMap.get(issue.id)
 
-							// Check if worktree exists (using pre-fetched Set - instant lookup)
-							const hasWorktree = worktreeIssueIds.has(issue.id)
+							// Trust fresh worktree inventory when available; only fall back to persisted
+							// state if the inventory could not be loaded.
+							const hasWorktree = resolveHasWorktreeFlag({
+								issueId: issue.id,
+								persistedHasWorktree: persistedTask?.hasWorktree,
+								worktreeIssueIds: worktreeInventory.issueIds,
+								worktreeInventoryLoaded: worktreeInventory.loaded,
+							})
 
 							let hasMergeConflict = false
 							let gitStatus: GitStatus = {
@@ -1405,7 +1435,7 @@ export class BoardService extends Effect.Service<BoardService>()("BoardService",
 							const baseTask: TaskWithSession = {
 								...issue,
 								sessionState,
-								hasWorktree: hasWorktree || persistedTask?.hasWorktree === true ? true : undefined,
+								hasWorktree,
 								hasMergeConflict,
 								hasDevServer: persistedTask?.hasDevServer === true ? true : undefined,
 								parentEpicId: parentEpicId ?? persistedTask?.parentEpicId,
